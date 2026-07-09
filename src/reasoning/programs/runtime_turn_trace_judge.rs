@@ -59,4 +59,3 @@ impl Program for RuntimeTurnTraceJudgeProgram {
             .rule("Do not treat interim plans, promises, or 'I will continue next' wording as a valid final answer by default.")
     }
 }
-

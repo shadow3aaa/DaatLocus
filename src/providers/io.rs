@@ -354,9 +354,7 @@ pub(super) fn normalize_sse_buffer(buffer: &mut Vec<u8>) {
 }
 
 pub(super) fn take_next_sse_event(buffer: &mut Vec<u8>) -> Option<String> {
-    let delimiter_index = buffer
-        .windows(2)
-        .position(|window| window == b"\n\n")?;
+    let delimiter_index = buffer.windows(2).position(|window| window == b"\n\n")?;
     let event_bytes = &buffer[..delimiter_index];
     let event = String::from_utf8_lossy(event_bytes).into_owned();
     buffer.drain(..delimiter_index + 2);

@@ -6,10 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::OnceLock;
 
-use crate::{
-    daat_locus_paths::daat_locus_paths,
-    persistence::append_bytes_durable,
-};
+use crate::{daat_locus_paths::daat_locus_paths, persistence::append_bytes_durable};
 
 use super::{runtime::PromptRequest, signature::Signature};
 
@@ -42,7 +39,6 @@ pub struct ProgramTraceRecord {
     pub parsed_output: Option<Value>,
     pub deserialization_error: Option<String>,
 }
-
 
 pub struct ProgramTraceRecordParts {
     pub origin: TraceOrigin,
@@ -93,8 +89,6 @@ impl ProgramTraceRecord {
         }
     }
 }
-
-
 
 fn trace_io_lock() -> &'static tokio::sync::Mutex<()> {
     TRACE_IO_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))

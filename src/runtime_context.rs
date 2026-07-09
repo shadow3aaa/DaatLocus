@@ -127,7 +127,6 @@ pub async fn execute_pre_turn_runtime_compaction(
         },
     )
     .await
-
 }
 
 pub async fn maybe_compact_runtime_messages(
@@ -217,10 +216,7 @@ fn build_history_compaction_source_items(
 fn flatten_history_compaction_source_items(
     items: &[HistoryCompactionSourceItem],
 ) -> Vec<HistoryMessage> {
-    items
-        .iter()
-        .flat_map(|item| item.clone())
-        .collect()
+    items.iter().flat_map(|item| item.clone()).collect()
 }
 
 fn collapse_history_compaction_source_item(
@@ -615,7 +611,6 @@ async fn build_mid_turn_compaction_outcome(
         },
     )
     .await
-
 }
 
 async fn append_runtime_compaction_event(event: RuntimeCompactionTelemetryEvent) {

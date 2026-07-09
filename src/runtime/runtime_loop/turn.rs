@@ -107,7 +107,8 @@ fn preview_afterclaim_context_message(
 }
 
 fn afterclaim_agent_content(text: String, input: &AfterClaimContextInput) -> AgentContent {
-    let parts = input.iter()
+    let parts = input
+        .iter()
         .flat_map(|event| match &event.payload {
             EventPayload::TelegramIncoming(payload) => payload
                 .attachments
@@ -327,7 +328,7 @@ pub(crate) async fn execute_agent_loop_step(
                         live_draft_session,
                         claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
                         claimed_event_ids: &claimed_event_ids,
-        
+
                         observation: format!("runtime preflight failed: {err}"),
                         description: "Failed to build preturn context.".to_string(),
                     },
@@ -374,17 +375,15 @@ pub(crate) async fn execute_agent_loop_step(
     let mut pre_turn_compacted = false;
     if let Some(plan) = context
         .memory
-        .plan_runtime_conversation_compaction_for_request(
-            PlanCompactionInput {
-                envelope: &request_envelope,
-                injected_messages: &initial_injected_context_messages,
-                tools: &initial_tools,
-                limits: request_budget_limits,
-                baseline: &context.token_estimate_baseline,
-                min_messages: RUNTIME_HISTORY_MIN_MESSAGES,
-                summary_max_tokens: runtime_conversation_summary_budget,
-            },
-        )
+        .plan_runtime_conversation_compaction_for_request(PlanCompactionInput {
+            envelope: &request_envelope,
+            injected_messages: &initial_injected_context_messages,
+            tools: &initial_tools,
+            limits: request_budget_limits,
+            baseline: &context.token_estimate_baseline,
+            min_messages: RUNTIME_HISTORY_MIN_MESSAGES,
+            summary_max_tokens: runtime_conversation_summary_budget,
+        })
     {
         enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightCompaction);
         let compaction_started_at = std::time::Instant::now();
@@ -481,7 +480,7 @@ pub(crate) async fn execute_agent_loop_step(
                             live_draft_session,
                             claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
                             claimed_event_ids: &claimed_event_ids,
-            
+
                             observation: format!("runtime preflight failed: {err}"),
                             description: "Failed to execute pre-turn context compaction."
                                 .to_string(),
@@ -602,7 +601,6 @@ pub(crate) async fn execute_agent_loop_step(
                             turn_id: &runtime_turn_id,
                             claimed_inputs: &claimed_inputs,
                             claimed_event_ids: &claimed_event_ids,
-            
                             tools: &tools,
                             context_text: &runtime_context_text,
                             error_kind: RuntimeErrorKind::ContextOverflowAfterRecovery,
@@ -647,7 +645,6 @@ pub(crate) async fn execute_agent_loop_step(
                                 turn_id: &runtime_turn_id,
                                 claimed_inputs: &claimed_inputs,
                                 claimed_event_ids: &claimed_event_ids,
-                
                                 tools: &tools,
                                 context_text: &runtime_context_text,
                                 error_kind: RuntimeErrorKind::ModelRequestRepeatedFailure,
@@ -860,7 +857,6 @@ pub(crate) async fn execute_agent_loop_step(
                                 turn_id: &runtime_turn_id,
                                 claimed_inputs: &claimed_inputs,
                                 claimed_event_ids: &claimed_event_ids,
-                
                                 tools: &tools,
                                 context_text: &runtime_context_text,
                                 error_kind: classify_tool_runtime_error(&call.name, &error_text),
@@ -965,7 +961,6 @@ pub(crate) async fn execute_agent_loop_step(
                         actions: terminal_actions,
                     };
                 }
-
             }
             continue 'agent_loop;
         }
@@ -991,7 +986,6 @@ pub(crate) async fn execute_agent_loop_step(
                         turn_id: &runtime_turn_id,
                         claimed_inputs: &claimed_inputs,
                         claimed_event_ids: &claimed_event_ids,
-        
                         tools: &tools,
                         context_text: &runtime_context_text,
                         error_kind: RuntimeErrorKind::ModelEmptyReasoningOutput,
@@ -1041,7 +1035,6 @@ pub(crate) async fn execute_agent_loop_step(
                         turn_id: &runtime_turn_id,
                         claimed_inputs: &claimed_inputs,
                         claimed_event_ids: &claimed_event_ids,
-        
                         tools: &tools,
                         context_text: &runtime_context_text,
                         error_kind,
@@ -1114,8 +1107,7 @@ pub(crate) async fn execute_agent_loop_step(
         claimed_event_ids.is_empty() || claimed_events_are_terminal(context, &claimed_event_ids);
     finalize_claimed_runtime_events(context, &claimed_event_ids, &output);
     if !claimed_event_ids.is_empty()
-        && (claimed_events_finished
-            || output_is_runtime_context_compaction_boundary(&output))
+        && (claimed_events_finished || output_is_runtime_context_compaction_boundary(&output))
     {
         context.afterclaim_context_fingerprint = None;
         context.visible_source_lines.clear();
@@ -1454,10 +1446,7 @@ fn append_claimed_input_activity_cells(
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
     inputs: &[ClaimedRuntimeInput],
 ) {
-    if inputs
-        .iter()
-        .any(|_input| true)
-    {
+    if inputs.iter().any(|_input| true) {
         refresh_pending_user_inputs_for_dashboard(context, tx);
     }
 
@@ -1546,33 +1535,33 @@ mod tests {
     #[test]
     fn afterclaim_agent_content_carries_telegram_image_parts() {
         let input: AfterClaimContextInput = vec![crate::events::EventView {
-                event_id: uuid::Uuid::nil(),
-                source: crate::events::EventSource::Telegram,
-                status: crate::events::EventStatus::Claimed,
-                reply_message: None,
-                arrived_at_ms: 1,
-                payload: crate::events::EventPayload::TelegramIncoming(
-                    crate::events::TelegramIncomingEvent {
-                        chat_id: "chat-1".to_string(),
-                        chat_kind: "private".to_string(),
-                        chat_title: "Alice".to_string(),
-                        sender: "alice".to_string(),
-                        incoming_text: "inspect this".to_string(),
-                        telegram_update_id: 10,
-                        telegram_message_id: Some(20),
-                        telegram_message_date: Some(30),
-                        attachments: vec![crate::events::TelegramIncomingAttachment {
-                            kind: crate::events::TelegramIncomingAttachmentKind::Image,
-                            file_id: "file-1".to_string(),
-                            file_unique_id: "unique-1".to_string(),
-                            media_type: "image/png".to_string(),
-                            local_path: "/tmp/image.png".to_string(),
-                            description: Some("telegram photo 512x512".to_string()),
-                        }],
-                    },
-                ),
-                last_error: None,
-            }];
+            event_id: uuid::Uuid::nil(),
+            source: crate::events::EventSource::Telegram,
+            status: crate::events::EventStatus::Claimed,
+            reply_message: None,
+            arrived_at_ms: 1,
+            payload: crate::events::EventPayload::TelegramIncoming(
+                crate::events::TelegramIncomingEvent {
+                    chat_id: "chat-1".to_string(),
+                    chat_kind: "private".to_string(),
+                    chat_title: "Alice".to_string(),
+                    sender: "alice".to_string(),
+                    incoming_text: "inspect this".to_string(),
+                    telegram_update_id: 10,
+                    telegram_message_id: Some(20),
+                    telegram_message_date: Some(30),
+                    attachments: vec![crate::events::TelegramIncomingAttachment {
+                        kind: crate::events::TelegramIncomingAttachmentKind::Image,
+                        file_id: "file-1".to_string(),
+                        file_unique_id: "unique-1".to_string(),
+                        media_type: "image/png".to_string(),
+                        local_path: "/tmp/image.png".to_string(),
+                        description: Some("telegram photo 512x512".to_string()),
+                    }],
+                },
+            ),
+            last_error: None,
+        }];
 
         let content = afterclaim_agent_content("claimed input".to_string(), &input);
 

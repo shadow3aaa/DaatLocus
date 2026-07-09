@@ -39,7 +39,6 @@ impl SessionTitleState {
         });
         true
     }
-
 }
 
 pub fn sync_session_title_placeholder(
@@ -58,7 +57,6 @@ pub fn sync_session_title_placeholder(
         sync_dashboard_session_title(context, tx);
     }
 }
-
 
 fn sync_dashboard_session_title(
     context: &Context,
@@ -91,7 +89,6 @@ impl SessionTitleInput {
         })
     }
 }
-
 
 fn first_event_title(events: &[EventView]) -> Option<String> {
     events
@@ -285,5 +282,4 @@ mod tests {
             Some("Fix the Telegram session routing")
         );
     }
-
 }

@@ -1551,8 +1551,6 @@ fn render_assistant_cell_lines(cell: &AssistantActivityData, max_width: u16) -> 
     lines
 }
 
-
-
 fn thinking_collapsed_preview(content: &str) -> String {
     let mut lines: Vec<&str> = content.lines().collect();
     if lines.len() > 3 {
@@ -2417,12 +2415,11 @@ struct MessageActivityInput<'a> {
     max_width: u16,
 }
 
-fn render_message_activity_lines(
-    input: MessageActivityInput<'_>,
-) -> Vec<Line<'static>> {
+fn render_message_activity_lines(input: MessageActivityInput<'_>) -> Vec<Line<'static>> {
     let mut lines = vec![activity_header(input.title.to_string())];
     lines.extend(prefixed_body_lines(
-        input.detail_lines
+        input
+            .detail_lines
             .iter()
             .take(input.detail_limit)
             .map(|line| {
@@ -2436,18 +2433,23 @@ fn render_message_activity_lines(
     ));
 
     if input.markdown && !input.message_lines.is_empty() {
-        let joined = input.message_lines
+        let joined = input
+            .message_lines
             .iter()
             .take(input.message_limit)
             .cloned()
             .collect::<Vec<_>>()
             .join("\n");
-        let md_lines =
-            render_markdown_with_width(&joined, Color::White, detail_markdown_width(input.max_width));
+        let md_lines = render_markdown_with_width(
+            &joined,
+            Color::White,
+            detail_markdown_width(input.max_width),
+        );
         lines.extend(prefixed_detail_lines(md_lines, input.max_width));
     } else {
         lines.extend(prefixed_detail_lines(
-            input.message_lines
+            input
+                .message_lines
                 .iter()
                 .take(input.message_limit)
                 .map(|line| {

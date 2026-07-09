@@ -30,8 +30,6 @@ const LEGACY_RUNTIME_ERROR_CORRECTION_DIRS: &[&str] = &[
     "turn_demos",
 ];
 
-
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvaluationArtifactRuntimePromptCandidate {
     pub compile_key: String,

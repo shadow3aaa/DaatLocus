@@ -726,13 +726,16 @@ impl RuntimeConversation {
         let all_messages = self.messages();
         let mut request_messages = all_messages.clone();
         request_messages.extend(input.injected_messages.iter().cloned());
-        let agent_messages = input.envelope.agent_messages_with_history(&request_messages);
+        let agent_messages = input
+            .envelope
+            .agent_messages_with_history(&request_messages);
         let breakdown = estimate_agent_turn_request(&agent_messages, input.tools, input.limits)
             .with_calibrated_input_tokens(input.baseline);
         if !breakdown.above_auto_compact_threshold() {
             return None;
         }
-        let summary_max_tokens = input.summary_max_tokens
+        let summary_max_tokens = input
+            .summary_max_tokens
             .min(breakdown.input_budget_tokens())
             .min(breakdown.auto_compact_input_threshold_tokens());
         Self::compaction_plan_from_messages(all_messages, summary_max_tokens)

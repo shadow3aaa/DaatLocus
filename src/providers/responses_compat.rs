@@ -251,7 +251,7 @@ impl ResponsesCompatibleClient {
         emit_progress: bool,
     ) -> Result<AgentTurnStreamResult> {
         let url = self.url();
-let mut buffer = Vec::new();
+        let mut buffer = Vec::new();
         let mut delta_content = String::new();
         let mut output_messages = Vec::new();
         let mut reasoning_content = String::new();
@@ -291,7 +291,7 @@ let mut buffer = Vec::new();
                     &err,
                 )
             })?;
-buffer.extend_from_slice(&chunk);
+            buffer.extend_from_slice(&chunk);
             normalize_sse_buffer(&mut buffer);
 
             while let Some(event) = take_next_sse_event(&mut buffer) {

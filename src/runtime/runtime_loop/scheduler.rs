@@ -147,10 +147,7 @@ pub(crate) fn reset_cancelled_runtime_turn(context: &mut Context, reason: &str) 
     context.runtime_turn_started_at_ms = None;
 }
 
-pub(crate) fn interrupt_active_runtime_turn(
-    context: &mut Context,
-    reason: &str,
-) -> usize {
+pub(crate) fn interrupt_active_runtime_turn(context: &mut Context, reason: &str) -> usize {
     let mut claimed_event_ids = std::mem::take(&mut context.claimed_event_ids);
     if claimed_event_ids.is_empty() {
         claimed_event_ids = context

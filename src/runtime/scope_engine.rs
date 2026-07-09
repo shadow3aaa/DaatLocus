@@ -24,7 +24,7 @@ pub struct ScopeEditCodeResult {
 /// Wraps the scope-engine library to provide:
 /// - Path plus line-hash code search and reading
 /// - Hash-anchored code editing and deletion
-    /// - Propagation review events
+/// - Propagation review events
 /// - Config hints for language servers
 pub struct ScopeEngineHandle {
     project_root: Option<PathBuf>,
@@ -91,7 +91,6 @@ impl ScopeEngineHandle {
         state.accumulate(results);
         state.next_review()
     }
-
 
     /// Read code using a path plus line-hash anchor.
     pub fn read_code(&self, input: api::ReadCodeInput) -> Result<api::ReadCodeOutput> {

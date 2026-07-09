@@ -7,10 +7,7 @@ use miette::{Context as _, IntoDiagnostic, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    daat_locus_paths::DaatLocusPaths,
-    dashboard::SessionActivityEvent,
-};
+use crate::{daat_locus_paths::DaatLocusPaths, dashboard::SessionActivityEvent};
 
 const DASHBOARD_ACTIVITY_HISTORY_DB_FILE: &str = "dashboard_activity.sqlite3";
 const DASHBOARD_ACTIVITY_HISTORY_LIMIT_MAX: usize = 200;
@@ -92,7 +89,6 @@ pub struct DashboardInputHistory {
 }
 
 impl DashboardActivityHistoryStore {
-
     pub async fn with_session(session_id: &str) -> Result<Self> {
         let paths = DaatLocusPaths::for_session(session_id);
         Self::open_at_path(paths.memory_file(DASHBOARD_ACTIVITY_HISTORY_DB_FILE))

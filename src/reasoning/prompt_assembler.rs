@@ -8,8 +8,7 @@ use super::{
     },
     prompts::{SYSTEM_CORE, build_app_docs_prompt},
     turn_compile::{
-        PromptPersonaSpec, load_or_create_prompt_persona_spec_sync,
-        resolve_prompt_persona_language,
+        PromptPersonaSpec, load_or_create_prompt_persona_spec_sync, resolve_prompt_persona_language,
     },
 };
 

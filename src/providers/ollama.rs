@@ -687,7 +687,7 @@ impl OllamaClient {
         let mut last_assistant_progress_char_len = 0usize;
         let mut last_reasoning_progress_emit_at = Instant::now();
         let mut last_reasoning_progress_char_len = 0usize;
-let mut buffer = Vec::new();
+        let mut buffer = Vec::new();
         let url = self.chat_url();
         let stream_request_context = [
             format!("model={}", self.model),
@@ -719,10 +719,12 @@ let mut buffer = Vec::new();
                     &err,
                 )
             })?;
-buffer.extend_from_slice(&chunk);
+            buffer.extend_from_slice(&chunk);
 
             while let Some(line_end) = buffer.iter().position(|&b| b == b'\n') {
-                let line = String::from_utf8_lossy(&buffer[..line_end]).trim().to_string();
+                let line = String::from_utf8_lossy(&buffer[..line_end])
+                    .trim()
+                    .to_string();
                 buffer.drain(..=line_end);
                 if line.is_empty() {
                     continue;

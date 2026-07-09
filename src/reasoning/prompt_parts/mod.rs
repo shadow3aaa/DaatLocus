@@ -62,9 +62,7 @@ impl PreTurnContextPart for PreTurnProjectInstructionsPart {
                     );
                     return Some(PromptNode::State(PromptStateDoc::new(
                         self.key(),
-                        vec![(format!(
-                            "project_instruction_error={err}"
-                        ))],
+                        vec![(format!("project_instruction_error={err}"))],
                     )));
                 }
             };
@@ -124,9 +122,7 @@ impl AfterClaimContextPart for AfterClaimInputPart {
         if !input.is_empty() {
             children.push(PromptNode::State(PromptStateDoc::new(
                 "events",
-                vec![(render_afterclaim_events(
-                    input,
-                ))],
+                vec![(render_afterclaim_events(input))],
             )));
         }
         let skill_injections = ctx
@@ -135,9 +131,7 @@ impl AfterClaimContextPart for AfterClaimInputPart {
         if !skill_injections.is_empty() {
             children.push(PromptNode::State(PromptStateDoc::new(
                 "explicit_skills",
-                vec![(render_explicit_skill_injections(
-                    &skill_injections,
-                ))],
+                vec![(render_explicit_skill_injections(&skill_injections))],
             )));
         }
 

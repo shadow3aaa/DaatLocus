@@ -279,9 +279,7 @@ struct RestrictedSpawnInput<'a> {
     acl_guards: &'a mut Vec<AclGuard>,
 }
 
-fn spawn_restricted_inner(
-    input: RestrictedSpawnInput<'_>,
-) -> io::Result<RestrictedWindowsChild> {
+fn spawn_restricted_inner(input: RestrictedSpawnInput<'_>) -> io::Result<RestrictedWindowsChild> {
     apply_policy_acl_rules(
         input.policy,
         input.program,
@@ -290,7 +288,8 @@ fn spawn_restricted_inner(
         input.psid_everyone,
         input.acl_guards,
     )?;
-    let current_dir = input.options
+    let current_dir = input
+        .options
         .current_dir
         .clone()
         .unwrap_or(std::env::current_dir()?);
@@ -356,7 +355,8 @@ fn spawn_restricted_async_inner(
         input.psid_everyone,
         input.acl_guards,
     )?;
-    let current_dir = input.options
+    let current_dir = input
+        .options
         .current_dir
         .clone()
         .unwrap_or(std::env::current_dir()?);

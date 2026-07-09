@@ -45,9 +45,6 @@ fn default_prompt_persona_language() -> String {
     PROMPT_PERSONA_CONFIGURED_LOCALE_LANGUAGE.to_string()
 }
 
-
-
-
 #[cfg(test)]
 pub struct TurnRolloutRunner;
 
@@ -60,8 +57,6 @@ struct TurnTraceSourceTurn {
     actions: Vec<EpisodeActionRecord>,
     history_messages: Vec<HistoryMessage>,
 }
-
-
 
 #[cfg(test)]
 impl TurnRolloutRunner {
@@ -90,8 +85,6 @@ impl TurnRolloutRunner {
         }
     }
 }
-
-
 
 pub fn prompt_persona_path_sync() -> PathBuf {
     daat_locus_paths_sync().config_file(PROMPT_PERSONA_FILE_NAME)
@@ -253,8 +246,6 @@ pub fn render_prompt_persona_markdown(spec: &PromptPersonaSpec) -> String {
     )
 }
 
-
-
 #[cfg(test)]
 fn turn_trace_step_from_source_turn(turn: &TurnTraceSourceTurn) -> TurnTraceStep {
     TurnTraceStep {
@@ -268,13 +259,6 @@ fn turn_trace_step_from_source_turn(turn: &TurnTraceSourceTurn) -> TurnTraceStep
     }
 }
 
-
-
-
-
-
-
-
 pub fn current_runtime_system_prompt_artifact_from_store(
     compiled_prompts: &CompiledPromptStore,
 ) -> CompiledRuntimeSystemPrompt {
@@ -286,7 +270,6 @@ pub fn current_runtime_system_prompt_artifact_from_store(
         report: None,
     }
 }
-
 
 impl Default for PromptPersonaSpec {
     fn default() -> Self {
@@ -324,9 +307,6 @@ fn last_assistant_message(turn: &TurnTraceSourceTurn) -> Option<String> {
         })
         .filter(|message| !message.is_empty())
 }
-
-
-
 
 #[cfg(test)]
 mod tests {

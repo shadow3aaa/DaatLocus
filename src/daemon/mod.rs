@@ -1943,9 +1943,7 @@ async fn dir_list_handler(
             )
                 .into_response();
         }
-        let parent = requested
-            .parent()
-            .map(|p| p.display().to_string());
+        let parent = requested.parent().map(|p| p.display().to_string());
         let entries = list_subdirs(&requested);
         Ok(DirListResponse {
             path: requested.display().to_string(),

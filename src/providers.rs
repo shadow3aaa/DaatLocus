@@ -758,7 +758,7 @@ impl OpenAIClient {
             Some(allowed_tool_names)
         };
 
-let mut buffer = Vec::new();
+        let mut buffer = Vec::new();
         let mut content = String::new();
         let mut reasoning_content = String::new();
         let mut tool_calls: Vec<StreamingToolCallBuilder> = Vec::new();
@@ -795,7 +795,7 @@ let mut buffer = Vec::new();
                     &err,
                 )
             })?;
-buffer.extend_from_slice(&chunk);
+            buffer.extend_from_slice(&chunk);
             normalize_sse_buffer(&mut buffer);
             while let Some(event) = take_next_sse_event(&mut buffer) {
                 let data = event

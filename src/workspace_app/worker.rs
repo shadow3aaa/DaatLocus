@@ -11,9 +11,9 @@ use crate::{
     app::{AppDynamicToolResult, AppDynamicToolSpec, AppId, AppStateRender},
     persistence::PersistenceStore,
     workspace_app::{
-        WorkspaceAppConfigOutput, WorkspaceLuaRuntime,
-        WorkspaceNoticeOutput, WorkspaceRenderOutput, WorkspaceToolCallOutput,
-        WorkspaceToolDescriptor, load_runtime_state, load_workspace_lua_runtime,
+        WorkspaceAppConfigOutput, WorkspaceLuaRuntime, WorkspaceNoticeOutput,
+        WorkspaceRenderOutput, WorkspaceToolCallOutput, WorkspaceToolDescriptor,
+        load_runtime_state, load_workspace_lua_runtime,
         protocol::{
             WorkerHello, WorkerRequest, WorkerRequestOp, WorkerResponse, WorkerResponsePayload,
             WorkerResponseResult,

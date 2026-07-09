@@ -141,7 +141,6 @@ impl PendingWorkQueue {
         Ok(claimed)
     }
 
-
     pub fn consume(&self, work: PendingWork) -> Result<bool> {
         let mut inner = self.inner.lock();
         let Some(index) = inner

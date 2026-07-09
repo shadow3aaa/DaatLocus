@@ -309,7 +309,6 @@ impl WorkspaceAppRegistry {
         }
     }
 
-
     pub async fn sync_dirty_apps(
         &mut self,
         apps: &mut AppManager,

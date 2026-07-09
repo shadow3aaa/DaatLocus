@@ -7,7 +7,9 @@ pub(super) fn runtime_work_origin(inputs: &[ClaimedRuntimeInput]) -> Option<Stri
     if inputs.len() > 1 {
         return Some("runtime_work:batch".to_string());
     }
-    inputs.first().map(|event| format!("event:{}", event.event_id))
+    inputs
+        .first()
+        .map(|event| format!("event:{}", event.event_id))
 }
 
 pub(super) type ClaimedRuntimeInput = Box<EventView>;
@@ -163,14 +165,7 @@ pub(super) fn handle_model_request_failure(
             requeue_claimed_runtime_events(context, event_ids);
             return false;
         }
-        terminate_model_request_failure(
-            context,
-            None,
-            1,
-            event_ids,
-            error_text,
-            "non_retryable",
-        );
+        terminate_model_request_failure(context, None, 1, event_ids, error_text, "non_retryable");
         return true;
     };
 
