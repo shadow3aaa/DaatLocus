@@ -961,7 +961,8 @@ mod tests {
         assert_eq!(
             output,
             [
-                " • I updated the renderer.",
+                "   I updated the renderer.",
+                "",
                 "   • transcript",
                 "   • markdown",
                 "   • composer",
@@ -970,7 +971,6 @@ mod tests {
                 "   └ 10 10   fn render() {",
                 "     11    - old();",
                 "        11 + new();",
-                "",
                 "",
                 "",
                 "",

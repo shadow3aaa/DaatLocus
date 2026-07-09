@@ -628,7 +628,7 @@ mod tests {
             EventPayload::TerminalIncoming(_) => panic!("expected telegram payload"),
         }
         let terminal = restored.events.get(&terminal_id).expect("terminal event");
-        assert_eq!(terminal.source_label(), "test");
+        assert_eq!(terminal.source_label(), "dashboard");
         assert_eq!(terminal.status, EventStatus::Failed);
         assert_eq!(
             terminal.reply_message.as_deref(),
@@ -657,7 +657,7 @@ mod tests {
         let event = store
             .view(&event_id.to_string())
             .expect("view terminal event");
-        assert_eq!(event.source_label(), "test");
+        assert_eq!(event.source_label(), "dashboard");
         assert_eq!(event.status, EventStatus::Pending);
         match event.payload {
             EventPayload::TerminalIncoming(payload) => {
