@@ -2064,7 +2064,8 @@ model_id = "gpt-4.1-mini"
     #[tokio::test]
     async fn write_setup_persona_updates_identity_summary() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _home_override = crate::runtime::bootstrap::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
+        let _home_override =
+            crate::runtime::bootstrap::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
         let request = SetupConfigRequest {
             persona_name: Some("CustomAgent".to_string()),
             persona_language: Some("en-US".to_string()),

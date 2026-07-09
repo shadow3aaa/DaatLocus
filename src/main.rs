@@ -49,7 +49,6 @@ mod terminal_logo;
 mod workflow;
 mod workspace_app;
 
-
 fn main() {
     let cli = cli::parse_args();
 

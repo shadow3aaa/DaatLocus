@@ -4,10 +4,7 @@ use daat_locus_macros::model_schema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::reasoning::{
-    program::Program,
-    signature::Signature,
-};
+use crate::reasoning::{program::Program, signature::Signature};
 
 pub struct RuntimeTurnTraceJudgeProgram;
 

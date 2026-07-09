@@ -409,8 +409,6 @@ mod tests {
         ));
     }
 
-
-
     #[test]
     fn requeue_front_reactivates_claimed_event_driver() {
         let queue = test_queue();
@@ -454,7 +452,6 @@ mod tests {
                 .all(|entry| matches!(entry.state, PendingWorkEntryState::Pending))
         );
     }
-
 
     #[test]
     fn pending_event_ids_follow_manual_reordering() {

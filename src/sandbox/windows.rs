@@ -62,7 +62,6 @@ use super::{
     policy_paths_with_resolved,
 };
 
-
 #[allow(dead_code)]
 const WIN_WORLD_SID: i32 = 1;
 const WORKER_READ_ALLOW_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;

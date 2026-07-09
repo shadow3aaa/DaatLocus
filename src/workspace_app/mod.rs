@@ -1745,7 +1745,6 @@ return app
         );
     }
 
-
     #[tokio::test]
     async fn workspace_app_supports_app_local_require_and_basic_io_os() {
         let root = TempDir::new().expect("create temp workspace root");

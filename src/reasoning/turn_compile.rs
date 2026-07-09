@@ -45,8 +45,6 @@ fn default_prompt_persona_language() -> String {
     PROMPT_PERSONA_CONFIGURED_LOCALE_LANGUAGE.to_string()
 }
 
-
-
 pub fn prompt_persona_path_sync() -> PathBuf {
     daat_locus_paths_sync().config_file(PROMPT_PERSONA_FILE_NAME)
 }
@@ -207,7 +205,6 @@ pub fn render_prompt_persona_markdown(spec: &PromptPersonaSpec) -> String {
     )
 }
 
-
 pub fn current_runtime_system_prompt_artifact_from_store(
     compiled_prompts: &CompiledPromptStore,
 ) -> CompiledRuntimeSystemPrompt {
@@ -242,7 +239,6 @@ fn prompt_persona_spec_from_default_prompt(locale_hint: Option<&str>) -> PromptP
         identity_summary: PERSONA_DEFAULT.identity_summary.trim().to_string(),
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -370,6 +366,4 @@ Use the configured locale by default.
 
         assert_eq!(resolve_prompt_persona_language(&persona, "zh-CN"), "zh-CN");
     }
-
-
 }
