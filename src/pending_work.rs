@@ -386,100 +386,30 @@ mod tests {
     #[test]
     fn persisted_pending_work_queue_postcard_round_trips() {
         let event_id = Uuid::parse_str("33333333-3333-4333-8333-333333333333").expect("event uuid");
+
         let state = PersistedPendingWorkQueue {
-            queue: VecDeque::from([
-                PendingWorkEntry {
-                    work: PendingWork::Event { event_id },
-                    state: PendingWorkEntryState::Pending,
-                },
-                PendingWorkEntry {
-                    work: PendingWork::AppNotice {
-                        app: AppId::terminal(),
-                        reason: "terminal changed".to_string(),
-                    },
-                    state: PendingWorkEntryState::Claimed,
-                },
-            ]),
+            queue: VecDeque::from([PendingWorkEntry {
+                work: PendingWork::Event { event_id },
+                state: PendingWorkEntryState::Pending,
+            }]),
         };
 
         let bytes = postcard::to_allocvec(&state).expect("encode pending work");
         let restored: PersistedPendingWorkQueue =
             postcard::from_bytes(&bytes).expect("decode pending work");
 
-        assert_eq!(restored.queue.len(), 2);
-        match &restored.queue[0].work {
-            PendingWork::Event {
-                event_id: restored_event_id,
-            } => assert_eq!(*restored_event_id, event_id),
-            other => panic!("expected event work, got {other:?}"),
-        }
+        assert_eq!(restored.queue.len(), 1);
+        let PendingWork::Event {
+            event_id: restored_event_id,
+        } = &restored.queue[0].work;
+        assert_eq!(*restored_event_id, event_id);
         assert!(matches!(
             restored.queue[0].state,
             PendingWorkEntryState::Pending
         ));
-        match &restored.queue[1].work {
-            PendingWork::AppNotice { app, reason } => {
-                assert_eq!(*app, AppId::terminal());
-                assert_eq!(reason, "terminal changed");
-            }
-            other => panic!("expected app notice work, got {other:?}"),
-        }
-        assert!(matches!(
-            restored.queue[1].state,
-            PendingWorkEntryState::Claimed
-        ));
     }
 
-    #[test]
-    fn claim_batch_prioritizes_events_over_app_notices() {
-        let queue = test_queue();
-        let event_id = Uuid::new_v4();
-        queue
-            .enqueue(PendingWork::AppNotice {
-                app: AppId::terminal(),
-                reason: "terminal changed".to_string(),
-            })
-            .expect("enqueue app notice");
-        queue
-            .enqueue(PendingWork::Event { event_id })
-            .expect("enqueue event");
 
-        let claimed = queue.claim_batch(1).expect("claim work");
-        assert_eq!(claimed.len(), 1);
-        match &claimed[0] {
-            PendingWork::Event {
-                event_id: claimed_event_id,
-            } => assert_eq!(*claimed_event_id, event_id),
-            other => panic!("expected event to be claimed first, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn app_notice_enqueue_updates_reason_for_same_app() {
-        let queue = test_queue();
-        queue
-            .enqueue(PendingWork::AppNotice {
-                app: AppId::terminal(),
-                reason: "old reason".to_string(),
-            })
-            .expect("enqueue old app notice");
-        queue
-            .enqueue(PendingWork::AppNotice {
-                app: AppId::terminal(),
-                reason: "new reason".to_string(),
-            })
-            .expect("update app notice reason");
-
-        let claimed = queue.claim_batch(2).expect("claim work");
-        assert_eq!(claimed.len(), 1);
-        match &claimed[0] {
-            PendingWork::AppNotice { app, reason } => {
-                assert_eq!(*app, AppId::terminal());
-                assert_eq!(reason, "new reason");
-            }
-            other => panic!("expected app notice, got {other:?}"),
-        }
-    }
 
     #[test]
     fn requeue_front_reactivates_claimed_event_driver() {
@@ -500,12 +430,10 @@ mod tests {
 
         let reclaimed = queue.claim_batch(1).expect("claim requeued event");
         assert_eq!(reclaimed.len(), 1);
-        match &reclaimed[0] {
-            PendingWork::Event {
-                event_id: reclaimed_event_id,
-            } => assert_eq!(*reclaimed_event_id, event_id),
-            other => panic!("expected requeued event, got {other:?}"),
-        }
+        let PendingWork::Event {
+            event_id: reclaimed_event_id,
+        } = &reclaimed[0];
+        assert_eq!(*reclaimed_event_id, event_id);
     }
 
     #[test]
@@ -514,13 +442,6 @@ mod tests {
         let mut state = PersistedPendingWorkQueue::default();
         state.queue.push_back(PendingWorkEntry {
             work: PendingWork::Event { event_id },
-            state: PendingWorkEntryState::Claimed,
-        });
-        state.queue.push_back(PendingWorkEntry {
-            work: PendingWork::AppNotice {
-                app: AppId::terminal(),
-                reason: "terminal changed".to_string(),
-            },
             state: PendingWorkEntryState::Claimed,
         });
 
@@ -534,35 +455,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn clear_events_removes_event_work_and_preserves_app_notices() {
-        let queue = test_queue();
-        let claimed_event_id = Uuid::new_v4();
-        let pending_event_id = Uuid::new_v4();
-        queue
-            .enqueue(PendingWork::Event {
-                event_id: claimed_event_id,
-            })
-            .expect("enqueue event");
-        queue
-            .enqueue(PendingWork::AppNotice {
-                app: AppId::terminal(),
-                reason: "terminal changed".to_string(),
-            })
-            .expect("enqueue app notice");
-        queue.claim_batch(1).expect("claim first event work");
-        queue
-            .enqueue(PendingWork::Event {
-                event_id: pending_event_id,
-            })
-            .expect("enqueue pending event");
-
-        assert_eq!(queue.clear_events().expect("clear events"), 2);
-
-        let remaining = queue.claim_batch(2).expect("claim remaining work");
-        assert_eq!(remaining.len(), 1);
-        assert!(matches!(remaining[0], PendingWork::AppNotice { .. }));
-    }
 
     #[test]
     fn pending_event_ids_follow_manual_reordering() {
@@ -575,12 +467,6 @@ mod tests {
                 event_id: first_event_id,
             })
             .expect("enqueue first event");
-        queue
-            .enqueue(PendingWork::AppNotice {
-                app: AppId::terminal(),
-                reason: "terminal changed".to_string(),
-            })
-            .expect("enqueue app notice");
         queue
             .enqueue(PendingWork::Event {
                 event_id: second_event_id,
@@ -628,12 +514,6 @@ mod tests {
             })
             .expect("enqueue first event");
         queue
-            .enqueue(PendingWork::AppNotice {
-                app: AppId::terminal(),
-                reason: "terminal changed".to_string(),
-            })
-            .expect("enqueue app notice");
-        queue
             .enqueue(PendingWork::Event {
                 event_id: second_event_id,
             })
@@ -666,52 +546,6 @@ mod tests {
             !queue
                 .move_pending_event_to_position(second_event_id, 1)
                 .expect("move event to current position")
-        );
-    }
-    #[test]
-    fn pending_events_move_to_front_preserves_non_event_order() {
-        let queue = test_queue();
-        let first_event_id = Uuid::new_v4();
-        let second_event_id = Uuid::new_v4();
-        queue
-            .enqueue(PendingWork::Event {
-                event_id: first_event_id,
-            })
-            .expect("enqueue first event");
-        queue
-            .enqueue(PendingWork::AppNotice {
-                app: AppId::terminal(),
-                reason: "terminal changed".to_string(),
-            })
-            .expect("enqueue app notice");
-        queue
-            .enqueue(PendingWork::Event {
-                event_id: second_event_id,
-            })
-            .expect("enqueue second event");
-
-        assert!(
-            queue
-                .move_pending_event_to_front(second_event_id)
-                .expect("move second event to front")
-        );
-        assert_eq!(
-            queue.pending_event_ids(),
-            vec![second_event_id, first_event_id]
-        );
-        let claimed = queue.claim_batch(3).expect("claim reordered work");
-        assert!(matches!(
-            claimed.as_slice(),
-            [
-                PendingWork::Event { event_id: first_claimed },
-                PendingWork::Event { event_id: second_claimed },
-                PendingWork::AppNotice { .. }
-            ] if *first_claimed == second_event_id && *second_claimed == first_event_id
-        ));
-        assert!(
-            !queue
-                .move_pending_event_to_front(second_event_id)
-                .expect("claimed event is no longer movable")
         );
     }
 }

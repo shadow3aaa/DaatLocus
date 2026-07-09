@@ -45,46 +45,7 @@ fn default_prompt_persona_language() -> String {
     PROMPT_PERSONA_CONFIGURED_LOCALE_LANGUAGE.to_string()
 }
 
-#[cfg(test)]
-pub struct TurnRolloutRunner;
 
-#[cfg(test)]
-struct TurnTraceSourceTurn {
-    id: String,
-    current_doing: String,
-    description: String,
-    observation: String,
-    actions: Vec<EpisodeActionRecord>,
-    history_messages: Vec<HistoryMessage>,
-}
-
-#[cfg(test)]
-impl TurnRolloutRunner {
-    fn trace_from_turns(span_id: &str, turns: &[TurnTraceSourceTurn]) -> TurnTraceArtifact {
-        let steps = turns
-            .iter()
-            .map(turn_trace_step_from_source_turn)
-            .collect::<Vec<_>>();
-        let final_turn = turns
-            .last()
-            .expect("turn trace source should contain at least one turn");
-        let final_assistant_message = final_turn
-            .history_messages
-            .iter()
-            .rev()
-            .find(|message| message.is_assistant())
-            .and_then(|message| message.text_content().map(str::to_string))
-            .filter(|message| !message.trim().is_empty());
-        let final_reply_message = last_finish_and_send_reply_message(&final_turn.history_messages);
-        TurnTraceArtifact {
-            span_id: span_id.to_string(),
-            turn_count: turns.len(),
-            steps,
-            final_assistant_message,
-            final_reply_message,
-        }
-    }
-}
 
 pub fn prompt_persona_path_sync() -> PathBuf {
     daat_locus_paths_sync().config_file(PROMPT_PERSONA_FILE_NAME)
@@ -246,18 +207,6 @@ pub fn render_prompt_persona_markdown(spec: &PromptPersonaSpec) -> String {
     )
 }
 
-#[cfg(test)]
-fn turn_trace_step_from_source_turn(turn: &TurnTraceSourceTurn) -> TurnTraceStep {
-    TurnTraceStep {
-        turn_id: turn.id.clone(),
-        current_doing: turn.current_doing.clone(),
-        description: turn.description.clone(),
-        observation: turn.observation.clone(),
-        actions: turn.actions.clone(),
-        assistant_message: last_assistant_message(turn),
-        reply_message: last_finish_and_send_reply_message(&turn.history_messages),
-    }
-}
 
 pub fn current_runtime_system_prompt_artifact_from_store(
     compiled_prompts: &CompiledPromptStore,
@@ -294,24 +243,9 @@ fn prompt_persona_spec_from_default_prompt(locale_hint: Option<&str>) -> PromptP
     }
 }
 
-#[cfg(test)]
-fn last_assistant_message(turn: &TurnTraceSourceTurn) -> Option<String> {
-    turn.history_messages
-        .iter()
-        .rev()
-        .find(|message| message.is_assistant())
-        .and_then(|message| {
-            message
-                .text_content()
-                .map(|content| content.trim().to_string())
-        })
-        .filter(|message| !message.is_empty())
-}
 
 #[cfg(test)]
 mod tests {
-    use crate::reasoning::runtime::HistoryMessage;
-
     use super::*;
 
     #[test]
@@ -437,34 +371,5 @@ Use the configured locale by default.
         assert_eq!(resolve_prompt_persona_language(&persona, "zh-CN"), "zh-CN");
     }
 
-    #[test]
-    fn render_turn_trace_for_judge_includes_actions_and_assistant() {
-        let turns = vec![TurnTraceSourceTurn {
-            id: "turn-1".to_string(),
-            current_doing: "analyze main".to_string(),
-            description: "read main.rs".to_string(),
-            observation: "needs more inspection".to_string(),
-            actions: vec![crate::reasoning::episode::EpisodeActionRecord {
-                kind: "assistant_message".to_string(),
-                summary: "planning".to_string(),
-            }],
-            history_messages: vec![HistoryMessage {
-                message: crate::reasoning::runtime::AgentMessage::assistant("I will continue."),
-                activity_event: None,
-                tool_call_activity_events: Vec::new(),
-            }],
-        }];
 
-        let trace = TurnRolloutRunner::trace_from_turns("span-1", &turns);
-        let rendered = render_turn_trace_for_judge(&trace);
-
-        assert!(rendered.contains("turn[1].actions=assistant_message(planning)"));
-        assert!(rendered.contains("turn[1].assistant_message=I will continue."));
-    }
-
-    #[test]
-    fn unique_synthetic_telegram_id_is_positive_and_nonzero() {
-        let id = unique_synthetic_telegram_id();
-        assert!(id > 0);
-    }
 }

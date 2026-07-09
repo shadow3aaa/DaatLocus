@@ -5,12 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::reasoning::{
-    ir::PromptIR,
     program::Program,
-    prompts::{
-        PROGRAM_RUNTIME_TURN_TRACE_JUDGE_INSTRUCTIONS, PROGRAM_RUNTIME_TURN_TRACE_JUDGE_SYSTEM,
-        prompt_bullet_lines,
-    },
     signature::Signature,
 };
 

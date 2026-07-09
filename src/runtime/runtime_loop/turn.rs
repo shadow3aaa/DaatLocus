@@ -1536,7 +1536,6 @@ mod tests {
     fn afterclaim_agent_content_carries_telegram_image_parts() {
         let input: AfterClaimContextInput = vec![crate::events::EventView {
             event_id: uuid::Uuid::nil(),
-            source: crate::events::EventSource::Telegram,
             status: crate::events::EventStatus::Claimed,
             reply_message: None,
             arrived_at_ms: 1,

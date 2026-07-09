@@ -481,7 +481,7 @@ pub(crate) fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSu
 #[cfg(test)]
 pub(crate) struct DaatLocusHomeOverride {
     previous: Option<String>,
-    _guard: OwnedMutexGuard<()>,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 #[cfg(test)]
@@ -514,7 +514,7 @@ impl Drop for DaatLocusHomeOverride {
 
 #[cfg(test)]
 fn daat_locus_home_override_lock() -> Arc<tokio::sync::Mutex<()>> {
-    static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+    static LOCK: std::sync::OnceLock<Arc<tokio::sync::Mutex<()>>> = std::sync::OnceLock::new();
     Arc::clone(LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(()))))
 }
 

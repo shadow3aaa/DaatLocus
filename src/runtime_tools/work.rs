@@ -414,7 +414,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn update_plan_call_ui_renders_proposed_plan() {
         let call = AgentToolCall {
             id: "call_1".to_string(),

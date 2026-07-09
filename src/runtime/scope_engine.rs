@@ -32,8 +32,8 @@ pub struct ScopeEngineHandle {
     lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>>,
 }
 
+#[allow(dead_code)]
 impl ScopeEngineHandle {
-    /// Create a new scope engine handle (no project opened yet).
     pub fn new() -> Self {
         Self {
             project_root: None,

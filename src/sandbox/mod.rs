@@ -446,6 +446,7 @@ impl AsyncRead for SandboxChildStderr {
     }
 }
 
+#[allow(dead_code)]
 #[cfg(any(not(test), all(test, target_os = "windows")))]
 pub(super) fn apply_std_command_options(
     policy: &RuntimeSandboxPolicy,
@@ -478,6 +479,7 @@ fn apply_tokio_command_options(
         .stderr(options.stderr.to_stdio());
 }
 
+#[allow(dead_code)]
 #[cfg(any(not(test), all(test, target_os = "windows")))]
 fn strip_protected_env_from_std_command(
     policy: &RuntimeSandboxPolicy,
