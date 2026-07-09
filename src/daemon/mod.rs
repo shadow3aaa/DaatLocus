@@ -1963,6 +1963,7 @@ async fn dir_list_handler(
 }
 
 fn list_root_dirs() -> Result<DirListResponse> {
+    #[cfg(windows)]
     let mut entries: Vec<DirEntry> = Vec::new();
     #[cfg(windows)]
     {
