@@ -860,9 +860,10 @@ the Session should publish a placeholder title derived from the first external
 user/event sentence.
 
 Generated titles should use the configured efficient model. Do not use the main
-runtime model or judge model for routine title refreshes. Regenerate only when
-session activity changed, and no more frequently than every five minutes. If
-there is no new activity since the last generated title, do not regenerate.
+runtime model or judge model for routine title refreshes. Trigger regeneration
+after each completed turn (finish_and_send) when conversation activity has
+changed since the last generated title. If activity has not changed, skip
+regeneration.
 
 The Manager may cache the latest title in `SessionRegistry` from session
 status/dashboard snapshots. It must not inspect per-session memory or event

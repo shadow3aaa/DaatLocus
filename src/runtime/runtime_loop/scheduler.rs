@@ -39,6 +39,7 @@ pub(crate) async fn daat_locus_loop(
         if context.idle_since.is_none() {
             context.idle_since = Some(std::time::Instant::now());
         }
+        crate::runtime::session_title::sync_session_title_generated(context, tx).await;
         if let Some(status) =
             maybe_start_idle_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await
         {
@@ -97,6 +98,7 @@ pub(crate) async fn daat_locus_loop(
     context.active_runtime_turn = false;
     context.runtime_turn_started_at = None;
     context.runtime_turn_started_at_ms = None;
+    crate::runtime::session_title::sync_session_title_generated(context, tx).await;
     sync_dashboard_state(
         context,
         tx,

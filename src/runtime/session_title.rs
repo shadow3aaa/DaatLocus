@@ -1,21 +1,43 @@
 use chrono::Utc;
+use daat_locus_macros::model_schema;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::{
     context::Context,
     dashboard::{DashboardSessionTitle, DashboardState},
     events::{EventPayload, EventView},
-    reasoning::runtime::HistoryMessage,
+    reasoning::runtime::{HistoryMessage, PromptRequest},
+    schema_utils::model_schema_for,
 };
 
 const MAX_TITLE_CHARS: usize = 64;
 const MAX_EXCERPT_ITEMS: usize = 16;
 const MAX_EXCERPT_ITEM_CHARS: usize = 360;
 
+const TITLE_GENERATION_SYSTEM_PROMPT: &str =
+    "Generate a concise session title (≤64 characters) that captures the \
+     main topic, task, or question from the conversation below. Output a short \
+     label in the conversation language. Do not include prefixes like 'Title:' \
+     or quotes.";
+
+const TITLE_GENERATION_USER_PROMPT: &str =
+    "Generate a short title for this session based on the conversation above.";
+
+#[model_schema]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct SessionTitleOutput {
+    title: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SessionTitleState {
     current: Option<DashboardSessionTitle>,
     last_activity_signature: Option<String>,
+    last_generated_at_ms: Option<i64>,
+    last_generated_signature: Option<String>,
 }
 
 impl SessionTitleState {
@@ -38,6 +60,20 @@ impl SessionTitleState {
             updated_at_ms: now_ms,
         });
         true
+    }
+
+    fn should_generate(&self, signature: &str) -> bool {
+        self.last_generated_signature.as_deref() != Some(signature)
+    }
+
+    fn apply_generated(&mut self, title: String, signature: &str, now_ms: i64) {
+        self.current = Some(DashboardSessionTitle {
+            title,
+            generated: true,
+            updated_at_ms: now_ms,
+        });
+        self.last_generated_signature = Some(signature.to_string());
+        self.last_generated_at_ms = Some(now_ms);
     }
 }
 
@@ -66,6 +102,64 @@ fn sync_dashboard_session_title(
     tx.send_modify(|state| {
         state.session_title = session_title;
     });
+}
+
+pub async fn sync_session_title_generated(
+    context: &mut Context,
+    tx: &tokio::sync::watch::Sender<DashboardState>,
+) {
+    let events = context.events.views();
+    let messages = context.memory.runtime_conversation_messages();
+    let signature = activity_signature(&events, &messages);
+    if !context.session_title.should_generate(&signature) {
+        return;
+    }
+    let excerpt = conversation_excerpt(&events, &messages);
+    if excerpt.trim().is_empty() {
+        return;
+    }
+    let request = PromptRequest {
+        tool_name: "session_title".to_string(),
+        tool_description:
+            "Generate a concise title (≤64 chars) summarizing the session conversation."
+                .to_string(),
+        output_schema: model_schema_for::<SessionTitleOutput>(),
+        system_messages: vec![TITLE_GENERATION_SYSTEM_PROMPT.to_string()],
+        long_term_memory_messages: Vec::new(),
+        history_messages: vec![HistoryMessage::user(&excerpt)],
+        current_user_message: TITLE_GENERATION_USER_PROMPT.to_string(),
+        retry_messages: Vec::new(),
+    };
+    match context.efficient_llm.run_json(context, request).await {
+        Ok(value) => match serde_json::from_value::<SessionTitleOutput>(value) {
+            Ok(output) => {
+                let title = normalize_session_title(&output.title);
+                if let Some(title) = title {
+                    let events_after = context.events.views();
+                    let messages_after = context.memory.runtime_conversation_messages();
+                    let signature_after = activity_signature(&events_after, &messages_after);
+                    if context
+                        .session_title
+                        .last_generated_signature
+                        .as_deref()
+                        != Some(&signature_after)
+                    {
+                        let now_after = Utc::now().timestamp_millis();
+                        context
+                            .session_title
+                            .apply_generated(title, &signature_after, now_after);
+                        sync_dashboard_session_title(context, tx);
+                    }
+                }
+            }
+            Err(err) => {
+                warn!("failed to parse session title JSON: {err:?}");
+            }
+        },
+        Err(err) => {
+            warn!("session title generation failed: {err:?}");
+        }
+    }
 }
 
 struct SessionTitleInput {
