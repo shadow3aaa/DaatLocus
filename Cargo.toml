@@ -1,6 +1,6 @@
 [package]
 name = "daat-locus"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A long-running local agent runtime with memory, workflows, apps, and sleep-time self-improvement."
 license = "Apache-2.0"
@@ -111,9 +111,9 @@ rust-i18n = "4.1.0"
 unicode-width = "0.2"
 regex = "1.12.4"
 tokio-stream = "0.1.18"
-scope-engine = { version = "0.1.0", path = "crates/scope-engine" }
+scope-engine = { version = "0.2.0", path = "crates/scope-engine" }
 interprocess = { version = "2.4.2", features = ["tokio"] }
-daat-locus-macros = { version = "0.1.0", path = "crates/daat-locus-macros" }
+daat-locus-macros = { version = "0.2.0", path = "crates/daat-locus-macros" }
 daat-locus-md = { version = "0.3.6", path = "crates/daat-locus-md", default-features = false, features = ["markdown"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
