@@ -329,15 +329,36 @@ pub(super) fn parse_usage_from_response_json(
     if usage.is_zero() { None } else { Some(usage) }
 }
 
-pub(super) fn normalize_sse_buffer(buffer: &mut String) {
-    if buffer.contains('\r') {
-        *buffer = buffer.replace("\r\n", "\n").replace('\r', "\n");
+pub(super) fn normalize_sse_buffer(buffer: &mut Vec<u8>) {
+    if buffer.is_empty() {
+        return;
     }
+    // Replace \r\n with \n and bare \r with \n, operating on raw bytes.
+    let mut out = Vec::with_capacity(buffer.len());
+    let mut i = 0;
+    while i < buffer.len() {
+        if buffer[i] == b'\r' {
+            if i + 1 < buffer.len() && buffer[i + 1] == b'\n' {
+                out.push(b'\n');
+                i += 2;
+            } else {
+                out.push(b'\n');
+                i += 1;
+            }
+        } else {
+            out.push(buffer[i]);
+            i += 1;
+        }
+    }
+    *buffer = out;
 }
 
-pub(super) fn take_next_sse_event(buffer: &mut String) -> Option<String> {
-    let delimiter_index = buffer.find("\n\n")?;
-    let event = buffer[..delimiter_index].to_string();
+pub(super) fn take_next_sse_event(buffer: &mut Vec<u8>) -> Option<String> {
+    let delimiter_index = buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")?;
+    let event_bytes = &buffer[..delimiter_index];
+    let event = String::from_utf8_lossy(event_bytes).into_owned();
     buffer.drain(..delimiter_index + 2);
     Some(event)
 }

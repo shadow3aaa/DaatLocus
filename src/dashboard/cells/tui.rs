@@ -1541,39 +1541,17 @@ fn truncate_display_width(text: &str, max_width: usize) -> String {
 }
 
 fn render_assistant_cell_lines(cell: &AssistantActivityData, max_width: u16) -> Vec<Line<'static>> {
-    let title = source_title_or(&cell.content, "assistant");
-    let body_text = source_body_text(&cell.content);
-    let mut lines = vec![activity_header(title)];
-    if !body_text.trim().is_empty() {
+    let body_text = cell.content.trim();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if !body_text.is_empty() {
         let md_lines =
-            render_markdown_with_width(&body_text, Color::White, body_markdown_width(max_width));
+            render_markdown_with_width(body_text, Color::White, body_markdown_width(max_width));
         lines.extend(prefixed_body_lines(md_lines, max_width));
     }
     lines
 }
 
-fn source_title_or(content: &str, fallback: &str) -> String {
-    content
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or(fallback)
-        .to_string()
-}
 
-fn source_body_text(content: &str) -> String {
-    let mut lines = content.lines().collect::<Vec<_>>();
-    if !lines.is_empty() {
-        lines.remove(0);
-    }
-    while lines.first().is_some_and(|line| line.trim().is_empty()) {
-        lines.remove(0);
-    }
-    while lines.last().is_some_and(|line| line.trim().is_empty()) {
-        lines.pop();
-    }
-    lines.join("\n")
-}
 
 fn thinking_collapsed_preview(content: &str) -> String {
     let mut lines: Vec<&str> = content.lines().collect();
