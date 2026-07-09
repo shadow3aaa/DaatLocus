@@ -2307,18 +2307,12 @@ fn render_agent_message_reply_lines(
     message_lines: &[String],
     max_width: u16,
 ) -> Vec<Line<'static>> {
-    if message_lines.is_empty() {
-        return Vec::new();
-    }
-
     let joined = message_lines.join("\n");
-    let mut lines_iter = joined.trim_end_matches(['\r', '\n']).lines();
-    let title = lines_iter.next().unwrap_or_default().to_string();
-    let body = lines_iter.collect::<Vec<_>>().join("\n");
-    let mut lines = vec![activity_header(title)];
-    if !body.trim().is_empty() {
+    let body_text = joined.trim();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if !body_text.is_empty() {
         let md_lines =
-            render_markdown_with_width(&body, Color::White, body_markdown_width(max_width));
+            render_markdown_with_width(body_text, Color::White, body_markdown_width(max_width));
         lines.extend(prefixed_body_lines(md_lines, max_width));
     }
     lines
@@ -3891,15 +3885,16 @@ That's it.";
         assert!(
             rendered
                 .first()
-                .is_some_and(|line| line.starts_with("• [定位段 001] marker-001")),
-            "resolved message reply should start with an agent activity marker, not a prompt marker: {rendered:?}"
+                .is_some_and(|line| line.starts_with(ACTIVITY_BODY_INDENT)
+                    && line.contains("[定位段 001] marker-001")),
+            "resolved message reply first line should use body indent: {rendered:?}"
         );
-        let first_body_line = rendered
+        let second_line = rendered
             .iter()
             .find(|line| line.contains("marker-002"))
             .expect("reply body should render subsequent message lines");
         assert!(
-            first_body_line.starts_with(ACTIVITY_BODY_INDENT),
+            second_line.starts_with(ACTIVITY_BODY_INDENT),
             "resolved message body should use the agent body indent: {rendered:?}"
         );
         assert!(
@@ -3909,7 +3904,7 @@ That's it.";
             "resolved message reply should not render like a user prompt: {rendered:?}"
         );
         assert!(
-            !first_body_line.starts_with("   "),
+            !second_line.starts_with("   "),
             "reply body should not keep the old three-space indent: {rendered:?}"
         );
         assert!(rendered.iter().any(|line| line.contains("marker-012")));
