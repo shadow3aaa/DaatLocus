@@ -599,8 +599,8 @@ fn render_status_usage_lines(context: &Context) -> Vec<String> {
 
     let mut lines = Vec::new();
     for (label, llm) in [
-        ("main", &context.llm),
-        ("efficient", &context.efficient_llm),
+        ("main", context.llm.as_ref()),
+        ("efficient", context.efficient_llm.as_ref()),
     ] {
         let Some(info) = llm.token_usage_info() else {
             continue;

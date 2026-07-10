@@ -856,7 +856,7 @@ mod tests {
             let context = Context {
                 session_id: None,
                 llm: Box::new(UnusedLlm),
-                efficient_llm: Box::new(UnusedLlm),
+                efficient_llm: std::sync::Arc::new(UnusedLlm),
                 config,
                 memory: Memory::new().await,
                 plan: Plan::new().await,

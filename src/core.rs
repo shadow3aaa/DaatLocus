@@ -252,7 +252,6 @@ impl TokenUsageInfo {
         }
     }
 }
-
 /// LLM provider abstraction.
 #[async_trait]
 pub trait Llm {
@@ -262,6 +261,22 @@ pub trait Llm {
         context: &Context,
         request: PromptRequest,
     ) -> Result<serde_json::Value>;
+
+    /// Like [`run_json`](Self::run_json) but does not require a [`Context`] reference.
+    ///
+    /// Used for background tasks (e.g. session title generation) that need to
+    /// call the LLM without holding a live `&Context`.
+    ///
+    /// Default implementation returns an error; providers that support this
+    /// should override.
+    async fn run_json_no_context(
+        &self,
+        _request: PromptRequest,
+    ) -> Result<serde_json::Value> {
+        Err(miette!(
+            "run_json_no_context is not implemented for this provider"
+        ))
+    }
 
     /// Execute one tool-driven agent turn and return assistant text or tool calls.
     async fn run_agent_turn(

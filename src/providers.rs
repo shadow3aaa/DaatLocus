@@ -422,6 +422,34 @@ impl OpenAIClient {
         }
     }
 
+/// Step adapter state to the next downgrade level on a 400 response.
+/// Order: tool_choice (NamedFunction → RequiredString → Omit),
+/// then thinking budget (ReasoningEffortString → NestedReasoningObject → Unsupported).
+/// Returns false when no further downgrade is available.
+fn step_adapter_state_for_bad_request(
+    state: &mut ChatCompletionsAdapterState,
+    has_thinking_budget: bool,
+) -> bool {
+    if state.prompt_tool_choice_mode == PromptToolChoiceMode::NamedFunction {
+        state.prompt_tool_choice_mode = PromptToolChoiceMode::RequiredString;
+        return true;
+    }
+    if state.prompt_tool_choice_mode != PromptToolChoiceMode::Omit {
+        state.prompt_tool_choice_mode = PromptToolChoiceMode::Omit;
+        return true;
+    }
+    if has_thinking_budget {
+        if state.thinking_budget_mode == ThinkingBudgetMode::ReasoningEffortString {
+            state.thinking_budget_mode = ThinkingBudgetMode::NestedReasoningObject;
+            return true;
+        }
+        if state.thinking_budget_mode != ThinkingBudgetMode::Unsupported {
+            state.thinking_budget_mode = ThinkingBudgetMode::Unsupported;
+            return true;
+        }
+    }
+    false
+}
     async fn call_tool_json(&self, request: PromptRequest) -> Result<serde_json::Value> {
         let url = self.url();
         let output_schema = request.output_schema.clone();
@@ -476,51 +504,20 @@ impl OpenAIClient {
                 .into());
             }
 
-            if should_retry_prompt_request_with_string_tool_choice(&body)
-                && adapter_state.prompt_tool_choice_mode == PromptToolChoiceMode::NamedFunction
-            {
-                adapter_state.prompt_tool_choice_mode = PromptToolChoiceMode::RequiredString;
+            // On 400, step through adapter compatibility modes in order:
+            // tool_choice downgrade first, then thinking budget downgrade.
+            // Providers may reject parameters with generic error messages
+            // that don't name the specific parameter, so we always try the
+            // next mode instead of matching error text.
+            if Self::step_adapter_state_for_bad_request(
+                &mut adapter_state,
+                self.thinking_budget.is_some(),
+            ) {
                 self.update_adapter_state(adapter_state);
                 warn!(
-                    "llm provider rejected named function tool_choice; retrying prompt request with string tool_choice\n{}",
-                    request_context.join("\n")
-                );
-                continue;
-            }
-
-            if should_retry_prompt_request_without_tool_choice(&body)
-                && adapter_state.prompt_tool_choice_mode != PromptToolChoiceMode::Omit
-            {
-                adapter_state.prompt_tool_choice_mode = PromptToolChoiceMode::Omit;
-                self.update_adapter_state(adapter_state);
-                warn!(
-                    "llm provider does not support tool_choice; retrying prompt request without tool_choice\n{}",
-                    request_context.join("\n")
-                );
-                continue;
-            }
-
-            if self.thinking_budget.is_some()
-                && should_retry_prompt_request_with_nested_thinking_budget(&body)
-                && adapter_state.thinking_budget_mode == ThinkingBudgetMode::ReasoningEffortString
-            {
-                adapter_state.thinking_budget_mode = ThinkingBudgetMode::NestedReasoningObject;
-                self.update_adapter_state(adapter_state);
-                warn!(
-                    "llm provider rejected reasoning_effort; retrying prompt request with reasoning.effort\n{}",
-                    request_context.join("\n")
-                );
-                continue;
-            }
-
-            if self.thinking_budget.is_some()
-                && should_retry_request_without_thinking_budget(&body)
-                && adapter_state.thinking_budget_mode != ThinkingBudgetMode::Unsupported
-            {
-                adapter_state.thinking_budget_mode = ThinkingBudgetMode::Unsupported;
-                self.update_adapter_state(adapter_state);
-                warn!(
-                    "llm provider rejected thinking budget parameter; retrying prompt request without it\n{}",
+                    "llm api returned 400; retrying prompt request with downgraded adapter (tool_choice={:?}, thinking={:?})\n{}",
+                    adapter_state.prompt_tool_choice_mode,
+                    adapter_state.thinking_budget_mode,
                     request_context.join("\n")
                 );
                 continue;
@@ -1178,6 +1175,13 @@ impl Llm for OpenAIClient {
     async fn run_json(
         &self,
         _context: &Context,
+        request: PromptRequest,
+    ) -> Result<serde_json::Value> {
+        self.call_tool_json(request).await
+    }
+
+    async fn run_json_no_context(
+        &self,
         request: PromptRequest,
     ) -> Result<serde_json::Value> {
         self.call_tool_json(request).await

@@ -56,7 +56,7 @@ impl RuntimeTurnPhase {
 pub struct Context {
     pub session_id: Option<String>,
     pub llm: Box<dyn Llm + Send + Sync>,
-    pub efficient_llm: Box<dyn Llm + Send + Sync>,
+    pub efficient_llm: std::sync::Arc<dyn Llm + Send + Sync>,
     pub config: Config,
     pub memory: Memory,
     pub plan: Plan,

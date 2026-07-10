@@ -197,7 +197,7 @@ pub(crate) async fn run_session_serve(
     let mut context = Context {
         session_id: Some(session_id.as_str().to_string()),
         llm: client,
-        efficient_llm: efficient_client,
+        efficient_llm: std::sync::Arc::from(efficient_client),
         config,
         memory,
         plan,

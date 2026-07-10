@@ -174,6 +174,15 @@ impl Llm for PersistentTokenUsageLlm {
         result
     }
 
+    async fn run_json_no_context(
+        &self,
+        request: PromptRequest,
+    ) -> miette::Result<serde_json::Value> {
+        let result = self.inner.run_json_no_context(request).await;
+        self.persist_current_usage().await;
+        result
+    }
+
     async fn run_agent_turn(
         &self,
         context: &Context,
@@ -398,7 +407,7 @@ pub(crate) async fn build_eval_context_with_compiled(
     Context {
         session_id: None,
         llm: client,
-        efficient_llm: efficient_client,
+        efficient_llm: std::sync::Arc::from(efficient_client),
         config,
         memory,
         plan,

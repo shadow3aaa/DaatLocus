@@ -41,21 +41,6 @@ impl StreamingToolCallBuilder {
         })
     }
 }
-
-pub(super) fn should_retry_prompt_request_with_string_tool_choice(body: &str) -> bool {
-    let body = body.to_ascii_lowercase();
-    body.contains("unknown parameter: 'tool_choice.function'")
-        || body.contains("unknown parameter: \"tool_choice.function\"")
-}
-
-pub(super) fn should_retry_prompt_request_without_tool_choice(body: &str) -> bool {
-    let body = body.to_ascii_lowercase();
-    body.contains("does not support this tool_choice")
-        || body.contains("does not support tool_choice")
-        || body.contains("unknown parameter: 'tool_choice'")
-        || body.contains("unknown parameter: \"tool_choice\"")
-}
-
 pub(super) fn should_retry_prompt_request_with_nested_thinking_budget(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     body.contains("unknown parameter: 'reasoning_effort'")

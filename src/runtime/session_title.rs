@@ -3,7 +3,7 @@ use daat_locus_macros::model_schema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::{
     context::Context,
@@ -61,19 +61,8 @@ impl SessionTitleState {
         });
         true
     }
-
     fn should_generate(&self, signature: &str) -> bool {
         self.last_generated_signature.as_deref() != Some(signature)
-    }
-
-    fn apply_generated(&mut self, title: String, signature: &str, now_ms: i64) {
-        self.current = Some(DashboardSessionTitle {
-            title,
-            generated: true,
-            updated_at_ms: now_ms,
-        });
-        self.last_generated_signature = Some(signature.to_string());
-        self.last_generated_at_ms = Some(now_ms);
     }
 }
 
@@ -104,7 +93,7 @@ fn sync_dashboard_session_title(
     });
 }
 
-pub async fn sync_session_title_generated(
+pub fn spawn_session_title_generation(
     context: &mut Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
 ) {
@@ -118,6 +107,14 @@ pub async fn sync_session_title_generated(
     if excerpt.trim().is_empty() {
         return;
     }
+
+    // Eagerly mark as generated to prevent duplicate spawns.
+    let now_ms = Utc::now().timestamp_millis();
+    context
+        .session_title
+        .last_generated_signature = Some(signature.clone());
+    context.session_title.last_generated_at_ms = Some(now_ms);
+
     let request = PromptRequest {
         tool_name: "session_title".to_string(),
         tool_description:
@@ -130,36 +127,34 @@ pub async fn sync_session_title_generated(
         current_user_message: TITLE_GENERATION_USER_PROMPT.to_string(),
         retry_messages: Vec::new(),
     };
-    match context.efficient_llm.run_json(context, request).await {
-        Ok(value) => match serde_json::from_value::<SessionTitleOutput>(value) {
-            Ok(output) => {
-                let title = normalize_session_title(&output.title);
-                if let Some(title) = title {
-                    let events_after = context.events.views();
-                    let messages_after = context.memory.runtime_conversation_messages();
-                    let signature_after = activity_signature(&events_after, &messages_after);
-                    if context
-                        .session_title
-                        .last_generated_signature
-                        .as_deref()
-                        != Some(&signature_after)
-                    {
-                        let now_after = Utc::now().timestamp_millis();
-                        context
-                            .session_title
-                            .apply_generated(title, &signature_after, now_after);
-                        sync_dashboard_session_title(context, tx);
+
+    let llm = context.efficient_llm.clone();
+    let tx_clone = tx.clone();
+    tokio::spawn(async move {
+        match llm.run_json_no_context(request).await {
+            Ok(value) => match serde_json::from_value::<SessionTitleOutput>(value) {
+                Ok(output) => {
+                    if let Some(title) = normalize_session_title(&output.title) {
+                        debug!(title, "session title generated");
+                        let session_title = Some(DashboardSessionTitle {
+                            title,
+                            generated: true,
+                            updated_at_ms: Utc::now().timestamp_millis(),
+                        });
+                        tx_clone.send_modify(|state| {
+                            state.session_title = session_title;
+                        });
                     }
                 }
-            }
+                Err(err) => {
+                    warn!("failed to parse session title JSON: {err:?}");
+                }
+            },
             Err(err) => {
-                warn!("failed to parse session title JSON: {err:?}");
+                warn!("session title generation failed: {err:?}");
             }
-        },
-        Err(err) => {
-            warn!("session title generation failed: {err:?}");
         }
-    }
+    });
 }
 
 struct SessionTitleInput {
