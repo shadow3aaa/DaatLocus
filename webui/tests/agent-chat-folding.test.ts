@@ -36,6 +36,7 @@ describe("foldCompletedAgentChatActivity", () => {
         kind: "foldedActivityGroup",
         id: "folded-assistant-reply",
         bubbles: [bubble("read-file"), bubble("run-test")],
+        outputBubble: bubble("assistant-reply", "assistant", { reply: true }),
       },
       {
         kind: "bubble",
@@ -60,10 +61,12 @@ describe("foldCompletedAgentChatActivity", () => {
     expect(partialWindow[0]).toMatchObject({
       kind: "foldedActivityGroup",
       id: "folded-assistant-reply",
+      outputBubble: bubble("assistant-reply", "assistant", { reply: true }),
     });
     expect(extendedWindow[1]).toMatchObject({
       kind: "foldedActivityGroup",
       id: "folded-assistant-reply",
+      outputBubble: bubble("assistant-reply", "assistant", { reply: true }),
     });
   });
 

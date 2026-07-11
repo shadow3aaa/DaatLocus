@@ -175,9 +175,17 @@ pub fn render_dashboard_footer_context(
         .main_model_config()
         .effective_context_window_tokens()
         .max(1);
+    let worked_prefix = if let Some(started_at) = context.runtime_turn_started_at {
+        let elapsed = started_at.elapsed().as_secs();
+        format!("Worked for {} · ", format_elapsed_seconds_compact(elapsed))
+    } else {
+        String::new()
+    };
     let Some(info) = context.llm.token_usage_info() else {
-        return render_footer_context_with_usage(&model, estimated_input_tokens, effective_window)
-            .to_string();
+        return format!(
+            "{worked_prefix}{}",
+            render_footer_context_with_usage(&model, estimated_input_tokens, effective_window)
+        );
     };
     let used = usize::try_from(info.last_token_usage.input_tokens.max(0)).unwrap_or(0);
     let calibrated = estimated_input_tokens.map(|est| {
@@ -192,7 +200,7 @@ pub fn render_dashboard_footer_context(
             .or(estimated_input_tokens)
             .map(|value| (value, true))
     };
-    match footer_usage {
+    let usage_part = match footer_usage {
         Some((used, estimated)) => format!(
             "{model} · {}{}/{} used",
             if estimated { "~" } else { "" },
@@ -203,6 +211,11 @@ pub fn render_dashboard_footer_context(
             "{model} · {} window",
             format_compact_tokens(effective_window)
         ),
+    };
+    if worked_prefix.is_empty() {
+        usage_part
+    } else {
+        format!("{worked_prefix}{usage_part}")
     }
 }
 
@@ -267,6 +280,20 @@ fn format_compact_tokens(tokens: usize) -> String {
     } else {
         tokens.to_string()
     }
+}
+fn format_elapsed_seconds_compact(elapsed_seconds: u64) -> String {
+    if elapsed_seconds < 60 {
+        return format!("{elapsed_seconds}s");
+    }
+    if elapsed_seconds < 3600 {
+        let minutes = elapsed_seconds / 60;
+        let seconds = elapsed_seconds % 60;
+        return format!("{minutes}m {seconds:02}s");
+    }
+    let hours = elapsed_seconds / 3600;
+    let minutes = (elapsed_seconds % 3600) / 60;
+    let seconds = elapsed_seconds % 60;
+    format!("{hours}h {minutes:02}m {seconds:02}s")
 }
 
 pub fn render_sleep_status_output_for_dashboard(

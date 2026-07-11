@@ -1358,35 +1358,6 @@ fn append_committed_activity_cells(
         .collect::<Option<Vec<_>>>();
     append_committed_activity_cells_with_ids(context, tx, cells, stable_ids);
 }
-
-pub(super) fn append_final_message_separator_activity_cell(
-    context: &Context,
-    tx: &tokio::sync::watch::Sender<DashboardState>,
-    activity_len_before_turn: usize,
-    last_activity_cell_before_turn: Option<crate::dashboard::SessionActivityEvent>,
-    elapsed_seconds: Option<u64>,
-) {
-    let should_append = {
-        let state = tx.borrow();
-        let last_cell = state.activity_events.last();
-        let has_new_tail = state.activity_events.len() != activity_len_before_turn
-            || last_cell != last_activity_cell_before_turn.as_ref();
-        has_new_tail
-            && matches!(
-                last_cell,
-                Some(crate::dashboard::SessionActivityEvent::Assistant(_))
-            )
-    };
-    if !should_append {
-        return;
-    }
-    append_committed_activity_cells(
-        context,
-        Some(tx),
-        vec![final_message_separator_activity_cell(elapsed_seconds)],
-    );
-}
-
 fn append_committed_activity_cells_with_ids(
     context: &Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,

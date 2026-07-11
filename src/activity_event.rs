@@ -227,6 +227,8 @@ pub struct ReplyActivityDescriptor {
     pub subject: ReplySubject,
     #[serde(default)]
     pub message_lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

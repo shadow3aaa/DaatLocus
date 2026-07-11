@@ -14,9 +14,9 @@ use super::{
     common::{
         AssistantActivityData, CodingEditActivityData, CodingOpenProjectActivityData,
         CodingReviewActivityData, ErrorActivityData, ExploredActivityData,
-        ExploredCallActivityData, FinalMessageSeparatorActivityData, GenericAppActivityData,
-        MessageImageAttachment, ReducedMotion, RuntimeStatusActivityData, TerminalWaitActivityData,
-        ThinkingActivityData, UserActivityData,
+        ExploredCallActivityData, GenericAppActivityData, MessageImageAttachment, ReducedMotion,
+        RuntimeStatusActivityData, TerminalWaitActivityData, ThinkingActivityData,
+        UserActivityData,
     },
     exec::{ExecResultActivityData, LiveExecActivityData, TerminalExecutionMeta},
     highlight::{
@@ -511,9 +511,6 @@ fn render_activity_cell_lines_with_options(
 ) -> Vec<Line<'static>> {
     match cell {
         SessionActivityEvent::Assistant(cell) => render_assistant_cell_lines(cell, max_width),
-        SessionActivityEvent::FinalMessageSeparator(cell) => {
-            render_final_message_separator_cell_lines(cell, max_width)
-        }
         SessionActivityEvent::User(cell) => render_user_cell_lines(cell, max_width),
         SessionActivityEvent::Browser(cell) => render_browser_cell_lines(cell, max_width),
         SessionActivityEvent::LiveBrowser(cell) => render_live_browser_cell_lines(cell, max_width),
@@ -593,9 +590,6 @@ fn activity_cell_transcript_lines(cell: &SessionActivityEvent, width: u16) -> Ve
     match cell {
         SessionActivityEvent::Assistant(cell) => {
             transcript_markdown_section("ASSISTANT", &cell.content, Color::White, width)
-        }
-        SessionActivityEvent::FinalMessageSeparator(cell) => {
-            render_final_message_separator_cell_lines(cell, width)
         }
         SessionActivityEvent::User(cell) => transcript_user_lines(cell, width),
         SessionActivityEvent::Thinking(cell) => {
@@ -877,10 +871,6 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
         SessionActivityEvent::Assistant(cell) => {
             transcript_section("ASSISTANT", cell.content.clone())
         }
-        SessionActivityEvent::FinalMessageSeparator(cell) => cell
-            .elapsed_seconds
-            .map(|seconds| format!("Worked for {}", format_elapsed_seconds_compact(seconds)))
-            .unwrap_or_else(|| "Worked".to_string()),
         SessionActivityEvent::User(cell) => transcript_section("USER", user_transcript_text(cell)),
         SessionActivityEvent::Thinking(cell) => {
             transcript_section("THINKING", cell.content.clone())
@@ -1481,28 +1471,6 @@ fn spans_display_width(spans: &[Span<'static>]) -> usize {
         .flat_map(|span| span.content.chars())
         .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
         .sum()
-}
-
-fn render_final_message_separator_cell_lines(
-    cell: &FinalMessageSeparatorActivityData,
-    max_width: u16,
-) -> Vec<Line<'static>> {
-    let width = usize::from(max_width);
-    if width == 0 {
-        return Vec::new();
-    }
-
-    let label = cell
-        .elapsed_seconds
-        .map(|seconds| format!("─ Worked for {} ─", format_elapsed_seconds_compact(seconds)))
-        .unwrap_or_else(|| "─".to_string());
-    let label_width = display_width(&label);
-    let text = if label_width >= width {
-        truncate_display_width(&label, width)
-    } else {
-        format!("{label}{}", "─".repeat(width.saturating_sub(label_width)))
-    };
-    vec![Line::from(Span::styled(text, dim_style()))]
 }
 
 fn format_elapsed_seconds_compact(elapsed_seconds: u64) -> String {
@@ -2276,10 +2244,27 @@ fn render_telegram_cell_lines(cell: &TelegramActivityData, max_width: u16) -> Ve
 }
 
 fn render_reply_cell_lines(cell: &ReplyActivityData, max_width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(elapsed) = cell.elapsed_seconds {
+        let label = format!("─ Worked for {} ─", format_elapsed_seconds_compact(elapsed));
+        let width = usize::from(max_width);
+        let label_width = display_width(&label);
+        let text = if label_width >= width {
+            truncate_display_width(&label, width)
+        } else {
+            format!("{label}{}", "─".repeat(width.saturating_sub(label_width)))
+        };
+        lines.push(Line::from(Span::styled(text, dim_style())));
+        lines.push(Line::from(""));
+    }
     if cell.disposition == crate::activity_event::ReplyDisposition::Resolved
         && cell.subject == crate::activity_event::ReplySubject::Message
     {
-        return render_agent_message_reply_lines(&cell.message_lines, max_width);
+        lines.extend(render_agent_message_reply_lines(
+            &cell.message_lines,
+            max_width,
+        ));
+        return lines;
     }
 
     let (title, color) = match cell.disposition {
@@ -2289,11 +2274,11 @@ fn render_reply_cell_lines(cell: &ReplyActivityData, max_width: u16) -> Vec<Line
         crate::activity_event::ReplyDisposition::Dismissed => ("Dismissed", Color::DarkGray),
         crate::activity_event::ReplyDisposition::Failed => ("Failed", Color::Red),
     };
-    let mut lines = vec![activity_header_with_styles(
+    lines.push(activity_header_with_styles(
         title,
         Style::default().fg(color).add_modifier(Modifier::BOLD),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
-    )];
+    ));
     if !cell.message_lines.is_empty() {
         let joined = cell.message_lines.join("\n");
         let md_lines =
@@ -3734,23 +3719,6 @@ That's it.";
     }
 
     #[test]
-    fn final_message_separator_renders_worked_duration() {
-        let rendered = render_activity_cell_lines(
-            &SessionActivityEvent::FinalMessageSeparator(FinalMessageSeparatorActivityData {
-                elapsed_seconds: Some(17 * 60 + 44),
-            }),
-            80,
-        )
-        .into_iter()
-        .map(|line| line_text(&line))
-        .collect::<Vec<_>>();
-
-        assert_eq!(rendered.len(), 1);
-        assert!(rendered[0].starts_with("─ Worked for 17m 44s ─"));
-        assert_eq!(display_width(&rendered[0]), 80);
-    }
-
-    #[test]
     fn plan_activity_cell_renders_explanation_and_empty_state() {
         let rendered = render_plan_cell_lines(
             &PlanActivityData {
@@ -3802,6 +3770,7 @@ That's it.";
                 disposition: ReplyDisposition::Resolved,
                 subject: ReplySubject::Notice,
                 message_lines: Vec::new(),
+                elapsed_seconds: None,
             },
             80,
         )
@@ -3875,6 +3844,7 @@ That's it.";
                 disposition: ReplyDisposition::Resolved,
                 subject: ReplySubject::Message,
                 message_lines,
+                elapsed_seconds: None,
             },
             80,
         )
@@ -3908,5 +3878,33 @@ That's it.";
             "reply body should not keep the old three-space indent: {rendered:?}"
         );
         assert!(rendered.iter().any(|line| line.contains("marker-012")));
+    }
+
+    #[test]
+    fn reply_activity_cell_renders_one_full_width_worked_duration() {
+        let rendered = render_reply_cell_lines(
+            &ReplyActivityData {
+                disposition: ReplyDisposition::Resolved,
+                subject: ReplySubject::Message,
+                message_lines: vec!["done".to_string()],
+                elapsed_seconds: Some(5),
+            },
+            80,
+        )
+        .into_iter()
+        .map(|line| line_text(&line))
+        .collect::<Vec<_>>();
+
+        assert!(rendered[0].starts_with("─ Worked for 5s ─"));
+        assert_eq!(display_width(&rendered[0]), 80);
+        assert!(rendered[1].is_empty());
+        assert!(rendered[2].contains("done"));
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|line| line.contains("Worked for"))
+                .count(),
+            1
+        );
     }
 }

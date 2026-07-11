@@ -22,6 +22,7 @@ export type AgentChatFoldDisplayItem<TBubble extends AgentChatFoldBubble> =
       kind: "foldedActivityGroup";
       id: string;
       bubbles: TBubble[];
+      outputBubble: TBubble;
       inputBoundaryId?: string;
     };
 
@@ -76,12 +77,14 @@ export function foldCompletedAgentChatActivity<
             kind: "foldedActivityGroup",
             id: `folded-${outputBubble.id}`,
             bubbles: pendingActivity,
+            outputBubble,
             inputBoundaryId,
           }
         : {
             kind: "foldedActivityGroup",
             id: `folded-${outputBubble.id}`,
             bubbles: pendingActivity,
+            outputBubble,
           },
     );
     pendingActivity = [];

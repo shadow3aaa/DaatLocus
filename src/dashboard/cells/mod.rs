@@ -22,7 +22,7 @@ pub(crate) use common::ExploredCallActivityData;
 use common::{
     AssistantActivityData, ErrorActivityData, GenericAppActivityData, MessageImageAttachment,
     RuntimeStatusActivityData, TerminalWaitActivityData, UserActivityData, assistant_message_data,
-    error_cell, final_message_separator_cell, terminal_wait_cell, user_message_data,
+    error_cell, terminal_wait_cell, user_message_data,
 };
 use common::{
     CodingEditActivityData, CodingOpenProjectActivityData, CodingReviewActivityData,
@@ -48,7 +48,6 @@ pub use common::ReducedMotion;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SessionActivityEvent {
     Assistant(AssistantActivityData),
-    FinalMessageSeparator(common::FinalMessageSeparatorActivityData),
     User(UserActivityData),
     Browser(BrowserActivityData),
     LiveBrowser(LiveBrowserActivityData),
@@ -255,11 +254,6 @@ pub fn assistant_activity_cell(content: &str) -> Option<SessionActivityEvent> {
         trimmed.to_string(),
     )))
 }
-
-pub fn final_message_separator_activity_cell(elapsed_seconds: Option<u64>) -> SessionActivityEvent {
-    SessionActivityEvent::FinalMessageSeparator(final_message_separator_cell(elapsed_seconds))
-}
-
 pub fn thinking_activity_cell(reasoning_content: &str) -> Option<SessionActivityEvent> {
     let trimmed = reasoning_content.trim();
     if trimmed.is_empty() {

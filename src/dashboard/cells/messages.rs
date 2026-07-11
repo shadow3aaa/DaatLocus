@@ -23,6 +23,7 @@ pub struct ReplyActivityData {
     pub disposition: ReplyDisposition,
     pub subject: ReplySubject,
     pub message_lines: Vec<String>,
+    pub elapsed_seconds: Option<u64>,
 }
 
 impl From<PatchActivityDescriptor> for PatchActivityData {
@@ -60,6 +61,7 @@ impl From<ReplyActivityDescriptor> for ReplyActivityData {
             disposition: data.disposition,
             subject: data.subject,
             message_lines: data.message_lines,
+            elapsed_seconds: data.elapsed_seconds,
         }
     }
 }

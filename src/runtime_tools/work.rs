@@ -46,12 +46,14 @@ fn reply_activity_event(
     disposition: ReplyDisposition,
     subject: ReplySubject,
     message_lines: Vec<String>,
+    elapsed_seconds: Option<u64>,
 ) -> SessionActivityEvent {
     SessionActivityEvent::Reply(
         crate::activity_event::ReplyActivityDescriptor {
             disposition,
             subject,
             message_lines,
+            elapsed_seconds,
         }
         .into(),
     )
@@ -204,6 +206,9 @@ fn execute_event_resolve_tool<'a>(
                 },
                 ReplySubject::Message,
                 reply_lines,
+                context
+                    .runtime_turn_started_at
+                    .map(|t| t.elapsed().as_secs()),
             )),
         ))
     })

@@ -4414,6 +4414,7 @@ function AgentChatBubbles({
                     <AgentChatFoldedActivityGroup
                       id={item.id}
                       bubbles={item.bubbles}
+                      outputBubble={item.outputBubble}
                       activeRuntimeStatusBubbleId={activeRuntimeStatusBubbleId}
                       latestReplyBubbleId={latestReplyBubbleId}
                       open={Boolean(openFoldedActivityGroups[item.id])}
@@ -4713,6 +4714,7 @@ function AgentChatQuickNavigation({
 function AgentChatFoldedActivityGroup({
   id,
   bubbles,
+  outputBubble,
   activeRuntimeStatusBubbleId,
   latestReplyBubbleId,
   open,
@@ -4721,6 +4723,7 @@ function AgentChatFoldedActivityGroup({
 }: {
   id: string;
   bubbles: AgentChatBubble[];
+  outputBubble: AgentChatBubble;
   activeRuntimeStatusBubbleId?: string | null;
   latestReplyBubbleId?: string | null;
   open: boolean;
@@ -4729,7 +4732,7 @@ function AgentChatFoldedActivityGroup({
 }) {
   const { toggle } = useCollapsibleState(false, open, onOpenChange);
   const activityCount = bubbles.length;
-  const workedDurationLabel = formatAgentChatWorkedDuration(bubbles);
+  const workedDurationLabel = formatAgentChatWorkedDuration(bubbles, outputBubble);
 
   if (activityCount === 0) {
     return null;
@@ -4789,10 +4792,6 @@ function AgentChatBubbleItem({
   isLatestReply?: boolean;
   compact?: boolean;
 }) {
-  if (bubble.uiHint === "final-message-separator") {
-    return <AgentWorkedSeparator bubble={bubble} compact={compact} />;
-  }
-
   const isConversationMessage = agentChatBubbleIsConversationMessage(bubble);
   const SessionActivityRender = agentChatSessionActivityRenderForBubble(bubble);
   const useCanonicalSessionActivity = Boolean(SessionActivityRender);
@@ -4871,20 +4870,6 @@ function AgentChatBubbleItem({
   );
 }
 
-function AgentWorkedSeparator({
-  bubble,
-  compact,
-}: {
-  bubble: AgentChatBubble;
-  compact: boolean;
-}) {
-  const label = normalizeAgentChatWorkedLabel(bubble.title.trim() || "Worked");
-
-  return (
-    <AgentChatWorkedDivider label={label} compact={compact} />
-  );
-}
-
 function AgentChatWorkedDivider({
   label,
   compact = false,
@@ -4932,11 +4917,6 @@ function AgentChatWorkedDivider({
 
   return <div className={className}>{content}</div>;
 }
-
-function normalizeAgentChatWorkedLabel(label: string) {
-  return label.replace(/^Worked For\b/, "Worked for");
-}
-
 function AgentChatActivityHeader({
   bubble,
   isFocused,
@@ -6074,7 +6054,6 @@ function AgentChatReplyActivityLine({
       slotKey={agentChatExpressionSlotKey("reply", id)}
     />
   ) : null;
-
   if (disposition === "resolved" && subject === "message") {
     const agentMessage = agentChatAgentMessageFromLines(messageLines);
     if (!agentMessage) {
@@ -6091,7 +6070,7 @@ function AgentChatReplyActivityLine({
             />
           </div>
         </div>
-<div className="-mb-1 mt-1 flex justify-start pl-8 sm:pl-10">
+        <div className="-mb-1 mt-1 flex justify-start pl-8 sm:pl-10">
           <button
             type="button"
             onClick={handleCopyReply}
@@ -6110,57 +6089,59 @@ function AgentChatReplyActivityLine({
   }
 
   return (
-    <div
-      className={cn(
-        "flex min-w-0 max-w-full flex-col gap-1 text-sm leading-6 text-foreground/90 [overflow-wrap:anywhere]",
-        disposition === "failed" && "text-destructive",
-        disposition === "dismissed" && "text-muted-foreground",
-      )}
-    >
-      <div className={cn(AGENT_CHAT_ACTIVITY_ROW_CLASS, "leading-6")}>
-        {replyMarker ?? (
-          <AgentChatActivityMarker
-            icon="activity"
-            tone={disposition === "failed" ? "error" : "default"}
-            className={
-              disposition === "dismissed" ? "text-muted-foreground" : undefined
-            }
-          />
+    <>
+      <div
+        className={cn(
+          "flex min-w-0 max-w-full flex-col gap-1 text-sm leading-6 text-foreground/90 [overflow-wrap:anywhere]",
+          disposition === "failed" && "text-destructive",
+          disposition === "dismissed" && "text-muted-foreground",
         )}
-        <p
-          className={cn(
-            "min-w-0 break-words font-semibold text-foreground",
-            disposition === "failed" && "text-destructive",
-            disposition === "dismissed" && "text-muted-foreground",
+      >
+        <div className={cn(AGENT_CHAT_ACTIVITY_ROW_CLASS, "leading-6")}>
+          {replyMarker ?? (
+            <AgentChatActivityMarker
+              icon="activity"
+              tone={disposition === "failed" ? "error" : "default"}
+              className={
+                disposition === "dismissed" ? "text-muted-foreground" : undefined
+              }
+            />
           )}
-        >
-          {title}
-        </p>
-      </div>
-      {messageLines.length > 0 ? (
-        <div className="px-2 text-foreground/90 sm:px-3">
-          <AgentChatMarkdownText
-            text={messageLines.join("\n")}
-            limit={AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT}
-            tone={disposition === "failed" ? "error" : "default"}
-          />
+          <p
+            className={cn(
+              "min-w-0 break-words font-semibold text-foreground",
+              disposition === "failed" && "text-destructive",
+              disposition === "dismissed" && "text-muted-foreground",
+            )}
+          >
+            {title}
+          </p>
         </div>
-      ) : null}
-<div className="-mb-1 mt-1 flex justify-start px-2 sm:px-3">
-        <button
-          type="button"
-          onClick={handleCopyReply}
-          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[0.7rem] text-muted-foreground/60 transition-colors hover:bg-muted/50 hover:text-muted-foreground"
-          aria-label="Copy"
-        >
-          {hasCopiedReply ? (
-            <CheckIcon className="h-3 w-3" aria-hidden="true" />
-          ) : (
-            <CopyIcon className="h-3 w-3" aria-hidden="true" />
-          )}
-        </button>
+        {messageLines.length > 0 ? (
+          <div className="px-2 text-foreground/90 sm:px-3">
+            <AgentChatMarkdownText
+              text={messageLines.join("\n")}
+              limit={AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT}
+              tone={disposition === "failed" ? "error" : "default"}
+            />
+          </div>
+        ) : null}
+        <div className="-mb-1 mt-1 flex justify-start px-2 sm:px-3">
+          <button
+            type="button"
+            onClick={handleCopyReply}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[0.7rem] text-muted-foreground/60 transition-colors hover:bg-muted/50 hover:text-muted-foreground"
+            aria-label="Copy"
+          >
+            {hasCopiedReply ? (
+              <CheckIcon className="h-3 w-3" aria-hidden="true" />
+            ) : (
+              <CopyIcon className="h-3 w-3" aria-hidden="true" />
+            )}
+          </button>
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -7078,25 +7059,6 @@ function agentChatActivityMetaFromEvent(event: SessionActivityEvent): {
     return { kind: "message", actor: "assistant", title: "Thinking" };
   }
 
-  const finalMessageSeparator = agentChatSessionActivityPayload(
-    event,
-    "FinalMessageSeparator",
-  );
-  if (finalMessageSeparator) {
-    const elapsedSeconds = nullableNumberValue(
-      finalMessageSeparator.elapsed_seconds,
-    );
-    return {
-      kind: "message",
-      actor: "system",
-      title:
-        elapsedSeconds === null
-          ? "Worked"
-          : `Worked for ${formatAgentChatDuration(elapsedSeconds * 1000)}`,
-      uiHint: "final-message-separator",
-    };
-  }
-
   const plan = agentChatSessionActivityPayload(event, "PlanResult");
   if (plan) {
     return { kind: "plan", actor: "system", title: "Updated Plan" };
@@ -7172,7 +7134,16 @@ function agentChatBubbleHasSessionActivityEvent(
   return Boolean(agentChatSessionActivityPayload(bubble.activityEvent, variant));
 }
 
-function formatAgentChatWorkedDuration(bubbles: AgentChatBubble[]) {
+function formatAgentChatWorkedDuration(
+  bubbles: AgentChatBubble[],
+  outputBubble: AgentChatBubble,
+) {
+  const reply = agentChatSessionActivityPayload(outputBubble.activityEvent, "Reply");
+  const elapsedSeconds = nullableNumberValue(reply?.elapsed_seconds);
+  if (elapsedSeconds !== null) {
+    return formatAgentChatDuration(elapsedSeconds * 1000);
+  }
+
   const startTimes = bubbles
     .map((bubble) => bubble.createdAt)
     .filter((value) => value > 0);
@@ -7392,11 +7363,7 @@ function agentChatFoldDisplayItemQuickNavTargetId(
     return item.inputBoundaryId;
   }
 
-  if (
-    item.kind === "bubble" &&
-    item.bubble.uiHint !== "final-message-separator" &&
-    agentChatBubbleIsUserInput(item.bubble)
-  ) {
+  if (item.kind === "bubble" && agentChatBubbleIsUserInput(item.bubble)) {
     return item.id;
   }
 
@@ -7404,10 +7371,7 @@ function agentChatFoldDisplayItemQuickNavTargetId(
 }
 
 function agentChatQuickNavLabelForBubble(bubble: AgentChatBubble) {
-  if (
-    bubble.uiHint === "final-message-separator" ||
-    !agentChatBubbleIsUserInput(bubble)
-  ) {
+  if (!agentChatBubbleIsUserInput(bubble)) {
     return null;
   }
 

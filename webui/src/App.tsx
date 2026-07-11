@@ -1230,7 +1230,6 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
         ],
       },
     },
-    { FinalMessageSeparator: { elapsed_seconds: 154 } },
     {
       Reply: {
         disposition: "resolved",
@@ -1239,6 +1238,7 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
           "Agent reply should use the activity marker.",
           "It must not be rendered as a user prompt.",
         ],
+        elapsed_seconds: 154,
       },
     },
     {

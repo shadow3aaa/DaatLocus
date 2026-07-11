@@ -180,9 +180,6 @@ export type SessionActivityMessage = {
   content: string;
 };
 
-export type SessionActivityFinalMessageSeparator = {
-  elapsed_seconds?: number | null;
-};
 
 export type SessionActivityUser = SessionActivityMessage & {
   image_attachments?: ActivityImageAttachment[];
@@ -270,6 +267,7 @@ export type SessionActivityReply = {
   disposition: "resolved" | "dismissed" | "failed" | (string & {});
   subject?: "message" | "notice" | (string & {});
   message_lines?: string[];
+  elapsed_seconds?: number | null;
 };
 
 export type SessionActivityPlan = {
@@ -296,7 +294,6 @@ export type SessionActivityPrimitive = {
 
 export type SessionActivityEvent =
   | { Assistant: SessionActivityMessage }
-  | { FinalMessageSeparator: SessionActivityFinalMessageSeparator }
   | { User: SessionActivityUser }
   | { Browser: SessionActivityBrowser }
   | { LiveBrowser: SessionActivityBrowser }

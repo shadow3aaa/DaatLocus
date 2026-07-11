@@ -29,9 +29,9 @@ pub use cells::{
     ActivityFeedRenderArgs, CachedActivityLines, DashboardActivityEvent, LiveActivityEvent,
     ReducedMotion, SessionActivityEvent, activity_event_from_tool_call_activity_event,
     activity_events_from_history_items, apply_activity_event, assistant_activity_cell,
-    final_message_separator_activity_cell, render_activity_feed_cached,
-    render_activity_from_messages, terminal_activity_event_from_terminal_data,
-    thinking_activity_cell, user_activity_cell_from_event,
+    render_activity_feed_cached, render_activity_from_messages,
+    terminal_activity_event_from_terminal_data, thinking_activity_cell,
+    user_activity_cell_from_event,
 };
 pub(crate) use command_flow::{dashboard_command_is_manager_owned, execute_control_command};
 pub use commands::{

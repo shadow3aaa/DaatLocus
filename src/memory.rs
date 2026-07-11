@@ -1026,7 +1026,6 @@ fn summarize_activity_event(event: &SessionActivityEvent) -> String {
             .unwrap_or_else(|| "reply submitted".to_string()),
         SessionActivityEvent::Thinking(data) => summarize_runtime_inline_text(&data.content),
         SessionActivityEvent::RuntimeStatus(data) => summarize_runtime_inline_text(&data.label),
-        SessionActivityEvent::FinalMessageSeparator(_) => "worked".to_string(),
     }
 }
 

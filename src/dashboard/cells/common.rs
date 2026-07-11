@@ -11,12 +11,6 @@ pub struct AssistantActivityData {
     pub content: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FinalMessageSeparatorActivityData {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elapsed_seconds: Option<u64>,
-}
-
 /// Controls animation behaviour in the TUI dashboard.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum ReducedMotion {
@@ -133,13 +127,6 @@ pub fn assistant_message_data(content: impl Into<String>) -> AssistantActivityDa
         content: content.into(),
     }
 }
-
-pub fn final_message_separator_cell(
-    elapsed_seconds: Option<u64>,
-) -> FinalMessageSeparatorActivityData {
-    FinalMessageSeparatorActivityData { elapsed_seconds }
-}
-
 pub fn user_message_data(content: impl Into<String>) -> UserActivityData {
     UserActivityData {
         content: content.into(),

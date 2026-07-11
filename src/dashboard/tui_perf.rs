@@ -550,6 +550,7 @@ fn mock_reply(idx: usize) -> ReplyActivityDescriptor {
             format!("Resolved dashboard update {idx}."),
             "The render path is deterministic for this scenario.".to_string(),
         ],
+        elapsed_seconds: None,
     }
 }
 
