@@ -104,13 +104,7 @@ pub enum ReasoningOption {
 /// Falls back to a basic toggle when `reasoning: true` but no explicit options.
 pub fn catalog_model_reasoning_options(model_id: &str) -> Vec<ReasoningOption> {
     let root = load_catalog_json();
-    let normalized = normalize_catalog_key(model_id);
-    for section in root.as_object().into_iter().flat_map(|o| o.values()) {
-        if let Some(model) = lookup_model_value_in_section(section, &normalized) {
-            return reasoning_options_for_model(model);
-        }
-    }
-    Vec::new()
+    reasoning_options_in_json(&root, &normalize_catalog_key(model_id))
 }
 
 pub fn catalog_model_reasoning_options_for_provider(
@@ -135,6 +129,42 @@ fn reasoning_options_for_model(model: &serde_json::Value) -> Vec<ReasoningOption
         return vec![ReasoningOption::Toggle];
     }
     Vec::new()
+}
+
+fn reasoning_options_in_json(
+    root: &serde_json::Value,
+    normalized_model_id: &str,
+) -> Vec<ReasoningOption> {
+    root.as_object()
+        .into_iter()
+        .flat_map(|providers| providers.values())
+        .filter_map(|section| {
+            lookup_model_value_in_section(section, normalized_model_id)
+                .map(reasoning_options_candidate)
+        })
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, options)| options)
+        .unwrap_or_default()
+}
+
+fn reasoning_options_candidate(model: &serde_json::Value) -> (usize, Vec<ReasoningOption>) {
+    let options = parse_reasoning_options(&model["reasoning_options"]);
+    if !options.is_empty() {
+        let score = options
+            .iter()
+            .map(|option| match option {
+                ReasoningOption::Toggle => 100,
+                ReasoningOption::BudgetTokens { .. } => 200,
+                ReasoningOption::Effort { values } => 300 + values.len(),
+            })
+            .max()
+            .unwrap_or_default();
+        return (score, options);
+    }
+    if model["reasoning"].as_bool() == Some(true) {
+        return (1, vec![ReasoningOption::Toggle]);
+    }
+    (0, Vec::new())
 }
 
 pub(crate) fn parse_reasoning_options(raw: &serde_json::Value) -> Vec<ReasoningOption> {
@@ -292,6 +322,51 @@ mod tests {
         assert_eq!(
             provider_ids_for_api_url_in_json(&root, "https://example.com/v1"),
             vec!["alpha".to_string(), "beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn global_reasoning_lookup_prefers_rich_explicit_options_over_toggle_fallback() {
+        let root = serde_json::json!({
+            "toggle-only": {
+                "models": {
+                    "gpt-5.5": {
+                        "reasoning": true
+                    }
+                }
+            },
+            "partial-effort": {
+                "models": {
+                    "gpt-5.5": {
+                        "reasoning": true,
+                        "reasoning_options": [{
+                            "type": "effort",
+                            "values": ["low", "medium", "high"]
+                        }]
+                    }
+                }
+            },
+            "full-effort": {
+                "models": {
+                    "gpt-5.5": {
+                        "reasoning": true,
+                        "reasoning_options": [{
+                            "type": "effort",
+                            "values": ["none", "low", "medium", "high", "xhigh"]
+                        }]
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            reasoning_options_in_json(&root, "gpt-5.5"),
+            vec![ReasoningOption::Effort {
+                values: ["none", "low", "medium", "high", "xhigh"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            }]
         );
     }
 

@@ -2995,6 +2995,22 @@ mod tests {
     }
 
     #[test]
+    fn unmatched_compatible_provider_uses_richest_catalog_reasoning_options() {
+        let provider = compatible_provider("https://us.dahetao.org/v1");
+        let options = reasoning_options_for_prompt(&provider, "gpt-5.5", None);
+
+        assert_eq!(
+            options,
+            vec![ReasoningOption::Effort {
+                values: ["none", "low", "medium", "high", "xhigh"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            }]
+        );
+    }
+
+    #[test]
     fn codex_oauth_reasoning_options_use_responses_effort_scale() {
         let provider = ProviderConfig::OpenaiCodexOauth { base_url: None };
         let options = reasoning_options_for_prompt(&provider, "gpt-5.5", None);
