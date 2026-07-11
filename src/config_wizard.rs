@@ -2780,7 +2780,9 @@ fn mask_secret(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_catalog::{ModelCapacity, conservative_model_capacity};
+    use crate::model_catalog::{
+        ModelCapacity, catalog_model_capacity_for_provider, conservative_model_capacity,
+    };
     use crate::model_discovery::parse_models_response;
 
     fn openai_provider() -> ProviderConfig {
@@ -2876,38 +2878,41 @@ mod tests {
 
     #[test]
     fn model_capacity_prefers_special_provider_catalog_match() {
-        let capacity = resolve_model_capacity(&copilot_provider(), "gpt-5.5", None, None, None);
+        let capacity = resolve_model_capacity(&copilot_provider(), "gpt-4.1", None, None, None);
+        let expected = catalog_model_capacity_for_provider("github-copilot", "gpt-4.1")
+            .expect("compiled catalog should contain github-copilot/gpt-4.1");
 
-        assert_eq!(capacity.context_window_tokens, 400_000);
-        assert_eq!(capacity.max_completion_tokens, 128_000);
-        assert!(capacity.supports_vision);
-        assert!(capacity.supports_tool_call);
+        assert_eq!(capacity, expected);
     }
 
     #[test]
     fn model_capacity_prefers_url_matched_catalog_provider() {
         let capacity = resolve_model_capacity(
             &compatible_provider("https://api.githubcopilot.com/"),
-            "gpt-5.5",
+            "gpt-4.1",
             None,
             None,
             None,
         );
 
-        assert_eq!(capacity.context_window_tokens, 400_000);
+        let expected = catalog_model_capacity_for_provider("github-copilot", "gpt-4.1")
+            .expect("compiled catalog should contain github-copilot/gpt-4.1");
+        assert_eq!(capacity, expected);
     }
 
     #[test]
     fn openai_provider_custom_base_url_can_match_catalog_provider() {
         let capacity = resolve_model_capacity(
             &openai_provider_with_base_url("https://api.githubcopilot.com/"),
-            "gpt-5.5",
+            "gpt-4.1",
             None,
             None,
             None,
         );
 
-        assert_eq!(capacity.context_window_tokens, 400_000);
+        let expected = catalog_model_capacity_for_provider("github-copilot", "gpt-4.1")
+            .expect("compiled catalog should contain github-copilot/gpt-4.1");
+        assert_eq!(capacity, expected);
     }
 
     #[test]

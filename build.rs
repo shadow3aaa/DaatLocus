@@ -3,11 +3,13 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     emit_build_target();
+    download_models_dev_catalog();
     build_embedded_webui(&manifest_dir);
     write_prompt_bindings(&manifest_dir);
     write_builtin_skill_bindings(&manifest_dir);
@@ -16,6 +18,39 @@ fn main() {
 fn emit_build_target() {
     let target = env::var("TARGET").expect("target triple");
     println!("cargo:rustc-env=DAAT_LOCUS_BUILD_TARGET={target}");
+}
+
+const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
+
+fn download_models_dev_catalog() {
+    let out_path = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("models-dev-api.json");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("daat-locus-build")
+        .build()
+        .unwrap_or_else(|err| panic!("failed to create models.dev client: {err}"));
+    let response = client
+        .get(MODELS_DEV_API_URL)
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .unwrap_or_else(|err| panic!("failed to download {MODELS_DEV_API_URL}: {err}"));
+    let body = response
+        .text()
+        .unwrap_or_else(|err| panic!("failed to read {MODELS_DEV_API_URL}: {err}"));
+    let root: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|err| panic!("{MODELS_DEV_API_URL} returned invalid JSON: {err}"));
+    if !root
+        .as_object()
+        .is_some_and(|providers| !providers.is_empty())
+    {
+        panic!("{MODELS_DEV_API_URL} returned an empty provider catalog");
+    }
+    fs::write(&out_path, body).unwrap_or_else(|err| {
+        panic!(
+            "failed to write models.dev catalog {}: {err}",
+            out_path.display()
+        )
+    });
 }
 
 fn build_embedded_webui(manifest_dir: &Path) {

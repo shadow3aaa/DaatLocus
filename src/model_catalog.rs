@@ -1,18 +1,13 @@
-//! Model capacity catalog backed by models.dev API JSON.
-//!
-//! Three-layer fallback:
-//! 1. Local cache at `~/.daat-locus/cache/models-dev-api.json`
-//! 2. Built-in copy compiled into the binary
-//! 3. Conservative defaults
-//!
-//! The cache is refreshed from `https://models.dev/api.json` on daemon
-//! startup and during the config wizard.
+//! The current catalog is downloaded into Cargo's `OUT_DIR` by `build.rs` and
+//! compiled into the binary. A newer runtime cache can override that snapshot.
 
 use std::sync::OnceLock;
 
-use crate::daat_locus_paths::{daat_locus_paths, daat_locus_paths_sync};
+use crate::daat_locus_paths::daat_locus_paths;
+#[cfg(not(test))]
+use crate::daat_locus_paths::daat_locus_paths_sync;
 
-const BUILTIN_API_JSON: &str = include_str!("../assets/models-dev-api.json");
+const COMPILED_API_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/models-dev-api.json"));
 
 const CONSERVATIVE_CONTEXT_WINDOW_TOKENS: usize = 32_768;
 const CONSERVATIVE_MAX_COMPLETION_TOKENS: usize =
@@ -35,18 +30,21 @@ pub fn conservative_model_capacity() -> ModelCapacity {
     }
 }
 
-/// Load the best available model catalog: cached file > built-in.
+/// Load the best available model catalog: cached file > compiled snapshot.
 fn load_catalog_json() -> serde_json::Value {
     static CATALOG: OnceLock<serde_json::Value> = OnceLock::new();
     CATALOG
         .get_or_init(|| {
-            let paths = daat_locus_paths_sync();
-            if let Ok(text) = std::fs::read_to_string(paths.models_dev_cache())
-                && let Ok(root) = serde_json::from_str::<serde_json::Value>(&text)
+            #[cfg(not(test))]
             {
-                return root;
+                let paths = daat_locus_paths_sync();
+                if let Ok(text) = std::fs::read_to_string(paths.models_dev_cache())
+                    && let Ok(root) = serde_json::from_str::<serde_json::Value>(&text)
+                {
+                    return root;
+                }
             }
-            serde_json::from_str(BUILTIN_API_JSON).unwrap_or(serde_json::Value::Null)
+            serde_json::from_str(COMPILED_API_JSON).unwrap_or(serde_json::Value::Null)
         })
         .clone()
 }
@@ -295,5 +293,16 @@ mod tests {
             provider_ids_for_api_url_in_json(&root, "https://example.com/v1"),
             vec!["alpha".to_string(), "beta".to_string()]
         );
+    }
+
+    #[test]
+    fn compiled_catalog_parses_typical_openai_model() {
+        let capacity = catalog_model_capacity_for_provider("openai", "gpt-4o")
+            .expect("compiled catalog should contain openai/gpt-4o");
+
+        assert!(capacity.context_window_tokens > 0);
+        assert!(capacity.max_completion_tokens > 0);
+        assert!(capacity.supports_vision);
+        assert!(capacity.supports_tool_call);
     }
 }
