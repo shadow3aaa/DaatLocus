@@ -6402,6 +6402,40 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
             </blockquote>
           ),
           hr: () => <Separator />,
+          table: ({ children }: any) => (
+            <div
+              aria-label="Scrollable markdown table"
+              className="my-2 min-w-0 max-w-full overflow-x-auto rounded-xl border border-border/80 bg-background/70 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin]"
+              tabIndex={0}
+            >
+              <table className="w-full min-w-[44rem] border-separate border-spacing-0 text-left text-[0.8125rem] leading-5 [overflow-wrap:normal]">
+                {children}
+              </table>
+            </div>
+          ),
+          thead: ({ children }: any) => (
+            <thead className="bg-muted/65 text-muted-foreground">{children}</thead>
+          ),
+          tbody: ({ children }: any) => (
+            <tbody className="divide-y divide-border/70">{children}</tbody>
+          ),
+          tr: ({ children }: any) => <tr>{children}</tr>,
+          th: ({ align, children }: any) => (
+            <th
+              className="min-w-32 border-b border-border/80 px-4 py-3 align-top text-left text-[0.7rem] font-semibold tracking-[0.08em] text-muted-foreground"
+              style={align ? { textAlign: align } : undefined}
+            >
+              {children}
+            </th>
+          ),
+          td: ({ align, children }: any) => (
+            <td
+              className="min-w-32 px-4 py-3 align-top text-foreground/90 [overflow-wrap:normal]"
+              style={align ? { textAlign: align } : undefined}
+            >
+              {children}
+            </td>
+          ),
           p: ({ children }: any) => (
             <p
               className={cn(
