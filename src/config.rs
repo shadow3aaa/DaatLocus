@@ -244,7 +244,7 @@ pub struct Config {
     /// Main model name; key reference into models.
     pub main_model: String,
     /// Efficient model name; key reference into models.
-    /// Default for non-main-loop operations such as judge and compaction.
+    /// Default for non-main-loop operations such as judge.
     /// When not set explicitly, defaults to the same value as main_model for backward compatibility.
     pub efficient_model: String,
     pub daemon: DaemonConfig,

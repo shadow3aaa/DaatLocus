@@ -33,7 +33,7 @@ Editors can reference it through GitHub raw, for example:
 - `[models]`: model definition registry.
 - `locale`: UI localization language.
 - `main_model`: model key used by the main runtime.
-- `efficient_model`: model key used by non-main-loop work such as judge and compaction.
+- `efficient_model`: model key used by non-main-loop work such as judge.
 - `[daemon]`: daemon port. The daemon listens on all IPv4 interfaces (`0.0.0.0`) for LAN access; protect remote dashboard/API access with daemon tokens.
 - `[judge]`: judge / pairwise evaluation config.
 - `[sandbox]`: runtime sandbox controls.

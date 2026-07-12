@@ -39,9 +39,9 @@ fn download_models_dev_catalog() {
         .unwrap_or_else(|err| panic!("failed to read {MODELS_DEV_API_URL}: {err}"));
     let root: serde_json::Value = serde_json::from_str(&body)
         .unwrap_or_else(|err| panic!("{MODELS_DEV_API_URL} returned invalid JSON: {err}"));
-    if !root
+    if root
         .as_object()
-        .is_some_and(|providers| !providers.is_empty())
+        .is_none_or(|providers| providers.is_empty())
     {
         panic!("{MODELS_DEV_API_URL} returned an empty provider catalog");
     }

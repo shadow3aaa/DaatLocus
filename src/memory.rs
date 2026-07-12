@@ -3,15 +3,14 @@ use std::{collections::VecDeque, future::Future};
 
 use crate::{
     context_budget::{
-        RequestBudgetBreakdown, RequestBudgetLimits, TokenEstimateBaseline, approx_token_count,
-        estimate_agent_message_tokens, estimate_agent_turn_request,
-        estimate_runtime_request_envelope, truncate_text_to_token_budget,
+        RequestBudgetBreakdown, RequestBudgetLimits, TokenEstimateBaseline,
+        estimate_agent_turn_request, estimate_runtime_request_envelope,
         truncate_text_to_token_budget_with_notice,
     },
     dashboard::SessionActivityEvent,
     persistence::PersistenceStore,
     reasoning::{
-        prompts::{MID_TURN_SUMMARY_PREFIX, RUNTIME_HISTORY_SUMMARY_PREFIX},
+        prompts::HISTORY_COMPACTION_SUMMARY_PREFIX,
         runtime::{AgentMessage, AgentToolSpec, HistoryMessage},
     },
 };
@@ -86,7 +85,6 @@ pub struct RuntimeCompactionRecord {
     pub source_message_count: usize,
     pub trimmed_item_count: usize,
     pub retained_user_message_count: usize,
-    pub used_fallback_summary: bool,
     pub summary: String,
 }
 
@@ -177,7 +175,7 @@ impl Memory {
     pub async fn apply_runtime_conversation_compaction(
         &mut self,
         plan: RuntimeConversationCompactionPlan,
-        outcome: Option<RuntimeCompactionOutcome>,
+        outcome: RuntimeCompactionOutcome,
     ) -> bool {
         let changed = self.runtime_conversation.apply_compaction(plan, outcome);
         if changed {
@@ -205,27 +203,6 @@ impl Memory {
 
     pub fn runtime_conversation_mut(&mut self) -> &mut RuntimeConversation {
         &mut self.runtime_conversation
-    }
-
-    pub async fn force_trim_runtime_conversation_to_fit_budget(
-        &mut self,
-        envelope: &RuntimeRequestEnvelope,
-        injected_messages: &[HistoryMessage],
-        tools: &[AgentToolSpec],
-        limits: RequestBudgetLimits,
-        baseline: &TokenEstimateBaseline,
-    ) -> bool {
-        let trimmed = self.runtime_conversation.force_trim_messages_to_fit_budget(
-            envelope,
-            injected_messages,
-            tools,
-            limits,
-            baseline,
-        );
-        if trimmed {
-            self.runtime_conversation.sync_to_disk().await;
-        }
-        trimmed
     }
 
     pub async fn clear_runtime_conversation(&mut self) {
@@ -274,10 +251,6 @@ impl RuntimeTurnDraft {
 
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
-    }
-
-    pub fn messages(&self) -> &[HistoryMessage] {
-        &self.messages
     }
 
     pub fn record_compaction(&mut self, record: RuntimeCompactionRecord) {
@@ -361,52 +334,6 @@ impl RuntimeRequestEnvelope {
     }
 }
 
-/// Forced trimming: compute how many tokens to free, then drop the oldest
-/// non-system messages in bulk until the projected savings cover the excess.
-impl RuntimeStepConversation {
-    pub fn force_trim_to_fit_budget(
-        &mut self,
-        tools: &[AgentToolSpec],
-        limits: RequestBudgetLimits,
-        baseline: &TokenEstimateBaseline,
-    ) -> bool {
-        let breakdown = estimate_agent_turn_request(self.agent_messages(), tools, limits)
-            .with_calibrated_input_tokens(baseline);
-        if breakdown.within_context_window() {
-            return true;
-        }
-        let excess = breakdown
-            .total_with_reserve_tokens
-            .saturating_sub(limits.context_window_tokens);
-        if excess == 0 {
-            return true;
-        }
-        let first_non_system = self
-            .agent_messages
-            .iter()
-            .position(|message| !matches!(message, AgentMessage::System { .. }));
-        let Some(start) = first_non_system else {
-            return false;
-        };
-        let mut saved = 0usize;
-        let mut cut = 0usize;
-        for message in &self.agent_messages[start..] {
-            if saved >= excess {
-                break;
-            }
-            saved += estimate_agent_message_tokens(message);
-            cut += 1;
-        }
-        if cut == 0 {
-            return false;
-        }
-        self.agent_messages.drain(start..start + cut);
-        let check = estimate_agent_turn_request(self.agent_messages(), tools, limits)
-            .with_calibrated_input_tokens(baseline);
-        check.within_context_window()
-    }
-}
-
 impl RuntimeStepConversation {
     fn new(turn_draft: RuntimeTurnDraft, agent_messages: Vec<AgentMessage>) -> Self {
         Self {
@@ -435,10 +362,6 @@ impl RuntimeStepConversation {
         self.turn_draft.set_current_doing(current_doing);
     }
 
-    pub fn history_messages(&self) -> &[HistoryMessage] {
-        self.turn_draft.messages()
-    }
-
     pub fn is_history_empty(&self) -> bool {
         self.turn_draft.is_empty()
     }
@@ -455,10 +378,10 @@ impl RuntimeStepConversation {
         compact_for_overflow: bool,
         policy: RuntimeStepCompactionPolicy,
         mut build_summary: F,
-    ) -> bool
+    ) -> Result<bool, String>
     where
         F: FnMut(Vec<AgentMessage>, usize) -> Fut,
-        Fut: Future<Output = Option<RuntimeCompactionOutcome>>,
+        Fut: Future<Output = Result<RuntimeCompactionOutcome, String>>,
     {
         let mut compacted_any = false;
         for _ in 0..policy.max_recoveries {
@@ -472,43 +395,37 @@ impl RuntimeStepConversation {
             if !needs_compaction {
                 break;
             }
-            if !self.compact_once(policy, &mut build_summary).await {
-                break;
-            }
+            self.compact_once(policy, &mut build_summary).await?;
             compacted_any = true;
         }
-        compacted_any
+        Ok(compacted_any)
     }
 
     async fn compact_once<F, Fut>(
         &mut self,
         policy: RuntimeStepCompactionPolicy,
         build_summary: &mut F,
-    ) -> bool
+    ) -> Result<(), String>
     where
         F: FnMut(Vec<AgentMessage>, usize) -> Fut,
-        Fut: Future<Output = Option<RuntimeCompactionOutcome>>,
+        Fut: Future<Output = Result<RuntimeCompactionOutcome, String>>,
     {
         let source_messages = self.agent_messages.clone();
         if source_messages.is_empty() {
-            return false;
+            return Err("runtime compaction has no messages to summarize".to_string());
         }
         let has_non_system = source_messages
             .iter()
             .any(|message| !matches!(message, AgentMessage::System { .. }));
         if !has_non_system {
-            return false;
+            return Err("runtime compaction has no non-system messages to summarize".to_string());
         }
 
-        let Some(outcome) = build_summary(source_messages.clone(), policy.summary_max_tokens).await
-        else {
-            return false;
-        };
-
+        let outcome = build_summary(source_messages.clone(), policy.summary_max_tokens).await?;
         self.agent_messages =
             rebuild_compacted_agent_messages(&source_messages, outcome.summary.clone());
         self.turn_draft.record_compaction(outcome.record);
-        true
+        Ok(())
     }
 }
 
@@ -519,6 +436,17 @@ impl RuntimeConversationCompactionPlan {
 
     pub fn summary_max_tokens(&self) -> usize {
         self.summary_max_tokens
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        source_messages: Vec<HistoryMessage>,
+        summary_max_tokens: usize,
+    ) -> Self {
+        Self {
+            source_messages,
+            summary_max_tokens,
+        }
     }
 }
 
@@ -641,81 +569,11 @@ impl RuntimeConversation {
 
     pub fn select_messages_for_runtime(
         &self,
-        max_tokens: usize,
+        _max_tokens: usize,
         _min_messages: usize,
-        summary_max_tokens: usize,
+        _summary_max_tokens: usize,
     ) -> Vec<HistoryMessage> {
-        if max_tokens == 0 {
-            return Vec::new();
-        }
-        let all_messages = self.messages();
-        if history_messages_total_token_cost(&all_messages) <= max_tokens {
-            return all_messages;
-        }
-
-        let summary_max_tokens = summary_max_tokens.min(max_tokens);
-        if summary_max_tokens == 0 {
-            return Vec::new();
-        }
-        let mut messages = Vec::new();
-        if let Some(summary) =
-            build_runtime_prompt_history_summary(&all_messages, summary_max_tokens)
-        {
-            messages.push(summary);
-        }
-        messages
-    }
-
-    fn force_trim_messages_to_fit_budget(
-        &mut self,
-        envelope: &RuntimeRequestEnvelope,
-        injected_messages: &[HistoryMessage],
-        tools: &[AgentToolSpec],
-        limits: RequestBudgetLimits,
-        baseline: &TokenEstimateBaseline,
-    ) -> bool {
-        let all_messages = self.messages();
-        let mut request_messages = all_messages.clone();
-        request_messages.extend(injected_messages.iter().cloned());
-        let agent_messages = envelope.agent_messages_with_history(&request_messages);
-        let breakdown = estimate_agent_turn_request(&agent_messages, tools, limits)
-            .with_calibrated_input_tokens(baseline);
-        if breakdown.within_context_window() {
-            return true;
-        }
-        let excess = breakdown
-            .total_with_reserve_tokens
-            .saturating_sub(limits.context_window_tokens);
-        if excess == 0 {
-            return true;
-        }
-        let first_non_system = self
-            .messages
-            .iter()
-            .position(|msg| !matches!(msg.message, AgentMessage::System { .. }));
-        let Some(start) = first_non_system else {
-            return false;
-        };
-        let mut saved = 0usize;
-        let mut cut = 0usize;
-        for message in &self.messages[start..] {
-            if saved >= excess {
-                break;
-            }
-            saved += history_message_token_cost(message);
-            cut += 1;
-        }
-        if cut == 0 {
-            return false;
-        }
-        self.messages.drain(start..start + cut);
-        let check_all = self.messages();
-        let mut check_request = check_all.clone();
-        check_request.extend(injected_messages.iter().cloned());
-        let check_agent = envelope.agent_messages_with_history(&check_request);
-        let check = estimate_agent_turn_request(&check_agent, tools, limits)
-            .with_calibrated_input_tokens(baseline);
-        check.within_context_window()
+        self.messages()
     }
 
     fn plan_compaction_for_request(
@@ -745,7 +603,7 @@ impl RuntimeConversation {
         source_messages: Vec<HistoryMessage>,
         summary_max_tokens: usize,
     ) -> Option<RuntimeConversationCompactionPlan> {
-        if summary_max_tokens == 0 {
+        if source_messages.is_empty() || summary_max_tokens == 0 {
             return None;
         }
         Some(RuntimeConversationCompactionPlan {
@@ -756,31 +614,14 @@ impl RuntimeConversation {
 
     fn apply_compaction(
         &mut self,
-        plan: RuntimeConversationCompactionPlan,
-        outcome: Option<RuntimeCompactionOutcome>,
+        _plan: RuntimeConversationCompactionPlan,
+        outcome: RuntimeCompactionOutcome,
     ) -> bool {
-        let (summary, record) = match outcome {
-            Some(outcome) => (
-                HistoryMessage::assistant(outcome.summary),
-                Some(outcome.record),
-            ),
-            None => {
-                let Some(summary) = build_runtime_prompt_history_summary(
-                    &plan.source_messages,
-                    plan.summary_max_tokens,
-                ) else {
-                    return false;
-                };
-                (summary, None)
-            }
-        };
-
         self.messages.clear();
-        self.messages.push(summary);
+        self.messages
+            .push(HistoryMessage::assistant(outcome.summary));
         self.messages = normalize_runtime_prompt_messages(std::mem::take(&mut self.messages));
-        if let Some(record) = record {
-            self.push_compaction_record(record);
-        }
+        self.push_compaction_record(outcome.record);
         true
     }
 
@@ -801,57 +642,6 @@ impl RuntimeConversation {
             tracing::error!("persist runtime conversation failed: {err}");
         }
     }
-}
-
-fn history_message_token_cost(message: &HistoryMessage) -> usize {
-    match &message.message {
-        AgentMessage::System { content } => {
-            approx_token_count("system") + approx_token_count(content) + 4
-        }
-        AgentMessage::User { content } => {
-            approx_token_count("user")
-                + approx_token_count(content.as_text())
-                + content.parts().len() * 1024
-                + 4
-        }
-        AgentMessage::Assistant { content } => {
-            approx_token_count("assistant") + approx_token_count(content) + 4
-        }
-        AgentMessage::AssistantToolCallProtocol {
-            content,
-            reasoning_content,
-            calls,
-        } => {
-            approx_token_count("assistant")
-                + approx_token_count(content.as_deref().unwrap_or_default())
-                + approx_token_count(reasoning_content.as_deref().unwrap_or_default())
-                + calls
-                    .iter()
-                    .map(|call| {
-                        approx_token_count(&call.id)
-                            + approx_token_count(&call.name)
-                            + approx_token_count(&call.arguments.to_string())
-                            + 8
-                    })
-                    .sum::<usize>()
-                + 4
-        }
-        AgentMessage::Tool {
-            tool_call_id,
-            name,
-            content,
-        } => {
-            approx_token_count("tool")
-                + approx_token_count(tool_call_id)
-                + approx_token_count(name)
-                + approx_token_count(content)
-                + 8
-        }
-    }
-}
-
-fn history_messages_total_token_cost(messages: &[HistoryMessage]) -> usize {
-    messages.iter().map(history_message_token_cost).sum()
 }
 
 fn summarize_runtime_inline_text(text: &str) -> String {
@@ -1034,81 +824,11 @@ fn activity_event_title(event: &SessionActivityEvent) -> String {
 }
 
 fn is_runtime_summary_message(message: &HistoryMessage) -> bool {
-    let content = history_message_content(message);
     message.is_assistant()
-        && (content.starts_with(RUNTIME_HISTORY_SUMMARY_PREFIX)
-            || content.starts_with(MID_TURN_SUMMARY_PREFIX))
-}
-
-fn summarize_tool_message_content(content: &str) -> String {
-    if let Some(summary_line) = content
-        .lines()
-        .find_map(|line| line.strip_prefix("summary="))
-        .map(str::trim)
-        && !summary_line.is_empty()
-    {
-        return summarize_runtime_inline_text(summary_line);
-    }
-
-    content
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map(summarize_runtime_inline_text)
-        .unwrap_or_else(|| "<no content>".to_string())
-}
-
-fn summarize_prompt_message_for_history_compaction(message: &HistoryMessage) -> Option<String> {
-    match &message.message {
-        AgentMessage::System { .. } => Some(format!(
-            "system: {}",
-            summarize_runtime_inline_text(history_message_content(message))
-        )),
-        AgentMessage::User { .. } => Some(format!(
-            "user: {}",
-            summarize_runtime_inline_text(history_message_content(message))
-        )),
-        AgentMessage::Assistant { .. } | AgentMessage::AssistantToolCallProtocol { .. } => {
-            Some(format!(
-                "assistant: {}",
-                summarize_runtime_inline_text(history_message_content(message))
-            ))
-        }
-        AgentMessage::Tool { .. } => Some(format!(
-            "tool: {}",
-            summarize_tool_message_content(history_message_content(message))
-        )),
-    }
-}
-
-fn build_runtime_prompt_history_summary(
-    messages: &[HistoryMessage],
-    max_tokens: usize,
-) -> Option<HistoryMessage> {
-    let rendered = messages
-        .iter()
-        .filter_map(summarize_prompt_message_for_history_compaction)
-        .collect::<Vec<_>>();
-    if rendered.is_empty() {
-        return None;
-    }
-
-    let omitted = rendered.len().saturating_sub(12);
-    let mut lines = vec![RUNTIME_HISTORY_SUMMARY_PREFIX.to_string()];
-    lines.extend(
-        rendered
-            .into_iter()
-            .take(12)
-            .map(|line| format!("- {line}")),
-    );
-    if omitted > 0 {
-        lines.push(format!(
-            "- ... {omitted} earlier history message(s) compacted"
-        ));
-    }
-    Some(HistoryMessage::assistant(truncate_text_to_token_budget(
-        &lines.join("\n"),
-        max_tokens.max(1),
-    )))
+        && message
+            .text_content()
+            .unwrap_or_default()
+            .starts_with(HISTORY_COMPACTION_SUMMARY_PREFIX)
 }
 
 #[cfg(test)]
@@ -1134,9 +854,6 @@ mod tests {
             reserved_output_tokens: 100,
         };
 
-        let history_only_messages = conversation.messages();
-        let history_only_budget = envelope.conversation_budget_tokens(&tools, limits);
-        assert!(history_messages_total_token_cost(&history_only_messages) <= history_only_budget);
         assert!(
             conversation
                 .plan_compaction_for_request(PlanCompactionInput {
@@ -1169,13 +886,12 @@ mod tests {
         };
 
         let all_messages = conversation.messages();
-        assert!(history_messages_total_token_cost(&all_messages) > 20);
         let plan = RuntimeConversation::compaction_plan_from_messages(all_messages, 8)
             .expect("expected compaction plan");
 
         let applied = conversation.apply_compaction(
             plan,
-            Some(RuntimeCompactionOutcome {
+            RuntimeCompactionOutcome {
                 summary: "summary".to_string(),
                 record: RuntimeCompactionRecord {
                     timestamp_ms: 0,
@@ -1187,10 +903,9 @@ mod tests {
                     source_message_count: 6,
                     trimmed_item_count: 0,
                     retained_user_message_count: 0,
-                    used_fallback_summary: false,
                     summary: "summary".to_string(),
                 },
-            }),
+            },
         );
         assert!(applied);
         assert_eq!(conversation.messages.len(), 1);

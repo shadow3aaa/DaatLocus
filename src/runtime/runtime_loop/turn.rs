@@ -256,10 +256,7 @@ pub(crate) async fn execute_agent_loop_step(
 
     let preflight_timeout = Duration::from_secs(RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS);
     let afterclaim_context_input = afterclaim_context_input_for_claimed_inputs(&claimed_inputs);
-    let claimed_event_views = claimed_inputs
-        .iter()
-        .map(|input| (**input).clone())
-        .collect::<Vec<_>>();
+    let claimed_event_views = claimed_inputs.clone();
     let live_draft_session = maybe_start_telegram_live_draft_session(context, &claimed_event_views);
     enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightPreTurnContext);
     let should_prepare_coding_project = should_prepare_coding_project_for_claimed_input(
@@ -391,105 +388,92 @@ pub(crate) async fn execute_agent_loop_step(
             "runtime preflight stage started: {}",
             RuntimeTurnPhase::PreflightCompaction.label()
         );
-        // Backoff retry: 3min → 6min → 10min
+        // Retry the main model with increasing request timeouts before aborting
+        // the turn. No local history summary or trim is allowed on failure.
         const COMPACTION_BACKOFF_TIMEOUTS_SECS: [u64; 3] = [180, 360, 600];
-        let mut summary = None;
-        let mut last_timeout_secs =
-            COMPACTION_BACKOFF_TIMEOUTS_SECS[COMPACTION_BACKOFF_TIMEOUTS_SECS.len() - 1];
+        let mut outcome = None;
+        let mut failure = None;
         for (attempt, timeout_secs) in COMPACTION_BACKOFF_TIMEOUTS_SECS.iter().enumerate() {
-            last_timeout_secs = *timeout_secs;
             match tokio::time::timeout(
                 Duration::from_secs(*timeout_secs),
                 execute_pre_turn_runtime_compaction(context, &plan),
             )
             .await
             {
-                Ok(s) => {
-                    summary = Some(s);
+                Ok(Ok(value)) => {
+                    outcome = Some(value);
                     break;
                 }
+                Ok(Err(err)) => {
+                    failure = Some(format!(
+                        "main model compaction attempt {} failed: {err}",
+                        attempt + 1
+                    ));
+                }
                 Err(_) => {
-                    if attempt + 1 < COMPACTION_BACKOFF_TIMEOUTS_SECS.len() {
-                        tracing::warn!(
-                            attempt = attempt + 1,
-                            timeout_secs = *timeout_secs,
-                            next_timeout_secs = COMPACTION_BACKOFF_TIMEOUTS_SECS[attempt + 1],
-                            "runtime preflight compaction timed out, retrying with longer timeout..."
-                        );
-                    }
+                    failure = Some(format!(
+                        "main model compaction attempt {} timed out after {}s",
+                        attempt + 1,
+                        timeout_secs
+                    ));
                 }
             }
-        }
-        match summary {
-            Some(summary) => {
-                tracing::debug!(
-                    elapsed_ms = compaction_started_at.elapsed().as_millis(),
-                    "runtime preflight stage completed: {}",
-                    RuntimeTurnPhase::PreflightCompaction.label()
-                );
-                let _ = context
-                    .memory
-                    .apply_runtime_conversation_compaction(plan, summary)
-                    .await;
-                context.token_estimate_baseline = TokenEstimateBaseline::default();
-                context.delivered_root_instruction_fingerprint = None;
-                context.visible_source_lines.clear();
-                pre_turn_compacted = true;
-            }
-            None => {
-                let err = miette!(
-                    "runtime preflight stage `{}` timed out after {}s (all retries exhausted)",
-                    RuntimeTurnPhase::PreflightCompaction.label(),
-                    last_timeout_secs
-                );
-                set_runtime_status(
-                    tx,
-                    RuntimeStatusLevel::Error,
-                    format!(
-                        "runtime turn preflight timeout: {}",
-                        RuntimeTurnPhase::PreflightCompaction.label()
-                    ),
-                );
-                tracing::error!(
-                    elapsed_ms = compaction_started_at.elapsed().as_millis(),
-                    timeout_secs = last_timeout_secs,
-                    "runtime preflight stage timed out: {}",
-                    RuntimeTurnPhase::PreflightCompaction.label()
-                );
-                let force_trimmed = context
-                    .memory
-                    .force_trim_runtime_conversation_to_fit_budget(
-                        &request_envelope,
-                        &initial_injected_context_messages,
-                        &initial_tools,
-                        request_budget_limits,
-                        &context.token_estimate_baseline,
-                    )
-                    .await;
-                if force_trimmed {
-                    tracing::warn!(
-                        "force-trimmed oldest runtime conversation messages to fit budget after preflight compaction timeout"
-                    );
-                    context.token_estimate_baseline = TokenEstimateBaseline::default();
-                    context.visible_source_lines.clear();
-                    pre_turn_compacted = true;
-                } else {
-                    return abort_runtime_turn_before_model(
-                        context,
-                        RuntimeTurnAbort {
-                            live_draft_session,
-                            claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
-                            claimed_event_ids: &claimed_event_ids,
 
-                            observation: format!("runtime preflight failed: {err}"),
-                            description: "Failed to execute pre-turn context compaction."
-                                .to_string(),
-                        },
-                    )
-                    .await;
-                }
+            if attempt + 1 < COMPACTION_BACKOFF_TIMEOUTS_SECS.len() {
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    timeout_secs = *timeout_secs,
+                    next_timeout_secs = COMPACTION_BACKOFF_TIMEOUTS_SECS[attempt + 1],
+                    error = failure.as_deref().unwrap_or("unknown compaction failure"),
+                    "runtime preflight compaction failed, retrying with longer timeout"
+                );
             }
         }
+        let Some(outcome) = outcome else {
+            let err = miette!(
+                "runtime preflight stage `{}` failed after main-model compaction retries: {}",
+                RuntimeTurnPhase::PreflightCompaction.label(),
+                failure.unwrap_or_else(|| "unknown compaction failure".to_string())
+            );
+            set_runtime_status(
+                tx,
+                RuntimeStatusLevel::Error,
+                format!(
+                    "runtime turn preflight failed: {}",
+                    RuntimeTurnPhase::PreflightCompaction.label()
+                ),
+            );
+            tracing::error!(
+                elapsed_ms = compaction_started_at.elapsed().as_millis(),
+                error = %err,
+                "runtime preflight compaction failed without local fallback"
+            );
+            return abort_runtime_turn_before_model(
+                context,
+                RuntimeTurnAbort {
+                    live_draft_session,
+                    claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
+                    claimed_event_ids: &claimed_event_ids,
+                    observation: format!("runtime preflight failed: {err}"),
+                    description: "Failed to generate a main-model runtime context compaction."
+                        .to_string(),
+                },
+            )
+            .await;
+        };
+        tracing::debug!(
+            elapsed_ms = compaction_started_at.elapsed().as_millis(),
+            "runtime preflight stage completed: {}",
+            RuntimeTurnPhase::PreflightCompaction.label()
+        );
+        let _ = context
+            .memory
+            .apply_runtime_conversation_compaction(plan, outcome)
+            .await;
+        context.token_estimate_baseline = TokenEstimateBaseline::default();
+        context.delivered_root_instruction_fingerprint = None;
+        context.visible_source_lines.clear();
+        pre_turn_compacted = true;
     }
     let mut conversation_slice = context.memory.runtime_conversation_slice(
         runtime_conversation_budget,
@@ -533,13 +517,31 @@ pub(crate) async fn execute_agent_loop_step(
 
     let output = 'agent_loop: loop {
         let tools = build_runtime_tool_specs(context);
-        if maybe_compact_runtime_messages(context, &mut runtime_step, &tools, false).await {
-            set_runtime_status_only(tx, "Compacting runtime context");
-            context.delivered_root_instruction_fingerprint = None;
-            context.visible_source_lines.clear();
-            break 'agent_loop runtime_context_compacted_output(
-                "runtime context compacted before model request; starting a new turn",
-            );
+        match maybe_compact_runtime_messages(context, &mut runtime_step, &tools, false).await {
+            Ok(true) => {
+                set_runtime_status_only(tx, "Compacting runtime context");
+                context.delivered_root_instruction_fingerprint = None;
+                context.visible_source_lines.clear();
+                break 'agent_loop runtime_context_compacted_output(
+                    "runtime context compacted before model request; starting a new turn",
+                );
+            }
+            Ok(false) => {}
+            Err(err) => {
+                let observation = format!("runtime context compaction failed: {err}");
+                set_runtime_status(tx, RuntimeStatusLevel::Error, observation.clone());
+                tracing::error!("{observation}");
+                break 'agent_loop AgentLoopStepOutput {
+                    observation: observation.clone(),
+                    description: "Failed to generate a main-model runtime context compaction."
+                        .to_string(),
+                    current_doing: "waiting for next tool decision".to_string(),
+                    actions: vec![EpisodeActionRecord {
+                        kind: "runtime_context_compaction_failed".to_string(),
+                        summary: observation,
+                    }],
+                };
+            }
         }
         let request = AgentTurnRequest {
             messages: runtime_step.clone_agent_messages(),
@@ -550,38 +552,45 @@ pub(crate) async fn execute_agent_loop_step(
         let response = match run_agent_turn_with_retry(context, request, tx).await {
             Ok(response) => response,
             Err(err) => {
-                if is_context_budget_exceeded(&err)
-                    && budget_recoveries < MID_TURN_COMPACTION_MAX_RECOVERIES
-                    && maybe_compact_runtime_messages(context, &mut runtime_step, &tools, true)
-                        .await
-                {
-                    budget_recoveries += 1;
-                    set_runtime_status(
-                        tx,
-                        RuntimeStatusLevel::Warn,
-                        format!(
-                            "Recovering from context overflow ({budget_recoveries}/{})",
-                            MID_TURN_COMPACTION_MAX_RECOVERIES
-                        ),
-                    );
-                    break 'agent_loop runtime_context_compacted_output(format!(
-                        "runtime context compacted after context overflow recovery ({budget_recoveries}/{}); starting a new turn",
-                        MID_TURN_COMPACTION_MAX_RECOVERIES
-                    ));
-                }
                 let is_overflow = is_context_budget_exceeded(&err);
-                if is_overflow {
-                    let force_trimmed = runtime_step.force_trim_to_fit_budget(
-                        &tools,
-                        runtime_request_budget_limits(context),
-                        &context.token_estimate_baseline,
-                    );
-                    if force_trimmed {
-                        tracing::warn!(
-                            "force-trimmed oldest messages to fit budget after compaction recovery failed"
-                        );
-                        context.token_estimate_baseline = TokenEstimateBaseline::default();
-                        continue 'agent_loop;
+                if is_overflow && budget_recoveries < MID_TURN_COMPACTION_MAX_RECOVERIES {
+                    match maybe_compact_runtime_messages(context, &mut runtime_step, &tools, true)
+                        .await
+                    {
+                        Ok(true) => {
+                            budget_recoveries += 1;
+                            set_runtime_status(
+                                tx,
+                                RuntimeStatusLevel::Warn,
+                                format!(
+                                    "Recovering from context overflow ({budget_recoveries}/{})",
+                                    MID_TURN_COMPACTION_MAX_RECOVERIES
+                                ),
+                            );
+                            break 'agent_loop runtime_context_compacted_output(format!(
+                                "runtime context compacted after context overflow recovery ({budget_recoveries}/{}); starting a new turn",
+                                MID_TURN_COMPACTION_MAX_RECOVERIES
+                            ));
+                        }
+                        Ok(false) => {}
+                        Err(compaction_err) => {
+                            let observation = format!(
+                                "runtime context compaction failed after context overflow: {compaction_err}"
+                            );
+                            set_runtime_status(tx, RuntimeStatusLevel::Error, observation.clone());
+                            tracing::error!("{observation}");
+                            break 'agent_loop AgentLoopStepOutput {
+                                observation: observation.clone(),
+                                description:
+                                    "Failed to generate a main-model runtime context compaction after context overflow."
+                                        .to_string(),
+                                current_doing: "waiting for next tool decision".to_string(),
+                                actions: vec![EpisodeActionRecord {
+                                    kind: "runtime_context_compaction_failed".to_string(),
+                                    summary: observation,
+                                }],
+                            };
+                        }
                     }
                 }
                 let overflow_fuse_tripped = if is_overflow {
@@ -683,13 +692,13 @@ pub(crate) async fn execute_agent_loop_step(
                     summary: observation.clone(),
                 };
                 let mut terminal_actions = actions.clone();
-                terminal_actions.push(terminal_action.clone());
+                terminal_actions.push(terminal_action);
                 runtime_step.push_history_message(HistoryMessage::assistant(observation.clone()));
                 if let Some(cell) = assistant_activity_cell(&observation) {
                     append_committed_activity_cells(context, tx, vec![cell]);
                 }
                 break 'agent_loop AgentLoopStepOutput {
-                    observation: observation.clone(),
+                    observation,
                     description: "Model request failed.".to_string(),
                     current_doing: "waiting for next tool decision".to_string(),
                     actions: terminal_actions,
@@ -1071,7 +1080,7 @@ pub(crate) async fn execute_agent_loop_step(
             kind: "assistant_message".to_string(),
             summary: current_doing.clone(),
         };
-        actions.push(assistant_action.clone());
+        actions.push(assistant_action);
         runtime_step.set_current_doing(current_doing.clone());
         runtime_step.push_history_message(HistoryMessage::assistant(content.clone()));
         if let Some(cell) = assistant_activity_cell(&content) {
@@ -1114,7 +1123,6 @@ pub(crate) async fn execute_agent_loop_step(
         context.token_estimate_baseline = TokenEstimateBaseline::default();
     }
     context.claimed_event_ids.clear();
-    let _history_messages = runtime_step.history_messages().to_vec();
     if !runtime_step.is_history_empty() {
         record_runtime_history_messages(context, runtime_step.into_turn_draft()).await;
     }
@@ -1417,7 +1425,7 @@ fn append_claimed_input_activity_cells(
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
     inputs: &[ClaimedRuntimeInput],
 ) {
-    if inputs.iter().any(|_input| true) {
+    if !inputs.is_empty() {
         refresh_pending_user_inputs_for_dashboard(context, tx);
     }
 
@@ -1630,8 +1638,7 @@ mod tests {
     async fn coding_project_prepare_opens_project_scope() {
         let project = tempfile::tempdir().expect("project dir");
         let mut apps =
-            crate::app::AppManager::new(None, vec![Box::new(crate::coding_app::CodingApp::new())])
-                .await
+            crate::app::AppManager::new(vec![Box::new(crate::coding_app::CodingApp::new())])
                 .expect("app manager");
         let app_context = AppToolExecutionContext {
             execution_cwd: project.path().to_path_buf(),
@@ -1663,8 +1670,7 @@ mod tests {
         )
         .expect("write agents");
         let mut apps =
-            crate::app::AppManager::new(None, vec![Box::new(crate::coding_app::CodingApp::new())])
-                .await
+            crate::app::AppManager::new(vec![Box::new(crate::coding_app::CodingApp::new())])
                 .expect("app manager");
         let app_context = AppToolExecutionContext {
             execution_cwd: project.path().to_path_buf(),

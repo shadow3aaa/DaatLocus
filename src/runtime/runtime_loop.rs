@@ -124,6 +124,23 @@ mod tests {
 
     struct UnusedLlm;
 
+    struct JsonCompactionLlm {
+        summary: &'static str,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Llm for JsonCompactionLlm {
+        async fn run_json(
+            &self,
+            _context: &Context,
+            _request: PromptRequest,
+        ) -> Result<serde_json::Value> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(serde_json::json!({ "summary": self.summary }))
+        }
+    }
+
     #[async_trait]
     impl Llm for UnusedLlm {
         async fn run_json(
@@ -157,9 +174,7 @@ mod tests {
             let home_override = DaatLocusHomeOverride::set(home.path().to_path_buf()).await;
             let telegram = TelegramTransportState::new();
             let (daemon_control_tx, _daemon_control_rx) = tokio::sync::mpsc::unbounded_channel();
-            let apps = AppManager::new(None, Vec::<Box<dyn App>>::new())
-                .await
-                .expect("app manager");
+            let apps = AppManager::new(Vec::<Box<dyn App>>::new()).expect("app manager");
             let context = Context {
                 session_id: None,
                 llm: Box::new(UnusedLlm),
@@ -212,6 +227,38 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn pre_turn_compaction_uses_main_model_without_calling_efficient_model() {
+        let mut isolated = IsolatedRuntimeContext::new().await;
+        let context = &mut isolated.context;
+        let main_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        context.llm = Box::new(JsonCompactionLlm {
+            summary: "main model summary",
+            calls: main_calls.clone(),
+        });
+        context.efficient_llm = Arc::new(UnusedLlm);
+
+        let main_model = context.config.main_model.clone();
+        let model = context
+            .config
+            .models
+            .get_mut(&main_model)
+            .expect("default main model");
+        model.context_window_tokens = 1_000_000;
+        model.effective_context_window_percent = 100;
+        model.max_completion_tokens = 1;
+        let plan = crate::memory::RuntimeConversationCompactionPlan::for_test(
+            vec![HistoryMessage::user("user input")],
+            1_024,
+        );
+
+        let outcome = crate::runtime_context::execute_pre_turn_runtime_compaction(context, &plan)
+            .await
+            .expect("main model compaction should succeed");
+
+        assert_eq!(main_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(outcome.summary.contains("main model summary"));
+    }
     fn terminal_event(text: &str) -> crate::events::TerminalIncomingEvent {
         crate::events::TerminalIncomingEvent {
             origin: "test".to_string(),
@@ -405,7 +452,7 @@ mod tests {
         let event_a = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
         let event_b = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let inputs = vec![
-            Box::new(EventView {
+            EventView {
                 event_id: event_a,
                 status: EventStatus::Pending,
                 reply_message: None,
@@ -422,8 +469,8 @@ mod tests {
                     attachments: Vec::new(),
                 }),
                 last_error: None,
-            }),
-            Box::new(EventView {
+            },
+            EventView {
                 event_id: event_b,
                 status: EventStatus::Pending,
                 reply_message: None,
@@ -440,7 +487,7 @@ mod tests {
                     attachments: Vec::new(),
                 }),
                 last_error: None,
-            }),
+            },
         ];
 
         assert_eq!(

@@ -12,7 +12,7 @@ pub(super) fn runtime_work_origin(inputs: &[ClaimedRuntimeInput]) -> Option<Stri
         .map(|event| format!("event:{}", event.event_id))
 }
 
-pub(super) type ClaimedRuntimeInput = Box<EventView>;
+pub(super) type ClaimedRuntimeInput = EventView;
 
 pub(super) fn claimed_runtime_input_fingerprint(inputs: &[ClaimedRuntimeInput]) -> Option<String> {
     if inputs.is_empty() {
@@ -46,7 +46,7 @@ pub(super) fn claim_pending_runtime_inputs(
             PendingWork::Event { event_id } => {
                 match context.events.claim_event_if_pending(event_id) {
                     Ok(Some(event)) => {
-                        claimed_inputs.push(Box::new(event));
+                        claimed_inputs.push(event);
                     }
                     Ok(None) => {
                         if let Err(err) = context
@@ -378,12 +378,7 @@ pub(super) fn claimed_event_statuses_are_terminal(statuses: &[EventStatus]) -> b
 pub(super) fn afterclaim_context_input_for_claimed_inputs(
     inputs: &[ClaimedRuntimeInput],
 ) -> AfterClaimContextInput {
-    let mut context = AfterClaimContextInput::default();
-    for input in inputs {
-        let event = input;
-        context.push((**event).clone());
-    }
-    context
+    inputs.to_vec()
 }
 
 pub(super) enum RuntimeFollowUpDecision {
