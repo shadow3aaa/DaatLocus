@@ -3,9 +3,24 @@ use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::api::{PropagationResult, PropagationSource};
 use crate::treesitter::TreeSitterAnalyzer;
+
+const LSP_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
+const LSP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const LSP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+type LspResponse = Result<serde_json::Value, String>;
+type SpawnedLsp = (
+    Child,
+    BufWriter<ChildStdin>,
+    Receiver<LspResponse>,
+    JoinHandle<()>,
+);
 
 // ── LSP Server Configuration ──────────────────────────────────
 
@@ -236,7 +251,8 @@ impl LspServerConfig for JdtlsConfig {
 struct LspClientInner {
     process: Option<Child>,
     stdin_writer: Option<BufWriter<ChildStdin>>,
-    stdout_reader: Option<std::io::BufReader<ChildStdout>>,
+    response_receiver: Option<Receiver<LspResponse>>,
+    reader_thread: Option<JoinHandle<()>>,
     next_id: u64,
     initialized: bool,
     /// The language ID for didOpen notifications.
@@ -286,7 +302,8 @@ impl LspClient {
                     inner: RefCell::new(LspClientInner {
                         process: None,
                         stdin_writer: None,
-                        stdout_reader: None,
+                        response_receiver: None,
+                        reader_thread: None,
                         next_id: 0,
                         initialized: false,
                         language_id,
@@ -296,11 +313,12 @@ impl LspClient {
         };
 
         match Self::spawn_and_initialize(&binary_path, &project_root, config) {
-            Ok((process, stdin_w, stdout_r)) => Self {
+            Ok((process, stdin_w, response_receiver, reader_thread)) => Self {
                 inner: RefCell::new(LspClientInner {
                     process: Some(process),
                     stdin_writer: Some(stdin_w),
-                    stdout_reader: Some(stdout_r),
+                    response_receiver: Some(response_receiver),
+                    reader_thread: Some(reader_thread),
                     next_id: 1,
                     initialized: true,
                     language_id,
@@ -315,7 +333,8 @@ impl LspClient {
                     inner: RefCell::new(LspClientInner {
                         process: None,
                         stdin_writer: None,
-                        stdout_reader: None,
+                        response_receiver: None,
+                        reader_thread: None,
                         next_id: 0,
                         initialized: false,
                         language_id,
@@ -520,14 +539,7 @@ impl LspClient {
         binary_path: &Path,
         project_root: &Path,
         config: &dyn LspServerConfig,
-    ) -> Result<
-        (
-            Child,
-            BufWriter<ChildStdin>,
-            std::io::BufReader<ChildStdout>,
-        ),
-        String,
-    > {
+    ) -> Result<SpawnedLsp, String> {
         let mut child = Command::new(binary_path)
             .args(config.spawn_args())
             .current_dir(project_root)
@@ -542,11 +554,21 @@ impl LspClient {
 
         let mut writer = BufWriter(stdin);
         let mut reader = std::io::BufReader::new(stdout);
+        let (response_sender, response_receiver) = mpsc::channel();
+        let reader_thread = std::thread::spawn(move || {
+            loop {
+                let response = Self::read_message(&mut reader);
+                let failed = response.is_err();
+                if response_sender.send(response).is_err() || failed {
+                    break;
+                }
+            }
+        });
 
         // ── LSP initialize ─────────────────────────────────────
         let root_uri = path_to_file_uri(project_root);
         let mut init_params = serde_json::json!({
-            "rootUri": root_uri.clone(),
+            "rootUri": root_uri,
             "capabilities": {},
         });
         // Merge extra params from config
@@ -559,8 +581,15 @@ impl LspClient {
             }
         }
 
-        let resp = Self::send_request_raw(&mut writer, &mut reader, 0, "initialize", init_params)
-            .map_err(|e| {
+        let resp = Self::send_request_raw(
+            &mut writer,
+            &response_receiver,
+            0,
+            "initialize",
+            init_params,
+            LSP_INITIALIZE_TIMEOUT,
+        )
+        .map_err(|e| {
             let _ = child.kill();
             format!("initialize failed: {e}")
         })?;
@@ -586,7 +615,7 @@ impl LspClient {
         std::thread::sleep(std::time::Duration::from_secs(
             config.post_init_delay_secs(),
         ));
-        Ok((child, writer, reader))
+        Ok((child, writer, response_receiver, reader_thread))
     }
 
     // ── LSP file synchronization ────────────────────────────────
@@ -663,25 +692,27 @@ impl LspClient {
             "context": { "includeDeclaration": false }
         });
 
-        let (writer, reader) = match (&mut inner.stdin_writer, &mut inner.stdout_reader) {
-            (Some(w), Some(r)) => (w, r),
+        let (writer, response_receiver) = match (&mut inner.stdin_writer, &inner.response_receiver)
+        {
+            (Some(writer), Some(response_receiver)) => (writer, response_receiver),
             _ => return vec![],
         };
 
         let id = inner.next_id;
         inner.next_id += 1;
 
-        let params = params.clone();
         let resp = match Self::send_request_raw(
             writer,
-            reader,
+            response_receiver,
             id,
             "textDocument/references",
             params.clone(),
+            LSP_REQUEST_TIMEOUT,
         ) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[scope-engine/lsp] textDocument/references failed: {e}");
+                Self::disable(inner);
                 return vec![];
             }
         };
@@ -700,16 +731,18 @@ impl LspClient {
                 inner.next_id += 1;
                 let retry_resp = match Self::send_request_raw(
                     writer,
-                    reader,
+                    response_receiver,
                     retry_id,
                     "textDocument/references",
                     params,
+                    LSP_REQUEST_TIMEOUT,
                 ) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!(
                             "[scope-engine/lsp] retry textDocument/references also failed: {e}"
                         );
+                        Self::disable(inner);
                         return vec![];
                     }
                 };
@@ -782,10 +815,11 @@ impl LspClient {
 
     fn send_request_raw(
         writer: &mut BufWriter<ChildStdin>,
-        reader: &mut std::io::BufReader<ChildStdout>,
+        response_receiver: &Receiver<LspResponse>,
         id: u64,
         method: &str,
         params: serde_json::Value,
+        timeout: Duration,
     ) -> Result<serde_json::Value, String> {
         let request = serde_json::json!({
             "jsonrpc": "2.0",
@@ -794,7 +828,7 @@ impl LspClient {
             "params": params,
         });
         Self::write_message(writer, &request)?;
-        Self::read_response(reader, id)
+        Self::wait_for_response(response_receiver, id, timeout)
     }
 
     fn send_notification(
@@ -826,48 +860,86 @@ impl LspClient {
         Ok(())
     }
 
-    fn read_response(
+    fn read_message(
         reader: &mut std::io::BufReader<ChildStdout>,
-        expected_id: u64,
     ) -> Result<serde_json::Value, String> {
+        let mut header = String::new();
         loop {
-            let mut header_line = String::new();
-            loop {
-                let mut byte = [0u8; 1];
-                reader
-                    .read_exact(&mut byte)
-                    .map_err(|e| format!("read header byte failed: {e}"))?;
-                let ch = byte[0] as char;
-                header_line.push(ch);
-                if header_line.ends_with("\r\n\r\n") {
-                    break;
-                }
-                if header_line.len() > 4096 {
-                    return Err("header too long, possibly malformed LSP response".to_string());
-                }
-            }
-
-            let content_length: usize = header_line
-                .lines()
-                .find_map(|line| {
-                    line.strip_prefix("Content-Length: ")
-                        .and_then(|v| v.trim().parse().ok())
-                })
-                .ok_or("missing Content-Length header")?;
-
-            let mut body_buf = vec![0u8; content_length];
+            let mut byte = [0u8; 1];
             reader
-                .read_exact(&mut body_buf)
-                .map_err(|e| format!("read body failed: {e}"))?;
-            let body: serde_json::Value =
-                serde_json::from_slice(&body_buf).map_err(|e| format!("json parse failed: {e}"))?;
+                .read_exact(&mut byte)
+                .map_err(|e| format!("read header byte failed: {e}"))?;
+            header.push(byte[0] as char);
+            if header.ends_with("\r\n\r\n") {
+                break;
+            }
+            if header.len() > 4096 {
+                return Err("header too long, possibly malformed LSP response".to_string());
+            }
+        }
 
-            if let Some(resp_id) = body.get("id").and_then(|v| v.as_u64()) {
-                let is_response = body.get("result").is_some() || body.get("error").is_some();
-                if resp_id == expected_id && is_response {
-                    return Ok(body);
+        let content_length: usize = header
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Content-Length: ")
+                    .and_then(|value| value.trim().parse().ok())
+            })
+            .ok_or("missing Content-Length header")?;
+
+        let mut body = vec![0u8; content_length];
+        reader
+            .read_exact(&mut body)
+            .map_err(|e| format!("read body failed: {e}"))?;
+        serde_json::from_slice(&body).map_err(|e| format!("json parse failed: {e}"))
+    }
+
+    fn wait_for_response(
+        response_receiver: &Receiver<LspResponse>,
+        expected_id: u64,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "request {expected_id} timed out after {} ms",
+                    timeout.as_millis()
+                ));
+            }
+
+            match response_receiver.recv_timeout(remaining) {
+                Ok(Ok(message)) => {
+                    let is_response =
+                        message.get("result").is_some() || message.get("error").is_some();
+                    if message.get("id").and_then(|value| value.as_u64()) == Some(expected_id)
+                        && is_response
+                    {
+                        return Ok(message);
+                    }
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!(
+                        "request {expected_id} timed out after {} ms",
+                        timeout.as_millis()
+                    ));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err("LSP response channel disconnected".to_string());
                 }
             }
+        }
+    }
+
+    fn disable(inner: &mut LspClientInner) {
+        inner.initialized = false;
+        inner.stdin_writer = None;
+        inner.response_receiver = None;
+        inner.reader_thread = None;
+        if let Some(mut child) = inner.process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
@@ -878,24 +950,20 @@ impl Drop for LspClient {
         if !inner.initialized {
             return;
         }
-        if let (Some(writer), Some(reader)) = (&mut inner.stdin_writer, &mut inner.stdout_reader) {
+        if let (Some(writer), Some(response_receiver)) =
+            (&mut inner.stdin_writer, &inner.response_receiver)
+        {
             let _ = Self::send_request_raw(
                 writer,
-                reader,
+                response_receiver,
                 inner.next_id,
                 "shutdown",
                 serde_json::json!(null),
+                LSP_SHUTDOWN_TIMEOUT,
             );
             let _ = Self::send_notification(writer, "exit", serde_json::json!(null));
         }
-        if let Some(ref mut child) = inner.process {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        inner.initialized = false;
-        inner.process = None;
-        inner.stdin_writer = None;
-        inner.stdout_reader = None;
+        Self::disable(inner);
         eprintln!("[scope-engine/lsp] language server shut down");
     }
 }
@@ -1015,37 +1083,6 @@ fn file_uri_to_path_string(uri: &str) -> String {
     format!("//{decoded}")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{file_uri_from_absolute_path_string, file_uri_to_path_string};
-
-    #[test]
-    fn windows_verbatim_paths_become_valid_file_uris() {
-        let uri =
-            file_uri_from_absolute_path_string(r"\\?\C:\Users\Name With Space\src\main#test.rs");
-
-        assert_eq!(
-            uri,
-            "file:///C:/Users/Name%20With%20Space/src/main%23test.rs"
-        );
-    }
-
-    #[test]
-    fn unix_paths_become_valid_file_uris() {
-        let uri = file_uri_from_absolute_path_string("/tmp/name with space/main#test.rs");
-
-        assert_eq!(uri, "file:///tmp/name%20with%20space/main%23test.rs");
-    }
-
-    #[test]
-    fn file_uris_decode_windows_drive_paths() {
-        let path =
-            file_uri_to_path_string("file:///C:/Users/Name%20With%20Space/src/main%23test.rs");
-
-        assert_eq!(path, "C:/Users/Name With Space/src/main#test.rs");
-    }
-}
-
 // ── Analyzer trait impl ──────────────────────────────────────
 
 impl Analyzer for LspClient {
@@ -1080,3 +1117,67 @@ impl Analyzer for LspClient {
 
 /// LspAnalyzer is a type alias for LspClient, preserving API compatibility.
 pub type LspAnalyzer = LspClient;
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        LspClient, LspResponse, file_uri_from_absolute_path_string, file_uri_to_path_string,
+    };
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn windows_verbatim_paths_become_valid_file_uris() {
+        let uri =
+            file_uri_from_absolute_path_string(r"\\?\C:\Users\Name With Space\src\main#test.rs");
+
+        assert_eq!(
+            uri,
+            "file:///C:/Users/Name%20With%20Space/src/main%23test.rs"
+        );
+    }
+
+    #[test]
+    fn unix_paths_become_valid_file_uris() {
+        let uri = file_uri_from_absolute_path_string("/tmp/name with space/main#test.rs");
+
+        assert_eq!(uri, "file:///tmp/name%20with%20space/main%23test.rs");
+    }
+
+    #[test]
+    fn file_uris_decode_windows_drive_paths() {
+        let path =
+            file_uri_to_path_string("file:///C:/Users/Name%20With%20Space/src/main%23test.rs");
+
+        assert_eq!(path, "C:/Users/Name With Space/src/main#test.rs");
+    }
+
+    #[test]
+    fn response_wait_ignores_unrelated_messages() {
+        let (sender, receiver) = mpsc::channel::<LspResponse>();
+        sender
+            .send(Ok(serde_json::json!({"method": "window/logMessage"})))
+            .unwrap();
+        sender
+            .send(Ok(serde_json::json!({"id": 6, "result": []})))
+            .unwrap();
+        sender
+            .send(Ok(serde_json::json!({"id": 7, "result": ["match"]})))
+            .unwrap();
+
+        let response = LspClient::wait_for_response(&receiver, 7, Duration::from_millis(50))
+            .expect("matching response should be returned");
+
+        assert_eq!(response["result"], serde_json::json!(["match"]));
+    }
+
+    #[test]
+    fn response_wait_times_out() {
+        let (_sender, receiver) = mpsc::channel::<LspResponse>();
+
+        let error = LspClient::wait_for_response(&receiver, 9, Duration::from_millis(10))
+            .expect_err("missing response should time out");
+
+        assert!(error.contains("request 9 timed out"));
+    }
+}
