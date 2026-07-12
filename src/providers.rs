@@ -422,34 +422,34 @@ impl OpenAIClient {
         }
     }
 
-/// Step adapter state to the next downgrade level on a 400 response.
-/// Order: tool_choice (NamedFunction → RequiredString → Omit),
-/// then thinking budget (ReasoningEffortString → NestedReasoningObject → Unsupported).
-/// Returns false when no further downgrade is available.
-fn step_adapter_state_for_bad_request(
-    state: &mut ChatCompletionsAdapterState,
-    has_thinking_budget: bool,
-) -> bool {
-    if state.prompt_tool_choice_mode == PromptToolChoiceMode::NamedFunction {
-        state.prompt_tool_choice_mode = PromptToolChoiceMode::RequiredString;
-        return true;
-    }
-    if state.prompt_tool_choice_mode != PromptToolChoiceMode::Omit {
-        state.prompt_tool_choice_mode = PromptToolChoiceMode::Omit;
-        return true;
-    }
-    if has_thinking_budget {
-        if state.thinking_budget_mode == ThinkingBudgetMode::ReasoningEffortString {
-            state.thinking_budget_mode = ThinkingBudgetMode::NestedReasoningObject;
+    /// Step adapter state to the next downgrade level on a 400 response.
+    /// Order: tool_choice (NamedFunction → RequiredString → Omit),
+    /// then thinking budget (ReasoningEffortString → NestedReasoningObject → Unsupported).
+    /// Returns false when no further downgrade is available.
+    fn step_adapter_state_for_bad_request(
+        state: &mut ChatCompletionsAdapterState,
+        has_thinking_budget: bool,
+    ) -> bool {
+        if state.prompt_tool_choice_mode == PromptToolChoiceMode::NamedFunction {
+            state.prompt_tool_choice_mode = PromptToolChoiceMode::RequiredString;
             return true;
         }
-        if state.thinking_budget_mode != ThinkingBudgetMode::Unsupported {
-            state.thinking_budget_mode = ThinkingBudgetMode::Unsupported;
+        if state.prompt_tool_choice_mode != PromptToolChoiceMode::Omit {
+            state.prompt_tool_choice_mode = PromptToolChoiceMode::Omit;
             return true;
         }
+        if has_thinking_budget {
+            if state.thinking_budget_mode == ThinkingBudgetMode::ReasoningEffortString {
+                state.thinking_budget_mode = ThinkingBudgetMode::NestedReasoningObject;
+                return true;
+            }
+            if state.thinking_budget_mode != ThinkingBudgetMode::Unsupported {
+                state.thinking_budget_mode = ThinkingBudgetMode::Unsupported;
+                return true;
+            }
+        }
+        false
     }
-    false
-}
     async fn call_tool_json(&self, request: PromptRequest) -> Result<serde_json::Value> {
         let url = self.url();
         let output_schema = request.output_schema.clone();
@@ -1180,10 +1180,7 @@ impl Llm for OpenAIClient {
         self.call_tool_json(request).await
     }
 
-    async fn run_json_no_context(
-        &self,
-        request: PromptRequest,
-    ) -> Result<serde_json::Value> {
+    async fn run_json_no_context(&self, request: PromptRequest) -> Result<serde_json::Value> {
         self.call_tool_json(request).await
     }
 

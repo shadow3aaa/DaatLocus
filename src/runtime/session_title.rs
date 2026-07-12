@@ -17,8 +17,7 @@ const MAX_TITLE_CHARS: usize = 64;
 const MAX_EXCERPT_ITEMS: usize = 16;
 const MAX_EXCERPT_ITEM_CHARS: usize = 360;
 
-const TITLE_GENERATION_SYSTEM_PROMPT: &str =
-    "Generate a concise session title (≤64 characters) that captures the \
+const TITLE_GENERATION_SYSTEM_PROMPT: &str = "Generate a concise session title (≤64 characters) that captures the \
      main topic, task, or question from the conversation below. Output a short \
      label in the conversation language. Do not include prefixes like 'Title:' \
      or quotes.";
@@ -110,16 +109,13 @@ pub fn spawn_session_title_generation(
 
     // Eagerly mark as generated to prevent duplicate spawns.
     let now_ms = Utc::now().timestamp_millis();
-    context
-        .session_title
-        .last_generated_signature = Some(signature.clone());
+    context.session_title.last_generated_signature = Some(signature);
     context.session_title.last_generated_at_ms = Some(now_ms);
 
     let request = PromptRequest {
         tool_name: "session_title".to_string(),
         tool_description:
-            "Generate a concise title (≤64 chars) summarizing the session conversation."
-                .to_string(),
+            "Generate a concise title (≤64 chars) summarizing the session conversation.".to_string(),
         output_schema: model_schema_for::<SessionTitleOutput>(),
         system_messages: vec![TITLE_GENERATION_SYSTEM_PROMPT.to_string()],
         long_term_memory_messages: Vec::new(),

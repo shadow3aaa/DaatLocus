@@ -1,4 +1,4 @@
-use crate::app::{AppDocs, AppId};
+use crate::app::AppDocs;
 
 use super::prompt_text::{PromptTextBuilder, render_bullet_list};
 
@@ -38,14 +38,13 @@ impl AppPrompt {
     }
 }
 
-pub fn build_app_docs_prompt(app_id: AppId, docs: &AppDocs) -> String {
+pub fn build_app_docs_prompt(docs: &AppDocs) -> String {
     if let Some(body) = docs.body_markdown.as_deref()
         && !body.trim().is_empty()
     {
         return body.trim().to_string();
     }
     let mut builder = PromptTextBuilder::new();
-    let _ = app_id;
     builder.push_paragraph(render_bullet_list(docs.lines.clone()));
     builder.build()
 }

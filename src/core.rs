@@ -269,10 +269,7 @@ pub trait Llm {
     ///
     /// Default implementation returns an error; providers that support this
     /// should override.
-    async fn run_json_no_context(
-        &self,
-        _request: PromptRequest,
-    ) -> Result<serde_json::Value> {
+    async fn run_json_no_context(&self, _request: PromptRequest) -> Result<serde_json::Value> {
         Err(miette!(
             "run_json_no_context is not implemented for this provider"
         ))

@@ -261,7 +261,7 @@ impl HistoryMessage {
     pub fn system(content: impl Into<String>) -> Self {
         let content = content.into();
         Self {
-            message: AgentMessage::system(content.clone()),
+            message: AgentMessage::system(content),
             activity_event: None,
             tool_call_activity_events: Vec::new(),
         }
@@ -270,7 +270,7 @@ impl HistoryMessage {
     pub fn user(content: impl Into<String>) -> Self {
         let content = content.into();
         Self {
-            message: AgentMessage::user(content.clone()),
+            message: AgentMessage::user(content),
             activity_event: None,
             tool_call_activity_events: Vec::new(),
         }
@@ -279,7 +279,7 @@ impl HistoryMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         let content = content.into();
         Self {
-            message: AgentMessage::assistant(content.clone()),
+            message: AgentMessage::assistant(content),
             activity_event: None,
             tool_call_activity_events: Vec::new(),
         }
@@ -295,7 +295,7 @@ impl HistoryMessage {
         let name = name.into();
         let content = content.into();
         Self {
-            message: AgentMessage::tool(tool_call_id, name, content.clone()),
+            message: AgentMessage::tool(tool_call_id, name, content),
             activity_event,
             tool_call_activity_events: Vec::new(),
         }

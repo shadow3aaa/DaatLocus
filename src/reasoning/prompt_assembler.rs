@@ -125,10 +125,7 @@ fn render_app_docs_section(ctx: &Context) -> String {
     let mut sections = Vec::new();
     for app_id in ctx.apps.app_ids() {
         if let Some(docs) = ctx.apps.docs(&app_id) {
-            sections.push(format!(
-                "## {app_id}\n\n{}",
-                build_app_docs_prompt(app_id.clone(), &docs)
-            ));
+            sections.push(format!("## {app_id}\n\n{}", build_app_docs_prompt(&docs)));
         }
     }
     if sections.is_empty() {
