@@ -965,4 +965,58 @@ mod tests {
 
         assert!(payload.get("max_output_tokens").is_none(), "{payload:#}");
     }
+
+    #[test]
+    fn responses_payload_keeps_tool_output_before_tool_image_attachment() {
+        let client = ResponsesCompatibleClient::new(
+            "test-key",
+            "https://example.test/v1",
+            &ModelConfig {
+                model_id: "gpt-5.5".to_string(),
+                provider: "responses-compatible".to_string(),
+                supports_vision: Some(true),
+                ..ModelConfig::default()
+            },
+        );
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let image_path = dir.path().join("diagram.png");
+        std::fs::write(&image_path, b"\x89PNG\r\n\x1a\nfixture").expect("write image");
+        let payload = build_agent_payload(
+            &client,
+            AgentTurnRequest {
+                messages: vec![
+                    AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                        None,
+                        None,
+                        vec![AgentToolCall {
+                            id: "call-image".to_string(),
+                            name: "view_image".to_string(),
+                            arguments: json!({"path": "diagram.png"}),
+                        }],
+                    ),
+                    AgentMessage::tool(
+                        "call-image",
+                        "view_image",
+                        "summary=loaded image diagram.png",
+                    ),
+                    AgentMessage::user_content(AgentContent::multimodal(
+                        "The `view_image` tool attached image content for visual inspection.",
+                        vec![AgentContentPart::Image {
+                            path: image_path.display().to_string(),
+                            media_type: "image/png".to_string(),
+                            description: Some("diagram".to_string()),
+                        }],
+                    )),
+                ],
+                tools: vec![],
+            },
+            false,
+        );
+
+        assert_eq!(payload["input"][0]["type"], "function_call");
+        assert_eq!(payload["input"][1]["type"], "function_call_output");
+        assert_eq!(payload["input"][1]["call_id"], "call-image");
+        assert_eq!(payload["input"][2]["role"], "user");
+        assert_eq!(payload["input"][2]["content"][1]["type"], "input_image");
+    }
 }

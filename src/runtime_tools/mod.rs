@@ -16,12 +16,13 @@ use crate::{
     live_progress::TelegramLiveStatus,
     reasoning::{
         episode::EpisodeActionRecord,
-        runtime::{AgentToolCall, AgentToolInputSpec, AgentToolSpec},
+        runtime::{AgentContentPart, AgentToolCall, AgentToolInputSpec, AgentToolSpec},
     },
     schema_utils::{model_schema, model_schema_for, validate_model_facing_schema},
 };
 
 mod files;
+mod view_image;
 mod work;
 
 pub(super) type ToolFuture<'a> =
@@ -61,6 +62,7 @@ pub struct ToolExecutionResult {
     pub summary: String,
     pub payload: Value,
     pub model_content_override: Option<String>,
+    pub model_image_parts: Vec<AgentContentPart>,
     pub activity_event: Option<SessionActivityEvent>,
     pub skip_source_elision: bool,
 }
@@ -75,6 +77,7 @@ impl ToolExecutionResult {
             summary: summary.into(),
             payload,
             model_content_override: None,
+            model_image_parts: Vec::new(),
             activity_event,
             skip_source_elision: false,
         }
@@ -82,6 +85,11 @@ impl ToolExecutionResult {
 
     pub fn with_model_content(mut self, model_content: impl Into<String>) -> Self {
         self.model_content_override = Some(model_content.into());
+        self
+    }
+
+    pub fn with_model_image_part(mut self, image: AgentContentPart) -> Self {
+        self.model_image_parts.push(image);
         self
     }
 
@@ -198,6 +206,28 @@ impl StaticRuntimeTool {
                 schema: model_schema(schema),
             },
             availability: None,
+            summarize,
+            call_ui,
+            execute,
+        }
+    }
+
+    fn new_with_schema_and_availability(
+        name: &'static str,
+        description: &'static str,
+        schema: serde_json::Value,
+        availability: ToolAvailability,
+        summarize: ToolSummarizer,
+        call_ui: ToolCallActivityBuilder,
+        execute: ToolExecutor,
+    ) -> Self {
+        Self {
+            name,
+            description,
+            input_spec: AgentToolInputSpec::JsonSchema {
+                schema: model_schema(schema),
+            },
+            availability: Some(availability),
             summarize,
             call_ui,
             execute,
@@ -458,6 +488,7 @@ impl RuntimeTool for AppRuntimeTool {
 fn build_static_runtime_tools() -> Vec<Box<dyn RuntimeTool>> {
     let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
     tools.extend(files::register_tools());
+    tools.extend(view_image::register_tools());
     tools.extend(work::register_tools());
     tools
 }
@@ -563,8 +594,11 @@ fn find_runtime_tool<'a>(
 }
 
 pub fn build_runtime_tool_specs(context: &Context) -> Vec<AgentToolSpec> {
-    let tools = build_runtime_tools(context);
-    tools.into_iter().map(|tool| tool.spec()).collect()
+    build_runtime_tools(context)
+        .into_iter()
+        .filter(|tool| tool.is_available(context))
+        .map(|tool| tool.spec())
+        .collect()
 }
 
 fn runtime_availability_denial(
@@ -1234,6 +1268,7 @@ mod tests {
 
         assert!(names.contains("read_file"));
         assert!(names.contains("edit_file"));
+        assert!(names.contains("view_image"));
         assert!(names.contains("browser__get_state"));
         assert!(names.contains("browser__browser_open_page"));
         assert!(names.contains("browser__browser_snapshot"));
@@ -1255,6 +1290,110 @@ mod tests {
         assert!(!names.contains("coding_open_project"));
         assert!(!names.contains("terminal_exec"));
         assert!(!names.contains("browser_open_page"));
+    }
+
+    #[tokio::test]
+    async fn view_image_attaches_a_supported_local_file() {
+        let mut isolated = IsolatedTestContext::new().await;
+        let root = isolated.context.execution_cwd.clone();
+        let model_name = isolated.context.config.main_model.clone();
+        isolated
+            .context
+            .config
+            .models
+            .get_mut(&model_name)
+            .expect("default model")
+            .supports_vision = Some(true);
+        let mut bytes = b"\x89PNG\r\n\x1a\nfixture".to_vec();
+        bytes.extend_from_slice(b"image-data");
+        std::fs::write(root.join("diagram.png"), &bytes).expect("write image fixture");
+
+        let call = AgentToolCall {
+            id: "call_view_image".to_string(),
+            name: "view_image".to_string(),
+            arguments: json!({ "path": "diagram.png" }),
+        };
+
+        let result = execute_agent_tool_call(&mut isolated.context, &call)
+            .await
+            .expect("view image");
+
+        assert_eq!(result.payload["media_type"], "image/png");
+        assert_eq!(result.payload["bytes"], bytes.len());
+        assert_eq!(result.model_image_parts.len(), 1);
+        assert!(matches!(
+            &result.model_image_parts[0],
+            crate::reasoning::runtime::AgentContentPart::Image { media_type, .. }
+                if media_type == "image/png"
+        ));
+    }
+
+    #[tokio::test]
+    async fn view_image_rejects_a_non_vision_model() {
+        let mut isolated = IsolatedTestContext::new().await;
+        let root = isolated.context.execution_cwd.clone();
+        std::fs::write(root.join("diagram.png"), b"\x89PNG\r\n\x1a\nfixture")
+            .expect("write image fixture");
+        let model_name = isolated.context.config.main_model.clone();
+        isolated
+            .context
+            .config
+            .models
+            .get_mut(&model_name)
+            .expect("default model")
+            .supports_vision = Some(false);
+
+        let call = AgentToolCall {
+            id: "call_view_image".to_string(),
+            name: "view_image".to_string(),
+            arguments: json!({ "path": "diagram.png" }),
+        };
+
+        let result = execute_agent_tool_call(&mut isolated.context, &call)
+            .await
+            .expect("unavailable tool result");
+        assert_eq!(result.payload["available"], false);
+        assert!(
+            result
+                .model_content()
+                .contains("disabled by the current runtime availability policy")
+        );
+    }
+
+    #[test]
+    fn tool_output_images_are_separate_from_the_tool_protocol_message() {
+        let result = ToolExecutionResult::from_activity_event("image", json!({}), None)
+            .with_model_image_part(crate::reasoning::runtime::AgentContentPart::Image {
+                path: "/tmp/diagram.png".to_string(),
+                media_type: "image/png".to_string(),
+                description: Some("diagram".to_string()),
+            });
+
+        let tool_message = crate::reasoning::runtime::AgentMessage::tool(
+            "call_image",
+            "view_image",
+            result.model_content(),
+        );
+        let attachment_message = crate::reasoning::runtime::AgentMessage::user_content(
+            crate::reasoning::runtime::AgentContent::multimodal(
+                "The `view_image` tool attached image content for visual inspection.",
+                result.model_image_parts,
+            ),
+        );
+
+        assert!(matches!(
+            tool_message,
+            crate::reasoning::runtime::AgentMessage::Tool { .. }
+        ));
+        let crate::reasoning::runtime::AgentMessage::User { content } = attachment_message else {
+            panic!("expected image attachment user message");
+        };
+        assert_eq!(content.parts().len(), 1);
+        assert!(matches!(
+            &content.parts()[0],
+            crate::reasoning::runtime::AgentContentPart::Image { media_type, .. }
+                if media_type == "image/png"
+        ));
     }
 
     #[tokio::test]

@@ -856,7 +856,7 @@ pub(crate) async fn execute_agent_loop_step(
                         _ => {}
                     }
                 }
-                let result = match execute_agent_tool_call(context, call).await {
+                let mut result = match execute_agent_tool_call(context, call).await {
                     Ok(result) => result,
                     Err(err) => {
                         let error_text = err.to_string();
@@ -930,24 +930,37 @@ pub(crate) async fn execute_agent_loop_step(
                         &result.model_content(),
                     )
                 };
+                let activity_event = result.activity_event.clone();
+                let history_content = result.history_content_with_budget(
+                    &call.id,
+                    &call.name,
+                    context
+                        .config
+                        .main_model_config()
+                        .tool_output_max_tokens
+                        .max(1),
+                );
+                let model_image_parts = std::mem::take(&mut result.model_image_parts);
                 runtime_step.push_agent_message(AgentMessage::tool(
                     call.id.clone(),
                     call.name.clone(),
                     model_content,
                 ));
-                let activity_event = result.activity_event.clone();
+                if !model_image_parts.is_empty() {
+                    runtime_step.push_agent_message(AgentMessage::user_content(
+                        AgentContent::multimodal(
+                            format!(
+                                "The `{}` tool attached image content for visual inspection.",
+                                call.name
+                            ),
+                            model_image_parts,
+                        ),
+                    ));
+                }
                 runtime_step.push_history_message(HistoryMessage::tool(
                     call.id.clone(),
                     call.name.clone(),
-                    result.history_content_with_budget(
-                        &call.id,
-                        &call.name,
-                        context
-                            .config
-                            .main_model_config()
-                            .tool_output_max_tokens
-                            .max(1),
-                    ),
+                    history_content,
                     activity_event.clone(),
                 ));
                 append_committed_activity_cells(context, tx, activity_event.into_iter().collect());
