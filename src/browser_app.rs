@@ -1007,8 +1007,8 @@ impl App for BrowserApp {
         APP_BROWSER.app_docs()
     }
 
-    fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
-        Ok(vec![
+    fn tool_specs(&self) -> Vec<AppToolSpec> {
+        vec![
             AppToolSpec {
                 name: "browser_open_page".to_string(),
                 description: "Create a browser page, open the specified URL, and return the new `page_id`.".to_string(),
@@ -1055,7 +1055,7 @@ impl App for BrowserApp {
                 description: "Close the specified browser page. Close pages that are no longer needed to save memory.".to_string(),
                 input_schema: model_schema_for::<BrowserClosePageArgs>(),
             },
-        ])
+        ]
     }
 
     fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {

@@ -59,8 +59,7 @@ pub fn render_markdown_with_width(
     wrap_width: Option<u16>,
 ) -> Vec<Line<'static>> {
     let width = wrap_width.map(|w| w as usize).unwrap_or(usize::MAX);
-    let renderer =
-        MarkdownRenderer::new(width).with_render_hooks(Box::new(SyntaxHighlightHooks));
+    let renderer = MarkdownRenderer::new(width).with_render_hooks(Box::new(SyntaxHighlightHooks));
     let blocks = renderer.parse(input);
     let theme = ThemeConfig::default().with_text_color(base_color);
     renderer.render(&blocks, &theme)

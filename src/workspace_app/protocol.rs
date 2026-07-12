@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::{
-    app::{AppDynamicToolResult, AppDynamicToolSpec, AppStateRender},
+    app::{AppStateRender, AppToolExecutionResult, AppToolSpec},
     workspace_app::WorkspaceAppConfigOutput,
 };
 
@@ -39,7 +39,7 @@ pub(crate) struct WorkerResponse {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum WorkerResponseResult {
-    Ok { payload: WorkerResponsePayload },
+    Ok { payload: Box<WorkerResponsePayload> },
     Err { message: String },
 }
 
@@ -48,8 +48,8 @@ pub(crate) enum WorkerResponseResult {
 pub(crate) enum WorkerResponsePayload {
     Config(WorkspaceAppConfigOutput),
     RenderState(AppStateRender),
-    ToolSpecs(Vec<AppDynamicToolSpec>),
-    ToolResult(AppDynamicToolResult),
+    ToolSpecs(Vec<AppToolSpec>),
+    ToolResult(Box<AppToolExecutionResult>),
     Notice(Option<String>),
     Unit,
 }

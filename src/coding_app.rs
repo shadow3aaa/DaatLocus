@@ -813,8 +813,8 @@ impl App for CodingApp {
         }
     }
 
-    fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
-        Ok(vec![
+    fn tool_specs(&self) -> Vec<AppToolSpec> {
+        vec![
             AppToolSpec {
                 name: "open_project".to_string(),
                 description: "Open a project for semantic code operations using scope-engine.".to_string(),
@@ -844,7 +844,7 @@ impl App for CodingApp {
                 description: "Acknowledge and return accumulated scope-engine propagation review events, optionally batched with limit.".to_string(),
                 input_schema: model_schema_for::<CodingNextReviewArgs>(),
             },
-        ])
+        ]
     }
 
     fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {

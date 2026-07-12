@@ -131,28 +131,13 @@ pub struct AppDocs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AppDynamicToolSpec {
-    pub name: String,
-    pub description: String,
-    pub input_schema: Value,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AppDynamicToolResult {
-    pub summary: String,
-    pub payload: Value,
-    pub model_content: Option<String>,
-    pub ui_lines: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct AppToolSpec {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppToolExecutionResult {
     pub summary: String,
     pub payload: Value,
@@ -224,20 +209,8 @@ pub trait App: Send + Sync {
 
     fn docs(&self) -> AppDocs;
 
-    fn dynamic_tools(&self) -> Result<Vec<AppDynamicToolSpec>> {
-        Ok(Vec::new())
-    }
-
-    fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
-        Ok(self
-            .dynamic_tools()?
-            .into_iter()
-            .map(|tool| AppToolSpec {
-                name: tool.name,
-                description: tool.description,
-                input_schema: tool.input_schema,
-            })
-            .collect())
+    fn tool_specs(&self) -> Vec<AppToolSpec> {
+        Vec::new()
     }
 
     fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {
@@ -267,29 +240,7 @@ pub trait App: Send + Sync {
         call: &AgentToolCall,
         _context: &AppToolExecutionContext,
     ) -> Result<AppToolExecutionResult> {
-        let result = self
-            .execute_dynamic_tool(&call.name, call.arguments.clone())
-            .await?;
-        Ok(AppToolExecutionResult::from_activity_event(
-            result.summary,
-            result.payload,
-            result.model_content,
-            Some(SessionActivityEvent::GenericApp(
-                TextActivityDescriptor {
-                    title: call.name.clone(),
-                    body_lines: result.ui_lines,
-                }
-                .into(),
-            )),
-        ))
-    }
-
-    async fn execute_dynamic_tool(
-        &mut self,
-        _name: &str,
-        _arguments: Value,
-    ) -> Result<AppDynamicToolResult> {
-        Err(miette!("unknown app tool"))
+        Err(miette!("unknown app tool `{}`", call.name))
     }
 
     fn cached_root_project_instructions(
@@ -319,7 +270,7 @@ pub enum AppInstallDisposition {
 }
 
 impl AppManager {
-    pub async fn new(_initial_app: Option<AppId>, apps: Vec<Box<dyn App>>) -> Result<Self> {
+    pub fn new(apps: Vec<Box<dyn App>>) -> Result<Self> {
         let mut order = Vec::with_capacity(apps.len());
         let mut table = HashMap::with_capacity(apps.len());
 
@@ -371,21 +322,10 @@ impl AppManager {
     }
 
     pub fn all_tool_specs(&self) -> Vec<(AppId, Vec<AppToolSpec>)> {
-        let mut app_tools = Vec::new();
-        for id in &self.order {
-            let Some(app) = self.apps.get(id) else {
-                continue;
-            };
-            match app.tool_specs() {
-                Ok(tools) => {
-                    app_tools.push((id.clone(), tools));
-                }
-                Err(err) => {
-                    tracing::warn!("failed to list tools for app `{id}`: {err:?}");
-                }
-            }
-        }
-        app_tools
+        self.order
+            .iter()
+            .filter_map(|id| self.apps.get(id).map(|app| (id.clone(), app.tool_specs())))
+            .collect()
     }
 
     pub fn before_runtime_tool_call(
@@ -438,12 +378,13 @@ impl AppManager {
             .apps
             .get(app_id)
             .ok_or_else(|| miette!("app missing for tool `{}`: {app_id}", call.name))?;
-        let tool_spec = owner
-            .tool_specs()?
-            .into_iter()
-            .find(|tool| tool.name == app_tool_name)
-            .ok_or_else(|| miette!("app `{app_id}` does not own tool `{}`", call.name))?;
-        let _ = tool_spec;
+        if !owner
+            .tool_specs()
+            .iter()
+            .any(|tool| tool.name == app_tool_name)
+        {
+            return Err(miette!("app `{app_id}` does not own tool `{}`", call.name));
+        }
         let app = self
             .apps
             .get_mut(app_id)
@@ -493,15 +434,12 @@ impl AppManager {
             let Some(app_tool_name) = id.demangle_tool_name(exposed_tool_name) else {
                 continue;
             };
-            match app.tool_specs() {
-                Ok(app_tools) => {
-                    if app_tools.iter().any(|tool| tool.name == app_tool_name) {
-                        return Ok((id.clone(), app_tool_name.to_string()));
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!("failed to list tools for app `{id}`: {err:?}");
-                }
+            if app
+                .tool_specs()
+                .iter()
+                .any(|tool| tool.name == app_tool_name)
+            {
+                return Ok((id.clone(), app_tool_name.to_string()));
             }
         }
         Err(miette!("unknown app tool `{exposed_tool_name}`"))

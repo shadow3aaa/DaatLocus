@@ -176,7 +176,7 @@ fn execute_read_file_runtime_tool<'a>(
         };
         let skip_elision = args.force_no_elide.unwrap_or(false);
         Ok(ToolExecutionResult::from_activity_event(
-            summary.clone(),
+            summary,
             json!({
                 "path": args.path,
                 "resolved_path": resolved.display().to_string(),

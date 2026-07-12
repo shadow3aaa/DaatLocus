@@ -157,7 +157,7 @@ impl WorkspaceAppWorkerClient {
             ));
         }
         match response.result {
-            WorkerResponseResult::Ok { payload } => Ok(payload),
+            WorkerResponseResult::Ok { payload } => Ok(*payload),
             WorkerResponseResult::Err { message } => Err(miette!("{message}")),
         }
     }

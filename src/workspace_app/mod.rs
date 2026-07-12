@@ -22,8 +22,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     app::{
-        App, AppDocs, AppDynamicToolResult, AppDynamicToolSpec, AppId, AppInstallDisposition,
-        AppManager, AppStateRender,
+        App, AppDocs, AppId, AppInstallDisposition, AppManager, AppStateRender,
+        AppToolExecutionResult, AppToolSpec,
     },
     daat_locus_paths::daat_locus_paths_sync,
     persistence::PersistenceStore,
@@ -85,22 +85,10 @@ impl WorkspaceAppSyncReport {
     }
 }
 
+#[allow(dead_code)]
 pub enum WorkspaceAppWatcherHandle {
     Recommended(RecommendedWatcher),
     Poll(PollWatcher),
-}
-
-impl Drop for WorkspaceAppWatcherHandle {
-    fn drop(&mut self) {
-        match self {
-            Self::Recommended(watcher) => {
-                let _ = watcher;
-            }
-            Self::Poll(watcher) => {
-                let _ = watcher;
-            }
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -126,7 +114,7 @@ struct WorkspaceAppHandleState {
     worker: WorkspaceAppWorkerClient,
     render: AppStateRender,
     render_cache_served: bool,
-    tool_specs: Vec<AppDynamicToolSpec>,
+    tool_specs: Vec<AppToolSpec>,
     last_error: Option<String>,
 }
 
@@ -476,19 +464,8 @@ fn build_watcher_callback(
             if event.kind.is_access() {
                 return;
             }
-            match invalidations_for_event(&apps_root, &event) {
-                Ok(invalidations) => {
-                    for invalidation in invalidations {
-                        let _ = tx.send(invalidation);
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "failed to map workspace app watcher event for {}: {err:?}",
-                        apps_root.display()
-                    );
-                    let _ = tx.send(WorkspaceAppInvalidation::FullRescan);
-                }
+            for invalidation in invalidations_for_event(&apps_root, &event) {
+                let _ = tx.send(invalidation);
             }
         }
         Err(err) => {
@@ -501,24 +478,21 @@ fn build_watcher_callback(
     }
 }
 
-fn invalidations_for_event(
-    apps_root: &Path,
-    event: &Event,
-) -> Result<Vec<WorkspaceAppInvalidation>> {
+fn invalidations_for_event(apps_root: &Path, event: &Event) -> Vec<WorkspaceAppInvalidation> {
     if event.paths.is_empty() {
-        return Ok(vec![WorkspaceAppInvalidation::FullRescan]);
+        return vec![WorkspaceAppInvalidation::FullRescan];
     }
     let mut dirty = BTreeSet::new();
     for path in &event.paths {
         let Some(folder_name) = app_folder_name_from_path(apps_root, path) else {
-            return Ok(vec![WorkspaceAppInvalidation::FullRescan]);
+            return vec![WorkspaceAppInvalidation::FullRescan];
         };
         dirty.insert(folder_name);
     }
-    Ok(dirty
+    dirty
         .into_iter()
         .map(|folder_name| WorkspaceAppInvalidation::Dirty { folder_name })
-        .collect())
+        .collect()
 }
 
 fn app_folder_name_from_path(apps_root: &Path, path: &Path) -> Option<String> {
@@ -981,7 +955,7 @@ impl WorkspaceApp {
             id.clone(),
             app_dir.to_path_buf(),
             state_dir,
-            entry_relative_path.clone(),
+            entry_relative_path,
             protected_env_vars.to_vec(),
             strong_filesystem,
             sandbox_disabled,
@@ -1095,21 +1069,21 @@ impl App for WorkspaceApp {
         }
     }
 
-    fn dynamic_tools(&self) -> Result<Vec<AppDynamicToolSpec>> {
-        Ok(self.handle_state.lock().tool_specs.clone())
+    fn tool_specs(&self) -> Vec<AppToolSpec> {
+        self.handle_state.lock().tool_specs.clone()
     }
 
-    async fn execute_dynamic_tool(
+    async fn execute_tool(
         &mut self,
-        name: &str,
-        arguments: JsonValue,
-    ) -> Result<AppDynamicToolResult> {
+        call: &crate::reasoning::runtime::AgentToolCall,
+        _context: &crate::app::AppToolExecutionContext,
+    ) -> Result<AppToolExecutionResult> {
         let mut state = self.handle_state.lock();
         let result = match state.worker.request(WorkerRequestOp::CallTool {
-            name: name.to_string(),
-            arguments,
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
         }) {
-            Ok(WorkerResponsePayload::ToolResult(result)) => result,
+            Ok(WorkerResponsePayload::ToolResult(result)) => *result,
             Ok(other) => {
                 return Err(miette!(
                     "workspace app `{}` worker returned unexpected tool result payload: {other:?}",
@@ -1170,10 +1144,47 @@ fn resolve_relative_child_path(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(root.join(relative_path))
 }
 
-fn load_runtime_state(path: &Path) -> Result<JsonValue> {
-    Ok(PersistenceStore::runtime_sync()
+fn load_runtime_state(path: &Path) -> JsonValue {
+    PersistenceStore::runtime_sync()
         .read_json_file_sync(path, "workspace app state")
-        .unwrap_or_else(|| JsonValue::Object(Default::default())))
+        .unwrap_or_else(|| JsonValue::Object(Default::default()))
+}
+
+#[cfg(test)]
+fn workspace_app_tool_call(
+    name: &str,
+    arguments: serde_json::Value,
+) -> crate::reasoning::runtime::AgentToolCall {
+    crate::reasoning::runtime::AgentToolCall {
+        id: name.to_string(),
+        name: name.to_string(),
+        arguments,
+    }
+}
+
+#[cfg(test)]
+fn workspace_app_tool_context(execution_cwd: &Path) -> crate::app::AppToolExecutionContext {
+    crate::app::AppToolExecutionContext {
+        execution_cwd: execution_cwd.to_path_buf(),
+        sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),
+        dashboard_tx: None,
+        tool_output_max_tokens: 4096,
+        turn_epoch: 0,
+    }
+}
+
+#[cfg(test)]
+async fn execute_workspace_app_tool(
+    app: &mut dyn App,
+    execution_cwd: &Path,
+    name: &str,
+    arguments: serde_json::Value,
+) -> Result<AppToolExecutionResult> {
+    app.execute_tool(
+        &workspace_app_tool_call(name, arguments),
+        &workspace_app_tool_context(execution_cwd),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1273,13 +1284,17 @@ return app
                 .iter()
                 .any(|line| line == "count=1")
         );
-        let tools = app.dynamic_tools().expect("list tools");
+        let tools = app.tool_specs();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "increment_notes");
-        let result = app
-            .execute_dynamic_tool("increment_notes", serde_json::json!({ "amount": 4 }))
-            .await
-            .expect("execute app tool");
+        let result = execute_workspace_app_tool(
+            app.as_mut(),
+            root.path(),
+            "increment_notes",
+            serde_json::json!({ "amount": 4 }),
+        )
+        .await
+        .expect("execute app tool");
         assert_eq!(result.summary, "counter updated");
         assert_eq!(result.payload, serde_json::json!({ "count": 5 }));
         assert!(
@@ -1485,12 +1500,11 @@ return app
             "config should run before init during worker cold start"
         );
 
-        app.execute_dynamic_tool("hang", serde_json::json!({}))
+        execute_workspace_app_tool(&mut app, root.path(), "hang", serde_json::json!({}))
             .await
             .expect_err("configured request timeout should stop long-running tool");
 
-        let result = app
-            .execute_dynamic_tool("ok", serde_json::json!({}))
+        let result = execute_workspace_app_tool(&mut app, root.path(), "ok", serde_json::json!({}))
             .await
             .expect("ok call after configured timeout should restart worker");
         assert_eq!(result.payload, serde_json::json!({ "ok_calls": 1 }));
@@ -1560,15 +1574,13 @@ return app
         )
         .expect("load timeout app");
 
-        let first = app
-            .execute_dynamic_tool("ok", serde_json::json!({}))
+        let first = execute_workspace_app_tool(&mut app, root.path(), "ok", serde_json::json!({}))
             .await
             .expect("first ok call should succeed");
         assert_eq!(first.payload, serde_json::json!({ "ok_calls": 1 }));
         app.set_request_timeout_for_tests(Duration::from_millis(250));
 
-        let err = app
-            .execute_dynamic_tool("hang", serde_json::json!({}))
+        let err = execute_workspace_app_tool(&mut app, root.path(), "hang", serde_json::json!({}))
             .await
             .expect_err("hanging tool should time out");
         assert!(
@@ -1576,8 +1588,7 @@ return app
             "expected timeout error, got {err:?}"
         );
 
-        let second = app
-            .execute_dynamic_tool("ok", serde_json::json!({}))
+        let second = execute_workspace_app_tool(&mut app, root.path(), "ok", serde_json::json!({}))
             .await
             .expect("ok call after timeout should rebuild Lua runtime");
         assert_eq!(
@@ -1615,9 +1626,7 @@ return app
             bootstrap.errors
         );
         let mut registry = bootstrap.registry;
-        let mut apps = AppManager::new(None, bootstrap.apps)
-            .await
-            .expect("build app manager");
+        let mut apps = AppManager::new(bootstrap.apps).expect("build app manager");
 
         let render = apps
             .state_renders()
@@ -1701,9 +1710,7 @@ return app
             bootstrap.errors
         );
         let mut registry = bootstrap.registry;
-        let mut apps = AppManager::new(None, bootstrap.apps)
-            .await
-            .expect("build app manager");
+        let mut apps = AppManager::new(bootstrap.apps).expect("build app manager");
 
         fs::write(
             root.path()
@@ -1876,9 +1883,7 @@ return app
             bootstrap.errors
         );
         let app_id = AppId::from_workspace_folder("schema_input").expect("valid app id");
-        let mut apps = AppManager::new(None, bootstrap.apps)
-            .await
-            .expect("build app manager");
+        let mut apps = AppManager::new(bootstrap.apps).expect("build app manager");
         let app_context = crate::app::AppToolExecutionContext {
             execution_cwd: root.path().to_path_buf(),
             sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),
@@ -1952,9 +1957,7 @@ return app
             bootstrap.errors
         );
         let app_id = AppId::from_workspace_folder("schema_output").expect("valid app id");
-        let mut apps = AppManager::new(None, bootstrap.apps)
-            .await
-            .expect("build app manager");
+        let mut apps = AppManager::new(bootstrap.apps).expect("build app manager");
         let app_context = crate::app::AppToolExecutionContext {
             execution_cwd: root.path().to_path_buf(),
             sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),

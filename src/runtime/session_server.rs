@@ -191,8 +191,8 @@ pub(crate) async fn run_session_serve(
             )
         })?;
     let sandbox_policy = sandbox_policy_for_runtime(&config, Some(&execution_cwd)).await;
-    let runtime_apps = build_runtime_apps(&execution_cwd, &sandbox_policy);
-    let apps = AppManager::new(None, runtime_apps.apps).await?;
+    let (apps, workspace_apps) = build_runtime_apps(&execution_cwd, &sandbox_policy);
+    let apps = AppManager::new(apps)?;
     let openskills = load_openskills_for_runtime(&execution_cwd);
     let mut context = Context {
         session_id: Some(session_id.as_str().to_string()),
@@ -208,7 +208,7 @@ pub(crate) async fn run_session_serve(
         pending_skill_run_flushes: Vec::new(),
         current_work_origin: None,
         apps,
-        workspace_apps: runtime_apps.workspace_registry,
+        workspace_apps,
         telegram: telegram_handle,
         telegram_acl: telegram_acl.clone(),
         compiled_prompts,

@@ -8,7 +8,7 @@ use miette::{Result, miette};
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value as LuaValue};
 
 use crate::{
-    app::{AppDynamicToolResult, AppDynamicToolSpec, AppId, AppStateRender},
+    app::{AppId, AppStateRender, AppToolExecutionResult, AppToolSpec},
     persistence::PersistenceStore,
     workspace_app::{
         WorkspaceAppConfigOutput, WorkspaceLuaRuntime, WorkspaceNoticeOutput,
@@ -128,7 +128,9 @@ impl LuaWorkerHost {
         WorkerResponse {
             id,
             result: match result {
-                Ok(payload) => WorkerResponseResult::Ok { payload },
+                Ok(payload) => WorkerResponseResult::Ok {
+                    payload: Box::new(payload),
+                },
                 Err(err) => WorkerResponseResult::Err {
                     message: err.to_string(),
                 },
@@ -193,8 +195,7 @@ impl LuaWorkerRuntime {
         let lua_runtime =
             load_workspace_lua_runtime(&id, &app_dir, &entry_relative_path, &entry_source)?;
         let state_file = state_dir.join("state.json");
-        let runtime = load_runtime_state(&state_file)
-            .map_err(|err| miette!("failed to load state for app `{id}`: {err:?}"))?;
+        let runtime = load_runtime_state(&state_file);
         let worker = Self {
             id,
             app_dir,
@@ -221,7 +222,7 @@ impl LuaWorkerRuntime {
             WorkerRequestOp::ListTools => self.list_tools().map(WorkerResponsePayload::ToolSpecs),
             WorkerRequestOp::CallTool { name, arguments } => self
                 .call_tool(&name, arguments)
-                .map(WorkerResponsePayload::ToolResult),
+                .map(|result| WorkerResponsePayload::ToolResult(Box::new(result))),
             WorkerRequestOp::PollNotices => self.poll_notices().map(WorkerResponsePayload::Notice),
             WorkerRequestOp::Shutdown => Ok(WorkerResponsePayload::Unit),
         }
@@ -296,7 +297,7 @@ impl LuaWorkerRuntime {
             )?;
             let result = self.map_lua(
                 "failed to execute `init`",
-                init_fn.call::<LuaValue>((ctx.clone(), state_value)),
+                init_fn.call::<LuaValue>((ctx, state_value)),
             )?;
             if !matches!(result, LuaValue::Nil) {
                 self.runtime =
@@ -348,11 +349,11 @@ impl LuaWorkerRuntime {
         })
     }
 
-    fn list_tools(&mut self) -> Result<Vec<AppDynamicToolSpec>> {
+    fn list_tools(&mut self) -> Result<Vec<AppToolSpec>> {
         Ok(self
             .load_tool_descriptors()?
             .into_iter()
-            .map(|descriptor| AppDynamicToolSpec {
+            .map(|descriptor| AppToolSpec {
                 name: descriptor.name,
                 description: descriptor.description,
                 input_schema: descriptor.input_schema,
@@ -405,7 +406,7 @@ impl LuaWorkerRuntime {
         &mut self,
         name: &str,
         arguments: serde_json::Value,
-    ) -> Result<AppDynamicToolResult> {
+    ) -> Result<AppToolExecutionResult> {
         let descriptors = self.load_tool_descriptors()?;
         let descriptor = descriptors
             .into_iter()
@@ -459,12 +460,18 @@ impl LuaWorkerRuntime {
             self.runtime = next_state;
             self.persist_runtime_state()?;
         }
-        Ok(AppDynamicToolResult {
-            summary: output.summary,
-            payload: output.payload,
-            model_content: output.model_content,
-            ui_lines: output.ui_lines,
-        })
+        Ok(AppToolExecutionResult::from_activity_event(
+            output.summary,
+            output.payload,
+            output.model_content,
+            Some(crate::dashboard::SessionActivityEvent::GenericApp(
+                crate::activity_event::TextActivityDescriptor {
+                    title: name.to_string(),
+                    body_lines: output.ui_lines,
+                }
+                .into(),
+            )),
+        ))
     }
 
     fn poll_notices(&mut self) -> Result<Option<String>> {

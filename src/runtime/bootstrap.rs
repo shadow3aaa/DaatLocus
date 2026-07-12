@@ -38,11 +38,6 @@ use crate::{
     workspace_app::{WorkspaceAppRegistry, bootstrap_workspace_apps},
 };
 
-pub(crate) struct RuntimeAppsBootstrap {
-    pub(crate) apps: Vec<Box<dyn crate::app::App>>,
-    pub(crate) workspace_registry: WorkspaceAppRegistry,
-}
-
 pub(crate) fn emit_startup_progress(message: impl AsRef<str>) {
     tracing::info!("{}", message.as_ref());
 }
@@ -338,7 +333,7 @@ fn daat_locus_source_root() -> Option<PathBuf> {
 pub(crate) fn build_runtime_apps(
     execution_cwd: &Path,
     sandbox_policy: &RuntimeSandboxPolicy,
-) -> RuntimeAppsBootstrap {
+) -> (Vec<Box<dyn crate::app::App>>, WorkspaceAppRegistry) {
     let mut apps: Vec<Box<dyn crate::app::App>> = vec![
         Box::new(BrowserApp::new()),
         Box::new(TerminalApp::new()),
@@ -349,10 +344,7 @@ pub(crate) fn build_runtime_apps(
         tracing::warn!("{error}");
     }
     apps.extend(bootstrap.apps);
-    RuntimeAppsBootstrap {
-        apps,
-        workspace_registry: bootstrap.registry,
-    }
+    (apps, bootstrap.registry)
 }
 
 pub(crate) async fn build_eval_context_with_compiled(
@@ -383,8 +375,8 @@ pub(crate) async fn build_eval_context_with_compiled(
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
     bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
-    let runtime_apps = build_runtime_apps(&execution_cwd, &sandbox_policy);
-    let apps = AppManager::new(None, runtime_apps.apps).await.unwrap();
+    let (apps, workspace_apps) = build_runtime_apps(&execution_cwd, &sandbox_policy);
+    let apps = AppManager::new(apps).unwrap();
     let token_usage_store = load_persistent_token_usage_store(None).await;
     let client = build_llm(&config.main_model, &config)
         .unwrap_or_else(|err| panic!("failed to construct main LLM client: {err:?}"));
@@ -418,7 +410,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         pending_skill_run_flushes: Vec::new(),
         current_work_origin: None,
         apps,
-        workspace_apps: runtime_apps.workspace_registry,
+        workspace_apps,
         telegram: telegram_handle,
         telegram_acl,
         compiled_prompts,

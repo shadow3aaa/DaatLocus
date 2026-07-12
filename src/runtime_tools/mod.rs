@@ -381,7 +381,7 @@ impl RuntimeTool for AppGetStateRuntimeTool {
             Some(SessionActivityEvent::GenericApp(
                 TextActivityDescriptor {
                     title: AppId::render_exposed_tool_name(&self.exposed_name),
-                    body_lines: state.lines.clone(),
+                    body_lines: state.lines,
                 }
                 .into(),
             )),
@@ -852,7 +852,7 @@ mod tests {
                 Box::new(TerminalApp::new()),
                 Box::new(CodingApp::new()),
             ];
-            let apps = AppManager::new(None, apps).await.unwrap();
+            let apps = AppManager::new(apps).expect("app manager");
             let context = Context {
                 session_id: None,
                 llm: Box::new(UnusedLlm),

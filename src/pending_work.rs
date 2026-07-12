@@ -421,9 +421,7 @@ mod tests {
         assert!(matches!(claimed[0], PendingWork::Event { .. }));
         assert_eq!(queue.pending_count(), 0);
 
-        queue
-            .requeue_front(work.clone())
-            .expect("requeue claimed event");
+        queue.requeue_front(work).expect("requeue claimed event");
         assert_eq!(queue.pending_count(), 1);
 
         let reclaimed = queue.claim_batch(1).expect("claim requeued event");

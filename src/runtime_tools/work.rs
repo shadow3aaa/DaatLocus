@@ -166,7 +166,7 @@ fn execute_event_resolve_tool<'a>(
                     &event_id,
                     &event,
                     args.disposition,
-                    reply_message.clone(),
+                    reply_message,
                     args.note.clone(),
                 )?;
                 delivery_summary
@@ -196,7 +196,7 @@ fn execute_event_resolve_tool<'a>(
             "note": args.note.clone(),
         });
         Ok(ToolExecutionResult::from_activity_event(
-            summary.clone(),
+            summary,
             result_payload,
             Some(reply_activity_event(
                 match args.disposition {
@@ -275,7 +275,7 @@ fn execute_update_plan_tool<'a>(
             steps: plan_ui_steps,
         };
         Ok(ToolExecutionResult::from_activity_event(
-            summary.clone(),
+            summary,
             json!({
                 "explanation": explanation,
                 "plan": effective_steps,

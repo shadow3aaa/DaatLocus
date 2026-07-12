@@ -673,8 +673,8 @@ impl App for TerminalApp {
         APP_TERMINAL.app_docs()
     }
 
-    fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
-        Ok(vec![
+    fn tool_specs(&self) -> Vec<AppToolSpec> {
+        vec![
             AppToolSpec {
                 name: "terminal_exec".to_string(),
                 description: "Start a terminal command and return output after the current yield window ends. Set `session_id` to null to create a new session, or pass an existing session id returned by a prior terminal call to reuse that session. Never invent a session id. If the command is still running, the result keeps the session so later calls can continue with terminal_write_stdin.".to_string(),
@@ -690,7 +690,7 @@ impl App for TerminalApp {
                 description: "Terminate the current foreground process in the specified terminal session and return the updated session state.".to_string(),
                 input_schema: model_schema_for::<TerminalTerminateArgs>(),
             },
-        ])
+        ]
     }
 
     fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {
