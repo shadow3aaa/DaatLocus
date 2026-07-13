@@ -230,7 +230,7 @@ Rules:
   lines, or cached render output.
 - The old per-kind TUI glyph icon system is deprecated for product UI. Do not
   revive glyphs such as app-specific symbols for Browser, Coding, Patch, or
-  Primitive. The standard current TUI layout markers such as `•`, `›`, and
+  Primitive, or Workflow. The standard current TUI layout markers such as `•`, `›`, and
   detail indentation are layout markers, not a per-kind icon system; mirror
   them only when the current TUI renderer uses them.
 - Avoid nested cards in the session message list. Use flat activity rows,
@@ -1122,6 +1122,125 @@ Runtime context is split by lifetime:
 
 Therefore, when adding an agent-facing interface, first decide which layer it belongs to. Do not directly pile prompt instructions, routing catalogs, or durable task state into app-local state.
 
+### Workflow
+
+`Workflow` is a first-class executable orchestration program for multiple
+isolated agent workers. It is not an `App`, `Event`, `PendingWork`, `Skill`, or
+the removed workflow/primitive mechanism. A workflow may use skills as
+instructions and runtime/app tools through a worker's explicitly granted
+capabilities, but neither relationship changes the object boundary.
+
+A workflow is one Lua 5.4 source file in the workflow directory:
+
+```text
+<name>.lua
+```
+
+The filename stem is the workflow id. There is no `workflow.toml`, manifest,
+sidecar metadata, profile catalog, or predeclared job/task vocabulary. The Lua
+file itself declares its input/output schemas, worker capability requests,
+extra tools, and control flow. Dynamic schemas from a workflow are external
+model-facing schemas: validate them when the workflow is loaded against the
+portable schema rules in this document, rather than silently rewriting them.
+
+### Workflow Entry Points
+
+Both interactive users and the Session main agent start the same
+`WorkflowInvocation`:
+
+```text
+/workflows picker or form -> WorkflowInvocation -> <name>.lua
+workflow__<name>(typed input) -> WorkflowInvocation -> <name>.lua
+```
+
+`/workflows` is a picker/form surface, not a family of miniature CLI
+subcommands. When a workflow is loaded, expose one stable, typed main-agent
+tool per workflow, such as `workflow__investigate(...)`. Its input schema comes
+from the Lua definition. Do not expose a universal
+`workflow__start({ workflow_id, arbitrary_json })` tool, and do not make the
+model mechanically enumerate workflow ids or construct arbitrary JSON when a
+loaded schema can express the call.
+
+The Session main agent is outside the workflow graph. It remains the caller and
+result consumer, with its stable system prompt, tool directory, and
+`finish_and_send` contract unchanged for the invocation. A completed workflow
+returns a normal `ToolResult` to the original `workflow__<name>` call in main
+history. The main agent may call workflows again during an ordinary main turn.
+
+There is no `workflow.main()` node, main actor, main lease, Context reuse, or
+main-in-workflow re-entry protocol. `model = "main"` in a worker definition
+selects the main model provider for an isolated worker; it does not mean the
+Session main agent and grants neither its full `Context` nor its history.
+Changing the main agent's per-node output schema or tool surface would break its
+stable request prefix and provider prefix-cache behavior; keep that variability
+inside isolated workers instead.
+
+### Lua Workflow Runtime
+
+The workflow file owns ordinary Lua control flow. Functions, local state,
+conditions, loops, recursion, result-driven retries and branches, concurrency
+handles, `await`, and `await_all` are normal Lua behavior. The actual execution
+graph is created dynamically as workers are spawned and awaited; do not reduce
+workflows to a static DAG, declarative configuration language, fixed stage
+sequence, or a special `branch()` DSL.
+
+The intended small Lua surface is:
+
+```lua
+workflow.define({ input = InputSchema, output = OutputSchema,
+  run = function(input, ctx) ... end })
+workflow.agent({ model, input, output, instruction, capabilities, extra_tools })
+workflow.await(handle)
+workflow.await_all(handles)
+workflow.tool({ name, input, output, run })
+```
+
+`workflow.agent(...)` creates an isolated worker specification. The script
+passes the actual task input to the resulting handle; worker outputs are
+validated against the declared output schema before Lua receives them.
+`workflow.tool(...)` defines a local workflow tool with declared schemas; it is
+available only where the workflow explicitly grants it. `capabilities` requests
+runtime/app capabilities and `extra_tools` adds explicitly declared tools. The
+host owns validation, routing, lifecycle, cancellation, result transport, and
+all unavoidable policy enforcement; it must not substitute hidden role
+profiles, task ids, node ids, budgets, thinking levels, timeouts, retries, or
+pre-enumerated jobs for script decisions. Opaque run/node identifiers may exist
+internally for scheduling and journaling but are not script-visible API.
+
+Lua workflows are deliberately side-effectful: ordinary I/O, file operations,
+and shell execution such as `io.popen` or `os.execute` are permitted. This does
+not bypass the Session's non-bypassable `RuntimeSandboxPolicy`, workspace,
+writable-root, or process-sandbox boundaries. A script can choose its own
+control flow and requested capabilities, not escape host policy.
+
+Because arbitrary Lua can cause side effects, do not automatically replay a
+journal or restart a workflow from its beginning after interruption. Mark an
+interrupted invocation `Interrupted`. Script authors own checkpoints,
+idempotence, and any explicit recovery behavior. Journals are for observation,
+debugging, attribution, and result correlation, not automatic recovery.
+
+### Workflow Worker Boundaries
+
+A workflow worker is an isolated agent turn. It receives only its declared
+instruction, typed input, permitted tools/capabilities, and worker-local message
+history. It must not inherit the Session main agent's full `Context`, claimed
+event ids, event-completion authority, or conversation history.
+
+Worker tools are ordinary named, schema-validated tools. They may include
+explicitly granted app/runtime tools and workflow-local tools. Do not reuse the
+Workspace App `render_state`/`call_tool` protocol to implement workers. Build a
+worker-specific `AgentTurnRequest { messages, tools }` and route tool calls
+through a worker runtime boundary instead.
+
+`finish_and_send` belongs to the Session main agent's claimed-event completion
+contract and is not a worker tool. A worker completes by producing its declared
+output or a structured failure. If a worker needs an externally visible action,
+that action must be represented by an explicitly granted tool and routed through
+a host-owned completion/effect sink; do not give it a claimed event id or let it
+resolve the caller's event directly. Worker completion, progress, and failures
+must be returned to the workflow runner, then to the Session owner through an
+explicit result channel before any Session state or event disposition changes.
+
 ## Core Objects
 
 ### App
@@ -1239,7 +1358,7 @@ guidance. A skill is a named Markdown document placed under
 `~/.daat-locus/skills/<name>/SKILL.md` that the model can discover through the
 system prompt skill list and read via `read_file`.
 
-Skills replaced the old workflow/primitive mechanism. Key differences:
+Skills replaced the removed workflow/primitive mechanism. Key differences:
 
 - No explicit bind step. The model discovers available skills in the system
   prompt skill list (name + description + path) and reads the SKILL.md content
@@ -2229,7 +2348,9 @@ If the answer leans toward driving the next round of processing, it usually belo
   client-visible status.
 - `Event` decides what happened, whether to respond, and how to complete it.
 - `PendingWork` decides what should drive the next turn.
-- `Skill` supplies specialized instructions and workflows for specific tasks.
+- `Workflow` composes isolated agent workers through a side-effectful Lua
+  program; it is invoked by users or the main agent and returns a typed result
+  without placing the Session main agent inside its graph.
 - `Plan` decides how the current task continues.
 - `Memory` provides thread continuity and long-term experience.
 - `Sleep` improves behavior from runtime mistakes.

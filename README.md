@@ -76,6 +76,7 @@ daat-locus config              # open the interactive config menu
 - [简体中文 README](README_zh-CN.md)
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
+- [Lua Workflows](docs/workflows.md)
 - [Semantic Code Operation & Propagation Engine](crates/scope-engine/README.md)
 - [Contributing](CONTRIBUTING.md)
 - [Skills](skills/) — Reusable skill SKILL.md files for task automation
