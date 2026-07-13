@@ -10,7 +10,7 @@
       }
     },
     "efficient_model": {
-      "description": "Efficient model name; key reference into models.\nDefault for non-main-loop operations such as judge and compaction.\nWhen not set explicitly, defaults to the same value as main_model for backward compatibility.",
+      "description": "Efficient model name; key reference into models.\nDefault for non-main-loop operations such as judge.\nWhen not set explicitly, defaults to the same value as main_model for backward compatibility.",
       "type": "string",
       "default": "default"
     },

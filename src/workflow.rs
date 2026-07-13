@@ -67,11 +67,6 @@ impl WorkflowCancellationRegistry {
             *active = None;
         }
     }
-
-    #[cfg(test)]
-    pub fn has_active(&self) -> bool {
-        self.active.lock().is_some()
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -433,7 +428,7 @@ where
     )?;
     workflow.set(
         "await_all",
-        scope.create_function(|lua, _: LuaValue| Ok(lua.create_table()?))?,
+        scope.create_function(|lua, _: LuaValue| lua.create_table())?,
     )?;
     workflow.set("tool", scope.create_function(|_, _: Table| Ok(()))?)?;
     Ok(())

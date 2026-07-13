@@ -1047,7 +1047,9 @@ mod tests {
                 runtime_turn_started_at: None,
                 runtime_turn_started_at_ms: None,
                 runtime_turn_epoch: 0,
-                runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new()),
+                runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new(
+                    HashMap::new(),
+                )),
                 runtime_model_request_failures: std::sync::Arc::new(parking_lot::Mutex::new(
                     HashMap::new(),
                 )),

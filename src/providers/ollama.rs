@@ -753,7 +753,9 @@ impl OllamaClient {
                         >= 64
                         || last_assistant_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !content.trim().is_empty() {
-                        progress.map(|progress| progress.emit_assistant_content(content.clone()));
+                        if let Some(progress) = progress {
+                            progress.emit_assistant_content(content.clone());
+                        }
                         last_assistant_progress_emit_at = Instant::now();
                         last_assistant_progress_char_len = content.chars().count();
                     }
@@ -768,7 +770,9 @@ impl OllamaClient {
                         >= 64
                         || last_reasoning_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !thinking.trim().is_empty() {
-                        progress.map(|progress| progress.emit_reasoning_content(thinking.clone()));
+                        if let Some(progress) = progress {
+                            progress.emit_reasoning_content(thinking.clone());
+                        }
                         last_reasoning_progress_emit_at = Instant::now();
                         last_reasoning_progress_char_len = thinking.chars().count();
                     }
@@ -809,8 +813,10 @@ impl OllamaClient {
             }
         }
 
-        progress.map(|progress| progress.emit_reasoning_content(thinking.clone()));
-        progress.map(|progress| progress.emit_assistant_content(content.clone()));
+        if let Some(progress) = progress {
+            progress.emit_reasoning_content(thinking.clone());
+            progress.emit_assistant_content(content.clone());
+        }
         if let Some(usage) = last_usage {
             self.record_usage(Some(usage));
         }
@@ -911,7 +917,7 @@ impl ModelProvider for OllamaClient {
                 &payload,
                 &request_context,
                 "prompt request",
-                &budget,
+                budget,
                 2,
             )
             .await?;

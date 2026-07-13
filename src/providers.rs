@@ -623,7 +623,7 @@ impl OpenAIClient {
                 return Err(ContextBudgetExceededError::for_request(
                     "agent turn",
                     &self.model,
-                    &budget,
+                    budget,
                     Some(&format!(
                         "provider_status={status}; provider_body={}",
                         truncate_for_error(&body)
@@ -806,10 +806,9 @@ impl OpenAIClient {
                         >= 64
                         || last_assistant_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !content.trim().is_empty() {
-                        options
-                            .progress
-                            .as_ref()
-                            .map(|progress| progress.emit_assistant_content(content.clone()));
+                        if let Some(progress) = options.progress.as_ref() {
+                            progress.emit_assistant_content(content.clone());
+                        }
                         last_assistant_progress_emit_at = Instant::now();
                         last_assistant_progress_char_len = content.chars().count();
                     }
@@ -823,9 +822,9 @@ impl OpenAIClient {
                         >= 64
                         || last_reasoning_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !reasoning_content.trim().is_empty() {
-                        options.progress.as_ref().map(|progress| {
-                            progress.emit_reasoning_content(reasoning_content.clone())
-                        });
+                        if let Some(progress) = options.progress.as_ref() {
+                            progress.emit_reasoning_content(reasoning_content.clone());
+                        }
                         last_reasoning_progress_emit_at = Instant::now();
                         last_reasoning_progress_char_len = reasoning_content.chars().count();
                     }
@@ -846,18 +845,15 @@ impl OpenAIClient {
         }
         if !reasoning_content.trim().is_empty()
             && reasoning_content.chars().count() != last_reasoning_progress_char_len
+            && let Some(progress) = options.progress.as_ref()
         {
-            options
-                .progress
-                .as_ref()
-                .map(|progress| progress.emit_reasoning_content(reasoning_content.clone()));
+            progress.emit_reasoning_content(reasoning_content.clone());
         }
-        if !content.trim().is_empty() && content.chars().count() != last_assistant_progress_char_len
+        if !content.trim().is_empty()
+            && content.chars().count() != last_assistant_progress_char_len
+            && let Some(progress) = options.progress.as_ref()
         {
-            options
-                .progress
-                .as_ref()
-                .map(|progress| progress.emit_assistant_content(content.clone()));
+            progress.emit_assistant_content(content.clone());
         }
         if let Some(usage) = last_usage {
             self.record_last_usage(usage);
