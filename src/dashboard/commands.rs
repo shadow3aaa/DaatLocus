@@ -13,7 +13,14 @@ pub enum DashboardControlCommand {
     InterruptRuntime,
     RestartDaemon,
     ReloadSkills,
-    SetSkillAutoUse { path: PathBuf, enabled: bool },
+    RunWorkflow {
+        workflow_id: String,
+        input: serde_json::Value,
+    },
+    SetSkillAutoUse {
+        path: PathBuf,
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,6 +38,10 @@ pub enum DashboardAction {
     InterruptRuntime,
     RestartDaemon,
     ReloadSkills,
+    RunWorkflow {
+        workflow_id: String,
+        input: serde_json::Value,
+    },
     SetSkillAutoUse {
         path: PathBuf,
         enabled: bool,
@@ -56,8 +67,8 @@ pub enum DashboardAction {
     },
 }
 
-pub(crate) fn dashboard_action_is_manager_owned(_action: &DashboardAction) -> bool {
-    false
+pub(crate) fn dashboard_action_is_manager_owned(action: &DashboardAction) -> bool {
+    matches!(action, DashboardAction::RestartDaemon)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,6 +156,14 @@ pub(crate) fn execute_dashboard_action(
                 Ok(()) => DashboardActionResult::ok("queued skills reload"),
                 Err(err) => {
                     DashboardActionResult::error(format!("failed to queue skills reload: {err}"))
+                }
+            }
+        }
+        DashboardAction::RunWorkflow { workflow_id, input } => {
+            match control_tx.send(DashboardControlCommand::RunWorkflow { workflow_id, input }) {
+                Ok(()) => DashboardActionResult::ok("queued workflow run"),
+                Err(err) => {
+                    DashboardActionResult::error(format!("failed to queue workflow run: {err}"))
                 }
             }
         }

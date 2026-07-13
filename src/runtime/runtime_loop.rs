@@ -6,9 +6,7 @@ use crate::{
     activity_event::{TextActivityDescriptor, ToolCallActivityEvent, compact_preserved_body_lines},
     app::{AppId, AppToolExecutionContext},
     context::{Context, RuntimeTurnPhase},
-    context_budget::{
-        TokenEstimateBaseline, estimate_agent_turn_request, is_context_budget_exceeded,
-    },
+    context_budget::{TokenEstimateBaseline, is_context_budget_exceeded},
     dashboard::render::{
         AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, FORCE_SLEEP_ERROR_BACKLOG_THRESHOLD,
         render_dashboard_footer_context, sync_dashboard_state,
@@ -80,7 +78,7 @@ pub(crate) use scheduler::{
     RuntimeLoopCycle, daat_locus_loop, interrupt_active_runtime_turn, reset_cancelled_runtime_turn,
 };
 pub(crate) use sleep_driver::{SleepTaskResult, handle_sleep_task_result};
-pub(crate) use turn::execute_agent_loop_step;
+pub(crate) use turn::{append_workflow_activity_event, execute_agent_loop_step};
 pub(crate) use workflow_evidence::{AgentLoopStepExecution, AgentLoopStepOutput};
 
 use claimed_input::*;
@@ -110,7 +108,7 @@ mod tests {
         app::{App, AppManager},
         config::Config,
         context_budget::TokenEstimateBaseline,
-        core::Llm,
+        core::{ModelProvider, ModelRequestOptions},
         memory::Memory,
         openskills::OpenSkillsCatalog,
         plan::Plan,
@@ -122,41 +120,81 @@ mod tests {
         workspace_app::WorkspaceAppRegistry,
     };
 
-    struct UnusedLlm;
+    struct UnusedModelProvider;
 
-    struct JsonCompactionLlm {
+    struct JsonCompactionModelProvider {
         summary: &'static str,
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     #[async_trait]
-    impl Llm for JsonCompactionLlm {
-        async fn run_json(
+    impl ModelProvider for JsonCompactionModelProvider {
+        async fn complete_json(
             &self,
-            _context: &Context,
             _request: PromptRequest,
+            _options: ModelRequestOptions,
         ) -> Result<serde_json::Value> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(serde_json::json!({ "summary": self.summary }))
         }
+
+        async fn complete_agent_turn(
+            &self,
+            _request: AgentTurnRequest,
+            _options: ModelRequestOptions,
+        ) -> Result<AgentTurnStreamResult> {
+            Err(miette!("unused test model provider"))
+        }
+
+        fn request_budget_limits(&self) -> crate::context_budget::RequestBudgetLimits {
+            crate::context_budget::RequestBudgetLimits {
+                context_window_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
+                auto_compact_threshold_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
+                reserved_output_tokens: crate::context_budget::DEFAULT_MAX_COMPLETION_TOKENS,
+            }
+        }
+
+        fn token_usage_info(&self) -> crate::core::TokenUsageInfo {
+            crate::core::TokenUsageInfo::default()
+        }
+
+        fn model_name(&self) -> String {
+            "json-compaction-test".to_string()
+        }
     }
 
     #[async_trait]
-    impl Llm for UnusedLlm {
-        async fn run_json(
+    impl ModelProvider for UnusedModelProvider {
+        async fn complete_json(
             &self,
-            _context: &Context,
             _request: PromptRequest,
+            _options: ModelRequestOptions,
         ) -> Result<serde_json::Value> {
-            Err(miette!("unused test llm"))
+            Err(miette!("unused test model provider"))
         }
 
-        async fn run_agent_turn(
+        async fn complete_agent_turn(
             &self,
-            _context: &Context,
             _request: AgentTurnRequest,
+            _options: ModelRequestOptions,
         ) -> Result<AgentTurnStreamResult> {
-            Err(miette!("unused test llm"))
+            Err(miette!("unused test model provider"))
+        }
+
+        fn request_budget_limits(&self) -> crate::context_budget::RequestBudgetLimits {
+            crate::context_budget::RequestBudgetLimits {
+                context_window_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
+                auto_compact_threshold_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
+                reserved_output_tokens: crate::context_budget::DEFAULT_MAX_COMPLETION_TOKENS,
+            }
+        }
+
+        fn token_usage_info(&self) -> crate::core::TokenUsageInfo {
+            crate::core::TokenUsageInfo::default()
+        }
+
+        fn model_name(&self) -> String {
+            "unused-test-model-provider".to_string()
         }
     }
 
@@ -177,14 +215,16 @@ mod tests {
             let apps = AppManager::new(Vec::<Box<dyn App>>::new()).expect("app manager");
             let context = Context {
                 session_id: None,
-                llm: Box::new(UnusedLlm),
-                efficient_llm: std::sync::Arc::new(UnusedLlm),
+                model_provider: Box::new(UnusedModelProvider),
+                efficient_model_provider: std::sync::Arc::new(UnusedModelProvider),
                 config: Config::default(),
                 memory: Memory::new().await,
                 plan: Plan::new().await,
                 events: crate::events::EventStore::new().await,
                 pending_work: crate::pending_work::PendingWorkQueue::new().await,
                 openskills: OpenSkillsCatalog::default(),
+                workflows: crate::workflow::WorkflowCatalog::load(execution.path()),
+                workflow_cancellation: crate::workflow::WorkflowCancellationRegistry::default(),
                 active_skill_run: None,
                 pending_skill_run_flushes: Vec::new(),
                 current_work_origin: None,
@@ -232,11 +272,11 @@ mod tests {
         let mut isolated = IsolatedRuntimeContext::new().await;
         let context = &mut isolated.context;
         let main_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        context.llm = Box::new(JsonCompactionLlm {
+        context.model_provider = Box::new(JsonCompactionModelProvider {
             summary: "main model summary",
             calls: main_calls.clone(),
         });
-        context.efficient_llm = Arc::new(UnusedLlm);
+        context.efficient_model_provider = Arc::new(UnusedModelProvider);
 
         let main_model = context.config.main_model.clone();
         let model = context

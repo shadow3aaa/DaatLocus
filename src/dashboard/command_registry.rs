@@ -23,7 +23,7 @@ const NO_ALIASES: &[&str] = &[];
 const QUIT_ALIASES: &[&str] = &["q", "exit"];
 const APP_STATUS_ALIASES: &[&str] = &["app_status"];
 
-static DASHBOARD_COMMANDS: [DashboardCommandSpec; 8] = [
+static DASHBOARD_COMMANDS: [DashboardCommandSpec; 9] = [
     DashboardCommandSpec {
         primary_verb: "quit",
         description: "exit the dashboard",
@@ -80,6 +80,13 @@ static DASHBOARD_COMMANDS: [DashboardCommandSpec; 8] = [
         remote_command: Some("skills"),
         remote_description: None,
     },
+    DashboardCommandSpec {
+        primary_verb: "workflows",
+        description: "browse loaded Lua workflows and their typed input schemas",
+        aliases: NO_ALIASES,
+        remote_command: Some("workflows"),
+        remote_description: None,
+    },
 ];
 
 pub(super) fn dashboard_commands() -> &'static [DashboardCommandSpec] {
@@ -127,6 +134,10 @@ pub(super) fn sleep_command_accepts(verb: &str) -> bool {
 
 pub(super) fn skills_command_accepts(verb: &str) -> bool {
     dashboard_command_accepts("skills", verb)
+}
+
+pub(super) fn workflows_command_accepts(verb: &str) -> bool {
+    dashboard_command_accepts("workflows", verb)
 }
 
 pub(super) fn dashboard_command_is_known(verb: &str) -> bool {

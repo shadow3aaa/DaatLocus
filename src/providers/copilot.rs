@@ -5,8 +5,7 @@ use miette::{Result, miette};
 
 use crate::{
     config::{ModelConfig, redact_secret_text},
-    context::Context,
-    core::{Llm, TokenUsageInfo},
+    core::{ModelProvider, ModelRequestOptions, TokenUsageInfo},
     reasoning::runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
 };
 
@@ -153,34 +152,55 @@ fn derive_copilot_base_url(session_token: &str) -> String {
 }
 
 #[async_trait]
-impl Llm for CopilotClient {
-    async fn run_json(
+impl ModelProvider for CopilotClient {
+    async fn complete_json(
         &self,
-        context: &Context,
         request: PromptRequest,
+        options: ModelRequestOptions,
     ) -> Result<serde_json::Value> {
         self.ensure_auth().await?;
-        self.inner.lock().await.run_json(context, request).await
+        self.inner
+            .lock()
+            .await
+            .complete_json(request, options)
+            .await
     }
 
-    async fn run_agent_turn(
+    async fn complete_agent_turn(
         &self,
-        context: &Context,
         request: AgentTurnRequest,
+        options: ModelRequestOptions,
     ) -> Result<AgentTurnStreamResult> {
         self.ensure_auth().await?;
         self.inner
             .lock()
             .await
-            .run_agent_turn(context, request)
+            .complete_agent_turn(request, options)
             .await
     }
 
-    fn token_usage_info(&self) -> Option<TokenUsageInfo> {
-        self.inner.try_lock().ok()?.token_usage_info()
+    fn request_budget_limits(&self) -> crate::context_budget::RequestBudgetLimits {
+        self.inner
+            .try_lock()
+            .map(|inner| inner.request_budget_limits())
+            .unwrap_or(crate::context_budget::RequestBudgetLimits {
+                context_window_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
+                auto_compact_threshold_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
+                reserved_output_tokens: crate::context_budget::DEFAULT_MAX_COMPLETION_TOKENS,
+            })
     }
 
-    fn model_name(&self) -> Option<String> {
-        self.inner.try_lock().ok()?.model_name()
+    fn token_usage_info(&self) -> TokenUsageInfo {
+        self.inner
+            .try_lock()
+            .map(|inner| inner.token_usage_info())
+            .unwrap_or_default()
+    }
+
+    fn model_name(&self) -> String {
+        self.inner
+            .try_lock()
+            .map(|inner| inner.model_name())
+            .unwrap_or_default()
     }
 }

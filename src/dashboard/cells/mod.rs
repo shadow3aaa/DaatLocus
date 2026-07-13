@@ -46,6 +46,14 @@ pub use tui::{ActivityFeedRenderArgs, CachedActivityLines};
 pub use common::ReducedMotion;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowActivityData {
+    pub workflow_id: String,
+    pub status: crate::workflow::WorkflowInvocationStatus,
+    pub output: Option<serde_json::Value>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SessionActivityEvent {
     Assistant(AssistantActivityData),
     User(UserActivityData),
@@ -68,6 +76,7 @@ pub enum SessionActivityEvent {
     Error(ErrorActivityData),
     Thinking(ThinkingActivityData),
     RuntimeStatus(RuntimeStatusActivityData),
+    Workflow(WorkflowActivityData),
 }
 
 const RUNTIME_STATUS_LIVE_CELL_KEY: &str = "runtime-status";

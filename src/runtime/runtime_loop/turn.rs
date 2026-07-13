@@ -1368,6 +1368,25 @@ fn compact_runtime_error_text(text: &str, max_chars: usize) -> String {
     value
 }
 
+pub(crate) fn append_workflow_activity_event(
+    context: &Context,
+    tx: &tokio::sync::watch::Sender<DashboardState>,
+    result: &crate::workflow::WorkflowInvocationResult,
+) {
+    append_committed_activity_cells(
+        context,
+        Some(tx),
+        vec![crate::dashboard::SessionActivityEvent::Workflow(
+            crate::dashboard::WorkflowActivityData {
+                workflow_id: result.workflow_id.clone(),
+                status: result.status.clone(),
+                output: result.output.clone(),
+                message: result.message.clone(),
+            },
+        )],
+    );
+}
+
 fn append_committed_activity_cells(
     context: &Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,

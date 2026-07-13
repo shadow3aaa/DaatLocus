@@ -13,7 +13,7 @@ use crate::{
     app::AppManager,
     config::Config,
     context_budget::TokenEstimateBaseline,
-    core::Llm,
+    core::ModelProvider,
     daemon::DaemonControlCommand,
     dashboard::{DashboardActivityHistoryStore, DashboardState},
     events::EventStore,
@@ -31,6 +31,7 @@ use crate::{
     sandbox::RuntimeSandboxPolicy,
     telegram_acl::TelegramAclHandle,
     telegram_transport::state::TelegramTransportStateHandle,
+    workflow::{WorkflowCancellationRegistry, WorkflowCatalog},
     workspace_app::WorkspaceAppRegistry,
 };
 
@@ -55,14 +56,16 @@ impl RuntimeTurnPhase {
 
 pub struct Context {
     pub session_id: Option<String>,
-    pub llm: Box<dyn Llm + Send + Sync>,
-    pub efficient_llm: std::sync::Arc<dyn Llm + Send + Sync>,
+    pub model_provider: Box<dyn ModelProvider + Send + Sync>,
+    pub efficient_model_provider: std::sync::Arc<dyn ModelProvider + Send + Sync>,
     pub config: Config,
     pub memory: Memory,
     pub plan: Plan,
     pub events: EventStore,
     pub pending_work: PendingWorkQueue,
     pub openskills: OpenSkillsCatalog,
+    pub workflows: WorkflowCatalog,
+    pub workflow_cancellation: WorkflowCancellationRegistry,
     pub active_skill_run: Option<ActiveSkillRunSession>,
     pub pending_skill_run_flushes: Vec<PendingSkillRunFlush>,
     pub current_work_origin: Option<String>,

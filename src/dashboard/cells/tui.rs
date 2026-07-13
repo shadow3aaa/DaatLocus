@@ -539,6 +539,7 @@ fn render_activity_cell_lines_with_options(
         SessionActivityEvent::RuntimeStatus(cell) => {
             render_runtime_status_cell_lines(cell, max_width)
         }
+        SessionActivityEvent::Workflow(cell) => render_workflow_cell_lines(cell, max_width),
     }
 }
 
@@ -608,6 +609,7 @@ fn activity_cell_transcript_lines(cell: &SessionActivityEvent, width: u16) -> Ve
         SessionActivityEvent::Error(cell) => {
             transcript_text_section("ERROR", &cell.title, &cell.body_lines, width)
         }
+        SessionActivityEvent::Workflow(cell) => workflow_transcript_lines(cell, width),
         _ => transcript_plain_block(activity_cell_transcript_block(cell)),
     }
 }
@@ -753,6 +755,22 @@ fn transcript_plan_lines(cell: &PlanActivityData, width: u16) -> Vec<Line<'stati
             .collect::<Vec<_>>()
     };
     lines.extend(prefixed_detail_lines(steps, width));
+    lines
+}
+
+fn workflow_transcript_lines(cell: &super::WorkflowActivityData, width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![transcript_header("WORKFLOW")];
+    let mut body = vec![Line::from(format!(
+        "{}: {:?}",
+        cell.workflow_id, cell.status
+    ))];
+    if !cell.message.trim().is_empty() {
+        body.push(Line::from(cell.message.clone()));
+    }
+    if let Some(output) = cell.output.as_ref() {
+        body.push(Line::from(output.to_string()));
+    }
+    lines.extend(prefixed_detail_lines(body, width));
     lines
 }
 
@@ -1020,7 +1038,21 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
             "ERROR",
             primary_transcript_text(&cell.title, &cell.body_lines),
         ),
+        SessionActivityEvent::Workflow(cell) => {
+            transcript_section("WORKFLOW", workflow_activity_text(cell))
+        }
     }
+}
+
+fn workflow_activity_text(cell: &super::WorkflowActivityData) -> String {
+    let mut lines = vec![format!("{}: {:?}", cell.workflow_id, cell.status)];
+    if !cell.message.trim().is_empty() {
+        lines.push(cell.message.clone());
+    }
+    if let Some(output) = cell.output.as_ref() {
+        lines.push(output.to_string());
+    }
+    lines.join("\n")
 }
 
 fn transcript_section(title: &str, body: String) -> String {
@@ -1896,6 +1928,33 @@ fn coding_edit_title(cell: &CodingEditActivityData) -> String {
         "Edited Code (+{} -{})",
         cell.added_lines, cell.removed_lines
     )
+}
+
+fn render_workflow_cell_lines(
+    cell: &super::WorkflowActivityData,
+    max_width: u16,
+) -> Vec<Line<'static>> {
+    let status = format!("{:?}", cell.status).to_ascii_lowercase();
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Workflow", bold_style()),
+        Span::raw(" "),
+        Span::styled(cell.workflow_id.clone(), Style::default().fg(Color::Cyan)),
+        Span::raw(" — "),
+        Span::styled(status, dim_style()),
+    ])];
+    if !cell.message.trim().is_empty() {
+        lines.extend(prefixed_detail_lines(
+            vec![Line::from(cell.message.clone())],
+            max_width,
+        ));
+    }
+    if let Some(output) = cell.output.as_ref() {
+        lines.extend(prefixed_detail_lines(
+            vec![Line::from(output.to_string())],
+            max_width,
+        ));
+    }
+    lines
 }
 
 fn render_runtime_status_cell_lines(

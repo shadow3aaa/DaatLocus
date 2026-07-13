@@ -10,6 +10,9 @@ pub(crate) async fn daat_locus_loop(
     context: &mut Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
+    session_title_result_tx: &tokio::sync::mpsc::UnboundedSender<
+        crate::runtime::session_title::SessionTitleGenerationResult,
+    >,
     sleep_running: &mut bool,
     sleep_status: &mut SleepStatusSnapshot,
 ) -> RuntimeLoopCycle {
@@ -39,7 +42,10 @@ pub(crate) async fn daat_locus_loop(
         if context.idle_since.is_none() {
             context.idle_since = Some(std::time::Instant::now());
         }
-        crate::runtime::session_title::spawn_session_title_generation(context, tx);
+        crate::runtime::session_title::spawn_session_title_generation(
+            context,
+            session_title_result_tx,
+        );
         if let Some(status) =
             maybe_start_idle_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await
         {
@@ -84,7 +90,7 @@ pub(crate) async fn daat_locus_loop(
     context.active_runtime_turn = false;
     context.runtime_turn_started_at = None;
     context.runtime_turn_started_at_ms = None;
-    crate::runtime::session_title::spawn_session_title_generation(context, tx);
+    crate::runtime::session_title::spawn_session_title_generation(context, session_title_result_tx);
     sync_dashboard_state(
         context,
         tx,

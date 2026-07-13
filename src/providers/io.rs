@@ -1,3 +1,5 @@
+use crate::context_budget::RequestBudgetBreakdown;
+
 use super::*;
 
 #[derive(Default, Clone)]

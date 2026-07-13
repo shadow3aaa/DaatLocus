@@ -20,12 +20,8 @@ use uuid::Uuid;
 
 use crate::{
     config::{ModelConfig, redact_secret_text},
-    context::Context,
-    context_budget::{
-        ContextBudgetExceededError, RequestBudgetLimits, estimate_agent_turn_request,
-        estimate_prompt_request,
-    },
-    core::{Llm, TokenUsage, TokenUsageInfo},
+    context_budget::{ContextBudgetExceededError, RequestBudgetLimits},
+    core::{ModelProgressSink, ModelProvider, ModelRequestOptions, TokenUsage, TokenUsageInfo},
     persistence::{PersistenceFileMode, PersistenceStore, write_bytes_atomic},
     providers::thinking::{responses_reasoning_effort, thinking_budget_is_none},
     reasoning::runtime::{
@@ -66,6 +62,8 @@ pub(crate) struct CodexOAuthClient {
     auth_client: reqwest::Client,
     cached: tokio::sync::Mutex<Option<CodexOAuthAccess>>,
     inner: tokio::sync::Mutex<CodexResponsesClient>,
+    request_budget_limits: RequestBudgetLimits,
+    model: String,
 }
 
 struct CodexResponsesClient {
@@ -397,20 +395,15 @@ impl CodexResponsesClient {
         }
     }
 
-    async fn run_json(&self, context: &Context, request: PromptRequest) -> Result<Value> {
+    async fn complete_json(
+        &self,
+        request: PromptRequest,
+        options: ModelRequestOptions,
+    ) -> Result<Value> {
         let output_schema = request.output_schema.clone();
-        let budget = estimate_prompt_request(&request, self.request_budget_limits());
-        if !budget.within_context_window() {
-            return Err(ContextBudgetExceededError::for_request(
-                "prompt request",
-                &self.model,
-                &budget,
-                None,
-            )
-            .into());
-        }
-        let request_context = summarize_prompt_request(&request, Some(&budget));
-        let request_identity = codex_request_identity(context);
+        let budget = &options.budget;
+        let request_context = summarize_prompt_request(&request, Some(budget));
+        let request_identity = codex_request_identity(options.conversation_id.as_deref());
         let payload =
             build_prompt_responses_payload(self, request, output_schema, request_identity.as_ref());
         let response = self
@@ -431,7 +424,7 @@ impl CodexResponsesClient {
                 return Err(ContextBudgetExceededError::for_request(
                     "prompt request",
                     &self.model,
-                    &budget,
+                    budget,
                     Some(&format!(
                         "provider_status={status}; provider_body={}",
                         truncate_for_error(&body)
@@ -447,7 +440,7 @@ impl CodexResponsesClient {
         }
 
         let result = self
-            .parse_responses_stream(Some(context), response, false)
+            .parse_responses_stream(options.progress.as_ref(), response, false)
             .await?;
         let content = result.last_assistant_message.as_deref().unwrap_or_default();
         if let Some(value) = super::extract_json_value_from_content(content) {
@@ -459,29 +452,15 @@ impl CodexResponsesClient {
         ))
     }
 
-    async fn run_agent_turn(
+    async fn complete_agent_turn(
         &self,
-        context: &Context,
         request: AgentTurnRequest,
+        options: ModelRequestOptions,
     ) -> Result<AgentTurnStreamResult> {
-        let budget = estimate_agent_turn_request(
-            &request.messages,
-            &request.tools,
-            self.request_budget_limits(),
-        )
-        .with_calibrated_input_tokens(&context.token_estimate_baseline);
-        if !budget.within_context_window() {
-            return Err(ContextBudgetExceededError::for_request(
-                "agent turn",
-                &self.model,
-                &budget,
-                None,
-            )
-            .into());
-        }
-        let request_context = summarize_agent_turn_request(&request, Some(&budget));
+        let budget = &options.budget;
+        let request_context = summarize_agent_turn_request(&request, Some(budget));
         let mut strip_images = !self.supports_vision.load(Ordering::Relaxed);
-        let request_identity = codex_request_identity(context);
+        let request_identity = codex_request_identity(options.conversation_id.as_deref());
         loop {
             let payload = build_agent_responses_payload(
                 self,
@@ -495,7 +474,7 @@ impl CodexResponsesClient {
             let status = response.status();
             if status.is_success() {
                 return self
-                    .parse_responses_stream(Some(context), response, true)
+                    .parse_responses_stream(options.progress.as_ref(), response, true)
                     .await;
             }
             let url = self.url();
@@ -511,7 +490,7 @@ impl CodexResponsesClient {
                 return Err(ContextBudgetExceededError::for_request(
                     "agent turn",
                     &self.model,
-                    &budget,
+                    budget,
                     Some(&format!(
                         "provider_status={status}; provider_body={}",
                         truncate_for_error(&body)
@@ -551,7 +530,7 @@ impl CodexResponsesClient {
 
     async fn parse_responses_stream(
         &self,
-        context: Option<&Context>,
+        progress: Option<&ModelProgressSink>,
         response: reqwest::Response,
         emit_progress: bool,
     ) -> Result<AgentTurnStreamResult> {
@@ -630,8 +609,8 @@ impl CodexResponsesClient {
                                     || last_assistant_progress_emit_at.elapsed()
                                         >= Duration::from_millis(800);
                                 if should_emit && !delta_content.trim().is_empty() {
-                                    if let Some(context) = context {
-                                        context.emit_live_assistant_progress(&delta_content);
+                                    if let Some(progress) = progress {
+                                        progress.emit_assistant_content(delta_content.clone());
                                     }
                                     last_assistant_progress_emit_at = Instant::now();
                                     last_assistant_progress_char_len =
@@ -653,8 +632,8 @@ impl CodexResponsesClient {
                                     || last_reasoning_progress_emit_at.elapsed()
                                         >= Duration::from_millis(800);
                                 if should_emit && !reasoning_content.trim().is_empty() {
-                                    if let Some(context) = context {
-                                        context.emit_live_reasoning_progress(&reasoning_content);
+                                    if let Some(progress) = progress {
+                                        progress.emit_reasoning_content(reasoning_content.clone());
                                     }
                                     last_reasoning_progress_emit_at = Instant::now();
                                     last_reasoning_progress_char_len =
@@ -697,16 +676,16 @@ impl CodexResponsesClient {
         if emit_progress
             && !reasoning_content.trim().is_empty()
             && reasoning_content.chars().count() != last_reasoning_progress_char_len
-            && let Some(context) = context
+            && let Some(progress) = progress
         {
-            context.emit_live_reasoning_progress(&reasoning_content);
+            progress.emit_reasoning_content(reasoning_content.clone());
         }
         if emit_progress
             && !delta_content.trim().is_empty()
             && delta_content.chars().count() != last_assistant_progress_char_len
-            && let Some(context) = context
+            && let Some(progress) = progress
         {
-            context.emit_live_assistant_progress(&delta_content);
+            progress.emit_assistant_content(delta_content.clone());
         }
 
         let content = if output_messages.is_empty() {
@@ -735,19 +714,19 @@ impl CodexResponsesClient {
         })
     }
 
+    fn token_usage_info(&self) -> TokenUsageInfo {
+        self.token_usage
+            .lock()
+            .ok()
+            .map(|info| info.clone())
+            .unwrap_or_default()
+    }
+
     fn record_last_usage(&self, usage: TokenUsage) {
         if let Ok(mut info) = self.token_usage.lock() {
             info.model_context_window = Some(self.context_window_tokens as i64);
             info.append_last_usage(usage);
         }
-    }
-
-    fn token_usage_info(&self) -> Option<TokenUsageInfo> {
-        self.token_usage.lock().ok().map(|info| info.clone())
-    }
-
-    fn model_name(&self) -> Option<String> {
-        Some(self.model.clone())
     }
 }
 
@@ -779,11 +758,15 @@ impl CodexOAuthClient {
             .expect("failed to build OpenAI Codex auth http client");
         let base_url = base_url.unwrap_or(CODEX_RESPONSES_BASE_URL);
         let inner = CodexResponsesClient::new(base_url, model_config);
+        let request_budget_limits = inner.request_budget_limits();
+        let model = inner.model.clone();
         Self {
             auth_file,
             auth_client,
             cached: tokio::sync::Mutex::new(None),
             inner: tokio::sync::Mutex::new(inner),
+            request_budget_limits,
+            model,
         }
     }
 
@@ -829,35 +812,46 @@ impl CodexOAuthClient {
 }
 
 #[async_trait]
-impl Llm for CodexOAuthClient {
-    async fn run_json(
+impl ModelProvider for CodexOAuthClient {
+    async fn complete_json(
         &self,
-        context: &Context,
         request: PromptRequest,
+        options: ModelRequestOptions,
     ) -> Result<serde_json::Value> {
         self.ensure_auth().await?;
-        self.inner.lock().await.run_json(context, request).await
+        self.inner
+            .lock()
+            .await
+            .complete_json(request, options)
+            .await
     }
 
-    async fn run_agent_turn(
+    async fn complete_agent_turn(
         &self,
-        context: &Context,
         request: AgentTurnRequest,
+        options: ModelRequestOptions,
     ) -> Result<AgentTurnStreamResult> {
         self.ensure_auth().await?;
         self.inner
             .lock()
             .await
-            .run_agent_turn(context, request)
+            .complete_agent_turn(request, options)
             .await
     }
 
-    fn token_usage_info(&self) -> Option<TokenUsageInfo> {
-        self.inner.try_lock().ok()?.token_usage_info()
+    fn request_budget_limits(&self) -> RequestBudgetLimits {
+        self.request_budget_limits
     }
 
-    fn model_name(&self) -> Option<String> {
-        self.inner.try_lock().ok()?.model_name()
+    fn token_usage_info(&self) -> TokenUsageInfo {
+        self.inner
+            .try_lock()
+            .map(|inner| inner.token_usage_info())
+            .unwrap_or_default()
+    }
+
+    fn model_name(&self) -> String {
+        self.model.clone()
     }
 }
 
@@ -969,15 +963,12 @@ fn codex_reasoning_payload(client: &CodexResponsesClient, request_kind: &str) ->
     Some(Value::Object(reasoning))
 }
 
-fn codex_request_identity(context: &Context) -> Option<CodexRequestIdentity> {
-    context
-        .session_id
-        .as_deref()
-        .map(|session_id| CodexRequestIdentity {
-            session_id: session_id.to_string(),
-            thread_id: session_id.to_string(),
-            window_id: format!("{session_id}:0"),
-        })
+fn codex_request_identity(conversation_id: Option<&str>) -> Option<CodexRequestIdentity> {
+    conversation_id.map(|conversation_id| CodexRequestIdentity {
+        session_id: conversation_id.to_string(),
+        thread_id: conversation_id.to_string(),
+        window_id: format!("{conversation_id}:0"),
+    })
 }
 
 fn prompt_cache_key(identity: &CodexRequestIdentity, request_kind: &str) -> String {

@@ -292,6 +292,13 @@ export type SessionActivityPrimitive = {
   primitive_id: string;
 };
 
+export type SessionActivityWorkflow = {
+  workflow_id: string;
+  status: "Completed" | "Failed" | "Interrupted" | (string & {});
+  output?: unknown | null;
+  message: string;
+};
+
 export type SessionActivityEvent =
   | { Assistant: SessionActivityMessage }
   | { User: SessionActivityUser }
@@ -315,6 +322,7 @@ export type SessionActivityEvent =
   | { Error: SessionActivityCommon }
   | { Thinking: SessionActivityThinking }
   | { RuntimeStatus: SessionActivityRuntimeStatus }
+  | { Workflow: SessionActivityWorkflow }
   | Record<string, unknown>;
 
 export type DashboardActivityHistoryItem = {
@@ -344,6 +352,24 @@ export type DashboardActivityHistoryCount = {
   total_items: number;
 };
 
+export type DashboardWorkflowInputField = {
+  name: string;
+  schema: unknown;
+};
+
+export type DashboardWorkflowSummary = {
+  id: string;
+  path: string;
+  input_schema: unknown;
+  output_schema: unknown;
+  input_fields: DashboardWorkflowInputField[];
+};
+
+export type DashboardWorkflowLoadError = {
+  path: string;
+  message: string;
+};
+
 export type DashboardSkillSummary = {
   name: string;
   description: string;
@@ -371,6 +397,8 @@ export type DashboardSnapshot = {
   app_status_outputs: Array<[string, string]>;
   skills?: DashboardSkillSummary[];
   skill_errors?: DashboardSkillError[];
+  workflows?: DashboardWorkflowSummary[];
+  workflow_errors?: DashboardWorkflowLoadError[];
   pending_access_requests: DashboardPendingAccessRequest[];
   pending_user_inputs?: DashboardPendingUserInput[];
   activity_events: SessionActivityEvent[];
@@ -684,6 +712,7 @@ export type DashboardAction =
   | { kind: "interrupt_runtime" }
   | { kind: "restart_daemon" }
   | { kind: "reload_skills" }
+  | { kind: "run_workflow"; workflow_id: string; input: unknown }
   | { kind: "set_skill_auto_use"; path: string; enabled: boolean }
   | { kind: "dismiss_pending_user_input"; event_id: string }
   | { kind: "clear_pending_user_inputs" }

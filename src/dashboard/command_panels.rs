@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
     DashboardAction, DashboardPendingUserInput, DashboardPendingUserInputMoveDirection,
-    DashboardState, command_text::skill_status_description,
+    DashboardState, DashboardWorkflowSummary, command_text::skill_status_description,
 };
 use crate::openskills::{OpenSkillDashboardError, OpenSkillDashboardSummary};
 
@@ -35,6 +35,9 @@ pub(super) enum CommandSelectionAction {
         text: String,
     },
     OpenSkillsList,
+    OpenWorkflowForm {
+        workflow: DashboardWorkflowSummary,
+    },
     OpenSkillsToggle,
     RunAction {
         title: String,
@@ -78,6 +81,20 @@ pub(super) struct SkillsTogglePanelItem {
     pub(super) user_disabled: bool,
     pub(super) auto_use_enabled: bool,
 }
+pub(super) struct WorkflowFormPanel {
+    pub(super) workflow: DashboardWorkflowSummary,
+    pub(super) values: Vec<String>,
+    pub(super) selected: usize,
+    pub(super) scroll: usize,
+    pub(super) feedback: Option<CommandFeedback>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct WorkflowFormSubmission {
+    pub(super) workflow_id: String,
+    pub(super) input: serde_json::Value,
+}
+
 pub(super) struct PendingUserInputQueuePanel {
     pub(super) inputs: Vec<DashboardPendingUserInput>,
     pub(super) selected: usize,
@@ -90,6 +107,7 @@ pub(super) enum CommandPanel {
     Selection(CommandSelectionPanel),
     SkillsList(SkillsListPanel),
     SkillsToggle(SkillsTogglePanel),
+    WorkflowForm(WorkflowFormPanel),
     PendingUserInputQueue(PendingUserInputQueuePanel),
 }
 
@@ -114,6 +132,7 @@ pub(super) enum CommandPanelAction {
     Replace(CommandPanel),
     OpenSkillsList,
     OpenSkillsToggle,
+    SubmitWorkflow(WorkflowFormSubmission),
     EditPendingUserInput {
         event_id: String,
         incoming_text: String,
@@ -147,6 +166,7 @@ impl CommandPanel {
         match self {
             CommandPanel::SkillsList(panel) => panel.sync_state(state),
             CommandPanel::SkillsToggle(panel) => panel.sync_state(state),
+            CommandPanel::WorkflowForm(panel) => panel.sync_state(state),
             CommandPanel::PendingUserInputQueue(panel) => panel.sync_state(state),
             CommandPanel::Detail(_) | CommandPanel::Selection(_) => {}
         }
@@ -162,6 +182,9 @@ impl CommandPanel {
             CommandPanel::SkillsToggle(_) => {
                 "Space/Enter toggle auto-use   type search   Backspace edit   Esc close"
             }
+            CommandPanel::WorkflowForm(_) => {
+                "Enter edit/submit   ↑/↓ field   type value   Tab next   Esc close"
+            }
             CommandPanel::PendingUserInputQueue(_) => {
                 "Enter edit   d discard   Shift+↑/↓ reorder   c clear   Esc close"
             }
@@ -171,6 +194,10 @@ impl CommandPanel {
     pub(super) fn set_error_feedback(&mut self, feedback: CommandFeedback) {
         match self {
             CommandPanel::SkillsToggle(panel) => {
+                panel.feedback =
+                    matches!(feedback.level, CommandFeedbackLevel::Error).then_some(feedback);
+            }
+            CommandPanel::WorkflowForm(panel) => {
                 panel.feedback =
                     matches!(feedback.level, CommandFeedbackLevel::Error).then_some(feedback);
             }
@@ -185,6 +212,7 @@ impl CommandPanel {
     pub(super) fn clear_feedback(&mut self) {
         match self {
             CommandPanel::SkillsToggle(panel) => panel.feedback = None,
+            CommandPanel::WorkflowForm(panel) => panel.feedback = None,
             CommandPanel::PendingUserInputQueue(panel) => panel.feedback = None,
             _ => {}
         }
@@ -290,6 +318,151 @@ impl SkillsListPanelItem {
         }
     }
 }
+impl WorkflowFormPanel {
+    pub(super) fn from_workflow(workflow: DashboardWorkflowSummary) -> Self {
+        let values = workflow
+            .input_fields
+            .iter()
+            .map(|field| default_value_text(&field.schema))
+            .collect();
+        Self {
+            workflow,
+            values,
+            selected: 0,
+            scroll: 0,
+            feedback: None,
+        }
+    }
+
+    pub(super) fn sync_state(&mut self, state: &DashboardState) {
+        let Some(workflow) = state
+            .workflows
+            .iter()
+            .find(|workflow| workflow.id == self.workflow.id)
+            .cloned()
+        else {
+            return;
+        };
+        let previous_values = std::mem::take(&mut self.values);
+        self.values = workflow
+            .input_fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                previous_values
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| default_value_text(&field.schema))
+            })
+            .collect();
+        self.workflow = workflow;
+        self.clamp_selection();
+    }
+
+    fn clamp_selection(&mut self) {
+        self.selected = self
+            .selected
+            .min(self.workflow.input_fields.len().saturating_sub(1));
+        self.scroll = adjusted_list_scroll(
+            self.scroll,
+            self.selected,
+            self.workflow.input_fields.len(),
+            6,
+        );
+    }
+
+    fn submit(&self) -> Result<WorkflowFormSubmission, String> {
+        let mut input = serde_json::Map::new();
+        for (index, field) in self.workflow.input_fields.iter().enumerate() {
+            let value = self
+                .values
+                .get(index)
+                .map(String::as_str)
+                .unwrap_or_default();
+            let parsed = parse_workflow_field_value(&field.name, value, &field.schema)?;
+            input.insert(field.name.clone(), parsed);
+        }
+        Ok(WorkflowFormSubmission {
+            workflow_id: self.workflow.id.clone(),
+            input: serde_json::Value::Object(input),
+        })
+    }
+}
+
+fn default_value_text(schema: &serde_json::Value) -> String {
+    if let Some(default) = schema.get("default") {
+        return default_value_to_text(default);
+    }
+    match schema_type(schema).as_deref() {
+        Some("string") => String::new(),
+        Some("integer") | Some("number") => "0".to_string(),
+        Some("boolean") => "false".to_string(),
+        Some("array") => "[]".to_string(),
+        Some("object") => "{}".to_string(),
+        _ => String::new(),
+    }
+}
+
+fn default_value_to_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    }
+}
+
+fn schema_type(schema: &serde_json::Value) -> Option<String> {
+    schema
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            schema
+                .get("type")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|types| {
+                    types
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .find(|kind| *kind != "null")
+                        .map(str::to_string)
+                })
+        })
+}
+
+fn parse_workflow_field_value(
+    field_name: &str,
+    value: &str,
+    schema: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let trimmed = value.trim();
+    let nullable = schema
+        .get("type")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|types| types.iter().any(|kind| kind.as_str() == Some("null")));
+    if nullable && (trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null")) {
+        return Ok(serde_json::Value::Null);
+    }
+    match schema_type(schema).as_deref() {
+        Some("string") => Ok(serde_json::Value::String(value.to_string())),
+        Some("integer") => trimmed
+            .parse::<i64>()
+            .map(serde_json::Value::from)
+            .map_err(|_| format!("{field_name} must be an integer")),
+        Some("number") => trimmed
+            .parse::<f64>()
+            .map(serde_json::Value::from)
+            .map_err(|_| format!("{field_name} must be a number")),
+        Some("boolean") => trimmed
+            .parse::<bool>()
+            .map(serde_json::Value::from)
+            .map_err(|_| format!("{field_name} must be true or false")),
+        Some("array") | Some("object") => {
+            serde_json::from_str(trimmed).map_err(|_| format!("{field_name} must be valid JSON"))
+        }
+        _ => Ok(serde_json::Value::String(value.to_string())),
+    }
+}
+
 impl PendingUserInputQueuePanel {
     pub(super) fn from_state(state: &DashboardState) -> Option<Self> {
         if state.pending_user_inputs.is_empty() {
@@ -449,6 +622,7 @@ pub(super) fn handle_command_panel_key(
         CommandPanel::Selection(selection) => handle_selection_panel_key(selection, key),
         CommandPanel::SkillsList(skills) => handle_skills_list_panel_key(skills, key),
         CommandPanel::SkillsToggle(skills) => handle_skills_toggle_panel_key(skills, key),
+        CommandPanel::WorkflowForm(form) => handle_workflow_form_panel_key(form, key),
         CommandPanel::PendingUserInputQueue(queue) => {
             handle_pending_user_input_queue_panel_key(queue, key)
         }
@@ -537,6 +711,11 @@ fn handle_selection_panel_key(
                     CommandPanelAction::Replace(detail_panel(title.clone(), text.clone()))
                 }
                 CommandSelectionAction::OpenSkillsList => CommandPanelAction::OpenSkillsList,
+                CommandSelectionAction::OpenWorkflowForm { workflow } => {
+                    CommandPanelAction::Replace(CommandPanel::WorkflowForm(
+                        WorkflowFormPanel::from_workflow(workflow.clone()),
+                    ))
+                }
                 CommandSelectionAction::RunAction {
                     title,
                     action,
@@ -552,6 +731,77 @@ fn handle_selection_panel_key(
         _ => CommandPanelAction::None,
     }
 }
+fn handle_workflow_form_panel_key(
+    panel: &mut WorkflowFormPanel,
+    key: KeyEvent,
+) -> CommandPanelAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => CommandPanelAction::Close,
+        KeyCode::Up | KeyCode::Char('k') => {
+            panel.selected = panel.selected.saturating_sub(1);
+            panel.clamp_selection();
+            CommandPanelAction::None
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            panel.selected =
+                (panel.selected + 1).min(panel.workflow.input_fields.len().saturating_sub(1));
+            panel.clamp_selection();
+            CommandPanelAction::None
+        }
+        KeyCode::PageUp => {
+            panel.selected = panel.selected.saturating_sub(6);
+            panel.clamp_selection();
+            CommandPanelAction::None
+        }
+        KeyCode::PageDown => {
+            panel.selected =
+                (panel.selected + 6).min(panel.workflow.input_fields.len().saturating_sub(1));
+            panel.clamp_selection();
+            CommandPanelAction::None
+        }
+        KeyCode::Home => {
+            panel.selected = 0;
+            panel.clamp_selection();
+            CommandPanelAction::None
+        }
+        KeyCode::End => {
+            panel.selected = panel.workflow.input_fields.len().saturating_sub(1);
+            panel.clamp_selection();
+            CommandPanelAction::None
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = panel.values.get_mut(panel.selected) {
+                value.pop();
+            }
+            panel.feedback = None;
+            CommandPanelAction::None
+        }
+        KeyCode::Enter => match panel.submit() {
+            Ok(submission) => CommandPanelAction::SubmitWorkflow(submission),
+            Err(message) => {
+                panel.feedback = Some(CommandFeedback {
+                    title: format!("WORKFLOW {}", panel.workflow.id),
+                    message,
+                    detail: None,
+                    level: CommandFeedbackLevel::Error,
+                });
+                CommandPanelAction::None
+            }
+        },
+        KeyCode::Char(value)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            if let Some(target) = panel.values.get_mut(panel.selected) {
+                target.push(value);
+            }
+            panel.feedback = None;
+            CommandPanelAction::None
+        }
+        _ => CommandPanelAction::None,
+    }
+}
+
 fn handle_pending_user_input_queue_panel_key(
     panel: &mut PendingUserInputQueuePanel,
     key: KeyEvent,

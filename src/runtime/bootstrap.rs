@@ -14,7 +14,7 @@ use crate::{
     coding_app::CodingApp,
     context::Context,
     context_budget::TokenEstimateBaseline,
-    core::{Llm, TokenUsageInfo},
+    core::{ModelProvider, ModelRequestOptions, TokenUsageInfo},
     daat_locus_paths::daat_locus_paths,
     events::EventStore,
     memory::Memory,
@@ -22,7 +22,7 @@ use crate::{
     pending_work::PendingWorkQueue,
     persistence::PersistenceStore,
     plan::Plan,
-    providers::build_llm,
+    providers::build_model_provider,
     reasoning::{
         compiled::{
             CompiledPromptStore, load_all_compiled_programs_for_model,
@@ -34,6 +34,7 @@ use crate::{
     telegram_acl::TelegramAclHandle,
     telegram_transport::state::TelegramTransportState,
     terminal_app::TerminalApp,
+    workflow::{WorkflowCancellationRegistry, WorkflowCatalog},
     workspace_app::paths::{resolve_runtime_workspace_dir, workspace_apps_dir},
     workspace_app::{WorkspaceAppRegistry, bootstrap_workspace_apps},
 };
@@ -86,13 +87,13 @@ pub(crate) async fn load_persistent_token_usage_store(
     })
 }
 
-pub(crate) fn wrap_llm_with_persistent_token_usage(
+pub(crate) fn wrap_model_provider_with_persistent_token_usage(
     role: PersistentTokenUsageRole,
     configured_model: String,
-    inner: Box<dyn Llm + Send + Sync>,
+    inner: Box<dyn ModelProvider + Send + Sync>,
     store: Arc<PersistentTokenUsageStore>,
-) -> Box<dyn Llm + Send + Sync> {
-    Box::new(PersistentTokenUsageLlm::new(
+) -> Box<dyn ModelProvider + Send + Sync> {
+    Box::new(PersistentTokenUsageModelProvider::new(
         role,
         configured_model,
         inner,
@@ -100,24 +101,22 @@ pub(crate) fn wrap_llm_with_persistent_token_usage(
     ))
 }
 
-struct PersistentTokenUsageLlm {
+struct PersistentTokenUsageModelProvider {
     role: PersistentTokenUsageRole,
     configured_model: String,
     baseline: TokenUsageInfo,
-    inner: Box<dyn Llm + Send + Sync>,
+    inner: Box<dyn ModelProvider + Send + Sync>,
     store: Arc<PersistentTokenUsageStore>,
 }
 
-impl PersistentTokenUsageLlm {
+impl PersistentTokenUsageModelProvider {
     fn new(
         role: PersistentTokenUsageRole,
         configured_model: String,
-        inner: Box<dyn Llm + Send + Sync>,
+        inner: Box<dyn ModelProvider + Send + Sync>,
         store: Arc<PersistentTokenUsageStore>,
     ) -> Self {
-        let actual_model = inner
-            .model_name()
-            .unwrap_or_else(|| configured_model.clone());
+        let actual_model = inner.model_name();
         let baseline = store.baseline_for_role(role, &actual_model);
         Self {
             role,
@@ -129,73 +128,62 @@ impl PersistentTokenUsageLlm {
     }
 
     fn actual_model(&self) -> String {
-        self.inner
-            .model_name()
-            .unwrap_or_else(|| self.configured_model.clone())
+        let model = self.inner.model_name();
+        if model.trim().is_empty() {
+            self.configured_model.clone()
+        } else {
+            model
+        }
     }
 
-    fn merged_token_usage_info(&self) -> Option<TokenUsageInfo> {
-        let process_usage = self.inner.token_usage_info();
-        match process_usage {
-            Some(process_usage) => Some(self.baseline.merged_with_process_usage(&process_usage)),
-            None if !self.baseline.total_token_usage.is_zero()
-                || !self.baseline.last_token_usage.is_zero()
-                || !self.baseline.daily_token_usage.is_empty() =>
-            {
-                Some(self.baseline.clone())
-            }
-            None => None,
-        }
+    fn merged_token_usage_info(&self) -> TokenUsageInfo {
+        self.baseline
+            .merged_with_process_usage(&self.inner.token_usage_info())
     }
 
     async fn persist_current_usage(&self) {
-        if let Some(usage) = self.merged_token_usage_info() {
-            self.store
-                .persist_role(self.role, self.actual_model(), usage)
-                .await;
-        }
+        self.store
+            .persist_role(
+                self.role,
+                self.actual_model(),
+                self.merged_token_usage_info(),
+            )
+            .await;
     }
 }
 
 #[async_trait]
-impl Llm for PersistentTokenUsageLlm {
-    async fn run_json(
+impl ModelProvider for PersistentTokenUsageModelProvider {
+    async fn complete_json(
         &self,
-        context: &Context,
         request: PromptRequest,
+        options: ModelRequestOptions,
     ) -> miette::Result<serde_json::Value> {
-        let result = self.inner.run_json(context, request).await;
+        let result = self.inner.complete_json(request, options).await;
         self.persist_current_usage().await;
         result
     }
 
-    async fn run_json_no_context(
+    async fn complete_agent_turn(
         &self,
-        request: PromptRequest,
-    ) -> miette::Result<serde_json::Value> {
-        let result = self.inner.run_json_no_context(request).await;
-        self.persist_current_usage().await;
-        result
-    }
-
-    async fn run_agent_turn(
-        &self,
-        context: &Context,
         request: AgentTurnRequest,
+        options: ModelRequestOptions,
     ) -> miette::Result<AgentTurnStreamResult> {
-        let result = self.inner.run_agent_turn(context, request).await;
+        let result = self.inner.complete_agent_turn(request, options).await;
         self.persist_current_usage().await;
         result
     }
 
-    fn token_usage_info(&self) -> Option<TokenUsageInfo> {
+    fn request_budget_limits(&self) -> crate::context_budget::RequestBudgetLimits {
+        self.inner.request_budget_limits()
+    }
+
+    fn token_usage_info(&self) -> TokenUsageInfo {
         self.merged_token_usage_info()
     }
 
-    fn model_name(&self) -> Option<String> {
-        self.inner
-            .model_name()
-            .or_else(|| Some(self.configured_model.clone()))
+    fn model_name(&self) -> String {
+        self.actual_model()
     }
 }
 
@@ -371,6 +359,7 @@ pub(crate) async fn build_eval_context_with_compiled(
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
     let openskills = load_openskills_for_runtime(&execution_cwd);
+    let workflows = WorkflowCatalog::load(&execution_cwd);
     let telegram_acl = TelegramAclHandle::load().await;
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
@@ -378,17 +367,17 @@ pub(crate) async fn build_eval_context_with_compiled(
     let (apps, workspace_apps) = build_runtime_apps(&execution_cwd, &sandbox_policy);
     let apps = AppManager::new(apps).unwrap();
     let token_usage_store = load_persistent_token_usage_store(None).await;
-    let client = build_llm(&config.main_model, &config)
-        .unwrap_or_else(|err| panic!("failed to construct main LLM client: {err:?}"));
-    let client = wrap_llm_with_persistent_token_usage(
+    let client = build_model_provider(&config.main_model, &config)
+        .unwrap_or_else(|err| panic!("failed to construct main model provider: {err:?}"));
+    let client = wrap_model_provider_with_persistent_token_usage(
         PersistentTokenUsageRole::Main,
         config.main_model_config().model_id.clone(),
         client,
         token_usage_store.clone(),
     );
-    let efficient_client = build_llm(&config.efficient_model, &config)
-        .unwrap_or_else(|err| panic!("failed to construct efficient LLM client: {err:?}"));
-    let efficient_client = wrap_llm_with_persistent_token_usage(
+    let efficient_client = build_model_provider(&config.efficient_model, &config)
+        .unwrap_or_else(|err| panic!("failed to construct efficient model provider: {err:?}"));
+    let efficient_client = wrap_model_provider_with_persistent_token_usage(
         PersistentTokenUsageRole::Efficient,
         config.efficient_model_config().model_id.clone(),
         efficient_client,
@@ -398,14 +387,16 @@ pub(crate) async fn build_eval_context_with_compiled(
 
     Context {
         session_id: None,
-        llm: client,
-        efficient_llm: std::sync::Arc::from(efficient_client),
+        model_provider: client,
+        efficient_model_provider: std::sync::Arc::from(efficient_client),
         config,
         memory,
         plan,
         events,
         pending_work,
         openskills,
+        workflows,
+        workflow_cancellation: WorkflowCancellationRegistry::default(),
         active_skill_run: None,
         pending_skill_run_flushes: Vec::new(),
         current_work_origin: None,

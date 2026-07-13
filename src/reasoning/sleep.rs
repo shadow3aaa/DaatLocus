@@ -151,7 +151,7 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
         let runtime_error_cases_json =
             serde_json::to_string_pretty(runtime_error_cases).into_diagnostic()?;
         let outcome = execute_program_with_ir_report(
-            context.efficient_llm.as_ref(),
+            context.efficient_model_provider.as_ref(),
             context,
             &renderer,
             &program,
@@ -216,7 +216,7 @@ async fn run_skill_improvement_pipeline(
         let evidence_json = serde_json::to_string_pretty(records).into_diagnostic()?;
         let ir = program.dataset_ir(skill_name.clone(), skill_content.clone(), evidence_json);
         let outcome = match execute_program_with_ir_report(
-            context.efficient_llm.as_ref(),
+            context.efficient_model_provider.as_ref(),
             context,
             &renderer,
             &program,

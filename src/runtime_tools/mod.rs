@@ -19,6 +19,7 @@ use crate::{
         runtime::{AgentContentPart, AgentToolCall, AgentToolInputSpec, AgentToolSpec},
     },
     schema_utils::{model_schema, model_schema_for, validate_model_facing_schema},
+    workflow::{WorkflowInvocation, invoke as invoke_workflow},
 };
 
 mod files;
@@ -485,6 +486,114 @@ impl RuntimeTool for AppRuntimeTool {
     }
 }
 
+struct WorkflowRuntimeTool {
+    workflow_id: String,
+    name: String,
+    input_spec: AgentToolInputSpec,
+}
+
+impl WorkflowRuntimeTool {
+    fn new(definition: &crate::workflow::WorkflowDefinition) -> Self {
+        Self {
+            workflow_id: definition.id.clone(),
+            name: definition.tool_name(),
+            input_spec: AgentToolInputSpec::JsonSchema {
+                schema: definition.input_schema.clone(),
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl RuntimeTool for WorkflowRuntimeTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "Run this typed Lua workflow. It orchestrates isolated workers and returns the workflow's declared output."
+    }
+
+    fn input_spec(&self) -> AgentToolInputSpec {
+        self.input_spec.clone()
+    }
+
+    fn summarize_action(&self, call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
+        Ok(EpisodeActionRecord {
+            kind: self.name.clone(),
+            summary: summarize_inline_text(&call.arguments.to_string()),
+        })
+    }
+
+    fn call_activity_event(&self, call: &AgentToolCall) -> miette::Result<ToolCallActivityEvent> {
+        Ok(ToolCallActivityEvent::app(
+            self.name.clone(),
+            vec![format!(
+                "input={}",
+                summarize_inline_text(&call.arguments.to_string())
+            )],
+        ))
+    }
+
+    async fn execute(
+        &self,
+        context: &mut Context,
+        call: &AgentToolCall,
+    ) -> miette::Result<ToolExecutionResult> {
+        let result = invoke_workflow(
+            context,
+            WorkflowInvocation {
+                workflow_id: self.workflow_id.clone(),
+                input: call.arguments.clone(),
+            },
+        )
+        .await?;
+        let payload = json!({
+            "workflow_id": result.workflow_id,
+            "status": result.status,
+            "output": result.output,
+            "message": result.message,
+        });
+        Ok(ToolExecutionResult::from_activity_event(
+            format!("workflow {}", self.workflow_id),
+            payload,
+            Some(workflow_activity_event(&result)),
+        ))
+    }
+}
+
+fn workflow_activity_event(
+    result: &crate::workflow::WorkflowInvocationResult,
+) -> SessionActivityEvent {
+    SessionActivityEvent::Workflow(crate::dashboard::WorkflowActivityData {
+        workflow_id: result.workflow_id.clone(),
+        status: result.status.clone(),
+        output: result.output.clone(),
+        message: result.message.clone(),
+    })
+}
+
+fn build_workflow_runtime_tools(
+    context: &Context,
+    reserved_names: &HashSet<String>,
+) -> Vec<Box<dyn RuntimeTool>> {
+    let mut seen_names = reserved_names.clone();
+    let mut tools = Vec::new();
+    for definition in context.workflows.definitions() {
+        let tool = WorkflowRuntimeTool::new(definition);
+        if seen_names.insert(tool.name.clone()) {
+            tools.push(Box::new(tool) as Box<dyn RuntimeTool>);
+        } else {
+            tracing::warn!(
+                "skipping workflow `{}` because exposed tool `{}` conflicts with another runtime tool",
+                definition.id,
+                definition.tool_name()
+            );
+        }
+    }
+    tools
+}
+
 fn build_static_runtime_tools() -> Vec<Box<dyn RuntimeTool>> {
     let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
     tools.extend(files::register_tools());
@@ -559,11 +668,14 @@ fn build_app_runtime_tools(
 
 pub fn build_runtime_tools(context: &Context) -> Vec<Box<dyn RuntimeTool>> {
     let mut tools = build_static_runtime_tools();
-    let reserved_names = tools
+    let mut reserved_names = tools
         .iter()
         .map(|tool| tool.name().to_string())
         .collect::<HashSet<_>>();
-    tools.extend(build_app_runtime_tools(context, &reserved_names));
+    let app_tools = build_app_runtime_tools(context, &reserved_names);
+    reserved_names.extend(app_tools.iter().map(|tool| tool.name().to_string()));
+    tools.extend(app_tools);
+    tools.extend(build_workflow_runtime_tools(context, &reserved_names));
     tools
 }
 
@@ -827,7 +939,7 @@ mod tests {
         config::Config,
         context::Context,
         context_budget::TokenEstimateBaseline,
-        core::Llm,
+        core::{ModelProvider, ModelRequestOptions},
         events::EventStore,
         memory::Memory,
         openskills::OpenSkillsCatalog,
@@ -845,24 +957,40 @@ mod tests {
         workspace_app::WorkspaceAppRegistry,
     };
 
-    struct UnusedLlm;
+    struct UnusedModelProvider;
 
     #[async_trait]
-    impl Llm for UnusedLlm {
-        async fn run_json(
+    impl ModelProvider for UnusedModelProvider {
+        async fn complete_json(
             &self,
-            _context: &Context,
             _request: PromptRequest,
+            _options: ModelRequestOptions,
         ) -> Result<serde_json::Value> {
-            Err(miette!("unused test llm"))
+            Err(miette!("unused test model provider"))
         }
 
-        async fn run_agent_turn(
+        async fn complete_agent_turn(
             &self,
-            _context: &Context,
             _request: AgentTurnRequest,
+            _options: ModelRequestOptions,
         ) -> Result<AgentTurnStreamResult> {
-            Err(miette!("unused test llm"))
+            Err(miette!("unused test model provider"))
+        }
+
+        fn request_budget_limits(&self) -> crate::context_budget::RequestBudgetLimits {
+            crate::context_budget::RequestBudgetLimits {
+                context_window_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
+                auto_compact_threshold_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
+                reserved_output_tokens: crate::context_budget::DEFAULT_MAX_COMPLETION_TOKENS,
+            }
+        }
+
+        fn token_usage_info(&self) -> crate::core::TokenUsageInfo {
+            crate::core::TokenUsageInfo::default()
+        }
+
+        fn model_name(&self) -> String {
+            "unused-test-model-provider".to_string()
         }
     }
 
@@ -889,14 +1017,16 @@ mod tests {
             let apps = AppManager::new(apps).expect("app manager");
             let context = Context {
                 session_id: None,
-                llm: Box::new(UnusedLlm),
-                efficient_llm: std::sync::Arc::new(UnusedLlm),
+                model_provider: Box::new(UnusedModelProvider),
+                efficient_model_provider: std::sync::Arc::new(UnusedModelProvider),
                 config,
                 memory: Memory::new().await,
                 plan: Plan::new().await,
                 events: EventStore::new().await,
                 pending_work: PendingWorkQueue::new().await,
                 openskills: OpenSkillsCatalog::default(),
+                workflows: crate::workflow::WorkflowCatalog::load(execution.path()),
+                workflow_cancellation: crate::workflow::WorkflowCancellationRegistry::default(),
                 active_skill_run: None,
                 pending_skill_run_flushes: Vec::new(),
                 current_work_origin: None,
@@ -917,9 +1047,7 @@ mod tests {
                 runtime_turn_started_at: None,
                 runtime_turn_started_at_ms: None,
                 runtime_turn_epoch: 0,
-                runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new(
-                    HashMap::new(),
-                )),
+                runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new()),
                 runtime_model_request_failures: std::sync::Arc::new(parking_lot::Mutex::new(
                     HashMap::new(),
                 )),

@@ -22,13 +22,13 @@ use crate::{
     },
     dashboard::render::{
         AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, current_plan_step_for_dashboard,
-        pending_user_inputs_from_sources, render_activity_for_dashboard,
-        render_app_status_outputs_for_dashboard, render_dashboard_footer_context,
-        render_sleep_status_output_for_dashboard, render_status_command_output_for_dashboard,
-        render_system_prompt_output_for_dashboard, render_telegram_status_for_dashboard,
-        runtime_activity_for_dashboard, runtime_optimization_snapshot_for_dashboard,
-        skill_optimization_snapshot_for_dashboard, status_command_snapshot_for_dashboard,
-        token_usage_snapshot_for_dashboard,
+        dashboard_workflow_errors, dashboard_workflow_summaries, pending_user_inputs_from_sources,
+        render_activity_for_dashboard, render_app_status_outputs_for_dashboard,
+        render_dashboard_footer_context, render_sleep_status_output_for_dashboard,
+        render_status_command_output_for_dashboard, render_system_prompt_output_for_dashboard,
+        render_telegram_status_for_dashboard, runtime_activity_for_dashboard,
+        runtime_optimization_snapshot_for_dashboard, skill_optimization_snapshot_for_dashboard,
+        status_command_snapshot_for_dashboard, token_usage_snapshot_for_dashboard,
     },
     dashboard::{
         DashboardAction, DashboardActivityHistoryStore, DashboardControlCommand,
@@ -47,12 +47,12 @@ use crate::{
     pending_work::{PendingEventMoveDirection, PendingWork, PendingWorkQueue},
     plan::Plan,
     preturn_state::PreTurnState,
-    providers::build_llm,
+    providers::build_model_provider,
     runtime::bootstrap::{
         PersistentTokenUsageRole, bootstrap_telegram_transport_state_from_acl, build_runtime_apps,
         emit_startup_progress, load_compiled_prompts_only, load_persistent_token_usage_store,
         load_token_estimate_baseline, sandbox_policy_for_runtime,
-        wrap_llm_with_persistent_token_usage,
+        wrap_model_provider_with_persistent_token_usage,
     },
     runtime::runtime_loop::{
         RuntimeLoopCycle, SleepTaskResult, daat_locus_loop, handle_dashboard_control_command,
@@ -64,6 +64,7 @@ use crate::{
     telegram_transport::state::{
         PendingOutboundMessage, TelegramTransportState, TelegramTransportStateHandle,
     },
+    workflow::{WorkflowCancellationRegistry, WorkflowCatalog},
     workspace_app::paths::{resolve_runtime_workspace_dir, workspace_apps_dir},
     workspace_app::{WorkspaceAppInvalidation, start_workspace_app_watcher},
 };
@@ -110,7 +111,10 @@ pub(crate) async fn run_session_serve(
         mpsc::unbounded_channel::<DashboardControlCommand>();
     let (runtime_interrupt_tx, mut runtime_interrupt_rx) = mpsc::unbounded_channel::<()>();
     let (runtime_wake_tx, mut runtime_wake_rx) = mpsc::unbounded_channel::<()>();
+    let workflow_cancellation = WorkflowCancellationRegistry::default();
     let (sleep_result_tx, mut sleep_result_rx) = mpsc::unbounded_channel::<SleepTaskResult>();
+    let (session_title_result_tx, mut session_title_result_rx) =
+        mpsc::unbounded_channel::<crate::runtime::session_title::SessionTitleGenerationResult>();
     let (workspace_app_invalidation_tx, mut workspace_app_invalidation_rx) =
         mpsc::unbounded_channel::<WorkspaceAppInvalidation>();
     let (daemon_control_tx, mut daemon_control_rx) =
@@ -133,6 +137,7 @@ pub(crate) async fn run_session_serve(
         telegram: telegram_handle.clone(),
         dashboard_control_tx: dashboard_control_tx.clone(),
         runtime_interrupt_tx: runtime_interrupt_tx.clone(),
+        workflow_cancellation: workflow_cancellation.clone(),
         runtime_wake_tx: runtime_wake_tx.clone(),
         daemon_control_tx: daemon_control_tx.clone(),
     }));
@@ -148,15 +153,15 @@ pub(crate) async fn run_session_serve(
     let memory = Memory::with_session(session_id.as_str()).await;
     let plan = Plan::with_session(session_id.as_str()).await;
     let token_usage_store = load_persistent_token_usage_store(Some(session_id.as_str())).await;
-    let client = build_llm(&config.main_model, &config)?;
-    let client = wrap_llm_with_persistent_token_usage(
+    let client = build_model_provider(&config.main_model, &config)?;
+    let client = wrap_model_provider_with_persistent_token_usage(
         PersistentTokenUsageRole::Main,
         config.main_model_config().model_id.clone(),
         client,
         token_usage_store.clone(),
     );
-    let efficient_client = build_llm(&config.efficient_model, &config)?;
-    let efficient_client = wrap_llm_with_persistent_token_usage(
+    let efficient_client = build_model_provider(&config.efficient_model, &config)?;
+    let efficient_client = wrap_model_provider_with_persistent_token_usage(
         PersistentTokenUsageRole::Efficient,
         config.efficient_model_config().model_id.clone(),
         efficient_client,
@@ -194,16 +199,19 @@ pub(crate) async fn run_session_serve(
     let (apps, workspace_apps) = build_runtime_apps(&execution_cwd, &sandbox_policy);
     let apps = AppManager::new(apps)?;
     let openskills = load_openskills_for_runtime(&execution_cwd);
+    let workflows = WorkflowCatalog::load(&execution_cwd);
     let mut context = Context {
         session_id: Some(session_id.as_str().to_string()),
-        llm: client,
-        efficient_llm: std::sync::Arc::from(efficient_client),
+        model_provider: client,
+        efficient_model_provider: std::sync::Arc::from(efficient_client),
         config,
         memory,
         plan,
         events,
         pending_work,
         openskills,
+        workflows,
+        workflow_cancellation: workflow_cancellation.clone(),
         active_skill_run: None,
         pending_skill_run_flushes: Vec::new(),
         current_work_origin: None,
@@ -257,6 +265,8 @@ pub(crate) async fn run_session_serve(
             app_status_outputs: render_app_status_outputs_for_dashboard(&context),
             skills: context.openskills.dashboard_summaries(),
             skill_errors: context.openskills.dashboard_errors(),
+            workflows: dashboard_workflow_summaries(&context),
+            workflow_errors: dashboard_workflow_errors(&context),
             pending_access_requests: context.telegram_acl.pending_requests(),
             pending_user_inputs: pending_user_inputs_from_sources(
                 &context.events,
@@ -344,6 +354,7 @@ pub(crate) async fn run_session_serve(
                 &mut context,
                 &tx,
                 &sleep_result_tx,
+                &session_title_result_tx,
                 &mut sleep_running,
                 &mut sleep_status,
             ), if !runtime_idle => {
@@ -374,6 +385,13 @@ pub(crate) async fn run_session_serve(
                 )
                 .await;
             }
+            Some(result) = session_title_result_rx.recv(), if runtime_idle => {
+                crate::runtime::session_title::apply_session_title_generation_result(
+                    &mut context,
+                    &tx,
+                    result,
+                );
+            }
             Some(command) = daemon_control_rx.recv() => {
                 reset_cancelled_runtime_turn(&mut context, "session daemon control interrupt");
                 apply_session_daemon_control_command(
@@ -384,16 +402,19 @@ pub(crate) async fn run_session_serve(
                 break;
             }
             Some(()) = runtime_interrupt_rx.recv() => {
+                let workflow_interrupted = workflow_cancellation.interrupt_active();
                 runtime_idle = false;
-                handle_dashboard_control_command(
-                    &mut context,
-                    &tx,
-                    &sleep_result_tx,
-                    &mut sleep_running,
-                    &mut sleep_status,
-                    DashboardControlCommand::InterruptRuntime,
-                )
-                .await;
+                if !workflow_interrupted {
+                    handle_dashboard_control_command(
+                        &mut context,
+                        &tx,
+                        &sleep_result_tx,
+                        &mut sleep_running,
+                        &mut sleep_status,
+                        DashboardControlCommand::InterruptRuntime,
+                    )
+                    .await;
+                }
             }
             signal = tokio::signal::ctrl_c(), if !ctrl_c_disabled => {
                 match signal {
@@ -446,6 +467,7 @@ struct SessionIpcServerState {
     telegram: TelegramTransportStateHandle,
     dashboard_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
     runtime_interrupt_tx: mpsc::UnboundedSender<()>,
+    workflow_cancellation: WorkflowCancellationRegistry,
     runtime_wake_tx: mpsc::UnboundedSender<()>,
     daemon_control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
 }
@@ -722,18 +744,27 @@ fn execute_session_dashboard_action(
     }
 
     match action {
-        DashboardAction::InterruptRuntime => match state.runtime_interrupt_tx.send(()) {
-            Ok(()) => crate::dashboard::DashboardActionResult {
+        DashboardAction::InterruptRuntime => {
+            let message = if state.workflow_cancellation.interrupt_active() {
+                "interrupting active workflow"
+            } else {
+                match state.runtime_interrupt_tx.send(()) {
+                    Ok(()) => "queued runtime interrupt",
+                    Err(err) => {
+                        return crate::dashboard::DashboardActionResult {
+                            success: false,
+                            message: format!("failed to queue interrupt: {err}"),
+                            detail: None,
+                        };
+                    }
+                }
+            };
+            crate::dashboard::DashboardActionResult {
                 success: true,
-                message: "queued runtime interrupt".to_string(),
+                message: message.to_string(),
                 detail: None,
-            },
-            Err(err) => crate::dashboard::DashboardActionResult {
-                success: false,
-                message: format!("failed to queue interrupt: {err}"),
-                detail: None,
-            },
-        },
+            }
+        }
         DashboardAction::DismissPendingUserInput { event_id } => {
             let result = dismiss_pending_user_input(&state.events, &state.pending_work, event_id);
             if result.success {

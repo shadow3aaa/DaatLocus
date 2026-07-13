@@ -18,12 +18,8 @@ use crate::{
     config::{
         Config, ModelConfig, ProviderConfig, normalize_provider_base_url, resolve_env_reference,
     },
-    context::Context,
-    context_budget::{
-        ContextBudgetExceededError, RequestBudgetBreakdown, RequestBudgetLimits,
-        estimate_agent_turn_request, estimate_prompt_request,
-    },
-    core::{Llm, TokenUsage, TokenUsageInfo},
+    context_budget::{ContextBudgetExceededError, RequestBudgetLimits},
+    core::{ModelProvider, ModelRequestOptions, TokenUsage, TokenUsageInfo},
     dsml_repair,
     reasoning::runtime::{
         AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec,
@@ -450,20 +446,15 @@ impl OpenAIClient {
         }
         false
     }
-    async fn call_tool_json(&self, request: PromptRequest) -> Result<serde_json::Value> {
+    async fn call_tool_json(
+        &self,
+        request: PromptRequest,
+        options: &ModelRequestOptions,
+    ) -> Result<serde_json::Value> {
         let url = self.url();
         let output_schema = request.output_schema.clone();
-        let budget = estimate_prompt_request(&request, self.request_budget_limits());
-        if !budget.within_context_window() {
-            return Err(ContextBudgetExceededError::for_request(
-                "prompt request",
-                &self.model,
-                &budget,
-                None,
-            )
-            .into());
-        }
-        let request_context = summarize_prompt_request(&request, Some(&budget));
+        let budget = &options.budget;
+        let request_context = summarize_prompt_request(&request, Some(budget));
         let mut adapter_state = self.adapter_state_guard();
         let body = loop {
             let payload =
@@ -495,7 +486,7 @@ impl OpenAIClient {
                 return Err(ContextBudgetExceededError::for_request(
                     "prompt request",
                     &self.model,
-                    &budget,
+                    budget,
                     Some(&format!(
                         "provider_status={status}; provider_body={}",
                         truncate_for_error(&body)
@@ -580,26 +571,12 @@ impl OpenAIClient {
 
     async fn call_agent_turn(
         &self,
-        context: &Context,
         request: AgentTurnRequest,
+        options: &ModelRequestOptions,
     ) -> Result<AgentTurnStreamResult> {
         let url = self.url();
-        let budget = estimate_agent_turn_request(
-            &request.messages,
-            &request.tools,
-            self.request_budget_limits(),
-        )
-        .with_calibrated_input_tokens(&context.token_estimate_baseline);
-        if !budget.within_context_window() {
-            return Err(ContextBudgetExceededError::for_request(
-                "agent turn",
-                &self.model,
-                &budget,
-                None,
-            )
-            .into());
-        }
-        let request_context = summarize_agent_turn_request(&request, Some(&budget));
+        let budget = &options.budget;
+        let request_context = summarize_agent_turn_request(&request, Some(budget));
         let request_has_reasoning_content = request.messages.iter().any(|message| {
             matches!(
                 message,
@@ -829,7 +806,10 @@ impl OpenAIClient {
                         >= 64
                         || last_assistant_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !content.trim().is_empty() {
-                        context.emit_live_assistant_progress(&content);
+                        options
+                            .progress
+                            .as_ref()
+                            .map(|progress| progress.emit_assistant_content(content.clone()));
                         last_assistant_progress_emit_at = Instant::now();
                         last_assistant_progress_char_len = content.chars().count();
                     }
@@ -843,7 +823,9 @@ impl OpenAIClient {
                         >= 64
                         || last_reasoning_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !reasoning_content.trim().is_empty() {
-                        context.emit_live_reasoning_progress(&reasoning_content);
+                        options.progress.as_ref().map(|progress| {
+                            progress.emit_reasoning_content(reasoning_content.clone())
+                        });
                         last_reasoning_progress_emit_at = Instant::now();
                         last_reasoning_progress_char_len = reasoning_content.chars().count();
                     }
@@ -865,11 +847,17 @@ impl OpenAIClient {
         if !reasoning_content.trim().is_empty()
             && reasoning_content.chars().count() != last_reasoning_progress_char_len
         {
-            context.emit_live_reasoning_progress(&reasoning_content);
+            options
+                .progress
+                .as_ref()
+                .map(|progress| progress.emit_reasoning_content(reasoning_content.clone()));
         }
         if !content.trim().is_empty() && content.chars().count() != last_assistant_progress_char_len
         {
-            context.emit_live_assistant_progress(&content);
+            options
+                .progress
+                .as_ref()
+                .map(|progress| progress.emit_assistant_content(content.clone()));
         }
         if let Some(usage) = last_usage {
             self.record_last_usage(usage);
@@ -1171,33 +1159,37 @@ fn extract_json_value_from_content(content: &str) -> Option<serde_json::Value> {
 }
 
 #[async_trait]
-impl Llm for OpenAIClient {
-    async fn run_json(
+impl ModelProvider for OpenAIClient {
+    async fn complete_json(
         &self,
-        _context: &Context,
         request: PromptRequest,
+        options: ModelRequestOptions,
     ) -> Result<serde_json::Value> {
-        self.call_tool_json(request).await
+        self.call_tool_json(request, &options).await
     }
 
-    async fn run_json_no_context(&self, request: PromptRequest) -> Result<serde_json::Value> {
-        self.call_tool_json(request).await
-    }
-
-    async fn run_agent_turn(
+    async fn complete_agent_turn(
         &self,
-        context: &Context,
         request: AgentTurnRequest,
+        options: ModelRequestOptions,
     ) -> Result<AgentTurnStreamResult> {
-        self.call_agent_turn(context, request).await
+        self.call_agent_turn(request, &options).await
     }
 
-    fn token_usage_info(&self) -> Option<TokenUsageInfo> {
-        self.token_usage.lock().ok().map(|info| info.clone())
+    fn request_budget_limits(&self) -> RequestBudgetLimits {
+        self.request_budget_limits()
     }
 
-    fn model_name(&self) -> Option<String> {
-        Some(self.model.clone())
+    fn token_usage_info(&self) -> TokenUsageInfo {
+        self.token_usage
+            .lock()
+            .ok()
+            .map(|info| info.clone())
+            .unwrap_or_default()
+    }
+
+    fn model_name(&self) -> String {
+        self.model.clone()
     }
 }
 
@@ -1205,8 +1197,11 @@ impl Llm for OpenAIClient {
 // LLM factory from config.
 // ---------------------------------------------------------------------------
 
-/// Build the matching LLM instance by model name and global Config.
-pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn Llm + Send + Sync>> {
+/// Build the matching model provider instance by model name and global Config.
+pub fn build_model_provider(
+    model_name: &str,
+    config: &Config,
+) -> Result<Box<dyn ModelProvider + Send + Sync>> {
     let model_config = config
         .models
         .get(model_name)

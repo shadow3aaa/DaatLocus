@@ -108,6 +108,16 @@ pub(super) fn handle_key_event(
                     SkillsTogglePanel::from_state(state),
                 ));
             }
+            CommandPanelAction::SubmitWorkflow(submission) => {
+                return TuiInputOutcome::RunPanelAction {
+                    title: format!("WORKFLOW {}", submission.workflow_id),
+                    action: DashboardAction::RunWorkflow {
+                        workflow_id: submission.workflow_id,
+                        input: submission.input,
+                    },
+                    keep_panel: true,
+                };
+            }
             CommandPanelAction::EditPendingUserInput {
                 event_id,
                 incoming_text,

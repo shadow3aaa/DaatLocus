@@ -388,7 +388,7 @@ type WebSlashCommandFeedback = {
 type WebSlashPanel =
   | {
       kind: "selection";
-      panel: "debug" | "sleep" | "skills" | "app-status";
+      panel: "debug" | "sleep" | "skills" | "app-status" | "workflows";
     }
   | {
       kind: "detail";
@@ -408,6 +408,12 @@ type WebSlashPanel =
   | {
       kind: "skills-toggle";
       search: string;
+      feedback?: WebSlashCommandFeedback | null;
+    }
+  | {
+      kind: "workflow-form";
+      workflowId: string;
+      values: Record<string, string>;
       feedback?: WebSlashCommandFeedback | null;
     };
 
@@ -457,6 +463,10 @@ const WEB_SLASH_COMMANDS: WebSlashCommandDefinition[] = [
   {
     name: "skills",
     description: "list and manage OpenSkills automatic use",
+  },
+  {
+    name: "workflows",
+    description: "browse loaded Lua workflows and run typed inputs",
   },
 ];
 
@@ -539,6 +549,14 @@ type AgentChatSessionActivityRender =
       detail?: string | null;
       startedAtMs?: number | null;
       reducedMotion?: string | null;
+    }
+  | {
+      kind: "workflow";
+      icon: AgentChatActivityMarkerKind;
+      workflowId: string;
+      status: string;
+      output?: unknown | null;
+      message: string;
     };
 
 type AgentChatExploredCallAction = "read" | "list" | "search" | "run" | "unknown";
@@ -1024,7 +1042,7 @@ function AgentChatComposer({
   async function runSlashDashboardAction(
     action: DashboardAction,
     commandLabel?: string,
-  ) {
+  ): Promise<DashboardActionResult | null> {
     setIsSending(true);
     setSendError(null);
     setSlashActionFeedback(null);
@@ -1038,11 +1056,15 @@ function AgentChatComposer({
         return [];
       });
       setSlashCommandSelection(0);
-      setSlashActionFeedback(
-        webSlashActionFeedbackForResult(commandLabel ?? action.kind, result),
-      );
+      if (action.kind !== "run_workflow") {
+        setSlashActionFeedback(
+          webSlashActionFeedbackForResult(commandLabel ?? action.kind, result),
+        );
+      }
+      return result;
     } catch (error) {
       setSendError(error instanceof Error ? error.message : String(error));
+      return null;
     } finally {
       setIsSending(false);
     }
@@ -1150,7 +1172,7 @@ function AgentChatComposer({
         onSelectSuggestion={applyInputSuggestion}
         onHoverSuggestion={setSlashCommandSelection}
         onRunAction={(command) => void runSlashAction(command)}
-        onRunDashboardAction={(action) => void runSlashDashboardAction(action)}
+        onRunDashboardAction={runSlashDashboardAction}
       />
       {supportsVision ? (
         <Input
@@ -1785,7 +1807,9 @@ function WebSlashCommandPanel({
   onSelectSuggestion: (suggestion: WebInputSuggestion) => void;
   onHoverSuggestion: (index: number) => void;
   onRunAction: (command: string, detailTitle?: string) => void;
-  onRunDashboardAction: (action: DashboardAction) => void;
+  onRunDashboardAction: (
+    action: DashboardAction,
+  ) => Promise<DashboardActionResult | null>;
 }) {
   const hasContent =
     Boolean(panel) ||
@@ -1876,7 +1900,9 @@ function WebSlashPanelView({
   onClose: () => void;
   onSetPanel: (panel: WebSlashPanel | null) => void;
   onRunAction: (command: string, detailTitle?: string) => void;
-  onRunDashboardAction: (action: DashboardAction) => void;
+  onRunDashboardAction: (
+    action: DashboardAction,
+  ) => Promise<DashboardActionResult | null>;
 }) {
   switch (panel.kind) {
     case "selection":
@@ -1915,6 +1941,17 @@ function WebSlashPanelView({
     case "skills-toggle":
       return (
         <WebSlashSkillsTogglePanel
+          panel={panel}
+          snapshot={snapshot}
+          isSending={isSending}
+          onClose={onClose}
+          onSetPanel={onSetPanel}
+          onRunDashboardAction={onRunDashboardAction}
+        />
+      );
+    case "workflow-form":
+      return (
+        <WebSlashWorkflowFormPanel
           panel={panel}
           snapshot={snapshot}
           isSending={isSending}
@@ -1967,6 +2004,330 @@ function WebSlashPanelShell({
   );
 }
 
+function WebSlashWorkflowFormPanel({
+  panel,
+  snapshot,
+  isSending,
+  onClose,
+  onSetPanel,
+  onRunDashboardAction,
+}: {
+  panel: Extract<WebSlashPanel, { kind: "workflow-form" }>;
+  snapshot: DashboardSnapshot | null;
+  isSending: boolean;
+  onClose: () => void;
+  onSetPanel: (panel: WebSlashPanel | null) => void;
+  onRunDashboardAction: (
+    action: DashboardAction,
+  ) => Promise<DashboardActionResult | null>;
+}) {
+  const workflow = webSlashWorkflowById(snapshot, panel.workflowId);
+  if (!workflow) {
+    return (
+      <WebSlashPanelShell
+        title="Workflow"
+        subtitle="The selected workflow is no longer loaded."
+        onClose={onClose}
+      >
+        <Alert>
+          <InfoIcon className="size-4" aria-hidden="true" />
+          <AlertDescription className="text-xs">
+            Return to /workflows and choose a currently loaded workflow.
+          </AlertDescription>
+        </Alert>
+      </WebSlashPanelShell>
+    );
+  }
+  const selectedWorkflow = workflow;
+
+  function updateField(name: string, value: string) {
+    onSetPanel({
+      kind: "workflow-form",
+      workflowId: selectedWorkflow.id,
+      values: { ...panel.values, [name]: value },
+      feedback: null,
+    });
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    let input: Record<string, unknown>;
+    try {
+      input = webSlashWorkflowInputFromValues(selectedWorkflow, panel.values);
+    } catch (error) {
+      onSetPanel({
+        ...panel,
+        feedback: {
+          title: `WORKFLOW ${selectedWorkflow.id}`,
+          message: error instanceof Error ? error.message : String(error),
+          level: "error",
+        },
+      });
+      return;
+    }
+
+    const result = await onRunDashboardAction({
+      kind: "run_workflow",
+      workflow_id: selectedWorkflow.id,
+      input,
+    });
+    if (result) {
+      onSetPanel({
+        ...panel,
+        feedback: webSlashActionFeedbackForResult(
+          `/workflows ${selectedWorkflow.id}`,
+          result,
+        ),
+      });
+    }
+  }
+
+  const fieldCount = selectedWorkflow.input_fields.length;
+  return (
+    <WebSlashPanelShell
+      title={`Workflow ${selectedWorkflow.id}`}
+      subtitle={
+        fieldCount === 0
+          ? "No declared input fields. Run this workflow directly."
+          : `${fieldCount} typed input field${fieldCount === 1 ? "" : "s"}.`
+      }
+      onClose={onClose}
+    >
+      <form className="flex min-w-0 flex-col gap-3" onSubmit={submit}>
+        {panel.feedback ? (
+          <WebSlashCommandFeedbackView feedback={panel.feedback} />
+        ) : null}
+        {fieldCount > 0 ? (
+          <FieldGroup>
+            {selectedWorkflow.input_fields.map((field) => {
+              const type = webSlashWorkflowSchemaTypeLabel(field.schema);
+              const nullable = webSlashWorkflowSchemaIsNullable(field.schema);
+              const multiline = webSlashWorkflowSchemaUsesJsonInput(field.schema);
+              const value =
+                panel.values[field.name] ??
+                webSlashWorkflowDefaultValueText(field.schema);
+              const fieldId = `workflow-${selectedWorkflow.id}-${field.name}`;
+              const hint = nullable
+                ? "Leave empty or enter null for a null value."
+                : multiline
+                  ? "Enter a JSON value."
+                  : undefined;
+              return (
+                <Field key={field.name} className="gap-1.5">
+                  <FieldLabel htmlFor={fieldId} className="flex min-w-0 gap-2">
+                    <span className="min-w-0 truncate">{field.name}</span>
+                    <span className="shrink-0 font-mono text-xs font-normal text-muted-foreground">
+                      {type}
+                    </span>
+                  </FieldLabel>
+                  {multiline ? (
+                    <Textarea
+                      id={fieldId}
+                      value={value}
+                      disabled={isSending}
+                      placeholder={webSlashWorkflowFieldPlaceholder(field.schema)}
+                      onChange={(event) => updateField(field.name, event.target.value)}
+                      className="min-h-20 font-mono text-xs"
+                    />
+                  ) : (
+                    <Input
+                      id={fieldId}
+                      value={value}
+                      disabled={isSending}
+                      placeholder={webSlashWorkflowFieldPlaceholder(field.schema)}
+                      onChange={(event) => updateField(field.name, event.target.value)}
+                      className="h-8 font-mono text-xs"
+                    />
+                  )}
+                  {hint ? (
+                    <p className="text-xs leading-4 text-muted-foreground">{hint}</p>
+                  ) : null}
+                </Field>
+              );
+            })}
+          </FieldGroup>
+        ) : null}
+        <div className="flex items-center justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={onClose} disabled={isSending}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={isSending}>
+            {isSending ? <Spinner className="size-3.5" /> : null}
+            {isSending ? "Queuing workflow" : "Run workflow"}
+          </Button>
+        </div>
+      </form>
+    </WebSlashPanelShell>
+  );
+}
+
+function webSlashWorkflowById(snapshot: DashboardSnapshot | null, workflowId: string) {
+  return (snapshot?.workflows ?? []).find((workflow) => workflow.id === workflowId) ?? null;
+}
+
+
+function webSlashWorkflowSchemaRecord(schema: unknown): Record<string, unknown> | null {
+  return schema && typeof schema === "object" && !Array.isArray(schema)
+    ? (schema as Record<string, unknown>)
+    : null;
+}
+
+function webSlashWorkflowSchemaType(schema: unknown) {
+  const type = webSlashWorkflowSchemaRecord(schema)?.type;
+  if (typeof type === "string") {
+    return type;
+  }
+  if (Array.isArray(type)) {
+    return (
+      type.find(
+        (candidate): candidate is string =>
+          typeof candidate === "string" && candidate !== "null",
+      ) ?? null
+    );
+  }
+  return null;
+}
+
+function webSlashWorkflowSchemaIsNullable(schema: unknown) {
+  const type = webSlashWorkflowSchemaRecord(schema)?.type;
+  return Array.isArray(type) && type.includes("null");
+}
+
+function webSlashWorkflowSchemaTypeLabel(schema: unknown) {
+  const type = webSlashWorkflowSchemaType(schema) ?? "string";
+  return webSlashWorkflowSchemaIsNullable(schema) ? `${type} | null` : type;
+}
+
+function webSlashWorkflowSchemaUsesJsonInput(schema: unknown) {
+  const type = webSlashWorkflowSchemaType(schema);
+  return type === "array" || type === "object";
+}
+
+function webSlashWorkflowDefaultValueText(schema: unknown) {
+  const schemaRecord = webSlashWorkflowSchemaRecord(schema);
+  if (schemaRecord && "default" in schemaRecord) {
+    const value = schemaRecord.default;
+    if (typeof value === "string") {
+      return value;
+    }
+    try {
+      return JSON.stringify(value) ?? "";
+    } catch {
+      return "";
+    }
+  }
+
+  switch (webSlashWorkflowSchemaType(schema)) {
+    case "integer":
+    case "number":
+      return "0";
+    case "boolean":
+      return "false";
+    case "array":
+      return "[]";
+    case "object":
+      return "{}";
+    default:
+      return "";
+  }
+}
+
+function webSlashWorkflowFieldPlaceholder(schema: unknown) {
+  const nullable = webSlashWorkflowSchemaIsNullable(schema);
+  const type = webSlashWorkflowSchemaType(schema);
+  const base =
+    type === "boolean"
+      ? "true or false"
+      : type === "array"
+        ? "[]"
+        : type === "object"
+          ? "{}"
+          : type === "integer" || type === "number"
+            ? "0"
+            : "text";
+  return nullable ? `${base} or null` : base;
+}
+
+function webSlashWorkflowInputFromValues(
+  workflow: NonNullable<DashboardSnapshot["workflows"]>[number],
+  values: Record<string, string>,
+) {
+  const input: Record<string, unknown> = {};
+  for (const field of workflow.input_fields) {
+    input[field.name] = webSlashWorkflowParseFieldValue(
+      field.name,
+      values[field.name] ?? webSlashWorkflowDefaultValueText(field.schema),
+      field.schema,
+    );
+  }
+  return input;
+}
+
+function webSlashWorkflowParseFieldValue(
+  fieldName: string,
+  value: string,
+  schema: unknown,
+): unknown {
+  const trimmed = value.trim();
+  if (
+    webSlashWorkflowSchemaIsNullable(schema) &&
+    (!trimmed || trimmed.toLowerCase() === "null")
+  ) {
+    return null;
+  }
+
+  switch (webSlashWorkflowSchemaType(schema)) {
+    case "string":
+      return value;
+    case "integer": {
+      if (!/^[+-]?\d+$/.test(trimmed)) {
+        throw new Error(`${fieldName} must be an integer.`);
+      }
+      const parsed = Number(trimmed);
+      if (!Number.isSafeInteger(parsed)) {
+        throw new Error(`${fieldName} must be a safe integer.`);
+      }
+      return parsed;
+    }
+    case "number": {
+      const parsed = Number(trimmed);
+      if (!Number.isFinite(parsed)) {
+        throw new Error(`${fieldName} must be a number.`);
+      }
+      return parsed;
+    }
+    case "boolean":
+      if (trimmed === "true") {
+        return true;
+      }
+      if (trimmed === "false") {
+        return false;
+      }
+      throw new Error(`${fieldName} must be true or false.`);
+    case "array":
+    case "object": {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        throw new Error(`${fieldName} must be valid JSON.`);
+      }
+      if (webSlashWorkflowSchemaType(schema) === "array" && !Array.isArray(parsed)) {
+        throw new Error(`${fieldName} must be a JSON array.`);
+      }
+      if (
+        webSlashWorkflowSchemaType(schema) === "object" &&
+        (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      ) {
+        throw new Error(`${fieldName} must be a JSON object.`);
+      }
+      return parsed;
+    }
+    default:
+      return value;
+  }
+}
+
 function WebSlashSelectionPanel({
   panel,
   snapshot,
@@ -1982,7 +2343,9 @@ function WebSlashSelectionPanel({
   onClose: () => void;
   onSetPanel: (panel: WebSlashPanel | null) => void;
   onRunAction: (command: string, detailTitle?: string) => void;
-  onRunDashboardAction: (action: DashboardAction) => void;
+  onRunDashboardAction: (
+    action: DashboardAction,
+  ) => Promise<DashboardActionResult | null>;
 }) {
   const meta = webSlashSelectionMeta(panel, snapshot);
   const items = webSlashSelectionItems(panel, snapshot);
@@ -2784,7 +3147,7 @@ function webSlashExtraArgumentFeedback(
   parts: string[],
 ): WebSlashCommandFeedback | null {
   const [verb] = parts;
-  const rootNoArg = ["status", "clear", "restart"];
+  const rootNoArg = ["status", "clear", "restart", "workflows"];
   if (rootNoArg.includes(verb) && parts.length > 1) {
     return {
       title: verb.toUpperCase(),
@@ -2879,7 +3242,7 @@ function webSlashPanelForInput(
     if (verb === "status") {
       return { kind: "status" };
     }
-    if (["debug", "sleep", "skills"].includes(verb)) {
+    if (["debug", "sleep", "skills", "workflows"].includes(verb)) {
       return { kind: "selection", panel: verb as Extract<WebSlashPanel, { kind: "selection" }>["panel"] };
     }
     if (webSlashCommandAccepts("app-status", verb)) {
@@ -3052,6 +3415,19 @@ function webSlashSelectionMeta(
       subtitle: "Inspect sleep state or start a background sleep run.",
     };
   }
+  if (panel === "workflows") {
+    const workflows = snapshot?.workflows ?? [];
+    const errors = snapshot?.workflow_errors ?? [];
+    return {
+      title: "Workflows",
+      subtitle:
+        workflows.length > 0
+          ? `${workflows.length} loaded Lua workflow${workflows.length === 1 ? "" : "s"}, ${errors.length} load error${errors.length === 1 ? "" : "s"}.`
+          : errors.length > 0
+            ? `${errors.length} workflow load error${errors.length === 1 ? "" : "s"}.`
+            : "No Lua workflows are loaded.",
+    };
+  }
   return {
     title: "App Status",
     subtitle: "Choose an app to inspect.",
@@ -3159,6 +3535,23 @@ function webSlashSelectionItems(
       },
     ];
   }
+  if (panel === "workflows") {
+    const workflows = (snapshot?.workflows ?? []).map((workflow) => ({
+      id: `workflow:${workflow.id}`,
+      name: workflow.id,
+      description:
+        workflow.input_fields.length === 0
+          ? "No declared input fields"
+          : `${workflow.input_fields.length} typed input field${workflow.input_fields.length === 1 ? "" : "s"}`,
+    }));
+    const errors = (snapshot?.workflow_errors ?? []).map((error, index) => ({
+      id: `workflow-error:${index}`,
+      name: error.path,
+      description: error.message,
+      disabled: true,
+    }));
+    return [...workflows, ...errors];
+  }
   return (snapshot?.app_status_outputs ?? []).map(([name, output]) => ({
     id: `app-status:${name}`,
     name,
@@ -3177,7 +3570,9 @@ function webSlashRunSelectionItem(
   snapshot: DashboardSnapshot | null,
   onSetPanel: (panel: WebSlashPanel | null) => void,
   onRunAction: (command: string, detailTitle?: string) => void,
-  onRunDashboardAction: (action: DashboardAction) => void,
+  onRunDashboardAction: (
+    action: DashboardAction,
+  ) => Promise<DashboardActionResult | null>,
 ) {
   if (itemId === "debug-persona") {
     onRunAction("/debug persona", "DEBUG PERSONA");
@@ -3196,11 +3591,29 @@ function webSlashRunSelectionItem(
   } else if (itemId === "sleep-status") {
     onSetPanel({ kind: "sleep-status" });
   } else if (itemId === "sleep-run") {
-    onRunDashboardAction({ kind: "run_sleep" });
+    void onRunDashboardAction({ kind: "run_sleep" });
   } else if (itemId === "skills-list") {
     onSetPanel({ kind: "skills-list", search: "" });
   } else if (itemId === "skills-toggle") {
     onSetPanel({ kind: "skills-toggle", search: "", feedback: null });
+  } else if (itemId.startsWith("workflow:")) {
+    const workflow = webSlashWorkflowById(
+      snapshot,
+      itemId.slice("workflow:".length),
+    );
+    if (workflow) {
+      onSetPanel({
+        kind: "workflow-form",
+        workflowId: workflow.id,
+        values: Object.fromEntries(
+          workflow.input_fields.map((field) => [
+            field.name,
+            webSlashWorkflowDefaultValueText(field.schema),
+          ]),
+        ) as Record<string, string>,
+        feedback: null,
+      });
+    }
   } else if (itemId.startsWith("app-status:")) {
     const appName = itemId.slice("app-status:".length);
     const app = (snapshot?.app_status_outputs ?? []).find(([name]) => name === appName);
@@ -5038,6 +5451,10 @@ function AgentChatSessionActivityView({
     );
   }
 
+  if (render.kind === "workflow") {
+    return <AgentChatWorkflowActivityCell render={render} />;
+  }
+
   if (render.kind === "browser") {
     return (
       <AgentChatActivityTextCell
@@ -5128,6 +5545,61 @@ function AgentChatSessionActivityView({
       isLatestReply={isLatestReply}
     />
   );
+}
+
+function AgentChatWorkflowActivityCell({
+  render,
+}: {
+  render: Extract<AgentChatSessionActivityRender, { kind: "workflow" }>;
+}) {
+  const status = render.status.toLowerCase();
+  const output = formatAgentChatWorkflowOutput(render.output);
+  const tone =
+    status === "completed"
+      ? "text-emerald-600 dark:text-emerald-400"
+      : "text-destructive";
+
+  return (
+    <div className="grid min-w-0 grid-cols-[0.75rem_minmax(0,1fr)] items-start gap-x-3 px-2 sm:gap-x-[16px] sm:px-3">
+      <AgentChatActivityMarker
+        icon="activity"
+        tone={status === "completed" ? "default" : "error"}
+      />
+      <div className="min-w-0 border-l border-border/60 pl-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-sm font-medium text-foreground">Workflow</span>
+          <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+            {render.workflowId}
+          </span>
+          <Badge variant="outline" className={cn("ml-auto shrink-0 text-[0.65rem]", tone)}>
+            {render.status}
+          </Badge>
+        </div>
+        <p className="mt-1 break-words text-xs leading-5 text-muted-foreground">
+          {render.message}
+        </p>
+        {output ? (
+          <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/45 p-2 font-mono text-xs leading-5 text-foreground/90">
+            {output}
+          </pre>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function formatAgentChatWorkflowOutput(output: unknown) {
+  if (output === null || output === undefined) {
+    return null;
+  }
+  if (typeof output === "string") {
+    return output;
+  }
+  try {
+    return JSON.stringify(output, null, 2);
+  } catch {
+    return String(output);
+  }
 }
 
 const AGENT_CHAT_ACTIVITY_ROW_CLASS =
@@ -7840,6 +8312,18 @@ function agentChatSessionActivityRenderForBubble(
       detail: nullableStringValue(runtimeStatus.detail),
       startedAtMs: nullableNumberValue(runtimeStatus.active_runtime_started_at_ms),
       reducedMotion: nullableStringValue(runtimeStatus.reduced_motion),
+    };
+  }
+
+  const workflow = agentChatSessionActivityPayload(activityEvent, "Workflow");
+  if (workflow) {
+    return {
+      kind: "workflow",
+      icon: "activity",
+      workflowId: stringValue(workflow.workflow_id, "unknown"),
+      status: stringValue(workflow.status, "Failed"),
+      output: workflow.output,
+      message: stringValue(workflow.message, "workflow completed"),
     };
   }
 

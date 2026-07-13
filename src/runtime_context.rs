@@ -92,17 +92,7 @@ pub fn build_afterclaim_context_text(context: &Context, input: &AfterClaimContex
 }
 
 pub fn runtime_request_budget_limits(context: &Context) -> RequestBudgetLimits {
-    RequestBudgetLimits {
-        context_window_tokens: context
-            .config
-            .main_model_config()
-            .effective_context_window_tokens(),
-        auto_compact_threshold_tokens: context
-            .config
-            .main_model_config()
-            .auto_compact_token_limit(),
-        reserved_output_tokens: context.config.main_model_config().reserved_output_tokens(),
-    }
+    context.model_provider.request_budget_limits()
 }
 
 pub async fn execute_pre_turn_runtime_compaction(
@@ -328,9 +318,14 @@ async fn execute_runtime_compaction(
     }
 
     let request = build_history_compaction_request(trimmed.messages.clone());
+    let options = crate::core::ModelRequestOptions::for_prompt(
+        context.model_provider.as_ref(),
+        &request,
+        context.session_id.clone(),
+    )?;
     let value = context
-        .llm
-        .run_json(context, request)
+        .model_provider
+        .complete_json(request, options)
         .await
         .map_err(|err| {
             miette!("main model failed to generate runtime compaction summary: {err}")

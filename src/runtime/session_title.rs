@@ -7,6 +7,7 @@ use tracing::{debug, warn};
 
 use crate::{
     context::Context,
+    core::ModelRequestOptions,
     dashboard::{DashboardSessionTitle, DashboardState},
     events::{EventPayload, EventView},
     reasoning::runtime::{HistoryMessage, PromptRequest},
@@ -63,6 +64,32 @@ impl SessionTitleState {
     fn should_generate(&self, signature: &str) -> bool {
         self.last_generated_signature.as_deref() != Some(signature)
     }
+
+    fn apply_generation_result(
+        &mut self,
+        result: SessionTitleGenerationResult,
+        now_ms: i64,
+    ) -> bool {
+        if self.last_generated_signature.as_deref() != Some(result.activity_signature.as_str()) {
+            return false;
+        }
+        let Some(title) = result.title else {
+            return false;
+        };
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|current| current.generated && current.title == title)
+        {
+            return false;
+        }
+        self.current = Some(DashboardSessionTitle {
+            title,
+            generated: true,
+            updated_at_ms: now_ms,
+        });
+        true
+    }
 }
 
 pub fn sync_session_title_placeholder(
@@ -92,9 +119,37 @@ fn sync_dashboard_session_title(
     });
 }
 
-pub fn spawn_session_title_generation(
+pub fn apply_session_title_generation_result(
     context: &mut Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
+    result: SessionTitleGenerationResult,
+) {
+    if context
+        .session_title
+        .apply_generation_result(result, Utc::now().timestamp_millis())
+    {
+        sync_dashboard_session_title(context, tx);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionTitleGenerationResult {
+    pub activity_signature: String,
+    pub title: Option<String>,
+}
+
+impl SessionTitleGenerationResult {
+    fn from_output(activity_signature: String, output: SessionTitleOutput) -> Self {
+        Self {
+            activity_signature,
+            title: normalize_session_title(&output.title),
+        }
+    }
+}
+
+pub fn spawn_session_title_generation(
+    context: &mut Context,
+    results_tx: &tokio::sync::mpsc::UnboundedSender<SessionTitleGenerationResult>,
 ) {
     let events = context.events.views();
     let messages = context.memory.runtime_conversation_messages();
@@ -109,7 +164,7 @@ pub fn spawn_session_title_generation(
 
     // Eagerly mark as generated to prevent duplicate spawns.
     let now_ms = Utc::now().timestamp_millis();
-    context.session_title.last_generated_signature = Some(signature);
+    context.session_title.last_generated_signature = Some(signature.clone());
     context.session_title.last_generated_at_ms = Some(now_ms);
 
     let request = PromptRequest {
@@ -124,23 +179,28 @@ pub fn spawn_session_title_generation(
         retry_messages: Vec::new(),
     };
 
-    let llm = context.efficient_llm.clone();
-    let tx_clone = tx.clone();
+    let model_provider = context.efficient_model_provider.clone();
+    let options = match ModelRequestOptions::for_prompt(
+        model_provider.as_ref(),
+        &request,
+        context.session_id.clone(),
+    ) {
+        Ok(options) => options,
+        Err(err) => {
+            warn!("failed to create session title request options: {err:?}");
+            return;
+        }
+    };
+    let results_tx = results_tx.clone();
     tokio::spawn(async move {
-        match llm.run_json_no_context(request).await {
+        match model_provider.complete_json(request, options).await {
             Ok(value) => match serde_json::from_value::<SessionTitleOutput>(value) {
                 Ok(output) => {
-                    if let Some(title) = normalize_session_title(&output.title) {
+                    let result = SessionTitleGenerationResult::from_output(signature, output);
+                    if let Some(title) = result.title.as_deref() {
                         debug!(title, "session title generated");
-                        let session_title = Some(DashboardSessionTitle {
-                            title,
-                            generated: true,
-                            updated_at_ms: Utc::now().timestamp_millis(),
-                        });
-                        tx_clone.send_modify(|state| {
-                            state.session_title = session_title;
-                        });
                     }
+                    let _ = results_tx.send(result);
                 }
                 Err(err) => {
                     warn!("failed to parse session title JSON: {err:?}");
@@ -366,5 +426,42 @@ mod tests {
             first_visible_history_title(&messages).as_deref(),
             Some("Fix the Telegram session routing")
         );
+    }
+
+    #[test]
+    fn generation_result_only_updates_the_current_activity() {
+        let mut state = SessionTitleState {
+            current: Some(DashboardSessionTitle {
+                title: "placeholder".to_string(),
+                generated: false,
+                updated_at_ms: 0,
+            }),
+            last_generated_signature: Some("current activity".to_string()),
+            ..SessionTitleState::default()
+        };
+
+        assert!(!state.apply_generation_result(
+            SessionTitleGenerationResult {
+                activity_signature: "stale activity".to_string(),
+                title: Some("Stale title".to_string()),
+            },
+            1,
+        ));
+        assert_eq!(
+            state.snapshot().expect("placeholder title").title,
+            "placeholder"
+        );
+
+        assert!(state.apply_generation_result(
+            SessionTitleGenerationResult {
+                activity_signature: "current activity".to_string(),
+                title: Some("Current title".to_string()),
+            },
+            2,
+        ));
+        let title = state.snapshot().expect("generated title");
+        assert_eq!(title.title, "Current title");
+        assert!(title.generated);
+        assert_eq!(title.updated_at_ms, 2);
     }
 }

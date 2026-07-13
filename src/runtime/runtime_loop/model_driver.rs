@@ -3,6 +3,7 @@ use crate::{
     context_budget::{
         TokenEstimateBaseline, estimate_agent_message_tokens, estimate_tool_spec_tokens,
     },
+    core::{ModelProgressSink, ModelRequestOptions},
     dashboard::{
         DashboardContextCompositionPrefixUnit, DashboardContextCompositionSegment,
         DashboardContextCompositionSnapshot,
@@ -18,28 +19,27 @@ pub(super) async fn run_agent_turn_with_retry(
     request: AgentTurnRequest,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
 ) -> Result<AgentTurnStreamResult> {
-    let limits = runtime_request_budget_limits(context);
-    let estimated_input_tokens = {
-        let raw_budget = estimate_agent_turn_request(&request.messages, &request.tools, limits);
-        let calibrated_budget =
-            raw_budget.with_calibrated_input_tokens(&context.token_estimate_baseline);
-        calibrated_budget.total_input_tokens
-    };
-    let budget = estimate_agent_turn_request(&request.messages, &request.tools, limits)
-        .with_calibrated_input_tokens(&context.token_estimate_baseline);
+    let options = ModelRequestOptions::for_agent_turn(
+        context.model_provider.as_ref(),
+        &request,
+        context.session_id.clone(),
+    )?
+    .with_progress(current_model_progress_sink(context));
+    let estimated_input_tokens = options.budget.total_input_tokens;
     let session_id = context.session_id.clone();
+    let model_name = context.model_provider.model_name();
     write_current_turn_messages_dump(
         session_id.as_deref(),
         &request,
-        &budget,
-        context.llm.model_name().as_deref(),
+        &options.budget,
+        Some(model_name.as_str()),
     )
     .await;
     let context_composition = build_context_composition_snapshot(
         context.latest_context_composition.as_ref(),
         context,
         &request,
-        limits.context_window_tokens,
+        options.budget.context_window_tokens,
     );
     context.latest_context_composition = Some(context_composition.clone());
     if let Some(tx) = tx {
@@ -54,10 +54,6 @@ pub(super) async fn run_agent_turn_with_retry(
     const BASE_REQUEST_TIMEOUT_SECS: u64 = 300;
     const MAX_REQUEST_TIMEOUT_SECS: u64 = 1200;
 
-    let model_name = context
-        .llm
-        .model_name()
-        .unwrap_or_else(|| context.config.main_model_config().model_id.clone());
     let mut attempt = 1usize;
     loop {
         set_runtime_status_only(tx, "Working");
@@ -67,7 +63,9 @@ pub(super) async fn run_agent_turn_with_retry(
             .min(MAX_REQUEST_TIMEOUT_SECS);
         let turn_result = match tokio::time::timeout(
             Duration::from_secs(request_timeout_secs),
-            context.llm.run_agent_turn(context, request.clone()),
+            context
+                .model_provider
+                .complete_agent_turn(request.clone(), options.clone()),
         )
         .await
         {
@@ -79,16 +77,15 @@ pub(super) async fn run_agent_turn_with_retry(
         match turn_result {
             Ok(response) => {
                 write_current_turn_response_dump(session_id.as_deref(), &response, attempt).await;
-                if let Some(info) = context.llm.token_usage_info() {
-                    let observed_input =
-                        usize::try_from(info.last_token_usage.input_tokens.max(0)).unwrap_or(0);
-                    if observed_input > 0 {
-                        context.token_estimate_baseline = TokenEstimateBaseline {
-                            estimated_input_tokens,
-                            observed_input_tokens: Some(observed_input),
-                        };
-                        save_token_estimate_baseline(&context.token_estimate_baseline).await;
-                    }
+                let info = context.model_provider.token_usage_info();
+                let observed_input =
+                    usize::try_from(info.last_token_usage.input_tokens.max(0)).unwrap_or(0);
+                if observed_input > 0 {
+                    context.token_estimate_baseline = TokenEstimateBaseline {
+                        estimated_input_tokens,
+                        observed_input_tokens: Some(observed_input),
+                    };
+                    save_token_estimate_baseline(&context.token_estimate_baseline).await;
                 }
                 clear_runtime_status(tx);
                 return Ok(response);
@@ -115,7 +112,7 @@ pub(super) async fn run_agent_turn_with_retry(
                 );
                 set_runtime_status(tx, RuntimeStatusLevel::Warn, summary);
                 tracing::warn!(
-                    "run_agent_turn retry #{attempt} after {backoff_ms}ms (model={}, messages={}, tools={}, estimated_input_tokens={estimated_input_tokens}): {error_detail}",
+                    "complete_agent_turn retry #{attempt} after {backoff_ms}ms (model={}, messages={}, tools={}, estimated_input_tokens={estimated_input_tokens}): {error_detail}",
                     model_name,
                     request.messages.len(),
                     request.tools.len(),
@@ -125,6 +122,15 @@ pub(super) async fn run_agent_turn_with_retry(
             }
         }
     }
+}
+
+fn current_model_progress_sink(context: &Context) -> Option<ModelProgressSink> {
+    context
+        .live_progress_tx
+        .lock()
+        .as_ref()
+        .cloned()
+        .map(ModelProgressSink::new)
 }
 
 fn plain_report_text(err: &miette::Report) -> String {
@@ -224,10 +230,7 @@ fn build_context_composition_snapshot(
 
     DashboardContextCompositionSnapshot {
         captured_at_ms: Some(chrono::Utc::now().timestamp_millis()),
-        model: context
-            .llm
-            .model_name()
-            .or_else(|| Some(context.config.main_model_config().model_id.clone())),
+        model: Some(context.model_provider.model_name()),
         model_context_window: Some(model_context_window),
         total_estimated_tokens,
         total_bytes,

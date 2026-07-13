@@ -1,6 +1,6 @@
 use crate::{
     context::Context,
-    core::Llm,
+    core::{ModelProvider, ModelRequestOptions},
     dashboard::SessionActivityEvent,
     logging::{RuntimeStatusLevel, set_runtime_status},
 };
@@ -24,7 +24,7 @@ pub struct ProgramExecutionOutcome<O> {
 }
 
 struct ProgramExecutionRequest<'a, P: Program, R: Renderer> {
-    llm: &'a (dyn Llm + Send + Sync),
+    model_provider: &'a (dyn ModelProvider + Send + Sync),
     context: &'a Context,
     renderer: &'a R,
     program: &'a P,
@@ -35,7 +35,7 @@ struct ProgramExecutionRequest<'a, P: Program, R: Renderer> {
 }
 
 struct PromptRequestExecution<'a> {
-    llm: &'a (dyn Llm + Send + Sync),
+    model_provider: &'a (dyn ModelProvider + Send + Sync),
     context: &'a Context,
     program_name: &'a str,
     signature: Signature,
@@ -577,7 +577,7 @@ fn log_prompt_compile_event(context: &Context, message: String) {
 }
 
 pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
-    llm: &(dyn Llm + Send + Sync),
+    model_provider: &(dyn ModelProvider + Send + Sync),
     context: &Context,
     renderer: &R,
     program: &P,
@@ -587,7 +587,7 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
 ) -> Result<ProgramExecutionOutcome<P::Output>> {
     execute_program_with_ir_report_with_retry_hook_and_validator(
         ProgramExecutionRequest {
-            llm,
+            model_provider,
             context,
             renderer,
             program,
@@ -617,7 +617,7 @@ where
     F: FnMut(&PromptRequest),
 {
     let ProgramExecutionRequest {
-        llm,
+        model_provider,
         context,
         renderer,
         program,
@@ -630,7 +630,7 @@ where
     let request = renderer.render(context, program, ir, tuning);
     execute_prompt_request_with_retry_hook_and_validator(
         PromptRequestExecution {
-            llm,
+            model_provider,
             context,
             program_name: program.name(),
             signature: program.signature(),
@@ -655,7 +655,7 @@ where
     F: FnMut(&PromptRequest),
 {
     let PromptRequestExecution {
-        llm,
+        model_provider,
         context,
         program_name,
         signature,
@@ -667,7 +667,9 @@ where
     let mut last_error = None;
 
     for attempt in 0..=max_retry_count {
-        let value = match llm.run_json(context, request.clone()).await {
+        let options =
+            ModelRequestOptions::for_prompt(model_provider, &request, context.session_id.clone())?;
+        let value = match model_provider.complete_json(request.clone(), options).await {
             Ok(value) => value,
             Err(err) => {
                 let error_text = err.to_string();

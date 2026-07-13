@@ -3,13 +3,17 @@ use std::borrow::Cow;
 use async_trait::async_trait;
 use chrono::Local;
 use daat_locus_macros::model_schema;
-use miette::{Result, miette};
+use miette::Result;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    context::Context,
+    context_budget::{
+        ContextBudgetExceededError, RequestBudgetBreakdown, RequestBudgetLimits,
+        estimate_agent_turn_request, estimate_prompt_request,
+    },
     events::EventDisposition,
+    live_progress::LiveProgressEvent,
     plan::PlanStatus,
     reasoning::runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
 };
@@ -252,45 +256,122 @@ impl TokenUsageInfo {
         }
     }
 }
-/// LLM provider abstraction.
+/// An explicit, runtime-owned sink for streaming model progress.
+///
+/// Model providers may report model output through this sink, but they never
+/// receive the session's mutable runtime state.
+#[derive(Clone)]
+pub struct ModelProgressSink {
+    sender: tokio::sync::mpsc::UnboundedSender<LiveProgressEvent>,
+}
+
+impl ModelProgressSink {
+    pub fn new(sender: tokio::sync::mpsc::UnboundedSender<LiveProgressEvent>) -> Self {
+        Self { sender }
+    }
+
+    pub fn emit_assistant_content(&self, content: impl Into<String>) {
+        let _ = self.sender.send(LiveProgressEvent::AssistantContent {
+            content: content.into(),
+        });
+    }
+
+    pub fn emit_reasoning_content(&self, content: impl Into<String>) {
+        let _ = self.sender.send(LiveProgressEvent::ReasoningContent {
+            content: content.into(),
+        });
+    }
+}
+
+/// Explicit metadata and runtime policy for one provider call.
+///
+/// This contains only values a provider is allowed to observe. It deliberately
+/// excludes [`crate::context::Context`], which remains owned by the runtime.
+#[derive(Clone)]
+pub struct ModelRequestOptions {
+    pub conversation_id: Option<String>,
+    pub progress: Option<ModelProgressSink>,
+    pub budget: RequestBudgetBreakdown,
+}
+
+impl ModelRequestOptions {
+    pub fn for_prompt(
+        provider: &(dyn ModelProvider + Send + Sync),
+        request: &PromptRequest,
+        conversation_id: Option<String>,
+    ) -> Result<Self> {
+        let budget = estimate_prompt_request(request, provider.request_budget_limits());
+        Self::from_budget("prompt request", provider, budget, conversation_id)
+    }
+
+    pub fn for_agent_turn(
+        provider: &(dyn ModelProvider + Send + Sync),
+        request: &AgentTurnRequest,
+        conversation_id: Option<String>,
+    ) -> Result<Self> {
+        let budget = estimate_agent_turn_request(
+            &request.messages,
+            &request.tools,
+            provider.request_budget_limits(),
+        );
+        Self::from_budget("agent turn", provider, budget, conversation_id)
+    }
+
+    fn from_budget(
+        request_kind: &str,
+        provider: &(dyn ModelProvider + Send + Sync),
+        budget: RequestBudgetBreakdown,
+        conversation_id: Option<String>,
+    ) -> Result<Self> {
+        if !budget.within_context_window() {
+            return Err(ContextBudgetExceededError::for_request(
+                request_kind,
+                &provider.model_name(),
+                &budget,
+                None,
+            )
+            .into());
+        }
+        Ok(Self {
+            conversation_id,
+            progress: None,
+            budget,
+        })
+    }
+
+    pub fn with_progress(mut self, progress: Option<ModelProgressSink>) -> Self {
+        self.progress = progress;
+        self
+    }
+}
+
+/// Model protocol provider abstraction.
+///
+/// Providers translate explicit model requests to an upstream protocol. They
+/// do not receive runtime state, own request budgets, or construct call
+/// metadata; the runtime supplies fully-validated [`ModelRequestOptions`].
 #[async_trait]
-pub trait Llm {
-    /// Execute a structured program request and return the raw JSON argument object.
-    async fn run_json(
+pub trait ModelProvider: Send + Sync {
+    /// Complete a structured request and return the raw JSON argument object.
+    async fn complete_json(
         &self,
-        context: &Context,
         request: PromptRequest,
+        options: ModelRequestOptions,
     ) -> Result<serde_json::Value>;
 
-    /// Like [`run_json`](Self::run_json) but does not require a [`Context`] reference.
-    ///
-    /// Used for background tasks (e.g. session title generation) that need to
-    /// call the LLM without holding a live `&Context`.
-    ///
-    /// Default implementation returns an error; providers that support this
-    /// should override.
-    async fn run_json_no_context(&self, _request: PromptRequest) -> Result<serde_json::Value> {
-        Err(miette!(
-            "run_json_no_context is not implemented for this provider"
-        ))
-    }
-
-    /// Execute one tool-driven agent turn and return assistant text or tool calls.
-    async fn run_agent_turn(
+    /// Complete one tool-driven agent turn.
+    async fn complete_agent_turn(
         &self,
-        _: &Context,
-        _: AgentTurnRequest,
-    ) -> Result<AgentTurnStreamResult> {
-        Err(miette!(
-            "run_agent_turn is not implemented for this provider"
-        ))
-    }
+        request: AgentTurnRequest,
+        options: ModelRequestOptions,
+    ) -> Result<AgentTurnStreamResult>;
 
-    fn token_usage_info(&self) -> Option<TokenUsageInfo> {
-        None
-    }
+    /// Static request budget limits advertised by this model configuration.
+    fn request_budget_limits(&self) -> RequestBudgetLimits;
 
-    fn model_name(&self) -> Option<String> {
-        None
-    }
+    /// Current process-local token accounting for this provider.
+    fn token_usage_info(&self) -> TokenUsageInfo;
+
+    /// The model identifier sent to the upstream provider.
+    fn model_name(&self) -> String;
 }

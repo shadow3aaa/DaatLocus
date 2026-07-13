@@ -72,6 +72,121 @@ pub fn validate_model_facing_schema(schema: &Value) -> Result<()> {
     }
 }
 
+pub fn validate_value_against_schema(value: &Value, schema: &Value, label: &str) -> Result<()> {
+    let object = schema
+        .as_object()
+        .ok_or_else(|| miette!("{label} schema must be a JSON object"))?;
+
+    if let Some(enum_values) = object.get("enum") {
+        let enum_values = enum_values
+            .as_array()
+            .ok_or_else(|| miette!("{label}.enum must be an array"))?;
+        if !enum_values.iter().any(|candidate| candidate == value) {
+            return Err(miette!("{label} must match one of the allowed enum values"));
+        }
+    }
+
+    let type_names = value_schema_type_names(object, label)?;
+    if value.is_null() {
+        if type_names.iter().any(|type_name| type_name == "null") {
+            return Ok(());
+        }
+        return Err(miette!("{label} must not be null"));
+    }
+
+    let mut matched = false;
+    for type_name in &type_names {
+        match type_name.as_str() {
+            "object" if value.is_object() => {
+                validate_object_instance(value, object, label)?;
+                matched = true;
+            }
+            "array" if value.is_array() => {
+                validate_array_instance(value, object, label)?;
+                matched = true;
+            }
+            "string" if value.is_string() => matched = true,
+            "integer" if value.as_i64().is_some() || value.as_u64().is_some() => matched = true,
+            "number" if value.is_number() => matched = true,
+            "boolean" if value.is_boolean() => matched = true,
+            _ => {}
+        }
+    }
+    if matched {
+        Ok(())
+    } else if type_names.len() == 1 {
+        Err(miette!("{label} must be a {}", type_names[0]))
+    } else {
+        Err(miette!(
+            "{label} must match schema type {}",
+            type_names.join(" or ")
+        ))
+    }
+}
+
+fn value_schema_type_names(object: &Map<String, Value>, label: &str) -> Result<Vec<String>> {
+    let type_value = object
+        .get("type")
+        .ok_or_else(|| miette!("{label}.type is required"))?;
+    match type_value {
+        Value::String(value) => Ok(vec![value.clone()]),
+        Value::Array(values) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .as_str()
+                    .map(ToString::to_string)
+                    .ok_or_else(|| miette!("{label}.type[{index}] must be a string"))
+            })
+            .collect(),
+        _ => Err(miette!("{label}.type must be a string or string array")),
+    }
+}
+
+fn validate_object_instance(value: &Value, schema: &Map<String, Value>, label: &str) -> Result<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| miette!("{label} must be an object"))?;
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .ok_or_else(|| miette!("{label}.properties must be an object"))?;
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| miette!("{label}.required must be an array"))?;
+
+    for field in required {
+        let field = field
+            .as_str()
+            .ok_or_else(|| miette!("{label}.required entries must be strings"))?;
+        if !object.contains_key(field) {
+            return Err(miette!("{label}.{field} is required"));
+        }
+    }
+    for (key, field_value) in object {
+        let Some(field_schema) = properties.get(key) else {
+            return Err(miette!("{label}.{key} is not allowed"));
+        };
+        validate_value_against_schema(field_value, field_schema, &format!("{label}.{key}"))?;
+    }
+    Ok(())
+}
+
+fn validate_array_instance(value: &Value, schema: &Map<String, Value>, label: &str) -> Result<()> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| miette!("{label} must be an array"))?;
+    let item_schema = schema
+        .get("items")
+        .ok_or_else(|| miette!("{label}.items is required"))?;
+    for (index, item) in items.iter().enumerate() {
+        validate_value_against_schema(item, item_schema, &format!("{label}[{index}]"))?;
+    }
+    Ok(())
+}
+
 pub fn string_schema() -> Value {
     json!({ "type": "string" })
 }

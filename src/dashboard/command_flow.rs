@@ -9,12 +9,16 @@ use super::command_registry::{
     app_status_command_accepts, clear_command_accepts, dashboard_command_is_known,
     dashboard_commands, debug_command_accepts, quit_command_accepts, restart_command_accepts,
     skills_command_accepts, sleep_command_accepts, status_command_accepts,
+    workflows_command_accepts,
 };
 use super::command_text::{
     fallback_output, render_app_status_text, render_available_app_statuses, render_skill_detail,
     render_skills_list, resolve_skill_target, skill_status_description, truncate_command_text,
 };
-use super::{DashboardAction, DashboardActionResult, DashboardControlCommand, DashboardState};
+use super::{
+    DashboardAction, DashboardActionResult, DashboardControlCommand, DashboardState,
+    DashboardWorkflowLoadError, DashboardWorkflowSummary,
+};
 use crate::{
     openskills::OpenSkillDashboardSummary,
     reasoning::turn_compile::{
@@ -64,6 +68,8 @@ pub(super) fn command_panel_for_input(
         [verb, target] if app_status_command_accepts(verb) => {
             Some(app_status_detail_panel(context.state, target))
         }
+        [verb] if workflows_command_accepts(verb) => Some(workflows_command_panel(context.state)),
+        [verb, ..] if workflows_command_accepts(verb) => None,
         ["skills"] => Some(skills_command_panel(context.state)),
         ["skills", "list"] | ["skills", "show"] => Some(CommandPanel::SkillsList(
             SkillsListPanel::from_state(context.state),
@@ -170,6 +176,7 @@ pub(crate) fn execute_control_command(
         [verb, target] if app_status_command_accepts(verb) => render_app_status_text(state, target),
         ["sleep"] => "available actions: status, run".to_string(),
         ["sleep", "status"] => fallback_output(&state.sleep_status_output),
+        [verb] if workflows_command_accepts(verb) => render_workflows_list(state),
         ["skills"] | ["skills", "list"] | ["skills", "show"] => render_skills_list(state),
         ["skills", "show", target] => render_skill_detail(state, target),
         [verb, ..] if dashboard_command_is_known(verb) => {
@@ -318,6 +325,104 @@ fn app_status_detail_panel(state: &DashboardState, target: &str) -> CommandPanel
     let output = render_app_status_text(state, target);
     let target = target.trim().to_ascii_lowercase();
     detail_panel(format!("APP STATUS {}", target.to_uppercase()), output)
+}
+
+fn workflows_command_panel(state: &DashboardState) -> CommandPanel {
+    let mut items = state
+        .workflows
+        .iter()
+        .map(workflow_selection_item)
+        .collect::<Vec<_>>();
+    items.extend(
+        state
+            .workflow_errors
+            .iter()
+            .map(workflow_error_selection_item),
+    );
+    if items.is_empty() {
+        return detail_panel(
+            "WORKFLOWS",
+            "No Lua workflows are loaded. Add a .lua file under the workflows directory, then reload the session.",
+        );
+    }
+    CommandPanel::Selection(CommandSelectionPanel {
+        title: "Workflows".to_string(),
+        subtitle: Some(format!(
+            "{} loaded workflow{}, {} load error{}",
+            state.workflows.len(),
+            if state.workflows.len() == 1 { "" } else { "s" },
+            state.workflow_errors.len(),
+            if state.workflow_errors.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+        )),
+        items,
+        selected: 0,
+        scroll: 0,
+    })
+}
+
+fn workflow_selection_item(workflow: &DashboardWorkflowSummary) -> CommandSelectionItem {
+    CommandSelectionItem {
+        name: workflow.id.clone(),
+        description: format!(
+            "{} input field{}",
+            workflow.input_fields.len(),
+            if workflow.input_fields.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+        ),
+        action: CommandSelectionAction::OpenWorkflowForm {
+            workflow: workflow.clone(),
+        },
+        disabled: false,
+    }
+}
+
+fn workflow_error_selection_item(error: &DashboardWorkflowLoadError) -> CommandSelectionItem {
+    CommandSelectionItem {
+        name: format!("Load error: {}", error.path),
+        description: truncate_command_text(&error.message, 100),
+        action: CommandSelectionAction::ShowDetail {
+            title: "WORKFLOW LOAD ERROR".to_string(),
+            text: format!("Path: {}\nError: {}", error.path, error.message),
+        },
+        disabled: false,
+    }
+}
+
+fn render_workflows_list(state: &DashboardState) -> String {
+    let mut lines = state
+        .workflows
+        .iter()
+        .map(|workflow| {
+            format!(
+                "{} — {} input field{}",
+                workflow.id,
+                workflow.input_fields.len(),
+                if workflow.input_fields.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    lines.extend(
+        state
+            .workflow_errors
+            .iter()
+            .map(|error| format!("load error: {} — {}", error.path, error.message)),
+    );
+    if lines.is_empty() {
+        "No Lua workflows are loaded.".to_string()
+    } else {
+        lines.join("\n")
+    }
 }
 
 fn skills_command_panel(state: &DashboardState) -> CommandPanel {
@@ -569,6 +674,12 @@ fn command_extra_argument_feedback(parts: &[&str]) -> Option<CommandFeedback> {
             title: "SKILLS".to_string(),
             message: format!("skills {} accepts exactly one skill name.", parts[1]),
             detail: Some(format!("usage: /skills {} <skill>", parts[1])),
+            level: CommandFeedbackLevel::Error,
+        }),
+        [verb, ..] if workflows_command_accepts(verb) && parts.len() > 1 => Some(CommandFeedback {
+            title: "WORKFLOWS".to_string(),
+            message: "Choose a workflow from the /workflows panel.".to_string(),
+            detail: Some("usage: /workflows".to_string()),
             level: CommandFeedbackLevel::Error,
         }),
         [verb, ..] if app_status_command_accepts(verb) && parts.len() > 2 => {

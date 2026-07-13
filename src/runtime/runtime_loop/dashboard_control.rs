@@ -2,6 +2,7 @@ use super::sleep_driver::{SleepTrigger, start_background_sleep};
 use super::*;
 use crate::daemon::DaemonControlCommand;
 use crate::openskills::{reload_openskills_for_runtime, set_openskill_auto_use};
+use crate::workflow::{WorkflowInvocation, invoke as invoke_workflow};
 
 pub(crate) async fn handle_dashboard_control_command(
     context: &mut Context,
@@ -54,7 +55,48 @@ pub(crate) async fn handle_dashboard_control_command(
         }
         DashboardControlCommand::ReloadSkills => {
             context.openskills = reload_openskills_for_runtime(&context.execution_cwd);
-            set_runtime_status(Some(tx), RuntimeStatusLevel::Info, "skills reloaded");
+            context.workflows.reload();
+            set_runtime_status(
+                Some(tx),
+                RuntimeStatusLevel::Info,
+                "skills and workflows reloaded",
+            );
+            sync_dashboard_state(context, tx, sleep_status, None);
+        }
+        DashboardControlCommand::RunWorkflow { workflow_id, input } => {
+            set_runtime_status(
+                Some(tx),
+                RuntimeStatusLevel::Info,
+                format!("running workflow `{workflow_id}`"),
+            );
+            sync_dashboard_state(context, tx, sleep_status, None);
+            let result = invoke_workflow(context, WorkflowInvocation { workflow_id, input }).await;
+            match result {
+                Ok(result) => {
+                    let level = match result.status {
+                        crate::workflow::WorkflowInvocationStatus::Completed => {
+                            RuntimeStatusLevel::Info
+                        }
+                        crate::workflow::WorkflowInvocationStatus::Failed
+                        | crate::workflow::WorkflowInvocationStatus::Interrupted => {
+                            RuntimeStatusLevel::Error
+                        }
+                    };
+                    crate::runtime::runtime_loop::append_workflow_activity_event(
+                        context, tx, &result,
+                    );
+                    set_runtime_status(
+                        Some(tx),
+                        level,
+                        format!("workflow `{}`: {}", result.workflow_id, result.message),
+                    );
+                }
+                Err(err) => set_runtime_status(
+                    Some(tx),
+                    RuntimeStatusLevel::Error,
+                    format!("workflow invocation failed: {err}"),
+                ),
+            }
             sync_dashboard_state(context, tx, sleep_status, None);
         }
         DashboardControlCommand::SetSkillAutoUse { path, enabled } => {

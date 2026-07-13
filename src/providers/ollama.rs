@@ -13,12 +13,8 @@ use tracing::warn;
 
 use crate::{
     config::ModelConfig,
-    context::Context,
-    context_budget::{
-        ContextBudgetExceededError, RequestBudgetLimits, estimate_agent_turn_request,
-        estimate_prompt_request,
-    },
-    core::{Llm, TokenUsage, TokenUsageInfo},
+    context_budget::{ContextBudgetExceededError, RequestBudgetLimits},
+    core::{ModelProvider, ModelRequestOptions, TokenUsage, TokenUsageInfo},
     dsml_repair,
     model_catalog::catalog_model_capacity,
     providers::io::{
@@ -511,11 +507,11 @@ impl OllamaClient {
 
     async fn call_ollama_stream(
         &self,
-        context: &Context,
+        options: &ModelRequestOptions,
         payload: &Value,
-        budget: &crate::context_budget::RequestBudgetBreakdown,
         request: &AgentTurnRequest,
     ) -> Result<AgentTurnStreamResult> {
+        let budget = &options.budget;
         let request_context = summarize_agent_turn_request(request, Some(budget));
         let url = self.chat_url();
         let allowed_tool_names: HashSet<String> =
@@ -668,14 +664,14 @@ impl OllamaClient {
             }
 
             return self
-                .parse_ollama_stream(context, response, &allowed_tool_names)
+                .parse_ollama_stream(options.progress.as_ref(), response, &allowed_tool_names)
                 .await;
         }
     }
 
     async fn parse_ollama_stream(
         &self,
-        context: &Context,
+        progress: Option<&crate::core::ModelProgressSink>,
         response: reqwest::Response,
         allowed_tool_names: &HashSet<String>,
     ) -> Result<AgentTurnStreamResult> {
@@ -757,7 +753,7 @@ impl OllamaClient {
                         >= 64
                         || last_assistant_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !content.trim().is_empty() {
-                        context.emit_live_assistant_progress(&content);
+                        progress.map(|progress| progress.emit_assistant_content(content.clone()));
                         last_assistant_progress_emit_at = Instant::now();
                         last_assistant_progress_char_len = content.chars().count();
                     }
@@ -772,7 +768,7 @@ impl OllamaClient {
                         >= 64
                         || last_reasoning_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !thinking.trim().is_empty() {
-                        context.emit_live_reasoning_progress(&thinking);
+                        progress.map(|progress| progress.emit_reasoning_content(thinking.clone()));
                         last_reasoning_progress_emit_at = Instant::now();
                         last_reasoning_progress_char_len = thinking.chars().count();
                     }
@@ -813,15 +809,8 @@ impl OllamaClient {
             }
         }
 
-        if !thinking.trim().is_empty()
-            && thinking.chars().count() != last_reasoning_progress_char_len
-        {
-            context.emit_live_reasoning_progress(&thinking);
-        }
-        if !content.trim().is_empty() && content.chars().count() != last_assistant_progress_char_len
-        {
-            context.emit_live_assistant_progress(&content);
-        }
+        progress.map(|progress| progress.emit_reasoning_content(thinking.clone()));
+        progress.map(|progress| progress.emit_assistant_content(content.clone()));
         if let Some(usage) = last_usage {
             self.record_usage(Some(usage));
         }
@@ -884,20 +873,14 @@ impl OllamaClient {
 }
 
 #[async_trait]
-impl Llm for OllamaClient {
-    async fn run_json(&self, _context: &Context, request: PromptRequest) -> Result<Value> {
-        let budget = estimate_prompt_request(&request, self.request_budget_limits());
-        if !budget.within_context_window() {
-            return Err(ContextBudgetExceededError::for_request(
-                "prompt request",
-                &self.model,
-                &budget,
-                None,
-            )
-            .into());
-        }
-
-        let request_context = summarize_prompt_request(&request, Some(&budget));
+impl ModelProvider for OllamaClient {
+    async fn complete_json(
+        &self,
+        request: PromptRequest,
+        options: ModelRequestOptions,
+    ) -> Result<Value> {
+        let budget = &options.budget;
+        let request_context = summarize_prompt_request(&request, Some(budget));
         let output_schema = request.output_schema.clone();
         let mut payload = json!({
             "model": self.model,
@@ -937,27 +920,11 @@ impl Llm for OllamaClient {
         Ok(value)
     }
 
-    async fn run_agent_turn(
+    async fn complete_agent_turn(
         &self,
-        context: &Context,
         request: AgentTurnRequest,
+        options: ModelRequestOptions,
     ) -> Result<AgentTurnStreamResult> {
-        let budget = estimate_agent_turn_request(
-            &request.messages,
-            &request.tools,
-            self.request_budget_limits(),
-        )
-        .with_calibrated_input_tokens(&context.token_estimate_baseline);
-        if !budget.within_context_window() {
-            return Err(ContextBudgetExceededError::for_request(
-                "agent turn",
-                &self.model,
-                &budget,
-                None,
-            )
-            .into());
-        }
-
         let strip_images = self.vision_disabled();
         let messages = if strip_images {
             agent_turn_request_to_ollama_messages_stripped(&request)
@@ -969,10 +936,9 @@ impl Llm for OllamaClient {
             .iter()
             .map(|tool| {
                 let (description, parameters) = match &tool.input_spec {
-                    AgentToolInputSpec::JsonSchema { schema } => (
-                        tool.description.clone(),
-                        schema.clone(),
-                    ),
+                    AgentToolInputSpec::JsonSchema { schema } => {
+                        (tool.description.clone(), schema.clone())
+                    }
                     AgentToolInputSpec::FreeformGrammar {
                         syntax,
                         definition,
@@ -1018,16 +984,23 @@ impl Llm for OllamaClient {
             self.max_completion_tokens,
         );
 
-        self.call_ollama_stream(context, &payload, &budget, &request)
-            .await
+        self.call_ollama_stream(&options, &payload, &request).await
     }
 
-    fn token_usage_info(&self) -> Option<TokenUsageInfo> {
-        self.token_usage.lock().ok().map(|info| info.clone())
+    fn request_budget_limits(&self) -> RequestBudgetLimits {
+        self.request_budget_limits()
     }
 
-    fn model_name(&self) -> Option<String> {
-        Some(self.model.clone())
+    fn token_usage_info(&self) -> TokenUsageInfo {
+        self.token_usage
+            .lock()
+            .ok()
+            .map(|info| info.clone())
+            .unwrap_or_default()
+    }
+
+    fn model_name(&self) -> String {
+        self.model.clone()
     }
 }
 

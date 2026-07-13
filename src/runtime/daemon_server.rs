@@ -445,6 +445,7 @@ async fn run_daemon_serve_inner(
                         tracing::warn!("manager received interrupt command, but runtime turns are session-scoped");
                     }
                     DashboardControlCommand::ReloadSkills
+                    | DashboardControlCommand::RunWorkflow { .. }
                     | DashboardControlCommand::SetSkillAutoUse { .. } => {
                         tracing::warn!("manager received skills command, but skills state is session-scoped");
                     }

@@ -15,9 +15,9 @@ use super::{
     DashboardContextCompositionSnapshot, DashboardPendingUserInput, DashboardPlanStep,
     DashboardRuntimeActivity, DashboardRuntimeActivityStatus, DashboardRuntimeOptimizationSnapshot,
     DashboardRuntimeStatusLevel, DashboardSkillOptimizationSnapshot, DashboardState,
-    DashboardStatusCommandSnapshot, DashboardTokenUsageSnapshot,
-    activity_events_from_history_items, dashboard_agent_name, render_activity_from_messages,
-    sync_dashboard_runtime_status_live_cell,
+    DashboardStatusCommandSnapshot, DashboardTokenUsageSnapshot, DashboardWorkflowInputField,
+    DashboardWorkflowLoadError, DashboardWorkflowSummary, activity_events_from_history_items,
+    dashboard_agent_name, render_activity_from_messages, sync_dashboard_runtime_status_live_cell,
 };
 
 /// Sleep-related constants used in dashboard rendering.
@@ -43,6 +43,8 @@ pub fn sync_dashboard_state(
         state.app_status_outputs = render_app_status_outputs_for_dashboard(context);
         state.skills = context.openskills.dashboard_summaries();
         state.skill_errors = context.openskills.dashboard_errors();
+        state.workflows = dashboard_workflow_summaries(context);
+        state.workflow_errors = dashboard_workflow_errors(context);
         state.pending_access_requests = context.telegram_acl.pending_requests();
         state.pending_user_inputs = pending_user_inputs_for_dashboard(context);
         state.activity_events = if state.activity_history.items.is_empty() {
@@ -66,6 +68,50 @@ pub fn sync_dashboard_state(
         state.skill_optimization = skill_optimization_snapshot_for_dashboard(sleep_status);
         state.context_composition = context_composition_snapshot_for_dashboard(context);
     });
+}
+
+pub fn dashboard_workflow_summaries(context: &Context) -> Vec<DashboardWorkflowSummary> {
+    context
+        .workflows
+        .definitions()
+        .map(|workflow| DashboardWorkflowSummary {
+            id: workflow.id.clone(),
+            path: workflow.path.display().to_string(),
+            input_schema: workflow.input_schema.clone(),
+            output_schema: workflow.output_schema.clone(),
+            input_fields: workflow_input_fields(&workflow.input_schema),
+        })
+        .collect()
+}
+
+pub fn dashboard_workflow_errors(context: &Context) -> Vec<DashboardWorkflowLoadError> {
+    context
+        .workflows
+        .errors()
+        .iter()
+        .map(|error| DashboardWorkflowLoadError {
+            path: error.path.display().to_string(),
+            message: error.message.clone(),
+        })
+        .collect()
+}
+
+fn workflow_input_fields(schema: &serde_json::Value) -> Vec<DashboardWorkflowInputField> {
+    let mut fields = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .map(|properties| {
+            properties
+                .iter()
+                .map(|(name, schema)| DashboardWorkflowInputField {
+                    name: name.clone(),
+                    schema: schema.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    fields.sort_by(|left, right| left.name.cmp(&right.name));
+    fields
 }
 
 pub fn current_plan_step_for_dashboard(context: &Context) -> Option<DashboardPlanStep> {
@@ -99,16 +145,10 @@ fn dashboard_plan_status(step: &PlanStep) -> String {
 
 pub fn token_usage_snapshot_for_dashboard(context: &Context) -> DashboardTokenUsageSnapshot {
     DashboardTokenUsageSnapshot {
-        main: visible_token_usage(context.llm.token_usage_info()),
-        main_model: context
-            .llm
-            .model_name()
-            .or_else(|| Some(context.config.main_model_config().model_id.clone())),
-        judge: visible_token_usage(context.efficient_llm.token_usage_info()),
-        judge_model: context
-            .efficient_llm
-            .model_name()
-            .or_else(|| Some(context.config.efficient_model_config().model_id.clone())),
+        main: visible_token_usage(Some(context.model_provider.token_usage_info())),
+        main_model: Some(context.model_provider.model_name()),
+        judge: visible_token_usage(Some(context.efficient_model_provider.token_usage_info())),
+        judge_model: Some(context.efficient_model_provider.model_name()),
         efficient_model: Some(context.config.efficient_model_config().model_id.clone()),
     }
 }
@@ -166,14 +206,11 @@ pub fn render_dashboard_footer_context(
     context: &Context,
     estimated_input_tokens: Option<usize>,
 ) -> String {
-    let model = context
-        .llm
-        .model_name()
-        .unwrap_or_else(|| context.config.main_model_config().model_id.clone());
+    let model = context.model_provider.model_name();
     let effective_window = context
-        .config
-        .main_model_config()
-        .effective_context_window_tokens()
+        .model_provider
+        .request_budget_limits()
+        .context_window_tokens
         .max(1);
     let worked_prefix = if let Some(started_at) = context.runtime_turn_started_at {
         let elapsed = started_at.elapsed().as_secs();
@@ -181,12 +218,7 @@ pub fn render_dashboard_footer_context(
     } else {
         String::new()
     };
-    let Some(info) = context.llm.token_usage_info() else {
-        return format!(
-            "{worked_prefix}{}",
-            render_footer_context_with_usage(&model, estimated_input_tokens, effective_window)
-        );
-    };
+    let info = context.model_provider.token_usage_info();
     let used = usize::try_from(info.last_token_usage.input_tokens.max(0)).unwrap_or(0);
     let calibrated = estimated_input_tokens.map(|est| {
         context
@@ -240,24 +272,6 @@ pub fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String
             (key, lines.join("\n"))
         })
         .collect()
-}
-
-fn render_footer_context_with_usage(
-    model: &str,
-    estimated_input_tokens: Option<usize>,
-    effective_window: usize,
-) -> String {
-    match estimated_input_tokens {
-        Some(used) => format!(
-            "{model} · ~{}/{} used",
-            format_compact_tokens(used),
-            format_compact_tokens(effective_window)
-        ),
-        None => format!(
-            "{model} · {} window",
-            format_compact_tokens(effective_window)
-        ),
-    }
 }
 
 fn format_compact_tokens(tokens: usize) -> String {
@@ -625,18 +639,16 @@ fn render_status_usage_lines(context: &Context) -> Vec<String> {
     }
 
     let mut lines = Vec::new();
-    for (label, llm) in [
-        ("main", context.llm.as_ref()),
-        ("efficient", context.efficient_llm.as_ref()),
+    for (label, model_provider) in [
+        ("main", context.model_provider.as_ref()),
+        ("efficient", context.efficient_model_provider.as_ref()),
     ] {
-        let Some(info) = llm.token_usage_info() else {
-            continue;
-        };
+        let info = model_provider.token_usage_info();
         if info.total_token_usage.is_zero() {
             continue;
         }
 
-        let model = llm.model_name().unwrap_or_else(|| "<unknown>".to_string());
+        let model = model_provider.model_name();
         lines.push(format!("  {label} · {model}"));
 
         // Context pressure line — per-turn input vs window

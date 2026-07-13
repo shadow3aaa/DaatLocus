@@ -816,6 +816,11 @@ fn summarize_activity_event(event: &SessionActivityEvent) -> String {
             .unwrap_or_else(|| "reply submitted".to_string()),
         SessionActivityEvent::Thinking(data) => summarize_runtime_inline_text(&data.content),
         SessionActivityEvent::RuntimeStatus(data) => summarize_runtime_inline_text(&data.label),
+        SessionActivityEvent::Workflow(data) => format!(
+            "workflow {}: {:?}",
+            summarize_runtime_inline_text(&data.workflow_id),
+            data.status
+        ),
     }
 }
 

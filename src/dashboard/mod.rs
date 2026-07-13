@@ -27,11 +27,11 @@ mod view_state;
 pub(crate) use cells::sync_dashboard_runtime_status_live_cell;
 pub use cells::{
     ActivityFeedRenderArgs, CachedActivityLines, DashboardActivityEvent, LiveActivityEvent,
-    ReducedMotion, SessionActivityEvent, activity_event_from_tool_call_activity_event,
-    activity_events_from_history_items, apply_activity_event, assistant_activity_cell,
-    render_activity_feed_cached, render_activity_from_messages,
-    terminal_activity_event_from_terminal_data, thinking_activity_cell,
-    user_activity_cell_from_event,
+    ReducedMotion, SessionActivityEvent, WorkflowActivityData,
+    activity_event_from_tool_call_activity_event, activity_events_from_history_items,
+    apply_activity_event, assistant_activity_cell, render_activity_feed_cached,
+    render_activity_from_messages, terminal_activity_event_from_terminal_data,
+    thinking_activity_cell, user_activity_cell_from_event,
 };
 pub(crate) use command_flow::{dashboard_command_is_manager_owned, execute_control_command};
 pub use commands::{
@@ -274,6 +274,27 @@ impl Default for DashboardRuntimeActivity {
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
+pub struct DashboardWorkflowInputField {
+    pub name: String,
+    pub schema: serde_json::Value,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct DashboardWorkflowSummary {
+    pub id: String,
+    pub path: String,
+    pub input_schema: serde_json::Value,
+    pub output_schema: serde_json::Value,
+    pub input_fields: Vec<DashboardWorkflowInputField>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct DashboardWorkflowLoadError {
+    pub path: String,
+    pub message: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DashboardPendingUserInput {
     pub event_id: String,
     pub origin: String,
@@ -301,6 +322,9 @@ pub struct DashboardState {
     #[serde(default)]
     pub skill_errors: Vec<OpenSkillDashboardError>,
     #[serde(default)]
+    pub workflows: Vec<DashboardWorkflowSummary>,
+    #[serde(default)]
+    pub workflow_errors: Vec<DashboardWorkflowLoadError>,
     pub pending_access_requests: Vec<PendingAccessRequest>,
     #[serde(default)]
     pub pending_user_inputs: Vec<DashboardPendingUserInput>,
@@ -1304,7 +1328,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_commands_are_not_manager_owned() {
+    fn dashboard_commands_route_session_work_and_manager_restart() {
         assert!(!dashboard_command_is_manager_owned("/status"));
         assert!(!dashboard_command_is_manager_owned("/skills reload"));
 
@@ -1312,6 +1336,12 @@ mod tests {
             &DashboardAction::InterruptRuntime
         ));
         assert!(!dashboard_action_is_manager_owned(
+            &DashboardAction::RunWorkflow {
+                workflow_id: "investigate".to_string(),
+                input: serde_json::json!({}),
+            }
+        ));
+        assert!(dashboard_action_is_manager_owned(
             &DashboardAction::RestartDaemon
         ));
     }

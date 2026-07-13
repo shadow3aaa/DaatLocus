@@ -21,6 +21,7 @@ use super::command_input::{
 use super::command_panels::{
     CommandDetailPanel, CommandFeedback, CommandFeedbackLevel, CommandPanel, CommandSelectionPanel,
     DashboardCommandContext, PendingUserInputQueuePanel, SkillsListPanel, SkillsTogglePanel,
+    WorkflowFormPanel,
 };
 use super::command_registry::dashboard_command_is_known;
 use super::command_text::{truncate_command_text, truncate_display_width};
@@ -52,6 +53,13 @@ impl CommandPanel {
                 let rows = panel.visible_indices().len().min(8) as u16;
                 let feedback_rows = command_feedback_row_count(panel.feedback.as_ref());
                 5u16.saturating_add(rows)
+                    .saturating_add(feedback_rows)
+                    .clamp(6, 16)
+            }
+            CommandPanel::WorkflowForm(panel) => {
+                let rows = panel.workflow.input_fields.len().min(6) as u16;
+                let feedback_rows = command_feedback_row_count(panel.feedback.as_ref());
+                4u16.saturating_add(rows)
                     .saturating_add(feedback_rows)
                     .clamp(6, 16)
             }
@@ -150,6 +158,7 @@ pub(super) fn render_command_panel(f: &mut Frame, area: Rect, panel: &CommandPan
         CommandPanel::Selection(selection) => render_selection_panel(f, inner, selection),
         CommandPanel::SkillsList(skills) => render_skills_list_panel(f, inner, skills),
         CommandPanel::SkillsToggle(skills) => render_skills_toggle_panel(f, inner, skills),
+        CommandPanel::WorkflowForm(form) => render_workflow_form_panel(f, inner, form),
         CommandPanel::PendingUserInputQueue(panel) => {
             render_pending_user_input_queue_panel(f, inner, panel)
         }
@@ -259,6 +268,27 @@ fn command_panel_copy_lines(panel: &CommandPanel) -> (Vec<String>, u16) {
                             item.scope,
                             item.status_description()
                         ))
+                    }),
+            );
+            (lines, 0)
+        }
+        CommandPanel::WorkflowForm(panel) => {
+            let mut lines = vec![format!("Workflow {}", panel.workflow.id)];
+            lines.push("Enter values, then press Enter to run.".to_string());
+            lines.extend(
+                panel
+                    .workflow
+                    .input_fields
+                    .iter()
+                    .enumerate()
+                    .skip(panel.scroll)
+                    .map(|(index, field)| {
+                        let value = panel
+                            .values
+                            .get(index)
+                            .map(String::as_str)
+                            .unwrap_or_default();
+                        format!("{} = {}", field.name, value)
                     }),
             );
             (lines, 0)
@@ -556,6 +586,81 @@ fn pending_user_input_preview_lines(
         )]));
     }
     lines
+}
+
+fn render_workflow_form_panel(f: &mut Frame, area: Rect, panel: &WorkflowFormPanel) {
+    let subtitle = if panel.workflow.input_fields.is_empty() {
+        "No input fields. Press Enter to run.".to_string()
+    } else {
+        format!("{} typed input field(s)", panel.workflow.input_fields.len())
+    };
+    let mut rest = render_panel_title(
+        f,
+        area,
+        &format!("Workflow {}", panel.workflow.id),
+        Some(&subtitle),
+    );
+    if rest.height == 0 {
+        return;
+    }
+    if let Some(feedback) = panel.feedback.as_ref() {
+        let rows = command_feedback_row_count(Some(feedback)).min(rest.height);
+        if rows > 0 {
+            render_command_feedback(
+                f,
+                Rect {
+                    height: rows,
+                    ..rest
+                },
+                feedback,
+            );
+            rest.y = rest.y.saturating_add(rows);
+            rest.height = rest.height.saturating_sub(rows);
+        }
+    }
+    if rest.height == 0 {
+        return;
+    }
+    let lines = panel
+        .workflow
+        .input_fields
+        .iter()
+        .enumerate()
+        .skip(panel.scroll)
+        .take(rest.height as usize)
+        .map(|(index, field)| {
+            let selected = index == panel.selected;
+            let marker = if selected { "›" } else { " " };
+            let value = panel
+                .values
+                .get(index)
+                .map(String::as_str)
+                .unwrap_or_default();
+            let name_style = if selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let value_style = if selected {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
+                Span::styled(field.name.clone(), name_style),
+                Span::raw(" = "),
+                Span::styled(value.to_string(), value_style),
+            ])
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        rest,
+    );
 }
 
 fn render_pending_user_input_queue_panel(
