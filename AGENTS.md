@@ -1127,8 +1127,8 @@ Therefore, when adding an agent-facing interface, first decide which layer it be
 `Workflow` is a first-class executable orchestration program for multiple
 isolated agent workers. It is not an `App`, `Event`, `PendingWork`, `Skill`, or
 the removed workflow/primitive mechanism. A workflow may use skills as
-instructions and runtime/app tools through a worker's explicitly granted
-capabilities, but neither relationship changes the object boundary.
+instructions and host-provided App tools, but neither relationship changes the
+object boundary.
 
 A workflow is one Lua 5.4 source file in the workflow directory:
 
@@ -1138,10 +1138,11 @@ A workflow is one Lua 5.4 source file in the workflow directory:
 
 The filename stem is the workflow id. There is no `workflow.toml`, manifest,
 sidecar metadata, profile catalog, or predeclared job/task vocabulary. The Lua
-file itself declares its input/output schemas, worker capability requests,
-extra tools, and control flow. Dynamic schemas from a workflow are external
-model-facing schemas: validate them when the workflow is loaded against the
-portable schema rules in this document, rather than silently rewriting them.
+file itself declares its input/output schemas, worker instructions, local tools,
+and control flow. The host automatically provides allowed App operations to
+workers. Dynamic schemas from a workflow are external model-facing schemas:
+validate them when the workflow is loaded against the portable schema rules in
+this document, rather than silently rewriting them.
 
 ### Workflow Entry Points
 
@@ -1189,7 +1190,7 @@ The intended small Lua surface is:
 ```lua
 workflow.define({ input = InputSchema, output = OutputSchema,
   run = function(input, ctx) ... end })
-workflow.agent({ model, input, output, instruction, capabilities, extra_tools })
+workflow.agent({ model, input, output, instruction, extra_tools })
 workflow.await(handle)
 workflow.await_all(handles)
 workflow.tool({ name, input, output, run })
@@ -1197,21 +1198,22 @@ workflow.tool({ name, input, output, run })
 
 `workflow.agent(...)` creates an isolated worker specification. The script
 passes the actual task input to the resulting handle; worker outputs are
-validated against the declared output schema before Lua receives them.
-`workflow.tool(...)` defines a local workflow tool with declared schemas; it is
-available only where the workflow explicitly grants it. `capabilities` requests
-runtime/app capabilities and `extra_tools` adds explicitly declared tools. The
-host owns validation, routing, lifecycle, cancellation, result transport, and
-all unavoidable policy enforcement; it must not substitute hidden role
-profiles, task ids, node ids, budgets, thinking levels, timeouts, retries, or
-pre-enumerated jobs for script decisions. Opaque run/node identifiers may exist
-internally for scheduling and journaling but are not script-visible API.
+validated against the declared output schema before Lua receives them. The host
+automatically exposes allowed installed App operations to each worker; the
+script does not enumerate App tool names. `workflow.tool(...)` defines a local
+workflow tool with declared schemas; it is available only where the workflow
+explicitly grants it through `extra_tools`. The host owns validation, routing,
+lifecycle, cancellation, result transport, and all unavoidable policy
+enforcement; it must not substitute hidden role profiles, task ids, node ids,
+budgets, thinking levels, timeouts, retries, or pre-enumerated jobs for script
+decisions. Opaque run/node identifiers may exist internally for scheduling and
+journaling but are not script-visible API.
 
 Lua workflows are deliberately side-effectful: ordinary I/O, file operations,
 and shell execution such as `io.popen` or `os.execute` are permitted. This does
 not bypass the Session's non-bypassable `RuntimeSandboxPolicy`, workspace,
 writable-root, or process-sandbox boundaries. A script can choose its own
-control flow and requested capabilities, not escape host policy.
+control flow and local-tool grants, not escape host policy.
 
 Because arbitrary Lua can cause side effects, do not automatically replay a
 journal or restart a workflow from its beginning after interruption. Mark an
@@ -1222,24 +1224,28 @@ debugging, attribution, and result correlation, not automatic recovery.
 ### Workflow Worker Boundaries
 
 A workflow worker is an isolated agent turn. It receives only its declared
-instruction, typed input, permitted tools/capabilities, and worker-local message
-history. It must not inherit the Session main agent's full `Context`, claimed
-event ids, event-completion authority, or conversation history.
+instruction, typed input, host-provided App tools, explicitly granted
+workflow-local tools, and worker-local message history. It must not inherit the
+Session main agent's full `Context`, claimed event ids, event-completion
+authority, or conversation history.
 
-Worker tools are ordinary named, schema-validated tools. They may include
-explicitly granted app/runtime tools and workflow-local tools. Do not reuse the
-Workspace App `render_state`/`call_tool` protocol to implement workers. Build a
-worker-specific `AgentTurnRequest { messages, tools }` and route tool calls
-through a worker runtime boundary instead.
+Worker tools are ordinary named, schema-validated tools. They include allowed
+App operations supplied automatically by the host and workflow-local tools
+explicitly named in `extra_tools`. State/review helpers, static runtime tools,
+main-agent-only tools, and `finish_and_send` remain unavailable. Do not reuse
+the Workspace App `render_state`/`call_tool` protocol to implement workers.
+Build a worker-specific `AgentTurnRequest { messages, tools }` and route tool
+calls through a worker runtime boundary instead.
 
 `finish_and_send` belongs to the Session main agent's claimed-event completion
 contract and is not a worker tool. A worker completes by producing its declared
 output or a structured failure. If a worker needs an externally visible action,
-that action must be represented by an explicitly granted tool and routed through
-a host-owned completion/effect sink; do not give it a claimed event id or let it
-resolve the caller's event directly. Worker completion, progress, and failures
-must be returned to the workflow runner, then to the Session owner through an
-explicit result channel before any Session state or event disposition changes.
+that action must be represented by an available App operation or an explicitly
+granted workflow-local tool and routed through a host-owned completion/effect
+sink; do not give it a claimed event id or let it resolve the caller's event
+directly. Worker completion, progress, and failures must be returned to the
+workflow runner, then to the Session owner through an explicit result channel
+before any Session state or event disposition changes.
 
 ## Core Objects
 

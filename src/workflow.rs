@@ -230,7 +230,6 @@ struct WorkerDefinition {
     input_schema: Value,
     output_schema: Value,
     instruction: String,
-    capabilities: Vec<String>,
     extra_tools: Vec<String>,
 }
 
@@ -731,40 +730,31 @@ fn build_worker_tools(
     local_tools: &Arc<Mutex<BTreeMap<String, LocalToolDefinition>>>,
 ) -> Result<Vec<WorkerTool>> {
     let mut tools = BTreeMap::<String, WorkerTool>::new();
-    for capability in &definition.capabilities {
-        let Some((app_id, app_tool_name)) = parse_worker_app_capability(capability) else {
-            return Err(miette!(
-                "workflow capability `{capability}` is not allowed; use an explicit app tool name such as `browser__browser_snapshot`"
-            ));
-        };
-        let app_tools = context
-            .apps
-            .all_tool_specs()
-            .into_iter()
-            .find(|(candidate, _)| candidate == &app_id)
-            .map(|(_, specs)| specs)
-            .ok_or_else(|| {
-                miette!("workflow capability `{capability}` refers to an unavailable app")
-            })?;
-        let spec = app_tools
-            .into_iter()
-            .find(|spec| spec.name == app_tool_name)
-            .ok_or_else(|| {
-                miette!("workflow capability `{capability}` does not name an installed app tool")
-            })?;
-        validate_model_facing_schema(&spec.input_schema)?;
-        tools.insert(
-            capability.clone(),
-            WorkerTool {
-                name: capability.clone(),
-                description: spec.description,
-                input_schema: spec.input_schema,
-                kind: WorkerToolKind::App {
-                    owner_app_id: app_id,
-                    app_tool_name,
+    for (owner_app_id, app_tools) in context.apps.all_tool_specs() {
+        for spec in app_tools {
+            if matches!(spec.name.as_str(), "get_state" | "next_review") {
+                continue;
+            }
+            validate_model_facing_schema(&spec.input_schema)?;
+            let name = owner_app_id.mangle_tool_name(&spec.name);
+            if tools.contains_key(&name) {
+                return Err(miette!(
+                    "workflow worker App tool name `{name}` is duplicated"
+                ));
+            }
+            tools.insert(
+                name.clone(),
+                WorkerTool {
+                    name,
+                    description: spec.description,
+                    input_schema: spec.input_schema,
+                    kind: WorkerToolKind::App {
+                        owner_app_id: owner_app_id.clone(),
+                        app_tool_name: spec.name,
+                    },
                 },
-            },
-        );
+            );
+        }
     }
     let declared = local_tools
         .lock()
@@ -790,23 +780,6 @@ fn build_worker_tools(
         );
     }
     Ok(tools.into_values().collect())
-}
-
-fn parse_worker_app_capability(value: &str) -> Option<(AppId, String)> {
-    let (app_id, tool_name) = value.split_once(AppId::TOOL_NAME_SEPARATOR)?;
-    if !AppId::is_valid_name(app_id) || tool_name.trim().is_empty() {
-        return None;
-    }
-    if matches!(tool_name, "get_state" | "next_review") {
-        return None;
-    }
-    let app_id = match app_id {
-        "browser" => AppId::browser(),
-        "terminal" => AppId::terminal(),
-        "coding" => AppId::coding(),
-        _ => AppId::from_workspace_folder(app_id).ok()?,
-    };
-    Some((app_id, tool_name.to_string()))
 }
 
 async fn complete_workflow_worker_turn(
@@ -912,7 +885,7 @@ fn worker_app_result_value(result: AppToolExecutionResult) -> Value {
 
 fn worker_system_instruction(instruction: &str) -> String {
     format!(
-        "You are an isolated workflow worker. You receive only the workflow instruction, typed input, and explicitly granted tools. Do not claim or finish user events, do not assume access to session conversation history, and do not call tools outside your declared surface. When the work is complete, return exactly one JSON object matching your declared output schema with no markdown.\n\nWorkflow instruction:\n{instruction}"
+        "You are an isolated workflow worker. You receive only the workflow instruction, typed input, host-provided App tools, and explicitly declared workflow-local tools. Do not claim or finish user events, do not assume access to session conversation history, and do not call tools outside your declared surface. When the work is complete, return exactly one JSON object matching your declared output schema with no markdown.\n\nWorkflow instruction:\n{instruction}"
     )
 }
 
@@ -949,14 +922,17 @@ fn worker_definition_from_lua(lua: &Lua, table: Table) -> mlua::Result<WorkerDef
             "workflow.agent instruction must not be empty",
         ));
     }
-    let capabilities = string_list_from_lua(table.get::<Option<Table>>("capabilities")?)?;
+    if !matches!(table.get::<LuaValue>("capabilities")?, LuaValue::Nil) {
+        return Err(mlua::Error::external(
+            "workflow.agent `capabilities` has been removed; the host automatically provides allowed App tools",
+        ));
+    }
     let extra_tools = string_list_from_lua(table.get::<Option<Table>>("extra_tools")?)?;
     Ok(WorkerDefinition {
         model,
         input_schema,
         output_schema,
         instruction,
-        capabilities,
         extra_tools,
     })
 }
@@ -973,17 +949,74 @@ fn worker_definition_to_lua(lua: &Lua, definition: &WorkerDefinition) -> mlua::R
     table.set("input", lua.to_value(&definition.input_schema)?)?;
     table.set("output", lua.to_value(&definition.output_schema)?)?;
     table.set("instruction", definition.instruction.clone())?;
-    let capabilities = lua.create_table()?;
-    for capability in &definition.capabilities {
-        capabilities.push(capability.clone())?;
-    }
-    table.set("capabilities", capabilities)?;
     let extra_tools = lua.create_table()?;
     for local_tool in &definition.extra_tools {
         extra_tools.push(local_tool.clone())?;
     }
     table.set("extra_tools", extra_tools)?;
     Ok(table)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worker_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false,
+        })
+    }
+
+    fn worker_table(lua: &Lua) -> Table {
+        let table = lua.create_table().expect("create worker table");
+        let schema = lua
+            .to_value(&worker_schema())
+            .expect("serialize worker schema");
+        table
+            .set("input", schema.clone())
+            .expect("set worker input");
+        table.set("output", schema).expect("set worker output");
+        table
+            .set("instruction", "Return the required output.")
+            .expect("set worker instruction");
+        table
+    }
+
+    #[test]
+    fn worker_definition_rejects_removed_capabilities() {
+        let lua = new_lua().expect("create Lua runtime");
+        let table = worker_table(&lua);
+        let capabilities = lua.create_table().expect("create capabilities table");
+        capabilities
+            .push("browser__browser_snapshot")
+            .expect("add capability");
+        table
+            .set("capabilities", capabilities)
+            .expect("set capabilities");
+
+        let error = worker_definition_from_lua(&lua, table)
+            .expect_err("removed capabilities should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("`capabilities` has been removed")
+        );
+    }
+
+    #[test]
+    fn worker_definition_accepts_automatic_app_tools_without_capabilities() {
+        let lua = new_lua().expect("create Lua runtime");
+        let table = worker_table(&lua);
+
+        let definition = worker_definition_from_lua(&lua, table)
+            .expect("worker without capabilities should load");
+
+        assert!(definition.extra_tools.is_empty());
+    }
 }
 
 fn local_tool_definition_from_lua(lua: &Lua, table: Table) -> mlua::Result<LocalToolDefinition> {
@@ -1018,7 +1051,7 @@ fn string_list_from_lua(table: Option<Table>) -> mlua::Result<Vec<String>> {
         let value = item?;
         if value.trim().is_empty() {
             return Err(mlua::Error::external(
-                "workflow capability and local-tool names must not be empty",
+                "workflow local-tool names must not be empty",
             ));
         }
         values.insert(value);

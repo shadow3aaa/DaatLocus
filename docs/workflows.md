@@ -2,7 +2,7 @@
 
 Lua workflows are first-class executable orchestration programs for isolated
 agent workers. One workflow is one Lua 5.4 source file that declares its own
-typed input and output, worker instructions, explicitly granted capabilities,
+typed input and output, worker instructions, host-provided App tools,
 workflow-local tools, and ordinary control flow.
 
 A Workflow is deliberately distinct from the other runtime objects:
@@ -10,8 +10,8 @@ A Workflow is deliberately distinct from the other runtime objects:
 - **Workflow**: an executable, side-effectful Lua orchestration program that
   coordinates isolated worker turns and returns a typed result.
 - **App**: a long-lived, stateful capability domain such as Browser, Terminal,
-  or Coding. A worker can use an App tool only when the workflow explicitly
-  grants that exact tool.
+  or Coding. The host automatically provides a worker with allowed installed App
+  operations under their normal names and schemas.
 - **Event**: an external fact that the Session main agent must judge and
   resolve. Workers never receive a claimed event or `finish_and_send`.
 - **Skill**: reusable Markdown guidance for an agent. A skill may explain how
@@ -167,7 +167,7 @@ The supported workflow API is intentionally small:
 ```lua
 workflow.define({ input = InputSchema, output = OutputSchema,
   run = function(input, ctx) ... end })
-workflow.agent({ model, input, output, instruction, capabilities, extra_tools })
+workflow.agent({ model, input, output, instruction, extra_tools })
 workflow.await(handle)
 workflow.await_all(handles)
 workflow.tool({ name, input, output, run })
@@ -202,34 +202,26 @@ Use the runtime's portable model-facing schema dialect:
 Declare the narrowest useful schemas. They are both the interactive form and
 the main-agent tool contract.
 
-## Workers, tools, and capabilities
+## Workers and tools
 
 Each worker is an isolated agent turn. It receives only:
 
 - its `instruction` and typed input;
 - its declared `model` (`"main"` or `"efficient"`);
-- App tools named in `capabilities`; and
+- host-provided allowed App operations; and
 - local tools named in `extra_tools`.
+
+The host supplies installed App operation names, descriptions, and schemas
+automatically. Workflow authors do not list or maintain App tool names. State
+and review helpers such as `get_state` and `next_review`, static runtime tools
+such as `read_file` and `edit_file`, `finish_and_send`, and arbitrary main-agent
+tools remain unavailable to workers.
 
 It does **not** inherit the Session main agent's Context, claimed event id,
 event-completion authority, conversation history, or unrestricted tool list.
 Workers must finish by returning exactly one JSON object matching their output
 schema, with no Markdown. The host currently limits a worker to 16 model/tool
 rounds.
-
-Grant capabilities by exact installed App tool name, for example:
-
-```lua
-capabilities = {
-  "browser__browser_open_page",
-  "browser__browser_snapshot",
-}
-```
-
-Grant the least privilege needed. State and review tools such as `get_state`
-and `next_review` are not worker capabilities, and static runtime tools such
-as `read_file`, `edit_file`, `finish_and_send`, and arbitrary main-agent tools
-are not available to workers.
 
 `workflow.tool(...)` creates a named local tool. Its `run` function receives a
 validated JSON-compatible value and must return a value matching its declared
@@ -258,7 +250,7 @@ needed, and make recovery an explicit branch in your own Lua code.
    directory.
 2. Declare portable input and output schemas, then call `workflow.define` once.
 3. Give every worker a focused instruction, typed input/output, an explicit
-   model, and only the capabilities and local tools it needs.
+   model, and only the workflow-local tools it needs.
 4. Use `worker:run(...)`, `await`, and `await_all` for the control flow that
    belongs in Lua; keep Session event completion outside the workflow.
 5. Treat file and shell operations as real side effects under the sandbox;

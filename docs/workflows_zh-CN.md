@@ -1,14 +1,14 @@
 # Lua 工作流
 
 Lua 工作流是用于编排隔离 agent worker 的一等、可执行程序。每个工作流都是一个 Lua 5.4
-源文件：它自行声明类型化输入和输出、worker 指令、显式授予的能力、工作流局部工具以及普通的
+源文件：它自行声明类型化输入和输出、worker 指令、由宿主提供的 App 工具、工作流局部工具以及普通的
 控制流。
 
 Workflow 与运行时的其他对象刻意保持不同边界：
 
 - **Workflow**：可执行且允许副作用的 Lua 编排程序；它协调隔离 worker turn 并返回类型化结果。
-- **App**：Browser、Terminal、Coding 等长期存在且有状态的能力域。只有工作流明确授予某个
-  App 工具时，worker 才能使用该精确工具。
+- **App**：Browser、Terminal、Coding 等长期存在且有状态的能力域。宿主会自动以正常名称和
+  schema 向 worker 提供允许使用的已安装 App 操作。
 - **Event**：Session 主 agent 需要判断并完成的外部事实。worker 不会获得已 claim 的 event，也没有
   `finish_and_send`。
 - **Skill**：面向 agent 的可复用 Markdown 指南。Skill 可以说明如何编写或使用工作流，但不执行、
@@ -151,7 +151,7 @@ handle 动态形成，而不是静态 DAG。
 ```lua
 workflow.define({ input = InputSchema, output = OutputSchema,
   run = function(input, ctx) ... end })
-workflow.agent({ model, input, output, instruction, capabilities, extra_tools })
+workflow.agent({ model, input, output, instruction, extra_tools })
 workflow.await(handle)
 workflow.await_all(handles)
 workflow.tool({ name, input, output, run })
@@ -179,30 +179,22 @@ worker、局部工具的输入，以及最终输出，会在运行时再次校�
 
 请把 schema 收窄到真正需要的范围。它既是交互表单，也是主 agent 工具的契约。
 
-## Worker、工具与能力
+## Worker 与工具
 
 每个 worker 都是隔离的 agent turn。它只会得到：
 
 - `instruction` 和类型化输入；
 - 声明的 `model`（`"main"` 或 `"efficient"`）；
-- `capabilities` 中列出的 App 工具；以及
+- 由宿主提供的、允许使用的 App 操作；以及
 - `extra_tools` 中列出的局部工具。
+
+宿主会自动提供已安装 App 操作的名称、描述和 schema，工作流作者无需列举或维护 App 工具名称。
+`get_state`、`next_review` 等 state/review helper，`read_file`、`edit_file` 等静态运行时工具，
+`finish_and_send` 和任意主 agent 工具仍不会暴露给 worker。
 
 它**不会**继承 Session 主 agent 的 Context、已 claim 的 event id、完成 event 的权限、会话历史或不受
 限制的工具列表。worker 必须通过返回恰好一个符合输出 schema 的 JSON 对象来完成，不能附加 Markdown。
 当前 host 最多允许一个 worker 进行 16 个 model/tool round。
-
-能力必须使用已安装 App 工具的精确名称，例如：
-
-```lua
-capabilities = {
-  "browser__browser_open_page",
-  "browser__browser_snapshot",
-}
-```
-
-请按最小权限授予。`get_state`、`next_review` 等 state/review 工具不能作为 worker capability；
-`read_file`、`edit_file`、`finish_and_send` 等静态运行时工具和任意主 agent 工具也不会暴露给 worker。
 
 `workflow.tool(...)` 创建具名的局部工具。它的 `run` 会收到经过校验、可 JSON 表示的值，且必须返回满足
 声明输出 schema 的值。只有把名称加入某个 worker 的 `extra_tools` 后，该 worker 才能调用此工具。
@@ -221,7 +213,7 @@ capabilities = {
 
 1. 在目标 Session 的 `workflows` 目录下选择一个 lower-snake-case 文件名。
 2. 声明可移植的输入/输出 schema，并且只调用一次 `workflow.define`。
-3. 为每个 worker 提供聚焦的 instruction、类型化输入/输出、明确模型，以及它真正需要的能力和局部工具。
+3. 为每个 worker 提供聚焦的 instruction、类型化输入/输出、明确模型，以及它真正需要的工作流局部工具。
 4. 使用 `worker:run(...)`、`await` 和 `await_all` 把属于 Lua 的控制流保留在 Lua 中；Session event 完成
    留在工作流外。
 5. 将文件和 shell 操作视为沙箱下的真实副作用；自行实现幂等性或 checkpoint。

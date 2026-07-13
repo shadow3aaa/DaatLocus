@@ -78,7 +78,7 @@ main-agent tool contract.
 
 ## Define Workers Deliberately
 
-Declare a worker with a focused instruction and explicit boundaries:
+Declare a worker with a focused instruction and explicit typed boundaries:
 
 ```lua
 local reviewer = workflow.agent({
@@ -86,30 +86,27 @@ local reviewer = workflow.agent({
   input = Input,
   output = WorkerOutput,
   instruction = [[
-Review the typed input. Use only the granted tools. Return exactly one JSON
-object matching the output schema, without Markdown.
+Review the typed input. Use the available App tools when they help, and return
+exactly one JSON object matching the output schema, without Markdown.
 ]],
-  capabilities = {
-    "browser__browser_open_page",
-    "browser__browser_snapshot",
-  },
   extra_tools = { "normalize_text" },
 })
 ```
 
-A worker receives only its instruction, typed input, declared model, and the
-explicit tools above. It does **not** receive the Session main agent's Context,
-conversation history, claimed event ids, event-completion authority, or
-unrestricted runtime tools. It cannot call `finish_and_send`.
+A worker receives only its instruction, typed input, declared model,
+host-provided App tools, and the workflow-local tools named in `extra_tools`.
+The host exposes installed App operations using their normal names and schemas,
+so the workflow author does not list App tool names. State/review helpers
+(`get_state`, `next_review`), static runtime tools (`read_file`, `edit_file`),
+`finish_and_send`, and arbitrary main-agent tools are not available to workers.
+
+A worker does **not** receive the Session main agent's Context, conversation
+history, claimed event ids, or event-completion authority. It cannot call
+`finish_and_send`.
 
 Select `"main"` only when the worker needs the main model's quality. It means
 an isolated worker provider call, not reuse of the Session main agent or its
 history. Prefer `"efficient"` for focused helper work when it is sufficient.
-
-Grant capabilities by exact installed App tool name, and grant the minimum
-needed. State/review tools (`get_state`, `next_review`), static runtime tools
-(`read_file`, `edit_file`), and arbitrary main-agent tools are not worker
-capabilities.
 
 ## Use Local Tools for Explicit Effects
 
@@ -194,8 +191,8 @@ agent can eventually resolve a claimed external event.
 
 1. Write the schemas first and check all objects are fully required with
    `additionalProperties = false`.
-2. Declare local tools, then workers with focused instructions and least
-   privilege capabilities.
+2. Declare local tools, then workers with focused instructions and only the
+   workflow-local tools they need.
 3. Call `workflow.define` once and keep orchestration control flow inside its
    Lua `run` function.
 4. Reload with `/skills reload`; fix any `/workflows` load error before running.
@@ -204,6 +201,3 @@ agent can eventually resolve a claimed external event.
 6. Verify the main agent sees the generated `workflow__<workflow_id>` tool only
    after successful loading.
 7. Add idempotence/checkpoints before enabling file or shell side effects.
-
-For the full user and API reference, read `docs/workflows.md` or
-`docs/workflows_zh-CN.md`.
