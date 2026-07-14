@@ -579,7 +579,7 @@ pub fn read_code(project_root: &Path, params: &ReadCodeInput) -> Result<ReadCode
     let file_content = fs::read_to_string(&full_path)
         .map_err(|e| format!("Failed to read {}: {e}", full_path.display()))?;
     let (anchor_line, anchor_hash) = parse_line_anchor(&params.anchor)?;
-    verify_anchor_line(&file_content, anchor_line, &anchor_hash)?;
+    verify_anchor_line(&file_content, anchor_line, anchor_hash.as_deref())?;
     let line_count = file_content.lines().count().max(1);
     let (start_line, end_line) =
         read_range_for_mode(params.mode, &full_path, anchor_line, line_count)?;
@@ -613,23 +613,28 @@ fn read_range_for_mode(
     }
 }
 
-fn parse_line_anchor(anchor: &str) -> Result<(usize, String), String> {
-    let (line_str, hash_str) = anchor
-        .split_once('#')
-        .ok_or_else(|| format!("invalid anchor (expected line#hash): {anchor}"))?;
+fn parse_line_anchor(anchor: &str) -> Result<(usize, Option<String>), String> {
+    let (line_str, hash_str) = match anchor.split_once('#') {
+        Some((line_str, hash_str)) => (line_str, Some(hash_str)),
+        None => (anchor, None),
+    };
     let line = line_str
         .parse::<usize>()
         .map_err(|_| format!("invalid line number in anchor: {anchor}"))?;
     if line == 0 {
         return Err(format!("line number must be >= 1 in anchor: {anchor}"));
     }
-    if hash_str.is_empty() {
-        return Err(format!("missing hash in anchor: {anchor}"));
-    }
-    Ok((line, hash_str.to_string()))
+    Ok((
+        line,
+        hash_str.filter(|hash| !hash.is_empty()).map(str::to_string),
+    ))
 }
 
-fn verify_anchor_line(content: &str, line_num: usize, expected_hash: &str) -> Result<(), String> {
+fn verify_anchor_line(
+    content: &str,
+    line_num: usize,
+    expected_hash: Option<&str>,
+) -> Result<(), String> {
     let lines: Vec<&str> = content.lines().collect();
     if line_num > lines.len() {
         return Err(format!(
@@ -637,6 +642,9 @@ fn verify_anchor_line(content: &str, line_num: usize, expected_hash: &str) -> Re
             lines.len()
         ));
     }
+    let Some(expected_hash) = expected_hash else {
+        return Ok(());
+    };
     let actual = lines[line_num - 1];
     let actual_hash = patch::line_hash(actual);
     if actual_hash != expected_hash {
@@ -1240,6 +1248,47 @@ mod tests {
         assert!(result.content.contains("|let value_32 = 32;"));
         assert!(!result.content.contains("|let value_7 = 7;"));
         assert!(!result.content.contains("|let value_33 = 33;"));
+    }
+
+    #[test]
+    fn read_code_around_accepts_line_only_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "let first = true;\nlet second = false;\n",
+        )
+        .unwrap();
+
+        let result = read_code(
+            dir.path(),
+            &ReadCodeInput {
+                path: "lib.rs".to_string(),
+                anchor: "2".to_string(),
+                mode: ReadCodeMode::Around,
+            },
+        )
+        .unwrap();
+
+        assert!(result.content.contains("2#"));
+        assert!(result.content.contains("|let second = false;"));
+    }
+
+    #[test]
+    fn read_code_rejects_line_only_anchor_outside_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "let current = true;\n").unwrap();
+
+        let err = read_code(
+            dir.path(),
+            &ReadCodeInput {
+                path: "lib.rs".to_string(),
+                anchor: "2".to_string(),
+                mode: ReadCodeMode::Around,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.contains("out of bounds"), "{err}");
     }
 
     #[test]
