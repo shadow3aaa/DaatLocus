@@ -75,6 +75,11 @@ impl TokenEstimateBaseline {
         let delta = current_estimated_input_tokens.saturating_sub(self.estimated_input_tokens);
         observed.saturating_add(delta)
     }
+
+    pub fn conservative_total_input_tokens(&self, current_estimated_input_tokens: usize) -> usize {
+        current_estimated_input_tokens
+            .max(self.calibrated_total_input_tokens(current_estimated_input_tokens))
+    }
 }
 
 impl RequestBudgetBreakdown {
@@ -94,10 +99,13 @@ impl RequestBudgetBreakdown {
         }
     }
 
-    pub fn with_calibrated_input_tokens(mut self, baseline: &TokenEstimateBaseline) -> Self {
-        let calibrated = baseline.calibrated_total_input_tokens(self.total_input_tokens);
-        self.total_with_reserve_tokens = calibrated.saturating_add(self.reserved_output_tokens);
-        self.total_input_tokens = calibrated;
+    pub fn with_conservative_calibrated_input_tokens(
+        mut self,
+        baseline: &TokenEstimateBaseline,
+    ) -> Self {
+        let conservative = baseline.conservative_total_input_tokens(self.total_input_tokens);
+        self.total_with_reserve_tokens = conservative.saturating_add(self.reserved_output_tokens);
+        self.total_input_tokens = conservative;
         self
     }
 
@@ -513,6 +521,47 @@ mod tests {
     }
 
     #[test]
+    fn conservative_token_estimate_never_undercuts_current_estimate() {
+        let baseline = TokenEstimateBaseline {
+            estimated_input_tokens: 100,
+            observed_input_tokens: Some(50),
+        };
+
+        assert_eq!(baseline.calibrated_total_input_tokens(200), 150);
+        assert_eq!(baseline.conservative_total_input_tokens(200), 200);
+    }
+
+    #[test]
+    fn conservative_token_estimate_keeps_higher_observed_calibration() {
+        let baseline = TokenEstimateBaseline {
+            estimated_input_tokens: 100,
+            observed_input_tokens: Some(150),
+        };
+
+        assert_eq!(baseline.conservative_total_input_tokens(200), 250);
+    }
+
+    #[test]
+    fn conservative_calibrated_breakdown_does_not_hide_overflow() {
+        let limits = RequestBudgetLimits {
+            context_window_tokens: 1_000,
+            auto_compact_threshold_tokens: 900,
+            reserved_output_tokens: 100,
+        };
+        let baseline = TokenEstimateBaseline {
+            estimated_input_tokens: 800,
+            observed_input_tokens: Some(600),
+        };
+
+        let breakdown =
+            breakdown_for(950, limits).with_conservative_calibrated_input_tokens(&baseline);
+
+        assert_eq!(breakdown.total_input_tokens, 950);
+        assert!(!breakdown.within_context_window());
+        assert!(breakdown.above_auto_compact_threshold());
+    }
+
+    #[test]
     fn token_estimate_baseline_returns_estimated_when_no_observed() {
         let baseline = TokenEstimateBaseline::default();
         assert_eq!(baseline.calibrated_total_input_tokens(500_000), 500_000);
@@ -537,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn token_estimate_baseline_with_calibrated_input_tokens() {
+    fn token_estimate_baseline_with_conservative_calibrated_input_tokens() {
         let baseline = TokenEstimateBaseline {
             estimated_input_tokens: 545_000,
             observed_input_tokens: Some(810_000),
@@ -554,7 +603,7 @@ mod tests {
             }],
             limits,
         )
-        .with_calibrated_input_tokens(&baseline);
+        .with_conservative_calibrated_input_tokens(&baseline);
         assert_eq!(breakdown.total_input_tokens, 865_000);
         assert_eq!(breakdown.total_with_reserve_tokens, 1_265_000);
     }

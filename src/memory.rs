@@ -386,7 +386,7 @@ impl RuntimeStepConversation {
         let mut compacted_any = false;
         for _ in 0..policy.max_recoveries {
             let breakdown = estimate_agent_turn_request(self.agent_messages(), tools, limits)
-                .with_calibrated_input_tokens(baseline);
+                .with_conservative_calibrated_input_tokens(baseline);
             let needs_compaction = if compact_for_overflow {
                 !breakdown.within_context_window()
             } else {
@@ -588,7 +588,7 @@ impl RuntimeConversation {
             .envelope
             .agent_messages_with_history(&request_messages);
         let breakdown = estimate_agent_turn_request(&agent_messages, input.tools, input.limits)
-            .with_calibrated_input_tokens(input.baseline);
+            .with_conservative_calibrated_input_tokens(input.baseline);
         if !breakdown.above_auto_compact_threshold() {
             return None;
         }
@@ -872,6 +872,94 @@ mod tests {
                 })
                 .is_some()
         );
+    }
+
+    #[test]
+    fn low_observed_baseline_does_not_hide_pre_turn_compaction() {
+        let conversation = RuntimeConversation {
+            last_focus: Some("test".to_string()),
+            messages: vec![HistoryMessage::assistant("runtime history ".repeat(1_000))],
+            compaction_records: VecDeque::new(),
+            session_id: None,
+        };
+        let envelope = RuntimeRequestEnvelope::from_system_messages(vec!["system".to_string()]);
+        let tools = Vec::<AgentToolSpec>::new();
+        let limits = RequestBudgetLimits {
+            context_window_tokens: 2_000,
+            auto_compact_threshold_tokens: 1_000,
+            reserved_output_tokens: 100,
+        };
+        let baseline = TokenEstimateBaseline {
+            estimated_input_tokens: 10_000,
+            observed_input_tokens: Some(1),
+        };
+
+        assert!(
+            conversation
+                .plan_compaction_for_request(PlanCompactionInput {
+                    envelope: &envelope,
+                    injected_messages: &[],
+                    tools: &tools,
+                    limits,
+                    baseline: &baseline,
+                    min_messages: 0,
+                    summary_max_tokens: 80,
+                })
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn low_observed_baseline_does_not_hide_overflow_compaction() {
+        let mut runtime_step = RuntimeStepConversation::new(
+            RuntimeTurnDraft::new("test".to_string()),
+            vec![
+                AgentMessage::system("system"),
+                AgentMessage::user("x".repeat(10_000)),
+            ],
+        );
+        let limits = RequestBudgetLimits {
+            context_window_tokens: 1_000,
+            auto_compact_threshold_tokens: 900,
+            reserved_output_tokens: 100,
+        };
+        let baseline = TokenEstimateBaseline {
+            estimated_input_tokens: 10_000,
+            observed_input_tokens: Some(1),
+        };
+
+        let compacted = runtime_step
+            .maybe_compact(
+                &[],
+                limits,
+                &baseline,
+                true,
+                RuntimeStepCompactionPolicy {
+                    summary_max_tokens: 80,
+                    max_recoveries: 1,
+                },
+                |_messages, _max_tokens| async {
+                    Ok(RuntimeCompactionOutcome {
+                        summary: "summary".to_string(),
+                        record: RuntimeCompactionRecord {
+                            timestamp_ms: 0,
+                            phase: RuntimeCompactionPhase::MidTurn,
+                            reason: RuntimeCompactionReason::OverflowRecovery,
+                            reinjection_strategy:
+                                RuntimeCompactionReinjectionStrategy::PreserveSystemOnly,
+                            source_item_count: 1,
+                            source_message_count: 2,
+                            trimmed_item_count: 0,
+                            retained_user_message_count: 0,
+                            summary: "summary".to_string(),
+                        },
+                    })
+                },
+            )
+            .await
+            .expect("overflow compaction should succeed");
+
+        assert!(compacted);
     }
 
     #[test]
