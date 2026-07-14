@@ -13,7 +13,9 @@ A Workflow is deliberately distinct from the other runtime objects:
   or Coding. The host automatically provides a worker with allowed installed App
   operations under their normal names and schemas.
 - **Event**: an external fact that the Session main agent must judge and
-  resolve. Workers never receive a claimed event or `finish_and_send`.
+  resolve. Workers never receive a claimed event; their same-named
+  `finish_and_send` returns typed output to the workflow runner rather than
+  resolving or sending an event.
 - **Skill**: reusable Markdown guidance for an agent. A skill may explain how
   to author or use a workflow, but it does not execute, schedule, or own a
   workflow run.
@@ -209,20 +211,27 @@ Each worker is an isolated agent turn. It receives only:
 
 - its `instruction` and typed input;
 - its declared `model` (`"main"` or `"efficient"`);
-- host-provided allowed App operations; and
+- host-provided runtime and App tools; and
 - local tools named in `extra_tools`.
 
-The host supplies installed App operation names, descriptions, and schemas
-automatically. Workflow authors do not list or maintain App tool names. State
-and review helpers such as `get_state` and `next_review`, static runtime tools
-such as `read_file` and `edit_file`, `finish_and_send`, and arbitrary main-agent
-tools remain unavailable to workers.
+The host automatically supplies `read_file`, `edit_file`, `update_plan`, and,
+when the selected model supports vision, `view_image`. `update_plan` affects
+only the worker-local plan. It also supplies installed App operation names,
+descriptions, and schemas through isolated App instances, including generated
+`appid__get_state` tools and `coding__next_review`, so workflow authors do not
+list or maintain App tool names.
+
+Workers do not receive workflow entry tools (`workflow__<id>`) or the main-agent
+version of `finish_and_send`. Instead, a Worker has a same-named completion tool
+whose input is the declared worker output schema; it returns the typed result to
+the workflow runner and cannot resolve or send a user event. Arbitrary
+main-agent-only tools also remain unavailable.
 
 It does **not** inherit the Session main agent's Context, claimed event id,
 event-completion authority, conversation history, or unrestricted tool list.
-Workers must finish by returning exactly one JSON object matching their output
-schema, with no Markdown. The host currently limits a worker to 16 model/tool
-rounds.
+Workers must finish by calling their completion tool with exactly one JSON object
+matching their output schema, with no Markdown. The host currently limits a
+worker to 16 model/tool rounds.
 
 `workflow.tool(...)` creates a named local tool. Its `run` function receives a
 validated JSON-compatible value and must return a value matching its declared

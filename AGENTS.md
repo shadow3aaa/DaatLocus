@@ -1233,17 +1233,22 @@ workflow-local tools, and worker-local message history. It must not inherit the
 Session main agent's full `Context`, claimed event ids, event-completion
 authority, or conversation history.
 
-Worker tools are ordinary named, schema-validated tools. They include allowed
-App operations supplied automatically by the host and workflow-local tools
-explicitly named in `extra_tools`. State/review helpers, static runtime tools,
-main-agent-only tools, and `finish_and_send` remain unavailable. Do not reuse
-the Workspace App `render_state`/`call_tool` protocol to implement workers.
-Build a worker-specific `AgentTurnRequest { messages, tools }` and route tool
-calls through a worker runtime boundary instead.
+Worker tools are ordinary named, schema-validated tools. The host automatically
+provides `read_file`, `edit_file`, `update_plan`, and, when the selected model
+supports vision, `view_image`; `update_plan` changes only the worker-local plan.
+It also provides allowed App operations, including generated `appid__get_state`
+tools and `coding__next_review`, through isolated App instances, plus
+workflow-local tools explicitly named in `extra_tools`. Workflow entry tools
+(`workflow__<id>`) and the main-agent event-completion `finish_and_send` are
+unavailable. The worker instead receives a same-named completion tool whose
+input is its declared output schema; it returns typed output to the workflow
+runner and never resolves or sends an event. Do not reuse the Workspace App
+`render_state`/`call_tool` protocol to implement workers. Build a worker-specific
+`AgentTurnRequest { messages, tools }` and route tool calls through a worker
+runtime boundary.
 
-`finish_and_send` belongs to the Session main agent's claimed-event completion
-contract and is not a worker tool. A worker completes by producing its declared
-output or a structured failure. If a worker needs an externally visible action,
+A worker completes by calling its worker completion tool with declared output or
+by producing a structured failure. If it needs an externally visible action,
 that action must be represented by an available App operation or an explicitly
 granted workflow-local tool and routed through a host-owned completion/effect
 sink; do not give it a claimed event id or let it resolve the caller's event

@@ -97,15 +97,24 @@ exactly one JSON object matching the output schema, without Markdown.
 ```
 
 A worker receives only its instruction, typed input, declared model,
-host-provided App tools, and the workflow-local tools named in `extra_tools`.
-The host exposes installed App operations using their normal names and schemas,
-so the workflow author does not list App tool names. State/review helpers
-(`get_state`, `next_review`), static runtime tools (`read_file`, `edit_file`),
-`finish_and_send`, and arbitrary main-agent tools are not available to workers.
+host-provided runtime and App tools, and the workflow-local tools named in
+`extra_tools`. The host automatically provides `read_file`, `edit_file`,
+`update_plan`, and, when the selected model supports vision, `view_image`.
+`update_plan` affects only the worker-local plan. Installed App operations are
+provided through isolated App instances using their normal names and schemas,
+including generated `appid__get_state` tools and `coding__next_review`, so the
+workflow author does not list App tool names.
+
+Workers do not receive workflow entry tools (`workflow__<id>`) or the main-agent
+version of `finish_and_send`. Each worker instead receives a same-named
+completion tool whose input is its declared output schema; it returns typed
+output to the workflow runner and cannot resolve or send a user event. Other
+main-agent-only tools are not available to workers.
 
 A worker does **not** receive the Session main agent's Context, conversation
-history, claimed event ids, or event-completion authority. It cannot call
-`finish_and_send`.
+history, claimed event ids, or event-completion authority. Its same-named
+`finish_and_send` completion tool returns declared typed output to the workflow
+runner; it cannot resolve an event or send a user reply.
 
 Select `"main"` only when the worker needs the main model's quality. It means
 an isolated worker provider call, not reuse of the Session main agent or its

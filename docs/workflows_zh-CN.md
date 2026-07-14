@@ -9,8 +9,8 @@ Workflow 与运行时的其他对象刻意保持不同边界：
 - **Workflow**：可执行且允许副作用的 Lua 编排程序；它协调隔离 worker turn 并返回类型化结果。
 - **App**：Browser、Terminal、Coding 等长期存在且有状态的能力域。宿主会自动以正常名称和
   schema 向 worker 提供允许使用的已安装 App 操作。
-- **Event**：Session 主 agent 需要判断并完成的外部事实。worker 不会获得已 claim 的 event，也没有
-  `finish_and_send`。
+- **Event**：Session 主 agent 需要判断并完成的外部事实。worker 不会获得已 claim 的 event；其同名的
+  `finish_and_send` 只会把类型化输出交回 workflow runner，不会完成 event 或发送消息。
 - **Skill**：面向 agent 的可复用 Markdown 指南。Skill 可以说明如何编写或使用工作流，但不执行、
   调度或拥有一次工作流运行。
 
@@ -185,15 +185,20 @@ worker、局部工具的输入，以及最终输出，会在运行时再次校�
 
 - `instruction` 和类型化输入；
 - 声明的 `model`（`"main"` 或 `"efficient"`）；
-- 由宿主提供的、允许使用的 App 操作；以及
+- 由宿主提供的运行时与 App 工具；以及
 - `extra_tools` 中列出的局部工具。
 
-宿主会自动提供已安装 App 操作的名称、描述和 schema，工作流作者无需列举或维护 App 工具名称。
-`get_state`、`next_review` 等 state/review helper，`read_file`、`edit_file` 等静态运行时工具，
-`finish_and_send` 和任意主 agent 工具仍不会暴露给 worker。
+宿主会自动提供 `read_file`、`edit_file`、`update_plan`，以及在所选模型支持视觉输入时提供的
+`view_image`。`update_plan` 只影响 worker 自己的临时 Plan。宿主还会通过隔离的 App 实例提供已安装
+App 操作的名称、描述和 schema，包括生成的 `appid__get_state` 工具和 `coding__next_review`，因此工作流作者
+无需列举或维护 App 工具名称。
+
+worker 不会获得工作流入口工具（`workflow__<id>`），也不会获得主 agent 版本的 `finish_and_send`。但 Worker
+有一个同名的完成工具：其输入就是声明的 worker 输出 schema，它只把类型化结果交回 workflow runner，不能完成
+event 或向用户发送消息。任意其他主 agent 专用工具同样不可用。
 
 它**不会**继承 Session 主 agent 的 Context、已 claim 的 event id、完成 event 的权限、会话历史或不受
-限制的工具列表。worker 必须通过返回恰好一个符合输出 schema 的 JSON 对象来完成，不能附加 Markdown。
+限制的工具列表。worker 必须用完成工具提交恰好一个符合输出 schema 的 JSON 对象，不能附加 Markdown。
 当前 host 最多允许一个 worker 进行 16 个 model/tool round。
 
 `workflow.tool(...)` 创建具名的局部工具。它的 `run` 会收到经过校验、可 JSON 表示的值，且必须返回满足
