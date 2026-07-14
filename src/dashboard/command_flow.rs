@@ -342,7 +342,7 @@ fn workflows_command_panel(state: &DashboardState) -> CommandPanel {
     if items.is_empty() {
         return detail_panel(
             "WORKFLOWS",
-            "No Lua workflows are loaded. Add a .lua file under the workflows directory, then reload the session.",
+            "No Lua workflows are loaded. Add a .lua file under ~/.daat-locus/workflows, then reload the session.",
         );
     }
     CommandPanel::Selection(CommandSelectionPanel {

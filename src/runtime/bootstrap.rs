@@ -359,7 +359,7 @@ pub(crate) async fn build_eval_context_with_compiled(
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
     let openskills = load_openskills_for_runtime(&execution_cwd);
-    let workflows = WorkflowCatalog::load(&execution_cwd);
+    let workflows = WorkflowCatalog::load();
     let telegram_acl = TelegramAclHandle::load().await;
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();

@@ -1025,7 +1025,7 @@ mod tests {
                 events: EventStore::new().await,
                 pending_work: PendingWorkQueue::new().await,
                 openskills: OpenSkillsCatalog::default(),
-                workflows: crate::workflow::WorkflowCatalog::load(execution.path()),
+                workflows: crate::workflow::WorkflowCatalog::load(),
                 workflow_cancellation: crate::workflow::WorkflowCancellationRegistry::default(),
                 active_skill_run: None,
                 pending_skill_run_flushes: Vec::new(),

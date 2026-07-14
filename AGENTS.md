@@ -1130,11 +1130,15 @@ the removed workflow/primitive mechanism. A workflow may use skills as
 instructions and host-provided App tools, but neither relationship changes the
 object boundary.
 
-A workflow is one Lua 5.4 source file in the workflow directory:
+A workflow is one Lua 5.4 source file in the global workflow directory:
 
 ```text
-<name>.lua
+~/.daat-locus/workflows/<name>.lua
 ```
+
+When `DAAT_LOCUS_HOME` is set, the directory is `$DAAT_LOCUS_HOME/workflows`.
+All Sessions load this shared catalog, while each invocation still uses its
+Session workspace and sandbox.
 
 The filename stem is the workflow id. There is no `workflow.toml`, manifest,
 sidecar metadata, profile catalog, or predeclared job/task vocabulary. The Lua

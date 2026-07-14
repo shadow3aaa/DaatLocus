@@ -28,7 +28,6 @@ use crate::{
     schema_utils::{validate_model_facing_schema, validate_value_against_schema},
 };
 
-const WORKFLOWS_DIR_NAME: &str = "workflows";
 const WORKFLOW_TOOL_PREFIX: &str = "workflow__";
 const WORKER_MAX_TOOL_TURNS: usize = 16;
 const LUA_IO_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -133,9 +132,9 @@ pub struct WorkflowLoadError {
 }
 
 impl WorkflowCatalog {
-    pub fn load(execution_cwd: &Path) -> Self {
+    pub fn load() -> Self {
         let mut catalog = Self {
-            root: execution_cwd.join(WORKFLOWS_DIR_NAME),
+            root: crate::daat_locus_paths::daat_locus_paths_sync().workflows_dir(),
             definitions: BTreeMap::new(),
             errors: Vec::new(),
         };

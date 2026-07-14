@@ -6,6 +6,7 @@ use std::{
 const CONFIG_DIR_NAME: &str = "config";
 const STATE_DIR_NAME: &str = "state";
 const MEMORY_DIR_NAME: &str = "memory";
+const WORKFLOWS_DIR_NAME: &str = "workflows";
 const CACHE_DIR_NAME: &str = "cache";
 const ARTIFACTS_DIR_NAME: &str = "artifacts";
 const JOURNALS_DIR_NAME: &str = "journals";
@@ -34,6 +35,10 @@ impl DaatLocusPaths {
 
     pub fn state_dir(&self) -> PathBuf {
         self.root.join(STATE_DIR_NAME)
+    }
+
+    pub fn workflows_dir(&self) -> PathBuf {
+        self.root.join(WORKFLOWS_DIR_NAME)
     }
 
     pub fn memory_dir(&self) -> PathBuf {
@@ -188,6 +193,7 @@ fn ensure_layout_sync(paths: &DaatLocusPaths) {
     let _ = std::fs::create_dir_all(paths.root());
     let _ = std::fs::create_dir_all(paths.config_dir());
     let _ = std::fs::create_dir_all(paths.state_dir());
+    let _ = std::fs::create_dir_all(paths.workflows_dir());
     let _ = std::fs::create_dir_all(paths.memory_dir());
     let _ = std::fs::create_dir_all(paths.cache_dir());
     let _ = std::fs::create_dir_all(paths.artifacts_dir());

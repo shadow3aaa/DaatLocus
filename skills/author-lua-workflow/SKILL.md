@@ -26,7 +26,10 @@ tool:
 
 ## File and Loading Contract
 
-1. Create exactly one file at `<execution_cwd>/workflows/<workflow_id>.lua`.
+1. Create exactly one file at `~/.daat-locus/workflows/<workflow_id>.lua`.
+   When `DAAT_LOCUS_HOME` is set, use `$DAAT_LOCUS_HOME/workflows` instead.
+   All Sessions load this shared source catalog; the workflow still executes in
+   the invoking Session's workspace and sandbox.
 2. Derive `workflow_id` from the lower-snake-case filename stem. Use lowercase
    letters, digits, and single underscores; begin with a letter, never end with
    an underscore, and never use `__`.

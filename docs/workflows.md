@@ -20,15 +20,16 @@ A Workflow is deliberately distinct from the other runtime objects:
 
 ## Discovery and reload
 
-The runtime scans this directory when a session starts:
+The runtime scans this global directory when a session starts:
 
 ```text
-<execution_cwd>/workflows/*.lua
+~/.daat-locus/workflows/*.lua
 ```
 
-It creates the `workflows` directory if it is missing. `execution_cwd` is the
-current session workspace, so use the workspace for the session you want to
-run the workflow in rather than assuming it is the repository checkout.
+The location follows `DAAT_LOCUS_HOME` when it is set, so the effective path is
+`$DAAT_LOCUS_HOME/workflows`. The runtime creates the directory if it is
+missing. All sessions load the same workflow source catalog from this directory;
+workflow execution still uses the invoking session's workspace and sandbox.
 
 The filename stem is the workflow id and must be lower snake case. For example,
 `research_brief.lua` exposes the id `research_brief`. A workflow has no
@@ -68,7 +69,7 @@ Workflow runs also appear as typed Workflow activity rows in the dashboard.
 
 The following file can be copied from
 [`examples/workflows/research_brief.lua`](../examples/workflows/research_brief.lua)
-to `<execution_cwd>/workflows/research_brief.lua`.
+to `~/.daat-locus/workflows/research_brief.lua`.
 
 ```lua
 local Input = {
@@ -246,8 +247,7 @@ needed, and make recovery an explicit branch in your own Lua code.
 
 ## Authoring checklist
 
-1. Choose a lower-snake-case filename under the target session's `workflows`
-   directory.
+1. Choose a lower-snake-case filename under `~/.daat-locus/workflows`.
 2. Declare portable input and output schemas, then call `workflow.define` once.
 3. Give every worker a focused instruction, typed input/output, an explicit
    model, and only the workflow-local tools it needs.

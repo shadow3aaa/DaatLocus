@@ -16,14 +16,14 @@ Workflow 与运行时的其他对象刻意保持不同边界：
 
 ## 发现与重新加载
 
-Session 启动时，运行时会扫描下面的目录：
+运行时会在 Session 启动时扫描以下全局目录：
 
 ```text
-<execution_cwd>/workflows/*.lua
+~/.daat-locus/workflows/*.lua
 ```
 
-目录不存在时会自动创建。`execution_cwd` 是当前 Session 的工作区；请在希望运行工作流的
-Session 工作区中创建文件，而不要默认它一定是当前代码仓库。
+设置 `DAAT_LOCUS_HOME` 时，该位置为 `$DAAT_LOCUS_HOME/workflows`。目录不存在时会自动创建。
+所有 Session 都从此目录加载同一套工作流源文件；但工作流执行仍使用发起调用的 Session 工作区和沙箱。
 
 文件名去掉 `.lua` 后就是工作流 id，且必须是 lower snake case。例如
 `research_brief.lua` 的 id 为 `research_brief`。工作流不使用 manifest、sidecar metadata 或预先
@@ -57,7 +57,7 @@ workflow__research_brief(...)
 ## 最小工作流
 
 可将 [`examples/workflows/research_brief.lua`](../examples/workflows/research_brief.lua)
-复制到 `<execution_cwd>/workflows/research_brief.lua`：
+复制到 `~/.daat-locus/workflows/research_brief.lua`：
 
 ```lua
 local Input = {
@@ -211,7 +211,7 @@ worker、局部工具的输入，以及最终输出，会在运行时再次校�
 
 ## 编写检查表
 
-1. 在目标 Session 的 `workflows` 目录下选择一个 lower-snake-case 文件名。
+1. 在 `~/.daat-locus/workflows` 下选择一个 lower-snake-case 文件名。
 2. 声明可移植的输入/输出 schema，并且只调用一次 `workflow.define`。
 3. 为每个 worker 提供聚焦的 instruction、类型化输入/输出、明确模型，以及它真正需要的工作流局部工具。
 4. 使用 `worker:run(...)`、`await` 和 `await_all` 把属于 Lua 的控制流保留在 Lua 中；Session event 完成

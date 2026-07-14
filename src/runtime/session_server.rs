@@ -199,7 +199,7 @@ pub(crate) async fn run_session_serve(
     let (apps, workspace_apps) = build_runtime_apps(&execution_cwd, &sandbox_policy);
     let apps = AppManager::new(apps)?;
     let openskills = load_openskills_for_runtime(&execution_cwd);
-    let workflows = WorkflowCatalog::load(&execution_cwd);
+    let workflows = WorkflowCatalog::load();
     let mut context = Context {
         session_id: Some(session_id.as_str().to_string()),
         model_provider: client,
