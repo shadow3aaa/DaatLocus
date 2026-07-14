@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     activity_event::{TextActivityDescriptor, ToolCallActivityEvent, glyph},
-    app::{AppId, AppStateRender, AppToolExecutionContext},
+    app::{AppId, AppManager, AppStateRender, AppToolExecutionContext},
     context::Context,
     context_budget::truncate_text_to_token_budget_with_notice,
     dashboard::SessionActivityEvent,
@@ -26,7 +26,7 @@ mod files;
 mod view_image;
 mod work;
 
-pub(super) type ToolFuture<'a> =
+pub(crate) type ToolFuture<'a> =
     Pin<Box<dyn Future<Output = miette::Result<ToolExecutionResult>> + Send + 'a>>;
 type ToolExecutor = for<'a> fn(&'a mut Context, &'a AgentToolCall) -> ToolFuture<'a>;
 type ToolSummarizer = fn(&AgentToolCall) -> miette::Result<EpisodeActionRecord>;
@@ -594,6 +594,312 @@ fn build_workflow_runtime_tools(
     tools
 }
 
+pub(crate) fn worker_finish_and_send_tool(output_schema: Value) -> Box<dyn RuntimeTool> {
+    Box::new(StaticRuntimeTool::new_with_schema(
+        "finish_and_send",
+        "Finish this isolated workflow worker by returning its declared typed output.",
+        output_schema,
+        summarize_worker_finish_and_send_tool,
+        render_worker_finish_and_send_tool,
+        execute_worker_finish_and_send_tool,
+    ))
+}
+
+fn summarize_worker_finish_and_send_tool(
+    call: &AgentToolCall,
+) -> miette::Result<EpisodeActionRecord> {
+    Ok(EpisodeActionRecord {
+        kind: "finish_and_send".to_string(),
+        summary: summarize_inline_text(&call.arguments.to_string()),
+    })
+}
+
+fn render_worker_finish_and_send_tool(
+    call: &AgentToolCall,
+) -> miette::Result<ToolCallActivityEvent> {
+    Ok(ToolCallActivityEvent::app(
+        "finish_and_send",
+        vec![summarize_inline_text(&call.arguments.to_string())],
+    ))
+}
+
+fn execute_worker_finish_and_send_tool<'a>(
+    _context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        Ok(ToolExecutionResult::from_activity_event(
+            "worker completed",
+            call.arguments.clone(),
+            None,
+        ))
+    })
+}
+
+pub(crate) fn build_worker_runtime_tools_for_apps(
+    apps: &AppManager,
+    output_schema: Value,
+) -> Vec<Box<dyn RuntimeTool>> {
+    let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
+    tools.extend(files::register_tools());
+    tools.extend(view_image::register_tools());
+    tools.extend(work::register_update_plan_tools());
+    tools.push(worker_finish_and_send_tool(output_schema));
+
+    let reserved_names = tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<HashSet<_>>();
+    tools.extend(build_app_runtime_tools_for_apps(apps, &reserved_names));
+    tools
+}
+
+pub(crate) fn build_worker_runtime_tool_specs_for_apps(
+    apps: &AppManager,
+    output_schema: Value,
+    supports_vision: bool,
+) -> Vec<AgentToolSpec> {
+    build_worker_runtime_tools_for_apps(apps, output_schema)
+        .into_iter()
+        .filter(|tool| worker_runtime_tool_is_available(tool.as_ref(), supports_vision))
+        .map(|tool| tool.spec())
+        .collect()
+}
+
+pub(crate) async fn execute_worker_runtime_tool_call_for_apps(
+    apps: &mut AppManager,
+    execution_cwd: &std::path::Path,
+    sandbox_policy: &crate::sandbox::RuntimeSandboxPolicy,
+    tool_output_max_tokens: usize,
+    supports_vision: Option<bool>,
+    image_state_dir: &std::path::Path,
+    turn_epoch: u64,
+    call: &AgentToolCall,
+    output_schema: Value,
+    worker_plan: &mut crate::plan::Plan,
+) -> Result<ToolExecutionResult> {
+    let tools = build_worker_runtime_tools_for_apps(apps, output_schema);
+    let tool = find_runtime_tool(&tools, &call.name)?;
+    let worker_model_supports_vision = supports_vision.unwrap_or_else(|| {
+        crate::model_catalog::catalog_model_capacity("workflow-worker")
+            .map(|capacity| capacity.supports_vision)
+            .unwrap_or(true)
+    });
+    if !worker_runtime_tool_is_available(tool, worker_model_supports_vision) {
+        return Ok(unavailable_worker_tool_result(
+            call,
+            worker_model_supports_vision,
+        ));
+    }
+    let app_context = AppToolExecutionContext {
+        execution_cwd: execution_cwd.to_path_buf(),
+        sandbox_policy: sandbox_policy.clone(),
+        dashboard_tx: None,
+        tool_output_max_tokens: tool_output_max_tokens.max(1),
+        turn_epoch,
+    };
+    apps.before_runtime_tool_call(call, &app_context)?;
+    execute_worker_runtime_tool(
+        tool,
+        apps,
+        &app_context,
+        call,
+        worker_plan,
+        image_state_dir,
+        worker_model_supports_vision,
+    )
+    .await
+    .map(|result| result.ensure_model_content_with_budget(tool_output_max_tokens.max(1)))
+}
+
+fn build_app_runtime_tools_for_apps(
+    apps: &AppManager,
+    reserved_names: &HashSet<String>,
+) -> Vec<Box<dyn RuntimeTool>> {
+    let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
+    let mut seen_names = reserved_names.clone();
+    for (owner_app_id, app_tools) in apps.all_tool_specs() {
+        let get_state_exposed_name = owner_app_id.mangle_tool_name(APP_GET_STATE_TOOL_NAME);
+        if seen_names.insert(get_state_exposed_name.clone()) {
+            tools.push(Box::new(AppGetStateRuntimeTool::new(
+                owner_app_id.clone(),
+                get_state_exposed_name,
+            )));
+        } else {
+            tracing::warn!(
+                "skipping generated state tool for app `{}` because exposed name `{}` conflicts with another runtime tool",
+                owner_app_id,
+                get_state_exposed_name
+            );
+        }
+
+        for tool in &app_tools {
+            if !is_valid_dynamic_tool_name(&tool.name) {
+                tracing::warn!(
+                    "skipping app tool `{}` from app `{}` because its name must match [A-Za-z0-9_-]+",
+                    tool.name,
+                    owner_app_id
+                );
+                continue;
+            }
+            let exposed_name = owner_app_id.mangle_tool_name(&tool.name);
+            if !seen_names.insert(exposed_name.clone()) {
+                tracing::warn!(
+                    "skipping app tool `{}` from app `{}` because exposed name `{}` conflicts with another runtime tool",
+                    tool.name,
+                    owner_app_id,
+                    exposed_name
+                );
+                continue;
+            }
+            if let Err(err) = validate_model_facing_schema(&tool.input_schema) {
+                tracing::warn!(
+                    "skipping app tool `{}` from app `{}` because its input schema is invalid: {}",
+                    tool.name,
+                    owner_app_id,
+                    err
+                );
+                continue;
+            }
+            tools.push(Box::new(AppRuntimeTool {
+                owner_app_id: owner_app_id.clone(),
+                exposed_name,
+                app_tool_name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_spec: AgentToolInputSpec::JsonSchema {
+                    schema: tool.input_schema.clone(),
+                },
+            }));
+        }
+    }
+    tools
+}
+
+fn worker_runtime_tool_is_available(tool: &dyn RuntimeTool, supports_vision: bool) -> bool {
+    tool.name() != "view_image" || supports_vision
+}
+
+fn unavailable_worker_tool_result(
+    call: &AgentToolCall,
+    supports_vision: bool,
+) -> ToolExecutionResult {
+    let reason = if call.name == "view_image" && !supports_vision {
+        "`view_image` is unavailable because this worker's selected model does not support image inputs."
+    } else {
+        "This worker tool is unavailable."
+    };
+    ToolExecutionResult::from_activity_event(
+        format!("{} unavailable", AppId::render_exposed_tool_name(&call.name)),
+        json!({
+            "available": false,
+            "tool": call.name,
+            "reason": reason,
+            "allowed_next_action": "Use another available worker tool.",
+        }),
+        None,
+    )
+    .with_model_content(format!(
+        "Tool unavailable: `{}`\nReason: {reason}\nAllowed next action: Use another available worker tool.",
+        AppId::render_exposed_tool_name(&call.name)
+    ))
+}
+
+async fn execute_worker_runtime_tool(
+    tool: &dyn RuntimeTool,
+    apps: &mut AppManager,
+    app_context: &AppToolExecutionContext,
+    call: &AgentToolCall,
+    worker_plan: &mut crate::plan::Plan,
+    image_state_dir: &std::path::Path,
+    supports_vision: bool,
+) -> Result<ToolExecutionResult> {
+    match tool.name() {
+        "read_file" => {
+            return files::execute_worker_read_file(
+                app_context.execution_cwd.as_path(),
+                &app_context.sandbox_policy,
+                call,
+            )
+            .await;
+        }
+        "edit_file" => {
+            return files::execute_worker_edit_file(
+                app_context.execution_cwd.as_path(),
+                &app_context.sandbox_policy,
+                call,
+            )
+            .await;
+        }
+        "update_plan" => return work::execute_worker_update_plan(worker_plan, call).await,
+        "view_image" => {
+            return view_image::execute_worker_view_image(
+                app_context.execution_cwd.as_path(),
+                &app_context.sandbox_policy,
+                image_state_dir,
+                supports_vision,
+                call,
+            )
+            .await;
+        }
+        "finish_and_send" => {
+            return Ok(ToolExecutionResult::from_activity_event(
+                "worker completed",
+                call.arguments.clone(),
+                None,
+            ));
+        }
+        _ => {}
+    }
+    if let Some(app_tool_name) = tool.app_tool_name() {
+        let app_call = call.with_name(app_tool_name.to_string());
+        let app_id = if app_tool_name == APP_GET_STATE_TOOL_NAME {
+            apps.all_tool_specs()
+                .into_iter()
+                .find_map(|(app_id, _)| {
+                    (app_id.mangle_tool_name(APP_GET_STATE_TOOL_NAME) == tool.name())
+                        .then_some(app_id)
+                })
+                .ok_or_else(|| {
+                    miette!("worker app state tool owner missing for `{}`", tool.name())
+                })?
+        } else {
+            apps.all_tool_specs()
+                .into_iter()
+                .find_map(|(app_id, specs)| {
+                    specs
+                        .iter()
+                        .any(|spec| app_id.mangle_tool_name(&spec.name) == tool.name())
+                        .then_some(app_id)
+                })
+                .ok_or_else(|| miette!("worker app tool owner missing for `{}`", tool.name()))?
+        };
+        if app_tool_name == APP_GET_STATE_TOOL_NAME {
+            let args: AppGetStateArgs = parse_tool_args(call)?;
+            let state = apps
+                .state_render_for(&app_id)
+                .ok_or_else(|| miette!("worker app state missing for {app_id}"))?;
+            let payload = app_state_payload(&app_id, &state, args.detail.unwrap_or_default());
+            let model_content = render_app_get_state_model_content(&app_id, &state);
+            return Ok(ToolExecutionResult::from_activity_event(
+                format!("read {} state", app_id),
+                payload,
+                None,
+            )
+            .with_model_content(model_content));
+        }
+        let result = apps
+            .execute_tool_for_app(&app_id, &app_call, app_context)
+            .await?;
+        let mut output =
+            ToolExecutionResult::from_activity_event(result.summary, result.payload, None);
+        if let Some(model_content) = result.model_content {
+            output = output.with_model_content(model_content);
+        }
+        return Ok(output);
+    }
+    Err(miette!("unknown worker runtime tool `{}`", tool.name()))
+}
+
 fn build_static_runtime_tools() -> Vec<Box<dyn RuntimeTool>> {
     let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
     tools.extend(files::register_tools());
@@ -956,6 +1262,136 @@ mod tests {
         terminal_app::TerminalApp,
         workspace_app::WorkspaceAppRegistry,
     };
+
+    #[test]
+    fn worker_finish_and_send_uses_declared_output_schema() {
+        let output_schema = json!({
+            "type": "object",
+            "properties": {
+                "summary": { "type": "string" }
+            },
+            "required": ["summary"],
+            "additionalProperties": false,
+        });
+        let AgentToolInputSpec::JsonSchema { schema } =
+            worker_finish_and_send_tool(output_schema.clone()).input_spec()
+        else {
+            panic!("worker finish_and_send should use a JSON schema");
+        };
+
+        assert_eq!(schema, output_schema);
+        assert!(!json_contains_key(&schema, "disposition"));
+        assert!(!json_contains_key(&schema, "reply_message"));
+    }
+
+    #[test]
+    fn worker_runtime_tools_exclude_main_finish_and_workflow_tools() {
+        let output_schema = json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false,
+        });
+        let apps: Vec<Box<dyn App>> = vec![Box::new(BrowserApp::new())];
+        let apps = AppManager::new(apps).expect("app manager");
+        let names = build_worker_runtime_tool_specs_for_apps(&apps, output_schema, false)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+
+        assert!(names.iter().any(|name| name == "finish_and_send"));
+        assert!(names.iter().any(|name| name == "read_file"));
+        assert!(names.iter().any(|name| name == "edit_file"));
+        assert!(names.iter().any(|name| name == "update_plan"));
+        assert!(names.iter().any(|name| name == "browser__get_state"));
+        assert!(!names.iter().any(|name| name.starts_with("workflow__")));
+        assert!(!names.iter().any(|name| name == "view_image"));
+        let vision_names = build_worker_runtime_tool_specs_for_apps(
+            &apps,
+            json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false,
+            }),
+            true,
+        )
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+        assert!(vision_names.iter().any(|name| name == "view_image"));
+    }
+
+    #[tokio::test]
+    async fn worker_static_tools_execute_without_main_context_state() {
+        let home = tempfile::tempdir().expect("home");
+        let _home = DaatLocusHomeOverride::set(home.path().to_path_buf()).await;
+        let execution = tempfile::tempdir().expect("execution cwd");
+        std::fs::write(execution.path().join("notes.txt"), "alpha\nbeta\n").expect("write fixture");
+        let mut apps = AppManager::new(vec![Box::new(BrowserApp::new()) as Box<dyn App>])
+            .expect("worker apps");
+        let mut worker_plan = Plan::default();
+        let output_schema = json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false,
+        });
+        let read_call = AgentToolCall {
+            id: "worker-read".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({
+                "path": "notes.txt",
+                "start_line": 2,
+                "line_count": 1,
+                "force_no_elide": false,
+            }),
+        };
+        let image_state_dir = execution.path().join("images");
+        let result = execute_worker_runtime_tool_call_for_apps(
+            &mut apps,
+            execution.path(),
+            &RuntimeSandboxPolicy::disabled(),
+            1024,
+            Some(false),
+            &image_state_dir,
+            1,
+            &read_call,
+            output_schema.clone(),
+            &mut worker_plan,
+        )
+        .await
+        .expect("worker read_file");
+        assert_eq!(
+            result.model_content(),
+            format!("2#{}|beta", scope_engine::patch::line_hash("beta"))
+        );
+
+        let plan_call = AgentToolCall {
+            id: "worker-plan".to_string(),
+            name: "update_plan".to_string(),
+            arguments: json!({
+                "explanation": "Track the worker task.",
+                "plan": [{ "step": "Inspect fixture", "status": "in_progress" }],
+            }),
+        };
+        execute_worker_runtime_tool_call_for_apps(
+            &mut apps,
+            execution.path(),
+            &RuntimeSandboxPolicy::disabled(),
+            1024,
+            Some(false),
+            &image_state_dir,
+            2,
+            &plan_call,
+            output_schema,
+            &mut worker_plan,
+        )
+        .await
+        .expect("worker update_plan");
+        assert_eq!(worker_plan.steps().len(), 1);
+        assert_eq!(worker_plan.steps()[0].step, "Inspect fixture");
+    }
 
     struct UnusedModelProvider;
 

@@ -25,9 +25,8 @@ use crate::{
         App, AppDocs, AppId, AppInstallDisposition, AppManager, AppStateRender,
         AppToolExecutionResult, AppToolSpec,
     },
-    daat_locus_paths::daat_locus_paths_sync,
     persistence::PersistenceStore,
-    sandbox::{RuntimeSandboxPolicy, StrongFilesystemSandboxMode},
+    sandbox::StrongFilesystemSandboxMode,
     schema_utils::validate_model_facing_schema,
 };
 use client::WorkspaceAppWorkerClient;
@@ -158,20 +157,6 @@ struct WorkspaceNoticeOutput {
     state: Option<JsonValue>,
 }
 
-pub fn bootstrap_workspace_apps(
-    workspace_root: &Path,
-    sandbox_policy: &RuntimeSandboxPolicy,
-) -> WorkspaceAppBootstrap {
-    let state_root = daat_locus_paths_sync().state_dir().join("apps");
-    bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
-        workspace_root,
-        &state_root,
-        sandbox_policy.protected_env_vars(),
-        sandbox_policy.strong_filesystem,
-        sandbox_policy.is_disabled(),
-    )
-}
-
 #[cfg(test)]
 fn bootstrap_workspace_apps_with_state_root(
     workspace_root: &Path,
@@ -187,7 +172,7 @@ fn bootstrap_workspace_apps_with_state_root(
     )
 }
 
-fn bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
+pub(crate) fn bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
     workspace_root: &Path,
     state_root: &Path,
     protected_env_vars: &[String],

@@ -31,8 +31,8 @@ use crate::{
         episode::EpisodeActionRecord,
         prompt_parts::AfterClaimContextInput,
         runtime::{
-            AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentTurnItem,
-            AgentTurnRequest, AgentTurnStreamResult, HistoryMessage,
+            AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentTurnRequest,
+            AgentTurnStreamResult, HistoryMessage,
         },
         runtime_error::{
             RuntimeErrorActionContext, RuntimeErrorCase, RuntimeErrorCaseParts, RuntimeErrorKind,
@@ -458,36 +458,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_turn_follow_up_decision_state_machine_prefers_runtime_gate() {
-        let state = RuntimeTurnFollowUpState {
-            raw_stream_requested_follow_up: true,
-            claimed_statuses: &[],
-        };
-        assert!(matches!(
-            runtime_turn_follow_up_decision_from_state(&state),
-            RuntimeFollowUpDecision::Continue { .. }
-        ));
-
-        let state = RuntimeTurnFollowUpState {
-            raw_stream_requested_follow_up: false,
-            claimed_statuses: &[EventStatus::Claimed],
-        };
-        assert!(matches!(
-            runtime_turn_follow_up_decision_from_state(&state),
-            RuntimeFollowUpDecision::Continue { .. }
-        ));
-
-        let state = RuntimeTurnFollowUpState {
-            raw_stream_requested_follow_up: false,
-            claimed_statuses: &[EventStatus::Resolved],
-        };
-        assert!(matches!(
-            runtime_turn_follow_up_decision_from_state(&state),
-            RuntimeFollowUpDecision::AllowFinish
-        ));
-    }
-
-    #[test]
     fn claimed_runtime_input_fingerprint_is_stable_and_sorted() {
         let event_a = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
         let event_b = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
@@ -541,19 +511,6 @@ mod tests {
     #[test]
     fn claimed_runtime_input_fingerprint_is_none_for_empty_batch() {
         assert_eq!(claimed_runtime_input_fingerprint(&[]), None);
-    }
-
-    #[test]
-    fn follow_up_reason_messages_are_structured() {
-        assert_eq!(
-            RuntimeFollowUpReason::RawStreamRequestedFollowUp.message(),
-            "This sample is still marked needs_follow_up; continue the current turn."
-        );
-        assert!(
-            RuntimeFollowUpReason::ClaimedEventNeedsExplicitResolution
-                .message()
-                .contains("finish_and_send")
-        );
     }
 
     #[test]

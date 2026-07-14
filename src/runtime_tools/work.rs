@@ -22,24 +22,28 @@ use super::{
 };
 
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
-    vec![
-        Box::new(StaticRuntimeTool::new_with_schema(
-            "finish_and_send",
-            "Explicitly finish an event and send the final reply when a user reply is needed. `resolved` and `failed` both require `reply_message`; `dismissed` silently ends without sending a message.",
-            model_schema_for::<EventResolveArgs>(),
-            summarize_event_resolve_tool,
-            render_event_resolve_call_ui,
-            execute_event_resolve_tool,
-        )),
-        Box::new(StaticRuntimeTool::new_with_schema(
-            "update_plan",
-            "Submit the complete step-by-step plan for the current task.",
-            model_schema_for::<UpdatePlanArgs>(),
-            summarize_update_plan_tool,
-            render_update_plan_call_ui,
-            execute_update_plan_tool,
-        )),
-    ]
+    let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
+    tools.push(Box::new(StaticRuntimeTool::new_with_schema(
+        "finish_and_send",
+        "Explicitly finish an event and send the final reply when a user reply is needed. `resolved` and `failed` both require `reply_message`; `dismissed` silently ends without sending a message.",
+        model_schema_for::<EventResolveArgs>(),
+        summarize_event_resolve_tool,
+        render_event_resolve_call_ui,
+        execute_event_resolve_tool,
+    )));
+    tools.extend(register_update_plan_tools());
+    tools
+}
+
+pub(super) fn register_update_plan_tools() -> Vec<Box<dyn RuntimeTool>> {
+    vec![Box::new(StaticRuntimeTool::new_with_schema(
+        "update_plan",
+        "Submit the complete step-by-step plan for the current task.",
+        model_schema_for::<UpdatePlanArgs>(),
+        summarize_update_plan_tool,
+        render_update_plan_call_ui,
+        execute_update_plan_tool,
+    )) as Box<dyn RuntimeTool>]
 }
 
 fn reply_activity_event(
@@ -283,6 +287,35 @@ fn execute_update_plan_tool<'a>(
             Some(SessionActivityEvent::PlanResult(plan_event.into())),
         ))
     })
+}
+pub(crate) async fn execute_worker_update_plan(
+    worker_plan: &mut Plan,
+    call: &AgentToolCall,
+) -> Result<ToolExecutionResult> {
+    let args: UpdatePlanArgs = parse_tool_args(call)?;
+    let explanation = args.explanation.clone();
+    let plan = build_plan_from_args(args)?;
+    let changed = worker_plan.replace(plan.steps().to_vec());
+    let effective_steps = worker_plan.steps().to_vec();
+    let summary = if effective_steps.is_empty() {
+        if changed {
+            "cleared worker plan after completion".to_string()
+        } else {
+            "worker plan already clear".to_string()
+        }
+    } else if changed {
+        format!("updated worker plan with {} steps", effective_steps.len())
+    } else {
+        format!("worker plan unchanged with {} steps", effective_steps.len())
+    };
+    Ok(ToolExecutionResult::from_activity_event(
+        summary,
+        json!({
+            "explanation": explanation,
+            "plan": effective_steps,
+        }),
+        None,
+    ))
 }
 
 fn trim_optional_field(value: Option<String>) -> Option<String> {

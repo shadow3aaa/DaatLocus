@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 const EMPTY_REASONING_MAX_LOOPS: usize = 2;
+const MAIN_EXPLICIT_COMPLETION_MESSAGE: &str = "The claimed event remains unresolved. Do not end by only outputting text; keep calling tools, and explicitly call `finish_and_send` with a non-empty `reply_message` when the final result is ready.";
 
 fn enter_runtime_phase(
     context: &mut Context,
@@ -705,25 +706,16 @@ pub(crate) async fn execute_agent_loop_step(
                 };
             }
         };
-        let mut response_assistant_messages = Vec::new();
-        let mut response_tool_calls = Vec::new();
-        for item in response.items {
-            match item {
-                AgentTurnItem::AssistantMessage { content } => {
-                    if !content.trim().is_empty() {
-                        response_assistant_messages.push(content);
-                    }
-                }
-                AgentTurnItem::ToolCall { call } => response_tool_calls.push(call),
-            }
-        }
-        let response_assistant_content = response
-            .last_assistant_message
-            .clone()
-            .or_else(|| response_assistant_messages.last().cloned());
-        if let Some(reasoning_content) = response.last_reasoning_content.as_deref()
-            && !reasoning_content.trim().is_empty()
-        {
+        let response_protocol = response.protocol();
+        let follow_up_message = response_protocol.follow_up_message(
+            claimed_events_require_explicit_completion(context, &claimed_event_ids),
+            MAIN_EXPLICIT_COMPLETION_MESSAGE,
+        );
+        let response_tool_calls = response_protocol.tool_calls;
+        let response_assistant_text = response_protocol.assistant_text;
+        let response_reasoning_content = response_protocol.reasoning_content;
+        let response_assistant_content = response_protocol.final_assistant_message;
+        if let Some(reasoning_content) = response_reasoning_content.as_deref() {
             context.emit_live_reasoning_progress(reasoning_content);
             if let Some(cell) = thinking_activity_cell(reasoning_content) {
                 append_committed_activity_cells(context, tx, vec![cell]);
@@ -736,11 +728,7 @@ pub(crate) async fn execute_agent_loop_step(
         }
         if !response_tool_calls.is_empty() {
             let calls = response_tool_calls;
-            let assistant_text = if response_assistant_messages.is_empty() {
-                None
-            } else {
-                Some(response_assistant_messages.join("\n\n"))
-            };
+            let assistant_text = response_assistant_text;
             let tool_call_previews = calls
                 .iter()
                 .map(|call| {
@@ -760,7 +748,7 @@ pub(crate) async fn execute_agent_loop_step(
             runtime_step.push_agent_message(
                 AgentMessage::assistant_tool_call_protocol_with_reasoning(
                     assistant_text.clone(),
-                    response.last_reasoning_content.clone(),
+                    response_reasoning_content.clone(),
                     calls.clone(),
                 ),
             );
@@ -772,7 +760,7 @@ pub(crate) async fn execute_agent_loop_step(
             runtime_step.push_history_message(HistoryMessage {
                 message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
                     None,
-                    response.last_reasoning_content.clone(),
+                    response_reasoning_content.clone(),
                     calls.clone(),
                 ),
                 activity_event: None,
@@ -989,10 +977,9 @@ pub(crate) async fn execute_agent_loop_step(
 
         let content = response_assistant_content.unwrap_or_default();
         let is_empty_reasoning = content.trim().is_empty()
-            && response
-                .last_reasoning_content
+            && response_reasoning_content
                 .as_deref()
-                .is_some_and(|rc| !rc.trim().is_empty());
+                .is_some_and(|reasoning| !reasoning.trim().is_empty());
         if is_empty_reasoning {
             consecutive_empty_reasoning_loops += 1;
             if consecutive_empty_reasoning_loops >= EMPTY_REASONING_MAX_LOOPS {
@@ -1015,7 +1002,7 @@ pub(crate) async fn execute_agent_loop_step(
                         detected_by: "runtime_empty_reasoning_fuse",
                         expected_behavior: "The model should either call a tool or return user-visible assistant text.",
                         actual_behavior: "The model repeatedly returned reasoning content without assistant text or tool calls.",
-                        evidence: response.last_reasoning_content.as_deref().unwrap_or(""),
+                        evidence: response_reasoning_content.as_deref().unwrap_or(""),
                         recoverability: "terminated_by_empty_reasoning_fuse",
                         retry_count: consecutive_empty_reasoning_loops,
                         terminal_status: Some("fuse_tripped"),
@@ -1045,12 +1032,8 @@ pub(crate) async fn execute_agent_loop_step(
             continue 'agent_loop;
         }
         consecutive_empty_reasoning_loops = 0;
-        if let RuntimeFollowUpDecision::Continue { reason } = runtime_turn_follow_up_decision(
-            context,
-            response.raw_stream_follow_up,
-            &claimed_event_ids,
-        ) {
-            if let Some(error_kind) = runtime_follow_up_error_kind(reason) {
+        if let Some(expected_behavior) = follow_up_message {
+            if expected_behavior == MAIN_EXPLICIT_COMPLETION_MESSAGE {
                 record_runtime_error_case(
                     context,
                     RuntimeErrorRecordInput {
@@ -1059,10 +1042,10 @@ pub(crate) async fn execute_agent_loop_step(
                         claimed_event_ids: &claimed_event_ids,
                         tools: &tools,
                         context_text: &runtime_context_text,
-                        error_kind,
+                        error_kind: RuntimeErrorKind::MissingFinishAndSend,
                         severity: 2,
                         detected_by: "runtime_follow_up_gate",
-                        expected_behavior: reason.message(),
+                        expected_behavior,
                         actual_behavior: "The model returned assistant text without the required completion tool.",
                         evidence: &content,
                         recoverability: "follow_up_message_inserted",
@@ -1080,7 +1063,7 @@ pub(crate) async fn execute_agent_loop_step(
                 runtime_step.push_agent_message(AgentMessage::assistant(&content));
                 runtime_step.push_history_message(HistoryMessage::assistant(content.clone()));
             }
-            runtime_step.push_agent_message(AgentMessage::user(reason.message().to_string()));
+            runtime_step.push_agent_message(AgentMessage::user(expected_behavior));
             continue 'agent_loop;
         }
         let current_doing = content
@@ -1245,15 +1228,6 @@ async fn record_runtime_error_case(context: &Context, input: RuntimeErrorRecordI
         contract_refs: runtime_error_contract_refs(input.error_kind),
     });
     append_runtime_error_case(case).await;
-}
-
-fn runtime_follow_up_error_kind(reason: RuntimeFollowUpReason) -> Option<RuntimeErrorKind> {
-    match reason {
-        RuntimeFollowUpReason::ClaimedEventNeedsExplicitResolution => {
-            Some(RuntimeErrorKind::MissingFinishAndSend)
-        }
-        RuntimeFollowUpReason::RawStreamRequestedFollowUp => None,
-    }
 }
 
 fn classify_tool_runtime_error(tool_name: &str, error_text: &str) -> RuntimeErrorKind {

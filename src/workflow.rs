@@ -17,12 +17,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    app::{AppId, AppToolExecutionContext, AppToolExecutionResult},
+    app::AppManager,
     context::Context,
     core::ModelRequestOptions,
+    plan::Plan,
     reasoning::runtime::{
-        AgentMessage, AgentToolCall, AgentToolInputSpec, AgentToolSpec, AgentTurnItem,
-        AgentTurnRequest,
+        AgentMessage, AgentToolCall, AgentToolInputSpec, AgentToolSpec, AgentTurnRequest,
+    },
+    runtime::bootstrap::build_isolated_worker_apps,
+    runtime_tools::{
+        ToolExecutionResult, build_worker_runtime_tool_specs_for_apps,
+        execute_worker_runtime_tool_call_for_apps,
     },
     sandbox::{SandboxAsyncChild, SandboxProcessOptions, SandboxStdio},
     schema_utils::{validate_model_facing_schema, validate_value_against_schema},
@@ -30,6 +35,7 @@ use crate::{
 
 const WORKFLOW_TOOL_PREFIX: &str = "workflow__";
 const WORKER_MAX_TOOL_TURNS: usize = 16;
+const WORKER_EXPLICIT_COMPLETION_MESSAGE: &str = "The worker has not completed. Do not end by only outputting text; keep calling tools, and explicitly call `finish_and_send` with the declared typed output when the final result is ready.";
 const LUA_IO_MAX_BYTES: usize = 4 * 1024 * 1024;
 const LUA_SHELL_MAX_BYTES: usize = 4 * 1024 * 1024;
 const WORKFLOW_INTERRUPTED_ERROR: &str = "workflow interrupted";
@@ -264,24 +270,46 @@ struct WorkflowWorkerResult {
     output: Value,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct WorkerRuntimeState {
+    pub(crate) completed_output: Option<Value>,
+    worker_plan: Plan,
+    visible_source_lines: std::collections::HashSet<
+        crate::runtime::runtime_loop::coding_source_elision::CodingSourceLineKey,
+    >,
+    image_state_dir: PathBuf,
+    turn_epoch: u64,
+}
+
+impl WorkerRuntimeState {
+    fn new() -> Self {
+        let worker_id = uuid::Uuid::new_v4().to_string();
+        let image_state_dir = crate::daat_locus_paths::daat_locus_paths_sync()
+            .state_dir()
+            .join("workflow_workers")
+            .join(worker_id)
+            .join("viewed_images");
+        Self {
+            completed_output: None,
+            worker_plan: Plan::default(),
+            visible_source_lines: std::collections::HashSet::new(),
+            image_state_dir,
+            turn_epoch: 0,
+        }
+    }
+
+    fn next_turn_epoch(&mut self) -> u64 {
+        self.turn_epoch = self.turn_epoch.wrapping_add(1);
+        self.turn_epoch
+    }
+}
+
 #[derive(Clone, Debug)]
 struct WorkerTool {
     name: String,
     description: String,
     input_schema: Value,
-    kind: WorkerToolKind,
-}
-
-#[derive(Clone, Debug)]
-enum WorkerToolKind {
-    App {
-        owner_app_id: AppId,
-        app_tool_name: String,
-    },
-    Local {
-        local_name: String,
-        output_schema: Value,
-    },
+    output_schema: Value,
 }
 
 pub async fn invoke(
@@ -651,7 +679,9 @@ async fn run_worker(
 ) -> Result<WorkflowWorkerResult> {
     ensure_workflow_not_interrupted(cancellation)?;
     validate_value_against_schema(&input, &definition.input_schema, "worker input")?;
-    let tools = build_worker_tools(context, &definition, local_tools)?;
+    let mut worker_apps = build_worker_apps(context)?;
+    let worker_tools = build_worker_tools(&definition, local_tools)?;
+    let mut worker_runtime = WorkerRuntimeState::new();
     let mut messages = vec![
         AgentMessage::system(worker_system_instruction(&definition.instruction)),
         AgentMessage::user(
@@ -663,98 +693,151 @@ async fn run_worker(
         ensure_workflow_not_interrupted(cancellation)?;
         let request = AgentTurnRequest {
             messages: messages.clone(),
-            tools: tools
-                .iter()
-                .map(|tool| AgentToolSpec {
-                    name: tool.name.clone(),
-                    description: tool.description.clone(),
-                    input_spec: AgentToolInputSpec::JsonSchema {
-                        schema: tool.input_schema.clone(),
-                    },
-                })
-                .collect(),
+            tools: worker_tool_specs(
+                &worker_apps,
+                &definition,
+                &worker_tools,
+                worker_model_supports_vision(context, &definition.model),
+            ),
         };
         let response =
             complete_workflow_worker_turn(context, &definition.model, request, cancellation)
                 .await?;
-        let mut assistant_messages = Vec::new();
-        let mut calls = Vec::new();
-        for item in response.items {
-            match item {
-                AgentTurnItem::AssistantMessage { content } if !content.trim().is_empty() => {
-                    assistant_messages.push(content)
-                }
-                AgentTurnItem::ToolCall { call } => calls.push(call),
-                AgentTurnItem::AssistantMessage { .. } => {}
+        let protocol = response.protocol();
+        let follow_up_message =
+            protocol.follow_up_message(true, WORKER_EXPLICIT_COMPLETION_MESSAGE);
+        if !protocol.tool_calls.is_empty() {
+            let assistant_text = protocol.assistant_text.clone();
+            messages.push(AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                assistant_text,
+                protocol.reasoning_content.clone(),
+                protocol.tool_calls.clone(),
+            ));
+            for call in protocol.tool_calls {
+                ensure_workflow_not_interrupted(cancellation)?;
+                let result = execute_worker_tool(
+                    &mut worker_apps,
+                    context,
+                    &definition,
+                    &mut worker_runtime,
+                    &call,
+                    &worker_tools,
+                    local_tools,
+                    cancellation,
+                )
+                .await;
+                append_worker_tool_result_message(&mut messages, call, result, &mut worker_runtime);
             }
-        }
-        if calls.is_empty() {
-            let output = parse_worker_output(
-                response
-                    .last_assistant_message
-                    .or_else(|| assistant_messages.into_iter().last())
-                    .ok_or_else(|| miette!("worker returned no output"))?,
-            )?;
-            validate_value_against_schema(&output, &definition.output_schema, "worker output")?;
-            return Ok(WorkflowWorkerResult { output });
+        } else {
+            let content = protocol.final_assistant_message.unwrap_or_default();
+            if !content.trim().is_empty() {
+                messages.push(AgentMessage::assistant(&content));
+            }
+            messages.push(AgentMessage::user(
+                follow_up_message.expect("workers always require explicit completion"),
+            ));
         }
 
-        messages.push(AgentMessage::assistant_tool_call_protocol_with_reasoning(
-            (!assistant_messages.is_empty()).then(|| assistant_messages.join("\n\n")),
-            response.last_reasoning_content,
-            calls.clone(),
-        ));
-        for call in calls {
-            ensure_workflow_not_interrupted(cancellation)?;
-            let result =
-                execute_worker_tool(context, &call, &tools, local_tools, cancellation).await;
-            let content = match result {
-                Ok(value) => json!({ "ok": true, "result": value }).to_string(),
-                Err(err) => json!({ "ok": false, "error": err.to_string() }).to_string(),
-            };
-            messages.push(AgentMessage::tool(call.id, call.name, content));
+        if let Some(output) = worker_runtime.completed_output.take() {
+            return Ok(WorkflowWorkerResult { output });
         }
         if turn + 1 == WORKER_MAX_TOOL_TURNS {
             return Err(miette!(
-                "worker exceeded the maximum of {WORKER_MAX_TOOL_TURNS} tool turns"
+                "worker exceeded the maximum of {WORKER_MAX_TOOL_TURNS} tool turns without calling finish_and_send"
             ));
         }
     }
     Err(miette!("worker did not complete"))
 }
 
+fn worker_tool_specs(
+    apps: &AppManager,
+    definition: &WorkerDefinition,
+    local_tools: &[WorkerTool],
+    supports_vision: bool,
+) -> Vec<AgentToolSpec> {
+    let mut tools = build_worker_runtime_tool_specs_for_apps(
+        apps,
+        definition.output_schema.clone(),
+        supports_vision,
+    );
+    tools.extend(local_tools.iter().map(|tool| AgentToolSpec {
+        name: tool.name.clone(),
+        description: tool.description.clone(),
+        input_spec: AgentToolInputSpec::JsonSchema {
+            schema: tool.input_schema.clone(),
+        },
+    }));
+    tools
+}
+
+fn worker_model_supports_vision(context: &Context, model: &WorkerModel) -> bool {
+    let model = match model {
+        WorkerModel::Main => context.config.main_model_config(),
+        WorkerModel::Efficient => context.config.efficient_model_config(),
+    };
+    model.supports_vision.unwrap_or_else(|| {
+        crate::model_catalog::catalog_model_capacity(&model.model_id)
+            .map(|capacity| capacity.supports_vision)
+            .unwrap_or(true)
+    })
+}
+
+fn append_worker_tool_result_message(
+    messages: &mut Vec<AgentMessage>,
+    call: AgentToolCall,
+    result: Result<ToolExecutionResult>,
+    worker_runtime: &mut WorkerRuntimeState,
+) {
+    match result {
+        Ok(mut result) => {
+            let model_content = if result.skip_source_elision {
+                result.model_content()
+            } else {
+                crate::runtime::runtime_loop::coding_source_elision::elide_tool_model_content(
+                    &mut worker_runtime.visible_source_lines,
+                    &call,
+                    &result.model_content(),
+                )
+            };
+            let model_image_parts = std::mem::take(&mut result.model_image_parts);
+            messages.push(AgentMessage::tool(
+                call.id,
+                call.name.clone(),
+                model_content,
+            ));
+            if !model_image_parts.is_empty() {
+                messages.push(AgentMessage::user_content(
+                    crate::reasoning::runtime::AgentContent::multimodal(
+                        format!(
+                            "The `{}` tool attached image content for visual inspection.",
+                            call.name
+                        ),
+                        model_image_parts,
+                    ),
+                ));
+            }
+        }
+        Err(err) => messages.push(AgentMessage::tool(
+            call.id,
+            call.name,
+            json!({ "ok": false, "error": err.to_string() }).to_string(),
+        )),
+    }
+}
+
+fn build_worker_apps(context: &Context) -> Result<AppManager> {
+    let worker_id = uuid::Uuid::new_v4().to_string();
+    let (apps, _workspace_apps) =
+        build_isolated_worker_apps(&context.execution_cwd, &context.sandbox_policy, &worker_id);
+    AppManager::new(apps)
+}
+
 fn build_worker_tools(
-    context: &Context,
     definition: &WorkerDefinition,
     local_tools: &Arc<Mutex<BTreeMap<String, LocalToolDefinition>>>,
 ) -> Result<Vec<WorkerTool>> {
     let mut tools = BTreeMap::<String, WorkerTool>::new();
-    for (owner_app_id, app_tools) in context.apps.all_tool_specs() {
-        for spec in app_tools {
-            if matches!(spec.name.as_str(), "get_state" | "next_review") {
-                continue;
-            }
-            validate_model_facing_schema(&spec.input_schema)?;
-            let name = owner_app_id.mangle_tool_name(&spec.name);
-            if tools.contains_key(&name) {
-                return Err(miette!(
-                    "workflow worker App tool name `{name}` is duplicated"
-                ));
-            }
-            tools.insert(
-                name.clone(),
-                WorkerTool {
-                    name,
-                    description: spec.description,
-                    input_schema: spec.input_schema,
-                    kind: WorkerToolKind::App {
-                        owner_app_id: owner_app_id.clone(),
-                        app_tool_name: spec.name,
-                    },
-                },
-            );
-        }
-    }
     let declared = local_tools
         .lock()
         .map_err(|_| miette!("workflow local-tool lock poisoned"))?;
@@ -762,19 +845,13 @@ fn build_worker_tools(
         let local = declared
             .get(name)
             .ok_or_else(|| miette!("workflow worker references undeclared local tool `{name}`"))?;
-        if tools.contains_key(name) {
-            return Err(miette!("workflow worker tool name `{name}` is duplicated"));
-        }
         tools.insert(
             name.clone(),
             WorkerTool {
                 name: name.clone(),
                 description: format!("Workflow-local tool `{name}`."),
                 input_schema: local.input_schema.clone(),
-                kind: WorkerToolKind::Local {
-                    local_name: name.clone(),
-                    output_schema: local.output_schema.clone(),
-                },
+                output_schema: local.output_schema.clone(),
             },
         );
     }
@@ -818,83 +895,77 @@ async fn wait_for_workflow_interrupt(cancellation: &WorkflowCancellation) {
 }
 
 async fn execute_worker_tool(
-    context: &mut Context,
+    apps: &mut AppManager,
+    context: &Context,
+    definition: &WorkerDefinition,
+    worker_runtime: &mut WorkerRuntimeState,
     call: &AgentToolCall,
     tools: &[WorkerTool],
     local_tools: &Arc<Mutex<BTreeMap<String, LocalToolDefinition>>>,
     cancellation: Option<&WorkflowCancellation>,
-) -> Result<Value> {
+) -> Result<ToolExecutionResult> {
     ensure_workflow_not_interrupted(cancellation)?;
-    let tool = tools
-        .iter()
-        .find(|tool| tool.name == call.name)
-        .ok_or_else(|| miette!("worker attempted undeclared tool `{}`", call.name))?;
-    validate_value_against_schema(&call.arguments, &tool.input_schema, "worker tool input")?;
-    match &tool.kind {
-        WorkerToolKind::App {
-            owner_app_id,
-            app_tool_name,
-        } => {
-            ensure_workflow_not_interrupted(cancellation)?;
-            let app_context = AppToolExecutionContext {
-                execution_cwd: context.execution_cwd.clone(),
-                sandbox_policy: context.sandbox_policy.clone(),
-                dashboard_tx: context.dashboard_tx.clone(),
-                tool_output_max_tokens: context
-                    .config
-                    .main_model_config()
-                    .tool_output_max_tokens
-                    .max(1),
-                turn_epoch: context.runtime_turn_epoch,
-            };
-            let app_call = call.with_name(app_tool_name.clone());
-            let result = context
-                .apps
-                .execute_tool_for_app(owner_app_id, &app_call, &app_context)
-                .await?;
-            Ok(worker_app_result_value(result))
-        }
-        WorkerToolKind::Local {
-            local_name,
-            output_schema,
-        } => {
-            let local = local_tools
-                .lock()
-                .map_err(|_| miette!("workflow local-tool lock poisoned"))?
-                .get(local_name)
-                .cloned()
-                .ok_or_else(|| miette!("workflow local tool `{local_name}` disappeared"))?;
-            let lua_input = local.lua.to_value(&call.arguments).map_err(lua_error)?;
-            let lua_output: LuaValue = local.run.call(lua_input).map_err(lua_error)?;
-            let output: Value = local.lua.from_value(lua_output).map_err(lua_error)?;
-            ensure_workflow_not_interrupted(cancellation)?;
-            validate_value_against_schema(&output, output_schema, "workflow local tool output")?;
-            Ok(output)
-        }
+    if call.name == "finish_and_send" {
+        validate_value_against_schema(&call.arguments, &definition.output_schema, "worker output")?;
+        worker_runtime.completed_output = Some(call.arguments.clone());
+        return Ok(ToolExecutionResult::from_activity_event(
+            "worker completed",
+            call.arguments.clone(),
+            None,
+        ));
     }
+    if let Some(tool) = tools.iter().find(|tool| tool.name == call.name) {
+        validate_value_against_schema(&call.arguments, &tool.input_schema, "worker tool input")?;
+        return execute_worker_local_tool(tool, call, local_tools, cancellation);
+    }
+    let model_config = match definition.model {
+        WorkerModel::Main => context.config.main_model_config(),
+        WorkerModel::Efficient => context.config.efficient_model_config(),
+    };
+    let turn_epoch = worker_runtime.next_turn_epoch();
+    execute_worker_runtime_tool_call_for_apps(
+        apps,
+        &context.execution_cwd,
+        &context.sandbox_policy,
+        model_config.tool_output_max_tokens.max(1),
+        Some(worker_model_supports_vision(context, &definition.model)),
+        &worker_runtime.image_state_dir,
+        turn_epoch,
+        call,
+        definition.output_schema.clone(),
+        &mut worker_runtime.worker_plan,
+    )
+    .await
 }
 
-fn worker_app_result_value(result: AppToolExecutionResult) -> Value {
-    json!({
-        "summary": result.summary,
-        "payload": result.payload,
-        "model_content": result.model_content,
-    })
+fn execute_worker_local_tool(
+    tool: &WorkerTool,
+    call: &AgentToolCall,
+    local_tools: &Arc<Mutex<BTreeMap<String, LocalToolDefinition>>>,
+    cancellation: Option<&WorkflowCancellation>,
+) -> Result<ToolExecutionResult> {
+    let local = local_tools
+        .lock()
+        .map_err(|_| miette!("workflow local-tool lock poisoned"))?
+        .get(&tool.name)
+        .cloned()
+        .ok_or_else(|| miette!("workflow local tool `{}` disappeared", tool.name))?;
+    let lua_input = local.lua.to_value(&call.arguments).map_err(lua_error)?;
+    let lua_output: LuaValue = local.run.call(lua_input).map_err(lua_error)?;
+    let output: Value = local.lua.from_value(lua_output).map_err(lua_error)?;
+    ensure_workflow_not_interrupted(cancellation)?;
+    validate_value_against_schema(&output, &tool.output_schema, "workflow local tool output")?;
+    Ok(ToolExecutionResult::from_activity_event(
+        format!("workflow local tool `{}` completed", tool.name),
+        output,
+        None,
+    ))
 }
 
 fn worker_system_instruction(instruction: &str) -> String {
     format!(
-        "You are an isolated workflow worker. You receive only the workflow instruction, typed input, host-provided App tools, and explicitly declared workflow-local tools. Do not claim or finish user events, do not assume access to session conversation history, and do not call tools outside your declared surface. When the work is complete, return exactly one JSON object matching your declared output schema with no markdown.\n\nWorkflow instruction:\n{instruction}"
+        "You are an isolated workflow worker. You receive only the workflow instruction, typed input, worker-local App instances, and explicitly declared workflow-local tools. Do not claim or finish user events, do not assume access to session conversation history, and do not call workflow tools. When the work is complete, call `finish_and_send` exactly once with arguments matching your declared output schema. Do not end the turn with only assistant text.\n\nWorkflow instruction:\n{instruction}"
     )
-}
-
-fn parse_worker_output(content: String) -> Result<Value> {
-    serde_json::from_str(content.trim()).map_err(|err| {
-        miette!(
-            "worker returned invalid JSON output: {err}; output={}",
-            content.trim()
-        )
-    })
 }
 
 fn worker_definition_from_lua(lua: &Lua, table: Table) -> mlua::Result<WorkerDefinition> {
@@ -959,6 +1030,66 @@ fn worker_definition_to_lua(lua: &Lua, definition: &WorkerDefinition) -> mlua::R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::bootstrap::DaatLocusHomeOverride;
+
+    #[test]
+    fn workflow_catalog_loads_only_global_home_workflows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let _home = runtime.block_on(DaatLocusHomeOverride::set(temp.path().to_path_buf()));
+        let global_workflows = temp.path().join("workflows");
+        fs::create_dir_all(&global_workflows).expect("create global workflows directory");
+        fs::write(
+            global_workflows.join("global_only.lua"),
+            include_str!("../examples/workflows/research_brief.lua"),
+        )
+        .expect("write global workflow");
+
+        let session = tempfile::tempdir().expect("session tempdir");
+        let session_workflows = session.path().join("workflows");
+        fs::create_dir_all(&session_workflows).expect("create session workflows directory");
+        fs::write(
+            session_workflows.join("session_only.lua"),
+            include_str!("../examples/workflows/research_brief.lua"),
+        )
+        .expect("write session workflow");
+
+        let catalog = WorkflowCatalog::load();
+
+        assert!(catalog.get("global_only").is_some());
+        assert!(catalog.get("session_only").is_none());
+    }
+
+    #[test]
+    fn worker_result_messages_preserve_model_content_and_image_parts() {
+        let mut messages = Vec::new();
+        let mut worker_runtime = WorkerRuntimeState::new();
+        let call = AgentToolCall {
+            id: "worker-image".to_string(),
+            name: "view_image".to_string(),
+            arguments: json!({}),
+        };
+        let result = ToolExecutionResult::from_activity_event("image", json!({}), None)
+            .with_model_content("attached image")
+            .with_model_image_part(crate::reasoning::runtime::AgentContentPart::Image {
+                path: "worker-image.png".to_string(),
+                media_type: "image/png".to_string(),
+                description: Some("worker fixture".to_string()),
+            });
+
+        append_worker_tool_result_message(&mut messages, call, Ok(result), &mut worker_runtime);
+
+        assert!(matches!(
+            &messages[0],
+            AgentMessage::Tool { content, .. } if content == "attached image"
+        ));
+        assert!(matches!(
+            &messages[1],
+            AgentMessage::User { content }
+                if matches!(content.parts(), [crate::reasoning::runtime::AgentContentPart::Image { media_type, .. }]
+                    if media_type == "image/png")
+        ));
+    }
 
     fn worker_schema() -> Value {
         json!({

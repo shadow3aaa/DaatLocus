@@ -79,7 +79,7 @@ pub enum AgentToolInputSpec {
     },
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct AgentToolCall {
     pub id: String,
     pub name: String,
@@ -246,6 +246,55 @@ pub struct AgentTurnStreamResult {
     pub last_assistant_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reasoning_content: Option<String>,
+}
+
+impl AgentTurnStreamResult {
+    pub fn protocol(self) -> AgentTurnResponse {
+        let mut assistant_messages = Vec::new();
+        let mut tool_calls = Vec::new();
+        for item in self.items {
+            match item {
+                AgentTurnItem::AssistantMessage { content } if !content.trim().is_empty() => {
+                    assistant_messages.push(content)
+                }
+                AgentTurnItem::ToolCall { call } => tool_calls.push(call),
+                AgentTurnItem::AssistantMessage { .. } => {}
+            }
+        }
+        let final_assistant_message = self
+            .last_assistant_message
+            .filter(|content| !content.trim().is_empty())
+            .or_else(|| assistant_messages.last().cloned());
+        let assistant_text =
+            (!assistant_messages.is_empty()).then(|| assistant_messages.join("\n\n"));
+        AgentTurnResponse {
+            tool_calls,
+            assistant_text,
+            final_assistant_message,
+            reasoning_content: self.last_reasoning_content,
+            raw_stream_follow_up: self.raw_stream_follow_up,
+        }
+    }
+}
+
+pub struct AgentTurnResponse {
+    pub tool_calls: Vec<AgentToolCall>,
+    pub assistant_text: Option<String>,
+    pub final_assistant_message: Option<String>,
+    pub reasoning_content: Option<String>,
+    pub raw_stream_follow_up: bool,
+}
+
+impl AgentTurnResponse {
+    pub fn follow_up_message(
+        &self,
+        explicit_completion_required: bool,
+        explicit_completion_message: &'static str,
+    ) -> Option<&'static str> {
+        self.raw_stream_follow_up
+            .then_some("This sample is still marked needs_follow_up; continue the current turn.")
+            .or_else(|| explicit_completion_required.then_some(explicit_completion_message))
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -822,5 +871,61 @@ mod tests {
             }
             _ => panic!("expected user message"),
         }
+    }
+
+    #[test]
+    fn agent_turn_protocol_filters_empty_messages_and_prefers_final_content() {
+        let response = AgentTurnStreamResult {
+            items: vec![
+                AgentTurnItem::AssistantMessage {
+                    content: "  ".to_string(),
+                },
+                AgentTurnItem::AssistantMessage {
+                    content: "intermediate".to_string(),
+                },
+                AgentTurnItem::ToolCall {
+                    call: AgentToolCall {
+                        id: "call-1".to_string(),
+                        name: "example".to_string(),
+                        arguments: json!({}),
+                    },
+                },
+            ],
+            raw_stream_follow_up: false,
+            last_assistant_message: Some("final".to_string()),
+            last_reasoning_content: None,
+        }
+        .protocol();
+
+        assert_eq!(response.assistant_text.as_deref(), Some("intermediate"));
+        assert_eq!(response.final_assistant_message.as_deref(), Some("final"));
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(
+            response.follow_up_message(true, "complete"),
+            Some("complete")
+        );
+    }
+
+    #[test]
+    fn agent_turn_protocol_falls_back_to_last_nonempty_message() {
+        let response = AgentTurnStreamResult {
+            items: vec![
+                AgentTurnItem::AssistantMessage {
+                    content: "first".to_string(),
+                },
+                AgentTurnItem::AssistantMessage {
+                    content: "second".to_string(),
+                },
+            ],
+            raw_stream_follow_up: true,
+            last_assistant_message: Some(" ".to_string()),
+            last_reasoning_content: None,
+        }
+        .protocol();
+
+        assert_eq!(
+            response.follow_up_message(true, "complete"),
+            Some("This sample is still marked needs_follow_up; continue the current turn.")
+        );
     }
 }

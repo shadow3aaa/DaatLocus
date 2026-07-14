@@ -15,7 +15,7 @@ use crate::{
     context::Context,
     context_budget::TokenEstimateBaseline,
     core::{ModelProvider, ModelRequestOptions, TokenUsageInfo},
-    daat_locus_paths::daat_locus_paths,
+    daat_locus_paths::{daat_locus_paths, daat_locus_paths_sync},
     events::EventStore,
     memory::Memory,
     openskills::load_openskills_for_runtime,
@@ -36,7 +36,9 @@ use crate::{
     terminal_app::TerminalApp,
     workflow::{WorkflowCancellationRegistry, WorkflowCatalog},
     workspace_app::paths::{resolve_runtime_workspace_dir, workspace_apps_dir},
-    workspace_app::{WorkspaceAppRegistry, bootstrap_workspace_apps},
+    workspace_app::{
+        WorkspaceAppRegistry, bootstrap_workspace_apps_with_state_root_and_strong_filesystem,
+    },
 };
 
 pub(crate) fn emit_startup_progress(message: impl AsRef<str>) {
@@ -322,12 +324,43 @@ pub(crate) fn build_runtime_apps(
     execution_cwd: &Path,
     sandbox_policy: &RuntimeSandboxPolicy,
 ) -> (Vec<Box<dyn crate::app::App>>, WorkspaceAppRegistry) {
+    build_runtime_apps_with_workspace_app_state(
+        execution_cwd,
+        sandbox_policy,
+        daat_locus_paths_sync().state_dir().join("apps"),
+    )
+}
+
+pub(crate) fn build_isolated_worker_apps(
+    execution_cwd: &Path,
+    sandbox_policy: &RuntimeSandboxPolicy,
+    worker_id: &str,
+) -> (Vec<Box<dyn crate::app::App>>, WorkspaceAppRegistry) {
+    let state_root = daat_locus_paths_sync()
+        .state_dir()
+        .join("workflow_workers")
+        .join(worker_id)
+        .join("apps");
+    build_runtime_apps_with_workspace_app_state(execution_cwd, sandbox_policy, state_root)
+}
+
+fn build_runtime_apps_with_workspace_app_state(
+    execution_cwd: &Path,
+    sandbox_policy: &RuntimeSandboxPolicy,
+    workspace_app_state_root: PathBuf,
+) -> (Vec<Box<dyn crate::app::App>>, WorkspaceAppRegistry) {
     let mut apps: Vec<Box<dyn crate::app::App>> = vec![
         Box::new(BrowserApp::new()),
         Box::new(TerminalApp::new()),
         Box::new(CodingApp::new()),
     ];
-    let bootstrap = bootstrap_workspace_apps(execution_cwd, sandbox_policy);
+    let bootstrap = bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
+        execution_cwd,
+        &workspace_app_state_root,
+        sandbox_policy.protected_env_vars(),
+        sandbox_policy.strong_filesystem,
+        sandbox_policy.is_disabled(),
+    );
     for error in &bootstrap.errors {
         tracing::warn!("{error}");
     }

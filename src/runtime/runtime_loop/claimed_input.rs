@@ -381,67 +381,14 @@ pub(super) fn afterclaim_context_input_for_claimed_inputs(
     inputs.to_vec()
 }
 
-pub(super) enum RuntimeFollowUpDecision {
-    Continue { reason: RuntimeFollowUpReason },
-    AllowFinish,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RuntimeFollowUpReason {
-    RawStreamRequestedFollowUp,
-    ClaimedEventNeedsExplicitResolution,
-}
-
-pub(super) struct RuntimeTurnFollowUpState<'a> {
-    pub(super) raw_stream_requested_follow_up: bool,
-    pub(super) claimed_statuses: &'a [EventStatus],
-}
-
-impl RuntimeFollowUpReason {
-    pub(super) fn message(self) -> &'static str {
-        match self {
-            Self::RawStreamRequestedFollowUp => {
-                "This sample is still marked needs_follow_up; continue the current turn."
-            }
-            Self::ClaimedEventNeedsExplicitResolution => {
-                "The current turn has claimed events. Do not end by only outputting text; keep calling tools, and explicitly call `finish_and_send` with `reply_message` when the final reply is ready."
-            }
-        }
-    }
-}
-
-pub(super) fn runtime_turn_follow_up_decision(
+pub(super) fn claimed_events_require_explicit_completion(
     context: &Context,
-    raw_stream_follow_up: bool,
     claimed_event_ids: &[String],
-) -> RuntimeFollowUpDecision {
-    let claimed_statuses = claimed_event_ids
-        .iter()
-        .filter_map(|event_id| context.events.view(event_id).ok().map(|event| event.status))
-        .collect::<Vec<_>>();
-
-    let state = RuntimeTurnFollowUpState {
-        raw_stream_requested_follow_up: raw_stream_follow_up,
-        claimed_statuses: &claimed_statuses,
-    };
-
-    runtime_turn_follow_up_decision_from_state(&state)
-}
-
-pub(super) fn runtime_turn_follow_up_decision_from_state(
-    state: &RuntimeTurnFollowUpState<'_>,
-) -> RuntimeFollowUpDecision {
-    if state.raw_stream_requested_follow_up {
-        return RuntimeFollowUpDecision::Continue {
-            reason: RuntimeFollowUpReason::RawStreamRequestedFollowUp,
-        };
-    }
-
-    if summarize_claimed_event_statuses(state.claimed_statuses).has_claimed {
-        return RuntimeFollowUpDecision::Continue {
-            reason: RuntimeFollowUpReason::ClaimedEventNeedsExplicitResolution,
-        };
-    }
-
-    RuntimeFollowUpDecision::AllowFinish
+) -> bool {
+    claimed_event_ids.iter().any(|event_id| {
+        matches!(
+            context.events.view(event_id).map(|event| event.status),
+            Ok(EventStatus::Claimed)
+        )
+    })
 }

@@ -119,6 +119,80 @@ fn execute_view_image_runtime_tool<'a>(
         }))
     })
 }
+pub(crate) async fn execute_worker_view_image(
+    execution_cwd: &Path,
+    sandbox_policy: &crate::sandbox::RuntimeSandboxPolicy,
+    image_state_dir: &Path,
+    supports_vision: bool,
+    call: &AgentToolCall,
+) -> Result<ToolExecutionResult> {
+    if !supports_vision {
+        return Err(miette!(
+            "view_image is not available because the selected worker model does not support image inputs"
+        ));
+    }
+    let args: ViewImageArgs = parse_tool_args(call)?;
+    let requested_path = args.path;
+    let resolved = sandbox_policy.resolve_path(Path::new(&requested_path), Some(execution_cwd));
+    let canonical_path = resolved
+        .canonicalize()
+        .map_err(|err| miette!("unable to resolve image `{}`: {err}", resolved.display()))?;
+    sandbox_policy.ensure_path_readable(&canonical_path, "view_image target")?;
+
+    let bytes = read_view_image_bytes(&canonical_path)?;
+    let media_type = media_type_for_image_bytes(&bytes).ok_or_else(|| {
+        miette!(
+            "unsupported image type for `{}`; supported formats are PNG, JPEG, WebP, and GIF",
+            canonical_path.display()
+        )
+    })?;
+    let snapshot_path = snapshot_worker_viewed_image(image_state_dir, &bytes, media_type)?;
+
+    Ok(ToolExecutionResult::from_activity_event(
+        format!("loaded image {requested_path}"),
+        json!({
+            "path": requested_path,
+            "resolved_path": canonical_path.display().to_string(),
+            "media_type": media_type,
+            "bytes": bytes.len(),
+        }),
+        None,
+    )
+    .with_model_content(format!(
+        "Attached local image `{}` ({media_type}, {} bytes) for visual inspection.",
+        canonical_path.display(),
+        bytes.len()
+    ))
+    .with_model_image_part(AgentContentPart::Image {
+        path: snapshot_path.display().to_string(),
+        media_type: media_type.to_string(),
+        description: Some(format!("local image {requested_path}")),
+    }))
+}
+
+fn snapshot_worker_viewed_image(
+    image_state_dir: &Path,
+    bytes: &[u8],
+    media_type: &str,
+) -> Result<PathBuf> {
+    fs::create_dir_all(image_state_dir)
+        .map_err(|err| miette!("unable to create worker viewed-image cache: {err}"))?;
+    let digest = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let path = image_state_dir.join(format!(
+        "view-{digest}.{}",
+        image_extension_for_media_type(media_type)
+    ));
+    fs::write(&path, bytes).map_err(|err| {
+        miette!(
+            "unable to store worker viewed image `{}`: {err}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
 
 fn active_model_supports_vision(context: &Context) -> bool {
     let model = context.config.main_model_config();

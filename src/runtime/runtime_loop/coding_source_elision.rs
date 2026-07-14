@@ -28,7 +28,7 @@ struct CodingSourceElider<'a> {
     visible_full_lines: &'a mut HashSet<CodingSourceLineKey>,
 }
 
-pub(super) fn elide_tool_model_content(
+pub(crate) fn elide_tool_model_content(
     visible_lines: &mut HashSet<CodingSourceLineKey>,
     call: &AgentToolCall,
     content: &str,
