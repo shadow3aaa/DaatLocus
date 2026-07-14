@@ -97,6 +97,9 @@ const RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS: u64 = 60;
 
 #[cfg(test)]
 mod tests {
+    use super::turn::{
+        clear_runtime_failures_after_model_success, clear_runtime_overflow_failure_after_compaction,
+    };
     use super::*;
     use std::{collections::HashMap, sync::Arc, time::Instant};
 
@@ -511,6 +514,150 @@ mod tests {
     #[test]
     fn claimed_runtime_input_fingerprint_is_none_for_empty_batch() {
         assert_eq!(claimed_runtime_input_fingerprint(&[]), None);
+    }
+
+    #[tokio::test]
+    async fn overflow_fuse_trips_across_requeued_turns() {
+        let mut isolated = IsolatedRuntimeContext::new().await;
+        let context = &mut isolated.context;
+        let event_id = context
+            .events
+            .register_terminal_incoming(terminal_event("overflow me"))
+            .expect("register event");
+        context
+            .pending_work
+            .enqueue(PendingWork::Event { event_id })
+            .expect("enqueue event");
+        let fingerprint = format!("events=[{event_id}]");
+        let event_ids = vec![event_id.to_string()];
+
+        for expected_attempt in 1..RUNTIME_OVERFLOW_FUSE_THRESHOLD {
+            let claimed = claim_pending_runtime_inputs(context, 1);
+            assert_eq!(claimed.len(), 1);
+            assert!(!handle_runtime_overflow(
+                context,
+                Some(&fingerprint),
+                &event_ids,
+                "context limit exceeded",
+            ));
+            assert_eq!(
+                *context
+                    .runtime_overflow_failures
+                    .lock()
+                    .get(&fingerprint)
+                    .expect("overflow attempt should persist while requeued"),
+                expected_attempt
+            );
+        }
+
+        let claimed = claim_pending_runtime_inputs(context, 1);
+        assert_eq!(claimed.len(), 1);
+        assert!(handle_runtime_overflow(
+            context,
+            Some(&fingerprint),
+            &event_ids,
+            "context limit exceeded",
+        ));
+        let event = context
+            .events
+            .view(&event_id.to_string())
+            .expect("event view");
+        assert_eq!(event.status, EventStatus::Failed);
+        assert_eq!(context.pending_work.pending_count(), 0);
+        assert!(
+            context
+                .runtime_overflow_failures
+                .lock()
+                .get(&fingerprint)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_model_request_clears_both_failure_counters() {
+        let isolated = IsolatedRuntimeContext::new().await;
+        let context = &isolated.context;
+        let fingerprint = "events=[test]";
+        context.record_runtime_overflow_failure(fingerprint);
+        context.record_model_request_failure(fingerprint);
+
+        clear_runtime_failures_after_model_success(context, Some(fingerprint));
+
+        assert_eq!(context.record_runtime_overflow_failure(fingerprint), 1);
+        assert_eq!(context.record_model_request_failure(fingerprint), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_compaction_only_clears_overflow_failure_counter() {
+        let isolated = IsolatedRuntimeContext::new().await;
+        let context = &isolated.context;
+        let fingerprint = "events=[test]";
+        context.record_runtime_overflow_failure(fingerprint);
+        context.record_model_request_failure(fingerprint);
+
+        clear_runtime_overflow_failure_after_compaction(context, Some(fingerprint));
+
+        assert_eq!(context.record_runtime_overflow_failure(fingerprint), 1);
+        assert_eq!(context.record_model_request_failure(fingerprint), 2);
+    }
+
+    #[tokio::test]
+    async fn model_request_fuse_trips_across_requeued_turns() {
+        let mut isolated = IsolatedRuntimeContext::new().await;
+        let context = &mut isolated.context;
+        let event_id = context
+            .events
+            .register_terminal_incoming(terminal_event("model failure"))
+            .expect("register event");
+        context
+            .pending_work
+            .enqueue(PendingWork::Event { event_id })
+            .expect("enqueue event");
+        let fingerprint = format!("events=[{event_id}]");
+        let event_ids = vec![event_id.to_string()];
+
+        for expected_attempt in 1..RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD {
+            let claimed = claim_pending_runtime_inputs(context, 1);
+            assert_eq!(claimed.len(), 1);
+            assert!(!handle_model_request_failure(
+                context,
+                Some(&fingerprint),
+                &event_ids,
+                "temporary provider failure",
+                true,
+            ));
+            assert_eq!(
+                *context
+                    .runtime_model_request_failures
+                    .lock()
+                    .get(&fingerprint)
+                    .expect("model failure attempt should persist while requeued"),
+                expected_attempt
+            );
+        }
+
+        let claimed = claim_pending_runtime_inputs(context, 1);
+        assert_eq!(claimed.len(), 1);
+        assert!(handle_model_request_failure(
+            context,
+            Some(&fingerprint),
+            &event_ids,
+            "temporary provider failure",
+            true,
+        ));
+        let event = context
+            .events
+            .view(&event_id.to_string())
+            .expect("event view");
+        assert_eq!(event.status, EventStatus::Failed);
+        assert_eq!(context.pending_work.pending_count(), 0);
+        assert!(
+            context
+                .runtime_model_request_failures
+                .lock()
+                .get(&fingerprint)
+                .is_none()
+        );
     }
 
     #[test]

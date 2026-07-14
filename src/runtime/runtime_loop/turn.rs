@@ -25,9 +25,28 @@ fn enter_runtime_phase(
     set_runtime_status_only(tx, format!("processing: runtime turn / {}", phase.label()));
 }
 
+pub(super) fn clear_runtime_failures_after_model_success(
+    context: &Context,
+    fingerprint: Option<&str>,
+) {
+    let Some(fingerprint) = fingerprint else {
+        return;
+    };
+    context.clear_runtime_overflow_failure(fingerprint);
+    context.clear_model_request_failure(fingerprint);
+}
+
+pub(super) fn clear_runtime_overflow_failure_after_compaction(
+    context: &Context,
+    fingerprint: Option<&str>,
+) {
+    if let Some(fingerprint) = fingerprint {
+        context.clear_runtime_overflow_failure(fingerprint);
+    }
+}
+
 struct RuntimeTurnAbort<'a> {
     live_draft_session: Option<TelegramLiveDraftSession>,
-    claimed_input_fingerprint: Option<&'a str>,
     claimed_event_ids: &'a [String],
     observation: String,
     description: String,
@@ -39,7 +58,6 @@ async fn abort_runtime_turn_before_model(
 ) -> AgentLoopStepExecution {
     let RuntimeTurnAbort {
         live_draft_session,
-        claimed_input_fingerprint,
         claimed_event_ids,
         observation,
         description,
@@ -50,10 +68,6 @@ async fn abort_runtime_turn_before_model(
         session.shutdown(context).await;
     } else {
         context.install_live_progress(None);
-    }
-    if let Some(fingerprint) = claimed_input_fingerprint {
-        context.clear_runtime_overflow_failure(fingerprint);
-        context.clear_model_request_failure(fingerprint);
     }
     let output = AgentLoopStepOutput {
         observation: observation.clone(),
@@ -275,9 +289,7 @@ pub(crate) async fn execute_agent_loop_step(
             context,
             RuntimeTurnAbort {
                 live_draft_session,
-                claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
                 claimed_event_ids: &claimed_event_ids,
-
                 observation: format!("runtime preflight failed: auto coding project setup: {err}"),
                 description: "Failed to prepare the Coding app for the project session."
                     .to_string(),
@@ -324,9 +336,7 @@ pub(crate) async fn execute_agent_loop_step(
                     context,
                     RuntimeTurnAbort {
                         live_draft_session,
-                        claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
                         claimed_event_ids: &claimed_event_ids,
-
                         observation: format!("runtime preflight failed: {err}"),
                         description: "Failed to build preturn context.".to_string(),
                     },
@@ -453,7 +463,6 @@ pub(crate) async fn execute_agent_loop_step(
                 context,
                 RuntimeTurnAbort {
                     live_draft_session,
-                    claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
                     claimed_event_ids: &claimed_event_ids,
                     observation: format!("runtime preflight failed: {err}"),
                     description: "Failed to generate a main-model runtime context compaction."
@@ -467,10 +476,16 @@ pub(crate) async fn execute_agent_loop_step(
             "runtime preflight stage completed: {}",
             RuntimeTurnPhase::PreflightCompaction.label()
         );
-        let _ = context
+        let applied = context
             .memory
             .apply_runtime_conversation_compaction(plan, outcome)
             .await;
+        if applied {
+            clear_runtime_overflow_failure_after_compaction(
+                context,
+                claimed_input_fingerprint.as_deref(),
+            );
+        }
         context.token_estimate_baseline = TokenEstimateBaseline::default();
         context.delivered_root_instruction_fingerprint = None;
         context.visible_source_lines.clear();
@@ -520,6 +535,10 @@ pub(crate) async fn execute_agent_loop_step(
         let tools = build_runtime_tool_specs(context);
         match maybe_compact_runtime_messages(context, &mut runtime_step, &tools, false).await {
             Ok(true) => {
+                clear_runtime_overflow_failure_after_compaction(
+                    context,
+                    claimed_input_fingerprint.as_deref(),
+                );
                 set_runtime_status_only(tx, "Compacting runtime context");
                 context.delivered_root_instruction_fingerprint = None;
                 context.visible_source_lines.clear();
@@ -551,7 +570,13 @@ pub(crate) async fn execute_agent_loop_step(
         enter_runtime_phase(context, tx, RuntimeTurnPhase::ModelRequest);
         context.emit_live_generation_started();
         let response = match run_agent_turn_with_retry(context, request, tx).await {
-            Ok(response) => response,
+            Ok(response) => {
+                clear_runtime_failures_after_model_success(
+                    context,
+                    claimed_input_fingerprint.as_deref(),
+                );
+                response
+            }
             Err(err) => {
                 let is_overflow = is_context_budget_exceeded(&err);
                 if is_overflow && budget_recoveries < MID_TURN_COMPACTION_MAX_RECOVERIES {
@@ -559,6 +584,10 @@ pub(crate) async fn execute_agent_loop_step(
                         .await
                     {
                         Ok(true) => {
+                            clear_runtime_overflow_failure_after_compaction(
+                                context,
+                                claimed_input_fingerprint.as_deref(),
+                            );
                             budget_recoveries += 1;
                             set_runtime_status(
                                 tx,
@@ -1103,10 +1132,6 @@ pub(crate) async fn execute_agent_loop_step(
         session.shutdown(context).await;
     } else {
         context.install_live_progress(None);
-    }
-    if let Some(fingerprint) = claimed_input_fingerprint.as_deref() {
-        context.clear_runtime_overflow_failure(fingerprint);
-        context.clear_model_request_failure(fingerprint);
     }
     let claimed_events_finished =
         claimed_event_ids.is_empty() || claimed_events_are_terminal(context, &claimed_event_ids);
