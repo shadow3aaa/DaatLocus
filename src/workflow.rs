@@ -26,8 +26,8 @@ use crate::{
     },
     runtime::bootstrap::build_isolated_worker_apps,
     runtime_tools::{
-        ToolExecutionResult, build_worker_runtime_tool_specs_for_apps,
-        execute_worker_runtime_tool_call_for_apps,
+        ToolExecutionResult, WorkerRuntimeToolCallContext,
+        build_worker_runtime_tool_specs_for_apps, execute_worker_runtime_tool_call_for_apps,
     },
     sandbox::{SandboxAsyncChild, SandboxProcessOptions, SandboxStdio},
     schema_utils::{validate_model_facing_schema, validate_value_against_schema},
@@ -278,6 +278,16 @@ pub(crate) struct WorkerRuntimeState {
     >,
     image_state_dir: PathBuf,
     turn_epoch: u64,
+}
+
+struct WorkerToolCallContext<'a> {
+    apps: &'a mut AppManager,
+    context: &'a Context,
+    definition: &'a WorkerDefinition,
+    worker_runtime: &'a mut WorkerRuntimeState,
+    tools: &'a [WorkerTool],
+    local_tools: &'a Arc<Mutex<BTreeMap<String, LocalToolDefinition>>>,
+    cancellation: Option<&'a WorkflowCancellation>,
 }
 
 impl WorkerRuntimeState {
@@ -715,14 +725,16 @@ async fn run_worker(
             for call in protocol.tool_calls {
                 ensure_workflow_not_interrupted(cancellation)?;
                 let result = execute_worker_tool(
-                    &mut worker_apps,
-                    context,
-                    &definition,
-                    &mut worker_runtime,
                     &call,
-                    &worker_tools,
-                    local_tools,
-                    cancellation,
+                    WorkerToolCallContext {
+                        apps: &mut worker_apps,
+                        context,
+                        definition: &definition,
+                        worker_runtime: &mut worker_runtime,
+                        tools: &worker_tools,
+                        local_tools,
+                        cancellation,
+                    },
                 )
                 .await;
                 append_worker_tool_result_message(&mut messages, call, result, &mut worker_runtime);
@@ -888,15 +900,18 @@ async fn wait_for_workflow_interrupt(cancellation: &WorkflowCancellation) {
 }
 
 async fn execute_worker_tool(
-    apps: &mut AppManager,
-    context: &Context,
-    definition: &WorkerDefinition,
-    worker_runtime: &mut WorkerRuntimeState,
     call: &AgentToolCall,
-    tools: &[WorkerTool],
-    local_tools: &Arc<Mutex<BTreeMap<String, LocalToolDefinition>>>,
-    cancellation: Option<&WorkflowCancellation>,
+    execution: WorkerToolCallContext<'_>,
 ) -> Result<ToolExecutionResult> {
+    let WorkerToolCallContext {
+        apps,
+        context,
+        definition,
+        worker_runtime,
+        tools,
+        local_tools,
+        cancellation,
+    } = execution;
     ensure_workflow_not_interrupted(cancellation)?;
     if call.name == "finish_and_send" {
         validate_value_against_schema(&call.arguments, &definition.output_schema, "worker output")?;
@@ -918,15 +933,17 @@ async fn execute_worker_tool(
     let turn_epoch = worker_runtime.next_turn_epoch();
     execute_worker_runtime_tool_call_for_apps(
         apps,
-        &context.execution_cwd,
-        &context.sandbox_policy,
-        model_config.tool_output_max_tokens.max(1),
-        Some(worker_model_supports_vision(context, &definition.model)),
-        &worker_runtime.image_state_dir,
-        turn_epoch,
         call,
-        definition.output_schema.clone(),
-        &mut worker_runtime.worker_plan,
+        WorkerRuntimeToolCallContext {
+            execution_cwd: &context.execution_cwd,
+            sandbox_policy: &context.sandbox_policy,
+            tool_output_max_tokens: model_config.tool_output_max_tokens.max(1),
+            supports_vision: Some(worker_model_supports_vision(context, &definition.model)),
+            image_state_dir: &worker_runtime.image_state_dir,
+            turn_epoch,
+            output_schema: &definition.output_schema,
+            worker_plan: &mut worker_runtime.worker_plan,
+        },
     )
     .await
 }

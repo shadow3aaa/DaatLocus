@@ -666,19 +666,33 @@ pub(crate) fn build_worker_runtime_tool_specs_for_apps(
         .collect()
 }
 
+pub(crate) struct WorkerRuntimeToolCallContext<'a> {
+    pub(crate) execution_cwd: &'a std::path::Path,
+    pub(crate) sandbox_policy: &'a crate::sandbox::RuntimeSandboxPolicy,
+    pub(crate) tool_output_max_tokens: usize,
+    pub(crate) supports_vision: Option<bool>,
+    pub(crate) image_state_dir: &'a std::path::Path,
+    pub(crate) turn_epoch: u64,
+    pub(crate) output_schema: &'a Value,
+    pub(crate) worker_plan: &'a mut crate::plan::Plan,
+}
+
 pub(crate) async fn execute_worker_runtime_tool_call_for_apps(
     apps: &mut AppManager,
-    execution_cwd: &std::path::Path,
-    sandbox_policy: &crate::sandbox::RuntimeSandboxPolicy,
-    tool_output_max_tokens: usize,
-    supports_vision: Option<bool>,
-    image_state_dir: &std::path::Path,
-    turn_epoch: u64,
     call: &AgentToolCall,
-    output_schema: Value,
-    worker_plan: &mut crate::plan::Plan,
+    context: WorkerRuntimeToolCallContext<'_>,
 ) -> Result<ToolExecutionResult> {
-    let tools = build_worker_runtime_tools_for_apps(apps, output_schema);
+    let WorkerRuntimeToolCallContext {
+        execution_cwd,
+        sandbox_policy,
+        tool_output_max_tokens,
+        supports_vision,
+        image_state_dir,
+        turn_epoch,
+        output_schema,
+        worker_plan,
+    } = context;
+    let tools = build_worker_runtime_tools_for_apps(apps, output_schema.clone());
     let tool = find_runtime_tool(&tools, &call.name)?;
     let worker_model_supports_vision = supports_vision.unwrap_or_else(|| {
         crate::model_catalog::catalog_model_capacity("workflow-worker")
@@ -1350,15 +1364,17 @@ mod tests {
         let image_state_dir = execution.path().join("images");
         let result = execute_worker_runtime_tool_call_for_apps(
             &mut apps,
-            execution.path(),
-            &RuntimeSandboxPolicy::disabled(),
-            1024,
-            Some(false),
-            &image_state_dir,
-            1,
             &read_call,
-            output_schema.clone(),
-            &mut worker_plan,
+            WorkerRuntimeToolCallContext {
+                execution_cwd: execution.path(),
+                sandbox_policy: &RuntimeSandboxPolicy::disabled(),
+                tool_output_max_tokens: 1024,
+                supports_vision: Some(false),
+                image_state_dir: &image_state_dir,
+                turn_epoch: 1,
+                output_schema: &output_schema,
+                worker_plan: &mut worker_plan,
+            },
         )
         .await
         .expect("worker read_file");
@@ -1377,15 +1393,17 @@ mod tests {
         };
         execute_worker_runtime_tool_call_for_apps(
             &mut apps,
-            execution.path(),
-            &RuntimeSandboxPolicy::disabled(),
-            1024,
-            Some(false),
-            &image_state_dir,
-            2,
             &plan_call,
-            output_schema,
-            &mut worker_plan,
+            WorkerRuntimeToolCallContext {
+                execution_cwd: execution.path(),
+                sandbox_policy: &RuntimeSandboxPolicy::disabled(),
+                tool_output_max_tokens: 1024,
+                supports_vision: Some(false),
+                image_state_dir: &image_state_dir,
+                turn_epoch: 2,
+                output_schema: &output_schema,
+                worker_plan: &mut worker_plan,
+            },
         )
         .await
         .expect("worker update_plan");
