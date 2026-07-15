@@ -199,7 +199,7 @@ event 或向用户发送消息。任意其他主 agent 专用工具同样不可�
 
 它**不会**继承 Session 主 agent 的 Context、已 claim 的 event id、完成 event 的权限、会话历史或不受
 限制的工具列表。worker 必须用完成工具提交恰好一个符合输出 schema 的 JSON 对象，不能附加 Markdown。
-当前 host 最多允许一个 worker 进行 16 个 model/tool round。
+worker 可持续进行 model/tool round，直到完成、失败或被中断；host 不再施加固定的 worker turn 次数上限。
 
 `workflow.tool(...)` 创建具名的局部工具。它的 `run` 会收到经过校验、可 JSON 表示的值，且必须返回满足
 声明输出 schema 的值。只有把名称加入某个 worker 的 `extra_tools` 后，该 worker 才能调用此工具。

@@ -230,8 +230,9 @@ main-agent-only tools also remain unavailable.
 It does **not** inherit the Session main agent's Context, claimed event id,
 event-completion authority, conversation history, or unrestricted tool list.
 Workers must finish by calling their completion tool with exactly one JSON object
-matching their output schema, with no Markdown. The host currently limits a
-worker to 16 model/tool rounds.
+matching their output schema, with no Markdown. A worker may continue through
+model/tool rounds until it completes, fails, or is interrupted; there is no
+fixed worker turn-count limit.
 
 `workflow.tool(...)` creates a named local tool. Its `run` function receives a
 validated JSON-compatible value and must return a value matching its declared

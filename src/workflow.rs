@@ -34,7 +34,6 @@ use crate::{
 };
 
 const WORKFLOW_TOOL_PREFIX: &str = "workflow__";
-const WORKER_MAX_TOOL_TURNS: usize = 16;
 const WORKER_EXPLICIT_COMPLETION_MESSAGE: &str = "The worker has not completed. Do not end by only outputting text; keep calling tools, and explicitly call `finish_and_send` with the declared typed output when the final result is ready.";
 const LUA_IO_MAX_BYTES: usize = 4 * 1024 * 1024;
 const LUA_SHELL_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -689,7 +688,7 @@ async fn run_worker(
         ),
     ];
 
-    for turn in 0..WORKER_MAX_TOOL_TURNS {
+    loop {
         ensure_workflow_not_interrupted(cancellation)?;
         let request = AgentTurnRequest {
             messages: messages.clone(),
@@ -741,13 +740,7 @@ async fn run_worker(
         if let Some(output) = worker_runtime.completed_output.take() {
             return Ok(WorkflowWorkerResult { output });
         }
-        if turn + 1 == WORKER_MAX_TOOL_TURNS {
-            return Err(miette!(
-                "worker exceeded the maximum of {WORKER_MAX_TOOL_TURNS} tool turns without calling finish_and_send"
-            ));
-        }
     }
-    Err(miette!("worker did not complete"))
 }
 
 fn worker_tool_specs(

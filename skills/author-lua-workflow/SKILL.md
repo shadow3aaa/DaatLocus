@@ -116,6 +116,10 @@ history, claimed event ids, or event-completion authority. Its same-named
 `finish_and_send` completion tool returns declared typed output to the workflow
 runner; it cannot resolve an event or send a user reply.
 
+A worker may continue through model/tool rounds until it completes, fails, or
+is interrupted; there is no fixed worker turn-count limit. It must call its
+same-named completion tool with output that matches its declared schema.
+
 Select `"main"` only when the worker needs the main model's quality. It means
 an isolated worker provider call, not reuse of the Session main agent or its
 history. Prefer `"efficient"` for focused helper work when it is sufficient.
