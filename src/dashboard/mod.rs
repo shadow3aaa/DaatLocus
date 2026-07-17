@@ -1809,6 +1809,26 @@ mod tests {
             &DashboardAction::RestartDaemon
         ));
     }
+    #[test]
+    fn workflow_action_is_queued_on_the_session_control_channel() {
+        let (control_tx, mut control_rx) =
+            tokio::sync::mpsc::unbounded_channel::<DashboardControlCommand>();
+        let action = DashboardAction::RunWorkflow {
+            workflow_id: "investigate".to_string(),
+            input: serde_json::json!({ "topic": "workflow routing" }),
+        };
+
+        let result = execute_dashboard_action(action, &control_tx);
+
+        assert!(result.success);
+        assert_eq!(result.message, "queued workflow run");
+        assert!(matches!(
+            control_rx.try_recv(),
+            Ok(DashboardControlCommand::RunWorkflow { workflow_id, input })
+                if workflow_id == "investigate"
+                    && input == serde_json::json!({ "topic": "workflow routing" })
+        ));
+    }
 
     #[test]
     fn skills_toggle_panel_shows_only_error_feedback() {

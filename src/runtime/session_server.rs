@@ -851,8 +851,30 @@ fn execute_session_dashboard_action(
             }
             result
         }
+        DashboardAction::RunWorkflow { workflow_id, input } => queue_workflow_dashboard_action(
+            workflow_id,
+            input,
+            &state.dashboard_control_tx,
+            &state.runtime_wake_tx,
+        ),
         other => execute_dashboard_action(other, &state.dashboard_control_tx),
     }
+}
+
+fn queue_workflow_dashboard_action(
+    workflow_id: String,
+    input: serde_json::Value,
+    dashboard_control_tx: &mpsc::UnboundedSender<DashboardControlCommand>,
+    runtime_wake_tx: &mpsc::UnboundedSender<()>,
+) -> crate::dashboard::DashboardActionResult {
+    let result = execute_dashboard_action(
+        DashboardAction::RunWorkflow { workflow_id, input },
+        dashboard_control_tx,
+    );
+    if result.success {
+        wake_runtime_loop(runtime_wake_tx);
+    }
+    result
 }
 
 fn refresh_pending_user_inputs(state: &SessionIpcServerState) {
@@ -1529,6 +1551,30 @@ mod tests {
                     .checked_sub(Duration::from_secs(1))
                     .unwrap()
         );
+    }
+
+    #[test]
+    fn workflow_dashboard_action_wakes_the_session_runtime_loop() {
+        let (dashboard_control_tx, mut dashboard_control_rx) =
+            mpsc::unbounded_channel::<DashboardControlCommand>();
+        let (runtime_wake_tx, mut runtime_wake_rx) = mpsc::unbounded_channel::<()>();
+
+        let result = queue_workflow_dashboard_action(
+            "investigate".to_string(),
+            serde_json::json!({ "topic": "session-local" }),
+            &dashboard_control_tx,
+            &runtime_wake_tx,
+        );
+
+        assert!(result.success);
+        assert_eq!(result.message, "queued workflow run");
+        assert!(matches!(
+            dashboard_control_rx.try_recv(),
+            Ok(DashboardControlCommand::RunWorkflow { workflow_id, input })
+                if workflow_id == "investigate"
+                    && input == serde_json::json!({ "topic": "session-local" })
+        ));
+        assert_eq!(runtime_wake_rx.try_recv(), Ok(()));
     }
 
     #[test]
