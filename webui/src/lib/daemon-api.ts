@@ -292,11 +292,73 @@ export type SessionActivityPrimitive = {
   primitive_id: string;
 };
 
+export type WorkflowNodeStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | (string & {});
+
+export type WorkflowTransitionKind =
+  | "await"
+  | "verify"
+  | "revision"
+  | "retry"
+  | (string & {});
+
+export type WorkflowTransitionSnapshot = {
+  source_worker_id: string;
+  target_worker_id: string;
+  kind: WorkflowTransitionKind;
+};
+
+export type WorkflowWorkerSnapshot = {
+  worker_id: string;
+  await_group_id: string;
+  role: string;
+  model: string;
+  status: WorkflowNodeStatus;
+  started_at_ms: number;
+  completed_at_ms?: number | null;
+  input: unknown;
+  output?: unknown | null;
+  error?: string | null;
+  activity_count?: number;
+  activity_revision?: number;
+  /** Legacy snapshots may still decode this field; current snapshots omit it. */
+  activity?: SessionActivityEvent[];
+};
+
+export type WorkflowAwaitGroupSnapshot = {
+  group_id: string;
+  sequence: number;
+  status: WorkflowNodeStatus;
+  started_at_ms: number;
+  completed_at_ms?: number | null;
+  worker_ids: string[];
+};
+
+export type WorkflowRunSnapshot = {
+  run_id: string;
+  workflow_id: string;
+  status: WorkflowNodeStatus;
+  started_at_ms: number;
+  completed_at_ms?: number | null;
+  input: unknown;
+  output?: unknown | null;
+  error?: string | null;
+  await_groups: WorkflowAwaitGroupSnapshot[];
+  transitions: WorkflowTransitionSnapshot[];
+  workers: WorkflowWorkerSnapshot[];
+};
+
 export type SessionActivityWorkflow = {
   workflow_id: string;
-  status: "Completed" | "Failed" | "Interrupted" | (string & {});
+  status: "Running" | "Completed" | "Failed" | "Interrupted" | (string & {});
   output?: unknown | null;
   message: string;
+  snapshot?: WorkflowRunSnapshot | null;
 };
 
 export type SessionActivityEvent =
@@ -324,6 +386,23 @@ export type SessionActivityEvent =
   | { RuntimeStatus: SessionActivityRuntimeStatus }
   | { Workflow: SessionActivityWorkflow }
   | Record<string, unknown>;
+
+export type WorkflowWorkerActivityItem = {
+  cursor: number;
+  event: SessionActivityEvent;
+};
+
+export type WorkflowWorkerActivityPage = {
+  run_id: string;
+  worker_id: string;
+  items: WorkflowWorkerActivityItem[];
+  oldest_cursor: number | null;
+  newest_cursor: number | null;
+  has_more_before: boolean;
+  has_more_after: boolean;
+  activity_count: number;
+  revision: number;
+};
 
 export type DashboardActivityHistoryItem = {
   id: string;
@@ -406,6 +485,7 @@ export type DashboardSnapshot = {
     key: string;
     event: SessionActivityEvent;
   }>;
+  active_workflow_runs?: WorkflowRunSnapshot[];
   activity_history?: DashboardActivityHistoryWindow;
   last_cycle_elapsed_ms: number | null;
   runtime_status: string | null;
@@ -862,6 +942,59 @@ export async function fetchDashboardActivityHistory({
   return parseJsonResponse<DashboardActivityHistoryPage>(
     response,
     "Dashboard activity history",
+  );
+}
+
+export async function fetchWorkflowWorkerActivity({
+  runId,
+  workerId,
+  before,
+  after,
+  limit = 80,
+  signal,
+  token = getStoredDaemonToken(),
+  sessionId,
+}: FetchOptions & {
+  runId: string;
+  workerId: string;
+  before?: number;
+  after?: number;
+  limit?: number;
+  sessionId: string;
+}): Promise<WorkflowWorkerActivityPage> {
+  if (before !== undefined && after !== undefined) {
+    throw new DaemonApiError(
+      "Workflow worker activity accepts either before or after, not both.",
+    );
+  }
+  const daemonToken = token.trim();
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for workflow worker activity.");
+  }
+
+  const url = new URL("/dashboard/workflow-worker-activity", window.location.href);
+  url.searchParams.set("session_id", sessionId);
+  url.searchParams.set("run_id", runId);
+  url.searchParams.set("worker_id", workerId);
+  url.searchParams.set("limit", String(limit));
+  if (before !== undefined) {
+    url.searchParams.set("before", String(before));
+  }
+  if (after !== undefined) {
+    url.searchParams.set("after", String(after));
+  }
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+  return parseJsonResponse<WorkflowWorkerActivityPage>(
+    response,
+    "Workflow worker activity",
   );
 }
 

@@ -1,3 +1,20 @@
+import { graphlib, layout as layoutDagreGraph } from "@dagrejs/dagre";
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  Handle,
+  MarkerType,
+  MiniMap,
+  Position,
+  ReactFlow,
+  type Edge,
+  type Node as FlowNode,
+  type NodeProps,
+  type NodeTypes,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+
 import {
   createContext,
   Fragment,
@@ -22,6 +39,7 @@ import {
 import { createPortal } from "react-dom";
 
 import {
+  ArrowLeftIcon,
   ArrowDownIcon,
   AlertTriangleIcon,
   CheckIcon,
@@ -69,6 +87,7 @@ import {
   Empty,
   EmptyDescription,
   EmptyHeader,
+  EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -78,6 +97,13 @@ import {
   InputGroupAddon,
   InputGroupTextarea,
 } from "@/components/ui/input-group";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
@@ -86,6 +112,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   fetchDashboardActivityHistory,
+  fetchWorkflowWorkerActivity,
   fetchSettingsSummary,
   getDashboardAttachmentUrl,
   runDashboardAction,
@@ -100,6 +127,13 @@ import {
   type DashboardPlanStep,
   type TokenUsageInfo,
   type SessionActivityEvent,
+  type WorkflowAwaitGroupSnapshot,
+  type WorkflowNodeStatus,
+  type WorkflowRunSnapshot,
+  type WorkflowTransitionKind,
+  type WorkflowTransitionSnapshot,
+  type WorkflowWorkerActivityPage,
+  type WorkflowWorkerSnapshot,
 } from "@/lib/daemon-api";
 import {
   foldCompletedAgentChatActivity,
@@ -557,6 +591,7 @@ type AgentChatSessionActivityRender =
       status: string;
       output?: unknown | null;
       message: string;
+      snapshot?: WorkflowRunSnapshot | null;
     };
 
 type AgentChatExploredCallAction = "read" | "list" | "search" | "run" | "unknown";
@@ -572,6 +607,7 @@ type AgentChatExploredCall = {
 };
 
 type AgentChatSessionActivityViewProps = {
+  sessionId?: string;
   bubbleId: string;
   render: AgentChatSessionActivityRender;
   isLatestReply?: boolean;
@@ -1147,7 +1183,7 @@ function AgentChatComposer({
         }
       }}
       onDragLeave={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+        if (!event.currentTarget.contains(event.relatedTarget as globalThis.Node | null)) {
           setIsDraggingImage(false);
         }
       }}
@@ -3932,6 +3968,126 @@ function formatFileSize(bytes: number) {
   return `${value.toFixed(maximumFractionDigits)} ${units[unitIndex]}`;
 }
 
+function useActivityFollowBottom<T extends HTMLElement>(
+  viewportRef: RefObject<T | null>,
+  contentKey: unknown,
+  resetKey: unknown,
+) {
+  const followBottomRef = useRef(true);
+  const manualScrollTopRef = useRef<number | null>(null);
+  const prependRestoreRef = useRef<{
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
+  const previousResetKeyRef = useRef(resetKey);
+
+  const isNearBottom = useCallback((viewport: T) => {
+    return (
+      viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <=
+      AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX
+    );
+  }, []);
+
+  const syncViewport = useCallback(
+    (viewport: T) => {
+      followBottomRef.current = isNearBottom(viewport);
+      manualScrollTopRef.current = viewport.scrollTop;
+    },
+    [isNearBottom],
+  );
+
+  const scrollToBottom = useCallback(
+    (behavior: ScrollBehavior = "auto") => {
+      const viewport = viewportRef.current;
+      if (!viewport) {
+        return;
+      }
+      followBottomRef.current = true;
+      viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+      manualScrollTopRef.current = viewport.scrollTop;
+    },
+    [viewportRef],
+  );
+
+  const scrollTo = useCallback(
+    (top: number, behavior: ScrollBehavior = "auto") => {
+      const viewport = viewportRef.current;
+      if (!viewport) {
+        return;
+      }
+      const boundedTop = Math.max(
+        0,
+        Math.min(top, Math.max(0, viewport.scrollHeight - viewport.clientHeight)),
+      );
+      viewport.scrollTo({ top: boundedTop, behavior });
+      manualScrollTopRef.current = boundedTop;
+      followBottomRef.current =
+        Math.max(0, viewport.scrollHeight - viewport.clientHeight) - boundedTop <=
+        AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX;
+    },
+    [viewportRef],
+  );
+
+  const handleScroll = useCallback(
+    (event: UIEvent<T>) => syncViewport(event.currentTarget),
+    [syncViewport],
+  );
+
+  const captureBeforePrepend = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || followBottomRef.current) {
+      return;
+    }
+    prependRestoreRef.current = {
+      scrollHeight: viewport.scrollHeight,
+      scrollTop: viewport.scrollTop,
+    };
+  }, [viewportRef]);
+
+  const resetToBottom = useCallback(() => {
+    followBottomRef.current = true;
+    manualScrollTopRef.current = null;
+    prependRestoreRef.current = null;
+  }, []);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    if (previousResetKeyRef.current !== resetKey) {
+      previousResetKeyRef.current = resetKey;
+      resetToBottom();
+    }
+
+    if (followBottomRef.current) {
+      scrollToBottom();
+      return;
+    }
+
+    const restore = prependRestoreRef.current;
+    if (restore) {
+      prependRestoreRef.current = null;
+      scrollTo(viewport.scrollHeight - restore.scrollHeight + restore.scrollTop);
+      return;
+    }
+
+    if (manualScrollTopRef.current !== null) {
+      scrollTo(manualScrollTopRef.current);
+    }
+  }, [contentKey, resetKey, resetToBottom, scrollTo, scrollToBottom, viewportRef]);
+
+  return {
+    followBottomRef,
+    scrollToBottom,
+    scrollTo,
+    handleScroll,
+    captureBeforePrepend,
+    resetToBottom,
+  };
+}
+
 function AgentChatBubbles({
   sessionId,
   snapshot,
@@ -3958,14 +4114,6 @@ function AgentChatBubbles({
   const [isLoadingNavHistory, setIsLoadingNavHistory] = useState(false);
   const [navHistoryError, setNavHistoryError] = useState<string | null>(null);
   const navHistoryAbortRef = useRef<AbortController | null>(null);
-  const lastFocusedScrollTopRef = useRef(0);
-  const hasFocusedScrollPositionRef = useRef(false);
-  const shouldRestoreFocusScrollRef = useRef(false);
-  const isFocusedNearBottomRef = useRef(true);
-  const restoreAfterPrependRef = useRef<{
-    scrollHeight: number;
-    scrollTop: number;
-  } | null>(null);
   const historySessionIdRef = useRef<string | null>(null);
   const loadedOlderHistoryRef = useRef(false);
   const navHistorySessionIdRef = useRef<string | null>(null);
@@ -3974,6 +4122,11 @@ function AgentChatBubbles({
   const bubbles = useMemo(
     () => mergeAgentChatBubbles(historyBubbles, snapshotBubbles),
     [historyBubbles, snapshotBubbles],
+  );
+  const activityScroll = useActivityFollowBottom<HTMLDivElement>(
+    panelRef,
+    bubbles,
+    sessionId,
   );
 
   const activeRuntimeStatusBubbleId = useMemo(() => {
@@ -4170,18 +4323,8 @@ function AgentChatBubbles({
   );
 
   const scrollToChatBottom = useCallback(
-    (behavior: ScrollBehavior = "auto") => {
-      const panel = panelRef.current;
-      if (!panel) {
-        return;
-      }
-
-      panel.scrollTo({
-        top: panel.scrollHeight,
-        behavior,
-      });
-    },
-    [panelRef],
+    (behavior: ScrollBehavior = "auto") => activityScroll.scrollToBottom(behavior),
+    [activityScroll.scrollToBottom],
   );
 
   function updateScrollButtonVisibility(panel: HTMLDivElement) {
@@ -4195,10 +4338,7 @@ function AgentChatBubbles({
     const distanceFromBottom =
       panel.scrollHeight - panel.clientHeight - panel.scrollTop;
 
-    lastFocusedScrollTopRef.current = panel.scrollTop;
-    hasFocusedScrollPositionRef.current = true;
-    isFocusedNearBottomRef.current =
-      distanceFromBottom <= AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX;
+    activityScroll.handleScroll(event);
 
     setShowScrollToBottom(distanceFromBottom > AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX);
     updateQuickNavActiveItem(panel);
@@ -4212,11 +4352,9 @@ function AgentChatBubbles({
   }
 
   function handleScrollToBottomClick() {
-    isFocusedNearBottomRef.current = true;
     scrollToChatBottom("smooth");
     setShowScrollToBottom(false);
   }
-
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel) {
@@ -4243,19 +4381,16 @@ function AgentChatBubbles({
           panelRect.top -
           AGENT_CHAT_QUICK_NAV_SCROLL_OFFSET_PX,
       );
-      const distanceFromBottom = panel.scrollHeight - panel.clientHeight - top;
+      activityScroll.scrollTo(top, behavior);
+      const distanceFromBottom = panel.scrollHeight - panel.clientHeight - panel.scrollTop;
 
-      isFocusedNearBottomRef.current =
-        distanceFromBottom <= AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX;
-      lastFocusedScrollTopRef.current = top;
       setActiveQuickNavItemId(id);
       setShowScrollToBottom(
         distanceFromBottom > AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX,
       );
-      panel.scrollTo({ top, behavior });
       return true;
     },
-    [panelRef],
+    [activityScroll.scrollTo, panelRef],
   );
 
   const handleQuickNavSelect = useCallback(
@@ -4279,13 +4414,7 @@ function AgentChatBubbles({
       return;
     }
 
-    const panel = panelRef.current;
-    if (panel) {
-      restoreAfterPrependRef.current = {
-        scrollHeight: panel.scrollHeight,
-        scrollTop: panel.scrollTop,
-      };
-    }
+    activityScroll.captureBeforePrepend();
 
     setIsLoadingHistory(true);
     setHistoryError(null);
@@ -4316,16 +4445,15 @@ function AgentChatBubbles({
       setHasMoreBefore(page.has_more_before);
       setHasMoreNavBefore(page.has_more_before);
     } catch (error) {
-      restoreAfterPrependRef.current = null;
       setHistoryError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsLoadingHistory(false);
     }
   }, [
+    activityScroll.captureBeforePrepend,
     hasMoreBefore,
     isLoadingHistory,
     oldestCursor,
-    panelRef,
     sessionId,
   ]);
 
@@ -4405,19 +4533,6 @@ function AgentChatBubbles({
     sessionId,
   ]);
 
-  useEffect(() => {
-    const panel = panelRef.current;
-    if (!panel) {
-      return;
-    }
-
-    if (!hasFocusedScrollPositionRef.current) {
-      lastFocusedScrollTopRef.current = panel.scrollHeight;
-      hasFocusedScrollPositionRef.current = true;
-      isFocusedNearBottomRef.current = true;
-    }
-    shouldRestoreFocusScrollRef.current = true;
-  }, [panelRef]);
 
   useEffect(() => {
     navHistoryAbortRef.current?.abort();
@@ -4490,37 +4605,10 @@ function AgentChatBubbles({
 
     setHistoryError(null);
     setNavHistoryError(null);
-    restoreAfterPrependRef.current = null;
   }, [sessionId, snapshot?.activity_history?.newest_cursor]);
 
 
 
-  useEffect(() => {
-    const restore = restoreAfterPrependRef.current;
-    if (!restore) {
-      return;
-    }
-
-    window.requestAnimationFrame(() => {
-      const panel = panelRef.current;
-      if (!panel) {
-        restoreAfterPrependRef.current = null;
-        return;
-      }
-      // When content was shorter than viewport before prepend,
-      // keep scrollTop at 0 to prevent hiding newly loaded content.
-      if (restore.scrollTop === 0 && restore.scrollHeight <= panel.clientHeight) {
-        panel.scrollTop = 0;
-      } else {
-        panel.scrollTop =
-          panel.scrollHeight - restore.scrollHeight + restore.scrollTop;
-      }
-      lastFocusedScrollTopRef.current = panel.scrollTop;
-      updateScrollButtonVisibility(panel);
-      updateQuickNavActiveItem(panel);
-      restoreAfterPrependRef.current = null;
-    });
-  }, [historyBubbles.length, panelRef, updateQuickNavActiveItem]);
 
   // Auto-load older history when content doesn't fill the viewport
   useEffect(() => {
@@ -4550,44 +4638,9 @@ function AgentChatBubbles({
       return;
     }
 
-    if (shouldRestoreFocusScrollRef.current) {
-      shouldRestoreFocusScrollRef.current = false;
-      window.requestAnimationFrame(() => {
-        const latestPanel = panelRef.current;
-        if (!latestPanel) {
-          return;
-        }
-        if (isFocusedNearBottomRef.current) {
-          scrollToChatBottom();
-        } else {
-          latestPanel.scrollTop = Math.min(
-            lastFocusedScrollTopRef.current,
-            Math.max(0, latestPanel.scrollHeight - latestPanel.clientHeight),
-          );
-        }
-        updateScrollButtonVisibility(latestPanel);
-        updateQuickNavActiveItem(latestPanel);
-        isFocusedNearBottomRef.current =
-          latestPanel.scrollHeight -
-            latestPanel.clientHeight -
-            latestPanel.scrollTop <=
-          AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX;
-      });
-      return;
-    }
-
-    const distanceFromBottom =
-      panel.scrollHeight - panel.clientHeight - panel.scrollTop;
-    if (isFocusedNearBottomRef.current) {
-      window.requestAnimationFrame(() => {
-        scrollToChatBottom();
-      });
-    } else {
-      setShowScrollToBottom(
-        distanceFromBottom > AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX,
-      );
-    }
-  }, [bubbles.length, panelRef, scrollToChatBottom, updateQuickNavActiveItem]);
+    updateScrollButtonVisibility(panel);
+    updateQuickNavActiveItem(panel);
+  }, [bubbles, panelRef, updateQuickNavActiveItem]);
 
   useEffect(() => {
     const foldedIds = new Set(
@@ -4624,11 +4677,15 @@ function AgentChatBubbles({
     }
 
     const nextTop = element.getBoundingClientRect().top;
-    panel.scrollTop += nextTop - anchor.top;
-    lastFocusedScrollTopRef.current = panel.scrollTop;
+    activityScroll.scrollTo(panel.scrollTop + nextTop - anchor.top);
     updateScrollButtonVisibility(panel);
     updateQuickNavActiveItem(panel);
-  }, [openFoldedActivityGroups, panelRef, updateQuickNavActiveItem]);
+  }, [
+    activityScroll.scrollTo,
+    openFoldedActivityGroups,
+    panelRef,
+    updateQuickNavActiveItem,
+  ]);
   useLayoutEffect(() => {
     const previousKey = previousActiveExpressionSlotKeyRef.current;
     const nextKey = activeAgentExpressionSlotKey;
@@ -4819,6 +4876,7 @@ function AgentChatBubbles({
                 >
                   {item.kind === "bubble" ? (
                     <AgentChatBubbleItem
+                      sessionId={sessionId}
                       bubble={item.bubble}
                       activeRuntimeStatusBubbleId={activeRuntimeStatusBubbleId}
                       isLatestReply={item.bubble.id === latestReplyBubbleId}
@@ -5193,12 +5251,14 @@ function AgentChatFoldedActivityGroup({
 }
 
 function AgentChatBubbleItem({
+  sessionId,
   bubble,
   activeRuntimeStatusBubbleId,
   isFocused = true,
   isLatestReply = false,
   compact = false,
 }: {
+  sessionId?: string;
   bubble: AgentChatBubble;
   activeRuntimeStatusBubbleId?: string | null;
   isFocused?: boolean;
@@ -5242,6 +5302,7 @@ function AgentChatBubbleItem({
         ) : null}
         {SessionActivityRender ? (
           <AgentChatSessionActivityView
+            sessionId={sessionId}
             bubbleId={bubble.id}
             render={SessionActivityRender}
             isActiveRuntimeStatus={bubble.id === activeRuntimeStatusBubbleId}
@@ -5392,6 +5453,7 @@ function AgentChatActivityHeader({
 }
 
 function AgentChatSessionActivityView({
+  sessionId,
   bubbleId,
   render,
   isActiveRuntimeStatus = false,
@@ -5452,7 +5514,7 @@ function AgentChatSessionActivityView({
   }
 
   if (render.kind === "workflow") {
-    return <AgentChatWorkflowActivityCell render={render} />;
+    return <AgentChatWorkflowActivityCell sessionId={sessionId} render={render} />;
   }
 
   if (render.kind === "browser") {
@@ -5548,58 +5610,609 @@ function AgentChatSessionActivityView({
 }
 
 function AgentChatWorkflowActivityCell({
+  sessionId,
   render,
 }: {
+  sessionId?: string;
   render: Extract<AgentChatSessionActivityRender, { kind: "workflow" }>;
 }) {
   const status = render.status.toLowerCase();
-  const output = formatAgentChatWorkflowOutput(render.output);
-  const tone =
-    status === "completed"
-      ? "text-emerald-600 dark:text-emerald-400"
-      : "text-destructive";
+  const hasInspector = Boolean(render.snapshot);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const tone = workflowStatusTextClass(status);
 
   return (
-    <div className="grid min-w-0 grid-cols-[0.75rem_minmax(0,1fr)] items-start gap-x-3 px-2 sm:gap-x-[16px] sm:px-3">
-      <AgentChatActivityMarker
-        icon="activity"
-        tone={status === "completed" ? "default" : "error"}
-      />
-      <div className="min-w-0 border-l border-border/60 pl-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-sm font-medium text-foreground">Workflow</span>
-          <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-            {render.workflowId}
-          </span>
-          <Badge variant="outline" className={cn("ml-auto shrink-0 text-[0.65rem]", tone)}>
-            {render.status}
-          </Badge>
+    <>
+      <div className="grid min-w-0 grid-cols-[0.75rem_minmax(0,1fr)] items-start gap-x-3 px-2 sm:gap-x-[16px] sm:px-3">
+        <AgentChatActivityMarker
+          icon="activity"
+          tone={status === "failed" || status === "interrupted" ? "error" : "default"}
+        />
+        <div className="min-w-0 border-l border-border/60 pl-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="truncate text-sm font-medium text-foreground">Workflow</span>
+            <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+              {render.workflowId}
+            </span>
+            <Badge variant="outline" className={cn("shrink-0 text-[0.65rem]", tone)}>
+              {render.status}
+            </Badge>
+            {hasInspector ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                className="ml-auto"
+                onClick={() => setInspectorOpen(true)}
+              >
+                Inspect run
+              </Button>
+            ) : null}
+          </div>
+          <p className="mt-1 break-words text-xs leading-5 text-muted-foreground">
+            {render.message}
+          </p>
+          {render.snapshot ? (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
+              {render.snapshot.workers.length} {render.snapshot.workers.length === 1 ? "agent" : "agents"}
+            </p>
+          ) : null}
         </div>
-        <p className="mt-1 break-words text-xs leading-5 text-muted-foreground">
-          {render.message}
-        </p>
-        {output ? (
-          <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/45 p-2 font-mono text-xs leading-5 text-foreground/90">
-            {output}
-          </pre>
-        ) : null}
+      </div>
+      {render.snapshot && sessionId ? (
+        <WorkflowInspectorSheet
+          sessionId={sessionId}
+          snapshot={render.snapshot}
+          open={inspectorOpen}
+          onOpenChange={setInspectorOpen}
+        />
+      ) : null}
+    </>
+  );
+}
+
+type WorkflowInspectorNodeData = {
+  agentId: string;
+  label: string;
+  detail: string;
+  status: WorkflowNodeStatus;
+  activityCount: number;
+};
+
+type WorkflowInspectorGraphNode = FlowNode<WorkflowInspectorNodeData>;
+
+const WORKFLOW_INSPECTOR_NODE_TYPES: NodeTypes = {
+  workflowInspector: WorkflowInspectorGraphNodeView,
+};
+
+function WorkflowInspectorSheet({
+  sessionId,
+  snapshot,
+  open,
+  onOpenChange,
+}: {
+  sessionId: string;
+  snapshot: WorkflowRunSnapshot;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null);
+  const selectedWorker = snapshot.workers.find(
+    (worker) => worker.worker_id === selectedWorkerId,
+  ) ?? null;
+  const graph = useMemo(() => workflowInspectorGraph(snapshot), [snapshot]);
+
+  useEffect(() => {
+    if (!open) {
+      setSelectedWorkerId(null);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (selectedWorkerId && !snapshot.workers.some((worker) => worker.worker_id === selectedWorkerId)) {
+      setSelectedWorkerId(null);
+    }
+  }, [selectedWorkerId, snapshot.workers]);
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
+        side="right"
+        className="w-[min(96vw,88rem)] gap-0 p-0 sm:max-w-none"
+      >
+        <SheetHeader className="border-b px-5 py-4 pr-12">
+          <div className="flex min-w-0 items-center gap-3">
+            {selectedWorker ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Back to agents"
+                onClick={() => setSelectedWorkerId(null)}
+              >
+                <ArrowLeftIcon data-icon="inline-start" aria-hidden="true" />
+              </Button>
+            ) : null}
+            <div className="min-w-0">
+              <SheetTitle className="flex min-w-0 flex-wrap items-center gap-2">
+                <span>{selectedWorker ? "Agent activity" : "Workflow Inspector"}</span>
+                <Badge variant="outline" className={workflowStatusTextClass(snapshot.status)}>
+                  {workflowStatusLabel(snapshot.status)}
+                </Badge>
+              </SheetTitle>
+              <SheetDescription className="truncate font-mono text-xs">
+                {selectedWorker
+                  ? `${selectedWorker.role} · ${selectedWorker.model}`
+                  : `${snapshot.workflow_id} · ${snapshot.run_id}`}
+              </SheetDescription>
+            </div>
+          </div>
+        </SheetHeader>
+        {selectedWorker ? (
+          <WorkflowInspectorAgentActivity
+            sessionId={sessionId}
+            runId={snapshot.run_id}
+            agent={selectedWorker}
+          />
+        ) : (
+          <WorkflowInspectorGraph
+            snapshot={snapshot}
+            nodes={graph.nodes}
+            edges={graph.edges}
+            onSelectAgent={setSelectedWorkerId}
+          />
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function WorkflowInspectorGraph({
+  snapshot,
+  nodes,
+  edges,
+  onSelectAgent,
+}: {
+  snapshot: WorkflowRunSnapshot;
+  nodes: WorkflowInspectorGraphNode[];
+  edges: Edge[];
+  onSelectAgent: (agentId: string) => void;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-5 py-3 text-xs text-muted-foreground">
+        <span>{snapshot.workers.length} {snapshot.workers.length === 1 ? "agent" : "agents"}</span>
+        <span>{formatWorkflowDuration(snapshot.started_at_ms, snapshot.completed_at_ms)}</span>
+        <span className="ml-auto">Select an agent to inspect its canonical activity stream.</span>
+      </div>
+      {snapshot.workers.length === 0 ? (
+        <Empty className="rounded-none border-0">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <CommandIcon aria-hidden="true" />
+            </EmptyMedia>
+            <EmptyTitle>Waiting for the first agent</EmptyTitle>
+            <EmptyDescription>
+              Agents appear dynamically as the workflow starts them.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : (
+        <div className="min-h-0 flex-1 bg-muted/15">
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={WORKFLOW_INSPECTOR_NODE_TYPES}
+            fitView
+            fitViewOptions={{ padding: 0.2, maxZoom: 1.15 }}
+            minZoom={0.2}
+            maxZoom={1.6}
+            nodesDraggable={false}
+            nodesConnectable={false}
+            elementsSelectable
+            onNodeClick={(_, node) => {
+              onSelectAgent(node.data.agentId);
+            }}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
+            <MiniMap
+              pannable
+              zoomable
+              nodeColor={(node) =>
+                workflowStatusGraphColor(String(node.data.status))
+              }
+              maskColor="color-mix(in oklab, var(--background) 72%, transparent)"
+            />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WorkflowInspectorGraphNodeView({ data }: NodeProps<WorkflowInspectorGraphNode>) {
+  return (
+    <div
+      className={cn(
+        "min-w-48 cursor-pointer rounded-xl border bg-background px-4 py-3 text-left shadow-sm transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md",
+        data.status === "running" && "border-primary/40 shadow-primary/10",
+        (data.status === "failed" || data.status === "interrupted") && "border-destructive/45",
+      )}
+    >
+      <Handle type="target" position={Position.Top} className="opacity-0" />
+      <div className="flex items-center gap-2">
+        <span className={cn("size-2 rounded-full", workflowStatusDotClass(data.status))} />
+        <span className="truncate text-sm font-medium text-foreground">{data.label}</span>
+        {data.status === "running" ? <Spinner className="ml-auto size-3" /> : null}
+      </div>
+      <p className="mt-1 truncate font-mono text-[0.68rem] text-muted-foreground">
+        {data.detail}
+      </p>
+      <p className="mt-2 text-[0.68rem] text-muted-foreground/80">
+        {data.activityCount} {data.activityCount === 1 ? "activity" : "activities"}
+      </p>
+      <Handle type="source" position={Position.Bottom} className="opacity-0" />
+    </div>
+  );
+}
+
+function WorkflowInspectorAgentActivity({
+  sessionId,
+  runId,
+  agent,
+}: {
+  sessionId: string;
+  runId: string;
+  agent: WorkflowWorkerSnapshot;
+}) {
+  const legacyActivity = agent.activity ?? [];
+  const [page, setPage] = useState<WorkflowWorkerActivityPage | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const [activityError, setActivityError] = useState<string | null>(null);
+  const requestSequenceRef = useRef(0);
+  const activities = useMemo(
+    () => page?.items.map((item) => item.event) ?? legacyActivity,
+    [legacyActivity, page],
+  );
+  const activityCount = Math.max(
+    page?.activity_count ?? 0,
+    agent.activity_count ?? 0,
+    activities.length,
+  );
+  const bubbles = useMemo(
+    () => agentChatBubblesFromSessionActivities(activities, `workflow-${agent.worker_id}`),
+    [activities, agent.worker_id],
+  );
+  const activityContentKey = useMemo(
+    () => ({ bubbles, error: agent.error, activityError }),
+    [activityError, bubbles, agent.error],
+  );
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const activityScroll = useActivityFollowBottom<HTMLDivElement>(
+    viewportRef,
+    activityContentKey,
+    `${runId}:${agent.worker_id}`,
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const requestSequence = requestSequenceRef.current + 1;
+    requestSequenceRef.current = requestSequence;
+    setPage(null);
+    setActivityError(null);
+    setIsLoading(true);
+    void fetchWorkflowWorkerActivity({
+      sessionId,
+      runId,
+      workerId: agent.worker_id,
+      signal: controller.signal,
+    })
+      .then((nextPage) => {
+        if (requestSequenceRef.current === requestSequence) {
+          setPage(nextPage);
+        }
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted && requestSequenceRef.current === requestSequence) {
+          setActivityError(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && requestSequenceRef.current === requestSequence) {
+          setIsLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, [agent.activity_revision, agent.worker_id, runId, sessionId]);
+
+  const loadOlder = useCallback(async () => {
+    if (!page?.has_more_before || page.oldest_cursor === null || isLoadingOlder) {
+      return;
+    }
+    const requestSequence = requestSequenceRef.current;
+    activityScroll.captureBeforePrepend();
+    setIsLoadingOlder(true);
+    setActivityError(null);
+    try {
+      const older = await fetchWorkflowWorkerActivity({
+        sessionId,
+        runId,
+        workerId: agent.worker_id,
+        before: page.oldest_cursor,
+      });
+      if (requestSequenceRef.current !== requestSequence) {
+        return;
+      }
+      setPage((current) => current ? mergeWorkflowWorkerActivityPages(older, current) : older);
+    } catch (error) {
+      if (requestSequenceRef.current === requestSequence) {
+        setActivityError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (requestSequenceRef.current === requestSequence) {
+        setIsLoadingOlder(false);
+      }
+    }
+  }, [activityScroll.captureBeforePrepend, agent.worker_id, isLoadingOlder, page, runId, sessionId]);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex flex-wrap items-center gap-2 border-b px-5 py-3">
+        <Badge variant="secondary">{agent.role}</Badge>
+        <span className="font-mono text-xs text-muted-foreground">{agent.model}</span>
+        <Badge variant="outline" className={workflowStatusTextClass(agent.status)}>
+          {workflowStatusLabel(agent.status)}
+        </Badge>
+        <span className="text-xs text-muted-foreground">
+          {formatWorkflowDuration(agent.started_at_ms, agent.completed_at_ms)}
+        </span>
+        <span className="ml-auto text-xs text-muted-foreground">
+          {activityCount} {activityCount === 1 ? "activity" : "activities"}
+        </span>
+      </div>
+      <div
+        ref={viewportRef}
+        aria-label="Agent activity"
+        onScroll={(event) => {
+          activityScroll.handleScroll(event);
+          if (event.currentTarget.scrollTop <= AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX) {
+            void loadOlder();
+          }
+        }}
+        className="min-h-0 flex-1 overflow-y-auto"
+      >
+        <div className="mx-auto flex w-full max-w-4xl flex-col gap-1 px-5 py-5">
+          {isLoading || isLoadingOlder ? (
+            <div className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
+              <Spinner className="size-3" />
+              {isLoading ? "Loading agent activity…" : "Loading earlier activity…"}
+            </div>
+          ) : null}
+          {activityError ? (
+            <Alert variant="destructive">
+              <AlertTriangleIcon aria-hidden="true" />
+              <AlertDescription>{activityError}</AlertDescription>
+            </Alert>
+          ) : null}
+          {bubbles.length > 0 ? (
+            bubbles.map((bubble) => (
+              <AgentChatBubbleItem
+                key={`${agent.worker_id}-${bubble.id}`}
+                bubble={bubble}
+                isFocused
+                compact
+              />
+            ))
+          ) : !isLoading ? (
+            <Empty className="min-h-64 border-0">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <CommandIcon aria-hidden="true" />
+                </EmptyMedia>
+                <EmptyTitle>No agent activity yet</EmptyTitle>
+                <EmptyDescription>
+                  Thinking, assistant turns, and tool activity will appear here as the agent runs.
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          ) : null}
+          {agent.error ? (
+            <Alert variant="destructive">
+              <AlertTriangleIcon aria-hidden="true" />
+              <AlertDescription>{agent.error}</AlertDescription>
+            </Alert>
+          ) : null}
+        </div>
       </div>
     </div>
   );
 }
 
-function formatAgentChatWorkflowOutput(output: unknown) {
-  if (output === null || output === undefined) {
-    return null;
+function mergeWorkflowWorkerActivityPages(
+  older: WorkflowWorkerActivityPage,
+  newer: WorkflowWorkerActivityPage,
+): WorkflowWorkerActivityPage {
+  const items = new Map<number, WorkflowWorkerActivityPage["items"][number]>();
+  for (const item of [...older.items, ...newer.items]) {
+    items.set(item.cursor, item);
   }
-  if (typeof output === "string") {
-    return output;
+  const merged = [...items.values()].sort((left, right) => left.cursor - right.cursor);
+  return {
+    ...newer,
+    items: merged,
+    oldest_cursor: merged[0]?.cursor ?? null,
+    newest_cursor: merged.at(-1)?.cursor ?? null,
+    has_more_before: older.has_more_before,
+    has_more_after: newer.has_more_after,
+    activity_count: Math.max(older.activity_count, newer.activity_count),
+    revision: Math.max(older.revision, newer.revision),
+  };
+}
+
+function workflowInspectorGraph(snapshot: WorkflowRunSnapshot): {
+  nodes: WorkflowInspectorGraphNode[];
+  edges: Edge[];
+} {
+  const graph = new graphlib.Graph().setDefaultEdgeLabel(() => ({}));
+  graph.setGraph({ rankdir: "TB", nodesep: 56, ranksep: 82, marginx: 24, marginy: 24 });
+  const workersById = new Map(
+    snapshot.workers.map((worker) => [worker.worker_id, worker] as const),
+  );
+  const workerOrdinals = new Map<string, number>();
+  const roleAttemptCounts = new Map<string, number>();
+  for (const worker of snapshot.workers) {
+    const attempt = (roleAttemptCounts.get(worker.role) ?? 0) + 1;
+    roleAttemptCounts.set(worker.role, attempt);
+    workerOrdinals.set(worker.worker_id, attempt);
   }
-  try {
-    return JSON.stringify(output, null, 2);
-  } catch {
-    return String(output);
+  const nodes: WorkflowInspectorGraphNode[] = snapshot.workers.map((worker) => ({
+    id: worker.worker_id,
+    type: "workflowInspector",
+    position: { x: 0, y: 0 },
+    data: {
+      agentId: worker.worker_id,
+      label: `${worker.role} · attempt ${workerOrdinals.get(worker.worker_id) ?? 1}`,
+      detail: worker.model,
+      status: worker.status,
+      activityCount: Math.max(worker.activity_count ?? 0, worker.activity?.length ?? 0),
+    },
+  }));
+  const edges = workflowInspectorTransitions(snapshot, workersById).map((transition, index) =>
+    workflowInspectorEdge(
+      transition.source_worker_id,
+      transition.target_worker_id,
+      `${transition.kind}:${transition.source_worker_id}:${transition.target_worker_id}:${index}`,
+      transition.kind,
+    ),
+  );
+
+  for (const node of nodes) {
+    graph.setNode(node.id, { width: 224, height: 88 });
   }
+  for (const edge of edges) {
+    graph.setEdge(edge.source, edge.target);
+  }
+  layoutDagreGraph(graph);
+  return {
+    nodes: nodes.map((node) => {
+      const position = graph.node(node.id) as { x: number; y: number; width: number; height: number };
+      return {
+        ...node,
+        position: {
+          x: position.x - position.width / 2,
+          y: position.y - position.height / 2,
+        },
+      };
+    }),
+    edges,
+  };
+}
+
+function workflowInspectorTransitions(
+  snapshot: WorkflowRunSnapshot,
+  workersById: Map<string, WorkflowWorkerSnapshot>,
+): WorkflowTransitionSnapshot[] {
+  const directTransitions = snapshot.transitions.filter(
+    (transition) =>
+      workersById.has(transition.source_worker_id)
+      && workersById.has(transition.target_worker_id)
+      && transition.source_worker_id !== transition.target_worker_id,
+  );
+  if (directTransitions.length > 0) {
+    return directTransitions;
+  }
+
+  const transitions: WorkflowTransitionSnapshot[] = [];
+  let previousWorkerIds: string[] | null = null;
+  for (const group of [...snapshot.await_groups].sort((left, right) => left.sequence - right.sequence)) {
+    const workerIds = [...new Set(group.worker_ids)].filter((workerId) => workersById.has(workerId));
+    if (previousWorkerIds && workerIds.length > 0) {
+      for (const sourceWorkerId of previousWorkerIds) {
+        for (const targetWorkerId of workerIds) {
+          if (sourceWorkerId !== targetWorkerId) {
+            transitions.push({
+              source_worker_id: sourceWorkerId,
+              target_worker_id: targetWorkerId,
+              kind: "await",
+            });
+          }
+        }
+      }
+    }
+    if (workerIds.length > 0) {
+      previousWorkerIds = workerIds;
+    }
+  }
+  return transitions;
+}
+
+function workflowInspectorEdge(
+  source: string,
+  target: string,
+  id: string,
+  label?: string,
+): Edge {
+  return {
+    id,
+    source,
+    target,
+    type: "smoothstep",
+    label,
+    markerEnd: { type: MarkerType.ArrowClosed },
+    style: { stroke: "var(--border)", strokeWidth: 1.5 },
+  };
+}
+
+
+function workflowStatusLabel(status: WorkflowNodeStatus | string) {
+  const normalized = status.toLowerCase();
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function workflowStatusTextClass(status: WorkflowNodeStatus | string) {
+  const normalized = status.toLowerCase();
+  return cn(
+    normalized === "running" && "text-primary",
+    normalized === "completed" && "text-foreground",
+    (normalized === "failed" || normalized === "interrupted") && "text-destructive",
+  );
+}
+
+function workflowStatusDotClass(status: WorkflowNodeStatus | string) {
+  const normalized = status.toLowerCase();
+  return cn(
+    normalized === "pending" && "bg-muted-foreground/45",
+    normalized === "running" && "bg-primary motion-safe:animate-pulse",
+    normalized === "completed" && "bg-foreground",
+    (normalized === "failed" || normalized === "interrupted") && "bg-destructive",
+  );
+}
+
+function workflowStatusGraphColor(status: WorkflowNodeStatus | string) {
+  const normalized = status.toLowerCase();
+  if (normalized === "failed" || normalized === "interrupted") {
+    return "var(--destructive)";
+  }
+  if (normalized === "running") {
+    return "var(--primary)";
+  }
+  return "var(--foreground)";
+}
+
+function formatWorkflowDuration(startedAtMs: number, completedAtMs?: number | null) {
+  const elapsed = Math.max(0, (completedAtMs ?? Date.now()) - startedAtMs);
+  if (elapsed < 1_000) {
+    return `${elapsed}ms`;
+  }
+  if (elapsed < 60_000) {
+    return `${(elapsed / 1_000).toFixed(elapsed < 10_000 ? 1 : 0)}s`;
+  }
+  const minutes = Math.floor(elapsed / 60_000);
+  const seconds = Math.floor((elapsed % 60_000) / 1_000);
+  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
 }
 
 const AGENT_CHAT_ACTIVITY_ROW_CLASS =
@@ -8324,6 +8937,7 @@ function agentChatSessionActivityRenderForBubble(
       status: stringValue(workflow.status, "Failed"),
       output: workflow.output,
       message: stringValue(workflow.message, "workflow completed"),
+      snapshot: asWorkflowRunSnapshot(workflow.snapshot),
     };
   }
 
@@ -8775,6 +9389,99 @@ function agentChatBlocksValue(value: unknown): AgentChatBlock[] {
     const record = asRecord(block);
     return Boolean(record && typeof record.type === "string");
   });
+}
+
+function asWorkflowRunSnapshot(value: unknown): WorkflowRunSnapshot | null {
+  const snapshot = asRecord(value);
+  if (!snapshot) {
+    return null;
+  }
+  const runId = nullableStringValue(snapshot.run_id);
+  const workflowId = nullableStringValue(snapshot.workflow_id);
+  const status = nullableStringValue(snapshot.status);
+  const startedAtMs = nullableNumberValue(snapshot.started_at_ms);
+  if (!runId || !workflowId || !status || startedAtMs === null) {
+    return null;
+  }
+  const awaitGroups = arrayValue(snapshot.await_groups)
+    .map(asRecord)
+    .filter((group): group is Record<string, unknown> => Boolean(group))
+    .map((group): WorkflowAwaitGroupSnapshot | null => {
+      const groupId = nullableStringValue(group.group_id);
+      if (!groupId) {
+        return null;
+      }
+      return {
+        group_id: groupId,
+        sequence: numberValue(group.sequence, 0),
+        status: stringValue(group.status, "pending") as WorkflowNodeStatus,
+        started_at_ms: numberValue(group.started_at_ms, startedAtMs),
+        completed_at_ms: nullableNumberValue(group.completed_at_ms),
+        worker_ids: stringArrayValue(group.worker_ids),
+      };
+    })
+    .filter((group): group is WorkflowAwaitGroupSnapshot => Boolean(group));
+  const workers = arrayValue(snapshot.workers)
+    .map(asRecord)
+    .filter((worker): worker is Record<string, unknown> => Boolean(worker))
+    .map((worker): WorkflowWorkerSnapshot | null => {
+      const workerId = nullableStringValue(worker.worker_id);
+      const awaitGroupId = nullableStringValue(worker.await_group_id);
+      if (!workerId || !awaitGroupId) {
+        return null;
+      }
+      return {
+        worker_id: workerId,
+        await_group_id: awaitGroupId,
+        role: stringValue(worker.role, "agent"),
+        model: stringValue(worker.model, "main"),
+        status: stringValue(worker.status, "pending") as WorkflowNodeStatus,
+        started_at_ms: numberValue(worker.started_at_ms, startedAtMs),
+        completed_at_ms: nullableNumberValue(worker.completed_at_ms),
+        input: worker.input,
+        output: worker.output,
+        error: nullableStringValue(worker.error),
+        activity_count: Math.max(
+          numberValue(worker.activity_count, 0),
+          arrayValue(worker.activity).length,
+        ),
+        activity_revision: numberValue(worker.activity_revision, 0),
+        activity: arrayValue(worker.activity)
+          .map(asSessionActivityEvent)
+          .filter((event): event is SessionActivityEvent => Boolean(event)),
+      };
+    })
+    .filter((worker): worker is WorkflowWorkerSnapshot => Boolean(worker));
+  const transitions = arrayValue(snapshot.transitions)
+    .map(asRecord)
+    .filter((transition): transition is Record<string, unknown> => Boolean(transition))
+    .map((transition): WorkflowTransitionSnapshot | null => {
+      const sourceWorkerId = nullableStringValue(transition.source_worker_id);
+      const targetWorkerId = nullableStringValue(transition.target_worker_id);
+      const kind = nullableStringValue(transition.kind);
+      if (!sourceWorkerId || !targetWorkerId || !kind) {
+        return null;
+      }
+      return {
+        source_worker_id: sourceWorkerId,
+        target_worker_id: targetWorkerId,
+        kind: kind as WorkflowTransitionKind,
+      };
+    })
+    .filter((transition): transition is WorkflowTransitionSnapshot => Boolean(transition));
+  return {
+    run_id: runId,
+    workflow_id: workflowId,
+    status: status as WorkflowNodeStatus,
+    started_at_ms: startedAtMs,
+    completed_at_ms: nullableNumberValue(snapshot.completed_at_ms),
+    input: snapshot.input,
+    output: snapshot.output,
+    error: nullableStringValue(snapshot.error),
+    await_groups: awaitGroups,
+    transitions,
+    workers,
+  };
 }
 
 function asSessionActivityEvent(value: unknown): SessionActivityEvent | null {
