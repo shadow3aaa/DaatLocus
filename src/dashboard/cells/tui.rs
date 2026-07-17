@@ -1547,7 +1547,7 @@ fn prefixed_wrapped_line(
                 ));
                 line.style = line_style;
                 out.push(line);
-                current_prefix.clone_from_slice(subsequent_prefix);
+                current_prefix = subsequent_prefix.to_vec();
                 current_width = 0;
             }
 
@@ -3145,6 +3145,40 @@ That's it.";
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
+    }
+
+    #[test]
+    fn user_prompt_wraps_when_initial_and_continuation_prefixes_differ() {
+        let cell = UserActivityData {
+            content: "A long user message must wrap across multiple lines without panicking when the first-line prefix has more spans than the continuation prefix.".to_string(),
+            image_attachments: Vec::new(),
+        };
+
+        let rendered = render_user_cell_lines(&cell, 32)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(
+            rendered.len() > 3,
+            "long user content should produce multiple wrapped lines: {rendered:?}"
+        );
+        assert!(
+            rendered[1].starts_with(USER_PROMPT_PREFIX),
+            "first user line should keep the prompt prefix: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .skip(2)
+                .take(rendered.len().saturating_sub(3))
+                .all(|line| line.starts_with(ACTIVITY_BODY_INDENT)),
+            "continuation lines should use the body indent: {rendered:?}"
+        );
+        assert!(
+            rendered.iter().all(|line| line_display_width(line) <= 32),
+            "wrapped user lines should fit the requested width: {rendered:?}"
+        );
     }
 
     #[test]
