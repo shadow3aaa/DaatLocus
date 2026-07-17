@@ -85,6 +85,7 @@ Declare a worker with a focused instruction and explicit typed boundaries:
 
 ```lua
 local reviewer = workflow.agent({
+  role = "review",
   model = "efficient", -- or "main"
   input = Input,
   output = WorkerOutput,
@@ -96,8 +97,12 @@ exactly one JSON object matching the output schema, without Markdown.
 })
 ```
 
+`role` is required and must be a non-empty string. It names this individual
+worker attempt in the workflow inspector; it does not select a host-managed
+profile. Re-running the same role produces another visible attempt rather than
+merging its activity into the earlier one.
+
 A worker receives only its instruction, typed input, declared model,
-host-provided runtime and App tools, and the workflow-local tools named in
 `extra_tools`. The host automatically provides `read_file`, `edit_file`,
 `update_plan`, and, when the selected model supports vision, `view_image`.
 `update_plan` affects only the worker-local plan. Installed App operations are
@@ -178,9 +183,14 @@ workflow.define({
 ```
 
 Use `worker:run(value)` with a colon, not `worker.run(value)`. It creates a
-handle. Await each handle once with `workflow.await(handle)`, or create a list
-of handles and use `workflow.await_all(handles)` to obtain outputs in matching
-order. `ctx` is host-owned and currently exposes no stable public Session API.
+handle. Await each handle once with `workflow.await(handle[, transition])`, or
+create a list of handles and use `workflow.await_all(handles[, transition])`
+to run them concurrently and obtain outputs in matching order. A failed worker
+or workflow interruption stops the group; each worker has separate runtime and
+App instances, so only external resources and workflow-local tool effects are
+shared. `transition` defaults to `"await"`; use `"verify"`, `"revision"`, or
+`"retry"` when that accurately describes the handoff from the prior awaited
+group. `ctx` is host-owned and currently exposes no stable public Session API.
 
 Return only a JSON-compatible value that matches the workflow's declared
 output schema. Do not use the worker output as an unvalidated final result.
@@ -207,10 +217,11 @@ agent can eventually resolve a claimed external event.
 
 1. Write the schemas first and check all objects are fully required with
    `additionalProperties = false`.
-2. Declare local tools, then workers with focused instructions and only the
-   workflow-local tools they need.
+2. Declare local tools, then workers with required non-empty roles, focused
+   instructions, and only the workflow-local tools they need.
 3. Call `workflow.define` once and keep orchestration control flow inside its
-   Lua `run` function.
+   Lua `run` function; label verify, revision, and retry handoffs with the
+   optional transition argument.
 4. Reload with `/skills reload`; fix any `/workflows` load error before running.
 5. Submit a smallest valid payload through the `/workflows` form and inspect
    the typed Workflow activity result.

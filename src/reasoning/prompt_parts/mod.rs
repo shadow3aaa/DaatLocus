@@ -49,9 +49,7 @@ impl PreTurnContextPart for PreTurnProjectInstructionsPart {
         let project_dir = ctx.coding_project_dir.as_deref()?;
         let cached = ctx.apps.cached_root_project_instructions();
         let loaded;
-        let instructions: &[crate::coding_app::ProjectInstructionDocument] = if !cached.is_empty() {
-            cached
-        } else {
+        let instructions: &[crate::coding_app::ProjectInstructionDocument] = if cached.is_empty() {
             loaded = match crate::coding_app::load_instruction_documents_in_dir(project_dir) {
                 Ok(instructions) if instructions.is_empty() => return None,
                 Ok(instructions) => instructions,
@@ -67,6 +65,8 @@ impl PreTurnContextPart for PreTurnProjectInstructionsPart {
                 }
             };
             &loaded
+        } else {
+            cached
         };
         let fingerprint = crate::coding_app::project_instruction_fingerprint(instructions);
         let previous = ctx.delivered_root_instruction_fingerprint.take();
@@ -242,7 +242,7 @@ fn summarize_context_text(text: &str, max_chars: usize) -> String {
     format!("{head}...")
 }
 
-pub(crate) fn compact_horizontal_whitespace(text: &str) -> String {
+pub fn compact_horizontal_whitespace(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut in_space_run = false;
     for ch in text.chars() {

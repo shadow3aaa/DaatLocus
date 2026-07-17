@@ -1,4 +1,5 @@
-use std::{env, ffi::OsStr, fs, io::Read, path::Path, sync::Arc};
+use std::fmt::Write as _;
+use std::{env, ffi::OsStr, fs, io::Read, io::Write as _, path::Path, sync::Arc};
 
 use crate::{
     commands::reset::{run_compile_reset, run_memory_reset, run_reset_all, run_state_reset},
@@ -28,7 +29,7 @@ use ratatui::{
 };
 use std::path::PathBuf;
 
-pub(crate) fn parse_args() -> Cli {
+pub fn parse_args() -> Cli {
     if is_top_level_help_request(env::args_os()) {
         print_top_level_help();
         std::process::exit(0);
@@ -195,7 +196,7 @@ mod tests {
 
 #[derive(Debug, Parser)]
 #[command(name = "daat-locus")]
-pub(crate) struct Cli {
+pub struct Cli {
     #[command(subcommand)]
     command: Option<DaatLocusCommand>,
     #[arg(long, hide = true)]
@@ -350,7 +351,7 @@ enum DaemonTokenTarget {
     Rotate { selector: String },
 }
 
-pub(crate) async fn async_main(cli: Cli) -> Result<()> {
+pub async fn async_main(cli: Cli) -> Result<()> {
     let _log_guard = init_logging(cli.session_id.as_deref()).await;
 
     match cli.command.as_ref() {
@@ -411,7 +412,7 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
             target: DevTarget::TuiPerf(args),
         }) => {
             crate::dashboard::tui_perf::run_tui_perf_command(
-                crate::dashboard::tui_perf::TuiPerfCommand {
+                &crate::dashboard::tui_perf::TuiPerfCommand {
                     scenario: args.scenario.clone(),
                     frames: args.frames,
                     warmup: args.warmup,
@@ -461,7 +462,7 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
 
     if matches!(
         cli.command,
-        None | Some(DaatLocusCommand::Run) | Some(DaatLocusCommand::Code { .. })
+        None | Some(DaatLocusCommand::Run | DaatLocusCommand::Code { .. })
     ) && route_to_config_ui_if_not_ready().await?
     {
         return Ok(());
@@ -503,10 +504,7 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
     }
 
     // First run starts the interactive setup when config.toml is missing.
-    let _config = if !config::config_file_exists().await {
-        run_first_time_setup_from_cli().await?;
-        return Ok(());
-    } else {
+    let _config = if config::config_file_exists().await {
         match load_config().await {
             Ok(o) => o,
             Err(e) => {
@@ -522,6 +520,9 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
                 std::process::exit(1);
             }
         }
+    } else {
+        run_first_time_setup_from_cli().await?;
+        return Ok(());
     };
 
     if let Some(DaatLocusCommand::Code { project_dir }) = cli.command.as_ref() {
@@ -603,7 +604,7 @@ async fn run_daemon_serve_command(config: crate::config::Config) -> Result<()> {
         result = &mut manager_task => return flatten_daemon_task_result(result),
     };
 
-    if let Err(err) = crate::daemon_tray::run_daemon_tray(tray_startup, tray_handle.clone()) {
+    if let Err(err) = crate::daemon_tray::run_daemon_tray(&tray_startup, &tray_handle) {
         tracing::warn!("daemon tray unavailable; continuing without tray: {err:?}");
     }
     tray_handle.shutdown();
@@ -728,18 +729,19 @@ fn session_list_text(sessions: &[crate::daemon::session::SessionSummary]) -> Str
         "SESSION ID", "SCOPE", "TITLE", "PROJECT"
     );
     for session in sessions {
-        output.push_str(&format!(
-            "{:<36}  {:<7}  {:<24}  {}\n",
+        let _ = writeln!(
+            output,
+            "{:<36}  {:<7}  {:<24}  {}",
             session.session_id,
             session_scope_label(&session.scope),
             session_title_for_table(session),
             session_project_for_table(session)
-        ));
+        );
     }
     output
 }
 
-fn session_scope_label(scope: &crate::daemon::session::SessionScope) -> &'static str {
+const fn session_scope_label(scope: &crate::daemon::session::SessionScope) -> &'static str {
     match scope {
         crate::daemon::session::SessionScope::General => "general",
         crate::daemon::session::SessionScope::Project { .. } => "project",
@@ -838,11 +840,10 @@ async fn run_session_selector(client: DaemonClient, project_dir: Option<PathBuf>
                 }
             }
             let t = terminal.as_mut().unwrap();
-            let title = if let Some(project_dir) = project_dir.as_ref() {
-                format!(" Daat Locus Code Sessions: {} ", project_dir.display())
-            } else {
-                " Daat Locus Sessions ".to_string()
-            };
+            let title = project_dir.as_ref().map_or_else(
+                || " Daat Locus Sessions ".to_string(),
+                |project_dir| format!(" Daat Locus Code Sessions: {} ", project_dir.display()),
+            );
 
             t.draw(|frame| {
                 let block = Block::default()
@@ -917,7 +918,6 @@ async fn run_session_selector(client: DaemonClient, project_dir: Option<PathBuf>
                                 current_title.as_str()
                             }
                         );
-                        use std::io::Write;
                         let _ = std::io::stdout().flush();
                         let mut input = String::new();
                         if std::io::stdin().read_line(&mut input).is_ok() {
@@ -1208,8 +1208,7 @@ fn project_label(project_dir: &std::path::Path) -> String {
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| project_dir.display().to_string())
+        .map_or_else(|| project_dir.display().to_string(), str::to_string)
 }
 
 fn session_title(session: &crate::daemon::session::SessionSummary) -> String {
@@ -1423,16 +1422,16 @@ fn print_daemon_token_list(tokens: &[DaemonTokenListEntry]) {
             format_timestamp_ms(token.created_at_ms),
             token
                 .last_used_at_ms
-                .map(format_timestamp_ms)
-                .unwrap_or_else(|| "-".to_string())
+                .map_or_else(|| "-".to_string(), format_timestamp_ms)
         );
     }
 }
 
 fn format_timestamp_ms(timestamp_ms: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms)
-        .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-        .unwrap_or_else(|| timestamp_ms.to_string())
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms).map_or_else(
+        || timestamp_ms.to_string(),
+        |timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )
 }
 
 async fn run_daemon_stop_command() -> Result<()> {
@@ -1698,7 +1697,7 @@ mod session_selector_tests {
             SessionScope::Project { project_dir } => Some(project_dir.clone()),
         };
         SessionSummary {
-            session_id: SessionId::from_string(id.to_string()).expect("test session id"),
+            session_id: SessionId::from_string(id).expect("test session id"),
             scope,
             project_dir,
             title: Some(title.to_string()),

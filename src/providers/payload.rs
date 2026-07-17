@@ -73,7 +73,7 @@ pub(super) fn build_agent_turn_payload_common(
 }
 
 pub(super) fn history_message_to_openai_message(
-    message: crate::reasoning::runtime::HistoryMessage,
+    message: &crate::reasoning::runtime::HistoryMessage,
     flatten_tool_messages: bool,
 ) -> serde_json::Value {
     provider_message_from_agent_message(&message.message, flatten_tool_messages)
@@ -91,13 +91,13 @@ pub(super) fn prompt_request_to_openai_messages(
             request
                 .long_term_memory_messages
                 .into_iter()
-                .map(|message| history_message_to_openai_message(message, flatten_tool_messages)),
+                .map(|message| history_message_to_openai_message(&message, flatten_tool_messages)),
         )
         .chain(
             request
                 .history_messages
                 .into_iter()
-                .map(|message| history_message_to_openai_message(message, flatten_tool_messages)),
+                .map(|message| history_message_to_openai_message(&message, flatten_tool_messages)),
         )
         .chain(std::iter::once(json!({
             "role": "user",
@@ -107,7 +107,7 @@ pub(super) fn prompt_request_to_openai_messages(
             request
                 .retry_messages
                 .into_iter()
-                .map(|message| history_message_to_openai_message(message, flatten_tool_messages)),
+                .map(|message| history_message_to_openai_message(&message, flatten_tool_messages)),
         )
         .collect::<Vec<_>>()
 }
@@ -124,7 +124,7 @@ pub(super) fn agent_message_to_openai_message(
         }),
         AgentMessage::User { content } => json!({
             "role": "user",
-            "content": openai_user_content(content, strip_images),
+            "content": openai_user_content(&content, strip_images),
         }),
         AgentMessage::Assistant { content } => json!({
             "role": "assistant",
@@ -273,7 +273,7 @@ fn normalize_image_part_media_type(path: &str, media_type: &str) -> Option<Strin
         .as_deref()
     {
         Some("png") => Some("image/png".to_string()),
-        Some("jpg") | Some("jpeg") => Some("image/jpeg".to_string()),
+        Some("jpg" | "jpeg") => Some("image/jpeg".to_string()),
         Some("webp") => Some("image/webp".to_string()),
         Some("gif") => Some("image/gif".to_string()),
         _ => {
@@ -285,7 +285,7 @@ fn normalize_image_part_media_type(path: &str, media_type: &str) -> Option<Strin
     }
 }
 
-fn openai_user_content(content: AgentContent, strip_images: bool) -> serde_json::Value {
+fn openai_user_content(content: &AgentContent, strip_images: bool) -> serde_json::Value {
     if content.is_plain_text() {
         return json!(content.as_text());
     }

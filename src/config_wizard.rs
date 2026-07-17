@@ -1,5 +1,6 @@
 //! Interactive configuration wizard for first-run setup and `config` subcommands.
 
+use std::fmt::Write as _;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -185,11 +186,10 @@ where
         }
 
         match body["error"].as_str() {
-            Some("authorization_pending") => continue,
+            Some("authorization_pending") => {}
             Some("slow_down") => {
                 // GitHub asks clients to slow down by adding an extra delay.
                 tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
             }
             Some("expired_token") => {
                 return Err(miette!("{}", crate::tr!(locale, "github.expired")));
@@ -269,7 +269,7 @@ struct CodexDevicePollContext<'a> {
     interval: Duration,
 }
 
-pub(crate) async fn run_codex_oauth_browser_flow<F>(
+pub async fn run_codex_oauth_browser_flow<F>(
     locale: Locale,
     mut status: F,
 ) -> Result<CodexOAuthTokens>
@@ -327,7 +327,7 @@ where
 
     let _ = open_url(&auth_url);
 
-    let callback = tokio::time::timeout(Duration::from_secs(15 * 60), callback_rx)
+    let callback = tokio::time::timeout(Duration::from_mins(15), callback_rx)
         .await
         .map_err(|_| miette!("OpenAI Codex browser authorization timed out"))?
         .map_err(|_| miette!("OpenAI Codex callback server stopped before authorization"))?;
@@ -405,7 +405,8 @@ async fn handle_codex_oauth_callback(
     };
 
     let is_success = matches!(result, CodexOAuthCallbackResult::Code(_));
-    if let Some(tx) = state.callback_tx.lock().await.take() {
+    let callback_sender = state.callback_tx.lock().await.take();
+    if let Some(tx) = callback_sender {
         let _ = tx.send(result);
     }
 
@@ -595,7 +596,7 @@ where
     F: FnMut(String, Vec<String>) -> Result<()>,
 {
     let token_url = format!("{CODEX_OAUTH_ISSUER}{CODEX_DEVICE_TOKEN_PATH}");
-    let expires_at = std::time::Instant::now() + Duration::from_secs(15 * 60);
+    let expires_at = std::time::Instant::now() + Duration::from_mins(15);
     let mut dots = 0usize;
 
     loop {
@@ -698,7 +699,9 @@ fn urlenc(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 encoded.push(byte as char);
             }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
+            _ => {
+                let _ = write!(encoded, "%{byte:02X}");
+            }
         }
     }
     encoded
@@ -710,9 +713,7 @@ fn expand_user_path(path: &str) -> PathBuf {
         return std::env::home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
     }
     if let Some(rest) = trimmed.strip_prefix("~/") {
-        return std::env::home_dir()
-            .map(|home| home.join(rest))
-            .unwrap_or_else(|| PathBuf::from(trimmed));
+        return std::env::home_dir().map_or_else(|| PathBuf::from(trimmed), |home| home.join(rest));
     }
     PathBuf::from(trimmed)
 }
@@ -794,7 +795,7 @@ fn is_prompt_navigate_parent(err: &miette::Report) -> bool {
     err.downcast_ref::<PromptNavigateParent>().is_some()
 }
 
-pub(crate) fn is_setup_cancelled(err: &miette::Report) -> bool {
+pub fn is_setup_cancelled(err: &miette::Report) -> bool {
     is_prompt_cancelled(err) || is_prompt_navigate_parent(err)
 }
 
@@ -836,11 +837,11 @@ impl PromptUi {
         Ok(ui)
     }
 
-    fn set_locale(&mut self, locale: Locale) {
+    const fn set_locale(&mut self, locale: Locale) {
         self.locale = locale;
     }
 
-    fn locale(&self) -> Locale {
+    const fn locale(&self) -> Locale {
         self.locale
     }
 
@@ -905,7 +906,7 @@ impl PromptUi {
             let locale = self.locale;
             self.terminal_mut()?
                 .draw(|frame| {
-                    render_select_prompt(frame, locale, prompt, items, &mut state, compact)
+                    render_select_prompt(frame, locale, prompt, items, &mut state, compact);
                 })
                 .map_err(|e| {
                     miette!(
@@ -957,7 +958,7 @@ impl PromptUi {
             crate::tr!(self.locale, "common.yes"),
             crate::tr!(self.locale, "common.no"),
         ];
-        Ok(self.select(prompt, &items, if default { 0 } else { 1 })? == 0)
+        Ok(self.select(prompt, &items, usize::from(!default))? == 0)
     }
 
     fn usize(&mut self, prompt: &str, default: usize) -> Result<usize> {
@@ -965,13 +966,11 @@ impl PromptUi {
         let mut error: Option<String> = None;
         loop {
             let raw = self.text_inner(prompt, current, false, error.as_deref())?;
-            match raw.trim().parse::<usize>() {
-                Ok(value) => return Ok(value),
-                Err(_) => {
-                    current = raw;
-                    error = Some(crate::tr!(self.locale, "prompt_ui.non_negative_integer"));
-                }
+            if let Ok(value) = raw.trim().parse::<usize>() {
+                return Ok(value);
             }
+            current = raw;
+            error = Some(crate::tr!(self.locale, "prompt_ui.non_negative_integer"));
         }
     }
 
@@ -1084,14 +1083,14 @@ impl PromptUi {
             match key.code {
                 KeyCode::Esc | KeyCode::Enter => return Ok(()),
                 KeyCode::Up
-                | KeyCode::Char('k')
+                | KeyCode::Char('k' | 'j')
                 | KeyCode::Down
-                | KeyCode::Char('j')
                 | KeyCode::PageUp
                 | KeyCode::PageDown
                 | KeyCode::Home
                 | KeyCode::End => {
-                    scroll = detail_scroll_offset(scroll, key.code, lines.len(), detail_body_rows())
+                    scroll =
+                        detail_scroll_offset(scroll, key.code, lines.len(), detail_body_rows());
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Err(prompt_cancelled(self.locale));
@@ -1108,7 +1107,8 @@ fn detail_body_rows() -> u16 {
 }
 
 fn detail_scroll_offset(current: u16, key: KeyCode, line_count: usize, visible_rows: u16) -> u16 {
-    let max_scroll = line_count.saturating_sub(visible_rows.max(1) as usize) as u16;
+    let max_scroll = u16::try_from(line_count.saturating_sub(usize::from(visible_rows.max(1))))
+        .unwrap_or(u16::MAX);
     let page_step = visible_rows.max(1);
     match key {
         KeyCode::Up | KeyCode::Char('k') => current.saturating_sub(1),
@@ -1164,8 +1164,7 @@ fn render_select_prompt<T: AsRef<str>>(
 
     let (list_area, help_area) = if compact {
         let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]);
-        let [list_area, help_area] = inner.layout(&layout);
-        (list_area, help_area)
+        inner.layout(&layout).into()
     } else {
         let layout = Layout::vertical([
             Constraint::Length(1),
@@ -1267,7 +1266,7 @@ fn buffer_to_text(buffer: &ratatui::buffer::Buffer) -> String {
         .chunks(width)
         .map(|row| {
             row.iter()
-                .map(|cell| cell.symbol())
+                .map(ratatui::buffer::Cell::symbol)
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -1410,7 +1409,9 @@ fn render_text_prompt(frame: &mut Frame, state: &TextPromptRenderState<'_>) {
         input_area,
     );
     frame.set_cursor_position((
-        field_inner.x + 2 + state.value[..state.cursor].chars().count() as u16,
+        field_inner.x
+            + 2
+            + u16::try_from(state.value[..state.cursor].chars().count()).unwrap_or(u16::MAX),
         field_inner.y,
     ));
 
@@ -1420,13 +1421,15 @@ fn render_text_prompt(frame: &mut Frame, state: &TextPromptRenderState<'_>) {
         help_area,
     );
     frame.render_widget(
-        Paragraph::new(match state.error {
-            Some(error) => Line::from(Span::styled(
-                error.to_string(),
-                Style::default().fg(Color::Red),
-            )),
-            None => Line::raw(""),
-        }),
+        Paragraph::new(state.error.map_or_else(
+            || Line::raw(""),
+            |error| {
+                Line::from(Span::styled(
+                    error.to_string(),
+                    Style::default().fg(Color::Red),
+                ))
+            },
+        )),
         note_area,
     );
 }
@@ -1603,11 +1606,7 @@ fn previous_char_boundary(s: &str, index: usize) -> usize {
     if index == 0 {
         return 0;
     }
-    s[..index]
-        .char_indices()
-        .next_back()
-        .map(|(i, _)| i)
-        .unwrap_or(0)
+    s[..index].char_indices().next_back().map_or(0, |(i, _)| i)
 }
 
 fn next_char_boundary(s: &str, index: usize) -> usize {
@@ -1617,8 +1616,7 @@ fn next_char_boundary(s: &str, index: usize) -> usize {
     s[index..]
         .char_indices()
         .nth(1)
-        .map(|(offset, _)| index + offset)
-        .unwrap_or(s.len())
+        .map_or(s.len(), |(offset, _)| index + offset)
 }
 
 // ---------------------------------------------------------------------------
@@ -1647,7 +1645,7 @@ impl ProviderKind {
         ]
     }
 
-    fn from_index(i: usize) -> Self {
+    const fn from_index(i: usize) -> Self {
         match i {
             0 => Self::OpenAI,
             1 => Self::OpenAICodexOauth,
@@ -1670,16 +1668,15 @@ async fn prompt_provider(
     let kind = ProviderKind::from_index(kind_idx);
 
     let default_name = match kind {
-        ProviderKind::OpenAI => "openai",
         ProviderKind::OpenAICodexOauth => "codex-oauth",
         ProviderKind::GithubCopilot => "copilot",
-        ProviderKind::OpenAICompatible => "openai",
+        ProviderKind::OpenAI | ProviderKind::OpenAICompatible => "openai",
         ProviderKind::Ollama => "ollama",
         ProviderKind::OllamaCloud => "ollama-cloud",
     };
     // Suffix duplicate defaults to avoid a collision.
     let default_name = if existing_names.contains(&default_name.to_string()) {
-        format!("{}-2", default_name)
+        format!("{default_name}-2")
     } else {
         default_name.to_string()
     };
@@ -2161,7 +2158,7 @@ async fn add_provider_to_config(ui: &mut PromptUi, config: &mut Config) -> Resul
 
     if config.providers.contains_key(&name)
         && !ui.confirm(
-            &crate::tr!(locale, "common.overwrite_provider", name = name.clone()),
+            &crate::tr!(locale, "common.overwrite_provider", name = name),
             false,
         )?
     {
@@ -2202,7 +2199,7 @@ async fn add_model_to_config(
 
     if config.models.contains_key(&name)
         && !ui.confirm(
-            &crate::tr!(locale, "common.overwrite_model", name = name.clone()),
+            &crate::tr!(locale, "common.overwrite_model", name = name),
             false,
         )?
     {
@@ -2213,11 +2210,11 @@ async fn add_model_to_config(
 
     if prompt_set_main
         && ui.confirm(
-            &crate::tr!(locale, "config.set_as_main", name = name.clone()),
+            &crate::tr!(locale, "config.set_as_main", name = name),
             false,
         )?
     {
-        config.main_model = name.clone();
+        config.main_model.clone_from(&name);
     }
 
     Ok(Some(name))
@@ -2236,7 +2233,7 @@ fn select_main_model_in_config(ui: &mut PromptUi, config: &mut Config) -> Result
         &model_names,
         current_idx,
     )?;
-    config.main_model = model_names[idx].clone();
+    config.main_model.clone_from(&model_names[idx]);
     Ok(config.main_model.clone())
 }
 
@@ -2257,7 +2254,7 @@ fn select_efficient_model_in_config(ui: &mut PromptUi, config: &mut Config) -> R
         &model_names,
         current_idx,
     )?;
-    config.efficient_model = model_names[idx].clone();
+    config.efficient_model.clone_from(&model_names[idx]);
     Ok(config.efficient_model.clone())
 }
 
@@ -2448,19 +2445,17 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
         push_config_subfield(
             &mut lines,
             "thinking_budget",
-            model
-                .thinking_budget
-                .as_ref()
-                .map(|budget| budget.as_str().to_string())
-                .unwrap_or_else(|| "default".to_string()),
+            model.thinking_budget.as_ref().map_or_else(
+                || "default".to_string(),
+                |budget| budget.as_str().to_string(),
+            ),
         );
         push_config_subfield(
             &mut lines,
             "rpm",
             model
                 .rpm
-                .map(|rpm| rpm.to_string())
-                .unwrap_or_else(|| "unlimited".to_string()),
+                .map_or_else(|| "unlimited".to_string(), |rpm| rpm.to_string()),
         );
         push_config_subfield(
             &mut lines,
@@ -2511,8 +2506,7 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
             "supports_vision",
             model
                 .supports_vision
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "auto".to_string()),
+                .map_or_else(|| "auto".to_string(), |value| value.to_string()),
         );
         push_config_subfield(
             &mut lines,
@@ -2681,7 +2675,7 @@ pub async fn run_config_menu() -> Result<()> {
             Ok(()) => {}
             Err(err) => match config_menu_navigation_from_prompt_error(&err, false) {
                 Some(ConfigMenuPromptNavigation::ExitMenu) => break,
-                Some(ConfigMenuPromptNavigation::ReturnToMenu) => continue,
+                Some(ConfigMenuPromptNavigation::ReturnToMenu) => {}
                 None => return Err(err),
             },
         }
@@ -2697,14 +2691,14 @@ fn prompt_telegram_config(
     let default = TelegramConfig::default();
     let enabled = ui.confirm(
         &crate::tr!(locale, "config.telegram_enable"),
-        current.map(|config| config.enabled).unwrap_or(false),
+        current.is_some_and(|config| config.enabled),
     )?;
-    let poll_timeout_secs = current
-        .map(|config| config.poll_timeout_secs)
-        .unwrap_or(default.poll_timeout_secs);
-    let existing_token = current
-        .map(|config| config.bot_token.clone())
-        .unwrap_or_else(|| default.bot_token.clone());
+    let poll_timeout_secs =
+        current.map_or(default.poll_timeout_secs, |config| config.poll_timeout_secs);
+    let existing_token = current.map_or_else(
+        || default.bot_token.clone(),
+        |config| config.bot_token.clone(),
+    );
 
     if !enabled {
         return Ok(TelegramConfig {
@@ -2714,9 +2708,8 @@ fn prompt_telegram_config(
         });
     }
 
-    let has_existing_token = current
-        .map(|config| config.has_real_credentials())
-        .unwrap_or(false);
+    let has_existing_token =
+        current.is_some_and(super::config::TelegramConfig::has_real_credentials);
     let mut token_options = Vec::new();
     if has_existing_token {
         token_options.push(crate::tr!(locale, "config.telegram_keep_existing_token"));
@@ -3033,13 +3026,13 @@ mod tests {
                 {
                     "slug": "gpt-5.4-mini",
                     "display_name": "GPT-5.4-Mini",
-                    "context_window": 272000
+                    "context_window": 272_000
                 },
                 {
                     "slug": "gpt-5.5",
                     "display_name": "GPT-5.5",
-                    "max_context_window": 400000,
-                    "max_output_tokens": 128000,
+                    "max_context_window": 400_000,
+                    "max_output_tokens": 128_000,
                     "supported_reasoning_efforts": [
                         "none",
                         "minimal",
@@ -3064,11 +3057,11 @@ mod tests {
 
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "gpt-5.4-mini");
-        assert_eq!(models[0].context_window, Some(272000));
+        assert_eq!(models[0].context_window, Some(272_000));
         assert_eq!(models[0].max_output_tokens, None);
         assert_eq!(models[1].id, "gpt-5.5");
-        assert_eq!(models[1].context_window, Some(400000));
-        assert_eq!(models[1].max_output_tokens, Some(128000));
+        assert_eq!(models[1].context_window, Some(400_000));
+        assert_eq!(models[1].max_output_tokens, Some(128_000));
         assert_eq!(
             models[1].reasoning_options,
             Some(vec![ReasoningOption::Effort {

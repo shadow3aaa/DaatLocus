@@ -16,20 +16,20 @@ pub struct SymbolMatch {
 
 fn normalize_path_for_cmp(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\") {
-        PathBuf::from(rest)
-    } else {
-        p.to_path_buf()
-    }
+    s.strip_prefix(r"\\?\")
+        .map_or_else(|| p.to_path_buf(), PathBuf::from)
 }
 
 impl SymbolMatch {
+    #[must_use]
     pub fn canonical_selector(&self, file_path: &Path, project_root: &Path) -> String {
         let rel_path = normalize_path_for_cmp(file_path)
             .strip_prefix(normalize_path_for_cmp(project_root))
             .ok()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| file_path.to_string_lossy().to_string())
+            .map_or_else(
+                || file_path.to_string_lossy().to_string(),
+                |p| p.to_string_lossy().to_string(),
+            )
             .replace('\\', "/");
 
         format!(
@@ -38,6 +38,7 @@ impl SymbolMatch {
         )
     }
 
+    #[must_use]
     pub fn source_from(&self, content: &str) -> String {
         let lines: Vec<&str> = content.lines().collect();
         if self.start_line == 0 || self.end_line < self.start_line || self.start_line > lines.len()
@@ -67,6 +68,7 @@ pub struct ParseErrorDiagnostic {
 }
 
 impl ParseErrorDiagnostic {
+    #[must_use]
     pub fn message(&self) -> String {
         format!(
             "first parse error: {} node `{}` at L{}:C{}-L{}:C{}\n{}",
@@ -88,7 +90,7 @@ pub enum ParseErrorKind {
 }
 
 impl ParseErrorKind {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Error => "ERROR",
             Self::Missing => "MISSING",
@@ -107,6 +109,7 @@ impl Default for TreeSitterAnalyzer {
 }
 
 impl TreeSitterAnalyzer {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             registry: LanguageRegistry::new(),
@@ -117,6 +120,7 @@ impl TreeSitterAnalyzer {
     /// named definition (function, struct, enum, trait, impl) that contains
     /// that line. Returns a canonical CodeStruct-style selector like
     /// `src/foo.rs::fn authenticate #L10-L20`.
+    #[must_use]
     pub fn find_containing_symbol(
         &self,
         file_path: &Path,
@@ -127,6 +131,7 @@ impl TreeSitterAnalyzer {
             .map(|m| m.canonical_selector(file_path, project_root))
     }
 
+    #[must_use]
     pub fn find_containing_symbol_match(
         &self,
         file_path: &Path,
@@ -139,6 +144,9 @@ impl TreeSitterAnalyzer {
             .max_by_key(|m| (m.start_line, usize::MAX - m.end_line))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the source file cannot be read, parsed, or matched to a symbol.
     pub fn resolve_selector(
         &self,
         file_path: &Path,
@@ -150,14 +158,11 @@ impl TreeSitterAnalyzer {
             .filter(|m| symbol_matches_selector(m, parsed))
             .collect();
 
-        let symbol = match &parsed.target {
-            SelectorTarget::Symbol(symbol) => symbol,
-            _ => {
-                return Err(format!(
-                    "selector target is not a symbol and cannot be resolved as a symbol: {}",
-                    file_path.display()
-                ));
-            }
+        let SelectorTarget::Symbol(symbol) = &parsed.target else {
+            return Err(format!(
+                "selector target is not a symbol and cannot be resolved as a symbol: {}",
+                file_path.display()
+            ));
         };
 
         if let Some((start, end)) = symbol.line_range {
@@ -192,6 +197,9 @@ impl TreeSitterAnalyzer {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the file extension is unsupported, the file cannot be read, or parsing fails.
     pub fn symbols_in_file(&self, file_path: &Path) -> Result<Vec<SymbolMatch>, String> {
         let ext = file_path
             .extension()
@@ -214,14 +222,14 @@ impl TreeSitterAnalyzer {
             .parse(&content, None)
             .ok_or_else(|| format!("failed to parse {}", file_path.display()))?;
         let mut symbols = Vec::new();
-        self.collect_symbols(tree.root_node(), &content, &mut symbols);
+        Self::collect_symbols(tree.root_node(), &content, &mut symbols);
         Ok(symbols)
     }
 
+    #[must_use]
     pub fn is_import_only_reference(&self, file_path: &Path, line_number: usize) -> bool {
-        let ext = match file_path.extension().and_then(|e| e.to_str()) {
-            Some(ext) => ext,
-            None => return false,
+        let Some(ext) = file_path.extension().and_then(|e| e.to_str()) else {
+            return false;
         };
         let Some(adapter) = self.registry.get(ext) else {
             return false;
@@ -230,18 +238,16 @@ impl TreeSitterAnalyzer {
             return false;
         }
 
-        let content = match std::fs::read_to_string(file_path) {
-            Ok(content) => content,
-            Err(_) => return false,
+        let Ok(content) = std::fs::read_to_string(file_path) else {
+            return false;
         };
         let mut parser = adapter.parser();
         let Some(tree) = parser.parse(&content, None) else {
             return false;
         };
 
-        let query = match tree_sitter::Query::new(&adapter.language(), RUST_USE_IMPORT_QUERY) {
-            Ok(query) => query,
-            Err(_) => return false,
+        let Ok(query) = tree_sitter::Query::new(&adapter.language(), RUST_USE_IMPORT_QUERY) else {
+            return false;
         };
         let mut cursor = tree_sitter::QueryCursor::new();
         let mut matches = cursor.matches(&query, tree.root_node(), content.as_bytes());
@@ -262,6 +268,7 @@ impl TreeSitterAnalyzer {
     /// Validate that a file's content can be parsed by tree-sitter.
     /// Returns true if parsing succeeds (i.e. the file is syntactically valid
     /// for the given language), false otherwise.
+    #[must_use]
     pub fn can_parse(&self, ext: &str, content: &str) -> bool {
         self.parse_error_diagnostic(ext, content).is_none()
     }
@@ -272,20 +279,18 @@ impl TreeSitterAnalyzer {
     /// recovers by placing ERROR and MISSING nodes in the parse tree. This
     /// helper reports the first such node with source coordinates and a compact
     /// snippet so edit rejection messages can point at the likely problem.
+    #[must_use]
     pub fn parse_error_diagnostic(&self, ext: &str, content: &str) -> Option<ParseErrorDiagnostic> {
-        let adapter = match self.registry.get(ext) {
-            Some(adapter) => adapter,
-            None => {
-                return Some(ParseErrorDiagnostic {
-                    kind: ParseErrorKind::Error,
-                    node_kind: format!("unsupported extension `{ext}`"),
-                    start_line: 1,
-                    start_column: 1,
-                    end_line: 1,
-                    end_column: 1,
-                    snippet: parse_error_snippet(content, 1, 1),
-                });
-            }
+        let Some(adapter) = self.registry.get(ext) else {
+            return Some(ParseErrorDiagnostic {
+                kind: ParseErrorKind::Error,
+                node_kind: format!("unsupported extension `{ext}`"),
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 1,
+                snippet: parse_error_snippet(content, 1, 1),
+            });
         };
         let mut parser = adapter.parser();
         let tree = parser.parse(content, None)?;
@@ -312,13 +317,15 @@ impl TreeSitterAnalyzer {
 
     /// Return the SCOPE language adapter that owns semantic source operations
     /// for the given extension.
+    #[must_use]
     pub fn responsible_language_for_extension(&self, ext: &str) -> Option<&'static str> {
         self.registry
             .get(ext)
-            .map(|adapter| adapter.language_name())
+            .map(super::language::LanguageAdapter::language_name)
     }
 
     /// Return true when SCOPE owns semantic source operations for this path.
+    #[must_use]
     pub fn is_responsible_source_path(&self, file_path: &Path) -> bool {
         file_path
             .extension()
@@ -327,15 +334,10 @@ impl TreeSitterAnalyzer {
             .is_some()
     }
 
-    fn collect_symbols(
-        &self,
-        node: tree_sitter::Node,
-        source: &str,
-        symbols: &mut Vec<SymbolMatch>,
-    ) {
+    fn collect_symbols(node: tree_sitter::Node, source: &str, symbols: &mut Vec<SymbolMatch>) {
         let kind = node.kind();
         if is_definition_kind(kind)
-            && let Some(name) = self.extract_def_name(node, source)
+            && let Some(name) = Self::extract_def_name(node, source)
         {
             let start_line = node.start_position().row + 1;
             let end_line = node.end_position().row + 1;
@@ -350,12 +352,12 @@ impl TreeSitterAnalyzer {
 
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i) {
-                self.collect_symbols(child, source, symbols);
+                Self::collect_symbols(child, source, symbols);
             }
         }
     }
 
-    fn extract_def_name(&self, node: tree_sitter::Node, source: &str) -> Option<String> {
+    fn extract_def_name(node: tree_sitter::Node, source: &str) -> Option<String> {
         for i in 0..node.child_count() {
             let child = node.child(i)?;
             let kind = child.kind();
@@ -363,7 +365,7 @@ impl TreeSitterAnalyzer {
                 return child
                     .utf8_text(source.as_bytes())
                     .ok()
-                    .map(|s| s.to_string());
+                    .map(std::string::ToString::to_string);
             }
         }
         None
@@ -404,26 +406,20 @@ fn is_definition_kind(kind: &str) -> bool {
 
 fn kind_prefix(kind: &str) -> &'static str {
     match kind {
-        "function_item" => "fn ",
         "struct_item" => "struct ",
-        "enum_item" => "enum ",
-        "trait_item" => "trait ",
+        "enum_item" | "enum_declaration" => "enum ",
+        "trait_item" | "interface_declaration" => "trait ",
         "impl_item" => "impl ",
-        "function_definition" => "fn ",
-        "class_definition" => "class ",
-        "function_declaration" => "fn ",
-        "class_declaration" => "class ",
-        "interface_declaration" => "trait ",
-        "enum_declaration" => "enum ",
-        "method_definition" => "fn ",
+        "class_definition" | "class_declaration" => "class ",
+        "function_item" | "function_definition" | "function_declaration" | "method_definition" => {
+            "fn "
+        }
         "type_alias_declaration" => "type ",
         _ => "",
     }
 }
 
-fn first_parse_error_node<'tree>(
-    node: tree_sitter::Node<'tree>,
-) -> Option<tree_sitter::Node<'tree>> {
+fn first_parse_error_node(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
     if node.is_error() || node.is_missing() {
         return Some(node);
     }
@@ -454,10 +450,16 @@ fn parse_error_snippet(content: &str, line: usize, column: usize) -> String {
             .get(current_line.saturating_sub(1))
             .copied()
             .unwrap_or("");
-        snippet.push_str(&format!("{current_line:>width$} | {text}\n"));
+        let _ = std::fmt::Write::write_fmt(
+            &mut snippet,
+            format_args!("{current_line:>width$} | {text}\n"),
+        );
         if current_line == line {
             let caret_padding = " ".repeat(column.saturating_sub(1));
-            snippet.push_str(&format!("{:>width$} | {caret_padding}^\n", ""));
+            let _ = std::fmt::Write::write_fmt(
+                &mut snippet,
+                format_args!("{:>width$} | {caret_padding}^\n", ""),
+            );
         }
     }
 
@@ -489,7 +491,7 @@ mod tests {
         // Line 4 should be inside startup() (adjusted for the actual structure)
         let result = analyzer.find_containing_symbol(&path, 3, dir.path());
         // Just check it doesn't crash; exact line numbers depend on the test string
-        println!("find_containing_symbol result: {:?}", result);
+        println!("find_containing_symbol result: {result:?}");
     }
 
     #[test]
@@ -571,7 +573,7 @@ impl Hints for Beta {
     #[test]
     fn legacy_duplicate_method_selector_is_rejected_as_ambiguous() {
         let dir = tempfile::tempdir().unwrap();
-        let code = r#"trait Hints {
+        let code = r"trait Hints {
     fn setup_hints(&self);
 }
 
@@ -585,7 +587,7 @@ impl Hints for Alpha {
 impl Hints for Beta {
     fn setup_hints(&self) {}
 }
-"#;
+";
         let path = write_temp_rust_file(dir.path(), "dup.rs", code);
         let analyzer = TreeSitterAnalyzer::new();
         let parsed = crate::selector::parse_selector("dup.rs::fn setup_hints").unwrap();
@@ -604,13 +606,13 @@ impl Hints for Beta {
     #[test]
     fn rust_use_declaration_is_import_only_reference() {
         let dir = tempfile::tempdir().unwrap();
-        let code = r#"use crate::parser::Parser;
+        let code = r"use crate::parser::Parser;
 use crate::{engine::Engine, runtime};
 
 fn run() {
     Parser::new();
 }
-"#;
+";
         let path = write_temp_rust_file(dir.path(), "imports.rs", code);
         let analyzer = TreeSitterAnalyzer::new();
 
@@ -756,15 +758,15 @@ fn run() {
         let registry = LanguageRegistry::new();
         let langs = registry.list_languages();
         let names: Vec<&str> = langs.iter().map(|(n, _)| *n).collect();
-        assert!(names.contains(&"rust"), "rust in {:?}", names);
-        assert!(names.contains(&"python"), "python in {:?}", names);
-        assert!(names.contains(&"go"), "go in {:?}", names);
-        assert!(names.contains(&"java"), "java in {:?}", names);
-        assert!(names.contains(&"typescript"), "typescript in {:?}", names);
-        assert!(names.contains(&"javascript"), "javascript in {:?}", names);
-        assert!(names.contains(&"c"), "c in {:?}", names);
-        assert!(names.contains(&"cpp"), "cpp in {:?}", names);
-        assert!(names.contains(&"ruby"), "ruby in {:?}", names);
-        assert!(names.contains(&"php"), "php in {:?}", names);
+        assert!(names.contains(&"rust"), "rust in {names:?}");
+        assert!(names.contains(&"python"), "python in {names:?}");
+        assert!(names.contains(&"go"), "go in {names:?}");
+        assert!(names.contains(&"java"), "java in {names:?}");
+        assert!(names.contains(&"typescript"), "typescript in {names:?}");
+        assert!(names.contains(&"javascript"), "javascript in {names:?}");
+        assert!(names.contains(&"c"), "c in {names:?}");
+        assert!(names.contains(&"cpp"), "cpp in {names:?}");
+        assert!(names.contains(&"ruby"), "ruby in {names:?}");
+        assert!(names.contains(&"php"), "php in {names:?}");
     }
 }

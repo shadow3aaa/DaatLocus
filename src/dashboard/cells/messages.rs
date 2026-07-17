@@ -28,7 +28,7 @@ pub struct ReplyActivityData {
 
 impl From<PatchActivityDescriptor> for PatchActivityData {
     fn from(data: PatchActivityDescriptor) -> Self {
-        PatchActivityData {
+        Self {
             summary_line: data.summary_line,
             files: data.files,
         }
@@ -47,7 +47,7 @@ impl From<TelegramActivityDescriptor> for TelegramActivityData {
                 TelegramActivityAction::ResolveChat => "resolve chat".to_string(),
             });
         }
-        TelegramActivityData {
+        Self {
             title: data.title,
             detail_lines,
             message_lines: data.message_lines,
@@ -57,7 +57,7 @@ impl From<TelegramActivityDescriptor> for TelegramActivityData {
 
 impl From<ReplyActivityDescriptor> for ReplyActivityData {
     fn from(data: ReplyActivityDescriptor) -> Self {
-        ReplyActivityData {
+        Self {
             disposition: data.disposition,
             subject: data.subject,
             message_lines: data.message_lines,

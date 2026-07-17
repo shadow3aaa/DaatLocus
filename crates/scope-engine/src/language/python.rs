@@ -4,7 +4,8 @@ use tree_sitter::Language;
 pub struct PythonAdapter;
 
 impl PythonAdapter {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -30,17 +31,17 @@ impl LanguageAdapter for PythonAdapter {
 
     fn queries(&self) -> LanguageQueries {
         LanguageQueries {
-            definitions: r#"
+            definitions: r"
                 (function_definition name: (identifier) @name) @def
                 (class_definition name: (identifier) @name) @def
                 (decorated_definition (function_definition name: (identifier) @name)) @def
                 (decorated_definition (class_definition name: (identifier) @name)) @def
-            "#,
-            references: r#"
+            ",
+            references: r"
                 (call function: (identifier) @ref) @call
                 (call function: (attribute attribute: (identifier) @ref)) @call
                 (identifier) @ref
-            "#,
+            ",
         }
     }
 }

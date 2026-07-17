@@ -164,28 +164,28 @@ pub(super) struct CommandSuggestion {
 impl CommandPanel {
     pub(super) fn sync_state(&mut self, state: &DashboardState) {
         match self {
-            CommandPanel::SkillsList(panel) => panel.sync_state(state),
-            CommandPanel::SkillsToggle(panel) => panel.sync_state(state),
-            CommandPanel::WorkflowForm(panel) => panel.sync_state(state),
-            CommandPanel::PendingUserInputQueue(panel) => panel.sync_state(state),
-            CommandPanel::Detail(_) | CommandPanel::Selection(_) => {}
+            Self::SkillsList(panel) => panel.sync_state(state),
+            Self::SkillsToggle(panel) => panel.sync_state(state),
+            Self::WorkflowForm(panel) => panel.sync_state(state),
+            Self::PendingUserInputQueue(panel) => panel.sync_state(state),
+            Self::Detail(_) | Self::Selection(_) => {}
         }
     }
 
-    pub(super) fn footer_hint(&self) -> &'static str {
+    pub(super) const fn footer_hint(&self) -> &'static str {
         match self {
-            CommandPanel::Detail(_) => "Esc close   ↑/↓ scroll   PgUp/PgDn page",
-            CommandPanel::Selection(_) => "Enter select   ↑/↓ move   PgUp/PgDn page   Esc close",
-            CommandPanel::SkillsList(_) => {
+            Self::Detail(_) => "Esc close   ↑/↓ scroll   PgUp/PgDn page",
+            Self::Selection(_) => "Enter select   ↑/↓ move   PgUp/PgDn page   Esc close",
+            Self::SkillsList(_) => {
                 "Enter details   type search   Backspace edit   ↑/↓ move   Esc close"
             }
-            CommandPanel::SkillsToggle(_) => {
+            Self::SkillsToggle(_) => {
                 "Space/Enter toggle auto-use   type search   Backspace edit   Esc close"
             }
-            CommandPanel::WorkflowForm(_) => {
+            Self::WorkflowForm(_) => {
                 "Enter edit/submit   ↑/↓ field   type value   Tab next   Esc close"
             }
-            CommandPanel::PendingUserInputQueue(_) => {
+            Self::PendingUserInputQueue(_) => {
                 "Enter edit   d discard   Shift+↑/↓ reorder   c clear   Esc close"
             }
         }
@@ -193,15 +193,15 @@ impl CommandPanel {
 
     pub(super) fn set_error_feedback(&mut self, feedback: CommandFeedback) {
         match self {
-            CommandPanel::SkillsToggle(panel) => {
+            Self::SkillsToggle(panel) => {
                 panel.feedback =
                     matches!(feedback.level, CommandFeedbackLevel::Error).then_some(feedback);
             }
-            CommandPanel::WorkflowForm(panel) => {
+            Self::WorkflowForm(panel) => {
                 panel.feedback =
                     matches!(feedback.level, CommandFeedbackLevel::Error).then_some(feedback);
             }
-            CommandPanel::PendingUserInputQueue(panel) => {
+            Self::PendingUserInputQueue(panel) => {
                 panel.feedback =
                     matches!(feedback.level, CommandFeedbackLevel::Error).then_some(feedback);
             }
@@ -211,9 +211,9 @@ impl CommandPanel {
 
     pub(super) fn clear_feedback(&mut self) {
         match self {
-            CommandPanel::SkillsToggle(panel) => panel.feedback = None,
-            CommandPanel::WorkflowForm(panel) => panel.feedback = None,
-            CommandPanel::PendingUserInputQueue(panel) => panel.feedback = None,
+            Self::SkillsToggle(panel) => panel.feedback = None,
+            Self::WorkflowForm(panel) => panel.feedback = None,
+            Self::PendingUserInputQueue(panel) => panel.feedback = None,
             _ => {}
         }
     }
@@ -244,7 +244,7 @@ impl SkillsListPanel {
             .iter()
             .map(SkillsListPanelItem::from_summary)
             .collect();
-        self.errors = state.skill_errors.clone();
+        self.errors.clone_from(&state.skill_errors);
         if let Some(selected_path) = selected_path
             && let Some(actual_idx) = self
                 .items
@@ -394,8 +394,7 @@ fn default_value_text(schema: &serde_json::Value) -> String {
         return default_value_to_text(default);
     }
     match schema_type(schema).as_deref() {
-        Some("string") => String::new(),
-        Some("integer") | Some("number") => "0".to_string(),
+        Some("integer" | "number") => "0".to_string(),
         Some("boolean") => "false".to_string(),
         Some("array") => "[]".to_string(),
         Some("object") => "{}".to_string(),
@@ -443,7 +442,6 @@ fn parse_workflow_field_value(
         return Ok(serde_json::Value::Null);
     }
     match schema_type(schema).as_deref() {
-        Some("string") => Ok(serde_json::Value::String(value.to_string())),
         Some("integer") => trimmed
             .parse::<i64>()
             .map(serde_json::Value::from)
@@ -456,7 +454,7 @@ fn parse_workflow_field_value(
             .parse::<bool>()
             .map(serde_json::Value::from)
             .map_err(|_| format!("{field_name} must be true or false")),
-        Some("array") | Some("object") => {
+        Some("array" | "object") => {
             serde_json::from_str(trimmed).map_err(|_| format!("{field_name} must be valid JSON"))
         }
         _ => Ok(serde_json::Value::String(value.to_string())),
@@ -481,7 +479,7 @@ impl PendingUserInputQueuePanel {
             .inputs
             .get(self.selected)
             .map(|input| input.event_id.clone());
-        self.inputs = state.pending_user_inputs.clone();
+        self.inputs.clone_from(&state.pending_user_inputs);
         if let Some(selected_event_id) = selected_event_id
             && let Some(index) = self
                 .inputs
@@ -629,7 +627,10 @@ pub(super) fn handle_command_panel_key(
     }
 }
 
-fn handle_detail_panel_key(panel: &mut CommandDetailPanel, key: KeyEvent) -> CommandPanelAction {
+const fn handle_detail_panel_key(
+    panel: &mut CommandDetailPanel,
+    key: KeyEvent,
+) -> CommandPanelAction {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => CommandPanelAction::Close,
         KeyCode::Up | KeyCode::Char('k') => {
@@ -956,8 +957,7 @@ fn handle_skills_list_panel_key(panel: &mut SkillsListPanel, key: KeyEvent) -> C
         }
         KeyCode::Enter => panel
             .selected_detail_panel()
-            .map(CommandPanelAction::Replace)
-            .unwrap_or(CommandPanelAction::None),
+            .map_or(CommandPanelAction::None, CommandPanelAction::Replace),
         KeyCode::Char(c)
             if !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT) =>

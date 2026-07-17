@@ -2,7 +2,7 @@ mod apps;
 mod common;
 mod exec;
 mod highlight;
-pub(crate) mod markdown;
+pub mod markdown;
 mod messages;
 mod plan;
 mod tui;
@@ -18,16 +18,14 @@ use crate::{
 use super::{DashboardActivityHistoryItem, DashboardState};
 use apps::{BrowserActivityData, LiveBrowserActivityData, WebSearchActivityData};
 #[cfg(test)]
-pub(crate) use common::ExploredCallActivityData;
+pub use common::ExploredCallActivityData;
 use common::{
     AssistantActivityData, ErrorActivityData, GenericAppActivityData, MessageImageAttachment,
     RuntimeStatusActivityData, TerminalWaitActivityData, UserActivityData, assistant_message_data,
     error_cell, terminal_wait_cell, user_message_data,
 };
-use common::{
-    CodingEditActivityData, CodingOpenProjectActivityData, CodingReviewActivityData,
-    ExploredActivityData, ThinkingActivityData,
-};
+use common::{CodingEditActivityData, CodingOpenProjectActivityData, CodingReviewActivityData};
+pub use common::{ExploredActivityData, ThinkingActivityData};
 use common::{render_exposed_tool_names, render_exposed_tool_names_in_lines, thinking_cell};
 use exec::{ExecResultActivityData, LiveExecActivityData, is_output_metadata_line, live_exec_cell};
 use messages::{PatchActivityData, ReplyActivityData, TelegramActivityData};
@@ -51,6 +49,10 @@ pub struct WorkflowActivityData {
     pub status: crate::workflow::WorkflowInvocationStatus,
     pub output: Option<serde_json::Value>,
     pub message: String,
+    /// Complete inspector state for this invocation. Older persisted workflow
+    /// events did not carry a snapshot, so history decoding keeps this optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<crate::workflow::WorkflowRunSnapshot>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,7 +93,7 @@ pub(super) fn sync_runtime_status_live_cell(
     }
 }
 
-pub(crate) fn sync_dashboard_runtime_status_live_cell(state: &mut DashboardState) {
+pub fn sync_dashboard_runtime_status_live_cell(state: &mut DashboardState) {
     let cell = runtime_status_live_cell(state);
     state
         .live_activity_events
@@ -173,13 +175,13 @@ pub fn render_activity_from_messages(messages: Vec<HistoryMessage>) -> Vec<Sessi
         .rev()
         .flat_map(activity_cells_from_prompt_message)
         .collect::<Vec<_>>();
-    coalesce_activity_cells(cells)
+    coalesce_activity_events(cells)
 }
 
 pub fn activity_events_from_history_items(
     items: &[DashboardActivityHistoryItem],
 ) -> Vec<SessionActivityEvent> {
-    coalesce_activity_cells(
+    coalesce_activity_events(
         items
             .iter()
             .map(|item| item.event.clone())
@@ -190,8 +192,33 @@ pub fn activity_events_from_history_items(
 pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivityEvent) {
     match event {
         DashboardActivityEvent::AppendCommittedCells { mut cells } => {
+            let committed_workflow_run_ids = cells
+                .iter()
+                .filter_map(|cell| match cell {
+                    SessionActivityEvent::Workflow(workflow) => workflow
+                        .snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.run_id.as_str()),
+                    _ => None,
+                })
+                .map(ToOwned::to_owned)
+                .collect::<std::collections::HashSet<_>>();
+            if !committed_workflow_run_ids.is_empty() {
+                state
+                    .active_workflow_runs
+                    .retain(|run| !committed_workflow_run_ids.contains(run.run_id.as_str()));
+                state.live_activity_events.retain(|live| {
+                    !matches!(
+                        &live.event,
+                        SessionActivityEvent::Workflow(workflow)
+                            if workflow.snapshot.as_ref().is_some_and(|snapshot| {
+                                committed_workflow_run_ids.contains(snapshot.run_id.as_str())
+                            })
+                    )
+                });
+            }
             state.activity_events.append(&mut cells);
-            state.activity_events = coalesce_activity_cells(state.activity_events.clone());
+            state.activity_events = coalesce_activity_events(state.activity_events.clone());
             let history_events = activity_events_from_history_items(&state.activity_history.items);
             if !history_events.is_empty() {
                 state.activity_events = history_events;
@@ -353,7 +380,20 @@ fn terminal_wait_activity_cell_from_terminal_event(
 
 fn is_terminal_poll_meta_line(line: &str) -> bool {
     let line = line.trim();
-    line.starts_with("terminal-session-") && line.contains("  exit=") && line.contains("  cwd=")
+    let is_session_meta = line.starts_with("terminal-session-")
+        && line.contains("  exit=")
+        && line.contains("  cwd=");
+    let mut fields = line.split_whitespace();
+    let is_wait_parameters = matches!(
+        (fields.next(), fields.next(), fields.next()),
+        (Some(wait_mode), Some(yield_time_ms), None)
+            if matches!(wait_mode, "wait_mode=any_output" | "wait_mode=timeout")
+                && yield_time_ms.strip_prefix("yield_time_ms=").is_some_and(|value| {
+                    value == "default" || value.parse::<u64>().is_ok()
+                })
+    );
+
+    is_session_meta || is_wait_parameters
 }
 
 fn user_agent_content_from_event(event: &EventView) -> Option<AgentContent> {
@@ -424,14 +464,13 @@ fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<SessionAct
             }
             cells
         }
-        AgentMessage::AssistantToolCallProtocol { .. } => Vec::new(),
+        AgentMessage::AssistantToolCallProtocol { .. } | AgentMessage::System { .. } => Vec::new(),
         AgentMessage::Tool { .. } => message.activity_event.into_iter().collect(),
         AgentMessage::User { content } => {
             vec![SessionActivityEvent::User(user_cell_from_agent_content(
                 content,
             ))]
         }
-        AgentMessage::System { .. } => Vec::new(),
     }
 }
 
@@ -467,15 +506,17 @@ fn message_image_attachment_from_part(part: &AgentContentPart) -> Option<Message
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| {
-            std::path::Path::new(path)
-                .file_name()
-                .and_then(|value| value.to_str())
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or("image")
-                .to_string()
-        });
+        .map_or_else(
+            || {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("image")
+                    .to_string()
+            },
+            ToString::to_string,
+        );
     Some(MessageImageAttachment {
         label,
         uri: dashboard_attachment_uri(path),
@@ -485,13 +526,7 @@ fn message_image_attachment_from_part(part: &AgentContentPart) -> Option<Message
 }
 
 fn dashboard_attachment_uri(path: &str) -> String {
-    format!(
-        "/dashboard/attachments/{}",
-        path.as_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    )
+    format!("/dashboard/attachments/{}", hex::encode(path.as_bytes()))
 }
 
 fn is_runtime_context_history_message(message: &HistoryMessage) -> bool {
@@ -571,22 +606,22 @@ fn upsert_live_activity_cell(cells: &mut Vec<LiveActivityEvent>, incoming: LiveA
     }
 }
 
-fn coalesce_activity_cells(cells: Vec<SessionActivityEvent>) -> Vec<SessionActivityEvent> {
+pub fn coalesce_activity_events(events: Vec<SessionActivityEvent>) -> Vec<SessionActivityEvent> {
     let mut merged: Vec<SessionActivityEvent> = Vec::new();
-    for cell in cells {
-        if let SessionActivityEvent::Explored(new_group) = &cell
+    for event in events {
+        if let SessionActivityEvent::Explored(new_group) = &event
             && let Some(SessionActivityEvent::Explored(existing_group)) = merged.last_mut()
             && existing_group.stable_id == new_group.stable_id
         {
-            existing_group.title = new_group.title.clone();
+            existing_group.title.clone_from(&new_group.title);
             existing_group.calls.extend(new_group.calls.clone());
             continue;
         }
 
         if let Some(last) = merged.last_mut() {
-            let same_exact = *last == cell;
+            let same_exact = *last == event;
             let same_exec_pair = matches!(
-                (&mut *last, &cell),
+                (&mut *last, &event),
                 (
                     SessionActivityEvent::ExecResult(last_exec),
                     SessionActivityEvent::ExecResult(new_exec)
@@ -594,7 +629,7 @@ fn coalesce_activity_cells(cells: Vec<SessionActivityEvent>) -> Vec<SessionActiv
                     if last_exec.title == new_exec.title
             );
             let same_error_family = matches!(
-                (&*last, &cell),
+                (&*last, &event),
                 (SessionActivityEvent::Error(last_error), SessionActivityEvent::Error(new_error))
                     if strip_repeated_suffix(&last_error.title) == new_error.title
             );
@@ -603,7 +638,7 @@ fn coalesce_activity_cells(cells: Vec<SessionActivityEvent>) -> Vec<SessionActiv
                     if let (
                         SessionActivityEvent::ExecResult(last_exec),
                         SessionActivityEvent::ExecResult(new_exec),
-                    ) = (&mut *last, cell)
+                    ) = (&mut *last, event)
                     {
                         if new_exec.meta.is_some() {
                             last_exec.meta = new_exec.meta;
@@ -618,14 +653,14 @@ fn coalesce_activity_cells(cells: Vec<SessionActivityEvent>) -> Vec<SessionActiv
                     } else {
                         last_error.title = format!("{} (x2)", last_error.title);
                     }
-                    if same_error_family && let SessionActivityEvent::Error(new_error) = cell {
+                    if same_error_family && let SessionActivityEvent::Error(new_error) = event {
                         last_error.body_lines = new_error.body_lines;
                     }
                 }
                 continue;
             }
         }
-        merged.push(cell);
+        merged.push(event);
     }
     merged
 }
@@ -643,16 +678,15 @@ fn parse_repeated_suffix(title: &str) -> Option<(String, usize)> {
 }
 
 fn strip_repeated_suffix(title: &str) -> String {
-    parse_repeated_suffix(title)
-        .map(|(base, _)| base)
-        .unwrap_or_else(|| title.to_string())
+    parse_repeated_suffix(title).map_or_else(|| title.to_string(), |(base, _)| base)
 }
 
 fn current_time_ms() -> i64 {
-    std::time::SystemTime::now()
+    let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -691,7 +725,7 @@ mod tests {
                     label: "Working".to_string(),
                     detail: None,
                     active_runtime_started_at_ms: Some(1),
-                    reduced_motion: Default::default(),
+                    reduced_motion: ReducedMotion::default(),
                 },
             ),
         }
@@ -789,6 +823,18 @@ mod tests {
     }
 
     #[test]
+    fn terminal_poll_wait_parameters_do_not_create_activity_cell() {
+        let cell = terminal_activity_event_from_terminal_data(TerminalActivityDescriptor {
+            action: TerminalActivityAction::Poll,
+            origin: None,
+            title: "terminal-session-38".to_string(),
+            body_lines: vec!["wait_mode=timeout yield_time_ms=30000".to_string()],
+        });
+
+        assert!(cell.is_none());
+    }
+
+    #[test]
     fn terminal_poll_strips_session_metadata_from_visible_body() {
         let cell = terminal_activity_event_from_terminal_data(TerminalActivityDescriptor {
             action: TerminalActivityAction::Poll,
@@ -866,7 +912,7 @@ mod tests {
             content: "boundary".to_string(),
         });
 
-        let contiguous = coalesce_activity_cells(vec![first_group.clone(), updated_group.clone()]);
+        let contiguous = coalesce_activity_events(vec![first_group.clone(), updated_group.clone()]);
         assert_eq!(contiguous.len(), 1);
         match &contiguous[0] {
             SessionActivityEvent::Explored(group) => {
@@ -882,7 +928,7 @@ mod tests {
             _ => panic!("expected explored group"),
         }
 
-        let separated = coalesce_activity_cells(vec![first_group, boundary, updated_group]);
+        let separated = coalesce_activity_events(vec![first_group, boundary, updated_group]);
         assert_eq!(separated.len(), 3);
     }
 
@@ -906,7 +952,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let merged = coalesce_activity_cells(groups);
+        let merged = coalesce_activity_events(groups);
 
         assert_eq!(merged.len(), 1);
         let SessionActivityEvent::Explored(group) = &merged[0] else {

@@ -208,7 +208,7 @@ async fn reset_artifact_dir(path: &Path) -> Result<()> {
 
 async fn save_artifact<T>(dir: &Path, stem: &str, artifact: &T) -> Result<PathBuf>
 where
-    T: Serialize,
+    T: Serialize + Sync,
 {
     let file_name = format!("{}-{}.json", artifact_file_stem(stem), Uuid::new_v4());
     let path = dir.join(file_name);
@@ -227,9 +227,10 @@ where
 
 async fn replace_artifacts<S, T, I>(dir: &Path, artifacts: I) -> Result<Vec<PathBuf>>
 where
-    T: Serialize,
-    S: AsRef<str>,
-    I: IntoIterator<Item = (S, T)>,
+    T: Serialize + Send + Sync,
+    S: AsRef<str> + Send,
+    I: IntoIterator<Item = (S, T)> + Send,
+    I::IntoIter: Send,
 {
     if dir.exists() {
         fs::remove_dir_all(dir).await.map_err(|err| {

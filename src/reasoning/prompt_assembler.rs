@@ -38,7 +38,7 @@ struct RuntimeSystemPromptSections {
 pub fn runtime_system_prompt_text(ctx: &Context) -> String {
     let configured_locale = ctx.config.locale.as_str();
     let persona = load_or_create_prompt_persona_spec_sync(configured_locale);
-    render_runtime_system_prompt(RuntimeSystemPromptSections {
+    render_runtime_system_prompt(&RuntimeSystemPromptSections {
         workspace_path: format!(
             "Your absolute workspace path is `{}`.",
             ctx.execution_cwd.display()
@@ -59,7 +59,7 @@ pub fn runtime_system_prompt_text(ctx: &Context) -> String {
 #[cfg(test)]
 pub fn runtime_system_prompt_text_from_additions(additions: &[String]) -> String {
     let persona = crate::reasoning::turn_compile::load_prompt_persona_spec_sync();
-    render_runtime_system_prompt(RuntimeSystemPromptSections {
+    render_runtime_system_prompt(&RuntimeSystemPromptSections {
         workspace_path:
             "The absolute runtime workspace path is injected into the real system prompt."
                 .to_string(),
@@ -74,7 +74,7 @@ pub fn runtime_system_prompt_text_from_additions(additions: &[String]) -> String
     })
 }
 
-fn render_runtime_system_prompt(sections: RuntimeSystemPromptSections) -> String {
+fn render_runtime_system_prompt(sections: &RuntimeSystemPromptSections) -> String {
     let rendered = SYSTEM_CORE
         .replace(WORKSPACE_PATH_PLACEHOLDER, sections.workspace_path.trim())
         .replace(PERSONA_SECTION_PLACEHOLDER, sections.persona_section.trim())
@@ -115,8 +115,7 @@ fn render_target_language(language: &str) -> String {
     match language.trim() {
         "en-US" => "English (en-US)".to_string(),
         "zh-CN" => "Simplified Chinese (zh-CN)".to_string(),
-        "configured-locale" => "the configured locale".to_string(),
-        "" => "the configured locale".to_string(),
+        "configured-locale" | "" => "the configured locale".to_string(),
         language => language.to_string(),
     }
 }

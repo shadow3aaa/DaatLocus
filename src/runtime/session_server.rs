@@ -70,7 +70,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub(crate) struct SessionServeArgs {
+pub struct SessionServeArgs {
     pub session_id: String,
     pub ipc_name: String,
     pub ipc_token: String,
@@ -78,11 +78,11 @@ pub(crate) struct SessionServeArgs {
 }
 
 // Workspace app notices are pull-based, so poll them only when a workspace app is loaded.
-pub(crate) async fn run_session_serve(
+pub async fn run_session_serve(
     config: crate::config::Config,
     args: SessionServeArgs,
 ) -> Result<()> {
-    let session_id = SessionId::from_string(args.session_id.clone())?;
+    let session_id = SessionId::from_string(&args.session_id)?;
     let mut lock =
         DaemonLock::acquire_with_suffix(&format!("session-{}", session_id.as_str())).await?;
     let daemon_lifecycle = DaemonLifecycleHandle::new(DaemonLifecycleState::Initializing);
@@ -90,8 +90,7 @@ pub(crate) async fn run_session_serve(
     let telegram_acl = TelegramAclHandle::load().await;
     let events = EventStore::with_session(session_id.as_str()).await;
     let pending_work = PendingWorkQueue::with_session(session_id.as_str()).await;
-    let dashboard_history =
-        DashboardActivityHistoryStore::with_session(session_id.as_str()).await?;
+    let dashboard_history = DashboardActivityHistoryStore::with_session(session_id.as_str())?;
     let initial_activity_history = dashboard_history.load_initial_window();
     let (tx, _rx) = watch::channel(DashboardState {
         agent_name: dashboard_agent_name(),
@@ -123,7 +122,7 @@ pub(crate) async fn run_session_serve(
     let telegram_handle = telegram.handle();
     bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
 
-    let ipc_server = SessionIpcServer::bind(&args.ipc_name).await?;
+    let ipc_server = SessionIpcServer::bind(&args.ipc_name)?;
     let ipc_task = tokio::spawn(run_ipc_server(SessionIpcServerState {
         server: ipc_server,
         expected_session_id: session_id.as_str().to_string(),
@@ -247,7 +246,7 @@ pub(crate) async fn run_session_serve(
     };
 
     let mut sleep_status = load_sleep_status_snapshot().await;
-    let startup_preturn_state = PreTurnState::new(&mut context).await;
+    let startup_preturn_state = PreTurnState::new(&context);
     let startup_preturn_context_output =
         build_preturn_context_text(&mut context, &startup_preturn_state);
     let app_renders = context.apps.state_renders();
@@ -267,6 +266,7 @@ pub(crate) async fn run_session_serve(
             skill_errors: context.openskills.dashboard_errors(),
             workflows: dashboard_workflow_summaries(&context),
             workflow_errors: dashboard_workflow_errors(&context),
+            active_workflow_runs: Vec::new(),
             pending_access_requests: context.telegram_acl.pending_requests(),
             pending_user_inputs: pending_user_inputs_from_sources(
                 &context.events,
@@ -297,7 +297,7 @@ pub(crate) async fn run_session_serve(
     crate::runtime::session_title::sync_session_title_placeholder(&mut context, &tx);
 
     let workspace_app_watcher = match start_workspace_app_watcher(
-        workspace_apps_dir(&context.execution_cwd),
+        &workspace_apps_dir(&context.execution_cwd),
         workspace_app_invalidation_tx,
     ) {
         Ok(watcher) => Some(watcher),
@@ -363,7 +363,7 @@ pub(crate) async fn run_session_serve(
             Some(()) = runtime_wake_rx.recv(), if runtime_idle => {
                 runtime_idle = false;
             }
-            _ = &mut runtime_idle_sleep, if runtime_idle && runtime_idle_sleep_enabled => {
+            () = &mut runtime_idle_sleep, if runtime_idle && runtime_idle_sleep_enabled => {
                 runtime_idle = false;
             }
             Some(invalidation) = workspace_app_invalidation_rx.recv(), if runtime_idle => {
@@ -582,16 +582,13 @@ async fn handle_ipc_connection(
                 SessionIpcResponse::DashboardActionResult { result },
             )
         }
-        SessionIpcRequest::EnqueueTelegramEvent { event } => {
-            enqueue_telegram_event(
-                &state.events,
-                &state.pending_work,
-                &state.runtime_wake_tx,
-                event,
-                request_id,
-            )
-            .await
-        }
+        SessionIpcRequest::EnqueueTelegramEvent { event } => enqueue_telegram_event(
+            &state.events,
+            &state.pending_work,
+            &state.runtime_wake_tx,
+            event,
+            request_id,
+        ),
         SessionIpcRequest::DashboardSnapshot => IpcResponseEnvelope::ok(
             request_id,
             SessionIpcResponse::DashboardSnapshot {
@@ -610,6 +607,33 @@ async fn handle_ipc_connection(
             Err(err) => IpcResponseEnvelope::error(
                 request_id,
                 "dashboard_history_failed",
+                format!("{err:?}"),
+                true,
+            ),
+        },
+        SessionIpcRequest::WorkflowWorkerActivityPage {
+            run_id,
+            worker_id,
+            before,
+            after,
+            limit,
+        } => match state
+            .dashboard_history
+            .query_workflow_worker_activity(&run_id, &worker_id, before, after, limit)
+        {
+            Ok(Some(page)) => IpcResponseEnvelope::ok(
+                request_id,
+                SessionIpcResponse::WorkflowWorkerActivityPage { page },
+            ),
+            Ok(None) => IpcResponseEnvelope::error(
+                request_id,
+                "workflow_worker_not_found",
+                format!("unknown workflow worker {run_id}/{worker_id}"),
+                false,
+            ),
+            Err(err) => IpcResponseEnvelope::error(
+                request_id,
+                "workflow_worker_activity_failed",
                 format!("{err:?}"),
                 true,
             ),
@@ -794,7 +818,7 @@ fn execute_session_dashboard_action(
             direction,
         } => {
             let result =
-                move_pending_user_input(&state.events, &state.pending_work, event_id, direction);
+                move_pending_user_input(&state.events, &state.pending_work, event_id, &direction);
             if result.success {
                 refresh_pending_user_inputs(state);
             }
@@ -853,7 +877,7 @@ fn dismiss_pending_user_input(
             };
         }
     }
-    if let Err(err) = pending_work.consume(PendingWork::Event { event_id }) {
+    if let Err(err) = pending_work.consume(&PendingWork::Event { event_id }) {
         return crate::dashboard::DashboardActionResult {
             success: false,
             message: "failed to remove pending input from queue".to_string(),
@@ -885,7 +909,7 @@ fn clear_pending_user_inputs(
             tracing::debug!("skipping non-user pending input during queue clear: {err:?}");
             continue;
         }
-        match pending_work.consume(PendingWork::Event { event_id }) {
+        match pending_work.consume(&PendingWork::Event { event_id }) {
             Ok(true) => {
                 match events.set_status(&event_id.to_string(), EventStatus::Dismissed, None) {
                     Ok(()) => dismissed += 1,
@@ -953,7 +977,7 @@ fn move_pending_user_input(
     events: &EventStore,
     pending_work: &PendingWorkQueue,
     event_id: uuid::Uuid,
-    direction: DashboardPendingUserInputMoveDirection,
+    direction: &DashboardPendingUserInputMoveDirection,
 ) -> crate::dashboard::DashboardActionResult {
     match validate_pending_terminal_event(events, event_id) {
         Ok(()) => {}
@@ -969,7 +993,7 @@ fn move_pending_user_input(
         DashboardPendingUserInputMoveDirection::Up => PendingEventMoveDirection::Up,
         DashboardPendingUserInputMoveDirection::Down => PendingEventMoveDirection::Down,
     };
-    match pending_work.move_pending_event(event_id, direction) {
+    match pending_work.move_pending_event(event_id, &direction) {
         Ok(true) => crate::dashboard::DashboardActionResult {
             success: true,
             message: "moved pending input".to_string(),
@@ -1109,9 +1133,9 @@ fn next_runtime_idle_sleep_delay_from_instants(
     }
 
     let idle_due = idle_since? + AUTO_SLEEP_IDLE_THRESHOLD;
-    let next_due = last_idle_sleep_at
-        .map(|last| std::cmp::max(idle_due, last + AUTO_SLEEP_MIN_INTERVAL))
-        .unwrap_or(idle_due);
+    let next_due = last_idle_sleep_at.map_or(idle_due, |last| {
+        std::cmp::max(idle_due, last + AUTO_SLEEP_MIN_INTERVAL)
+    });
     Some(next_due.saturating_duration_since(Instant::now()))
 }
 
@@ -1179,7 +1203,7 @@ async fn submit_user_input(
     }
 }
 
-async fn enqueue_telegram_event(
+fn enqueue_telegram_event(
     events: &EventStore,
     pending_work: &PendingWorkQueue,
     runtime_wake_tx: &mpsc::UnboundedSender<()>,
@@ -1263,11 +1287,10 @@ fn query_dashboard_history(
     after: Option<i64>,
     limit: usize,
 ) -> Result<crate::dashboard::DashboardActivityHistoryPage> {
-    if let Some(after) = after {
-        store.query_after(Some(after), limit)
-    } else {
-        store.query_before(before, limit)
-    }
+    after.map_or_else(
+        || store.query_before(before, limit),
+        |after| store.query_after(Some(after), limit),
+    )
 }
 
 fn drain_telegram_outbox(handle: &TelegramTransportStateHandle) -> Vec<PendingOutboundMessage> {
@@ -1298,39 +1321,36 @@ async fn stream_dashboard_snapshots(
         )
     })?;
     loop {
-        match rx.changed().await {
-            Ok(()) => {
-                let snapshot = rx.borrow().clone();
-                write_stream_event(
-                    stream,
-                    &SessionIpcStreamEvent::DashboardSnapshot {
-                        state: Box::new(snapshot),
-                    },
+        if matches!(rx.changed().await, Ok(())) {
+            let snapshot = rx.borrow().clone();
+            write_stream_event(
+                stream,
+                &SessionIpcStreamEvent::DashboardSnapshot {
+                    state: Box::new(snapshot),
+                },
+            )
+            .await
+            .map_err(|err| {
+                miette!(
+                    "write session IPC dashboard stream snapshot failed request_id={} request_kind=subscribe_dashboard: {err:?}",
+                    request_id
                 )
-                .await
-                .map_err(|err| {
-                    miette!(
-                        "write session IPC dashboard stream snapshot failed request_id={} request_kind=subscribe_dashboard: {err:?}",
-                        request_id
-                    )
-                })?;
-            }
-            Err(_) => {
-                write_stream_event(
-                    stream,
-                    &SessionIpcStreamEvent::DashboardClosed {
-                        reason: "dashboard state channel closed".to_string(),
-                    },
+            })?;
+        } else {
+            write_stream_event(
+                stream,
+                &SessionIpcStreamEvent::DashboardClosed {
+                    reason: "dashboard state channel closed".to_string(),
+                },
+            )
+            .await
+            .map_err(|err| {
+                miette!(
+                    "write session IPC dashboard stream close event failed request_id={} request_kind=subscribe_dashboard: {err:?}",
+                    request_id
                 )
-                .await
-                .map_err(|err| {
-                    miette!(
-                        "write session IPC dashboard stream close event failed request_id={} request_kind=subscribe_dashboard: {err:?}",
-                        request_id
-                    )
-                })?;
-                return Ok(());
-            }
+            })?;
+            return Ok(());
         }
     }
 }
@@ -1433,7 +1453,7 @@ mod tests {
 
     fn request(session_id: &str, ipc_token: &str) -> IpcRequestEnvelope {
         IpcRequestEnvelope::new(
-            &SessionId::from_string(session_id.to_string()).expect("valid session id"),
+            &SessionId::from_string(session_id).expect("valid session id"),
             ipc_token.to_string(),
             SessionIpcRequest::Status,
         )
@@ -1461,7 +1481,11 @@ mod tests {
     fn idle_sleep_delay_requires_idle_and_no_running_sleep() {
         assert!(next_runtime_idle_sleep_delay_from_instants(None, None, false).is_none());
 
-        let idle_since = Some(Instant::now() - AUTO_SLEEP_IDLE_THRESHOLD);
+        let idle_since = Some(
+            Instant::now()
+                .checked_sub(AUTO_SLEEP_IDLE_THRESHOLD)
+                .unwrap(),
+        );
         assert!(next_runtime_idle_sleep_delay_from_instants(idle_since, None, true).is_none());
     }
 
@@ -1472,10 +1496,20 @@ mod tests {
             next_runtime_idle_sleep_delay_from_instants(fresh_idle_since, None, false)
                 .expect("idle sleep should be scheduled");
         assert!(fresh_delay <= AUTO_SLEEP_IDLE_THRESHOLD);
-        assert!(fresh_delay > AUTO_SLEEP_IDLE_THRESHOLD - Duration::from_secs(1));
+        assert!(
+            fresh_delay
+                > AUTO_SLEEP_IDLE_THRESHOLD
+                    .checked_sub(Duration::from_secs(1))
+                    .unwrap()
+        );
 
-        let overdue_idle_since =
-            Some(Instant::now() - AUTO_SLEEP_IDLE_THRESHOLD - Duration::from_secs(1));
+        let overdue_idle_since = Some(
+            Instant::now()
+                .checked_sub(AUTO_SLEEP_IDLE_THRESHOLD)
+                .unwrap()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap(),
+        );
         let overdue_delay =
             next_runtime_idle_sleep_delay_from_instants(overdue_idle_since, None, false)
                 .expect("overdue idle sleep should be ready");
@@ -1489,7 +1523,12 @@ mod tests {
         )
         .expect("idle sleep should be throttled by min interval");
         assert!(throttled_delay <= AUTO_SLEEP_MIN_INTERVAL);
-        assert!(throttled_delay > AUTO_SLEEP_MIN_INTERVAL - Duration::from_secs(1));
+        assert!(
+            throttled_delay
+                > AUTO_SLEEP_MIN_INTERVAL
+                    .checked_sub(Duration::from_secs(1))
+                    .unwrap()
+        );
     }
 
     #[test]

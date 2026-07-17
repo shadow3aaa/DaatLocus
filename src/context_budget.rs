@@ -65,7 +65,10 @@ impl RequestBudgetLimits {
 }
 
 impl TokenEstimateBaseline {
-    pub fn calibrated_total_input_tokens(&self, current_estimated_input_tokens: usize) -> usize {
+    pub const fn calibrated_total_input_tokens(
+        &self,
+        current_estimated_input_tokens: usize,
+    ) -> usize {
         let Some(observed) = self.observed_input_tokens else {
             return current_estimated_input_tokens;
         };
@@ -109,7 +112,7 @@ impl RequestBudgetBreakdown {
         self
     }
 
-    pub fn within_context_window(&self) -> bool {
+    pub const fn within_context_window(&self) -> bool {
         self.total_with_reserve_tokens <= self.context_window_tokens
     }
 
@@ -123,7 +126,7 @@ impl RequestBudgetBreakdown {
             .min(self.input_budget_tokens())
     }
 
-    pub fn input_budget_tokens(&self) -> usize {
+    pub const fn input_budget_tokens(&self) -> usize {
         self.context_window_tokens
             .saturating_sub(self.reserved_output_tokens)
     }
@@ -190,7 +193,7 @@ pub fn is_context_budget_exceeded(err: &Report) -> bool {
     err.downcast_ref::<ContextBudgetExceededError>().is_some()
 }
 
-pub fn approx_token_count(text: &str) -> usize {
+pub const fn approx_token_count(text: &str) -> usize {
     let len = text.len();
     len.saturating_add(APPROX_BYTES_PER_TOKEN.saturating_sub(1)) / APPROX_BYTES_PER_TOKEN
 }
@@ -256,13 +259,9 @@ pub fn estimate_agent_turn_request(
                     } => Some(
                         content
                             .as_deref()
-                            .map(|content| message_token_cost("assistant", content))
-                            .unwrap_or(0)
+                            .map_or(0, |content| message_token_cost("assistant", content))
                             .saturating_add(
-                                reasoning_content
-                                    .as_deref()
-                                    .map(approx_token_count)
-                                    .unwrap_or(0),
+                                reasoning_content.as_deref().map_or(0, approx_token_count),
                             ),
                     ),
                     _ => None,
@@ -393,7 +392,7 @@ fn estimate_history_message_tokens(message: &HistoryMessage) -> usize {
     estimate_agent_message_tokens(&message.message)
 }
 
-pub(crate) fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {
+pub fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {
     match message {
         AgentMessage::System { content } => message_token_cost("system", content),
         AgentMessage::User { content } => message_token_cost("user", content.as_text())
@@ -406,14 +405,8 @@ pub(crate) fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {
         } => {
             let content_tokens = content
                 .as_deref()
-                .map(|content| message_token_cost("assistant", content))
-                .unwrap_or(4)
-                .saturating_add(
-                    reasoning_content
-                        .as_deref()
-                        .map(approx_token_count)
-                        .unwrap_or(0),
-                );
+                .map_or(4, |content| message_token_cost("assistant", content))
+                .saturating_add(reasoning_content.as_deref().map_or(0, approx_token_count));
             content_tokens.saturating_add(estimate_assistant_tool_call_protocol_tokens(
                 calls,
                 estimate_json_value_tokens,
@@ -431,7 +424,7 @@ pub(crate) fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {
     }
 }
 
-pub(crate) fn estimate_tool_spec_tokens(tool: &AgentToolSpec) -> usize {
+pub fn estimate_tool_spec_tokens(tool: &AgentToolSpec) -> usize {
     let input_tokens = match &tool.input_spec {
         AgentToolInputSpec::JsonSchema { schema } => estimate_json_value_tokens(schema),
         AgentToolInputSpec::FreeformGrammar {
@@ -455,11 +448,11 @@ fn estimate_json_value_tokens(value: &Value) -> usize {
         .unwrap_or_default()
 }
 
-fn message_token_cost(role: &str, content: &str) -> usize {
+const fn message_token_cost(role: &str, content: &str) -> usize {
     approx_token_count(role) + approx_token_count(content) + 4
 }
 
-fn yes_no(value: bool) -> &'static str {
+const fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 

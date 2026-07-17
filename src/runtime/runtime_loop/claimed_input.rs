@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    AfterClaimContextInput, AgentLoopStepOutput, Context, EventPayload, EventStatus, EventView,
+    PendingWork, RUNTIME_OVERFLOW_FUSE_THRESHOLD, Result,
+};
 
 pub(super) fn runtime_work_origin(inputs: &[ClaimedRuntimeInput]) -> Option<String> {
     if inputs.is_empty() {
@@ -51,7 +54,7 @@ pub(super) fn claim_pending_runtime_inputs(
                     Ok(None) => {
                         if let Err(err) = context
                             .pending_work
-                            .consume(PendingWork::Event { event_id })
+                            .consume(&PendingWork::Event { event_id })
                         {
                             tracing::error!(
                                 "failed to consume stale runtime event driver {event_id}: {err:?}"
@@ -93,7 +96,7 @@ pub(super) fn requeue_claimed_runtime_events(context: &Context, event_ids: &[Str
 }
 
 pub(super) fn handle_runtime_overflow(
-    context: &mut Context,
+    context: &Context,
     fingerprint: Option<&str>,
     event_ids: &[String],
     error_text: &str,
@@ -129,7 +132,7 @@ pub(super) fn handle_runtime_overflow(
             tracing::error!("failed to mark overflowed event {event_id} as failed: {err:?}");
         }
         if let Ok(parsed_event_id) = uuid::Uuid::parse_str(event_id)
-            && let Err(err) = context.pending_work.consume(PendingWork::Event {
+            && let Err(err) = context.pending_work.consume(&PendingWork::Event {
                 event_id: parsed_event_id,
             })
         {
@@ -154,7 +157,7 @@ pub(super) fn runtime_overflow_failure_note(attempts: usize, error_text: &str) -
 }
 
 pub(super) fn handle_model_request_failure(
-    context: &mut Context,
+    context: &Context,
     fingerprint: Option<&str>,
     event_ids: &[String],
     error_text: &str,
@@ -199,7 +202,7 @@ pub(super) fn handle_model_request_failure(
 }
 
 fn terminate_model_request_failure(
-    context: &mut Context,
+    context: &Context,
     fingerprint: Option<&str>,
     attempts: usize,
     event_ids: &[String],
@@ -222,7 +225,7 @@ fn terminate_model_request_failure(
             );
         }
         if let Ok(parsed_event_id) = uuid::Uuid::parse_str(event_id)
-            && let Err(err) = context.pending_work.consume(PendingWork::Event {
+            && let Err(err) = context.pending_work.consume(&PendingWork::Event {
                 event_id: parsed_event_id,
             })
         {
@@ -278,12 +281,8 @@ pub(super) fn finalize_claimed_runtime_events(
     if !requeued.is_empty() {
         let last_action = output.actions.last();
         tracing::debug!(
-            action_kind = last_action
-                .map(|action| action.kind.as_str())
-                .unwrap_or("none"),
-            action_summary = last_action
-                .map(|action| action.summary.as_str())
-                .unwrap_or(""),
+            action_kind = last_action.map_or("none", |action| action.kind.as_str()),
+            action_summary = last_action.map_or("", |action| action.summary.as_str()),
             requeued_claimed_events = requeued.len(),
             event_ids = requeued.join(","),
             "requeued claimed runtime events left unresolved at turn end",
@@ -319,8 +318,7 @@ pub(super) fn claimed_events_are_terminal(context: &Context, event_ids: &[String
         .ok();
     statuses
         .as_deref()
-        .map(claimed_event_statuses_are_terminal)
-        .unwrap_or(false)
+        .is_some_and(claimed_event_statuses_are_terminal)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,7 +353,7 @@ pub(super) fn summarize_claimed_event_statuses(
             | EventStatus::Resolved
             | EventStatus::Dismissed
             | EventStatus::Failed => {}
-            _ => {
+            EventStatus::Pending => {
                 all_terminal = false;
                 return ClaimedEventStatusSummary {
                     has_claimed,

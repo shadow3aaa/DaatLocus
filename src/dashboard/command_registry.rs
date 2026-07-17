@@ -148,12 +148,12 @@ pub(super) fn dashboard_command_is_known(verb: &str) -> bool {
 }
 
 #[derive(Clone, Copy, Serialize)]
-pub(crate) struct RemoteDashboardCommand {
+pub struct RemoteDashboardCommand {
     pub command: &'static str,
     pub description: &'static str,
 }
 
-pub(crate) fn remote_dashboard_commands() -> Vec<RemoteDashboardCommand> {
+pub fn remote_dashboard_commands() -> Vec<RemoteDashboardCommand> {
     dashboard_commands()
         .iter()
         .filter_map(|command| {

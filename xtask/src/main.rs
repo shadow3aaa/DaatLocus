@@ -1,5 +1,6 @@
 use std::{
     error::Error,
+    fmt::Write as _,
     fs,
     io::{self, BufWriter, IsTerminal, Write},
     path::{Component, Path, PathBuf},
@@ -51,8 +52,8 @@ fn run() -> Result<()> {
     match cli.command {
         Some(XtaskCommand::Package(args)) => match args.command {
             PackageSubcommand::Binary(args) => package_release_binary(args)?,
-            PackageSubcommand::Macos(args) => package_macos_installer(args)?,
-            PackageSubcommand::Windows(args) => package_windows_msi(args)?,
+            PackageSubcommand::Macos(args) => package_macos_installer(&args)?,
+            PackageSubcommand::Windows(args) => package_windows_msi(&args)?,
         },
         None => {
             let mut command = Cli::command();
@@ -146,6 +147,22 @@ struct RootPackage {
     #[serde(default)]
     authors: Vec<String>,
     repository: Option<String>,
+}
+
+struct MacosPackageContext {
+    target: String,
+    repo: PathBuf,
+    package: RootPackage,
+    paths: MacosInstallerPaths,
+    main_binary_name: String,
+    launcher_binary_name: String,
+}
+
+struct WindowsPackageContext {
+    repo: PathBuf,
+    package: RootPackage,
+    paths: WindowsMsiPaths,
+    binary_name: String,
 }
 
 struct MacosInstallerPaths {
@@ -273,15 +290,43 @@ fn package_release_binary(args: PackageReleaseArgs) -> Result<()> {
     print_packaged_artifact(&format!("release binary for {target}"), &archive_path);
     Ok(())
 }
-fn package_macos_installer(args: PackageMacosInstallerArgs) -> Result<()> {
-    if !cfg!(target_os = "macos") {
-        return Err("macOS installer packaging requires macOS".into());
-    }
+fn build_release_binaries(package_name: &str, target: &str, label: &str) -> Result<()> {
+    run_command(
+        Command::new("cargo")
+            .arg("build")
+            .arg("-p")
+            .arg(package_name)
+            .arg("-p")
+            .arg(LAUNCHER_PACKAGE_NAME)
+            .arg("--release")
+            .arg("--locked")
+            .arg("--target")
+            .arg(target),
+        label,
+    )
+}
 
-    let target = match args.target {
-        Some(target) => target,
-        None => rustc_host_target()?,
-    };
+fn ensure_file_exists(path: &Path, message: &str) -> Result<()> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(format!("{message}: {}", path.display()).into())
+    }
+}
+
+fn remove_if_exists(path: &Path) -> Result<()> {
+    if path.exists() {
+        if path.is_dir() {
+            fs::remove_dir_all(path)?;
+        } else {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
+fn package_macos_context(args: &PackageMacosInstallerArgs) -> Result<MacosPackageContext> {
+    let target = args.target.clone().map_or_else(rustc_host_target, Ok)?;
     ensure_safe_relative_path("target triple", Path::new(&target))?;
     let manifest = read_root_manifest()?;
     let repo = repo_root();
@@ -293,80 +338,66 @@ fn package_macos_installer(args: PackageMacosInstallerArgs) -> Result<()> {
         &target,
         &main_binary_name,
         &launcher_binary_name,
-    )?;
+    );
+    Ok(MacosPackageContext {
+        target,
+        repo,
+        package: manifest.package,
+        paths,
+        main_binary_name,
+        launcher_binary_name,
+    })
+}
 
-    if !args.skip_build {
-        run_command(
-            Command::new("cargo")
-                .arg("build")
-                .arg("-p")
-                .arg(&manifest.package.name)
-                .arg("-p")
-                .arg(LAUNCHER_PACKAGE_NAME)
-                .arg("--release")
-                .arg("--locked")
-                .arg("--target")
-                .arg(&target),
-            "build macOS release binaries",
-        )?;
+fn prepare_macos_bundle(context: &MacosPackageContext, keep_work_dir: bool) -> Result<()> {
+    let paths = &context.paths;
+    if !keep_work_dir {
+        remove_if_exists(&paths.work_dir)?;
     }
-
-    if !paths.binary_path.is_file() {
-        return Err(format!(
-            "release binary missing at {}; run `cargo xtask package macos` without --skip-build to build it",
-            paths.binary_path.display()
-        )
-        .into());
-    }
-    if !paths.launcher_binary_path.is_file() {
-        return Err(format!(
-            "launcher binary missing at {}; run `cargo xtask package macos` without --skip-build to build it",
-            paths.launcher_binary_path.display()
-        )
-        .into());
-    }
-
-    if paths.work_dir.exists() && !args.keep_work_dir {
-        fs::remove_dir_all(&paths.work_dir)?;
-    }
-    if paths.app_dir.exists() {
-        fs::remove_dir_all(&paths.app_dir)?;
-    }
-    if paths.pkg_root_dir.exists() {
-        fs::remove_dir_all(&paths.pkg_root_dir)?;
-    }
-    if paths.component_pkg_path.exists() {
-        fs::remove_file(&paths.component_pkg_path)?;
-    }
-    if paths.pkg_path.exists() {
-        fs::remove_file(&paths.pkg_path)?;
+    for path in [
+        &paths.app_dir,
+        &paths.pkg_root_dir,
+        &paths.component_pkg_path,
+        &paths.pkg_path,
+    ] {
+        remove_if_exists(path)?;
     }
     fs::create_dir_all(&paths.output_dir)?;
     fs::create_dir_all(&paths.macos_dir)?;
     fs::create_dir_all(&paths.resources_dir)?;
-
-    fs::copy(&paths.binary_path, paths.macos_dir.join(&main_binary_name))?;
+    fs::copy(
+        &paths.binary_path,
+        paths.macos_dir.join(&context.main_binary_name),
+    )?;
     fs::copy(
         &paths.launcher_binary_path,
-        paths.macos_dir.join(&launcher_binary_name),
+        paths.macos_dir.join(&context.launcher_binary_name),
     )?;
     render_macos_info_plist(
-        &repo.join("packaging").join("macos").join("Info.plist"),
+        &context
+            .repo
+            .join("packaging")
+            .join("macos")
+            .join("Info.plist"),
         &paths.info_plist_path,
         &MacosInfoPlistData {
-            product_name: product_name(&manifest.package.name),
-            executable_name: launcher_binary_name,
+            product_name: product_name(&context.package.name),
+            executable_name: context.launcher_binary_name.clone(),
             icon_file: MACOS_ICON_FILE_STEM.to_string(),
             bundle_identifier: MACOS_BUNDLE_IDENTIFIER.to_string(),
-            version: manifest.package.version.clone(),
+            version: context.package.version.clone(),
         },
     )?;
     render_macos_icns(
-        &repo.join("assets").join("logo.svg"),
+        &context.repo.join("assets").join("logo.svg"),
         &paths.iconset_dir,
         &paths.icon_path,
     )?;
+    Ok(())
+}
 
+fn build_macos_installer(context: &MacosPackageContext) -> Result<()> {
+    let paths = &context.paths;
     fs::create_dir_all(
         paths
             .pkg_app_dir
@@ -377,93 +408,115 @@ fn package_macos_installer(args: PackageMacosInstallerArgs) -> Result<()> {
     copy_dir_recursive(&paths.app_dir, &paths.pkg_app_dir)?;
     write_macos_cli_wrapper(&paths.pkg_cli_dir.join(MACOS_CLI_WRAPPER_NAME))?;
     create_macos_pkg(
-        &paths,
-        &product_name(&manifest.package.name),
-        &manifest.package.version,
-    )?;
+        paths,
+        &product_name(&context.package.name),
+        &context.package.version,
+    )
+}
 
-    if !paths.pkg_path.is_file() {
-        return Err(format!(
-            "productbuild did not create expected PKG at {}",
-            paths.pkg_path.display()
-        )
-        .into());
+fn package_macos_installer(args: &PackageMacosInstallerArgs) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Err("macOS installer packaging requires macOS".into());
     }
-
-    print_packaged_artifact("macOS app bundle", &paths.app_dir);
-    print_packaged_artifact("macOS installer", &paths.pkg_path);
+    let context = package_macos_context(args)?;
+    if !args.skip_build {
+        build_release_binaries(
+            &context.package.name,
+            &context.target,
+            "build macOS release binaries",
+        )?;
+    }
+    ensure_file_exists(
+        &context.paths.binary_path,
+        "release binary missing; run `cargo xtask package macos` without --skip-build to build it",
+    )?;
+    ensure_file_exists(
+        &context.paths.launcher_binary_path,
+        "launcher binary missing; run `cargo xtask package macos` without --skip-build to build it",
+    )?;
+    prepare_macos_bundle(&context, args.keep_work_dir)?;
+    build_macos_installer(&context)?;
+    ensure_file_exists(
+        &context.paths.pkg_path,
+        "productbuild did not create expected PKG",
+    )?;
+    print_packaged_artifact("macOS app bundle", &context.paths.app_dir);
+    print_packaged_artifact("macOS installer", &context.paths.pkg_path);
     Ok(())
 }
 
-fn package_windows_msi(args: PackageWindowsMsiArgs) -> Result<()> {
+fn package_windows_msi(args: &PackageWindowsMsiArgs) -> Result<()> {
     if !cfg!(windows) {
         return Err("Windows installer packaging requires Windows".into());
     }
-
     let manifest = read_root_manifest()?;
     let repo = repo_root();
     let binary_name = binary_name(&manifest.package.name);
     let paths = windows_msi_paths(&repo, &manifest.package, &binary_name)?;
-
+    let context = WindowsPackageContext {
+        repo,
+        package: manifest.package,
+        paths,
+        binary_name,
+    };
     if !args.skip_build {
-        run_command(
-            Command::new("cargo")
-                .arg("build")
-                .arg("-p")
-                .arg(&manifest.package.name)
-                .arg("-p")
-                .arg(LAUNCHER_PACKAGE_NAME)
-                .arg("--release")
-                .arg("--locked")
-                .arg("--target")
-                .arg(WINDOWS_MSI_TARGET),
+        build_release_binaries(
+            &context.package.name,
+            WINDOWS_MSI_TARGET,
             "build Windows release binaries",
         )?;
     }
-
-    if !paths.binary_path.is_file() {
-        return Err(format!(
-            "release binary missing at {}; run `cargo xtask package windows` without --skip-build to build it",
-            paths.binary_path.display()
-        )
-        .into());
+    ensure_file_exists(
+        &context.paths.binary_path,
+        "release binary missing; run `cargo xtask package windows` without --skip-build to build it",
+    )?;
+    ensure_file_exists(
+        &context.paths.launcher_binary_path,
+        "launcher binary missing; run `cargo xtask package windows` without --skip-build to build it",
+    )?;
+    if !args.keep_work_dir {
+        remove_if_exists(&context.paths.work_dir)?;
     }
-    if !paths.launcher_binary_path.is_file() {
-        return Err(format!(
-            "launcher binary missing at {}; run `cargo xtask package windows` without --skip-build to build it",
-            paths.launcher_binary_path.display()
-        )
-        .into());
-    }
+    fs::create_dir_all(&context.paths.work_dir)?;
+    fs::create_dir_all(&context.paths.output_dir)?;
+    build_windows_msi_artifacts(&context)?;
+    print_packaged_artifact("Windows MSI", &context.paths.msi_path);
+    print_packaged_artifact("Windows bootstrapper", &context.paths.bootstrapper_path);
+    Ok(())
+}
 
-    if paths.work_dir.exists() && !args.keep_work_dir {
-        fs::remove_dir_all(&paths.work_dir)?;
-    }
-    fs::create_dir_all(&paths.work_dir)?;
-    fs::create_dir_all(&paths.output_dir)?;
-
-    render_svg_icon_to_ico(&repo.join("assets").join("logo.svg"), &paths.icon_path)?;
+fn build_windows_msi_artifacts(context: &WindowsPackageContext) -> Result<()> {
+    let paths = &context.paths;
+    render_svg_icon_to_ico(
+        &context.repo.join("assets").join("logo.svg"),
+        &paths.icon_path,
+    )?;
     render_svg_to_png(
-        &repo.join("assets").join("logo.svg"),
+        &context.repo.join("assets").join("logo.svg"),
         &paths.bootstrapper_logo_path,
         WINDOWS_BOOTSTRAPPER_LOGO_SIZE,
         WINDOWS_BOOTSTRAPPER_LOGO_SIZE,
     )?;
-    render_text_file_to_rtf(&repo.join("LICENSE"), &paths.license_rtf_path)?;
-    let template_data = windows_msi_template_data(&manifest.package, &paths, &binary_name)?;
+    render_text_file_to_rtf(&context.repo.join("LICENSE"), &paths.license_rtf_path)?;
+    let template_data = windows_msi_template_data(&context.package, paths, &context.binary_name)?;
+    build_windows_msi(paths, &context.repo, &template_data)?;
+    build_windows_bootstrapper(paths, &context.repo, &template_data)
+}
+
+fn build_windows_msi(
+    paths: &WindowsMsiPaths,
+    repo: &Path,
+    template_data: &WindowsMsiTemplateData,
+) -> Result<()> {
     render_windows_msi_template(
         &repo
             .join("packaging")
             .join("windows")
             .join("daat-locus.wxs"),
         &paths.generated_wxs_path,
-        &template_data,
+        template_data,
     )?;
-
-    if paths.msi_path.exists() {
-        fs::remove_file(&paths.msi_path)?;
-    }
-
+    remove_if_exists(&paths.msi_path)?;
     run_command(
         Command::new("wix")
             .arg("build")
@@ -474,28 +527,23 @@ fn package_windows_msi(args: PackageWindowsMsiArgs) -> Result<()> {
             .arg(&paths.msi_path),
         "build Windows MSI",
     )?;
+    ensure_file_exists(&paths.msi_path, "WiX did not create expected MSI")
+}
 
-    if !paths.msi_path.is_file() {
-        return Err(format!(
-            "WiX did not create expected MSI at {}",
-            paths.msi_path.display()
-        )
-        .into());
-    }
-
+fn build_windows_bootstrapper(
+    paths: &WindowsMsiPaths,
+    repo: &Path,
+    template_data: &WindowsMsiTemplateData,
+) -> Result<()> {
     render_windows_msi_template(
         &repo
             .join("packaging")
             .join("windows")
             .join("daat-locus-bootstrapper.wxs"),
         &paths.generated_bundle_wxs_path,
-        &template_data,
+        template_data,
     )?;
-
-    if paths.bootstrapper_path.exists() {
-        fs::remove_file(&paths.bootstrapper_path)?;
-    }
-
+    remove_if_exists(&paths.bootstrapper_path)?;
     run_command(
         Command::new("wix")
             .arg("build")
@@ -506,18 +554,10 @@ fn package_windows_msi(args: PackageWindowsMsiArgs) -> Result<()> {
             .arg(&paths.bootstrapper_path),
         "build Windows bootstrapper",
     )?;
-
-    if !paths.bootstrapper_path.is_file() {
-        return Err(format!(
-            "WiX did not create expected bootstrapper at {}",
-            paths.bootstrapper_path.display()
-        )
-        .into());
-    }
-
-    print_packaged_artifact("Windows MSI", &paths.msi_path);
-    print_packaged_artifact("Windows bootstrapper", &paths.bootstrapper_path);
-    Ok(())
+    ensure_file_exists(
+        &paths.bootstrapper_path,
+        "WiX did not create expected bootstrapper",
+    )
 }
 
 fn print_packaged_artifact(label: &str, path: &Path) {
@@ -558,13 +598,16 @@ fn file_url(path: &Path) -> String {
     }
 
     let normalized = path_text.replace('\\', "/");
-    if let Some(unc_path) = normalized.strip_prefix("//") {
-        format!("file://{}", percent_encode_file_url_path(unc_path))
-    } else if normalized.starts_with('/') {
-        format!("file://{}", percent_encode_file_url_path(&normalized))
-    } else {
-        format!("file:///{}", percent_encode_file_url_path(&normalized))
-    }
+    normalized.strip_prefix("//").map_or_else(
+        || {
+            if normalized.starts_with('/') {
+                format!("file://{}", percent_encode_file_url_path(&normalized))
+            } else {
+                format!("file:///{}", percent_encode_file_url_path(&normalized))
+            }
+        },
+        |unc_path| format!("file://{}", percent_encode_file_url_path(unc_path)),
+    )
 }
 
 fn percent_encode_file_url_path(path: &str) -> String {
@@ -572,9 +615,11 @@ fn percent_encode_file_url_path(path: &str) -> String {
     for byte in path.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
-                encoded.push(byte as char)
+                encoded.push(byte as char);
             }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
+            _ => {
+                write!(encoded, "%{byte:02X}").expect("writing to String cannot fail");
+            }
         }
     }
     encoded
@@ -586,7 +631,7 @@ fn macos_installer_paths(
     target: &str,
     main_binary_name: &str,
     launcher_binary_name: &str,
-) -> Result<MacosInstallerPaths> {
+) -> MacosInstallerPaths {
     let release_dir = repo.join("target").join(target).join("release");
     let output_dir = release_dir.join("macos");
     let work_dir = release_dir.join("macos-work");
@@ -607,7 +652,7 @@ fn macos_installer_paths(
         package.name, package.version, target
     ));
 
-    Ok(MacosInstallerPaths {
+    MacosInstallerPaths {
         binary_path: release_dir.join(main_binary_name),
         launcher_binary_path: release_dir.join(launcher_binary_name),
         info_plist_path: contents_dir.join("Info.plist"),
@@ -624,7 +669,7 @@ fn macos_installer_paths(
         component_pkg_path,
         distribution_path,
         pkg_path,
-    })
+    }
 }
 
 fn render_macos_info_plist(
@@ -838,19 +883,41 @@ fn run_command(command: &mut Command, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn render_svg_to_pixmap(
+    tree: &resvg::usvg::Tree,
+    width: u32,
+    height: u32,
+    label: &str,
+) -> Result<resvg::tiny_skia::Pixmap> {
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+        .ok_or_else(|| format!("failed to allocate {width}x{height} {label} pixmap"))?;
+    let original_size = tree.size();
+    let width_as_float = width
+        .to_string()
+        .parse::<f32>()
+        .map_err(|error| format!("cannot convert icon width {width} to float: {error}"))?;
+    let height_as_float = height
+        .to_string()
+        .parse::<f32>()
+        .map_err(|error| format!("cannot convert icon height {height} to float: {error}"))?;
+    let transform = resvg::tiny_skia::Transform::from_scale(
+        width_as_float / original_size.width(),
+        height_as_float / original_size.height(),
+    );
+    resvg::render(tree, transform, &mut pixmap.as_mut());
+    Ok(pixmap)
+}
+
 fn render_svg_icon_to_ico(svg_path: &Path, ico_path: &Path) -> Result<()> {
     let tree = parse_svg(svg_path)?;
-    let original_size = tree.size();
     let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
 
     for &size in WINDOWS_MSI_ICON_SIZES {
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size)
-            .ok_or_else(|| format!("failed to allocate {size}x{size} icon pixmap"))?;
-        let sx = size as f32 / original_size.width();
-        let sy = size as f32 / original_size.height();
-        let transform = resvg::tiny_skia::Transform::from_scale(sx, sy);
-        resvg::render(&tree, transform, &mut pixmap.as_mut());
-        let image = ico::IconImage::from_rgba_data(size, size, pixmap.take_demultiplied());
+        let image = ico::IconImage::from_rgba_data(
+            size,
+            size,
+            render_svg_to_pixmap(&tree, size, size, "icon")?.take_demultiplied(),
+        );
         icon_dir.add_entry(ico::IconDirEntry::encode(&image)?);
     }
 
@@ -861,13 +928,7 @@ fn render_svg_icon_to_ico(svg_path: &Path, ico_path: &Path) -> Result<()> {
 
 fn render_svg_to_png(svg_path: &Path, png_path: &Path, width: u32, height: u32) -> Result<()> {
     let tree = parse_svg(svg_path)?;
-    let original_size = tree.size();
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| format!("failed to allocate {width}x{height} logo pixmap"))?;
-    let sx = width as f32 / original_size.width();
-    let sy = height as f32 / original_size.height();
-    let transform = resvg::tiny_skia::Transform::from_scale(sx, sy);
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let pixmap = render_svg_to_pixmap(&tree, width, height, "logo")?;
 
     let file = fs::File::create(png_path)?;
     let mut encoder = png::Encoder::new(BufWriter::new(file), width, height);
@@ -908,7 +969,9 @@ fn escape_rtf(text: &str) -> String {
             '}' => escaped.push_str(r"\}"),
             '\t' => escaped.push_str(r"\tab "),
             '\u{00}'..='\u{7f}' => escaped.push(ch),
-            _ => escaped.push_str(&format!(r"\u{}?", ch as i32)),
+            _ => {
+                write!(escaped, r"\u{}?", ch as i32).expect("writing to String cannot fail");
+            }
         }
     }
     escaped
@@ -965,10 +1028,7 @@ fn render_windows_msi_template(
 }
 
 fn msi_version(version: &str) -> Result<String> {
-    let core = version
-        .split_once('-')
-        .map(|(core, _)| core)
-        .unwrap_or(version);
+    let core = version.split_once('-').map_or(version, |(core, _)| core);
     let parts = core.split('.').collect::<Vec<_>>();
     if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
         return Err(format!(
@@ -990,10 +1050,9 @@ fn product_name(package_name: &str) -> String {
         .filter(|part| !part.is_empty())
         .map(|part| {
             let mut chars = part.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            }
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().collect::<String>() + chars.as_str()
+            })
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -1072,9 +1131,9 @@ fn archive_entry_path(path: &Path) -> String {
 }
 
 fn zstd_worker_count() -> u32 {
-    std::thread::available_parallelism()
-        .map(|count| count.get().clamp(1, 8) as u32)
-        .unwrap_or(1)
+    std::thread::available_parallelism().map_or(1, |count| {
+        u32::try_from(count.get().clamp(1, 8)).expect("clamped zstd worker count fits in u32")
+    })
 }
 
 fn read_root_manifest() -> Result<RootManifest> {

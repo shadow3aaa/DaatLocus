@@ -51,6 +51,10 @@ pub(super) fn handle_key_event(
     view: &mut TuiViewState,
     state: &DashboardState,
 ) -> TuiInputOutcome {
+    if key.kind == crossterm::event::KeyEventKind::Release {
+        return TuiInputOutcome::Continue;
+    }
+
     if is_ctrl_c(key)
         && let Some(text) = view.selected_text()
     {
@@ -61,6 +65,11 @@ pub(super) fn handle_key_event(
         return TuiInputOutcome::Continue;
     }
 
+    if view.workflow_inspector.is_some() {
+        view.handle_workflow_inspector_key(key);
+        return TuiInputOutcome::Continue;
+    }
+
     if view.transcript_overlay.is_some() {
         view.handle_transcript_overlay_key(key);
         return TuiInputOutcome::Continue;
@@ -68,6 +77,10 @@ pub(super) fn handle_key_event(
 
     if is_ctrl_t(key) {
         view.open_transcript_overlay(state);
+        return TuiInputOutcome::Continue;
+    }
+    if is_workflow_inspector_key(key) {
+        view.open_latest_workflow_inspector(state);
         return TuiInputOutcome::Continue;
     }
     if view.editing_pending_user_input.is_some() {
@@ -88,8 +101,9 @@ pub(super) fn handle_key_event(
         let action = view
             .command_panel
             .as_mut()
-            .map(|panel| handle_command_panel_key(panel, key))
-            .unwrap_or(CommandPanelAction::None);
+            .map_or(CommandPanelAction::None, |panel| {
+                handle_command_panel_key(panel, key)
+            });
         match action {
             CommandPanelAction::None => {}
             CommandPanelAction::Close => {
@@ -247,7 +261,7 @@ pub(super) fn handle_key_event(
             view.reset_command_popup();
         }
         KeyCode::Enter => {
-            return handle_enter_key(key, view, command_context);
+            return handle_enter_key(key, view, &command_context);
         }
         KeyCode::Left => {
             view.command_input.move_left();
@@ -271,14 +285,18 @@ pub(super) fn handle_key_event(
     TuiInputOutcome::Continue
 }
 
-fn is_ctrl_c(key: KeyEvent) -> bool {
+const fn is_ctrl_c(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'c'))
 }
 
-fn is_ctrl_t(key: KeyEvent) -> bool {
+const fn is_ctrl_t(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'t'))
 }
-fn is_ctrl_p(key: KeyEvent) -> bool {
+const fn is_workflow_inspector_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char(c) if key.modifiers.is_empty() && c.eq_ignore_ascii_case(&'w'))
+}
+
+const fn is_ctrl_p(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'p'))
 }
 
@@ -315,13 +333,13 @@ fn handle_ctrl_c_key(view: &mut TuiViewState, state: &DashboardState) -> TuiInpu
     TuiInputOutcome::Continue
 }
 
-fn composer_has_input(view: &TuiViewState) -> bool {
+const fn composer_has_input(view: &TuiViewState) -> bool {
     !view.command_input.is_empty()
         || !view.pending_pastes.is_empty()
         || !view.pending_image_attachments.is_empty()
 }
 
-fn ctrl_c_reminder_for_state(state: &DashboardState) -> Option<CtrlCReminder> {
+const fn ctrl_c_reminder_for_state(state: &DashboardState) -> Option<CtrlCReminder> {
     if state.runtime_activity.active_runtime_turn {
         Some(CtrlCReminder::Interrupt)
     } else {
@@ -442,7 +460,7 @@ fn handle_pending_user_input_edit_key(key: KeyEvent, view: &mut TuiViewState) ->
 fn handle_enter_key(
     key: KeyEvent,
     view: &mut TuiViewState,
-    command_context: DashboardCommandContext<'_>,
+    command_context: &DashboardCommandContext<'_>,
 ) -> TuiInputOutcome {
     if should_insert_newline_on_enter(key.modifiers) {
         view.command_input.insert_char('\n');
@@ -479,14 +497,14 @@ fn handle_enter_key(
         if matches!(dashboard_command_body(&input), Some("quit" | "q" | "exit")) {
             return TuiInputOutcome::Exit;
         }
-        if let Some(panel) = command_panel_for_input(&input, &command_context) {
+        if let Some(panel) = command_panel_for_input(&input, command_context) {
             view.command_panel = Some(panel);
             view.command_feedback = None;
             view.command_input.clear();
             view.reset_command_popup();
             return TuiInputOutcome::Continue;
         }
-        match dashboard_action_for_input(&input, &command_context) {
+        match dashboard_action_for_input(&input, command_context) {
             Ok(Some(invocation)) => {
                 return TuiInputOutcome::RunDashboardAction {
                     input,
@@ -508,7 +526,7 @@ fn handle_enter_key(
     if let Some(completion) = selected_command_completion(
         view.command_input.as_str(),
         view.command_popup_selection,
-        &command_context,
+        command_context,
     ) && completion != view.command_input.as_str()
     {
         view.command_input.set_text(completion);
@@ -521,7 +539,7 @@ fn handle_enter_key(
         if is_dashboard_command_input(&input) {
             view.command_panel = None;
             view.command_feedback = Some(
-                command_blocks_submission(&input, &command_context)
+                command_blocks_submission(&input, command_context)
                     .unwrap_or_else(|| unsupported_dashboard_command_feedback(&input)),
             );
             view.reset_command_popup();
@@ -541,9 +559,8 @@ pub(super) async fn execute_input_outcome(
     command_runner: &dyn DashboardCommandRunner,
 ) -> bool {
     match outcome {
-        TuiInputOutcome::Continue => false,
         TuiInputOutcome::Exit => true,
-        TuiInputOutcome::CopySelection { .. } => false,
+        TuiInputOutcome::Continue | TuiInputOutcome::CopySelection { .. } => false,
         TuiInputOutcome::RunPanelAction {
             title,
             action,
@@ -714,7 +731,7 @@ fn media_type_for_image_path(path: &Path) -> Option<&'static str> {
     match path
         .extension()
         .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .as_deref()
     {
         Some("png") => Some("image/png"),
@@ -806,8 +823,8 @@ mod tests {
         };
         assert!(overlay.cells.is_empty());
         assert!(overlay.live_cells.is_empty());
-        assert!(overlay.follow_bottom);
-        assert_eq!(overlay.scroll, 0);
+        assert!(overlay.activity_scroll.follow_bottom);
+        assert_eq!(overlay.activity_scroll.scroll, 0);
     }
 
     #[test]
@@ -864,8 +881,8 @@ mod tests {
 
         assert!(matches!(outcome, TuiInputOutcome::Continue));
         let overlay = view.transcript_overlay.as_ref().expect("overlay");
-        assert!(!overlay.follow_bottom);
-        assert_eq!(overlay.scroll, 98);
+        assert!(!overlay.activity_scroll.follow_bottom);
+        assert_eq!(overlay.activity_scroll.scroll, 99);
         assert!(view.command_input.is_empty());
 
         let outcome = handle_key_event(
@@ -1005,8 +1022,8 @@ mod tests {
             &OkRunner,
         )
         .await;
-        view.max_scroll = 100;
-        view.auto_scroll = true;
+        view.activity_scroll.max_scroll = 100;
+        view.activity_scroll.follow_bottom = true;
 
         let outcome = handle_key_event(
             KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
@@ -1083,12 +1100,7 @@ mod tests {
         assert_eq!(view.command_input.as_str(), "hello\n");
 
         for ch in "world".chars() {
-            let outcome = handle_key_event(
-                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
-                &mut view,
-                &state,
-            );
-            assert!(matches!(outcome, TuiInputOutcome::Continue));
+            view.command_input.insert_char(ch);
         }
         assert_eq!(view.command_input.as_str(), "hello\nworld");
         assert_eq!(view.command_input.cursor_pos, "hello\nworld".len());

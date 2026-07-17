@@ -90,7 +90,7 @@ impl LiveExecActivityData {
 
 impl TerminalExecutionMeta {
     pub fn parse(meta_line: Option<&str>, output_lines: &[String]) -> Self {
-        let mut meta = TerminalExecutionMeta::default();
+        let mut meta = Self::default();
         if let Some(line) = meta_line {
             meta.parse_meta_line(line);
         }
@@ -158,7 +158,7 @@ impl TerminalExecutionMeta {
             "yield_time_ms" => self.yield_time_ms = value.parse::<u64>().ok(),
             "output_missed_bytes" => self.output_missed_bytes = value.parse::<u64>().ok(),
             "output_dropped_bytes" | "dropped" => {
-                self.output_dropped_bytes = parse_byte_count(value)
+                self.output_dropped_bytes = parse_byte_count(value);
             }
             "output_retained_bytes" => self.output_retained_bytes = value.parse::<u64>().ok(),
             "output_buffer_capacity" => self.output_buffer_capacity = value.parse::<u64>().ok(),
@@ -176,7 +176,7 @@ impl From<TextActivityDescriptor> for ExecResultActivityData {
         } else {
             Some(body_lines.remove(0))
         };
-        ExecResultActivityData {
+        Self {
             title: data.title,
             terminal_action: None,
             terminal_origin: None,
@@ -213,7 +213,7 @@ impl From<TerminalActivityDescriptor> for ExecResultActivityData {
         } else {
             Some(body_lines.remove(0))
         };
-        ExecResultActivityData {
+        Self {
             title: data.title,
             terminal_action: Some(data.action),
             terminal_origin: data.origin,
@@ -223,7 +223,7 @@ impl From<TerminalActivityDescriptor> for ExecResultActivityData {
     }
 }
 
-pub fn live_exec_cell(
+pub const fn live_exec_cell(
     title: String,
     call_lines: Vec<String>,
     started_at_ms: Option<i64>,

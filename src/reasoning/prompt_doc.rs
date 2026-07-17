@@ -22,7 +22,7 @@ pub struct PromptGroupDoc {
 }
 
 impl PromptDocument {
-    pub fn new(nodes: Vec<PromptNode>) -> Self {
+    pub const fn new(nodes: Vec<PromptNode>) -> Self {
         Self { nodes }
     }
 }

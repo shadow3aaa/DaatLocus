@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 pub mod process;
 use std::{
     collections::BTreeMap,
@@ -95,7 +96,7 @@ impl TerminalApp {
     const FAST_EXIT_OBSERVATION_GRACE_MS: u64 = 500;
     const MAX_EXITED_SESSION_TOMBSTONES: usize = 4;
 
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             sessions: BTreeMap::new(),
             next_session_index: 1,
@@ -104,7 +105,7 @@ impl TerminalApp {
     }
 
     #[cfg(test)]
-    fn new_with_output_buffer_capacity(output_buffer_capacity: usize) -> Self {
+    const fn new_with_output_buffer_capacity(output_buffer_capacity: usize) -> Self {
         Self {
             sessions: BTreeMap::new(),
             next_session_index: 1,
@@ -218,11 +219,10 @@ impl TerminalApp {
         loop {
             tokio::time::sleep(Duration::from_millis(50)).await;
             refresh_terminal_session(session);
-            let chunk = session
-                .process
-                .as_ref()
-                .map(|process| process.output_since(progress_offset))
-                .unwrap_or_else(|| empty_terminal_output_chunk(progress_offset, &session.state));
+            let chunk = session.process.as_ref().map_or_else(
+                || empty_terminal_output_chunk(progress_offset, &session.state),
+                |process| process.output_since(progress_offset),
+            );
             progress_offset = chunk.next_offset;
             apply_terminal_output_stats(&mut session.state, chunk.stats);
             let delta = format_terminal_output_chunk(&chunk, max_chars);
@@ -242,11 +242,10 @@ impl TerminalApp {
         .await;
         wait_for_trailing_terminal_output(session).await;
         refresh_terminal_session(session);
-        let chunk = session
-            .process
-            .as_ref()
-            .map(|process| process.output_since(start_offset))
-            .unwrap_or_else(|| empty_terminal_output_chunk(start_offset, &session.state));
+        let chunk = session.process.as_ref().map_or_else(
+            || empty_terminal_output_chunk(start_offset, &session.state),
+            |process| process.output_since(start_offset),
+        );
         session.output_offset = chunk.next_offset;
         apply_terminal_output_stats(&mut session.state, chunk.stats);
         session.last_activity = Instant::now();
@@ -316,11 +315,10 @@ impl TerminalApp {
             tokio::time::sleep(Duration::from_millis(50)).await;
             refresh_terminal_session(session);
             let previous_progress_offset = progress_offset;
-            let chunk = session
-                .process
-                .as_ref()
-                .map(|process| process.output_since(progress_offset))
-                .unwrap_or_else(|| empty_terminal_output_chunk(progress_offset, &session.state));
+            let chunk = session.process.as_ref().map_or_else(
+                || empty_terminal_output_chunk(progress_offset, &session.state),
+                |process| process.output_since(progress_offset),
+            );
             progress_offset = chunk.next_offset;
             apply_terminal_output_stats(&mut session.state, chunk.stats);
             let has_output_update =
@@ -340,11 +338,10 @@ impl TerminalApp {
         }
         wait_for_trailing_terminal_output(session).await;
         refresh_terminal_session(session);
-        let chunk = session
-            .process
-            .as_ref()
-            .map(|process| process.output_since(start_offset))
-            .unwrap_or_else(|| empty_terminal_output_chunk(start_offset, &session.state));
+        let chunk = session.process.as_ref().map_or_else(
+            || empty_terminal_output_chunk(start_offset, &session.state),
+            |process| process.output_since(start_offset),
+        );
         session.output_offset = chunk.next_offset;
         apply_terminal_output_stats(&mut session.state, chunk.stats);
         session.last_activity = Instant::now();
@@ -373,7 +370,7 @@ impl TerminalApp {
         }
     }
 
-    pub async fn terminate_session(&mut self, session_id: &str) -> Result<TerminalSessionState> {
+    pub fn terminate_session(&mut self, session_id: &str) -> Result<TerminalSessionState> {
         let state = {
             let session = self.session_mut(session_id)?;
             if let Some(process) = session.process.as_mut() {
@@ -465,11 +462,11 @@ fn display_session_label(session_id: &str) -> String {
     session_id.to_string()
 }
 
-fn terminal_progress_mode(text: &str) -> &'static str {
+const fn terminal_progress_mode(text: &str) -> &'static str {
     if text.is_empty() { "poll" } else { "continue" }
 }
 
-fn terminal_wait_mode_label(wait_mode: TerminalWaitMode) -> &'static str {
+const fn terminal_wait_mode_label(wait_mode: TerminalWaitMode) -> &'static str {
     match wait_mode {
         TerminalWaitMode::AnyOutput => "any_output",
         TerminalWaitMode::Timeout => "timeout",
@@ -483,29 +480,32 @@ fn terminal_session_meta(session: &TerminalSessionState) -> String {
         session.status,
         session
             .exit_code
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string()),
+            .map_or_else(|| "-".to_string(), |value| value.to_string()),
         session.cwd.as_deref().unwrap_or("-")
     );
     if session.output_dropped_bytes > 0 {
-        meta.push_str(&format!(
+        let _ = write!(
+            meta,
             "  dropped={}B  buffer={}/{}B",
             session.output_dropped_bytes,
             session.output_retained_bytes,
             session.output_buffer_capacity
-        ));
+        );
     }
     meta
 }
 
-fn apply_terminal_output_stats(session: &mut TerminalSessionState, stats: TerminalOutputStats) {
+const fn apply_terminal_output_stats(
+    session: &mut TerminalSessionState,
+    stats: TerminalOutputStats,
+) {
     session.output_total_written_bytes = stats.total_written_bytes;
     session.output_retained_bytes = stats.retained_bytes;
     session.output_dropped_bytes = stats.dropped_bytes;
     session.output_buffer_capacity = stats.buffer_capacity;
 }
 
-fn empty_terminal_output_chunk(
+const fn empty_terminal_output_chunk(
     next_offset: usize,
     session: &TerminalSessionState,
 ) -> TerminalOutputChunk {
@@ -705,8 +705,7 @@ impl App for TerminalApp {
                         args.session_id.unwrap_or_else(|| "new".to_string()),
                         args.workdir.unwrap_or_else(|| "none".to_string()),
                         args.yield_time_ms
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "default".to_string())
+                            .map_or_else(|| "default".to_string(), |value| value.to_string())
                     ),
                 })
             }
@@ -721,8 +720,7 @@ impl App for TerminalApp {
                         terminal_progress_mode(&args.text),
                         terminal_wait_mode_label(wait_mode),
                         args.yield_time_ms
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "default".to_string())
+                            .map_or_else(|| "default".to_string(), |value| value.to_string())
                     ),
                 })
             }
@@ -749,8 +747,7 @@ impl App for TerminalApp {
                         args.session_id.unwrap_or_else(|| "new".to_string()),
                         args.workdir.unwrap_or_else(|| "-".to_string()),
                         args.yield_time_ms
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "default".to_string())
+                            .map_or_else(|| "default".to_string(), |value| value.to_string())
                     )],
                 ))
             }
@@ -768,8 +765,7 @@ impl App for TerminalApp {
                         "wait_mode={} yield_time_ms={}",
                         terminal_wait_mode_label(wait_mode),
                         args.yield_time_ms
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "default".to_string())
+                            .map_or_else(|| "default".to_string(), |value| value.to_string())
                     )],
                 ))
             }
@@ -793,13 +789,10 @@ impl App for TerminalApp {
         match call.name.as_str() {
             "terminal_exec" => {
                 let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
-                let effective_workdir = args
-                    .workdir
-                    .as_deref()
-                    .map(|workdir| {
-                        resolve_terminal_path(context, workdir, Some(&context.execution_cwd))
-                    })
-                    .unwrap_or_else(|| context.execution_cwd.clone());
+                let effective_workdir = args.workdir.as_deref().map_or_else(
+                    || context.execution_cwd.clone(),
+                    |workdir| resolve_terminal_path(context, workdir, Some(&context.execution_cwd)),
+                );
                 context
                     .sandbox_policy
                     .ensure_path_readable(&effective_workdir, "terminal workdir")
@@ -868,8 +861,7 @@ impl App for TerminalApp {
                     format!(
                         "yield_time_ms={}",
                         args.yield_time_ms
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "default".to_string())
+                            .map_or_else(|| "default".to_string(), |value| value.to_string())
                     ),
                 ];
                 extra_lines.extend(terminal_output_metadata_lines(&result));
@@ -995,8 +987,7 @@ impl App for TerminalApp {
                     format!(
                         "yield_time_ms={}",
                         args.yield_time_ms
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "default".to_string())
+                            .map_or_else(|| "default".to_string(), |value| value.to_string())
                     ),
                 ];
                 if !args.text.is_empty() {
@@ -1052,7 +1043,7 @@ impl App for TerminalApp {
             }
             "terminal_terminate" => {
                 let args: TerminalTerminateArgs = parse_terminal_tool_args(call)?;
-                let session = self.terminate_session(&args.session_id).await?;
+                let session = self.terminate_session(&args.session_id)?;
                 Ok(AppToolExecutionResult::from_activity_event(
                     format!("terminated {}", display_session_label(&session.session_id)),
                     json!({ "session": session }),
@@ -1096,7 +1087,7 @@ fn refresh_terminal_session(session: &mut TerminalSession) {
     session.state.process_id = session
         .process
         .as_ref()
-        .and_then(|process| process.process_id());
+        .and_then(process::TerminalProcess::process_id);
     let mut process_running = session.process.is_some();
     if let Some(process) = session.process.as_mut() {
         match process.try_wait() {
@@ -1124,8 +1115,7 @@ fn refresh_terminal_session(session: &mut TerminalSession) {
     session.state.has_unread_output = session
         .process
         .as_ref()
-        .map(|process| process.output_len() > session.output_offset)
-        .unwrap_or(false);
+        .is_some_and(|process| process.output_len() > session.output_offset);
     if !session.state.status.starts_with("exited") {
         session.state.status = if process_running {
             "running".to_string()
@@ -1189,12 +1179,10 @@ fn render_session_state_line(state: &TerminalSessionState) -> String {
         state.status,
         state
             .process_id
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "none".to_string()),
+            .map_or_else(|| "none".to_string(), |value| value.to_string()),
         state
             .exit_code
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "none".to_string()),
+            .map_or_else(|| "none".to_string(), |value| value.to_string()),
         state.cwd.as_deref().unwrap_or("unknown"),
         state.has_unread_output,
         state.output_total_written_bytes,
@@ -1365,10 +1353,9 @@ mod tests {
                 "Start-Sleep -Milliseconds {delay_ms}; Write-Output '{text}'; Start-Sleep -Seconds 2"
             )
         } else {
-            format!(
-                "sleep {}; printf '%s\\n' '{text}'; sleep 2",
-                delay_ms as f64 / 1000.0
-            )
+            let seconds = delay_ms / 1_000;
+            let milliseconds = delay_ms % 1_000;
+            format!("sleep {seconds}.{milliseconds:03}; printf '%s\\n' '{text}'; sleep 2")
         }
     }
 
@@ -1499,7 +1486,6 @@ mod tests {
 
         let terminated = app
             .terminate_session(&created.session.session_id)
-            .await
             .expect("terminate should succeed");
         assert_eq!(terminated.session_id, created.session.session_id);
 
@@ -1537,7 +1523,6 @@ mod tests {
             .await
             .expect("create long-running session should succeed");
         app.terminate_session(&created.session.session_id)
-            .await
             .expect("terminate should succeed");
         assert!(app.sessions.is_empty());
     }
@@ -1692,7 +1677,6 @@ mod tests {
 
         if polled.session.status == "running" {
             app.terminate_session(&polled.session.session_id)
-                .await
                 .expect("terminate should succeed");
         }
     }
@@ -1932,7 +1916,6 @@ mod tests {
                 "any_output mode should return before the full command exits"
             );
             app.terminate_session(&result.session.session_id)
-                .await
                 .expect("terminate should succeed");
         }
     }
@@ -1987,7 +1970,6 @@ mod tests {
                 waited.output
             );
             app.terminate_session(&waited.session.session_id)
-                .await
                 .expect("terminate should succeed");
         }
     }

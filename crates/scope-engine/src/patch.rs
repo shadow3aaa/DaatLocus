@@ -31,6 +31,7 @@ struct PreparedStructuredEdits {
     files: Vec<PreparedFileEdits>,
 }
 
+#[must_use]
 pub fn line_hash(line_content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(line_content.as_bytes());
@@ -119,7 +120,7 @@ struct PropagationCollectionContext<'a> {
 }
 
 fn collect_propagation_results(
-    context: PropagationCollectionContext<'_>,
+    context: &PropagationCollectionContext<'_>,
     edits: &[PlannedEdit],
 ) -> Vec<PropagationResult> {
     let PropagationCollectionContext {
@@ -147,27 +148,34 @@ fn collect_propagation_results(
         }
     }
 
+    let lsp_references_for = |symbol_name: &str| {
+        let Ok(lsp_guard) = lsp_analyzer.lock() else {
+            return Vec::new();
+        };
+        let Some(lsp) = &*lsp_guard else {
+            return Vec::new();
+        };
+        let (line, character) =
+            find_symbol_position(new_content, symbol_name).unwrap_or_else(|| {
+                let hint_line = edits.first().map_or(1, |edit| edit.start_line);
+                (hint_line, 0)
+            });
+        lsp.find_references_for_symbol(full_path, line, character, project_root)
+    };
+
     for sym_name in &modified_symbol_names {
-        let mut lsp_refs: Vec<PropagationResult> = Vec::new();
-        if let Ok(lsp_guard) = lsp_analyzer.lock()
-            && let Some(ref lsp) = *lsp_guard
-        {
-            let (line, character) =
-                find_symbol_position(new_content, sym_name).unwrap_or_else(|| {
-                    let hint_line = edits.first().map(|edit| edit.start_line).unwrap_or(1);
-                    (hint_line, 0)
-                });
-            lsp_refs = lsp.find_references_for_symbol(full_path, line, character, project_root);
-        }
+        let lsp_refs = lsp_references_for(sym_name);
         if lsp_refs.is_empty() {
             let rel = normalize_for_comparison(full_path)
                 .strip_prefix(normalize_for_comparison(project_root))
                 .ok()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| full_path.to_string_lossy().to_string());
-            let selector = format!("{}::{}", rel, sym_name);
+                .map_or_else(
+                    || full_path.to_string_lossy().to_string(),
+                    |p| p.to_string_lossy().to_string(),
+                );
+            let selector = format!("{rel}::{sym_name}");
             if seen.insert(selector.clone()) {
-                let first_line = edits.first().map(|edit| edit.start_line).unwrap_or(1);
+                let first_line = edits.first().map_or(1, |edit| edit.start_line);
                 let file_snippet = original
                     .lines()
                     .skip(first_line.saturating_sub(3))
@@ -178,7 +186,7 @@ fn collect_propagation_results(
                     .ok()
                     .map(|entries| {
                         entries
-                            .filter_map(|e| e.ok())
+                            .filter_map(std::result::Result::ok)
                             .filter(|e| {
                                 e.path().is_dir()
                                     && e.path().file_name().is_some_and(|n| n == "src")
@@ -186,12 +194,14 @@ fn collect_propagation_results(
                             .filter_map(|e| std::fs::read_dir(e.path()).ok())
                             .flat_map(|entries| {
                                 let normalized_root = normalize_for_comparison(project_root);
-                                entries.filter_map(|e| e.ok()).filter_map(move |e| {
-                                    normalize_for_comparison(&e.path())
-                                        .strip_prefix(&normalized_root)
-                                        .ok()
-                                        .map(|p| p.to_string_lossy().to_string())
-                                })
+                                entries
+                                    .filter_map(std::result::Result::ok)
+                                    .filter_map(move |e| {
+                                        normalize_for_comparison(&e.path())
+                                            .strip_prefix(&normalized_root)
+                                            .ok()
+                                            .map(|p| p.to_string_lossy().to_string())
+                                    })
                             })
                             .collect()
                     })
@@ -200,8 +210,7 @@ fn collect_propagation_results(
                 results.push(PropagationResult {
                     selector,
                     reason: format!(
-                        "symbol \"{}\" was modified; no LSP available to find references",
-                        sym_name
+                        "symbol \"{sym_name}\" was modified; no LSP available to find references"
                     ),
                     source: PropagationSource::OpenEnded,
                     lsp_references: None,
@@ -229,10 +238,11 @@ fn find_symbol_position(content: &str, symbol_name: &str) -> Option<(usize, usiz
     })
 }
 
-fn normalized_edit_content(content: Option<&crate::api::EditContent>) -> Option<Vec<String>> {
-    content.map(|c| c.clone().into_lines())
-}
-
+/// Applies structured edits and discovers references that need propagation review.
+///
+/// # Errors
+///
+/// Returns an error when an edit is invalid or cannot be written.
 pub fn edit_code_apply(
     edits: &[StructuredEdit],
     project_root: &Path,
@@ -246,7 +256,7 @@ pub fn edit_code_apply(
     let mut results = Vec::new();
     for file in &prepared.files {
         results.extend(collect_propagation_results(
-            PropagationCollectionContext {
+            &PropagationCollectionContext {
                 full_path: &file.full_path,
                 original: &file.original,
                 new_content: &file.new_content,
@@ -261,6 +271,11 @@ pub fn edit_code_apply(
     Ok((results, applied_summary))
 }
 
+/// Applies structured edits without collecting propagation information.
+///
+/// # Errors
+///
+/// Returns an error when an edit is invalid or cannot be written.
 pub fn edit_file_apply(
     edits: &[StructuredEdit],
     project_root: &Path,
@@ -269,6 +284,200 @@ pub fn edit_file_apply(
     let prepared = prepare_structured_edits(edits, project_root, &analyzer, false)?;
     write_prepared_structured_edits(&prepared, None)?;
     Ok(applied_summary_from_prepared(&prepared))
+}
+
+struct PreparedEditContext<'a> {
+    project_root: &'a Path,
+    analyzer: &'a TreeSitterAnalyzer,
+    validate_parse: bool,
+}
+
+struct EditGroup<'a> {
+    display_path: String,
+    edits: Vec<&'a StructuredEdit>,
+}
+
+fn group_edits_by_file<'a>(
+    edits: &'a [StructuredEdit],
+    project_root: &Path,
+) -> HashMap<PathBuf, EditGroup<'a>> {
+    let mut edits_by_file = HashMap::new();
+    for edit in edits {
+        let full_path = if Path::new(&edit.path).is_absolute() {
+            PathBuf::from(&edit.path)
+        } else {
+            project_root.join(&edit.path)
+        };
+        let display_path = display_path_for_edit(project_root, &full_path);
+        edits_by_file
+            .entry(full_path)
+            .and_modify(|group: &mut EditGroup<'a>| group.edits.push(edit))
+            .or_insert_with(|| EditGroup {
+                display_path,
+                edits: vec![edit],
+            });
+    }
+    edits_by_file
+}
+
+fn read_original_content(
+    group: &EditGroup<'_>,
+    full_path: &Path,
+) -> Result<(bool, String), String> {
+    if full_path.exists() {
+        return std::fs::read_to_string(full_path)
+            .map(|content| (true, content))
+            .map_err(|error| format!("cannot read {}: {error}", full_path.display()));
+    }
+
+    for edit in &group.edits {
+        let start_valid = edit
+            .start
+            .as_deref()
+            .is_none_or(|start| start == "1#" || start.starts_with("1#"));
+        if !start_valid {
+            return Err(format!(
+                "cannot create new file {}: start anchor must be `1#`",
+                full_path.display()
+            ));
+        }
+    }
+    Ok((false, String::new()))
+}
+
+fn edit_operation(edit: &StructuredEdit, original_is_empty: bool) -> Result<EditOp, String> {
+    match (edit.op.clone(), original_is_empty) {
+        (Some(EditOp::Replace) | None, true) => Ok(EditOp::Append),
+        (Some(operation), _) => Ok(operation),
+        (None, false) => Err(format!(
+            "op is required for editing existing file {}",
+            edit.path
+        )),
+    }
+}
+
+fn edit_start_anchor(edit: &StructuredEdit, original_is_empty: bool) -> Result<String, String> {
+    match &edit.start {
+        Some(start) => Ok(start.clone()),
+        None if original_is_empty => Ok("1#".to_string()),
+        None => Err(format!(
+            "start anchor is required for editing existing file {}",
+            edit.path
+        )),
+    }
+}
+
+fn replacement_lines(edit: &StructuredEdit) -> Vec<String> {
+    edit.content
+        .as_ref()
+        .map(|content| content.clone().into_lines())
+        .unwrap_or_default()
+}
+
+fn planned_edit_for(
+    edit: &StructuredEdit,
+    full_path: &Path,
+    original: &str,
+    context: &PreparedEditContext<'_>,
+) -> Result<PlannedEdit, String> {
+    let operation = edit_operation(edit, original.is_empty())?;
+    let start = edit_start_anchor(edit, original.is_empty())?;
+    let (start_line, start_hash) = parse_start_anchor(&start)?;
+    if !original.is_empty() {
+        verify_line(original, start_line, &start_hash)?;
+    }
+
+    let primary_symbol_name = if context.validate_parse && !original.is_empty() {
+        context
+            .analyzer
+            .find_containing_symbol(full_path, start_line, context.project_root)
+            .and_then(|selector| crate::selector::parse_selector(&selector).ok())
+            .and_then(|parsed| parsed.name().map(str::to_string))
+    } else {
+        None
+    };
+
+    let replacement = replacement_lines(edit);
+    match operation {
+        EditOp::Replace => {
+            let end_anchor = edit
+                .end
+                .as_deref()
+                .ok_or_else(|| format!("replace requires `end` anchor for {}", edit.path))?;
+            let (end_line, end_hash) = parse_start_anchor(end_anchor)?;
+            if end_line < start_line {
+                return Err(format!(
+                    "replace end line {} is before start line {} in {}",
+                    end_line, start_line, edit.path
+                ));
+            }
+            if !original.is_empty() {
+                verify_line(original, end_line, &end_hash)?;
+            }
+            Ok(PlannedEdit {
+                start_line,
+                old_count: end_line - start_line + 1,
+                replacement,
+                primary_symbol_name,
+            })
+        }
+        EditOp::Append => Ok(PlannedEdit {
+            start_line: if original.is_empty() {
+                1
+            } else {
+                start_line + 1
+            },
+            old_count: 0,
+            replacement,
+            primary_symbol_name,
+        }),
+        EditOp::Prepend => Ok(PlannedEdit {
+            start_line: if original.is_empty() { 1 } else { start_line },
+            old_count: 0,
+            replacement,
+            primary_symbol_name,
+        }),
+    }
+}
+
+fn prepare_file_edits(
+    full_path: PathBuf,
+    group: EditGroup<'_>,
+    context: &PreparedEditContext<'_>,
+) -> Result<PreparedFileEdits, String> {
+    let (existed, original) = read_original_content(&group, &full_path)?;
+    let planned = group
+        .edits
+        .into_iter()
+        .map(|edit| planned_edit_for(edit, &full_path, &original, context))
+        .collect::<Result<Vec<_>, _>>()?;
+    let new_content =
+        apply_planned_edits_to_content(&original, &planned, &full_path.to_string_lossy())?;
+    let extension = full_path
+        .extension()
+        .and_then(|extension| extension.to_str());
+    if context.validate_parse
+        && extension.is_some_and(|extension| !extension.is_empty())
+        && !new_content.is_empty()
+        && let Some(diagnostic) = context
+            .analyzer
+            .parse_error_diagnostic(extension.expect("checked above"), &new_content)
+    {
+        return Err(format!(
+            "edit rejected: tree-sitter cannot parse the result for {}\n{}",
+            full_path.display(),
+            diagnostic.message()
+        ));
+    }
+
+    Ok(PreparedFileEdits {
+        display_path: group.display_path,
+        full_path,
+        existed,
+        original,
+        new_content,
+        planned,
+    })
 }
 
 fn prepare_structured_edits(
@@ -281,183 +490,16 @@ fn prepare_structured_edits(
         return Err("edits array is empty".to_string());
     }
 
-    struct EditGroup<'a> {
-        display_path: String,
-        edits: Vec<&'a StructuredEdit>,
-    }
-
-    let mut edits_by_file: HashMap<PathBuf, EditGroup<'_>> = HashMap::new();
-    for edit in edits {
-        let full_path = if std::path::Path::new(&edit.path).is_absolute() {
-            PathBuf::from(&edit.path)
-        } else {
-            project_root.join(&edit.path)
-        };
-        let display_path = display_path_for_edit(project_root, &full_path);
-        edits_by_file
-            .entry(full_path)
-            .and_modify(|group| group.edits.push(edit))
-            .or_insert_with(|| EditGroup {
-                display_path,
-                edits: vec![edit],
-            });
-    }
-
-    let mut prepared_files = Vec::new();
-
-    for (full_path, group) in edits_by_file {
-        let existed = full_path.exists();
-        let original = if existed {
-            std::fs::read_to_string(&full_path)
-                .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?
-        } else {
-            // New file creation: only line-1 operations are valid (no
-            // existing content to anchor against).  Replace at line 1 is
-            // accepted and treated equivalently to Append.
-            for e in &group.edits {
-                let start_valid = match &e.start {
-                    Some(start) => start == "1#" || start.starts_with("1#"),
-                    None => true,
-                };
-                if !start_valid {
-                    return Err(format!(
-                        "cannot create new file {}: start anchor must be `1#`",
-                        full_path.display()
-                    ));
-                }
-            }
-            String::new()
-        };
-
-        let mut planned: Vec<PlannedEdit> = Vec::new();
-
-        for edit in group.edits {
-            // Resolve op: default to Append for new files, required for existing
-            let op = match edit.op.clone() {
-                Some(op) if original.is_empty() && op == EditOp::Replace => EditOp::Append,
-                Some(op) => op,
-                None if original.is_empty() => EditOp::Append,
-                None => {
-                    return Err(format!(
-                        "op is required for editing existing file {}",
-                        edit.path
-                    ));
-                }
-            };
-
-            // Resolve start anchor: default to "1#" for new files, required for existing
-            let start = match &edit.start {
-                Some(s) => s.clone(),
-                None if original.is_empty() => "1#".to_string(),
-                None => {
-                    return Err(format!(
-                        "start anchor is required for editing existing file {}",
-                        edit.path
-                    ));
-                }
-            };
-
-            let (start_line, start_hash) = parse_start_anchor(&start)?;
-
-            if !original.is_empty() {
-                verify_line(&original, start_line, &start_hash)?;
-            }
-
-            let mut primary_symbol_name = None;
-            if validate_parse
-                && !original.is_empty()
-                && let Some(sel) =
-                    analyzer.find_containing_symbol(&full_path, start_line, project_root)
-                && let Ok(parsed) = crate::selector::parse_selector(&sel)
-            {
-                primary_symbol_name = parsed.name().map(str::to_string);
-            }
-
-            match op {
-                EditOp::Replace => {
-                    let (end_line, end_hash) = match &edit.end {
-                        Some(end_anchor) => parse_start_anchor(end_anchor)?,
-                        None => {
-                            return Err(format!("replace requires `end` anchor for {}", edit.path));
-                        }
-                    };
-                    if end_line < start_line {
-                        return Err(format!(
-                            "replace end line {} is before start line {} in {}",
-                            end_line, start_line, edit.path
-                        ));
-                    }
-                    if !original.is_empty() {
-                        verify_line(&original, end_line, &end_hash)?;
-                    }
-                    let old_count = end_line - start_line + 1;
-                    let replacement =
-                        normalized_edit_content(edit.content.as_ref()).unwrap_or_default();
-                    planned.push(PlannedEdit {
-                        start_line,
-                        old_count,
-                        replacement,
-                        primary_symbol_name,
-                    });
-                }
-                EditOp::Append => {
-                    let replacement =
-                        normalized_edit_content(edit.content.as_ref()).unwrap_or_default();
-                    let insert_line = if original.is_empty() {
-                        1
-                    } else {
-                        start_line + 1
-                    };
-                    planned.push(PlannedEdit {
-                        start_line: insert_line,
-                        old_count: 0,
-                        replacement,
-                        primary_symbol_name,
-                    });
-                }
-                EditOp::Prepend => {
-                    let replacement =
-                        normalized_edit_content(edit.content.as_ref()).unwrap_or_default();
-                    let insert_line = if original.is_empty() { 1 } else { start_line };
-                    planned.push(PlannedEdit {
-                        start_line: insert_line,
-                        old_count: 0,
-                        replacement,
-                        primary_symbol_name,
-                    });
-                }
-            }
-        }
-
-        let new_content =
-            apply_planned_edits_to_content(&original, &planned, &full_path.to_string_lossy())?;
-
-        let ext = full_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if validate_parse
-            && !ext.is_empty()
-            && !new_content.is_empty()
-            && let Some(diagnostic) = analyzer.parse_error_diagnostic(ext, &new_content)
-        {
-            return Err(format!(
-                "edit rejected: tree-sitter cannot parse the result for {}\n{}",
-                full_path.display(),
-                diagnostic.message()
-            ));
-        }
-
-        prepared_files.push(PreparedFileEdits {
-            display_path: group.display_path,
-            full_path,
-            existed,
-            original,
-            new_content,
-            planned,
-        });
-    }
-
-    Ok(PreparedStructuredEdits {
-        files: prepared_files,
-    })
+    let context = PreparedEditContext {
+        project_root,
+        analyzer,
+        validate_parse,
+    };
+    let files = group_edits_by_file(edits, project_root)
+        .into_iter()
+        .map(|(full_path, group)| prepare_file_edits(full_path, group, &context))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PreparedStructuredEdits { files })
 }
 
 fn write_prepared_structured_edits(
@@ -525,11 +567,8 @@ fn display_path_for_edit(project_root: &Path, full_path: &Path) -> String {
 
 fn normalize_for_comparison(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\") {
-        PathBuf::from(rest)
-    } else {
-        p.to_path_buf()
-    }
+    s.strip_prefix(r"\\?\")
+        .map_or_else(|| p.to_path_buf(), PathBuf::from)
 }
 
 #[cfg(test)]
@@ -614,7 +653,7 @@ mod e2e_tests {
                     "pub fn added() {".to_string(),
                     "    println!(\"added\");".to_string(),
                     "}".to_string(),
-                    "".to_string(),
+                    String::new(),
                 ])),
             },
             api::StructuredEdit {
@@ -720,8 +759,8 @@ mod e2e_tests {
         assert!(err.contains("tree-sitter cannot parse the result"));
         assert!(err.contains("src\\lib.rs") || err.contains("src/lib.rs"));
         assert!(err.contains("first parse error:"));
-        assert!(err.contains("L"));
-        assert!(err.contains("C"));
+        assert!(err.contains('L'));
+        assert!(err.contains('C'));
         assert!(err.contains("println!"));
         assert!(err.contains('^'));
 

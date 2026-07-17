@@ -67,7 +67,7 @@ pub enum DashboardAction {
     },
 }
 
-pub(crate) fn dashboard_action_is_manager_owned(action: &DashboardAction) -> bool {
+pub const fn dashboard_action_is_manager_owned(action: &DashboardAction) -> bool {
     matches!(action, DashboardAction::RestartDaemon)
 }
 
@@ -120,7 +120,7 @@ pub trait DashboardCommandRunner: Send + Sync {
     ) -> DashboardActionResult;
 }
 
-pub(crate) fn execute_dashboard_action(
+pub fn execute_dashboard_action(
     action: DashboardAction,
     control_tx: &tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
 ) -> DashboardActionResult {

@@ -204,7 +204,9 @@ pub async fn compact_runtime_error_case_file(consumed_offset: u64) -> miette::Re
             ));
         }
     };
-    let keep_from = (consumed_offset as usize).min(bytes.len());
+    let keep_from = usize::try_from(consumed_offset)
+        .unwrap_or(usize::MAX)
+        .min(bytes.len());
     write_bytes_atomic(
         path.clone(),
         bytes[keep_from..].to_vec(),

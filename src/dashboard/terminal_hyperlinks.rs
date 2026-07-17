@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
@@ -222,7 +223,7 @@ fn trim_trailing_link_punctuation(text: &str) -> &str {
     text.trim_end_matches(['.', ',', ';', ':', ')', ']', '}'])
 }
 
-fn ranges_overlap(
+const fn ranges_overlap(
     left_start: usize,
     left_end: usize,
     right_start: usize,
@@ -244,7 +245,7 @@ fn file_uri_for_display_path(text: &str) -> Option<String> {
     };
     let mut target = format!("file://{}", uri_path(&absolute));
     if let Some(line) = line {
-        target.push_str(&format!("#L{line}"));
+        let _ = write!(target, "#L{line}");
     }
     Some(target)
 }

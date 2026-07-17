@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{collections::HashSet, future::Future, pin::Pin};
 
 use async_trait::async_trait;
@@ -26,14 +27,14 @@ mod files;
 mod view_image;
 mod work;
 
-pub(crate) type ToolFuture<'a> =
+pub type ToolFuture<'a> =
     Pin<Box<dyn Future<Output = miette::Result<ToolExecutionResult>> + Send + 'a>>;
 type ToolExecutor = for<'a> fn(&'a mut Context, &'a AgentToolCall) -> ToolFuture<'a>;
 type ToolSummarizer = fn(&AgentToolCall) -> miette::Result<EpisodeActionRecord>;
 type ToolCallActivityBuilder = fn(&AgentToolCall) -> miette::Result<ToolCallActivityEvent>;
 type ToolAvailability = fn(&Context) -> bool;
 
-pub(super) fn parse_tool_args<T: for<'de> serde::Deserialize<'de>>(
+pub fn parse_tool_args<T: for<'de> serde::Deserialize<'de>>(
     call: &AgentToolCall,
 ) -> miette::Result<T> {
     serde_json::from_value(call.arguments.clone()).map_err(|err| {
@@ -46,7 +47,7 @@ pub(super) fn parse_tool_args<T: for<'de> serde::Deserialize<'de>>(
     })
 }
 
-pub(super) fn summarize_inline_text(text: &str) -> String {
+pub fn summarize_inline_text(text: &str) -> String {
     const MAX_CHARS: usize = 120;
     let compact = text.replace('\n', "\\n");
     let mut chars = compact.chars();
@@ -94,7 +95,7 @@ impl ToolExecutionResult {
         self
     }
 
-    pub fn with_skip_source_elision(mut self, skip: bool) -> Self {
+    pub const fn with_skip_source_elision(mut self, skip: bool) -> Self {
         self.skip_source_elision = skip;
         self
     }
@@ -252,8 +253,7 @@ impl RuntimeTool for StaticRuntimeTool {
 
     fn is_available(&self, context: &Context) -> bool {
         self.availability
-            .map(|availability| availability(context))
-            .unwrap_or(true)
+            .is_none_or(|availability| availability(context))
     }
 
     fn summarize_action(&self, call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
@@ -330,8 +330,8 @@ fn app_state_payload(app_id: &AppId, state: &AppStateRender, detail: AppStateDet
 
 fn render_app_get_state_model_content(app_id: &AppId, state: &AppStateRender) -> String {
     let mut out = String::new();
-    out.push_str(&format!("app={app_id}\n"));
-    out.push_str(&format!("state_title={}\n", state.title));
+    let _ = writeln!(out, "app={app_id}");
+    let _ = writeln!(out, "state_title={}", state.title);
     out.push_str("state:\n");
     if state.lines.is_empty() {
         out.push_str("- no visible state\n");
@@ -356,7 +356,7 @@ impl RuntimeTool for AppGetStateRuntimeTool {
         Some(APP_GET_STATE_TOOL_NAME)
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Read the current state for this app capability domain."
     }
 
@@ -510,7 +510,7 @@ impl RuntimeTool for WorkflowRuntimeTool {
         &self.name
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Run this typed Lua workflow. It orchestrates isolated workers and returns the workflow's declared output."
     }
 
@@ -570,6 +570,7 @@ fn workflow_activity_event(
         status: result.status.clone(),
         output: result.output.clone(),
         message: result.message.clone(),
+        snapshot: Some(result.snapshot.clone()),
     })
 }
 
@@ -594,33 +595,29 @@ fn build_workflow_runtime_tools(
     tools
 }
 
-pub(crate) fn worker_finish_and_send_tool(output_schema: Value) -> Box<dyn RuntimeTool> {
+pub fn worker_finish_and_send_tool(output_schema: Value) -> Box<dyn RuntimeTool> {
     Box::new(StaticRuntimeTool::new_with_schema(
         "finish_and_send",
         "Finish this isolated workflow worker by returning its declared typed output.",
         output_schema,
-        summarize_worker_finish_and_send_tool,
-        render_worker_finish_and_send_tool,
+        |call| Ok(summarize_worker_finish_and_send_tool(call)),
+        |call| Ok(render_worker_finish_and_send_tool(call)),
         execute_worker_finish_and_send_tool,
     ))
 }
 
-fn summarize_worker_finish_and_send_tool(
-    call: &AgentToolCall,
-) -> miette::Result<EpisodeActionRecord> {
-    Ok(EpisodeActionRecord {
+fn summarize_worker_finish_and_send_tool(call: &AgentToolCall) -> EpisodeActionRecord {
+    EpisodeActionRecord {
         kind: "finish_and_send".to_string(),
         summary: summarize_inline_text(&call.arguments.to_string()),
-    })
+    }
 }
 
-fn render_worker_finish_and_send_tool(
-    call: &AgentToolCall,
-) -> miette::Result<ToolCallActivityEvent> {
-    Ok(ToolCallActivityEvent::app(
+fn render_worker_finish_and_send_tool(call: &AgentToolCall) -> ToolCallActivityEvent {
+    ToolCallActivityEvent::app(
         "finish_and_send",
         vec![summarize_inline_text(&call.arguments.to_string())],
-    ))
+    )
 }
 
 fn execute_worker_finish_and_send_tool<'a>(
@@ -636,14 +633,12 @@ fn execute_worker_finish_and_send_tool<'a>(
     })
 }
 
-pub(crate) fn build_worker_runtime_tools_for_apps(
+fn build_worker_runtime_tools_for_apps(
     apps: &AppManager,
     output_schema: Value,
 ) -> Vec<Box<dyn RuntimeTool>> {
-    let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
-    tools.extend(files::register_tools());
-    tools.extend(view_image::register_tools());
-    tools.extend(work::register_update_plan_tools());
+    let mut tools = build_static_runtime_tools();
+    tools.retain(|tool| tool.name() != "finish_and_send");
     tools.push(worker_finish_and_send_tool(output_schema));
 
     let reserved_names = tools
@@ -654,7 +649,7 @@ pub(crate) fn build_worker_runtime_tools_for_apps(
     tools
 }
 
-pub(crate) fn build_worker_runtime_tool_specs_for_apps(
+pub fn build_worker_runtime_tool_specs_for_apps(
     apps: &AppManager,
     output_schema: Value,
     supports_vision: bool,
@@ -666,7 +661,7 @@ pub(crate) fn build_worker_runtime_tool_specs_for_apps(
         .collect()
 }
 
-pub(crate) struct WorkerRuntimeToolCallContext<'a> {
+pub struct WorkerRuntimeToolCallContext<'a> {
     pub(crate) execution_cwd: &'a std::path::Path,
     pub(crate) sandbox_policy: &'a crate::sandbox::RuntimeSandboxPolicy,
     pub(crate) tool_output_max_tokens: usize,
@@ -677,7 +672,7 @@ pub(crate) struct WorkerRuntimeToolCallContext<'a> {
     pub(crate) worker_plan: &'a mut crate::plan::Plan,
 }
 
-pub(crate) async fn execute_worker_runtime_tool_call_for_apps(
+pub async fn execute_worker_runtime_tool_call_for_apps(
     apps: &mut AppManager,
     call: &AgentToolCall,
     context: WorkerRuntimeToolCallContext<'_>,
@@ -696,8 +691,7 @@ pub(crate) async fn execute_worker_runtime_tool_call_for_apps(
     let tool = find_runtime_tool(&tools, &call.name)?;
     let worker_model_supports_vision = supports_vision.unwrap_or_else(|| {
         crate::model_catalog::catalog_model_capacity("workflow-worker")
-            .map(|capacity| capacity.supports_vision)
-            .unwrap_or(true)
+            .is_none_or(|capacity| capacity.supports_vision)
     });
     if !worker_runtime_tool_is_available(tool, worker_model_supports_vision) {
         return Ok(unavailable_worker_tool_result(
@@ -841,10 +835,9 @@ async fn execute_worker_runtime_tool(
                 app_context.execution_cwd.as_path(),
                 &app_context.sandbox_policy,
                 call,
-            )
-            .await;
+            );
         }
-        "update_plan" => return work::execute_worker_update_plan(worker_plan, call).await,
+        "update_plan" => return work::execute_worker_update_plan(worker_plan, call),
         "view_image" => {
             return view_image::execute_worker_view_image(
                 app_context.execution_cwd.as_path(),
@@ -852,8 +845,7 @@ async fn execute_worker_runtime_tool(
                 image_state_dir,
                 supports_vision,
                 call,
-            )
-            .await;
+            );
         }
         "finish_and_send" => {
             return Ok(ToolExecutionResult::from_activity_event(
@@ -895,7 +887,7 @@ async fn execute_worker_runtime_tool(
             let payload = app_state_payload(&app_id, &state, args.detail.unwrap_or_default());
             let model_content = render_app_get_state_model_content(&app_id, &state);
             return Ok(ToolExecutionResult::from_activity_event(
-                format!("read {} state", app_id),
+                format!("read {app_id} state"),
                 payload,
                 None,
             )
@@ -904,8 +896,11 @@ async fn execute_worker_runtime_tool(
         let result = apps
             .execute_tool_for_app(&app_id, &app_call, app_context)
             .await?;
-        let mut output =
-            ToolExecutionResult::from_activity_event(result.summary, result.payload, None);
+        let mut output = ToolExecutionResult::from_activity_event(
+            result.summary,
+            result.payload,
+            result.activity_event,
+        );
         if let Some(model_content) = result.model_content {
             output = output.with_model_content(model_content);
         }
@@ -1021,7 +1016,7 @@ fn find_runtime_tool<'a>(
     tools
         .iter()
         .find(|tool| tool.name() == canonical_name)
-        .map(|tool| tool.as_ref())
+        .map(std::convert::AsRef::as_ref)
         .ok_or_else(|| miette!("unknown runtime tool: {name}"))
 }
 
@@ -1056,8 +1051,7 @@ fn unavailable_tool_result(
 ) -> ToolExecutionResult {
     let display_tool_name = AppId::render_exposed_tool_name(&call.name);
     let model_content = format!(
-        "Tool unavailable: `{}`\nReason: {reason}\nAllowed next action: {allowed_next_action}",
-        display_tool_name
+        "Tool unavailable: `{display_tool_name}`\nReason: {reason}\nAllowed next action: {allowed_next_action}"
     );
     ToolExecutionResult::from_activity_event(
         format!("{display_tool_name} unavailable"),
@@ -1085,29 +1079,33 @@ pub fn summarize_action_from_tool_call(
     let tools = build_runtime_tools(context);
     let tool = find_runtime_tool(&tools, &call.name)?;
     let tool_call = tool_call_for_runtime_tool(tool, call);
-    match tool.summarize_action(&tool_call) {
-        Ok(summary) => Ok(summary),
-        Err(_) => context.apps.summarize_tool_call(call),
-    }
+    tool.summarize_action(&tool_call)
+        .map_or_else(|_| context.apps.summarize_tool_call(call), Ok)
 }
 
 pub fn build_tool_call_activity_event(
     context: &Context,
     call: &AgentToolCall,
 ) -> Result<ToolCallActivityEvent> {
-    let tools = build_runtime_tools(context);
-    let tool = find_runtime_tool(&tools, &call.name)?;
+    build_tool_call_activity_event_from_tools(&build_runtime_tools(context), call, &context.apps)
+}
+
+fn build_tool_call_activity_event_from_tools(
+    tools: &[Box<dyn RuntimeTool>],
+    call: &AgentToolCall,
+    apps: &AppManager,
+) -> Result<ToolCallActivityEvent> {
+    let tool = find_runtime_tool(tools, &call.name)?;
     let tool_call = tool_call_for_runtime_tool(tool, call);
-    match tool.call_activity_event(&tool_call) {
-        Ok(event) => Ok(event),
-        Err(_) => context.apps.tool_call_activity_event(call),
-    }
+    tool.call_activity_event(&tool_call)
+        .map_or_else(|_| apps.tool_call_activity_event(call), Ok)
 }
 
 fn tool_call_for_runtime_tool(tool: &dyn RuntimeTool, call: &AgentToolCall) -> AgentToolCall {
-    tool.app_tool_name()
-        .map(|app_tool_name| call.with_name(app_tool_name))
-        .unwrap_or_else(|| call.clone())
+    tool.app_tool_name().map_or_else(
+        || call.clone(),
+        |app_tool_name| call.with_name(app_tool_name),
+    )
 }
 
 pub fn render_telegram_tool_result_status(
@@ -1179,7 +1177,7 @@ fn demangle_known_app_tool_name(tool_name: &str) -> &str {
     canonical_runtime_tool_name(tool_name)
 }
 
-fn canonical_runtime_tool_name(tool_name: &str) -> &str {
+const fn canonical_runtime_tool_name(tool_name: &str) -> &str {
     tool_name
 }
 
@@ -1209,7 +1207,7 @@ fn telegram_status(icon: impl Into<String>, text: impl Into<String>) -> Telegram
     }
 }
 
-fn plural_noun(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
+const fn plural_noun(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
     if count == 1 { singular } else { plural }
 }
 
@@ -1617,14 +1615,15 @@ mod tests {
     #[tokio::test]
     async fn terminal_write_stdin_tool_schema_does_not_use_schema_composition() {
         let isolated = IsolatedTestContext::new().await;
-
         let spec = build_runtime_tool_specs(&isolated.context)
             .into_iter()
             .find(|tool| tool.name == "terminal__terminal_write_stdin")
             .expect("terminal write stdin tool");
+
         let AgentToolInputSpec::JsonSchema { schema } = spec.input_spec else {
             panic!("terminal_write_stdin should use json schema");
         };
+        drop(isolated);
 
         crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
         for key in ["oneOf", "anyOf", "allOf"] {
@@ -1635,14 +1634,15 @@ mod tests {
     #[tokio::test]
     async fn coding_read_code_tool_schema_does_not_use_schema_composition() {
         let isolated = IsolatedTestContext::new().await;
-
         let spec = build_runtime_tool_specs(&isolated.context)
             .into_iter()
             .find(|tool| tool.name == "coding__read_code")
             .expect("coding read code tool");
+
         let AgentToolInputSpec::JsonSchema { schema } = spec.input_spec else {
             panic!("coding_read_code should use json schema");
         };
+        drop(isolated);
 
         crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
         for key in ["oneOf", "anyOf", "allOf"] {
@@ -1660,14 +1660,15 @@ mod tests {
     #[tokio::test]
     async fn coding_search_code_tool_schema_exposes_rg_aligned_options() {
         let isolated = IsolatedTestContext::new().await;
-
         let spec = build_runtime_tool_specs(&isolated.context)
             .into_iter()
             .find(|tool| tool.name == "coding__search_code")
             .expect("coding search code tool");
+
         let AgentToolInputSpec::JsonSchema { schema } = spec.input_spec else {
             panic!("coding_search_code should use json schema");
         };
+        drop(isolated);
 
         crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
         let properties = schema
@@ -1717,6 +1718,7 @@ mod tests {
     async fn structured_edit_tool_schemas_do_not_use_schema_composition() {
         let isolated = IsolatedTestContext::new().await;
         let specs = build_runtime_tool_specs(&isolated.context);
+        drop(isolated);
 
         for tool_name in ["edit_file", "coding__edit_code"] {
             let spec = specs
@@ -1781,6 +1783,7 @@ mod tests {
         let result = execute_agent_tool_call(&mut isolated.context, &call)
             .await
             .expect("read file");
+        drop(isolated);
 
         assert_eq!(
             result.model_content(),
@@ -1822,11 +1825,11 @@ mod tests {
         let result = execute_agent_tool_call(&mut isolated.context, &call)
             .await
             .expect("edit file");
-
         assert_eq!(
             std::fs::read_to_string(root.join("README.md")).expect("read markdown fixture"),
             "new\n"
         );
+        drop(isolated);
         let Some(SessionActivityEvent::CodingEdit(ui_event)) = &result.activity_event else {
             panic!("edit_file should render as coding edit activity");
         };
@@ -1845,6 +1848,7 @@ mod tests {
         let isolated = IsolatedTestContext::new().await;
 
         let specs = build_runtime_tool_specs(&isolated.context);
+        drop(isolated);
         let names = specs
             .into_iter()
             .map(|tool| tool.name)
@@ -1901,6 +1905,7 @@ mod tests {
         let result = execute_agent_tool_call(&mut isolated.context, &call)
             .await
             .expect("view image");
+        drop(isolated);
 
         assert_eq!(result.payload["media_type"], "image/png");
         assert_eq!(result.payload["bytes"], bytes.len());
@@ -1936,6 +1941,7 @@ mod tests {
         let result = execute_agent_tool_call(&mut isolated.context, &call)
             .await
             .expect("unavailable tool result");
+        drop(isolated);
         assert_eq!(result.payload["available"], false);
         assert!(
             result
@@ -1995,6 +2001,7 @@ mod tests {
         let result = execute_agent_tool_call(&mut isolated.context, &call)
             .await
             .unwrap();
+        drop(isolated);
 
         assert!(
             result.model_content().contains("delegated-terminal"),
@@ -2043,7 +2050,6 @@ mod tests {
         let err = execute_agent_tool_call(&mut isolated.context, &edit_call)
             .await
             .expect_err("SCOPE-owned source edit should be rejected");
-
         assert!(
             err.to_string()
                 .contains("edit_file is forbidden for SCOPE-owned source files"),
@@ -2053,6 +2059,7 @@ mod tests {
             std::fs::read_to_string(root.join("lib.rs")).expect("read rust fixture"),
             "pub fn value() -> i32 {\n    1\n}\n"
         );
+        drop(isolated);
     }
 
     #[tokio::test]
@@ -2090,11 +2097,11 @@ mod tests {
         execute_agent_tool_call(&mut isolated.context, &edit_call)
             .await
             .expect("non-SCOPE edit should be allowed");
-
         assert_eq!(
             std::fs::read_to_string(root.join("README.md")).expect("read markdown fixture"),
             "new\n"
         );
+        drop(isolated);
     }
 
     #[tokio::test]
@@ -2109,6 +2116,7 @@ mod tests {
         let result = execute_agent_tool_call(&mut isolated.context, &call)
             .await
             .unwrap();
+        drop(isolated);
 
         assert!(result.model_content().contains("app=terminal"));
         assert_eq!(result.payload["app"], "terminal");
@@ -2123,11 +2131,11 @@ mod tests {
     #[tokio::test]
     async fn app_tools_do_not_expose_unscoped_aliases() {
         let isolated = IsolatedTestContext::new().await;
-
         let names = build_runtime_tool_specs(&isolated.context)
             .into_iter()
             .map(|tool| tool.name)
             .collect::<HashSet<_>>();
+        drop(isolated);
 
         assert!(names.contains("read_file"));
         assert!(names.contains("edit_file"));

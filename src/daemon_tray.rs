@@ -12,11 +12,11 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{daemon::DaemonControlCommand, open_url::open_url};
 
-pub(crate) const NO_TRAY_ENV: &str = "DAAT_LOCUS_NO_TRAY";
-pub(crate) const ENABLE_TRAY_ENV: &str = "DAAT_LOCUS_ENABLE_TRAY";
+pub const NO_TRAY_ENV: &str = "DAAT_LOCUS_NO_TRAY";
+pub const ENABLE_TRAY_ENV: &str = "DAAT_LOCUS_ENABLE_TRAY";
 
 #[derive(Clone)]
-pub(crate) struct DaemonTrayHandle {
+pub struct DaemonTrayHandle {
     shutdown: Arc<AtomicBool>,
 }
 
@@ -32,25 +32,28 @@ impl DaemonTrayHandle {
     }
 }
 
-pub(crate) struct DaemonTrayStartup {
+pub struct DaemonTrayStartup {
     pub(crate) port: u16,
     pub(crate) control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
 }
 
-pub(crate) fn should_attempt_daemon_tray() -> bool {
+pub fn should_attempt_daemon_tray() -> bool {
     if std::env::var_os(NO_TRAY_ENV).is_some() {
         return false;
     }
     std::env::var_os(ENABLE_TRAY_ENV).is_some() || platform_tray::gui_session_available()
 }
 
-pub(crate) fn run_daemon_tray(startup: DaemonTrayStartup, handle: DaemonTrayHandle) -> Result<()> {
-    platform_tray::run_tray_loop(startup.port, startup.control_tx, handle.shutdown)
+pub fn run_daemon_tray(startup: &DaemonTrayStartup, handle: &DaemonTrayHandle) -> Result<()> {
+    platform_tray::run_tray_loop(startup.port, &startup.control_tx, &handle.shutdown)
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod platform_tray {
-    use super::*;
+    use super::{
+        Arc, AtomicBool, DaemonControlCommand, Duration, Instant, Ordering, Result, miette, mpsc,
+        oneshot, open_url,
+    };
     use tao::{
         event::{Event, StartCause},
         event_loop::{ControlFlow, EventLoopBuilder},
@@ -70,7 +73,7 @@ mod platform_tray {
         TrayIcon(TrayIconEvent),
     }
 
-    pub(super) fn gui_session_available() -> bool {
+    pub(super) const fn gui_session_available() -> bool {
         #[cfg(target_os = "linux")]
         {
             std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
@@ -83,8 +86,8 @@ mod platform_tray {
 
     pub(super) fn run_tray_loop(
         port: u16,
-        control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
-        shutdown: Arc<AtomicBool>,
+        control_tx: &mpsc::UnboundedSender<DaemonControlCommand>,
+        shutdown: &Arc<AtomicBool>,
     ) -> Result<()> {
         let mut event_loop = EventLoopBuilder::<TrayEvent>::with_user_event().build();
         let proxy = event_loop.create_proxy();
@@ -121,7 +124,7 @@ mod platform_tray {
                     if event.id == OPEN_WEBUI_ID {
                         open_webui(port);
                     } else if event.id == EXIT_DAEMON_ID {
-                        request_daemon_shutdown(&control_tx);
+                        request_daemon_shutdown(control_tx);
                         *control_flow = ControlFlow::Exit;
                     }
                 }

@@ -3,7 +3,7 @@ use crate::context_budget::RequestBudgetBreakdown;
 use super::*;
 
 #[derive(Default, Clone)]
-pub(crate) struct StreamingToolCallBuilder {
+pub struct StreamingToolCallBuilder {
     id: String,
     name: String,
     arguments: String,
@@ -22,12 +22,12 @@ impl StreamingToolCallBuilder {
         }
     }
 
-    /// A builder that never received any tool_call delta content. Some
+    /// A builder that never received any `tool_call` delta content. Some
     /// OpenAI-compatible proxies (e.g. Anthropic models fronted by a gateway)
-    /// emit tool_call deltas with a non-zero `index`, leaving lower indices as
+    /// emit `tool_call` deltas with a non-zero `index`, leaving lower indices as
     /// empty placeholders that must be skipped rather than treated as
     /// incomplete calls.
-    pub(crate) fn is_empty(&self) -> bool {
+    pub(crate) const fn is_empty(&self) -> bool {
         self.id.is_empty() && self.name.is_empty() && self.arguments.is_empty()
     }
 
@@ -49,7 +49,7 @@ pub(super) fn should_retry_prompt_request_with_nested_thinking_budget(body: &str
         || body.contains("unknown parameter: \"reasoning_effort\"")
 }
 
-pub(crate) fn should_retry_request_without_thinking_budget(body: &str) -> bool {
+pub fn should_retry_request_without_thinking_budget(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     body.contains("unknown parameter: 'reasoning'")
         || body.contains("unknown parameter: \"reasoning\"")
@@ -57,7 +57,7 @@ pub(crate) fn should_retry_request_without_thinking_budget(body: &str) -> bool {
         || body.contains("unknown parameter: \"reasoning.effort\"")
 }
 
-pub(crate) fn should_retry_request_without_reasoning_summary(body: &str) -> bool {
+pub fn should_retry_request_without_reasoning_summary(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     body.contains("reasoning.summary")
         || (body.contains("reasoning")
@@ -73,7 +73,7 @@ pub(crate) fn should_retry_request_without_reasoning_summary(body: &str) -> bool
                 || body.contains("verified")))
 }
 
-pub(crate) fn should_retry_request_without_reasoning_content(body: &str) -> bool {
+pub fn should_retry_request_without_reasoning_content(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     body.contains("reasoning_content")
         && (body.contains("unknown parameter")
@@ -87,7 +87,7 @@ pub(crate) fn should_retry_request_without_reasoning_content(body: &str) -> bool
 
 /// Returns `true` when the provider error indicates the model does not accept
 /// `image_url` (or `input_image`) content blocks.
-pub(crate) fn looks_like_vision_unsupported_error(body: &str) -> bool {
+pub fn looks_like_vision_unsupported_error(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     // Providers that use OpenAI-compatible deserialization emit this when an
     // enum variant (image_url / input_image) is unknown.
@@ -99,7 +99,7 @@ pub(crate) fn looks_like_vision_unsupported_error(body: &str) -> bool {
         || (body.contains("vision") && body.contains("not supported"))
 }
 
-pub(crate) fn summarize_agent_turn_request(
+pub fn summarize_agent_turn_request(
     request: &AgentTurnRequest,
     budget: Option<&RequestBudgetBreakdown>,
 ) -> Vec<String> {
@@ -135,7 +135,7 @@ pub(crate) fn summarize_agent_turn_request(
     lines
 }
 
-pub(crate) fn summarize_prompt_request(
+pub fn summarize_prompt_request(
     request: &PromptRequest,
     budget: Option<&RequestBudgetBreakdown>,
 ) -> Vec<String> {
@@ -170,8 +170,7 @@ fn agent_message_char_count(message: &AgentMessage) -> usize {
                                 + media_type.chars().count()
                                 + description
                                     .as_deref()
-                                    .map(|text| text.chars().count())
-                                    .unwrap_or(0)
+                                    .map_or(0, |text| text.chars().count())
                         }
                     })
                     .sum::<usize>()
@@ -199,11 +198,11 @@ pub(super) fn parse_agent_turn_stream_result_from_json(
     let message = &response_json["choices"][0]["message"];
     let content = message["content"]
         .as_str()
-        .map(|text| text.to_string())
+        .map(std::string::ToString::to_string)
         .unwrap_or_default();
     let reasoning_content = message["reasoning_content"]
         .as_str()
-        .map(|text| text.to_string())
+        .map(std::string::ToString::to_string)
         .filter(|text| !text.trim().is_empty());
 
     if let Some(tool_calls) = message["tool_calls"].as_array()
@@ -286,25 +285,25 @@ pub(super) fn parse_usage_from_response_json(
     let usage = response_json.get("usage")?;
     let input_tokens = usage
         .get("prompt_tokens")
-        .and_then(|value| value.as_i64())
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or_default();
     let output_tokens = usage
         .get("completion_tokens")
-        .and_then(|value| value.as_i64())
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or_default();
     let total_tokens = usage
         .get("total_tokens")
-        .and_then(|value| value.as_i64())
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or_else(|| input_tokens + output_tokens);
     let cached_input_tokens = usage
         .get("prompt_tokens_details")
         .and_then(|value| value.get("cached_tokens"))
-        .and_then(|value| value.as_i64())
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or_default();
     let reasoning_output_tokens = usage
         .get("completion_tokens_details")
         .and_then(|value| value.get("reasoning_tokens"))
-        .and_then(|value| value.as_i64())
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or_default();
     let usage = TokenUsage {
         input_tokens,
@@ -325,13 +324,12 @@ pub(super) fn normalize_sse_buffer(buffer: &mut Vec<u8>) {
     let mut i = 0;
     while i < buffer.len() {
         if buffer[i] == b'\r' {
-            if i + 1 < buffer.len() && buffer[i + 1] == b'\n' {
-                out.push(b'\n');
-                i += 2;
+            out.push(b'\n');
+            i += if i + 1 < buffer.len() && buffer[i + 1] == b'\n' {
+                2
             } else {
-                out.push(b'\n');
-                i += 1;
-            }
+                1
+            };
         } else {
             out.push(buffer[i]);
             i += 1;
@@ -348,7 +346,7 @@ pub(super) fn take_next_sse_event(buffer: &mut Vec<u8>) -> Option<String> {
     Some(event)
 }
 
-pub(crate) fn format_request_error(
+pub fn format_request_error(
     prefix: &str,
     url: &str,
     request_context: &[String],
@@ -459,7 +457,7 @@ fn request_error_headline(prefix: &str, kind: &str, source: &str) -> String {
     }
 }
 
-pub(crate) async fn send_request_for_streaming_response(
+pub async fn send_request_for_streaming_response(
     request: reqwest::RequestBuilder,
     timeout: Duration,
     prefix: &str,
@@ -484,7 +482,7 @@ pub(crate) async fn send_request_for_streaming_response(
     }
 }
 
-pub(crate) async fn read_response_text_with_timeout(
+pub async fn read_response_text_with_timeout(
     response: reqwest::Response,
     timeout: Duration,
     prefix: &str,
@@ -509,7 +507,7 @@ pub(crate) async fn read_response_text_with_timeout(
     }
 }
 
-pub(crate) fn truncate_for_error(text: &str) -> String {
+pub fn truncate_for_error(text: &str) -> String {
     const MAX_LEN: usize = 600;
     if text.chars().count() <= MAX_LEN {
         return text.to_string();
@@ -518,7 +516,7 @@ pub(crate) fn truncate_for_error(text: &str) -> String {
     format!("{truncated}...")
 }
 
-pub(crate) fn non_empty_string(text: String) -> Option<String> {
+pub fn non_empty_string(text: String) -> Option<String> {
     if text.trim().is_empty() {
         None
     } else {
@@ -526,7 +524,7 @@ pub(crate) fn non_empty_string(text: String) -> Option<String> {
     }
 }
 
-pub(crate) fn looks_like_context_window_error(body: &str) -> bool {
+pub fn looks_like_context_window_error(body: &str) -> bool {
     let normalized = body.to_ascii_lowercase();
     normalized.contains("context length")
         || normalized.contains("context window")
@@ -535,15 +533,15 @@ pub(crate) fn looks_like_context_window_error(body: &str) -> bool {
         || normalized.contains("max context")
 }
 
-pub(crate) fn truncate_for_json_error(value: &serde_json::Value) -> String {
+pub fn truncate_for_json_error(value: &serde_json::Value) -> String {
     truncate_for_error(&value.to_string())
 }
 
-pub(crate) fn parse_retry_after_seconds(value: &str) -> Option<u64> {
+pub fn parse_retry_after_seconds(value: &str) -> Option<u64> {
     value.trim().parse::<u64>().ok()
 }
 
-pub(crate) fn default_rate_limit_backoff(attempt: usize) -> Duration {
+pub const fn default_rate_limit_backoff(attempt: usize) -> Duration {
     let seconds = match attempt {
         0 => 2,
         1 => 4,

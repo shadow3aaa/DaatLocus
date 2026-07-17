@@ -1,7 +1,7 @@
 //! Lightweight renderable layout primitives for dashboard cells:
-//! - Renderable: minimal trait (render + desired_height), no cursor support for now.
-//! - FlexRenderable: column with flex factors, allocates remaining space proportionally.
-//! - ViewportCulledColumn: wraps a column, renders only children overlapping the viewport.
+//! - Renderable: minimal trait (render + `desired_height`), no cursor support for now.
+//! - `FlexRenderable`: column with flex factors, allocates remaining space proportionally.
+//! - `ViewportCulledColumn`: wraps a column, renders only children overlapping the viewport.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -42,7 +42,7 @@ struct FlexChild {
 }
 
 impl FlexRenderable {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { children: vec![] }
     }
 
@@ -88,14 +88,15 @@ impl FlexRenderable {
 
         // Pass 2: flex children.
         if total_flex > 0 && free_space > 0 {
-            let space_per_flex = free_space / total_flex as u16;
+            let total_flex = u16::try_from(total_flex).unwrap_or(u16::MAX);
+            let space_per_flex = free_space / total_flex;
             let mut allocated_flex = 0u16;
             for (i, fc) in self.children.iter().enumerate() {
                 if fc.flex > 0 {
                     let max_child = if i == last_flex_idx {
                         free_space.saturating_sub(allocated_flex)
                     } else {
-                        space_per_flex * fc.flex as u16
+                        space_per_flex.saturating_mul(u16::try_from(fc.flex).unwrap_or(u16::MAX))
                     };
                     let h = fc.child.desired_height(area.width).min(max_child);
                     sizes[i] = h;
@@ -127,7 +128,7 @@ impl Renderable for FlexRenderable {
     fn desired_height(&self, width: u16) -> u16 {
         // allocate with u16::MAX height so flex children aren't artificially capped
         let rects = self.allocate(Rect::new(0, 0, width, u16::MAX));
-        rects.last().map(|r| r.bottom()).unwrap_or(0)
+        rects.last().map_or(0, |r| r.bottom())
     }
 }
 
@@ -157,7 +158,7 @@ impl ViewportCulledColumn {
     }
 
     /// Set scroll offset for `Renderable::render`.
-    pub fn set_scroll(&mut self, scroll: u16) {
+    pub const fn set_scroll(&mut self, scroll: u16) {
         self.scroll = scroll;
     }
 }

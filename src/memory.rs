@@ -89,7 +89,7 @@ pub struct RuntimeCompactionRecord {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct PlanCompactionInput<'a> {
+pub struct PlanCompactionInput<'a> {
     pub envelope: &'a RuntimeRequestEnvelope,
     pub injected_messages: &'a [HistoryMessage],
     pub tools: &'a [AgentToolSpec],
@@ -148,7 +148,7 @@ impl Memory {
     }
 
     pub fn begin_runtime_step(&self, agent_messages: Vec<AgentMessage>) -> RuntimeStepConversation {
-        RuntimeStepConversation::new(self.begin_runtime_turn(), agent_messages)
+        RuntimeStepConversation::with_turn_draft(self.begin_runtime_turn(), agent_messages)
     }
 
     pub fn begin_runtime_step_from_parts(
@@ -197,11 +197,11 @@ impl Memory {
         )
     }
 
-    pub fn runtime_conversation(&self) -> &RuntimeConversation {
+    pub const fn runtime_conversation(&self) -> &RuntimeConversation {
         &self.runtime_conversation
     }
 
-    pub fn runtime_conversation_mut(&mut self) -> &mut RuntimeConversation {
+    pub const fn runtime_conversation_mut(&mut self) -> &mut RuntimeConversation {
         &mut self.runtime_conversation
     }
 
@@ -230,7 +230,7 @@ pub struct RuntimeConversation {
 }
 
 impl RuntimeTurnDraft {
-    fn new(current_doing: String) -> Self {
+    const fn new(current_doing: String) -> Self {
         Self {
             current_doing,
             messages: Vec::new(),
@@ -249,7 +249,7 @@ impl RuntimeTurnDraft {
         self.messages.push(message);
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }
 
@@ -263,7 +263,7 @@ impl RuntimeTurnDraft {
 }
 
 impl RuntimeRequestEnvelope {
-    pub fn from_system_messages(system_messages: Vec<String>) -> Self {
+    pub const fn from_system_messages(system_messages: Vec<String>) -> Self {
         Self {
             system_messages,
             user_message: None,
@@ -335,7 +335,14 @@ impl RuntimeRequestEnvelope {
 }
 
 impl RuntimeStepConversation {
-    fn new(turn_draft: RuntimeTurnDraft, agent_messages: Vec<AgentMessage>) -> Self {
+    pub const fn new(agent_messages: Vec<AgentMessage>) -> Self {
+        Self::with_turn_draft(RuntimeTurnDraft::new(String::new()), agent_messages)
+    }
+
+    const fn with_turn_draft(
+        turn_draft: RuntimeTurnDraft,
+        agent_messages: Vec<AgentMessage>,
+    ) -> Self {
         Self {
             agent_messages,
             turn_draft,
@@ -362,7 +369,7 @@ impl RuntimeStepConversation {
         self.turn_draft.set_current_doing(current_doing);
     }
 
-    pub fn is_history_empty(&self) -> bool {
+    pub const fn is_history_empty(&self) -> bool {
         self.turn_draft.is_empty()
     }
 
@@ -383,16 +390,16 @@ impl RuntimeStepConversation {
         F: FnMut(Vec<AgentMessage>, usize) -> Fut,
         Fut: Future<Output = Result<RuntimeCompactionOutcome, String>>,
     {
+        if compact_for_overflow {
+            self.compact_once(policy, &mut build_summary).await?;
+            return Ok(true);
+        }
+
         let mut compacted_any = false;
         for _ in 0..policy.max_recoveries {
             let breakdown = estimate_agent_turn_request(self.agent_messages(), tools, limits)
                 .with_conservative_calibrated_input_tokens(baseline);
-            let needs_compaction = if compact_for_overflow {
-                !breakdown.within_context_window()
-            } else {
-                breakdown.above_auto_compact_threshold()
-            };
-            if !needs_compaction {
+            if !breakdown.above_auto_compact_threshold() {
                 break;
             }
             self.compact_once(policy, &mut build_summary).await?;
@@ -434,12 +441,12 @@ impl RuntimeConversationCompactionPlan {
         &self.source_messages
     }
 
-    pub fn summary_max_tokens(&self) -> usize {
+    pub const fn summary_max_tokens(&self) -> usize {
         self.summary_max_tokens
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(
+    pub(crate) const fn for_test(
         source_messages: Vec<HistoryMessage>,
         summary_max_tokens: usize,
     ) -> Self {
@@ -488,16 +495,13 @@ impl RuntimeConversation {
     ) -> Self {
         let persistence = PersistenceStore::for_session(session_id.as_deref()).await;
         if let Some(conversation) = persistence
-            .read_json_memory::<RuntimeConversation>(
-                RUNTIME_CONVERSATION_FILE_NAME,
-                "runtime conversation",
-            )
+            .read_json_memory::<Self>(RUNTIME_CONVERSATION_FILE_NAME, "runtime conversation")
             .await
         {
             return conversation.with_runtime_session(session_id);
         }
         if let Some(conversation) = persistence
-            .read_postcard_memory::<RuntimeConversation>(
+            .read_postcard_memory::<Self>(
                 RUNTIME_CONVERSATION_LEGACY_FILE_NAME,
                 "legacy runtime conversation",
             )
@@ -760,8 +764,9 @@ fn summarize_activity_event(event: &SessionActivityEvent) -> String {
         SessionActivityEvent::ExecResult(data) => summarize_runtime_inline_text(&data.title),
         SessionActivityEvent::LiveExec(data) => summarize_runtime_inline_text(&data.title),
         SessionActivityEvent::TerminalWait(data) => summarize_runtime_inline_text(&data.title),
-        SessionActivityEvent::Warning(data) => summarize_runtime_inline_text(&data.title),
-        SessionActivityEvent::Error(data) => summarize_runtime_inline_text(&data.title),
+        SessionActivityEvent::Warning(data) | SessionActivityEvent::Error(data) => {
+            summarize_runtime_inline_text(&data.title)
+        }
         SessionActivityEvent::User(data) => summarize_runtime_inline_text(&data.content),
         SessionActivityEvent::CodingOpenProject(data) => {
             format!(
@@ -812,8 +817,10 @@ fn summarize_activity_event(event: &SessionActivityEvent) -> String {
             .message_lines
             .iter()
             .find(|line| !line.trim().is_empty())
-            .map(|line| summarize_runtime_inline_text(line))
-            .unwrap_or_else(|| "reply submitted".to_string()),
+            .map_or_else(
+                || "reply submitted".to_string(),
+                |line| summarize_runtime_inline_text(line),
+            ),
         SessionActivityEvent::Thinking(data) => summarize_runtime_inline_text(&data.content),
         SessionActivityEvent::RuntimeStatus(data) => summarize_runtime_inline_text(&data.label),
         SessionActivityEvent::Workflow(data) => format!(
@@ -911,13 +918,10 @@ mod tests {
 
     #[tokio::test]
     async fn low_observed_baseline_does_not_hide_overflow_compaction() {
-        let mut runtime_step = RuntimeStepConversation::new(
-            RuntimeTurnDraft::new("test".to_string()),
-            vec![
-                AgentMessage::system("system"),
-                AgentMessage::user("x".repeat(10_000)),
-            ],
-        );
+        let mut runtime_step = RuntimeStepConversation::new(vec![
+            AgentMessage::system("system"),
+            AgentMessage::user("x".repeat(10_000)),
+        ]);
         let limits = RequestBudgetLimits {
             context_window_tokens: 1_000,
             auto_compact_threshold_tokens: 900,
@@ -1006,8 +1010,7 @@ mod tests {
             conversation
                 .messages
                 .last()
-                .map(HistoryMessage::is_assistant)
-                .unwrap_or(false)
+                .is_some_and(HistoryMessage::is_assistant)
         );
         assert!(
             conversation

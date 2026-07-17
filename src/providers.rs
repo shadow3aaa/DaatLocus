@@ -31,7 +31,7 @@ use crate::{
 mod copilot;
 pub use copilot::CopilotClient;
 mod codex_oauth;
-pub(crate) use codex_oauth::{
+pub use codex_oauth::{
     CodexOAuthClient, CodexOAuthTokens, codex_cli_auth_file, codex_oauth_access_from_file,
     codex_oauth_auth_file, codex_oauth_client_version, codex_oauth_default_base_url,
     import_codex_cli_oauth_tokens, write_codex_oauth_tokens,
@@ -39,14 +39,30 @@ pub(crate) use codex_oauth::{
 mod ollama;
 pub use ollama::OllamaClient;
 
-pub(crate) mod responses_compat;
+pub mod responses_compat;
 
 mod io;
-use io::*;
+use io::{
+    StreamingToolCallBuilder, default_rate_limit_backoff, format_request_error,
+    looks_like_context_window_error, looks_like_vision_unsupported_error, non_empty_string,
+    normalize_sse_buffer, parse_agent_turn_stream_result_from_json, parse_retry_after_seconds,
+    parse_usage_from_response_json, read_response_text_with_timeout,
+    send_request_for_streaming_response, should_retry_prompt_request_with_nested_thinking_budget,
+    should_retry_request_without_reasoning_content, should_retry_request_without_thinking_budget,
+    summarize_agent_turn_request, summarize_prompt_request, take_next_sse_event,
+    truncate_for_error, truncate_for_json_error,
+};
 mod payload;
 mod thinking;
-use payload::*;
-use thinking::*;
+#[cfg(test)]
+use payload::{agent_message_to_openai_message, agent_turn_request_to_openai_messages};
+use payload::{
+    build_agent_turn_payload_common, flatten_tool_result_as_assistant_text,
+    prompt_request_to_openai_messages,
+};
+#[cfg(test)]
+use thinking::{DEEPSEEK_THINKING_MAX_TOKENS, apply_optional_thinking_budget};
+use thinking::{apply_provider_thinking_config, max_completion_tokens_for_chat_payload};
 pub struct OpenAIClient {
     client: reqwest::Client,
     pub(crate) api_key: String,
@@ -154,7 +170,7 @@ enum ActiveChatCompletionsAdapter {
 }
 
 impl OpenAIClient {
-    /// Build from standalone credentials and ModelConfig.
+    /// Build from standalone credentials and `ModelConfig`.
     pub fn from_parts(api_key: &str, base_url: &str, model_config: &ModelConfig) -> Self {
         let base_url = normalize_provider_base_url(base_url);
         let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
@@ -199,8 +215,7 @@ impl OpenAIClient {
                     Some(false) => VisionMode::Disabled,
                     None => {
                         let supports = catalog_model_capacity(&model_config.model_id)
-                            .map(|c| c.supports_vision)
-                            .unwrap_or(false);
+                            .is_some_and(|c| c.supports_vision);
                         if supports {
                             VisionMode::Enabled
                         } else {
@@ -216,7 +231,7 @@ impl OpenAIClient {
             token_usage: Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
-                model_context_window: Some(context_window_tokens as i64),
+                model_context_window: i64::try_from(context_window_tokens).ok(),
                 daily_token_usage: Vec::new(),
             }),
         }
@@ -253,7 +268,7 @@ impl OpenAIClient {
         }
     }
 
-    fn request_budget_limits(&self) -> RequestBudgetLimits {
+    const fn request_budget_limits(&self) -> RequestBudgetLimits {
         RequestBudgetLimits {
             context_window_tokens: self.effective_context_window_tokens,
             auto_compact_threshold_tokens: self.auto_compact_threshold_tokens,
@@ -275,7 +290,7 @@ impl OpenAIClient {
                 let mut timestamps = limiter.lock().await;
                 let now = Instant::now();
                 while let Some(front) = timestamps.front().copied() {
-                    if now.duration_since(front) >= Duration::from_secs(60) {
+                    if now.duration_since(front) >= Duration::from_mins(1) {
                         timestamps.pop_front();
                     } else {
                         break;
@@ -287,7 +302,7 @@ impl OpenAIClient {
                     None
                 } else {
                     timestamps.front().copied().map(|front| {
-                        Duration::from_secs(60).saturating_sub(now.duration_since(front))
+                        Duration::from_mins(1).saturating_sub(now.duration_since(front))
                     })
                 }
             };
@@ -361,9 +376,10 @@ impl OpenAIClient {
                     ));
                 }
 
-                let delay = retry_after
-                    .map(Duration::from_secs)
-                    .unwrap_or_else(|| default_rate_limit_backoff(rate_limit_attempt));
+                let delay = retry_after.map_or_else(
+                    || default_rate_limit_backoff(rate_limit_attempt),
+                    Duration::from_secs,
+                );
                 let delay_ms = delay.as_millis();
                 warn!(
                     "llm api returned HTTP 429; retrying request in {} ms (attempt {}/{})\n{}",
@@ -419,8 +435,8 @@ impl OpenAIClient {
     }
 
     /// Step adapter state to the next downgrade level on a 400 response.
-    /// Order: tool_choice (NamedFunction → RequiredString → Omit),
-    /// then thinking budget (ReasoningEffortString → NestedReasoningObject → Unsupported).
+    /// Order: `tool_choice` (`NamedFunction` → `RequiredString` → Omit),
+    /// then thinking budget (`ReasoningEffortString` → `NestedReasoningObject` → Unsupported).
     /// Returns false when no further downgrade is available.
     fn step_adapter_state_for_bad_request(
         state: &mut ChatCompletionsAdapterState,
@@ -542,11 +558,10 @@ impl OpenAIClient {
                 truncate_for_json_error(&response_json)
             ));
         };
-        let first_tool_call = if let Some(first_tool_call) = tool_calls.first() {
-            first_tool_call
-        } else if let Some(value) = extract_json_value_from_content(content) {
-            return Ok(value);
-        } else {
+        let Some(first_tool_call) = tool_calls.first() else {
+            if let Some(value) = extract_json_value_from_content(content) {
+                return Ok(value);
+            }
             return Err(miette!(
                 "llm response included empty tool_calls; content={}; response={}",
                 truncate_for_error(content),
@@ -831,7 +846,9 @@ impl OpenAIClient {
                 }
                 if let Some(delta_tool_calls) = delta["tool_calls"].as_array() {
                     for tool_call in delta_tool_calls {
-                        let Some(index) = tool_call["index"].as_u64().map(|index| index as usize)
+                        let Some(index) = tool_call["index"]
+                            .as_u64()
+                            .and_then(|index| usize::try_from(index).ok())
                         else {
                             continue;
                         };
@@ -902,12 +919,12 @@ impl OpenAIClient {
             });
         }
 
-        let scavenged_calls = if let Some(ref allowed) = allowed_tool_names {
-            let combined = format!("{reasoning_content}\n{content}");
-            dsml_repair::scavenge_dsml_tool_calls(&combined, allowed, 4)
-        } else {
-            Vec::new()
-        };
+        let scavenged_calls = allowed_tool_names
+            .as_ref()
+            .map_or_else(Vec::new, |allowed| {
+                let combined = format!("{reasoning_content}\n{content}");
+                dsml_repair::scavenge_dsml_tool_calls(&combined, allowed, 4)
+            });
 
         let cleaned_content = dsml_repair::strip_dsml_from_thinking(&content);
         let cleaned_reasoning = dsml_repair::strip_dsml_from_thinking(&reasoning_content);
@@ -962,7 +979,7 @@ impl OpenAIClient {
 
     fn record_last_usage(&self, usage: TokenUsage) {
         if let Ok(mut info) = self.token_usage.lock() {
-            info.model_context_window = Some(self.context_window_tokens as i64);
+            info.model_context_window = i64::try_from(self.context_window_tokens).ok();
             info.append_last_usage(usage);
         }
     }

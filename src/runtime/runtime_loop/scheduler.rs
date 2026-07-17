@@ -1,12 +1,17 @@
 use super::sleep_driver::{maybe_start_forced_sleep, maybe_start_idle_sleep};
-use super::*;
+use super::{
+    Context, DashboardState, Duration, EventStatus, PendingWork, RuntimeTurnPhase,
+    SleepStatusSnapshot, SleepTaskResult, clear_runtime_status, execute_agent_loop_step,
+    refresh_sleep_status_queues, requeue_claimed_runtime_events, set_runtime_status_only,
+    sync_dashboard_state, sync_workspace_apps_from_invalidation,
+};
 
-pub(crate) enum RuntimeLoopCycle {
+pub enum RuntimeLoopCycle {
     Idle,
     ProcessedWork,
 }
 
-pub(crate) async fn daat_locus_loop(
+pub async fn daat_locus_loop(
     context: &mut Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
@@ -27,12 +32,10 @@ pub(crate) async fn daat_locus_loop(
         tracing::warn!(
             elapsed_secs = context
                 .runtime_turn_started_at
-                .map(|t| t.elapsed().as_secs())
-                .unwrap_or(0),
+                .map_or(0, |t| t.elapsed().as_secs()),
             phase = context
                 .active_runtime_phase
-                .map(|phase| phase.label())
-                .unwrap_or("running"),
+                .map_or("running", crate::context::RuntimeTurnPhase::label),
             "stale active_runtime_turn detected at loop entry; resetting cancelled turn"
         );
         reset_cancelled_runtime_turn(context, "stale active_runtime_turn at loop entry");
@@ -107,7 +110,7 @@ fn sync_driver_frontier_from_sources(context: &Context) {
             if let Err(err) = context.pending_work.enqueue(work) {
                 tracing::error!("failed to sync pending event driver {event_id}: {err:?}");
             }
-        } else if let Err(err) = context.pending_work.consume(work) {
+        } else if let Err(err) = context.pending_work.consume(&work) {
             tracing::error!("failed to remove stale event driver {event_id}: {err:?}");
         }
     }
@@ -132,7 +135,7 @@ fn recover_stale_runtime_turn_claims(context: &mut Context) {
     context.current_work_origin = None;
 }
 
-pub(crate) fn reset_cancelled_runtime_turn(context: &mut Context, reason: &str) {
+pub fn reset_cancelled_runtime_turn(context: &mut Context, reason: &str) {
     recover_stale_runtime_turn_claims(context);
     tracing::warn!(reason, "reset cancelled active runtime turn");
     context.active_runtime_turn = false;
@@ -141,7 +144,7 @@ pub(crate) fn reset_cancelled_runtime_turn(context: &mut Context, reason: &str) 
     context.runtime_turn_started_at_ms = None;
 }
 
-pub(crate) fn interrupt_active_runtime_turn(context: &mut Context, reason: &str) -> usize {
+pub fn interrupt_active_runtime_turn(context: &mut Context, reason: &str) -> usize {
     let mut claimed_event_ids = std::mem::take(&mut context.claimed_event_ids);
     if claimed_event_ids.is_empty() {
         claimed_event_ids = context
@@ -164,7 +167,7 @@ pub(crate) fn interrupt_active_runtime_turn(context: &mut Context, reason: &str)
             failed_events += 1;
         }
         if let Ok(parsed_event_id) = uuid::Uuid::parse_str(&event_id)
-            && let Err(err) = context.pending_work.consume(PendingWork::Event {
+            && let Err(err) = context.pending_work.consume(&PendingWork::Event {
                 event_id: parsed_event_id,
             })
         {

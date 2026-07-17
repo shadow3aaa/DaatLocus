@@ -3,7 +3,7 @@ use std::io;
 #[cfg(not(target_os = "windows"))]
 use std::process::Command;
 
-pub(crate) fn open_url(url: &str) -> io::Result<()> {
+pub fn open_url(url: &str) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
         open_url_windows(url)
@@ -41,7 +41,8 @@ fn open_url_windows(url: &str) -> io::Result<()> {
     } as isize;
 
     if result <= 32 {
-        Err(io::Error::from_raw_os_error(result as i32))
+        let os_error = i32::try_from(result).unwrap_or(i32::MIN);
+        Err(io::Error::from_raw_os_error(os_error))
     } else {
         Ok(())
     }

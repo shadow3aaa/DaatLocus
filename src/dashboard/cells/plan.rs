@@ -26,7 +26,7 @@ pub enum PlanStepDisplayStatus {
 
 impl From<PlanActivityDescriptor> for PlanActivityData {
     fn from(data: PlanActivityDescriptor) -> Self {
-        PlanActivityData {
+        Self {
             kind: data.kind,
             explanation: data.explanation,
             steps: data

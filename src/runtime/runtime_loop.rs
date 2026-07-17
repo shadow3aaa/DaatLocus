@@ -63,7 +63,7 @@ use crate::runtime::bootstrap::{
     build_eval_context_with_compiled, load_compiled_prompts_only, summarize_sleep_summary,
 };
 mod claimed_input;
-pub(crate) mod coding_source_elision;
+pub mod coding_source_elision;
 mod dashboard_control;
 mod live_draft;
 mod model_driver;
@@ -73,15 +73,21 @@ mod turn;
 mod workflow_evidence;
 mod workspace_apps;
 
-pub(crate) use dashboard_control::handle_dashboard_control_command;
-pub(crate) use scheduler::{
+pub use dashboard_control::handle_dashboard_control_command;
+pub use scheduler::{
     RuntimeLoopCycle, daat_locus_loop, interrupt_active_runtime_turn, reset_cancelled_runtime_turn,
 };
-pub(crate) use sleep_driver::{SleepTaskResult, handle_sleep_task_result};
-pub(crate) use turn::{append_workflow_activity_event, execute_agent_loop_step};
-pub(crate) use workflow_evidence::{AgentLoopStepExecution, AgentLoopStepOutput};
+pub use sleep_driver::{SleepTaskResult, handle_sleep_task_result};
+pub use turn::{append_workflow_activity_event, execute_agent_loop_step};
+pub use workflow_evidence::{AgentLoopStepExecution, AgentLoopStepOutput};
 
-use claimed_input::*;
+use claimed_input::{
+    ClaimedRuntimeInput, afterclaim_context_input_for_claimed_inputs, claim_pending_runtime_inputs,
+    claimed_events_are_terminal, claimed_events_require_explicit_completion,
+    claimed_runtime_input_fingerprint, finalize_claimed_runtime_events,
+    handle_model_request_failure, handle_runtime_overflow, requeue_claimed_runtime_events,
+    runtime_work_origin,
+};
 use live_draft::{TelegramLiveDraftSession, maybe_start_telegram_live_draft_session};
 use workflow_evidence::{
     maybe_record_skill_read, record_runtime_history_messages, record_skill_run_evidence,
@@ -97,6 +103,10 @@ const RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS: u64 = 60;
 
 #[cfg(test)]
 mod tests {
+    use super::claimed_input::{
+        ClaimedEventStatusSummary, claimed_event_statuses_are_terminal,
+        runtime_overflow_failure_note, summarize_claimed_event_statuses,
+    };
     use super::turn::{
         clear_runtime_failures_after_model_success, clear_runtime_overflow_failure_after_compaction,
     };
@@ -301,6 +311,7 @@ mod tests {
 
         assert_eq!(main_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(outcome.summary.contains("main model summary"));
+        drop(isolated);
     }
     fn terminal_event(text: &str) -> crate::events::TerminalIncomingEvent {
         crate::events::TerminalIncomingEvent {
@@ -355,6 +366,7 @@ mod tests {
                 .expect("claim after interrupt")
                 .is_empty()
         );
+        drop(isolated);
     }
 
     #[tokio::test]
@@ -393,6 +405,7 @@ mod tests {
             .expect("claim after reset");
         assert_eq!(reclaimed.len(), 1);
         assert!(matches!(reclaimed[0], PendingWork::Event { event_id: id } if id == event_id));
+        drop(isolated);
     }
 
     #[test]
@@ -571,6 +584,7 @@ mod tests {
                 .get(&fingerprint)
                 .is_none()
         );
+        drop(isolated);
     }
 
     #[tokio::test]
@@ -585,6 +599,7 @@ mod tests {
 
         assert_eq!(context.record_runtime_overflow_failure(fingerprint), 1);
         assert_eq!(context.record_model_request_failure(fingerprint), 1);
+        drop(isolated);
     }
 
     #[tokio::test]
@@ -599,6 +614,7 @@ mod tests {
 
         assert_eq!(context.record_runtime_overflow_failure(fingerprint), 1);
         assert_eq!(context.record_model_request_failure(fingerprint), 2);
+        drop(isolated);
     }
 
     #[tokio::test]
@@ -658,6 +674,7 @@ mod tests {
                 .get(&fingerprint)
                 .is_none()
         );
+        drop(isolated);
     }
 
     #[test]

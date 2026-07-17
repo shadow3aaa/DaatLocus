@@ -44,7 +44,7 @@ pub enum RuntimeTurnPhase {
 }
 
 impl RuntimeTurnPhase {
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::PreflightPreTurnContext => "preflight: preturn context",
             Self::PreflightCompaction => "preflight: compaction",
@@ -179,7 +179,7 @@ impl Context {
     }
 
     pub fn install_live_progress(
-        &mut self,
+        &self,
         tx: Option<tokio::sync::mpsc::UnboundedSender<LiveProgressEvent>>,
     ) {
         *self.live_progress_tx.lock() = tx;
@@ -198,7 +198,9 @@ impl Context {
                 draft_id,
                 last_sent_text: None,
             });
-        (record.draft_id, record.last_sent_text.clone())
+        let draft = (record.draft_id, record.last_sent_text.clone());
+        drop(drafts);
+        draft
     }
 
     pub fn clear_telegram_live_draft(&self, event_id: &str) {
@@ -226,12 +228,13 @@ impl Context {
     }
 
     fn emit_live_progress(&self, event: LiveProgressEvent) {
-        if let Some(tx) = self.live_progress_tx.lock().as_ref() {
+        let tx = { self.live_progress_tx.lock().clone() };
+        if let Some(tx) = tx {
             let _ = tx.send(event);
         }
     }
 
-    pub fn set_runtime_phase(&mut self, phase: Option<RuntimeTurnPhase>) {
+    pub const fn set_runtime_phase(&mut self, phase: Option<RuntimeTurnPhase>) {
         self.active_runtime_phase = phase;
     }
 
@@ -239,7 +242,9 @@ impl Context {
         let mut failures = self.runtime_overflow_failures.lock();
         let entry = failures.entry(key.to_string()).or_insert(0);
         *entry += 1;
-        *entry
+        let count = *entry;
+        drop(failures);
+        count
     }
 
     pub fn clear_runtime_overflow_failure(&self, key: &str) {
@@ -250,7 +255,9 @@ impl Context {
         let mut failures = self.runtime_model_request_failures.lock();
         let entry = failures.entry(key.to_string()).or_insert(0);
         *entry += 1;
-        *entry
+        let count = *entry;
+        drop(failures);
+        count
     }
 
     pub fn clear_model_request_failure(&self, key: &str) {
@@ -260,8 +267,8 @@ impl Context {
     pub async fn shutdown(self) {
         self.memory.shutdown().await;
         self.plan.shutdown().await;
-        self.events.shutdown().await;
-        self.pending_work.shutdown().await;
+        self.events.shutdown();
+        self.pending_work.shutdown();
         let _ = self.apps.shutdown().await;
     }
 }

@@ -41,7 +41,7 @@ use crate::{
     },
 };
 
-pub(crate) fn emit_startup_progress(message: impl AsRef<str>) {
+pub fn emit_startup_progress(message: impl AsRef<str>) {
     tracing::info!("{}", message.as_ref());
 }
 
@@ -49,7 +49,7 @@ const TOKEN_ESTIMATE_BASELINE_FILE: &str = "token_estimate_baseline.json";
 const TOKEN_USAGE_FILE: &str = "token_usage.json";
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum PersistentTokenUsageRole {
+pub enum PersistentTokenUsageRole {
     Main,
     Efficient,
 }
@@ -71,12 +71,12 @@ struct PersistedTokenUsageRole {
 }
 
 #[derive(Debug)]
-pub(crate) struct PersistentTokenUsageStore {
+pub struct PersistentTokenUsageStore {
     persistence: PersistenceStore,
     snapshot: parking_lot::Mutex<PersistedTokenUsageSnapshot>,
 }
 
-pub(crate) async fn load_persistent_token_usage_store(
+pub async fn load_persistent_token_usage_store(
     session_id: Option<&str>,
 ) -> Arc<PersistentTokenUsageStore> {
     let persistence = PersistenceStore::for_session(session_id).await;
@@ -89,7 +89,7 @@ pub(crate) async fn load_persistent_token_usage_store(
     })
 }
 
-pub(crate) fn wrap_model_provider_with_persistent_token_usage(
+pub fn wrap_model_provider_with_persistent_token_usage(
     role: PersistentTokenUsageRole,
     configured_model: String,
     inner: Box<dyn ModelProvider + Send + Sync>,
@@ -228,14 +228,14 @@ impl PersistentTokenUsageStore {
 }
 
 impl PersistedTokenUsageSnapshot {
-    fn role(&self, role: PersistentTokenUsageRole) -> &PersistedTokenUsageRole {
+    const fn role(&self, role: PersistentTokenUsageRole) -> &PersistedTokenUsageRole {
         match role {
             PersistentTokenUsageRole::Main => &self.main,
             PersistentTokenUsageRole::Efficient => &self.efficient,
         }
     }
 
-    fn role_mut(&mut self, role: PersistentTokenUsageRole) -> &mut PersistedTokenUsageRole {
+    const fn role_mut(&mut self, role: PersistentTokenUsageRole) -> &mut PersistedTokenUsageRole {
         match role {
             PersistentTokenUsageRole::Main => &mut self.main,
             PersistentTokenUsageRole::Efficient => &mut self.efficient,
@@ -253,7 +253,7 @@ impl PersistedTokenUsageRole {
     }
 }
 
-pub(crate) async fn load_token_estimate_baseline() -> TokenEstimateBaseline {
+pub async fn load_token_estimate_baseline() -> TokenEstimateBaseline {
     let persistence = PersistenceStore::runtime().await;
     persistence
         .read_json_state_or_default(TOKEN_ESTIMATE_BASELINE_FILE, "token estimate baseline")
@@ -270,7 +270,7 @@ pub async fn save_token_estimate_baseline(baseline: &TokenEstimateBaseline) {
     }
 }
 
-pub(crate) async fn sandbox_policy_for_runtime(
+pub async fn sandbox_policy_for_runtime(
     config: &crate::config::Config,
     execution_cwd: Option<&Path>,
 ) -> RuntimeSandboxPolicy {
@@ -320,18 +320,18 @@ fn daat_locus_source_root() -> Option<PathBuf> {
     source_root.exists().then_some(source_root)
 }
 
-pub(crate) fn build_runtime_apps(
+pub fn build_runtime_apps(
     execution_cwd: &Path,
     sandbox_policy: &RuntimeSandboxPolicy,
 ) -> (Vec<Box<dyn crate::app::App>>, WorkspaceAppRegistry) {
     build_runtime_apps_with_workspace_app_state(
         execution_cwd,
         sandbox_policy,
-        daat_locus_paths_sync().state_dir().join("apps"),
+        &daat_locus_paths_sync().state_dir().join("apps"),
     )
 }
 
-pub(crate) fn build_isolated_worker_apps(
+pub fn build_isolated_worker_apps(
     execution_cwd: &Path,
     sandbox_policy: &RuntimeSandboxPolicy,
     worker_id: &str,
@@ -341,13 +341,13 @@ pub(crate) fn build_isolated_worker_apps(
         .join("workflow_workers")
         .join(worker_id)
         .join("apps");
-    build_runtime_apps_with_workspace_app_state(execution_cwd, sandbox_policy, state_root)
+    build_runtime_apps_with_workspace_app_state(execution_cwd, sandbox_policy, &state_root)
 }
 
 fn build_runtime_apps_with_workspace_app_state(
     execution_cwd: &Path,
     sandbox_policy: &RuntimeSandboxPolicy,
-    workspace_app_state_root: PathBuf,
+    workspace_app_state_root: &Path,
 ) -> (Vec<Box<dyn crate::app::App>>, WorkspaceAppRegistry) {
     let mut apps: Vec<Box<dyn crate::app::App>> = vec![
         Box::new(BrowserApp::new()),
@@ -356,7 +356,7 @@ fn build_runtime_apps_with_workspace_app_state(
     ];
     let bootstrap = bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
         execution_cwd,
-        &workspace_app_state_root,
+        workspace_app_state_root,
         sandbox_policy.protected_env_vars(),
         sandbox_policy.strong_filesystem,
         sandbox_policy.is_disabled(),
@@ -368,7 +368,7 @@ fn build_runtime_apps_with_workspace_app_state(
     (apps, bootstrap.registry)
 }
 
-pub(crate) async fn build_eval_context_with_compiled(
+pub async fn build_eval_context_with_compiled(
     config: crate::config::Config,
     compiled_prompts: CompiledPromptStore,
 ) -> Context {
@@ -467,7 +467,7 @@ pub(crate) async fn build_eval_context_with_compiled(
     }
 }
 
-pub(crate) fn bootstrap_telegram_transport_state_from_acl(
+pub fn bootstrap_telegram_transport_state_from_acl(
     telegram_handle: &crate::telegram_transport::state::TelegramTransportStateHandle,
     telegram_acl: &TelegramAclHandle,
 ) {
@@ -476,7 +476,7 @@ pub(crate) fn bootstrap_telegram_transport_state_from_acl(
     }
 }
 
-pub(crate) async fn load_compiled_prompts_only(
+pub async fn load_compiled_prompts_only(
     config: &crate::config::Config,
 ) -> miette::Result<CompiledPromptStore> {
     let compiled =
@@ -487,7 +487,7 @@ pub(crate) async fn load_compiled_prompts_only(
         .with_runtime_system_prompt(runtime_system_prompt))
 }
 
-pub(crate) fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> String {
+pub fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> String {
     let correction = &summary.runtime_error_correction;
     let skill = &summary.workflow_improvement;
     format!(
@@ -504,7 +504,7 @@ pub(crate) fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSu
 }
 
 #[cfg(test)]
-pub(crate) struct DaatLocusHomeOverride {
+pub struct DaatLocusHomeOverride {
     previous: Option<String>,
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }

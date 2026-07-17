@@ -52,10 +52,7 @@ mod workspace_app;
 fn main() {
     let cli = cli::parse_args();
 
-    if let Err(err) = crate::daemon::daemonize_current_process_if_requested() {
-        eprintln!("{err:?}");
-        std::process::exit(1);
-    }
+    crate::daemon::daemonize_current_process_if_requested();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

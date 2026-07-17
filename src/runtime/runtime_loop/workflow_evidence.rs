@@ -2,15 +2,15 @@ use std::path::Path;
 
 use chrono::Utc;
 
-use super::*;
+use super::{AgentToolCall, Context, EpisodeActionRecord, RuntimeTurnDraft};
 use crate::{
     context::{ActiveSkillRunSession, PendingSkillRunFlush, SkillRunOutcome},
     skill_run_records::{SkillRunRecord, append_skill_run_records},
 };
 
-pub(crate) struct AgentLoopStepExecution;
+pub struct AgentLoopStepExecution;
 
-pub(crate) struct AgentLoopStepOutput {
+pub struct AgentLoopStepOutput {
     pub(crate) observation: String,
     pub(crate) description: String,
     pub(crate) current_doing: String,
@@ -40,7 +40,7 @@ pub(super) fn maybe_record_skill_read(context: &mut Context, call: &AgentToolCal
     context.begin_skill_run_session(skill_name, origin);
 }
 
-/// Extract the file path being read from a read_file or coding__read_code call.
+/// Extract the file path being read from a `read_file` or `coding__read_code` call.
 fn skill_read_path(call: &AgentToolCall) -> Option<&Path> {
     let is_read_tool = matches!(call.name.as_str(), "read_file" | "coding__read_code")
         || call.name.ends_with("__read_code");
@@ -68,7 +68,7 @@ pub(super) async fn record_skill_run_evidence(context: &mut Context, output: &Ag
     }
 
     // Accumulate into pending flushes too (for already-completed sessions)
-    for flush in context.pending_skill_run_flushes.iter_mut() {
+    for flush in &mut context.pending_skill_run_flushes {
         accumulate_skill_session_from_output(&mut flush.session, output);
     }
 

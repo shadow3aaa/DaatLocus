@@ -33,7 +33,7 @@ const LOCUS_RIGHT: &[&str] = &[
     "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀",
 ];
 
-pub(crate) fn render_daat_locus_logo() -> String {
+pub fn render_daat_locus_logo() -> String {
     let mut out = String::new();
     let rows = DAAT_LEFT.len().max(LOCUS_RIGHT.len());
 

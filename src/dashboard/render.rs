@@ -21,8 +21,8 @@ use super::{
 };
 
 /// Sleep-related constants used in dashboard rendering.
-pub const AUTO_SLEEP_IDLE_THRESHOLD: Duration = Duration::from_secs(300);
-pub const AUTO_SLEEP_MIN_INTERVAL: Duration = Duration::from_secs(300);
+pub const AUTO_SLEEP_IDLE_THRESHOLD: Duration = Duration::from_mins(5);
+pub const AUTO_SLEEP_MIN_INTERVAL: Duration = Duration::from_mins(5);
 pub const FORCE_SLEEP_ERROR_BACKLOG_THRESHOLD: usize = 128;
 
 pub fn sync_dashboard_state(
@@ -212,12 +212,12 @@ pub fn render_dashboard_footer_context(
         .request_budget_limits()
         .context_window_tokens
         .max(1);
-    let worked_prefix = if let Some(started_at) = context.runtime_turn_started_at {
-        let elapsed = started_at.elapsed().as_secs();
-        format!("Worked for {} · ", format_elapsed_seconds_compact(elapsed))
-    } else {
-        String::new()
-    };
+    let worked_prefix = context
+        .runtime_turn_started_at
+        .map_or_else(String::new, |started_at| {
+            let elapsed = started_at.elapsed().as_secs();
+            format!("Worked for {} · ", format_elapsed_seconds_compact(elapsed))
+        });
     let info = context.model_provider.token_usage_info();
     let used = usize::try_from(info.last_token_usage.input_tokens.max(0)).unwrap_or(0);
     let calibrated = estimated_input_tokens.map(|est| {
@@ -475,11 +475,11 @@ pub fn runtime_activity_for_dashboard(
 
     if context.active_runtime_turn {
         let status = match context.active_runtime_phase {
-            Some(crate::context::RuntimeTurnPhase::PreflightPreTurnContext)
-            | Some(crate::context::RuntimeTurnPhase::PreflightCompaction)
-            | Some(crate::context::RuntimeTurnPhase::ModelRequest) => {
-                DashboardRuntimeActivityStatus::Thinking
-            }
+            Some(
+                crate::context::RuntimeTurnPhase::PreflightPreTurnContext
+                | crate::context::RuntimeTurnPhase::PreflightCompaction
+                | crate::context::RuntimeTurnPhase::ModelRequest,
+            ) => DashboardRuntimeActivityStatus::Thinking,
             Some(crate::context::RuntimeTurnPhase::ToolExecution) => {
                 DashboardRuntimeActivityStatus::Tooling
             }
@@ -505,9 +505,11 @@ pub fn runtime_activity_for_dashboard(
     }
 
     match runtime_status_level {
-        Some(DashboardRuntimeStatusLevel::Debug)
-        | Some(DashboardRuntimeStatusLevel::Info)
-        | Some(DashboardRuntimeStatusLevel::Warn) => DashboardRuntimeActivity::new(
+        Some(
+            DashboardRuntimeStatusLevel::Debug
+            | DashboardRuntimeStatusLevel::Info
+            | DashboardRuntimeStatusLevel::Warn,
+        ) => DashboardRuntimeActivity::new(
             DashboardRuntimeActivityStatus::Running,
             "Running",
             runtime_status.and_then(trimmed_runtime_status_detail),
@@ -546,10 +548,10 @@ pub fn status_command_snapshot_for_dashboard(context: &Context) -> DashboardStat
 
 fn status_command_runtime_turn(context: &Context) -> String {
     if context.active_runtime_turn {
-        return context
-            .active_runtime_phase
-            .map(|phase| format!("running ({})", phase.label()))
-            .unwrap_or_else(|| "running".to_string());
+        return context.active_runtime_phase.map_or_else(
+            || "running".to_string(),
+            |phase| format!("running ({})", phase.label()),
+        );
     }
 
     "idle".to_string()
@@ -674,22 +676,26 @@ fn render_status_usage_lines(context: &Context) -> Vec<String> {
         // Cumulative total line
         let total = &info.total_token_usage;
         let cached_pct = if total.input_tokens > 0 {
-            format!(
-                "{:.0}% cached",
-                total.cached_input_tokens as f64 / total.input_tokens as f64 * 100.0
-            )
+            let cached = total.cached_input_tokens.max(0);
+            let input = total.input_tokens.max(1);
+            let percent = cached.saturating_mul(100).saturating_add(input / 2) / input;
+            format!("{percent}% cached")
         } else {
             String::new()
         };
         if cached_pct.is_empty() {
             lines.push(format!(
                 "    Total:  {} Used",
-                format_compact_tokens(total.total_tokens.max(0) as usize),
+                format_compact_tokens(
+                    usize::try_from(total.total_tokens.max(0)).unwrap_or(usize::MAX),
+                ),
             ));
         } else {
             lines.push(format!(
                 "    Total:  {} Used · {}",
-                format_compact_tokens(total.total_tokens.max(0) as usize),
+                format_compact_tokens(
+                    usize::try_from(total.total_tokens.max(0)).unwrap_or(usize::MAX),
+                ),
                 cached_pct,
             ));
         }
@@ -702,7 +708,7 @@ fn render_status_usage_lines(context: &Context) -> Vec<String> {
     }
 
     // Remove trailing blank separator
-    while lines.last().is_some_and(|l| l.is_empty()) {
+    while lines.last().is_some_and(std::string::String::is_empty) {
         lines.pop();
     }
     lines
@@ -712,28 +718,33 @@ fn render_status_context_usage_line(used: i64, window: i64) -> String {
     format!(
         "    Context:  {} of {}",
         context_bar(used, window),
-        format_compact_tokens(window.max(0) as usize),
+        format_compact_tokens(usize::try_from(window.max(0)).unwrap_or(usize::MAX)),
     )
 }
 
 fn context_bar(used: i64, window: i64) -> String {
-    const W: usize = 20;
+    const WIDTH: usize = 20;
     if window <= 0 {
         return String::new();
     }
-    let used = used.max(0) as f64;
-    let window = window as f64;
-    let pct = used / window;
-    let pct_clamped = pct.clamp(0.0, 1.0);
-    let filled = (pct_clamped * W as f64).round() as usize;
+    let used = used.max(0);
+    let filled_numerator = used
+        .saturating_mul(i64::try_from(WIDTH).expect("context bar width fits in i64"))
+        .saturating_add(window / 2);
+    let filled = usize::try_from(filled_numerator / window)
+        .unwrap_or(usize::MAX)
+        .min(WIDTH);
     let bar: String = (0..filled)
         .map(|_| '\u{2588}')
-        .chain((0..W.saturating_sub(filled)).map(|_| '\u{2591}'))
+        .chain((0..WIDTH.saturating_sub(filled)).map(|_| '\u{2591}'))
         .collect();
-    if pct > 1.0 {
-        format!("{bar}> {:.1}%", pct * 100.0)
+    let tenths_percent = used.saturating_mul(1_000).saturating_add(window / 2) / window;
+    let whole_percent = tenths_percent / 10;
+    let fractional_percent = tenths_percent % 10;
+    if used > window {
+        format!("{bar}> {whole_percent}.{fractional_percent}%")
     } else {
-        format!("{bar} {:.1}%", pct * 100.0)
+        format!("{bar} {whole_percent}.{fractional_percent}%")
     }
 }
 

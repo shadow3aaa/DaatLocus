@@ -203,7 +203,7 @@ pub fn boolean_schema() -> Value {
     json!({ "type": "boolean" })
 }
 
-pub fn array_schema(items: Value) -> Value {
+pub fn array_schema(items: &Value) -> Value {
     json!({
         "type": "array",
         "items": items,
@@ -339,12 +339,13 @@ fn parse_type_names(
             .iter()
             .enumerate()
             .filter_map(|(index, value)| {
-                if let Some(value) = value.as_str() {
-                    Some(value.to_string())
-                } else {
-                    errors.push(format!("{path}.type[{index}]: must be a string"));
-                    None
-                }
+                value.as_str().map_or_else(
+                    || {
+                        errors.push(format!("{path}.type[{index}]: must be a string"));
+                        None
+                    },
+                    |value| Some(value.to_string()),
+                )
             })
             .collect(),
         _ => {

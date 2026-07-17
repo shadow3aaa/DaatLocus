@@ -1194,11 +1194,22 @@ The intended small Lua surface is:
 ```lua
 workflow.define({ input = InputSchema, output = OutputSchema,
   run = function(input, ctx) ... end })
-workflow.agent({ model, input, output, instruction, extra_tools })
-workflow.await(handle)
-workflow.await_all(handles)
+workflow.agent({ role, model, input, output, instruction, extra_tools })
+workflow.await(handle[, transition])
+workflow.await_all(handles[, transition])
 workflow.tool({ name, input, output, run })
 ```
+
+`role` is required and must be a non-empty string. It identifies a visible
+worker attempt in the inspector rather than selecting a hidden host profile;
+repeated executions of the same role remain separate attempts.
+
+The optional `transition` marks edges from the prior non-empty awaited group to
+the newly awaited group. It defaults to `"await"`; use `"verify"`,
+`"revision"`, or `"retry"` when they describe the handoff. `await_all` starts
+its workers concurrently, retains result ordering by handle, stops the group on
+any failure or interruption, and gives every worker separate runtime and App
+instances. Concurrent groups produce all-to-all barrier edges.
 
 `workflow.agent(...)` creates an isolated worker specification. The script
 passes the actual task input to the resulting handle; worker outputs are

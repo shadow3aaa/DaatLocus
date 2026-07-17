@@ -12,7 +12,7 @@ pub struct FrameRequester {
 }
 
 impl FrameRequester {
-    /// Create a new FrameRequester and spawn its associated FrameScheduler task.
+    /// Create a new `FrameRequester` and spawn its associated `FrameScheduler` task.
     pub fn new(draw_tx: broadcast::Sender<()>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let scheduler = FrameScheduler::new(rx, draw_tx);
@@ -50,7 +50,7 @@ impl FrameScheduler {
     }
 
     async fn run(mut self) {
-        const FAR_FUTURE: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+        const FAR_FUTURE: Duration = Duration::from_hours(8760);
         let mut next_deadline: Option<Instant> = None;
 
         loop {
@@ -66,7 +66,7 @@ impl FrameScheduler {
                     let deadline = self.limiter.clamp_deadline(deadline);
                     next_deadline = Some(next_deadline.map_or(deadline, |current| current.min(deadline)));
                 }
-                _ = &mut sleep => {
+                () = &mut sleep => {
                     if next_deadline.is_some() {
                         next_deadline = None;
                         self.limiter.mark_emitted(target);

@@ -148,7 +148,7 @@ impl DaemonTokenRegistryHandle {
         if changed || !self.path.exists() {
             write_registry(&self.path, &registry).await?;
         } else {
-            harden_private_file_permissions(&self.path).await?;
+            harden_private_file_permissions(&self.path);
         }
         Ok(())
     }
@@ -350,7 +350,7 @@ async fn load_local_daemon_auth_token_at(path: &Path) -> Result<DaemonAuthToken>
     let raw = tokio::fs::read_to_string(path)
         .await
         .map_err(|err| miette!("read daemon auth token {} failed: {err}", path.display()))?;
-    harden_private_file_permissions(path).await?;
+    harden_private_file_permissions(path);
     DaemonAuthToken::parse(raw.trim())
         .map_err(|err| miette!("invalid daemon auth token at {}: {err}", path.display()))
 }
@@ -372,23 +372,19 @@ async fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(unix)]
-async fn harden_private_file_permissions(path: &Path) -> Result<()> {
+fn harden_private_file_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .await
-        .map_err(|err| {
-            miette!(
-                "set daemon token file permissions {} failed: {err}",
-                path.display()
-            )
-        })
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|err| {
+        miette!(
+            "set daemon token file permissions {} failed: {err}",
+            path.display()
+        )
+    })
 }
 
 #[cfg(not(unix))]
-async fn harden_private_file_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
+const fn harden_private_file_permissions(_path: &Path) {}
 
 fn normalize_token_name(name: &str) -> Result<String> {
     let name = name.trim();

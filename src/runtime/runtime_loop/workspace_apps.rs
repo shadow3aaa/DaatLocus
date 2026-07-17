@@ -1,4 +1,4 @@
-use super::*;
+use super::Context;
 
 pub(super) async fn sync_workspace_apps_from_invalidation(context: &mut Context) {
     let report = match context

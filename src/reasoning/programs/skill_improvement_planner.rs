@@ -101,7 +101,6 @@ impl Program for SkillImprovementPlannerProgram {
 
 impl SkillImprovementPlannerProgram {
     pub fn dataset_ir(
-        &self,
         skill_name: String,
         skill_content: String,
         run_evidence_json: String,

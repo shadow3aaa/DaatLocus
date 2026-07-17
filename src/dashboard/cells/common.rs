@@ -278,8 +278,7 @@ fn strip_markdown_emphasis(value: &str) -> &str {
     }
     trimmed
         .strip_prefix('#')
-        .map(|inner| inner.trim_start_matches('#'))
-        .unwrap_or(trimmed)
+        .map_or(trimmed, |inner| inner.trim_start_matches('#'))
         .trim()
 }
 
@@ -308,13 +307,13 @@ fn is_markdown_block_syntax(value: &str) -> bool {
 fn ordered_list_prefix(value: &str) -> bool {
     let mut chars = value.chars().peekable();
     let mut saw_digit = false;
-    while chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+    while chars.peek().is_some_and(char::is_ascii_digit) {
         saw_digit = true;
         chars.next();
     }
     saw_digit
-        && matches!(chars.next(), Some('.') | Some(')'))
-        && chars.next().is_some_and(|ch| ch.is_whitespace())
+        && matches!(chars.next(), Some('.' | ')'))
+        && chars.next().is_some_and(char::is_whitespace)
 }
 
 fn is_common_han(ch: char) -> bool {
@@ -452,14 +451,12 @@ fn render_exposed_tool_name_token(token: &str) -> String {
     let start = token
         .char_indices()
         .find(|(_, ch)| ch.is_ascii_alphanumeric() || *ch == '_')
-        .map(|(index, _)| index)
-        .unwrap_or(token.len());
+        .map_or(token.len(), |(index, _)| index);
     let end = token
         .char_indices()
         .rev()
         .find(|(_, ch)| ch.is_ascii_alphanumeric() || *ch == '_')
-        .map(|(index, ch)| index + ch.len_utf8())
-        .unwrap_or(start);
+        .map_or(start, |(index, ch)| index + ch.len_utf8());
     if start >= end {
         return token.to_string();
     }

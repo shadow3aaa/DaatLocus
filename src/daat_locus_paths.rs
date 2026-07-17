@@ -21,7 +21,7 @@ pub struct DaatLocusPaths {
 }
 
 impl DaatLocusPaths {
-    pub fn from_root(root: PathBuf) -> Self {
+    pub const fn from_root(root: PathBuf) -> Self {
         Self { root }
     }
 
@@ -184,9 +184,10 @@ impl DaatLocusPaths {
 }
 
 fn resolve_daat_locus_home_root() -> PathBuf {
-    env::var("DAAT_LOCUS_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| env::home_dir().unwrap().join(".daat-locus"))
+    env::var("DAAT_LOCUS_HOME").map_or_else(
+        |_| env::home_dir().unwrap().join(".daat-locus"),
+        PathBuf::from,
+    )
 }
 
 fn ensure_layout_sync(paths: &DaatLocusPaths) {

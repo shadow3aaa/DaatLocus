@@ -259,7 +259,7 @@ impl OpenSkillsCatalog {
 }
 
 impl OpenSkillScope {
-    fn rank(self) -> u8 {
+    const fn rank(self) -> u8 {
         match self {
             Self::Project => 0,
             Self::DaatLocusHome => 1,
@@ -267,7 +267,7 @@ impl OpenSkillScope {
         }
     }
 
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Project => "project",
             Self::DaatLocusHome => "daat-locus",
@@ -277,7 +277,7 @@ impl OpenSkillScope {
 }
 
 impl OpenSkill {
-    pub fn auto_use_enabled(&self) -> bool {
+    pub const fn auto_use_enabled(&self) -> bool {
         self.allow_implicit_invocation && !self.user_disabled
     }
 }
@@ -316,10 +316,8 @@ fn ensure_builtin_skills_on_disk() {
             continue;
         }
         let skill_file = skill_dir.join(SKILL_FILE_NAME);
-        let need_write = match fs::read_to_string(&skill_file) {
-            Ok(existing) => existing != *content,
-            Err(_) => true,
-        };
+        let need_write =
+            fs::read_to_string(&skill_file).map_or(true, |existing| existing != *content);
         if need_write && let Err(err) = fs::write(&skill_file, content) {
             tracing::warn!(
                 "failed to write builtin skill {}: {err}",
@@ -658,9 +656,8 @@ fn load_allow_implicit_invocation(skill_path: &Path) -> bool {
         return true;
     };
     let metadata_path = skill_dir.join("agents").join("openai.yaml");
-    let contents = match fs::read_to_string(metadata_path) {
-        Ok(contents) => contents,
-        Err(_) => return true,
+    let Ok(contents) = fs::read_to_string(metadata_path) else {
+        return true;
     };
     serde_yaml::from_str::<OpenAiSkillMetadata>(&contents)
         .ok()
@@ -915,7 +912,7 @@ fn extract_dollar_mentions(text: &str) -> HashSet<&str> {
     mentions
 }
 
-fn is_mention_name_char(byte: u8) -> bool {
+const fn is_mention_name_char(byte: u8) -> bool {
     matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b':')
 }
 
@@ -926,23 +923,23 @@ fn is_common_env_var(name: &str) -> bool {
     )
 }
 
-const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r#"- Discovery: The list above is the OpenSkills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
+const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r"- Discovery: The list above is the OpenSkills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
 - Trigger rules: If the user names a skill with `$SkillName` or plain text, or the task clearly matches a skill description above, use that skill for the current turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
 - How to use a skill:
   1. Before task actions that rely on a skill, use Terminal or Coding tools as needed and read that skill's `SKILL.md` completely.
   2. Resolve relative paths mentioned by `SKILL.md` relative to the directory containing that `SKILL.md`.
   3. Read only the referenced files needed for the task; avoid loading unrelated `references/`, `scripts/`, or `assets/`.
   4. Prefer running or adapting provided `scripts/` and reusing provided `assets/` or templates when applicable.
-- If a named skill is missing, unreadable, or invalid, say so briefly and continue with the best fallback."#;
+- If a named skill is missing, unreadable, or invalid, say so briefly and continue with the best fallback.";
 
-const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r#"- Discovery: The list above is the OpenSkills available in this session (name + description + short path). Expand short paths with the matching alias from `### Skill roots`.
+const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r"- Discovery: The list above is the OpenSkills available in this session (name + description + short path). Expand short paths with the matching alias from `### Skill roots`.
 - Trigger rules: If the user names a skill with `$SkillName` or plain text, or the task clearly matches a skill description above, use that skill for the current turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
 - How to use a skill:
   1. Expand the listed short `file` path with `### Skill roots`, then use Terminal or Coding tools as needed and read that skill's `SKILL.md` completely before task actions that rely on it.
   2. Resolve relative paths mentioned by `SKILL.md` relative to the directory containing that expanded `SKILL.md`.
   3. Read only the referenced files needed for the task; avoid loading unrelated `references/`, `scripts/`, or `assets/`.
   4. Prefer running or adapting provided `scripts/` and reusing provided `assets/` or templates when applicable.
-- If a named skill is missing, unreadable, or invalid, say so briefly and continue with the best fallback."#;
+- If a named skill is missing, unreadable, or invalid, say so briefly and continue with the best fallback.";
 
 #[cfg(test)]
 mod tests {

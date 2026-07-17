@@ -102,9 +102,11 @@ impl TelegramAclHandle {
             .pending
             .entry(chat_id)
             .and_modify(|request| {
-                request.title = title.clone();
-                request.sender = sender.clone();
-                request.last_message_preview = last_message_preview.clone();
+                request.title.clone_from(&title);
+                request.sender.clone_from(&sender);
+                request
+                    .last_message_preview
+                    .clone_from(&last_message_preview);
                 request.last_seen_at_ms = seen_at_ms;
             })
             .or_insert_with(|| PendingAccessRequest {
@@ -115,12 +117,15 @@ impl TelegramAclHandle {
                 first_seen_at_ms: seen_at_ms,
                 last_seen_at_ms: seen_at_ms,
             });
-        persist_locked(&inner)
+        let persisted = persist_locked(&inner);
+        drop(inner);
+        persisted
     }
 
     pub fn pending_requests(&self) -> Vec<PendingAccessRequest> {
         let inner = self.inner.lock();
         let mut requests = inner.state.pending.values().cloned().collect::<Vec<_>>();
+        drop(inner);
         requests.sort_by(|left, right| {
             right
                 .last_seen_at_ms
@@ -138,6 +143,7 @@ impl TelegramAclHandle {
             .values()
             .cloned()
             .collect::<Vec<_>>();
+        drop(inner);
         chats.sort_by(|left, right| {
             right
                 .last_seen_at_ms
@@ -170,7 +176,9 @@ impl TelegramAclHandle {
                 last_seen_at_ms: seen_at_ms,
             },
         );
-        persist_locked(&inner)
+        let persisted = persist_locked(&inner);
+        drop(inner);
+        persisted
     }
 
     pub fn observe_approved(
@@ -193,9 +201,9 @@ impl TelegramAclHandle {
             .approved_meta
             .entry(chat_id)
             .and_modify(|chat| {
-                chat.title = title.clone();
-                chat.sender = sender.clone();
-                chat.last_message_preview = last_message_preview.clone();
+                chat.title.clone_from(&title);
+                chat.sender.clone_from(&sender);
+                chat.last_message_preview.clone_from(&last_message_preview);
                 chat.last_seen_at_ms = seen_at_ms;
             })
             .or_insert(ApprovedChat {
@@ -206,7 +214,9 @@ impl TelegramAclHandle {
                 approved_at_ms: seen_at_ms,
                 last_seen_at_ms: seen_at_ms,
             });
-        persist_locked(&inner)
+        let persisted = persist_locked(&inner);
+        drop(inner);
+        persisted
     }
 }
 

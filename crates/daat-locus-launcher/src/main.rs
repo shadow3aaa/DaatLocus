@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 use std::{
     env,
+    fmt::Write as _,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     net::{SocketAddr, TcpStream},
@@ -99,9 +100,7 @@ fn installed_main_binary_for_launcher(launcher: &Path) -> io::Result<PathBuf> {
     Ok(parent_dir_binary.unwrap_or(same_dir_binary))
 }
 fn spawn_daemon(main_binary: &Path, home: &Path) -> io::Result<()> {
-    let stderr = launcher_log_file(home)
-        .map(Stdio::from)
-        .unwrap_or_else(|_| Stdio::null());
+    let stderr = launcher_log_file(home).map_or_else(|_| Stdio::null(), Stdio::from);
     let with_tray = env::var_os(NO_TRAY_ENV).is_none();
     let mut command = Command::new(main_binary);
     configure_daemon_command(&mut command, with_tray);
@@ -123,9 +122,9 @@ fn configure_daemon_command(command: &mut Command, with_tray: bool) {
 #[cfg(windows)]
 fn apply_detached_creation_flags(command: &mut Command, with_tray: bool) {
     use std::os::windows::process::CommandExt;
-    const DETACHED_PROCESS: u32 = 0x00000008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut flags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
     if !with_tray {
         flags |= DETACHED_PROCESS;
@@ -208,17 +207,19 @@ fn percent_encode_url_component(value: &str) -> String {
     for byte in value.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(byte as char)
+                encoded.push(byte as char);
             }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
+            _ => {
+                write!(encoded, "%{byte:02X}").expect("writing to String cannot fail");
+            }
         }
     }
     encoded
 }
-fn should_start_without_config() -> bool {
+const fn should_start_without_config() -> bool {
     true
 }
-fn should_open_webui_after_launch() -> bool {
+const fn should_open_webui_after_launch() -> bool {
     cfg!(target_os = "macos")
 }
 #[cfg(target_os = "macos")]

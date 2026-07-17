@@ -7,7 +7,7 @@ use tracing::warn;
 use crate::reasoning::runtime::AgentToolCall;
 
 static DSML_FUNCTION_CALLS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<[｜|]DSML[｜|]function_calls>[\s\S]*?</?[｜|]DSML[｜|]function_calls>"#)
+    Regex::new(r"<[｜|]DSML[｜|]function_calls>[\s\S]*?</?[｜|]DSML[｜|]function_calls>")
         .expect("DSML function_calls regex must compile")
 });
 
@@ -17,7 +17,7 @@ static DSML_INVOKE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static DSML_INVOKE_STRIP_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<[｜|]DSML[｜|]invoke\s+[^>]*>[\s\S]*?</[｜|]DSML[｜|]invoke>"#)
+    Regex::new(r"<[｜|]DSML[｜|]invoke\s+[^>]*>[\s\S]*?</[｜|]DSML[｜|]invoke>")
         .expect("DSML invoke strip regex must compile")
 });
 
@@ -28,7 +28,7 @@ static DSML_PARAMETER_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("DSML parameter regex must compile")
 });
 
-pub(crate) fn strip_dsml_from_thinking(thinking: &str) -> String {
+pub fn strip_dsml_from_thinking(thinking: &str) -> String {
     let mut out = thinking.to_string();
 
     out = DSML_FUNCTION_CALLS_RE.replace_all(&out, "").to_string();
@@ -44,7 +44,7 @@ pub(crate) fn strip_dsml_from_thinking(thinking: &str) -> String {
     out.trim().to_string()
 }
 
-pub(crate) fn scavenge_dsml_tool_calls(
+pub fn scavenge_dsml_tool_calls(
     text: &str,
     allowed_tool_names: &HashSet<String>,
     max_calls: usize,
@@ -99,7 +99,7 @@ fn parse_dsml_parameters(body: &str) -> Value {
     for caps in DSML_PARAMETER_RE.captures_iter(body) {
         let key = caps.get(1).expect("parameter name").as_str();
         let string_flag = caps.get(2).map(|m| m.as_str());
-        let raw = caps.get(3).map(|m| m.as_str().trim()).unwrap_or("");
+        let raw = caps.get(3).map_or("", |m| m.as_str().trim());
 
         if string_flag == Some("false")
             && let Ok(parsed) = serde_json::from_str::<Value>(raw)
@@ -175,7 +175,7 @@ struct JsonObjectIter<'a> {
     pos: usize,
 }
 
-impl<'a> Iterator for JsonObjectIter<'a> {
+impl Iterator for JsonObjectIter<'_> {
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -224,7 +224,7 @@ impl<'a> Iterator for JsonObjectIter<'a> {
     }
 }
 
-pub(crate) fn repair_truncated_json(input: &str) -> TruncationRepairResult {
+pub fn repair_truncated_json(input: &str) -> TruncationRepairResult {
     if input.trim().is_empty() {
         return TruncationRepairResult {
             repaired: "{}".to_string(),
@@ -306,21 +306,21 @@ pub(crate) fn repair_truncated_json(input: &str) -> TruncationRepairResult {
         }
     }
 
-    match serde_json::from_str::<Value>(&s) {
-        Ok(value) => TruncationRepairResult {
-            repaired: s,
-            changed: true,
-            repaired_value: value,
-        },
-        Err(_) => {
+    serde_json::from_str::<Value>(&s).map_or_else(
+        |_| {
             warn!("dsml repair: truncated JSON repair failed, falling back to {{}}");
             TruncationRepairResult {
                 repaired: "{}".to_string(),
                 changed: true,
                 repaired_value: json!({}),
             }
-        }
-    }
+        },
+        |value| TruncationRepairResult {
+            repaired: s,
+            changed: true,
+            repaired_value: value,
+        },
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -330,23 +330,22 @@ enum BracketKind {
     String,
 }
 
-pub(crate) struct TruncationRepairResult {
+pub struct TruncationRepairResult {
     pub repaired: String,
     pub changed: bool,
     pub repaired_value: Value,
 }
 
-pub(crate) fn repair_tool_call_arguments(call: &mut AgentToolCall) -> bool {
-    let args_str = match call.arguments {
-        Value::String(ref s) => s.clone(),
-        _ => {
-            let s = call.arguments.to_string();
-            if s == "null" || s.is_empty() {
-                call.arguments = json!({});
-                return true;
-            }
-            s
+pub fn repair_tool_call_arguments(call: &mut AgentToolCall) -> bool {
+    let args_str = if let Value::String(ref s) = call.arguments {
+        s.clone()
+    } else {
+        let s = call.arguments.to_string();
+        if s == "null" || s.is_empty() {
+            call.arguments = json!({});
+            return true;
         }
+        s
     };
     if serde_json::from_str::<Value>(&args_str).is_ok() {
         return false;

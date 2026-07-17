@@ -187,8 +187,7 @@ impl CompiledPromptStore {
     pub fn runtime_system_additions(&self) -> &[String] {
         self.runtime_system_prompt
             .as_ref()
-            .map(|prompt| prompt.system_additions.as_slice())
-            .unwrap_or(&[])
+            .map_or(&[], |prompt| prompt.system_additions.as_slice())
     }
 }
 

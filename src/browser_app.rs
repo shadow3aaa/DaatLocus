@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{
     collections::{BTreeMap, HashMap},
     future::IntoFuture,
@@ -51,14 +52,14 @@ struct BrowserBackend {
 }
 
 impl BrowserBackend {
-    fn new(browser: Browser, runtime_guard: BrowserRuntimeGuard) -> Self {
+    const fn new(browser: Browser, runtime_guard: BrowserRuntimeGuard) -> Self {
         Self {
             browser: Some(browser),
             runtime_guard: Some(runtime_guard),
         }
     }
 
-    fn browser(&self) -> &Browser {
+    const fn browser(&self) -> &Browser {
         self.browser
             .as_ref()
             .expect("browser backend should own a browser while alive")
@@ -134,7 +135,7 @@ struct RenderedSnapshotLines {
 }
 
 impl BrowserApp {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             context: None,
             backend: None,
@@ -234,10 +235,10 @@ impl BrowserApp {
             .map(|value| value.trim().to_ascii_lowercase())
             .as_deref()
         {
-            None | Some("") | Some("load") | Some("complete") => {
+            None | Some("" | "load" | "complete") => {
                 Ok(("load", "() => document.readyState === 'complete'"))
             }
-            Some("dom") | Some("interactive") | Some("domcontentloaded") => {
+            Some("dom" | "interactive" | "domcontentloaded") => {
                 Ok(("dom", "() => document.readyState !== 'loading'"))
             }
             Some(other) => Err(miette!(
@@ -298,10 +299,10 @@ impl BrowserApp {
             page.aria_snapshot(),
         )
         .await?;
-        let state = self.replace_page_state(&page).await;
+        let page_state = self.replace_page_state(&page).await;
         let (snapshot, stats) = compact_browser_snapshot(&snapshot);
         Ok(BrowserSnapshotResult {
-            page: state,
+            page: page_state,
             snapshot,
             line_count: stats.line_count,
             ref_count: stats.ref_count,
@@ -499,8 +500,7 @@ fn normalize_snapshot_role(node: &AriaSnapshot) -> String {
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty())
-        .map(|role| role.to_ascii_lowercase())
-        .unwrap_or_else(|| "generic".to_string())
+        .map_or_else(|| "generic".to_string(), str::to_ascii_lowercase)
 }
 
 fn normalized_snapshot_text(value: Option<&str>) -> Option<String> {
@@ -556,10 +556,11 @@ fn build_snapshot_line(
     let indent = "  ".repeat(depth);
     let mut line = format!("{indent}- {role}");
     if let Some(name) = name {
-        line.push_str(&format!(
+        let _ = write!(
+            line,
             " \"{}\"",
             escape_snapshot_value(&compact_snapshot_text(name, 160))
-        ));
+        );
     }
 
     if let Some(node_ref) = node.node_ref.as_deref()
@@ -569,9 +570,9 @@ fn build_snapshot_line(
         let nth = duplicate_seen.entry(key.clone()).or_insert(0);
         let current_nth = *nth;
         *nth += 1;
-        line.push_str(&format!(" [ref={node_ref}]"));
+        let _ = write!(line, " [ref={node_ref}]");
         if duplicate_counts.get(&key).copied().unwrap_or(0) > 1 && current_nth > 0 {
-            line.push_str(&format!(" [nth={current_nth}]"));
+            let _ = write!(line, " [nth={current_nth}]");
         }
         stats.ref_count += 1;
         if is_interactive_role(role) {
@@ -580,23 +581,25 @@ fn build_snapshot_line(
     }
 
     if let Some(value_text) = normalized_snapshot_text(node.value_text.as_deref()) {
-        line.push_str(&format!(
+        let _ = write!(
+            line,
             " value=\"{}\"",
             escape_snapshot_value(&compact_snapshot_text(&value_text, 120))
-        ));
+        );
     } else if let Some(value_now) = node.value_now {
-        line.push_str(&format!(" value={value_now}"));
+        let _ = write!(line, " value={value_now}");
     }
 
     if let Some(description) = normalized_snapshot_text(node.description.as_deref()) {
-        line.push_str(&format!(
+        let _ = write!(
+            line,
             " description=\"{}\"",
             escape_snapshot_value(&compact_snapshot_text(&description, 120))
-        ));
+        );
     }
 
     if let Some(level) = node.level {
-        line.push_str(&format!(" level={level}"));
+        let _ = write!(line, " level={level}");
     }
     if node.disabled == Some(true) {
         line.push_str(" disabled");
@@ -608,7 +611,7 @@ fn build_snapshot_line(
         line.push_str(" selected");
     }
     if let Some(checked) = node.checked {
-        line.push_str(&format!(" checked={checked:?}"));
+        let _ = write!(line, " checked={checked:?}");
     }
     if node.pressed == Some(true) {
         line.push_str(" pressed");
@@ -1257,7 +1260,7 @@ impl App for BrowserApp {
                             format!("page={}", result.page.page_id),
                             format!("url={}", result.page.url),
                         ],
-                        url: Some(result.page.url.clone()),
+                        url: Some(result.page.url),
                         line_count: None,
                         ref_count: None,
                     }),

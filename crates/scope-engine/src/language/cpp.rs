@@ -4,7 +4,8 @@ use tree_sitter::Language;
 pub struct CppAdapter;
 
 impl CppAdapter {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -27,17 +28,17 @@ impl LanguageAdapter for CppAdapter {
     }
     fn queries(&self) -> LanguageQueries {
         LanguageQueries {
-            definitions: r#"
+            definitions: r"
                 (function_definition declarator: (function_declarator declarator: (identifier) @name)) @def
                 (class_specifier name: (type_identifier) @name) @def
                 (struct_specifier name: (type_identifier) @name) @def
                 (declaration declarator: (init_declarator declarator: (identifier) @name)) @def
-            "#,
-            references: r#"
+            ",
+            references: r"
                 (call_expression function: (identifier) @ref) @call
                 (call_expression function: (field_identifier) @ref) @call
                 (type_identifier) @ref
-            "#,
+            ",
         }
     }
 }

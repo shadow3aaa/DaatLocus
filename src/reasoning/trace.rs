@@ -54,9 +54,8 @@ pub struct ProgramTraceRecordParts {
 pub async fn append_program_trace(record: ProgramTraceRecord) {
     let trace_io_guard = trace_io_lock().lock().await;
     let path = daat_locus_paths().await.journal_file(TRACE_FILE_NAME);
-    let mut line = match serde_json::to_vec(&record) {
-        Ok(bytes) => bytes,
-        Err(_) => return,
+    let Ok(mut line) = serde_json::to_vec(&record) else {
+        return;
     };
     line.push(b'\n');
     let _ = append_bytes_durable(path, line).await;

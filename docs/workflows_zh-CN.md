@@ -114,6 +114,7 @@ workflow.tool({
 })
 
 local researcher = workflow.agent({
+  role = "research",
   model = "efficient",
   input = Input,
   output = ResearchOutput,
@@ -151,15 +152,23 @@ handle 动态形成，而不是静态 DAG。
 ```lua
 workflow.define({ input = InputSchema, output = OutputSchema,
   run = function(input, ctx) ... end })
-workflow.agent({ model, input, output, instruction, extra_tools })
-workflow.await(handle)
-workflow.await_all(handles)
+workflow.agent({ role, model, input, output, instruction, extra_tools })
+workflow.await(handle[, transition])
+workflow.await_all(handles[, transition])
 workflow.tool({ name, input, output, run })
 ```
 
+`role` 为必填且不可为空的字符串。它用于在工作流检查器中标识 worker attempt，不会选择宿主隐藏
+profile。即使多个执行使用同一个 role，检查器仍会将它们保留为独立 attempt。
+
 `workflow.agent(...)` 返回 worker factory。`factory:run(value)` 创建 handle，
-`workflow.await(handle)` 返回 worker 的类型化输出，`workflow.await_all({ handle_a, handle_b })`
-按 handle 顺序返回输出。需要协调一组 worker 时，请先创建 handles 再等待。一个 handle 只能被等待一次。
+`workflow.await(handle[, transition])` 返回 worker 的类型化输出，
+`workflow.await_all({ handle_a, handle_b }[, transition])` 会并发运行这些 worker，并按 handle
+顺序返回输出。任一 worker 失败或工作流被中断时，整个 group 都会停止并传播该失败或中断。每个并发 worker
+都有独立的 runtime 与 App 实例；只有显式共享的外部资源和工作流局部工具效果是共享的。
+`transition` 可省略，默认是 `"await"`；当下一个 worker 与上一 await group 是验证、返工或重试关系时，
+请使用 `"verify"`、`"revision"` 或 `"retry"`。需要协调一组 worker 时，请先创建 handles 再等待。
+一个 handle 只能被等待一次。
 
 ## 可移植 Schema
 
@@ -183,7 +192,7 @@ worker、局部工具的输入，以及最终输出，会在运行时再次校�
 
 每个 worker 都是隔离的 agent turn。它只会得到：
 
-- `instruction` 和类型化输入；
+- 必填且非空的 `role`、`instruction` 和类型化输入；
 - 声明的 `model`（`"main"` 或 `"efficient"`）；
 - 由宿主提供的运行时与 App 工具；以及
 - `extra_tools` 中列出的局部工具。
@@ -218,9 +227,9 @@ worker 可持续进行 model/tool round，直到完成、失败或被中断；ho
 
 1. 在 `~/.daat-locus/workflows` 下选择一个 lower-snake-case 文件名。
 2. 声明可移植的输入/输出 schema，并且只调用一次 `workflow.define`。
-3. 为每个 worker 提供聚焦的 instruction、类型化输入/输出、明确模型，以及它真正需要的工作流局部工具。
-4. 使用 `worker:run(...)`、`await` 和 `await_all` 把属于 Lua 的控制流保留在 Lua 中；Session event 完成
-   留在工作流外。
+3. 为每个 worker 提供必填且非空的 role、聚焦的 instruction、类型化输入/输出、明确模型，以及它真正需要的工作流局部工具。
+4. 使用 `worker:run(...)`、`await` 和 `await_all` 把属于 Lua 的控制流保留在 Lua 中。验证、返工和重试
+   交接请使用可选 transition 参数标记；Session event 完成留在工作流外。
 5. 将文件和 shell 操作视为沙箱下的真实副作用；自行实现幂等性或 checkpoint。
 6. 通过 `/skills reload` 重新加载，在 `/workflows` 中解决加载错误，并先用生成的表单测试，再依赖动态
    `workflow__<id>` 主 agent 工具。

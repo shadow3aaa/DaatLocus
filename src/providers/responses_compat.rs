@@ -1,8 +1,10 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use miette::{Result, miette};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -26,7 +28,7 @@ use crate::reasoning::runtime::{
     AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage, PromptRequest,
 };
 
-pub(crate) struct ResponsesCompatibleClient {
+pub struct ResponsesCompatibleClient {
     client: reqwest::Client,
     api_key: String,
     base_url: String,
@@ -61,12 +63,9 @@ impl ResponsesCompatibleClient {
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
         let reserved_output_tokens = model_config.reserved_output_tokens();
-        let supports_vision = match model_config.supports_vision {
-            Some(v) => v,
-            None => catalog_model_capacity(&model_config.model_id)
-                .map(|c| c.supports_vision)
-                .unwrap_or(false),
-        };
+        let supports_vision = model_config.supports_vision.unwrap_or_else(|| {
+            catalog_model_capacity(&model_config.model_id).is_some_and(|c| c.supports_vision)
+        });
         Self {
             client,
             api_key: api_key.to_string(),
@@ -90,7 +89,7 @@ impl ResponsesCompatibleClient {
             token_usage: std::sync::Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
-                model_context_window: Some(context_window_tokens as i64),
+                model_context_window: i64::try_from(context_window_tokens).ok(),
                 daily_token_usage: Vec::new(),
             }),
             supports_vision: std::sync::atomic::AtomicBool::new(supports_vision),
@@ -101,7 +100,7 @@ impl ResponsesCompatibleClient {
         format!("{}/responses", self.base_url.trim_end_matches('/'))
     }
 
-    fn request_budget_limits(&self) -> RequestBudgetLimits {
+    const fn request_budget_limits(&self) -> RequestBudgetLimits {
         RequestBudgetLimits {
             context_window_tokens: self.effective_context_window_tokens,
             auto_compact_threshold_tokens: self.auto_compact_threshold_tokens,
@@ -116,7 +115,7 @@ impl ResponsesCompatibleClient {
         let Some(rpm) = self.rpm else {
             return;
         };
-        let window = Duration::from_secs(60);
+        let window = Duration::from_mins(1);
         loop {
             let mut queue = limiter.lock().await;
             let now = Instant::now();
@@ -126,7 +125,7 @@ impl ResponsesCompatibleClient {
                 return;
             }
             let oldest = *queue.front().unwrap();
-            let wait = window - now.duration_since(oldest);
+            let wait = window.checked_sub(now.duration_since(oldest)).unwrap();
             drop(queue);
             tokio::time::sleep(wait).await;
         }
@@ -182,9 +181,10 @@ impl ResponsesCompatibleClient {
                     ));
                 }
 
-                let delay = retry_after
-                    .map(Duration::from_secs)
-                    .unwrap_or_else(|| default_rate_limit_backoff(rate_limit_attempt));
+                let delay = retry_after.map_or_else(
+                    || default_rate_limit_backoff(rate_limit_attempt),
+                    Duration::from_secs,
+                );
                 warn!(
                     "responses-compatible returned HTTP 429; retrying in {} ms (attempt {}/{})\n{}",
                     delay.as_millis(),
@@ -237,7 +237,7 @@ impl ResponsesCompatibleClient {
 
     fn record_last_usage(&self, usage: TokenUsage) {
         if let Ok(mut info) = self.token_usage.lock() {
-            info.model_context_window = Some(self.context_window_tokens as i64);
+            info.model_context_window = i64::try_from(self.context_window_tokens).ok();
             info.append_last_usage(usage);
         }
     }
@@ -264,8 +264,6 @@ impl ResponsesCompatibleClient {
             format!("model={}", self.model),
             "phase=response_stream".to_string(),
         ];
-
-        use futures_util::StreamExt;
 
         while !completed {
             let next_chunk = tokio::time::timeout(self.stream_idle_timeout, stream.next())
@@ -335,8 +333,9 @@ impl ResponsesCompatibleClient {
                             }
                         }
                     }
-                    Some("response.reasoning_summary_text.delta")
-                    | Some("response.reasoning_text.delta") => {
+                    Some(
+                        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta",
+                    ) => {
                         if let Some(delta) = value.get("delta").and_then(Value::as_str) {
                             reasoning_content.push_str(delta);
                             if emit_progress {
@@ -378,7 +377,7 @@ impl ResponsesCompatibleClient {
                             self.record_last_usage(usage);
                         }
                     }
-                    Some("response.failed") | Some("response.incomplete") => {
+                    Some("response.failed" | "response.incomplete") => {
                         return Err(miette!(
                             "responses-compatible stream failed: {}",
                             truncate_for_json_error(&value)
@@ -442,7 +441,7 @@ impl ModelProvider for ResponsesCompatibleClient {
         let request_context = super::io::summarize_prompt_request(&request, Some(budget));
         let (instructions, input) =
             history_messages_to_responses_parts(request.all_messages(), false);
-        let mut payload = base_payload(self, instructions, input, Vec::new());
+        let mut payload = base_payload(self, &instructions, &input, &Vec::new());
         payload["text"] = json!({
             "format": {
                 "type": "json_schema",
@@ -491,7 +490,6 @@ impl ModelProvider for ResponsesCompatibleClient {
     ) -> Result<AgentTurnStreamResult> {
         let budget = &options.budget;
         let request_context = super::io::summarize_agent_turn_request(&request, Some(budget));
-        use std::sync::atomic::Ordering;
         let strip_images = !self.supports_vision.load(Ordering::Relaxed);
         let payload = build_agent_payload(self, request.clone(), strip_images);
         let response = self
@@ -586,9 +584,9 @@ impl ModelProvider for ResponsesCompatibleClient {
 
 fn base_payload(
     client: &ResponsesCompatibleClient,
-    instructions: String,
-    input: Vec<Value>,
-    tools: Vec<Value>,
+    instructions: &str,
+    input: &[Value],
+    tools: &[Value],
 ) -> Value {
     let mut payload = json!({
         "model": client.model,
@@ -619,7 +617,7 @@ fn build_agent_payload(
         .into_iter()
         .map(agent_tool_to_responses_tool)
         .collect::<Vec<_>>();
-    base_payload(client, instructions, input, tools)
+    base_payload(client, &instructions, &input, &tools)
 }
 
 fn history_messages_to_responses_parts(
@@ -645,14 +643,14 @@ fn agent_messages_to_responses_parts(
         match message {
             AgentMessage::System { content } => instructions.push(content),
             AgentMessage::User { content } => {
-                input.push(responses_user_message(content, strip_images))
+                input.push(responses_user_message(&content, strip_images));
             }
             AgentMessage::Assistant { content } => {
-                input.push(responses_message("assistant", "output_text", content));
+                input.push(responses_message("assistant", "output_text", &content));
             }
             AgentMessage::AssistantToolCallProtocol { content, calls, .. } => {
                 if let Some(content) = content.filter(|content| !content.trim().is_empty()) {
-                    input.push(responses_message("assistant", "output_text", content));
+                    input.push(responses_message("assistant", "output_text", &content));
                 }
                 for call in calls {
                     valid_tool_call_ids.insert(call.id.clone());
@@ -679,7 +677,7 @@ fn agent_messages_to_responses_parts(
                     input.push(responses_message(
                         "assistant",
                         "output_text",
-                        flatten_tool_result_as_assistant_text(&name, &content),
+                        &flatten_tool_result_as_assistant_text(&name, &content),
                     ));
                 }
             }
@@ -689,7 +687,7 @@ fn agent_messages_to_responses_parts(
     (instructions.join("\n\n"), input)
 }
 
-fn responses_message(role: &str, content_type: &str, text: String) -> Value {
+fn responses_message(role: &str, content_type: &str, text: &str) -> Value {
     json!({
         "type": "message",
         "role": role,
@@ -700,9 +698,9 @@ fn responses_message(role: &str, content_type: &str, text: String) -> Value {
     })
 }
 
-fn responses_user_message(content: AgentContent, strip_images: bool) -> Value {
+fn responses_user_message(content: &AgentContent, strip_images: bool) -> Value {
     if content.is_plain_text() {
-        return responses_message("user", "input_text", content.as_text().to_string());
+        return responses_message("user", "input_text", content.as_text());
     }
 
     let mut parts = Vec::new();
@@ -802,7 +800,7 @@ fn response_item_message_text(item: &Value) -> Option<String> {
         .into_iter()
         .flat_map(|content| content.iter())
         .filter_map(|part| match part.get("type").and_then(Value::as_str) {
-            Some("output_text") | Some("input_text") => part.get("text").and_then(Value::as_str),
+            Some("output_text" | "input_text") => part.get("text").and_then(Value::as_str),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -948,7 +946,7 @@ mod tests {
             },
         );
 
-        let payload = base_payload(&client, "instructions".to_string(), vec![], vec![]);
+        let payload = base_payload(&client, "instructions", &[], &[]);
 
         assert!(payload.get("max_output_tokens").is_none(), "{payload:#}");
     }

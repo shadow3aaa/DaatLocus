@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{
     collections::HashMap,
     io::Write,
@@ -68,7 +69,7 @@ mod logs;
 pub mod session;
 pub mod session_ipc;
 
-pub(crate) type SessionTokenStore = Arc<parking_lot::RwLock<HashMap<session::SessionId, String>>>;
+pub type SessionTokenStore = Arc<parking_lot::RwLock<HashMap<session::SessionId, String>>>;
 
 pub use auth::{
     CreatedDaemonToken, DaemonAuthToken, DaemonTokenListEntry, DaemonTokenRegistryHandle,
@@ -159,7 +160,7 @@ pub enum DaemonLifecycleState {
 }
 
 impl DaemonLifecycleState {
-    fn as_u8(self) -> u8 {
+    const fn as_u8(self) -> u8 {
         match self {
             Self::Initializing => 0,
             Self::Ready => 1,
@@ -168,7 +169,7 @@ impl DaemonLifecycleState {
         }
     }
 
-    fn from_u8(value: u8) -> Self {
+    const fn from_u8(value: u8) -> Self {
         match value {
             1 => Self::Ready,
             2 => Self::Stopping,
@@ -177,7 +178,7 @@ impl DaemonLifecycleState {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Initializing => "initializing",
             Self::Ready => "ready",
@@ -186,7 +187,7 @@ impl DaemonLifecycleState {
         }
     }
 
-    fn allows_runtime_commands(self) -> bool {
+    const fn allows_runtime_commands(self) -> bool {
         matches!(self, Self::Ready)
     }
 }
@@ -254,7 +255,7 @@ pub struct CommandRequest {
     pub session_id: Option<String>,
 }
 
-fn default_command_origin() -> session_ipc::UserInputOrigin {
+const fn default_command_origin() -> session_ipc::UserInputOrigin {
     session_ipc::UserInputOrigin::WebUi
 }
 
@@ -412,6 +413,16 @@ struct DashboardStreamQuery {
 
 #[derive(Debug, Deserialize)]
 struct DashboardActivityHistoryQuery {
+    before: Option<i64>,
+    after: Option<i64>,
+    limit: Option<usize>,
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowWorkerActivityQuery {
+    run_id: Option<String>,
+    worker_id: Option<String>,
     before: Option<i64>,
     after: Option<i64>,
     limit: Option<usize>,
@@ -639,6 +650,10 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/dashboard/snapshot", get(snapshot_handler))
         .route("/dashboard/stream", get(stream_handler))
         .route("/dashboard/activity-history", get(activity_history_handler))
+        .route(
+            "/dashboard/workflow-worker-activity",
+            get(workflow_worker_activity_handler),
+        )
         .route("/dashboard/input-history", get(input_history_handler))
         .route(
             "/dashboard/activity-history/count",
@@ -683,7 +698,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/sessions", post(session_create_handler))
         .route("/sessions/{session_id}", delete(session_delete_handler))
         .route("/sessions/{session_id}/title", post(session_title_handler))
-        .with_state(app_state.clone());
+        .with_state(app_state);
 
     let router = router.fallback(get(embedded_webui_handler));
 
@@ -863,11 +878,7 @@ async fn store_command_attachment(
 
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let digest = hasher.finalize();
-    let digest_hex = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let digest_hex = hex::encode(hasher.finalize());
     let original_name = attachment.name.trim();
     let display_name = if original_name.is_empty() {
         "webui-image"
@@ -949,7 +960,7 @@ fn extension_for_dashboard_image(file_name: &str, media_type: &str) -> &'static 
         .as_deref()
     {
         Some("png") => "png",
-        Some("jpg") | Some("jpeg") => "jpg",
+        Some("jpg" | "jpeg") => "jpg",
         Some("webp") => "webp",
         Some("gif") => "gif",
         _ => match media_type {
@@ -1152,7 +1163,8 @@ async fn config_provider_auth_device_complete_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let flow = match state.setup_auth_flows.lock().get(&request.flow_id).cloned() {
+    let stored_flow = state.setup_auth_flows.lock().get(&request.flow_id).cloned();
+    let flow = match stored_flow {
         Some(flow) if !flow.is_expired() => flow,
         Some(_) => {
             state.setup_auth_flows.lock().remove(&request.flow_id);
@@ -1412,6 +1424,70 @@ async fn activity_history_handler(
             "session_id is required for dashboard activity history",
         )
             .into_response()
+    }
+}
+
+async fn workflow_worker_activity_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Query(query): Query<WorkflowWorkerActivityQuery>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(session_id) = query.session_id.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "session_id is required for workflow worker activity",
+        )
+            .into_response();
+    };
+    let Some(run_id) = query.run_id.filter(|value| !value.trim().is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "run_id is required").into_response();
+    };
+    let Some(worker_id) = query.worker_id.filter(|value| !value.trim().is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "worker_id is required").into_response();
+    };
+    if query.before.is_some() && query.after.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "workflow worker activity accepts either before or after, not both",
+        )
+            .into_response();
+    }
+
+    match session_client_for_request(&state, session_id).await {
+        Ok(client) => match client
+            .request(session_ipc::SessionIpcRequest::WorkflowWorkerActivityPage {
+                run_id,
+                worker_id,
+                before: query.before,
+                after: query.after,
+                limit: query
+                    .limit
+                    .unwrap_or(crate::dashboard::WORKFLOW_WORKER_ACTIVITY_INITIAL_LIMIT),
+            })
+            .await
+        {
+            Ok(session_ipc::SessionIpcResponse::WorkflowWorkerActivityPage { page }) => {
+                Json(page).into_response()
+            }
+            Ok(session_ipc::SessionIpcResponse::Error { code, message, .. })
+                if code == "workflow_worker_not_found" =>
+            {
+                (StatusCode::NOT_FOUND, message).into_response()
+            }
+            Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => {
+                (StatusCode::BAD_GATEWAY, message).into_response()
+            }
+            Ok(_) => (
+                StatusCode::BAD_GATEWAY,
+                "unexpected session IPC workflow worker activity response",
+            )
+                .into_response(),
+            Err(err) => (StatusCode::BAD_GATEWAY, format!("{err:?}")).into_response(),
+        },
+        Err(err) => (StatusCode::NOT_FOUND, format!("{err:?}")).into_response(),
     }
 }
 
@@ -1945,24 +2021,17 @@ async fn dir_list_handler(
         }
         let parent = requested.parent().map(|p| p.display().to_string());
         let entries = list_subdirs(&requested);
-        Ok(DirListResponse {
+        DirListResponse {
             path: requested.display().to_string(),
             parent,
             entries,
-        })
+        }
     };
 
-    match result {
-        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{err}")})),
-        )
-            .into_response(),
-    }
+    (StatusCode::OK, Json(result)).into_response()
 }
 
-fn list_root_dirs() -> Result<DirListResponse> {
+fn list_root_dirs() -> DirListResponse {
     #[cfg(windows)]
     let mut entries: Vec<DirEntry> = Vec::new();
     #[cfg(windows)]
@@ -1976,50 +2045,52 @@ fn list_root_dirs() -> Result<DirListResponse> {
                 });
             }
         }
-        Ok(DirListResponse {
+        DirListResponse {
             path: String::new(),
             parent: None,
             entries,
-        })
+        }
     }
     #[cfg(not(windows))]
     {
         let entries = list_subdirs(StdPath::new("/"));
-        Ok(DirListResponse {
+        DirListResponse {
             path: String::new(),
             parent: None,
             entries,
-        })
+        }
     }
 }
 
-fn default_dir_listing() -> Result<DirListResponse> {
+fn default_dir_listing() -> DirListResponse {
     match crate::workspace_app::paths::resolve_runtime_workspace_dir() {
         Ok(ws) if ws.is_dir() => {
             let parent = ws.parent().map(|p| p.display().to_string());
             let entries = list_subdirs(&ws);
-            Ok(DirListResponse {
+            DirListResponse {
                 path: ws.display().to_string(),
                 parent,
                 entries,
-            })
+            }
         }
         _ => list_root_dirs(),
     }
 }
 
 fn list_subdirs(path: &StdPath) -> Vec<DirEntry> {
-    let mut entries: Vec<DirEntry> = match std::fs::read_dir(path) {
-        Ok(read_dir) => read_dir
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
-            .map(|e| DirEntry {
-                name: e.file_name().to_string_lossy().to_string(),
-                kind: "dir".to_string(),
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    let mut entries: Vec<DirEntry> = std::fs::read_dir(path).map_or_else(
+        |_| Vec::new(),
+        |read_dir| {
+            read_dir
+                .filter_map(std::result::Result::ok)
+                .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+                .map(|e| DirEntry {
+                    name: e.file_name().to_string_lossy().to_string(),
+                    kind: "dir".to_string(),
+                })
+                .collect()
+        },
+    );
     entries.sort_by_key(|a| a.name.to_lowercase());
     entries
 }
@@ -2102,7 +2173,7 @@ async fn session_title_handler(
     if !state.auth_registry.authorize_headers(&headers).await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let session_id = match session::SessionId::from_string(session_id) {
+    let session_id = match session::SessionId::from_string(&session_id) {
         Ok(session_id) => session_id,
         Err(err) => {
             return (
@@ -2135,7 +2206,7 @@ async fn session_delete_handler(
     if !state.auth_registry.authorize_headers(&headers).await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let session_id = match session::SessionId::from_string(session_id) {
+    let session_id = match session::SessionId::from_string(&session_id) {
         Ok(session_id) => session_id,
         Err(err) => {
             return (
@@ -2167,7 +2238,7 @@ async fn session_delete_handler(
     }
 }
 
-pub(crate) async fn delete_session_by_id(
+pub async fn delete_session_by_id(
     sessions: &session::SessionRegistry,
     session_tokens: &SessionTokenStore,
     session_id: &session::SessionId,
@@ -2221,24 +2292,25 @@ async fn remove_session_directory(session_dir: &StdPath) -> Result<()> {
     ))
 }
 
-pub(crate) async fn terminate_process_backed_sessions(
+pub async fn terminate_process_backed_sessions(
     sessions: &session::SessionRegistry,
     session_tokens: &SessionTokenStore,
     reason: &str,
 ) -> Result<()> {
-    let targets = sessions
-        .list()
-        .into_iter()
-        .filter(|info| info.status.is_process_backed())
-        .collect::<Vec<_>>();
-    let results = futures_util::future::join_all(targets.into_iter().map(|info| {
-        terminate_process_backed_session(
-            sessions.clone(),
-            session_tokens.clone(),
-            info,
-            reason.to_string(),
-        )
-    }))
+    let results = futures_util::future::join_all(
+        sessions
+            .list()
+            .into_iter()
+            .filter(|info| info.status.is_process_backed())
+            .map(|info| {
+                terminate_process_backed_session(
+                    sessions.clone(),
+                    session_tokens.clone(),
+                    info,
+                    reason.to_string(),
+                )
+            }),
+    )
     .await;
     let errors = results
         .into_iter()
@@ -2354,15 +2426,15 @@ fn open_stdio_log_pair(
     Ok((path, stdout, stderr))
 }
 
-async fn session_log_path(session_id: &session::SessionId) -> PathBuf {
+fn session_log_path(session_id: &session::SessionId) -> PathBuf {
     session::session_state_paths(session_id).logs_file(SESSION_LOG)
 }
 
-async fn open_session_log(
+fn open_session_log(
     session_id: &session::SessionId,
 ) -> Result<(PathBuf, std::fs::File, std::fs::File)> {
-    let path = session_log_path(session_id).await;
-    let marker = format!("session `{}` starting", session_id);
+    let path = session_log_path(session_id);
+    let marker = format!("session `{session_id}` starting");
     open_stdio_log_pair(path, &marker)
 }
 
@@ -2427,7 +2499,7 @@ async fn spawn_session_process(
     let ipc_token = session::generate_ipc_token();
     let binary = std::env::current_exe()
         .map_err(|err| miette!("resolve current executable failed: {err}"))?;
-    let (session_log_path, stdout_log, stderr_log) = open_session_log(&session_id).await?;
+    let (session_log_path, stdout_log, stderr_log) = open_session_log(&session_id)?;
     let mut command = std::process::Command::new(binary);
     command
         .arg("--session-id")
@@ -2511,11 +2583,10 @@ async fn wait_for_session_ready(
                     .clone()
                     .or_else(|| summary.dashboard.session_title.clone()));
             }
-            Ok(session_ipc::SessionIpcResponse::StatusSummary { .. }) => {}
             Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => {
                 tracing::warn!("session status returned error during startup: {message}");
             }
-            Ok(_) => {}
+            Ok(session_ipc::SessionIpcResponse::StatusSummary { .. } | _) => {}
             Err(err) => {
                 tracing::debug!("session status probe failed during startup: {err:?}");
             }
@@ -2758,7 +2829,7 @@ fn settings_model_summary(
         request_timeout_secs: model.request_timeout_secs(),
         stream_idle_timeout_secs: model.stream_idle_timeout_secs(),
         context_window_tokens: model.context_window_tokens(),
-        effective_context_window_percent: model.effective_context_window_percent(),
+        effective_context_window_percent: i64::from(model.effective_context_window_percent()),
         effective_context_window_tokens: model.effective_context_window_tokens(),
         auto_compact_token_limit: model.auto_compact_token_limit(),
         reserved_output_tokens: model.reserved_output_tokens(),
@@ -2770,12 +2841,9 @@ fn settings_model_summary(
 
 /// Resolve vision support: explicit config wins, then catalog, then default to `true`.
 fn resolve_supports_vision(model: &ModelConfig) -> bool {
-    match model.supports_vision {
-        Some(v) => v,
-        None => catalog_model_capacity(&model.model_id)
-            .map(|c| c.supports_vision)
-            .unwrap_or(true),
-    }
+    model.supports_vision.unwrap_or_else(|| {
+        catalog_model_capacity(&model.model_id).is_none_or(|c| c.supports_vision)
+    })
 }
 
 fn credential_summary(value: &str, placeholder: Option<&str>) -> SettingsCredentialSummary {
@@ -2842,7 +2910,7 @@ fn is_valid_env_reference_name(name: &str) -> bool {
     chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn strong_filesystem_mode_label(value: StrongFilesystemSandboxMode) -> &'static str {
+const fn strong_filesystem_mode_label(value: StrongFilesystemSandboxMode) -> &'static str {
     match value {
         StrongFilesystemSandboxMode::Off => "off",
         StrongFilesystemSandboxMode::Auto => "auto",
@@ -2891,23 +2959,22 @@ async fn session_dashboard_ws(
                     break;
                 }
             }
-            Ok(Ok(session_ipc::SessionIpcStreamEvent::DashboardClosed { .. })) => break,
+            Ok(Ok(session_ipc::SessionIpcStreamEvent::DashboardClosed { .. }) | Err(_)) => {
+                break;
+            }
             Ok(Ok(session_ipc::SessionIpcStreamEvent::Error { message, .. })) => {
                 let _ = socket.send(Message::Text(message.into())).await;
                 break;
             }
-            Ok(Err(_)) => break,
             Err(_) => {
-                let sid = match session::SessionId::from_string(session_id.clone()) {
-                    Ok(sid) => sid,
-                    Err(_) => break,
+                let Ok(sid) = session::SessionId::from_string(&session_id) else {
+                    break;
                 };
                 if let Some(info) = sessions.get(&sid)
                     && matches!(info.status, session::SessionStatus::Dead)
                 {
                     break;
                 }
-                continue;
             }
         }
     }
@@ -2921,7 +2988,7 @@ async fn sync_session_title_from_dashboard_state(
     if snapshot.session_title.is_none() {
         return;
     }
-    let Ok(session_id) = session::SessionId::from_string(session_id.to_string()) else {
+    let Ok(session_id) = session::SessionId::from_string(session_id) else {
         tracing::warn!("dashboard snapshot carried invalid session id `{session_id}`");
         return;
     };
@@ -2952,7 +3019,7 @@ async fn session_client_for_request(
     session_client_for_id(&state.sessions, &state.session_tokens, session_id).await
 }
 
-pub(crate) async fn session_client_for_id(
+pub async fn session_client_for_id(
     sessions: &session::SessionRegistry,
     session_tokens: &SessionTokenStore,
     session_id: &str,
@@ -2961,7 +3028,7 @@ pub(crate) async fn session_client_for_id(
     if !readiness.is_complete() {
         return Err(miette!(readiness.agent_unavailable_message()));
     }
-    let session_id = session::SessionId::from_string(session_id.to_string())?;
+    let session_id = session::SessionId::from_string(session_id)?;
     let mut info = sessions
         .get(&session_id)
         .ok_or_else(|| miette!("session `{session_id}` not found"))?;
@@ -3050,7 +3117,7 @@ impl DaemonClient {
         })
     }
 
-    pub fn port(&self) -> u16 {
+    pub const fn port(&self) -> u16 {
         self.port
     }
 
@@ -3060,7 +3127,7 @@ impl DaemonClient {
     }
 
     #[cfg(test)]
-    fn with_control_timeout(mut self, timeout: Duration) -> Self {
+    const fn with_control_timeout(mut self, timeout: Duration) -> Self {
         self.control_timeout = timeout;
         self
     }
@@ -3332,7 +3399,7 @@ impl DaemonClient {
             limit
         );
         if let Some(before) = before {
-            url.push_str(&format!("&before={}", before));
+            let _ = write!(url, "&before={before}");
         }
         if let Some(session_id) = self.session_id.as_deref() {
             url.push_str("&session_id=");
@@ -3347,6 +3414,45 @@ impl DaemonClient {
             .json::<DashboardActivityHistoryPage>()
             .await
             .map_err(|err| miette!("decode activity history response failed: {err}"))
+    }
+
+    pub async fn workflow_worker_activity(
+        &self,
+        run_id: &str,
+        worker_id: &str,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<crate::dashboard::WorkflowWorkerActivityPage> {
+        let mut request = self
+            .http
+            .get(format!(
+                "{}/dashboard/workflow-worker-activity",
+                self.base_url()
+            ))
+            .query(&[
+                ("run_id", run_id.to_string()),
+                ("worker_id", worker_id.to_string()),
+                ("limit", limit.to_string()),
+            ]);
+        if let Some(before) = before {
+            request = request.query(&[("before", before)]);
+        }
+        if let Some(after) = after {
+            request = request.query(&[("after", after)]);
+        }
+        if let Some(session_id) = self.session_id.as_deref() {
+            request = request.query(&[("session_id", session_id)]);
+        }
+        self.with_auth(self.control_request(request))?
+            .send()
+            .await
+            .map_err(|err| miette!("workflow worker activity request failed: {err}"))?
+            .error_for_status()
+            .map_err(|err| miette!("workflow worker activity returned error: {err}"))?
+            .json::<crate::dashboard::WorkflowWorkerActivityPage>()
+            .await
+            .map_err(|err| miette!("decode workflow worker activity response failed: {err}"))
     }
 
     pub async fn input_history(&self, limit: usize) -> Result<DashboardInputHistory> {
@@ -3512,6 +3618,19 @@ impl DashboardHistoryLoader for DaemonClient {
             .map_err(|err| err.to_string())
     }
 
+    async fn load_workflow_worker_activity(
+        &self,
+        run_id: &str,
+        worker_id: &str,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<crate::dashboard::WorkflowWorkerActivityPage, String> {
+        self.workflow_worker_activity(run_id, worker_id, before, after, limit)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
     async fn load_recent_user_inputs(&self, limit: usize) -> Result<DashboardInputHistory, String> {
         self.input_history(limit)
             .await
@@ -3663,7 +3782,7 @@ enum DetachedDaemonStartupMode {
 }
 
 impl DetachedDaemonStartupMode {
-    fn from_tray_enabled(enabled: bool) -> Self {
+    const fn from_tray_enabled(enabled: bool) -> Self {
         if enabled {
             Self::WithTray
         } else {
@@ -3697,8 +3816,8 @@ fn apply_detached_daemon_creation_flags(
     command: &mut std::process::Command,
     startup_mode: DetachedDaemonStartupMode,
 ) {
-    const DETACHED_PROCESS: u32 = 0x00000008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
     let mut flags = CREATE_NEW_PROCESS_GROUP;
     if matches!(startup_mode, DetachedDaemonStartupMode::Headless) {
@@ -3745,9 +3864,9 @@ async fn log_tail_section(path: PathBuf, title: &str) -> Option<String> {
     }
 }
 
-pub fn daemonize_current_process_if_requested() -> Result<()> {
+pub fn daemonize_current_process_if_requested() {
     if std::env::var_os(DAEMONIZE_ENV).is_none() {
-        return Ok(());
+        return;
     }
     // This marker is only for the top-level daemon child. If it survives in the
     // daemon environment, later helper processes such as workspace app workers
@@ -3755,7 +3874,10 @@ pub fn daemonize_current_process_if_requested() -> Result<()> {
     unsafe {
         std::env::remove_var(DAEMONIZE_ENV);
     }
-    daemonize_current_process()
+    #[cfg(unix)]
+    daemonize_current_process().expect("daemon process should detach successfully");
+    #[cfg(not(unix))]
+    daemonize_current_process();
 }
 
 #[cfg(unix)]
@@ -3788,9 +3910,7 @@ unsafe fn fork_parent_exit(label: &str) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn daemonize_current_process() -> Result<()> {
-    Ok(())
-}
+const fn daemonize_current_process() {}
 
 pub async fn connect_daemon_status() -> Result<DaemonClient> {
     let port = configured_daemon_port().await?;
@@ -3888,12 +4008,11 @@ mod tests {
 
         configure_detached_daemon_command(&mut command, DetachedDaemonStartupMode::WithTray);
 
-        assert_eq!(command_args(&command), vec!["serve".to_string()]);
         assert_eq!(
             command_env(&command, crate::daemon_tray::ENABLE_TRAY_ENV),
-            Some(Some("1".to_string()))
+            (true, Some(std::ffi::OsStr::new("1")))
         );
-        assert_eq!(command_env(&command, DAEMONIZE_ENV), Some(None));
+        assert_eq!(command_env(&command, DAEMONIZE_ENV), (true, None));
     }
 
     #[test]
@@ -3905,11 +4024,11 @@ mod tests {
         assert_eq!(command_args(&command), vec!["serve".to_string()]);
         assert_eq!(
             command_env(&command, DAEMONIZE_ENV),
-            Some(Some("1".to_string()))
+            (true, Some(std::ffi::OsStr::new("1")))
         );
         assert_eq!(
             command_env(&command, crate::daemon_tray::ENABLE_TRAY_ENV),
-            Some(None)
+            (true, None)
         );
     }
 
@@ -3920,11 +4039,14 @@ mod tests {
             .collect()
     }
 
-    fn command_env(command: &std::process::Command, key: &str) -> Option<Option<String>> {
+    fn command_env<'a>(
+        command: &'a std::process::Command,
+        key: &str,
+    ) -> (bool, Option<&'a std::ffi::OsStr>) {
         command
             .get_envs()
             .find(|(name, _)| *name == std::ffi::OsStr::new(key))
-            .map(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+            .map_or((false, None), |(_, value)| (true, value))
     }
 
     #[test]

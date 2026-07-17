@@ -4,7 +4,8 @@ use tree_sitter::Language;
 pub struct RustAdapter;
 
 impl RustAdapter {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -30,18 +31,18 @@ impl LanguageAdapter for RustAdapter {
 
     fn queries(&self) -> LanguageQueries {
         LanguageQueries {
-            definitions: r#"
+            definitions: r"
                 (function_item name: (identifier) @name) @def
                 (struct_item name: (type_identifier) @name) @def
                 (enum_item name: (type_identifier) @name) @def
                 (impl_item type: (type_identifier) @name) @def
                 (trait_item name: (type_identifier) @name) @def
-            "#,
-            references: r#"
+            ",
+            references: r"
                 (call_expression function: (identifier) @ref) @call
                 (call_expression function: (scoped_identifier name: (identifier) @ref)) @call
                 (type_identifier) @ref
-            "#,
+            ",
         }
     }
 }

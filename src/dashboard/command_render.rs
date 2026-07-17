@@ -6,6 +6,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Paragraph, Wrap},
 };
+use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
 
 use super::DashboardPendingUserInput;
@@ -31,43 +32,54 @@ use super::view_state::CtrlCReminder;
 impl CommandPanel {
     pub(super) fn desired_height(&self) -> u16 {
         match self {
-            CommandPanel::Detail(panel) => {
-                let line_count = render_panel_text_lines(&panel.text).len() as u16;
+            Self::Detail(panel) => {
+                let line_count =
+                    u16::try_from(render_panel_text_lines(&panel.text).len()).unwrap_or(u16::MAX);
                 line_count.saturating_add(3).clamp(5, 16)
             }
-            CommandPanel::Selection(panel) => {
+            Self::Selection(panel) => {
                 let header = 1 + u16::from(panel.subtitle.is_some());
                 header
-                    .saturating_add(panel.items.len().min(8) as u16)
+                    .saturating_add(
+                        u16::try_from(panel.items.len().min(8))
+                            .expect("visible rows are capped at eight"),
+                    )
                     .saturating_add(2)
                     .clamp(5, 14)
             }
-            CommandPanel::SkillsList(panel) => {
-                let rows = panel.visible_indices().len().min(8) as u16;
-                let error_rows = panel.errors.len().min(2) as u16;
+            Self::SkillsList(panel) => {
+                let rows = u16::try_from(panel.visible_indices().len().min(8))
+                    .expect("visible rows are capped at eight");
+                let error_rows =
+                    u16::try_from(panel.errors.len().min(2)).expect("error rows are capped at two");
                 5u16.saturating_add(rows)
                     .saturating_add(error_rows)
                     .clamp(6, 16)
             }
-            CommandPanel::SkillsToggle(panel) => {
-                let rows = panel.visible_indices().len().min(8) as u16;
+            Self::SkillsToggle(panel) => {
+                let rows = u16::try_from(panel.visible_indices().len().min(8))
+                    .expect("visible rows are capped at eight");
                 let feedback_rows = command_feedback_row_count(panel.feedback.as_ref());
                 5u16.saturating_add(rows)
                     .saturating_add(feedback_rows)
                     .clamp(6, 16)
             }
-            CommandPanel::WorkflowForm(panel) => {
-                let rows = panel.workflow.input_fields.len().min(6) as u16;
+            Self::WorkflowForm(panel) => {
+                let rows = u16::try_from(panel.workflow.input_fields.len().min(6))
+                    .expect("workflow rows are capped at six");
                 let feedback_rows = command_feedback_row_count(panel.feedback.as_ref());
                 4u16.saturating_add(rows)
                     .saturating_add(feedback_rows)
                     .clamp(6, 16)
             }
-            CommandPanel::PendingUserInputQueue(panel) => {
+            Self::PendingUserInputQueue(panel) => {
                 let feedback_rows = command_feedback_row_count(panel.feedback.as_ref());
-                4u16.saturating_add(panel.inputs.len().min(8) as u16)
-                    .saturating_add(feedback_rows)
-                    .clamp(6, 15)
+                4u16.saturating_add(
+                    u16::try_from(panel.inputs.len().min(8))
+                        .expect("pending-input rows are capped at eight"),
+                )
+                .saturating_add(feedback_rows)
+                .clamp(6, 15)
             }
         }
     }
@@ -120,7 +132,7 @@ pub(super) fn command_popup_row_count(input: &str, context: &DashboardCommandCon
     if matches.is_empty() {
         0
     } else {
-        matches.len().min(6) as u16
+        u16::try_from(matches.len().min(6)).expect("popup matches are capped at six")
     }
 }
 
@@ -145,7 +157,7 @@ pub(super) fn pending_user_input_preview_row_count(inputs: &[DashboardPendingUse
     }
     let visible = inputs.len().min(PENDING_USER_INPUT_PREVIEW_LIMIT);
     let overflow = usize::from(inputs.len() > PENDING_USER_INPUT_PREVIEW_LIMIT);
-    (1 + visible + overflow) as u16
+    u16::try_from(1 + visible + overflow).expect("preview rows are bounded by the preview limit")
 }
 
 pub(super) fn render_command_panel(f: &mut Frame, area: Rect, panel: &CommandPanel) {
@@ -160,7 +172,7 @@ pub(super) fn render_command_panel(f: &mut Frame, area: Rect, panel: &CommandPan
         CommandPanel::SkillsToggle(skills) => render_skills_toggle_panel(f, inner, skills),
         CommandPanel::WorkflowForm(form) => render_workflow_form_panel(f, inner, form),
         CommandPanel::PendingUserInputQueue(panel) => {
-            render_pending_user_input_queue_panel(f, inner, panel)
+            render_pending_user_input_queue_panel(f, inner, panel);
         }
     }
 }
@@ -748,7 +760,7 @@ fn pending_user_input_preview_text(input: &DashboardPendingUserInput) -> String 
         if input.attachment_count == 1 {
             text.push_str(" +1 attachment");
         } else {
-            text.push_str(&format!(" +{} attachments", input.attachment_count));
+            let _ = write!(text, " +{} attachments", input.attachment_count);
         }
     }
     text
@@ -932,7 +944,7 @@ fn render_command_feedback(f: &mut Frame, area: Rect, feedback: &CommandFeedback
     );
 }
 
-fn inset_rect(area: Rect, vertical: u16, horizontal: u16) -> Rect {
+const fn inset_rect(area: Rect, vertical: u16, horizontal: u16) -> Rect {
     Rect {
         x: area.x.saturating_add(horizontal),
         y: area.y.saturating_add(vertical),
@@ -981,7 +993,8 @@ fn render_detail_panel(f: &mut Frame, area: Rect, panel: &CommandDetailPanel) {
         return;
     }
     let lines = render_panel_text_lines(&panel.text);
-    let max_scroll = lines.len().saturating_sub(body.height as usize) as u16;
+    let max_scroll =
+        u16::try_from(lines.len().saturating_sub(usize::from(body.height))).unwrap_or(u16::MAX);
     let scroll = panel.scroll.min(max_scroll);
     f.render_widget(
         Paragraph::new(Text::from(lines))
@@ -1067,7 +1080,7 @@ fn render_skills_list_panel(f: &mut Frame, area: Rect, panel: &SkillsListPanel) 
         let error_lines = panel
             .errors
             .iter()
-            .take(rest.height.min(2) as usize)
+            .take(usize::from(rest.height.min(2)))
             .map(|error| {
                 Line::from(vec![
                     Span::styled("!", Style::default().fg(Color::Yellow)),
@@ -1084,7 +1097,8 @@ fn render_skills_list_panel(f: &mut Frame, area: Rect, panel: &SkillsListPanel) 
                 ])
             })
             .collect::<Vec<_>>();
-        let rows = error_lines.len() as u16;
+        let rows =
+            u16::try_from(error_lines.len()).expect("error lines are limited by panel height");
         f.render_widget(
             Paragraph::new(Text::from(error_lines)).wrap(Wrap { trim: false }),
             Rect {

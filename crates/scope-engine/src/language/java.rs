@@ -4,7 +4,8 @@ use tree_sitter::Language;
 pub struct JavaAdapter;
 
 impl JavaAdapter {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -30,7 +31,7 @@ impl LanguageAdapter for JavaAdapter {
 
     fn queries(&self) -> LanguageQueries {
         LanguageQueries {
-            definitions: r#"
+            definitions: r"
                 (method_declaration name: (identifier) @name) @def
                 (class_declaration name: (identifier) @name) @def
                 (interface_declaration name: (identifier) @name) @def
@@ -38,13 +39,13 @@ impl LanguageAdapter for JavaAdapter {
                 (constructor_declaration name: (identifier) @name) @def
                 (field_declaration declarator: (variable_declarator name: (identifier) @name)) @def
                 (local_variable_declaration declarator: (variable_declarator name: (identifier) @name)) @def
-            "#,
-            references: r#"
+            ",
+            references: r"
                 (method_invocation name: (identifier) @ref) @call
                 (object_creation_expression type: (type_identifier) @ref) @call
                 (type_identifier) @ref
                 (identifier) @ref
-            "#,
+            ",
         }
     }
 }

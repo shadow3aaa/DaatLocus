@@ -1,6 +1,4 @@
 pub mod runtime_error_correction_planner;
-#[cfg(test)]
-pub mod runtime_turn_trace_judge;
 pub mod skill_improvement_planner;
 
 #[cfg(test)]
@@ -10,7 +8,6 @@ mod tests {
             program::Program,
             programs::{
                 runtime_error_correction_planner::RuntimeErrorCorrectionPlannerProgram,
-                runtime_turn_trace_judge::RuntimeTurnTraceJudgeProgram,
                 skill_improvement_planner::SkillImprovementPlannerProgram,
             },
         },
@@ -21,7 +18,6 @@ mod tests {
     fn program_output_schemas_follow_model_facing_dialect() {
         let schemas = [
             RuntimeErrorCorrectionPlannerProgram.output_schema(),
-            RuntimeTurnTraceJudgeProgram.output_schema(),
             SkillImprovementPlannerProgram.output_schema(),
         ];
 

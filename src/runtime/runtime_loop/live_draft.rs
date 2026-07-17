@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use super::*;
+use super::{Context, EventPayload, EventView, Result};
 use crate::{
     live_progress::{LiveProgressEvent, TelegramLiveStatus},
     telegram_transport::state::TelegramTransportStateHandle,
@@ -17,14 +17,14 @@ pub(super) struct TelegramLiveDraftSession {
 }
 
 impl TelegramLiveDraftSession {
-    pub(super) async fn shutdown(self, context: &mut Context) {
+    pub(super) async fn shutdown(self, context: &Context) {
         context.install_live_progress(None);
         let _ = tokio::time::timeout(Duration::from_secs(2), self.join).await;
     }
 }
 
 pub(super) fn maybe_start_telegram_live_draft_session(
-    context: &mut Context,
+    context: &Context,
     claimed_event_views: &[EventView],
 ) -> Option<TelegramLiveDraftSession> {
     if claimed_event_views.len() != 1 {
@@ -114,10 +114,11 @@ fn enqueue_live_draft(
 }
 
 fn stable_live_draft_id(event_id: uuid::Uuid) -> i64 {
-    ((event_id.as_u128() % i64::MAX as u128) + 1) as i64
+    let bounded = event_id.as_u128() % (i64::MAX as u128);
+    i64::try_from(bounded).expect("live-draft ID is reduced below i64::MAX") + 1
 }
 
-fn should_send_initial_live_draft(last_sent: &str) -> bool {
+const fn should_send_initial_live_draft(last_sent: &str) -> bool {
     last_sent.is_empty()
 }
 
@@ -175,8 +176,8 @@ impl TelegramLiveDraftState {
 
     fn apply(&mut self, event: LiveProgressEvent) -> bool {
         match event {
-            LiveProgressEvent::GenerationStarted => false,
-            LiveProgressEvent::AssistantContent { .. }
+            LiveProgressEvent::GenerationStarted
+            | LiveProgressEvent::AssistantContent { .. }
             | LiveProgressEvent::ReasoningContent { .. } => false,
             LiveProgressEvent::TelegramStatus(status) => {
                 let icon = status.icon.trim();

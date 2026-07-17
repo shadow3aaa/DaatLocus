@@ -88,7 +88,7 @@ pub struct CachedActivityLinesStats {
 }
 
 impl CachedActivityLines {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             entries: vec![],
             #[cfg(feature = "tui-perf-cmd")]
@@ -109,7 +109,7 @@ impl CachedActivityLines {
     }
 
     #[cfg(feature = "tui-perf-cmd")]
-    pub fn reset_stats(&mut self) {
+    pub const fn reset_stats(&mut self) {
         self.hits = 0;
         self.misses = 0;
     }
@@ -297,12 +297,10 @@ pub fn render_activity_feed_cached(
             thinking_expanded: matches!(cell, SessionActivityEvent::Thinking(_))
                 && expanded_thinking.contains(&i),
         };
-        let cached = if let Some(cached) = cache.get(i, inner.width, cell, options) {
-            cached
-        } else {
+        let cached = cache.get(i, inner.width, cell, options).unwrap_or_else(|| {
             let lines = render_activity_cell_lines_with_options(cell, inner.width, options);
             cache.set(i, inner.width, options, cell.clone(), lines)
-        };
+        });
         let cached_height = cached.height;
         if matches!(cell, SessionActivityEvent::User(_)) {
             user_cell_rows.push((column_rows, cached_height));
@@ -610,7 +608,7 @@ fn activity_cell_transcript_lines(cell: &SessionActivityEvent, width: u16) -> Ve
             transcript_text_section("ERROR", &cell.title, &cell.body_lines, width)
         }
         SessionActivityEvent::Workflow(cell) => workflow_transcript_lines(cell, width),
-        _ => transcript_plain_block(activity_cell_transcript_block(cell)),
+        _ => transcript_plain_block(&activity_cell_transcript_block(cell)),
     }
 }
 
@@ -631,7 +629,7 @@ fn transcript_header(title: impl Into<String>) -> Line<'static> {
     )])
 }
 
-fn transcript_plain_block(block: String) -> Vec<Line<'static>> {
+fn transcript_plain_block(block: &str) -> Vec<Line<'static>> {
     block
         .lines()
         .enumerate()
@@ -654,7 +652,7 @@ fn transcript_markdown_section(
     let mut lines = vec![transcript_header(title)];
     if !body.trim().is_empty() {
         lines.extend(prefixed_detail_lines(
-            render_markdown_with_width(body, base_color, detail_markdown_width(width)),
+            render_markdown_with_width(body, base_color, Some(detail_markdown_width(width))),
             width,
         ));
     }
@@ -705,7 +703,7 @@ fn transcript_plan_lines(cell: &PlanActivityData, width: u16) -> Vec<Line<'stati
             render_markdown_with_width(
                 &format!("note: {}", explanation.trim()),
                 Color::Gray,
-                detail_markdown_width(width),
+                Some(detail_markdown_width(width)),
             )
             .into_iter()
             .map(|mut line| {
@@ -764,6 +762,9 @@ fn workflow_transcript_lines(cell: &super::WorkflowActivityData, width: u16) -> 
         "{}: {:?}",
         cell.workflow_id, cell.status
     ))];
+    if let Some(snapshot) = cell.snapshot.as_ref() {
+        body.extend(workflow_snapshot_outline_lines(snapshot));
+    }
     if !cell.message.trim().is_empty() {
         body.push(Line::from(cell.message.clone()));
     }
@@ -771,6 +772,38 @@ fn workflow_transcript_lines(cell: &super::WorkflowActivityData, width: u16) -> 
         body.push(Line::from(output.to_string()));
     }
     lines.extend(prefixed_detail_lines(body, width));
+    lines
+}
+
+fn workflow_snapshot_outline_lines(
+    snapshot: &crate::workflow::WorkflowRunSnapshot,
+) -> Vec<Line<'static>> {
+    let duration = snapshot
+        .completed_at_ms
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
+        .saturating_sub(snapshot.started_at_ms);
+    let mut lines = vec![Line::from(format!(
+        "run {} · {:?} · {}ms · input {}",
+        snapshot.run_id, snapshot.status, duration, snapshot.input
+    ))];
+    let mut role_attempts = std::collections::BTreeMap::<&str, usize>::new();
+    lines.extend(snapshot.workers.iter().map(|worker| {
+        let attempt = role_attempts.entry(worker.role.as_str()).or_default();
+        *attempt += 1;
+        Line::from(format!(
+            "{} {} · attempt {} · {} · {:?} · {} activities",
+            if worker.status == crate::workflow::WorkflowNodeStatus::Completed {
+                "✓"
+            } else {
+                "○"
+            },
+            worker.role,
+            attempt,
+            worker.model,
+            worker.status,
+            worker.activity_count.max(worker.activity.len())
+        ))
+    }));
     lines
 }
 
@@ -887,11 +920,11 @@ fn patch_transcript_styled_lines(
 fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
     match cell {
         SessionActivityEvent::Assistant(cell) => {
-            transcript_section("ASSISTANT", cell.content.clone())
+            transcript_section("ASSISTANT", &cell.content.clone())
         }
-        SessionActivityEvent::User(cell) => transcript_section("USER", user_transcript_text(cell)),
+        SessionActivityEvent::User(cell) => transcript_section("USER", &user_transcript_text(cell)),
         SessionActivityEvent::Thinking(cell) => {
-            transcript_section("THINKING", cell.content.clone())
+            transcript_section("THINKING", &cell.content.clone())
         }
         SessionActivityEvent::Browser(cell) => {
             let mut lines = vec![format!(
@@ -904,7 +937,7 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
             if let Some(ref_count) = cell.ref_count {
                 lines.push(format!("refs: {ref_count}"));
             }
-            transcript_section("BROWSER", lines.join("\n"))
+            transcript_section("BROWSER", &lines.join("\n"))
         }
         SessionActivityEvent::LiveBrowser(cell) => {
             let mut lines = vec![format!(
@@ -912,7 +945,7 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
                 cell.url.as_deref().unwrap_or(cell.title.as_str())
             )];
             lines.extend(cell.body_lines.clone());
-            transcript_section("BROWSER", lines.join("\n"))
+            transcript_section("BROWSER", &lines.join("\n"))
         }
         SessionActivityEvent::WebSearch(cell) => {
             let mut lines = vec![format!("query: {}", cell.query)];
@@ -924,11 +957,11 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
                 WebSearchActivityAction::Searching => "SEARCHING THE WEB",
                 WebSearchActivityAction::Searched => "SEARCHED THE WEB",
             };
-            transcript_section(title, lines.join("\n"))
+            transcript_section(title, &lines.join("\n"))
         }
         SessionActivityEvent::CodingOpenProject(cell) => transcript_section(
             "OPENED PROJECT",
-            primary_transcript_text(&cell.project_root, &cell.detail_lines),
+            &primary_transcript_text(&cell.project_root, &cell.detail_lines),
         ),
         SessionActivityEvent::Explored(cell) => {
             let lines = cell
@@ -940,7 +973,7 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
                     lines
                 })
                 .collect::<Vec<_>>();
-            transcript_section(&cell.title, lines.join("\n"))
+            transcript_section(&cell.title, &lines.join("\n"))
         }
         SessionActivityEvent::CodingEdit(cell) => {
             let mut lines = vec![
@@ -956,7 +989,7 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
                     .map(|line| format!("impact: {line}")),
             );
             lines.extend(patch_files_transcript_lines(&cell.diff_files));
-            transcript_section(&cell.title, lines.join("\n"))
+            transcript_section(&cell.title, &lines.join("\n"))
         }
         SessionActivityEvent::CodingReview(cell) => {
             let mut lines = Vec::new();
@@ -969,10 +1002,10 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
             if cell.review_pending {
                 lines.push("review pending".to_string());
             }
-            transcript_section("REVIEW", lines.join("\n"))
+            transcript_section("REVIEW", &lines.join("\n"))
         }
         SessionActivityEvent::GenericApp(cell) => {
-            transcript_section(&cell.title, cell.body_lines.join("\n"))
+            transcript_section(&cell.title, &cell.body_lines.join("\n"))
         }
         SessionActivityEvent::PlanResult(cell) => {
             let mut lines = Vec::new();
@@ -997,7 +1030,7 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
                 PlanActivityKind::Proposed => "PROPOSED PLAN",
                 PlanActivityKind::Updated => "PLAN",
             };
-            transcript_section(title, lines.join("\n"))
+            transcript_section(title, &lines.join("\n"))
         }
         SessionActivityEvent::ExecResult(cell) => exec_transcript_block(
             "COMMAND",
@@ -1009,12 +1042,12 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
         SessionActivityEvent::Patch(cell) => {
             let mut lines = vec![cell.summary_line.clone()];
             lines.extend(patch_files_transcript_lines(&cell.files));
-            transcript_section("PATCH", lines.join("\n"))
+            transcript_section("PATCH", &lines.join("\n"))
         }
         SessionActivityEvent::Telegram(cell) => {
             let mut lines = cell.detail_lines.clone();
             lines.extend(cell.message_lines.clone());
-            transcript_section(&cell.title, lines.join("\n"))
+            transcript_section(&cell.title, &lines.join("\n"))
         }
         SessionActivityEvent::Reply(cell) => {
             let title = match cell.disposition {
@@ -1022,24 +1055,24 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
                 crate::activity_event::ReplyDisposition::Dismissed => "REPLY DISMISSED",
                 crate::activity_event::ReplyDisposition::Failed => "REPLY FAILED",
             };
-            transcript_section(title, cell.message_lines.join("\n"))
+            transcript_section(title, &cell.message_lines.join("\n"))
         }
         SessionActivityEvent::TerminalWait(cell) => {
-            transcript_section(&cell.title, terminal_wait_transcript_text(cell))
+            transcript_section(&cell.title, &terminal_wait_transcript_text(cell))
         }
         SessionActivityEvent::RuntimeStatus(cell) => {
-            transcript_section(&cell.label, cell.detail.clone().unwrap_or_default())
+            transcript_section(&cell.label, &cell.detail.clone().unwrap_or_default())
         }
         SessionActivityEvent::Warning(cell) => transcript_section(
             "WARNING",
-            primary_transcript_text(&cell.title, &cell.body_lines),
+            &primary_transcript_text(&cell.title, &cell.body_lines),
         ),
         SessionActivityEvent::Error(cell) => transcript_section(
             "ERROR",
-            primary_transcript_text(&cell.title, &cell.body_lines),
+            &primary_transcript_text(&cell.title, &cell.body_lines),
         ),
         SessionActivityEvent::Workflow(cell) => {
-            transcript_section("WORKFLOW", workflow_activity_text(cell))
+            transcript_section("WORKFLOW", &workflow_activity_text(cell))
         }
     }
 }
@@ -1055,7 +1088,7 @@ fn workflow_activity_text(cell: &super::WorkflowActivityData) -> String {
     lines.join("\n")
 }
 
-fn transcript_section(title: &str, body: String) -> String {
+fn transcript_section(title: &str, body: &str) -> String {
     let body = body.trim_end();
     if body.is_empty() {
         title.to_string()
@@ -1121,7 +1154,7 @@ fn exec_transcript_block(
         let marker = if exit_code == 0 { "✓" } else { "✗" };
         lines.push(format!("{marker} exit={exit_code}"));
     }
-    transcript_section(title, lines.join("\n"))
+    transcript_section(title, &lines.join("\n"))
 }
 
 fn live_exec_transcript_block(cell: &LiveExecActivityData) -> String {
@@ -1134,7 +1167,7 @@ fn live_exec_transcript_block(cell: &LiveExecActivityData) -> String {
     lines.extend(cell.call_lines.iter().map(|line| format!("call: {line}")));
     lines.extend(cell.output_lines.iter().cloned());
     lines.push("… running".to_string());
-    transcript_section("COMMAND", lines.join("\n"))
+    transcript_section("COMMAND", &lines.join("\n"))
 }
 
 fn elapsed_since_ms(started_at_ms: i64) -> Option<u64> {
@@ -1151,7 +1184,9 @@ fn format_elapsed_ms(ms: u64) -> String {
     if ms < 1_000 {
         format!("{ms}ms")
     } else {
-        format!("{:.1}s", ms as f64 / 1_000.0)
+        let seconds = ms / 1_000;
+        let tenths = (ms % 1_000) / 100;
+        format!("{seconds}.{tenths}s")
     }
 }
 
@@ -1257,7 +1292,7 @@ fn command_header_lines_with_marker(
             Span::styled(title.to_string(), bold_style()),
             Span::raw(ACTIVITY_TITLE_GAP),
         ],
-        vec![Span::styled(COMMAND_CONTINUATION_PREFIX, dim_style())],
+        &[Span::styled(COMMAND_CONTINUATION_PREFIX, dim_style())],
         max_width,
     )
 }
@@ -1266,7 +1301,9 @@ fn activity_marker(started_at_ms: Option<i64>) -> Span<'static> {
     let glyphs = ["•", "◦", "▪", "◦"];
     let now_ms = unix_time_millis();
     let seed = started_at_ms.unwrap_or(0);
-    let frame = ((now_ms.saturating_sub(seed) / 180).rem_euclid(glyphs.len() as i64)) as usize;
+    let glyph_count = i64::try_from(glyphs.len()).expect("activity marker glyph count fits in i64");
+    let frame = usize::try_from((now_ms.saturating_sub(seed) / 180).rem_euclid(glyph_count))
+        .expect("activity marker frame is non-negative");
     Span::styled(
         glyphs[frame],
         Style::default()
@@ -1277,9 +1314,8 @@ fn activity_marker(started_at_ms: Option<i64>) -> Span<'static> {
 
 fn shimmer_text(text: &str, started_at_ms: Option<i64>) -> Vec<Span<'static>> {
     let now_ms = unix_time_millis();
-    let elapsed_ms = started_at_ms
-        .map(|started_at_ms| now_ms.saturating_sub(started_at_ms))
-        .unwrap_or(now_ms);
+    let elapsed_ms =
+        started_at_ms.map_or(now_ms, |started_at_ms| now_ms.saturating_sub(started_at_ms));
     shimmer_spans_at(text, elapsed_ms, terminal_supports_true_color())
 }
 
@@ -1313,10 +1349,17 @@ fn shimmer_intensity(index: usize, char_count: usize, elapsed_ms: i64) -> f32 {
         return 0.0;
     }
 
-    let period = char_count + SHIMMER_PADDING * 2;
-    let phase = elapsed_ms.rem_euclid(SHIMMER_SWEEP_MS) as f32 / SHIMMER_SWEEP_MS as f32;
-    let pos = phase * period as f32;
-    let char_pos = index as f32 + SHIMMER_PADDING as f32;
+    let period = char_count.saturating_add(SHIMMER_PADDING * 2);
+    let elapsed_in_sweep = elapsed_ms.rem_euclid(SHIMMER_SWEEP_MS);
+    let elapsed_in_sweep = u16::try_from(elapsed_in_sweep)
+        .expect("shimmer elapsed time is bounded by its sweep duration");
+    let sweep_ms = u16::try_from(SHIMMER_SWEEP_MS).expect("shimmer sweep fits in u16");
+    let period = u16::try_from(period).unwrap_or(u16::MAX);
+    let index = u16::try_from(index).unwrap_or(u16::MAX);
+    let padding = u16::try_from(SHIMMER_PADDING).expect("shimmer padding fits in u16");
+    let phase = f32::from(elapsed_in_sweep) / f32::from(sweep_ms);
+    let pos = phase * f32::from(period);
+    let char_pos = f32::from(index) + f32::from(padding);
     let dist = (char_pos - pos).abs();
 
     if dist <= SHIMMER_BAND_HALF_WIDTH {
@@ -1338,34 +1381,65 @@ fn shimmer_style_for_level(intensity: f32) -> Style {
 }
 
 fn terminal_supports_true_color() -> bool {
-    supports_color::on_cached(supports_color::Stream::Stdout)
-        .map(|level| level.has_16m)
-        .unwrap_or(false)
+    supports_color::on_cached(supports_color::Stream::Stdout).is_some_and(|level| level.has_16m)
 }
 
 fn blend_rgb(fg: (u8, u8, u8), bg: (u8, u8, u8), alpha: f32) -> (u8, u8, u8) {
     let alpha = alpha.clamp(0.0, 1.0);
-    let r = (fg.0 as f32 * alpha + bg.0 as f32 * (1.0 - alpha)) as u8;
-    let g = (fg.1 as f32 * alpha + bg.1 as f32 * (1.0 - alpha)) as u8;
-    let b = (fg.2 as f32 * alpha + bg.2 as f32 * (1.0 - alpha)) as u8;
-    (r, g, b)
+    let weight = if alpha < 0.1 {
+        0
+    } else if alpha < 0.2 {
+        1
+    } else if alpha < 0.3 {
+        2
+    } else if alpha < 0.4 {
+        3
+    } else if alpha < 0.5 {
+        4
+    } else if alpha < 0.6 {
+        5
+    } else if alpha < 0.7 {
+        6
+    } else if alpha < 0.8 {
+        7
+    } else if alpha < 0.9 {
+        8
+    } else if alpha < 1.0 {
+        9
+    } else {
+        10
+    };
+    (
+        blend_channel(fg.0, bg.0, weight),
+        blend_channel(fg.1, bg.1, weight),
+        blend_channel(fg.2, bg.2, weight),
+    )
+}
+
+fn blend_channel(foreground: u8, background: u8, foreground_weight: u16) -> u8 {
+    let background_weight = 10u16.saturating_sub(foreground_weight);
+    let blended = (u16::from(background) * background_weight
+        + u16::from(foreground) * foreground_weight)
+        / 10;
+    u8::try_from(blended).expect("weighted average of two u8 channels fits in u8")
 }
 
 fn unix_time_millis() -> i64 {
-    std::time::SystemTime::now()
+    let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
 fn user_prompt_lines(lines: Vec<Line<'static>>, max_width: u16) -> Vec<Line<'static>> {
     let mut lines = prefix_wrapped_lines(
         lines,
-        vec![
+        &[
             Span::styled(USER_PROMPT_PREFIX, dim_style().add_modifier(Modifier::BOLD)),
             Span::raw(ACTIVITY_TITLE_GAP),
         ],
-        vec![Span::raw(ACTIVITY_BODY_INDENT)],
+        &[Span::raw(ACTIVITY_BODY_INDENT)],
         max_width,
     );
     for line in &mut lines {
@@ -1383,54 +1457,54 @@ fn blank_user_message_line() -> Line<'static> {
 fn prefixed_body_lines(lines: Vec<Line<'static>>, max_width: u16) -> Vec<Line<'static>> {
     prefix_wrapped_lines(
         lines,
-        vec![Span::raw(ACTIVITY_BODY_INDENT)],
-        vec![Span::raw(ACTIVITY_BODY_INDENT)],
+        &[Span::raw(ACTIVITY_BODY_INDENT)],
+        &[Span::raw(ACTIVITY_BODY_INDENT)],
         max_width,
     )
 }
 
-fn body_markdown_width(max_width: u16) -> Option<u16> {
-    Some(
-        max_width
-            .saturating_sub(ACTIVITY_BODY_INDENT.len() as u16)
-            .max(1),
-    )
+fn body_markdown_width(max_width: u16) -> u16 {
+    max_width
+        .saturating_sub(
+            u16::try_from(ACTIVITY_BODY_INDENT.len()).expect("body indent width fits in u16"),
+        )
+        .max(1)
 }
 
-fn detail_markdown_width(max_width: u16) -> Option<u16> {
-    Some(
-        max_width
-            .saturating_sub(DETAIL_SUBSEQUENT_PREFIX.len() as u16)
-            .max(1),
-    )
+fn detail_markdown_width(max_width: u16) -> u16 {
+    max_width
+        .saturating_sub(
+            u16::try_from(DETAIL_SUBSEQUENT_PREFIX.len()).expect("detail prefix width fits in u16"),
+        )
+        .max(1)
 }
 
 fn prefixed_detail_lines(lines: Vec<Line<'static>>, max_width: u16) -> Vec<Line<'static>> {
     prefix_wrapped_lines(
         lines,
-        vec![Span::styled(DETAIL_INITIAL_PREFIX, dim_style())],
-        vec![Span::raw(DETAIL_SUBSEQUENT_PREFIX)],
+        &[Span::styled(DETAIL_INITIAL_PREFIX, dim_style())],
+        &[Span::raw(DETAIL_SUBSEQUENT_PREFIX)],
         max_width,
     )
 }
 
 fn prefix_wrapped_lines(
     lines: Vec<Line<'static>>,
-    initial_prefix: Vec<Span<'static>>,
-    subsequent_prefix: Vec<Span<'static>>,
+    initial_prefix: &[Span<'static>],
+    subsequent_prefix: &[Span<'static>],
     max_width: u16,
 ) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for (index, line) in lines.into_iter().enumerate() {
         let prefix = if index == 0 {
-            initial_prefix.clone()
+            initial_prefix.to_vec()
         } else {
-            subsequent_prefix.clone()
+            subsequent_prefix.to_vec()
         };
         out.extend(prefixed_wrapped_line(
             line,
             prefix,
-            subsequent_prefix.clone(),
+            subsequent_prefix,
             max_width,
         ));
     }
@@ -1440,7 +1514,7 @@ fn prefix_wrapped_lines(
 fn prefixed_wrapped_line(
     content: Line<'static>,
     initial_prefix: Vec<Span<'static>>,
-    subsequent_prefix: Vec<Span<'static>>,
+    subsequent_prefix: &[Span<'static>],
     max_width: u16,
 ) -> Vec<Line<'static>> {
     let line_style = content.style;
@@ -1457,9 +1531,9 @@ fn prefixed_wrapped_line(
 
         for ch in span.content.chars() {
             let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            let content_width = max_width
-                .saturating_sub(spans_display_width(&current_prefix) as u16)
-                .max(1) as usize;
+            let prefix_width =
+                u16::try_from(spans_display_width(&current_prefix)).unwrap_or(u16::MAX);
+            let content_width = usize::from(max_width.saturating_sub(prefix_width).max(1));
             if current_width + chunk_width > 0
                 && current_width + chunk_width + ch_width > content_width
             {
@@ -1469,11 +1543,11 @@ fn prefixed_wrapped_line(
                 }
                 let mut line = Line::from(std::mem::replace(
                     &mut current_spans,
-                    subsequent_prefix.clone(),
+                    subsequent_prefix.to_vec(),
                 ));
                 line.style = line_style;
                 out.push(line);
-                current_prefix = subsequent_prefix.clone();
+                current_prefix.clone_from_slice(subsequent_prefix);
                 current_width = 0;
             }
 
@@ -1544,8 +1618,11 @@ fn render_assistant_cell_lines(cell: &AssistantActivityData, max_width: u16) -> 
     let body_text = cell.content.trim();
     let mut lines: Vec<Line<'static>> = Vec::new();
     if !body_text.is_empty() {
-        let md_lines =
-            render_markdown_with_width(body_text, Color::White, body_markdown_width(max_width));
+        let md_lines = render_markdown_with_width(
+            body_text,
+            Color::White,
+            Some(body_markdown_width(max_width)),
+        );
         lines.extend(prefixed_body_lines(md_lines, max_width));
     }
     lines
@@ -1576,23 +1653,26 @@ fn render_thinking_cell_lines(
     } else {
         thinking_collapsed_preview(&cell.content)
     };
-    let md_lines =
-        render_markdown_with_width(&body_text, Color::Gray, body_markdown_width(max_width))
+    let md_lines = render_markdown_with_width(
+        &body_text,
+        Color::Gray,
+        Some(body_markdown_width(max_width)),
+    )
+    .into_iter()
+    .map(|mut line| {
+        line.spans = line
+            .spans
             .into_iter()
-            .map(|mut line| {
-                line.spans = line
-                    .spans
-                    .into_iter()
-                    .map(|span| {
-                        Span::styled(
-                            span.content.to_string(),
-                            span.style.add_modifier(Modifier::DIM | Modifier::ITALIC),
-                        )
-                    })
-                    .collect();
-                line
+            .map(|span| {
+                Span::styled(
+                    span.content.to_string(),
+                    span.style.add_modifier(Modifier::DIM | Modifier::ITALIC),
+                )
             })
-            .collect::<Vec<_>>();
+            .collect();
+        line
+    })
+    .collect::<Vec<_>>();
     lines.extend(prefixed_body_lines(md_lines, max_width));
     lines
 }
@@ -1711,12 +1791,12 @@ fn render_explored_cell_lines(cell: &ExploredActivityData, max_width: u16) -> Ve
     let mut detail = Vec::new();
     let mut index = 0;
     while index < cell.calls.len() {
-        let call = &cell.calls[index];
+        let explored_call = &cell.calls[index];
         if matches!(
-            explored_call_action(call),
+            explored_call_action(explored_call),
             Some(ExploredCallActivityAction::Read)
         ) {
-            let mut names = vec![explored_read_target(call)];
+            let mut names = vec![explored_read_target(explored_call)];
             index += 1;
             while index < cell.calls.len()
                 && matches!(
@@ -1730,7 +1810,7 @@ fn render_explored_cell_lines(cell: &ExploredActivityData, max_width: u16) -> Ve
             names.dedup();
             detail.push(coding_action_line("Read", names.join(", ")));
         } else {
-            detail.push(explored_call_line(call));
+            detail.push(explored_call_line(explored_call));
             index += 1;
         }
     }
@@ -1753,15 +1833,13 @@ fn explored_call_line(call: &ExploredCallActivityData) -> Line<'static> {
             "List",
             call.target
                 .as_deref()
-                .map(compact_coding_summary_path)
-                .unwrap_or_else(|| summary.to_string()),
+                .map_or_else(|| summary.to_string(), compact_coding_summary_path),
         ),
         Some(ExploredCallActivityAction::Run) => coding_action_line(
             "Run",
             call.target
                 .as_deref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| summary.to_string()),
+                .map_or_else(|| summary.to_string(), ToString::to_string),
         ),
         None if tool_name == "Read" => {
             coding_action_line("Read", compact_coding_summary_path(summary))
@@ -1785,10 +1863,10 @@ fn explored_call_action(call: &ExploredCallActivityData) -> Option<ExploredCallA
 }
 
 fn explored_read_target(call: &ExploredCallActivityData) -> String {
-    call.target
-        .as_deref()
-        .map(compact_coding_summary_path)
-        .unwrap_or_else(|| compact_coding_summary_path(&call.summary))
+    call.target.as_deref().map_or_else(
+        || compact_coding_summary_path(&call.summary),
+        compact_coding_summary_path,
+    )
 }
 
 fn explored_search_target(call: &ExploredCallActivityData) -> String {
@@ -1818,37 +1896,27 @@ fn coding_action_line(title: &str, detail: String) -> Line<'static> {
 fn format_coding_search_summary(summary: &str) -> String {
     let (query_part, path) = summary
         .rsplit_once(" in ")
-        .map(|(query, path)| (query, Some(path)))
-        .unwrap_or((summary, None));
+        .map_or((summary, None), |(query, path)| (query, Some(path)));
     let query = strip_coding_result_count(query_part);
-    match path {
-        Some(path) => format!("{} in {}", query, compact_coding_summary_path(path)),
-        None => query.to_string(),
-    }
+    path.map_or_else(
+        || query.to_string(),
+        |path| format!("{} in {}", query, compact_coding_summary_path(path)),
+    )
 }
 
 fn strip_coding_result_count(summary: &str) -> &str {
     summary
         .rsplit_once(" — ")
-        .map(|(query, _)| query.trim())
-        .unwrap_or_else(|| summary.trim())
+        .map_or_else(|| summary.trim(), |(query, _)| query.trim())
 }
 
 fn compact_coding_summary_path(summary: &str) -> String {
     let target = summary
         .split_once(" -> ")
-        .map(|(target, _)| target)
-        .unwrap_or(summary)
+        .map_or(summary, |(target, _)| target)
         .trim();
-    let path = target
-        .split_once(":L")
-        .map(|(path, _)| path)
-        .unwrap_or(target);
-    let path = path
-        .split_once('#')
-        .map(|(path, _)| path)
-        .unwrap_or(path)
-        .trim();
+    let path = target.split_once(":L").map_or(target, |(path, _)| path);
+    let path = path.split_once('#').map_or(path, |(path, _)| path).trim();
     std::path::Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -1941,14 +2009,26 @@ fn render_workflow_cell_lines(
         Span::styled(cell.workflow_id.clone(), Style::default().fg(Color::Cyan)),
         Span::raw(" — "),
         Span::styled(status, dim_style()),
+        Span::styled("  [w inspect]", dim_style()),
     ])];
+    if let Some(snapshot) = cell.snapshot.as_ref() {
+        let summary = format!(
+            "{} agent{} · run {}",
+            snapshot.workers.len(),
+            if snapshot.workers.len() == 1 { "" } else { "s" },
+            snapshot.run_id,
+        );
+        lines.extend(prefixed_detail_lines(vec![Line::from(summary)], max_width));
+    }
     if !cell.message.trim().is_empty() {
         lines.extend(prefixed_detail_lines(
             vec![Line::from(cell.message.clone())],
             max_width,
         ));
     }
-    if let Some(output) = cell.output.as_ref() {
+    if cell.snapshot.is_none()
+        && let Some(output) = cell.output.as_ref()
+    {
         lines.extend(prefixed_detail_lines(
             vec![Line::from(output.to_string())],
             max_width,
@@ -1963,14 +2043,10 @@ fn render_runtime_status_cell_lines(
 ) -> Vec<Line<'static>> {
     let elapsed_seconds = cell
         .active_runtime_started_at_ms
-        .map(|started_at_ms| {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64;
-            now_ms.saturating_sub(started_at_ms).max(0) as u64 / 1000
-        })
-        .unwrap_or(0);
+        .map_or(0, |started_at_ms| {
+            let now_ms = unix_time_millis();
+            now_ms.saturating_sub(started_at_ms).max(0).cast_unsigned() / 1000
+        });
     runtime_status_cell_lines_at(cell, elapsed_seconds, max_width)
 }
 
@@ -2013,7 +2089,7 @@ fn runtime_status_cell_lines_at(
     prefixed_wrapped_line(
         Line::from(spans),
         vec![marker, Span::raw(ACTIVITY_TITLE_GAP)],
-        vec![Span::styled(COMMAND_CONTINUATION_PREFIX, dim_style())],
+        &[Span::styled(COMMAND_CONTINUATION_PREFIX, dim_style())],
         max_width,
     )
 }
@@ -2049,12 +2125,7 @@ fn render_warning_cell_lines(cell: &ErrorActivityData, max_width: u16) -> Vec<Li
         cell.body_lines
             .iter()
             .take(12)
-            .map(|line| {
-                Line::from(Span::styled(
-                    line.to_string(),
-                    Style::default().fg(Color::Gray),
-                ))
-            })
+            .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(Color::Gray))))
             .collect(),
         max_width,
     ));
@@ -2066,8 +2137,7 @@ fn render_browser_cell_lines(cell: &BrowserActivityData, max_width: u16) -> Vec<
         "Captured URL: {}",
         cell.url
             .as_deref()
-            .map(compact_browser_url)
-            .unwrap_or_else(|| "unknown".to_string())
+            .map_or_else(|| "unknown".to_string(), compact_browser_url)
     ))];
     let mut stats = Vec::new();
     if let Some(line_count) = cell.line_count {
@@ -2092,11 +2162,10 @@ fn render_live_browser_cell_lines(
     cell: &LiveBrowserActivityData,
     max_width: u16,
 ) -> Vec<Line<'static>> {
-    let title = cell
-        .url
-        .as_deref()
-        .map(|url| format!("Opening URL: {}", compact_browser_url(url)))
-        .unwrap_or_else(|| cell.title.clone());
+    let title = cell.url.as_deref().map_or_else(
+        || cell.title.clone(),
+        |url| format!("Opening URL: {}", compact_browser_url(url)),
+    );
     let mut lines = vec![activity_header_with_marker(
         activity_marker(None),
         title,
@@ -2136,12 +2205,12 @@ fn render_web_search_cell_lines(
                 .add_modifier(Modifier::UNDERLINED),
         )));
     }
-    detail.extend(cell.body_lines.iter().take(4).map(|line| {
-        Line::from(Span::styled(
-            line.to_string(),
-            Style::default().fg(Color::Gray),
-        ))
-    }));
+    detail.extend(
+        cell.body_lines
+            .iter()
+            .take(4)
+            .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(Color::Gray)))),
+    );
     lines.extend(prefixed_detail_lines(detail, max_width));
     lines
 }
@@ -2233,8 +2302,7 @@ fn render_live_exec_cell_lines(cell: &LiveExecActivityData, max_width: u16) -> V
 
 fn highlighted_shell_command_line(command: &str) -> Line<'static> {
     highlight_shell_command(command)
-        .map(Line::from)
-        .unwrap_or_else(|| Line::from(Span::raw(command.to_string())))
+        .map_or_else(|| Line::from(Span::raw(command.to_string())), Line::from)
 }
 
 fn render_patch_cell_lines(cell: &PatchActivityData, max_width: u16) -> Vec<Line<'static>> {
@@ -2291,7 +2359,7 @@ fn render_patch_cell_lines(cell: &PatchActivityData, max_width: u16) -> Vec<Line
 }
 
 fn render_telegram_cell_lines(cell: &TelegramActivityData, max_width: u16) -> Vec<Line<'static>> {
-    render_message_activity_lines(MessageActivityInput {
+    render_message_activity_lines(&MessageActivityInput {
         title: &cell.title,
         detail_lines: &cell.detail_lines,
         message_lines: &cell.message_lines,
@@ -2340,8 +2408,11 @@ fn render_reply_cell_lines(cell: &ReplyActivityData, max_width: u16) -> Vec<Line
     ));
     if !cell.message_lines.is_empty() {
         let joined = cell.message_lines.join("\n");
-        let md_lines =
-            render_markdown_with_width(&joined, Color::White, detail_markdown_width(max_width));
+        let md_lines = render_markdown_with_width(
+            &joined,
+            Color::White,
+            Some(detail_markdown_width(max_width)),
+        );
         lines.extend(prefixed_detail_lines(md_lines, max_width));
     }
     lines
@@ -2355,14 +2426,17 @@ fn render_agent_message_reply_lines(
     let body_text = joined.trim();
     let mut lines: Vec<Line<'static>> = Vec::new();
     if !body_text.is_empty() {
-        let md_lines =
-            render_markdown_with_width(body_text, Color::White, body_markdown_width(max_width));
+        let md_lines = render_markdown_with_width(
+            body_text,
+            Color::White,
+            Some(body_markdown_width(max_width)),
+        );
         lines.extend(prefixed_body_lines(md_lines, max_width));
     }
     lines
 }
 
-fn resolved_reply_title(cell: &ReplyActivityData) -> &'static str {
+const fn resolved_reply_title(cell: &ReplyActivityData) -> &'static str {
     match cell.subject {
         crate::activity_event::ReplySubject::Message => "Resolved Message",
         crate::activity_event::ReplySubject::Notice => "Resolved Notice",
@@ -2377,7 +2451,7 @@ fn render_plan_cell_lines(cell: &PlanActivityData, max_width: u16) -> Vec<Line<'
         let note_lines = render_markdown_with_width(
             explanation.trim(),
             Color::Gray,
-            detail_markdown_width(max_width),
+            Some(detail_markdown_width(max_width)),
         )
         .into_iter()
         .map(|mut line| {
@@ -2453,19 +2527,14 @@ struct MessageActivityInput<'a> {
     max_width: u16,
 }
 
-fn render_message_activity_lines(input: MessageActivityInput<'_>) -> Vec<Line<'static>> {
+fn render_message_activity_lines(input: &MessageActivityInput<'_>) -> Vec<Line<'static>> {
     let mut lines = vec![activity_header(input.title.to_string())];
     lines.extend(prefixed_body_lines(
         input
             .detail_lines
             .iter()
             .take(input.detail_limit)
-            .map(|line| {
-                Line::from(Span::styled(
-                    line.to_string(),
-                    Style::default().fg(Color::Gray),
-                ))
-            })
+            .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(Color::Gray))))
             .collect(),
         input.max_width,
     ));
@@ -2481,7 +2550,7 @@ fn render_message_activity_lines(input: MessageActivityInput<'_>) -> Vec<Line<'s
         let md_lines = render_markdown_with_width(
             &joined,
             Color::White,
-            detail_markdown_width(input.max_width),
+            Some(detail_markdown_width(input.max_width)),
         );
         lines.extend(prefixed_detail_lines(md_lines, input.max_width));
     } else {
@@ -2492,7 +2561,7 @@ fn render_message_activity_lines(input: MessageActivityInput<'_>) -> Vec<Line<'s
                 .take(input.message_limit)
                 .map(|line| {
                     Line::from(Span::styled(
-                        line.to_string(),
+                        line.clone(),
                         Style::default().fg(Color::White),
                     ))
                 })
@@ -2514,12 +2583,7 @@ fn render_wait_activity_lines(
         body_lines
             .iter()
             .take(limit)
-            .map(|line| {
-                Line::from(Span::styled(
-                    line.to_string(),
-                    Style::default().fg(Color::Gray),
-                ))
-            })
+            .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(Color::Gray))))
             .collect(),
         max_width,
     ));
@@ -2669,12 +2733,12 @@ fn render_patch_diff_line(
 
     let mut spans = vec![
         Span::styled(
-            format!("{old_lineno:>old_width$}", old_width = old_lineno_width),
+            format!("{old_lineno:>old_lineno_width$}"),
             patch_diff_style(Style::default().fg(Color::DarkGray), background),
         ),
         Span::styled(" ", patch_diff_style(Style::default(), background)),
         Span::styled(
-            format!("{new_lineno:>new_width$}", new_width = new_lineno_width),
+            format!("{new_lineno:>new_lineno_width$}"),
             patch_diff_style(Style::default().fg(Color::DarkGray), background),
         ),
         Span::styled(" ", patch_diff_style(Style::default(), background)),
@@ -2698,7 +2762,7 @@ fn render_patch_diff_line(
     line
 }
 
-fn patch_diff_style(style: Style, background: Option<Color>) -> Style {
+const fn patch_diff_style(style: Style, background: Option<Color>) -> Style {
     match background {
         Some(color) => style.bg(color),
         None => style,
@@ -2736,7 +2800,7 @@ fn exec_output_detail_lines(
                 } else {
                     Style::default().fg(Color::Gray)
                 };
-                Line::from(Span::styled(line.to_string(), style))
+                Line::from(Span::styled(line.clone(), style))
             })
             .collect()
     };
@@ -2809,8 +2873,7 @@ That's it.";
             .collect();
         assert!(
             fence_lines.is_empty(),
-            "expected fence delimiter lines to be hidden, got {:?}",
-            fence_lines
+            "expected fence delimiter lines to be hidden, got {fence_lines:?}"
         );
 
         // ── Code content is syntax‑highlighted ─────────────────
@@ -2840,8 +2903,7 @@ That's it.";
             code_line.spans.iter().filter_map(|s| s.style.fg).collect();
         assert!(
             unique_fgs.len() >= 2,
-            "code block should have >= 2 distinct colours, got {:?}",
-            unique_fgs
+            "code block should have >= 2 distinct colours, got {unique_fgs:?}"
         );
 
         // ── Plain text is White (base_color) ────────────────────
@@ -3374,8 +3436,7 @@ That's it.";
                 .expect("changed line should be rendered");
             assert!(
                 line.style.bg.is_some() || line.spans.iter().any(|span| span.style.bg.is_some()),
-                "changed line should keep diff background: {:?}",
-                line
+                "changed line should keep diff background: {line:?}"
             );
         }
 

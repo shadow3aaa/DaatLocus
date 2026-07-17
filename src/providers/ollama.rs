@@ -100,9 +100,11 @@ fn extract_json_value_from_content(content: &str) -> Option<Value> {
     if let Some(fenced) = content
         .strip_prefix("```json")
         .and_then(|s| s.strip_suffix("```"))
-        .or(content
-            .strip_prefix("```")
-            .and_then(|s| s.strip_suffix("```")))
+        .or_else(|| {
+            content
+                .strip_prefix("```")
+                .and_then(|s| s.strip_suffix("```"))
+        })
         && let Ok(value) = serde_json::from_str::<Value>(fenced)
     {
         return Some(value);
@@ -155,16 +157,15 @@ impl OllamaClient {
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
         let reserved_output_tokens = model_config.reserved_output_tokens();
         let max_completion_tokens = model_config.max_completion_tokens();
-        let vision_mode_initial = match model_config.supports_vision {
-            Some(false) => OllamaVisionMode::Disabled,
-            _ => {
-                let catalog = catalog_model_capacity(&model_config.model_id);
-                let supports = catalog.map(|c| c.supports_vision).unwrap_or(false);
-                if supports {
-                    OllamaVisionMode::Enabled
-                } else {
-                    OllamaVisionMode::Disabled
-                }
+        let vision_mode_initial = if model_config.supports_vision == Some(false) {
+            OllamaVisionMode::Disabled
+        } else {
+            let catalog = catalog_model_capacity(&model_config.model_id);
+            let supports = catalog.is_some_and(|c| c.supports_vision);
+            if supports {
+                OllamaVisionMode::Enabled
+            } else {
+                OllamaVisionMode::Disabled
             }
         };
         let thinking_mode_initial = if model_config.thinking_budget().is_some() {
@@ -175,7 +176,9 @@ impl OllamaClient {
         Self {
             client,
             host: host.clone(),
-            api_key: api_key.map(|s| s.to_string()).filter(|s| !s.is_empty()),
+            api_key: api_key
+                .map(std::string::ToString::to_string)
+                .filter(|s| !s.is_empty()),
             model: model_config.model_id.clone(),
             temperature: model_config.temperature,
             thinking_budget: model_config
@@ -189,7 +192,9 @@ impl OllamaClient {
                 &model_config.model_id,
                 model_config.rpm(),
             ),
-            keep_alive: keep_alive.map(|s| s.to_string()).filter(|s| !s.is_empty()),
+            keep_alive: keep_alive
+                .map(std::string::ToString::to_string)
+                .filter(|s| !s.is_empty()),
             request_timeout,
             stream_idle_timeout,
             effective_context_window_tokens,
@@ -199,7 +204,7 @@ impl OllamaClient {
             token_usage: Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
-                model_context_window: Some(context_window_tokens as i64),
+                model_context_window: i64::try_from(context_window_tokens).ok(),
                 daily_token_usage: Vec::new(),
             }),
         }
@@ -209,7 +214,7 @@ impl OllamaClient {
         format!("{}/api/chat", self.host)
     }
 
-    fn request_budget_limits(&self) -> RequestBudgetLimits {
+    const fn request_budget_limits(&self) -> RequestBudgetLimits {
         RequestBudgetLimits {
             context_window_tokens: self.effective_context_window_tokens,
             auto_compact_threshold_tokens: self.auto_compact_threshold_tokens,
@@ -272,7 +277,7 @@ impl OllamaClient {
                 let mut timestamps = limiter.lock().await;
                 let now = Instant::now();
                 while let Some(front) = timestamps.front().copied() {
-                    if now.duration_since(front) >= Duration::from_secs(60) {
+                    if now.duration_since(front) >= Duration::from_mins(1) {
                         timestamps.pop_front();
                     } else {
                         break;
@@ -283,7 +288,7 @@ impl OllamaClient {
                     None
                 } else {
                     timestamps.front().copied().map(|front| {
-                        Duration::from_secs(60).saturating_sub(now.duration_since(front))
+                        Duration::from_mins(1).saturating_sub(now.duration_since(front))
                     })
                 }
             };
@@ -349,9 +354,10 @@ impl OllamaClient {
                         truncate_for_error(&body)
                     ));
                 }
-                let delay = retry_after
-                    .map(Duration::from_secs)
-                    .unwrap_or_else(|| default_rate_limit_backoff(rate_limit_attempt));
+                let delay = retry_after.map_or_else(
+                    || default_rate_limit_backoff(rate_limit_attempt),
+                    Duration::from_secs,
+                );
                 warn!(
                     "ollama api returned HTTP 429; retrying in {} ms (attempt {}/{})\n{}",
                     delay.as_millis(),
@@ -511,6 +517,10 @@ impl OllamaClient {
         payload: &Value,
         request: &AgentTurnRequest,
     ) -> Result<AgentTurnStreamResult> {
+        const MAX_ADAPTIVE_RETRIES: usize = 2;
+        const MAX_429_RETRIES: usize = 4;
+        const MAX_5XX_RETRIES: usize = 4;
+
         let budget = &options.budget;
         let request_context = summarize_agent_turn_request(request, Some(budget));
         let url = self.chat_url();
@@ -521,11 +531,6 @@ impl OllamaClient {
         let mut adaptive_attempt = 0usize;
         let mut rate_limit_attempt = 0usize;
         let mut transient_attempt = 0usize;
-
-        const MAX_ADAPTIVE_RETRIES: usize = 2;
-        const MAX_429_RETRIES: usize = 4;
-        const MAX_5XX_RETRIES: usize = 4;
-
         loop {
             let response = self
                 .send_ollama_stream(&current_payload, &request_context)
@@ -552,9 +557,10 @@ impl OllamaClient {
                         truncate_for_error(&body)
                     ));
                 }
-                let delay = retry_after
-                    .map(Duration::from_secs)
-                    .unwrap_or_else(|| default_rate_limit_backoff(rate_limit_attempt));
+                let delay = retry_after.map_or_else(
+                    || default_rate_limit_backoff(rate_limit_attempt),
+                    Duration::from_secs,
+                );
                 warn!(
                     "ollama stream: api returned HTTP 429; retrying in {} ms (attempt {}/{})\n{}",
                     delay.as_millis(),
@@ -785,15 +791,13 @@ impl OllamaClient {
                     for (i, tc) in tc_array.iter().enumerate() {
                         let function = &tc["function"];
                         let name = function["name"].as_str().unwrap_or("");
-                        let arguments = if let Some(args_str) = function["arguments"].as_str() {
-                            serde_json::from_str(args_str).unwrap_or_else(|_| json!({}))
-                        } else {
-                            function["arguments"].clone()
-                        };
+                        let arguments = function["arguments"].as_str().map_or_else(
+                            || function["arguments"].clone(),
+                            |args_str| serde_json::from_str(args_str).unwrap_or_else(|_| json!({})),
+                        );
                         let id = tc["id"]
                             .as_str()
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| format!("call_{i}"));
+                            .map_or_else(|| format!("call_{i}"), std::string::ToString::to_string);
                         if !name.is_empty() {
                             parsed.push(AgentToolCall {
                                 id,
@@ -1030,12 +1034,12 @@ fn agent_message_to_ollama_content(
     flatten_orphan_tool_results: bool,
     valid_tool_call_ids: &HashSet<String>,
     strip_images: bool,
-) -> Option<Value> {
+) -> Value {
     match message {
-        AgentMessage::System { content } => Some(json!({
+        AgentMessage::System { content } => json!({
             "role": "system",
             "content": content,
-        })),
+        }),
         AgentMessage::User { content } => {
             let (text, images) = extract_ollama_multimodal_content(content);
             let mut msg = json!({
@@ -1045,12 +1049,12 @@ fn agent_message_to_ollama_content(
             if !strip_images && !images.is_empty() {
                 msg["images"] = json!(images);
             }
-            Some(msg)
+            msg
         }
-        AgentMessage::Assistant { content } => Some(json!({
+        AgentMessage::Assistant { content } => json!({
             "role": "assistant",
             "content": content,
-        })),
+        }),
         AgentMessage::AssistantToolCallProtocol {
             content,
             reasoning_content,
@@ -1080,7 +1084,7 @@ fn agent_message_to_ollama_content(
             {
                 msg["thinking"] = json!(thinking);
             }
-            Some(msg)
+            msg
         }
         AgentMessage::Tool {
             tool_call_id,
@@ -1088,15 +1092,15 @@ fn agent_message_to_ollama_content(
             content,
         } => {
             if flatten_orphan_tool_results && !valid_tool_call_ids.contains(tool_call_id) {
-                Some(json!({
+                json!({
                     "role": "assistant",
                     "content": format!("historical tool result ({name}):\n{content}"),
-                }))
+                })
             } else {
-                Some(json!({
+                json!({
                     "role": "tool",
                     "content": content,
-                }))
+                })
             }
         }
     }
@@ -1148,7 +1152,7 @@ fn normalize_ollama_image_media_type(path: &str, media_type: &str) -> Option<Str
         .as_deref()
     {
         Some("png") => Some("image/png".to_string()),
-        Some("jpg") | Some("jpeg") => Some("image/jpeg".to_string()),
+        Some("jpg" | "jpeg") => Some("image/jpeg".to_string()),
         Some("webp") => Some("image/webp".to_string()),
         Some("gif") => Some("image/gif".to_string()),
         _ => {
@@ -1166,10 +1170,12 @@ fn prompt_request_to_ollama_messages(request: &PromptRequest) -> Vec<Value> {
         messages.push(json!({"role": "system", "content": msg}));
     }
     for msg in request.all_messages() {
-        if let Some(m) = agent_message_to_ollama_content(&msg.message, true, &HashSet::new(), false)
-        {
-            messages.push(m);
-        }
+        messages.push(agent_message_to_ollama_content(
+            &msg.message,
+            true,
+            &HashSet::new(),
+            false,
+        ));
     }
     messages
 }
@@ -1198,11 +1204,12 @@ fn agent_turn_request_to_ollama_messages_inner(
     let flatten = true;
     let mut messages = Vec::new();
     for msg in &request.messages {
-        if let Some(m) =
-            agent_message_to_ollama_content(msg, flatten, &valid_tool_call_ids, strip_images)
-        {
-            messages.push(m);
-        }
+        messages.push(agent_message_to_ollama_content(
+            msg,
+            flatten,
+            &valid_tool_call_ids,
+            strip_images,
+        ));
     }
     messages
 }

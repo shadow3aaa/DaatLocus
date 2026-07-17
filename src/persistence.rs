@@ -104,7 +104,7 @@ impl PersistenceStore {
         read_json_optional(&self.memory_file(file_name), label).await
     }
 
-    pub fn read_json_file_sync<T>(&self, path: &Path, label: &str) -> Option<T>
+    pub fn read_json_file_sync<T>(path: &Path, label: &str) -> Option<T>
     where
         T: DeserializeOwned,
     {
@@ -113,7 +113,7 @@ impl PersistenceStore {
 
     pub async fn write_postcard_memory<T>(&self, file_name: &str, value: &T) -> Result<()>
     where
-        T: Serialize + ?Sized,
+        T: Serialize + ?Sized + Sync,
     {
         write_postcard_atomic(
             &self.memory_file(file_name),
@@ -125,7 +125,7 @@ impl PersistenceStore {
 
     pub async fn write_json_memory<T>(&self, file_name: &str, value: &T) -> Result<()>
     where
-        T: Serialize + ?Sized,
+        T: Serialize + ?Sized + Sync,
     {
         let bytes = serde_json::to_vec_pretty(value).into_diagnostic()?;
         write_bytes_atomic(
@@ -137,7 +137,7 @@ impl PersistenceStore {
         .into_diagnostic()
     }
 
-    pub fn write_json_file_sync<T>(&self, path: &Path, value: &T) -> Result<()>
+    pub fn write_json_file_sync<T>(path: &Path, value: &T) -> Result<()>
     where
         T: Serialize + ?Sized,
     {
@@ -153,7 +153,7 @@ impl PersistenceStore {
 
     pub async fn write_json_state<T>(&self, file_name: &str, value: &T) -> Result<()>
     where
-        T: Serialize + ?Sized,
+        T: Serialize + ?Sized + Sync,
     {
         let bytes = serde_json::to_vec_pretty(value).into_diagnostic()?;
         write_bytes_atomic(
@@ -276,7 +276,7 @@ pub async fn write_postcard_atomic<T>(
     mode: PersistenceFileMode,
 ) -> Result<()>
 where
-    T: Serialize + ?Sized,
+    T: Serialize + ?Sized + Sync,
 {
     let bytes = postcard::to_allocvec(value).into_diagnostic()?;
     write_bytes_atomic(path.to_path_buf(), bytes, mode)
@@ -344,13 +344,13 @@ pub fn write_bytes_atomic_sync(
             .create_new(true)
             .open(&temp_path)?;
         if mode == PersistenceFileMode::Private {
-            set_private_file_permissions(&temp_path)?;
+            set_private_file_permissions(&temp_path);
         }
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
         fs::rename(&temp_path, path)?;
-        sync_parent_dir(parent)?;
+        sync_parent_dir(parent);
         Ok(())
     })();
 
@@ -373,29 +373,29 @@ pub fn append_bytes_durable_sync(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.flush()?;
     file.sync_all()?;
     drop(file);
-    sync_parent_dir(parent)
+    sync_parent_dir(parent);
+    Ok(())
 }
 
-pub fn set_private_file_permissions(path: &Path) -> io::Result<()> {
+pub const fn set_private_file_permissions(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .expect("private persistence file permissions should be set");
     }
     #[cfg(not(unix))]
     {
         let _ = path;
     }
-    Ok(())
 }
 
 fn create_unique_temp_path(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path
         .file_name()
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_else(|| "state".into());
+        .map_or_else(|| "state".into(), |name| name.to_string_lossy());
     parent.join(format!(
         ".{name}.tmp-{}-{}",
         std::process::id(),
@@ -407,8 +407,7 @@ fn corrupt_path(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path
         .file_name()
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_else(|| "state".into());
+        .map_or_else(|| "state".into(), |name| name.to_string_lossy());
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
@@ -448,16 +447,17 @@ fn quarantine_corrupt_file_sync(path: &Path, label: &str) {
     }
 }
 
-fn sync_parent_dir(path: &Path) -> io::Result<()> {
+const fn sync_parent_dir(path: &Path) {
     #[cfg(unix)]
     {
-        fs::File::open(path)?.sync_all()?;
+        fs::File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .expect("parent directory should sync after durable write");
     }
     #[cfg(not(unix))]
     {
         let _ = path;
     }
-    Ok(())
 }
 
 #[cfg(test)]

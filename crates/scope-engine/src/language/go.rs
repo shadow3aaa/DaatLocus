@@ -4,7 +4,8 @@ use tree_sitter::Language;
 pub struct GoAdapter;
 
 impl GoAdapter {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -30,16 +31,16 @@ impl LanguageAdapter for GoAdapter {
 
     fn queries(&self) -> LanguageQueries {
         LanguageQueries {
-            definitions: r#"
+            definitions: r"
                 (function_declaration name: (identifier) @name) @def
                 (method_declaration name: (field_identifier) @name) @def
                 (type_declaration (type_identifier) @name) @def
-            "#,
-            references: r#"
+            ",
+            references: r"
                 (call_expression function: (identifier) @ref) @call
                 (call_expression function: (selector_expression field: (field_identifier) @ref)) @call
                 (type_identifier) @ref
-            "#,
+            ",
         }
     }
 }

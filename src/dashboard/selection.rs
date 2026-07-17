@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct SelectableId(String);
+pub struct SelectableId(String);
 
 impl SelectableId {
     pub(super) fn new(value: impl Into<String>) -> Self {
@@ -20,19 +20,19 @@ impl SelectableId {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TextPosition {
+pub struct TextPosition {
     pub(super) line: usize,
     pub(super) byte: usize,
 }
 
 impl TextPosition {
-    fn new(line: usize, byte: usize) -> Self {
+    const fn new(line: usize, byte: usize) -> Self {
         Self { line, byte }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SelectionRange {
+pub struct SelectionRange {
     pub(super) start: TextPosition,
     pub(super) end: TextPosition,
 }
@@ -79,7 +79,7 @@ impl SelectionRange {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ActiveSelection {
+pub struct ActiveSelection {
     group: SelectableId,
     anchor: SelectionEndpoint,
     focus: SelectionEndpoint,
@@ -93,7 +93,7 @@ struct SelectionEndpoint {
 }
 
 impl SelectionEndpoint {
-    fn new(id: SelectableId, position: TextPosition) -> Self {
+    const fn new(id: SelectableId, position: TextPosition) -> Self {
         Self { id, position }
     }
 }
@@ -108,7 +108,7 @@ struct ActiveSelectionSpan {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SelectableRegion {
+pub struct SelectableRegion {
     pub(super) id: SelectableId,
     pub(super) area: Rect,
     pub(super) group: SelectableId,
@@ -137,7 +137,7 @@ struct VisualRow {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SelectionRegistry {
+pub struct SelectionRegistry {
     regions: Vec<SelectableRegion>,
     active: Option<ActiveSelection>,
 }
@@ -163,7 +163,7 @@ impl SelectionRegistry {
     }
 
     #[cfg(test)]
-    pub(super) fn active(&self) -> Option<&ActiveSelection> {
+    pub(super) const fn active(&self) -> Option<&ActiveSelection> {
         self.active.as_ref()
     }
 
@@ -173,7 +173,7 @@ impl SelectionRegistry {
         had_selection
     }
 
-    pub(super) fn has_selection(&self) -> bool {
+    pub(super) const fn has_selection(&self) -> bool {
         self.active.is_some()
     }
 
@@ -213,7 +213,7 @@ impl SelectionRegistry {
         true
     }
 
-    pub(super) fn end_drag(&mut self) -> bool {
+    pub(super) const fn end_drag(&mut self) -> bool {
         let Some(active) = self.active.as_mut() else {
             return false;
         };
@@ -290,7 +290,7 @@ impl SelectionRegistry {
         let start = if ordinal == span.start_ordinal {
             span.start
         } else {
-            region.start_position()
+            SelectableRegion::start_position()
         };
         let end = if ordinal == span.end_ordinal {
             span.end
@@ -462,10 +462,11 @@ impl SelectableRegion {
             let (start_col, end_col) =
                 row.byte_range_to_visual_cols(&self.lines[row.logical_line], start, end);
             let screen_start = row.screen_x.saturating_add(start_col);
-            let mut screen_end = row.screen_x.saturating_add(end_col);
-            if start == end && row.byte_start == row.byte_end {
-                screen_end = screen_start.saturating_add(1);
-            }
+            let screen_end = if start == end && row.byte_start == row.byte_end {
+                screen_start.saturating_add(1)
+            } else {
+                row.screen_x.saturating_add(end_col)
+            };
             for x in screen_start..screen_end.min(self.area.right()) {
                 if let Some(cell) = buf.cell_mut((x, row.screen_y)) {
                     cell.set_style(cell.style().patch(selection_style));
@@ -500,7 +501,7 @@ impl SelectableRegion {
         ))
     }
 
-    fn start_position(&self) -> TextPosition {
+    const fn start_position() -> TextPosition {
         TextPosition::new(0, 0)
     }
 
@@ -664,14 +665,14 @@ fn safe_slice(line: &str, start: usize, end: usize) -> String {
     }
 }
 
-fn previous_char_boundary(line: &str, mut index: usize) -> usize {
+const fn previous_char_boundary(line: &str, mut index: usize) -> usize {
     while index > 0 && !line.is_char_boundary(index) {
         index -= 1;
     }
     index
 }
 
-fn position_le(left: TextPosition, right: TextPosition) -> bool {
+const fn position_le(left: TextPosition, right: TextPosition) -> bool {
     left.line < right.line || (left.line == right.line && left.byte <= right.byte)
 }
 
@@ -698,7 +699,7 @@ mod tests {
         SelectableRegion::new(
             SelectableId::new("test"),
             Rect::new(0, 0, width, height),
-            lines.iter().map(|line| line.to_string()).collect(),
+            lines.iter().map(std::string::ToString::to_string).collect(),
             scroll,
         )
     }

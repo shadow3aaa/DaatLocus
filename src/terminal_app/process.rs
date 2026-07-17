@@ -205,7 +205,7 @@ impl TerminalProcess {
 }
 
 impl HeadTailOutputBuffer {
-    fn new(capacity: usize) -> Self {
+    const fn new(capacity: usize) -> Self {
         let head_budget = capacity / 2;
         let tail_budget = capacity.saturating_sub(head_budget);
         Self {
@@ -301,7 +301,7 @@ impl HeadTailOutputBuffer {
         self.head_bytes().saturating_add(self.tail_bytes())
     }
 
-    fn end_offset(&self) -> usize {
+    const fn end_offset(&self) -> usize {
         self.total_written
     }
 
@@ -376,7 +376,7 @@ fn spawn_reader<R>(
         let mut pending = Vec::<u8>::new();
         loop {
             match reader.read(&mut buffer).await {
-                Ok(0) => break,
+                Ok(0) | Err(_) => break,
                 Ok(n) => {
                     pending.extend_from_slice(&buffer[..n]);
                     while let Some(chunk) = take_valid_utf8_prefix(&mut pending) {
@@ -384,7 +384,6 @@ fn spawn_reader<R>(
                         *last_update.lock() = Instant::now();
                     }
                 }
-                Err(_) => break,
             }
         }
         if !pending.is_empty() {
@@ -450,7 +449,7 @@ fn shell_command(command: &str) -> String {
     }
 }
 
-fn terminal_env_defaults() -> [(&'static str, &'static str); 10] {
+const fn terminal_env_defaults() -> [(&'static str, &'static str); 10] {
     [
         ("NO_COLOR", "1"),
         ("TERM", "dumb"),

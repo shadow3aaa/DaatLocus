@@ -6,7 +6,7 @@ use std::path::Path;
 /// Each language server implementation (rust-analyzer, gopls, etc.) implements this trait,
 /// allowing scope-engine to query references without knowing the specific LSP server details.
 ///
-/// All methods use `&self` to support interior mutability patterns (e.g. RefCell),
+/// All methods use `&self` to support interior mutability patterns (e.g. `RefCell`),
 /// so implementations can be shared behind `Mutex<dyn Analyzer + Send>`.
 pub trait Analyzer: Send {
     /// Find all references to the symbol at the given position in the file.

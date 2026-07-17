@@ -26,11 +26,10 @@ pub fn normalize_provider_base_url(base_url: &str) -> String {
 
 pub fn resolve_env_reference(value: &str) -> String {
     let trimmed = value.trim();
-    if let Some(name) = env_ref_name(trimmed) {
-        std::env::var(name).unwrap_or_else(|_| trimmed.to_string())
-    } else {
-        trimmed.to_string()
-    }
+    env_ref_name(trimmed).map_or_else(
+        || trimmed.to_string(),
+        |name| std::env::var(name).unwrap_or_else(|_| trimmed.to_string()),
+    )
 }
 
 pub fn redact_secret_text(text: &str, secret: &str) -> String {
@@ -88,7 +87,7 @@ impl ThinkingBudget {
         Self(value.into())
     }
 
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         self.0.as_str()
     }
 }
@@ -149,7 +148,7 @@ impl Default for ModelConfig {
 }
 
 impl ModelConfig {
-    pub fn thinking_budget(&self) -> Option<&ThinkingBudget> {
+    pub const fn thinking_budget(&self) -> Option<&ThinkingBudget> {
         self.thinking_budget.as_ref()
     }
 
@@ -172,14 +171,15 @@ impl ModelConfig {
         self.context_window_tokens.max(1)
     }
 
-    pub fn effective_context_window_percent(&self) -> i64 {
-        self.effective_context_window_percent.clamp(1, 100)
+    pub fn effective_context_window_percent(&self) -> u8 {
+        u8::try_from(self.effective_context_window_percent.clamp(1, 100))
+            .expect("clamped context-window percentage must fit in u8")
     }
 
     pub fn effective_context_window_tokens(&self) -> usize {
         let cw = self.context_window_tokens();
         let effective =
-            (cw as u128).saturating_mul(self.effective_context_window_percent() as u128) / 100;
+            (cw as u128).saturating_mul(u128::from(self.effective_context_window_percent())) / 100;
         usize::try_from(effective).unwrap_or(cw).clamp(1, cw)
     }
 
@@ -212,7 +212,7 @@ impl ModelConfig {
 #[serde(default)]
 pub struct JudgeConfig {
     pub enabled: bool,
-    /// None = use main_model.
+    /// None = use `main_model`.
     pub model: Option<String>,
     pub max_pairwise_candidates: usize,
     pub max_pairwise_cases: usize,
@@ -245,7 +245,7 @@ pub struct Config {
     pub main_model: String,
     /// Efficient model name; key reference into models.
     /// Default for non-main-loop operations such as judge.
-    /// When not set explicitly, defaults to the same value as main_model for backward compatibility.
+    /// When not set explicitly, defaults to the same value as `main_model` for backward compatibility.
     pub efficient_model: String,
     pub daemon: DaemonConfig,
     pub judge: JudgeConfig,
@@ -342,9 +342,10 @@ impl Config {
         })?;
 
         if let Some(judge_model_key) = &self.judge.model {
-            let judge = self.models.get(judge_model_key).ok_or_else(|| {
-                format!("judge.model '{}' not found in [models]", judge_model_key)
-            })?;
+            let judge = self
+                .models
+                .get(judge_model_key)
+                .ok_or_else(|| format!("judge.model '{judge_model_key}' not found in [models]"))?;
             self.providers.get(&judge.provider).ok_or_else(|| {
                 format!(
                     "judge.model '{}' references unknown provider '{}'",

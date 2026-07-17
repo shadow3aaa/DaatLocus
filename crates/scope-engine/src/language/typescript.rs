@@ -4,7 +4,8 @@ use tree_sitter::Language;
 pub struct TypeScriptAdapter;
 
 impl TypeScriptAdapter {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -30,7 +31,8 @@ impl LanguageAdapter for TypeScriptAdapter {
 pub struct TsxAdapter;
 
 impl TsxAdapter {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -56,7 +58,8 @@ impl LanguageAdapter for TsxAdapter {
 pub struct JavaScriptAdapter;
 
 impl JavaScriptAdapter {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -86,9 +89,10 @@ impl LanguageAdapter for JavaScriptAdapter {
 }
 
 impl TypeScriptAdapter {
-    pub fn ts_queries() -> LanguageQueries {
+    #[must_use]
+    pub const fn ts_queries() -> LanguageQueries {
         LanguageQueries {
-            definitions: r#"
+            definitions: r"
                 (function_declaration name: (identifier) @name) @def
                 (function_signature name: (identifier) @name) @def
                 (variable_declarator name: (identifier) @name value: (arrow_function)) @def
@@ -98,13 +102,13 @@ impl TypeScriptAdapter {
                 (type_alias_declaration name: (type_identifier) @name) @def
                 (enum_declaration name: (identifier) @name) @def
                 (method_definition name: (property_identifier) @name) @def
-            "#,
-            references: r#"
+            ",
+            references: r"
                 (call_expression function: (identifier) @ref) @call
                 (call_expression function: (member_expression property: (property_identifier) @ref)) @call
                 (new_expression constructor: (identifier) @ref) @call
                 (type_identifier) @ref
-            "#,
+            ",
         }
     }
 }

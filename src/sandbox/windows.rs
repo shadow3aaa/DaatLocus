@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, c_void},
@@ -50,19 +48,17 @@ use windows_sys::Win32::{
         Pipes::CreatePipe,
         SystemServices::SE_GROUP_LOGON_ID,
         Threading::{
-            CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, GetCurrentProcess,
-            GetExitCodeProcess, GetProcessId, INFINITE, OpenProcessToken, PROCESS_INFORMATION,
+            CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, GetCurrentProcess,
+            GetExitCodeProcess, GetProcessId, OpenProcessToken, PROCESS_INFORMATION,
             STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
         },
     },
 };
 
 use super::{
-    RuntimeSandboxPolicy, SandboxProcessOptions, SandboxStdio, apply_std_command_options,
-    policy_paths_with_resolved,
+    RuntimeSandboxPolicy, SandboxProcessOptions, SandboxStdio, policy_paths_with_resolved,
 };
 
-#[allow(dead_code)]
 const WIN_WORLD_SID: i32 = 1;
 const WORKER_READ_ALLOW_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 const WORKER_WRITE_ALLOW_MASK: u32 =
@@ -76,14 +72,16 @@ const WORKER_DENY_WRITE_MASK: u32 = FILE_GENERIC_WRITE
     | FILE_DELETE_CHILD;
 const WORKER_DENY_READ_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 
+#[cfg(not(test))]
 pub enum WindowsSandboxChild {
     Plain(std::process::Child),
     Restricted(RestrictedWindowsChild),
 }
 
+#[cfg(not(test))]
 unsafe impl Send for WindowsSandboxChild {}
+#[cfg(not(test))]
 unsafe impl Sync for WindowsSandboxChild {}
-
 pub struct WindowsSandboxAsyncChild {
     child: RestrictedWindowsChild,
     stdin: Option<tokio::fs::File>,
@@ -123,7 +121,7 @@ struct RestrictedToken {
 
 struct AclGuard {
     path: PathBuf,
-    original_dacl: Option<Vec<u8>>,
+    original_dacl: Option<Vec<u32>>,
 }
 
 struct StartupHandles {
@@ -140,6 +138,7 @@ struct ParentPipeHandles {
     stderr: Option<OwnedHandle>,
 }
 
+#[cfg(not(test))]
 impl WindowsSandboxChild {
     pub fn id(&self) -> u32 {
         match self {
@@ -171,19 +170,19 @@ impl WindowsSandboxChild {
 }
 
 impl WindowsSandboxAsyncChild {
-    pub fn id(&self) -> u32 {
+    pub const fn id(&self) -> u32 {
         self.child.id()
     }
 
-    pub fn take_stdin(&mut self) -> Option<tokio::fs::File> {
+    pub const fn take_stdin(&mut self) -> Option<tokio::fs::File> {
         self.stdin.take()
     }
 
-    pub fn take_stdout(&mut self) -> Option<tokio::fs::File> {
+    pub const fn take_stdout(&mut self) -> Option<tokio::fs::File> {
         self.stdout.take()
     }
 
-    pub fn take_stderr(&mut self) -> Option<tokio::fs::File> {
+    pub const fn take_stderr(&mut self) -> Option<tokio::fs::File> {
         self.stderr.take()
     }
 
@@ -195,22 +194,10 @@ impl WindowsSandboxAsyncChild {
         self.child.try_wait()
     }
 }
-
-pub fn spawn_plain(
-    policy: &RuntimeSandboxPolicy,
-    program: PathBuf,
-    args: Vec<String>,
-    options: SandboxProcessOptions,
-) -> io::Result<WindowsSandboxChild> {
-    let mut command = std::process::Command::new(program);
-    command.args(args);
-    apply_std_command_options(policy, &mut command, options);
-    command.spawn().map(WindowsSandboxChild::Plain)
-}
-
+#[cfg(not(test))]
 pub fn spawn_restricted(
     policy: &RuntimeSandboxPolicy,
-    program: PathBuf,
+    program: &PathBuf,
     args: Vec<String>,
     options: SandboxProcessOptions,
 ) -> io::Result<WindowsSandboxChild> {
@@ -220,7 +207,7 @@ pub fn spawn_restricted(
     let mut acl_guards = Vec::new();
     let process = match spawn_restricted_inner(RestrictedSpawnInput {
         policy,
-        program: &program,
+        program,
         args,
         options,
         psid_capability: cap_sid_ptr.as_ptr(),
@@ -241,7 +228,7 @@ pub fn spawn_restricted(
 
 pub fn spawn_restricted_async(
     policy: &RuntimeSandboxPolicy,
-    program: PathBuf,
+    program: &PathBuf,
     args: Vec<String>,
     options: SandboxProcessOptions,
 ) -> io::Result<WindowsSandboxAsyncChild> {
@@ -251,7 +238,7 @@ pub fn spawn_restricted_async(
     let mut acl_guards = Vec::new();
     let process = match spawn_restricted_async_inner(RestrictedSpawnInput {
         policy,
-        program: &program,
+        program,
         args,
         options,
         psid_capability: cap_sid_ptr.as_ptr(),
@@ -282,6 +269,7 @@ struct RestrictedSpawnInput<'a> {
     acl_guards: &'a mut Vec<AclGuard>,
 }
 
+#[cfg(not(test))]
 fn spawn_restricted_inner(input: RestrictedSpawnInput<'_>) -> io::Result<RestrictedWindowsChild> {
     apply_policy_acl_rules(
         input.policy,
@@ -301,7 +289,7 @@ fn spawn_restricted_inner(input: RestrictedSpawnInput<'_>) -> io::Result<Restric
     let program_wide = to_wide(input.program.as_os_str());
     let current_dir_wide = to_wide(current_dir.as_os_str());
     let env_block = environment_block(input.policy);
-    let stdio = StartupHandles::new(input.options)?;
+    let stdio = StartupHandles::new(&input.options)?;
     let startup_info = startup_info(&stdio);
     let mut process_info = PROCESS_INFORMATION::default();
 
@@ -313,11 +301,11 @@ fn spawn_restricted_inner(input: RestrictedSpawnInput<'_>) -> io::Result<Restric
             ptr::null(),
             ptr::null(),
             1,
-            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+            CREATE_UNICODE_ENVIRONMENT | 0x0800_0000,
             env_block.as_ptr().cast::<c_void>(),
             current_dir_wide.as_ptr(),
-            &startup_info,
-            &mut process_info,
+            &raw const startup_info,
+            &raw mut process_info,
         )
     };
     if created == 0 {
@@ -368,7 +356,7 @@ fn spawn_restricted_async_inner(
     let program_wide = to_wide(input.program.as_os_str());
     let current_dir_wide = to_wide(current_dir.as_os_str());
     let env_block = environment_block(input.policy);
-    let (stdio, parent_pipes) = StartupHandles::new_with_parent_pipes(input.options)?;
+    let (stdio, parent_pipes) = StartupHandles::new_with_parent_pipes(&input.options)?;
     let startup_info = startup_info(&stdio);
     let mut process_info = PROCESS_INFORMATION::default();
 
@@ -383,8 +371,8 @@ fn spawn_restricted_async_inner(
             CREATE_UNICODE_ENVIRONMENT,
             env_block.as_ptr().cast::<c_void>(),
             current_dir_wide.as_ptr(),
-            &startup_info,
-            &mut process_info,
+            &raw const startup_info,
+            &raw mut process_info,
         )
     };
     if created == 0 {
@@ -412,13 +400,13 @@ fn spawn_restricted_async_inner(
         acl_guards: std::mem::take(input.acl_guards),
         acl_cleaned: false,
     };
-    let (stdin, stdout, stderr) = parent_pipes.into_async_files()?;
+    let (child_stdin, child_stdout, child_stderr) = parent_pipes.into_async_files();
 
     Ok(WindowsSandboxAsyncChild {
         child,
-        stdin,
-        stdout,
-        stderr,
+        stdin: child_stdin,
+        stdout: child_stdout,
+        stderr: child_stderr,
     })
 }
 
@@ -584,7 +572,7 @@ fn ensure_acl_guard(path: &Path, acl_guards: &mut Vec<AclGuard>) -> io::Result<(
     Ok(())
 }
 
-fn capture_dacl(path: &Path) -> io::Result<Option<Vec<u8>>> {
+fn capture_dacl(path: &Path) -> io::Result<Option<Vec<u32>>> {
     let path_wide = to_wide(path.as_os_str());
     let mut security_descriptor: PSID = ptr::null_mut();
     let mut dacl = ptr::null_mut();
@@ -595,9 +583,9 @@ fn capture_dacl(path: &Path) -> io::Result<Option<Vec<u8>>> {
             DACL_SECURITY_INFORMATION,
             ptr::null_mut(),
             ptr::null_mut(),
-            &mut dacl,
+            &raw mut dacl,
             ptr::null_mut(),
-            &mut security_descriptor,
+            &raw mut security_descriptor,
         )
     };
     if code != ERROR_SUCCESS {
@@ -614,17 +602,25 @@ fn capture_dacl(path: &Path) -> io::Result<Option<Vec<u8>>> {
     let ok = unsafe {
         GetAclInformation(
             dacl.cast::<ACL>(),
-            (&mut info as *mut ACL_SIZE_INFORMATION).cast::<c_void>(),
-            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            (&raw mut info).cast::<c_void>(),
+            u32::try_from(std::mem::size_of::<ACL_SIZE_INFORMATION>())
+                .expect("ACL size information size fits in u32"),
             AclSizeInformation,
         )
     };
     if ok == 0 {
         return Err(last_os_error("GetAclInformation failed"));
     }
-    let bytes =
-        unsafe { std::slice::from_raw_parts(dacl.cast::<u8>(), info.AclBytesInUse as usize) };
-    Ok(Some(bytes.to_vec()))
+    let acl_bytes = usize::try_from(info.AclBytesInUse).expect("ACL byte count fits in usize");
+    let mut words = vec![0u32; acl_bytes.div_ceil(std::mem::size_of::<u32>())];
+    unsafe {
+        ptr::copy_nonoverlapping(
+            dacl.cast::<u8>(),
+            words.as_mut_ptr().cast::<u8>(),
+            acl_bytes,
+        );
+    }
+    Ok(Some(words))
 }
 
 fn add_explicit_aces(path: &Path, entries: &[(PSID, u32, i32)]) -> io::Result<()> {
@@ -638,9 +634,9 @@ fn add_explicit_aces(path: &Path, entries: &[(PSID, u32, i32)]) -> io::Result<()
             DACL_SECURITY_INFORMATION,
             ptr::null_mut(),
             ptr::null_mut(),
-            &mut dacl,
+            &raw mut dacl,
             ptr::null_mut(),
-            &mut security_descriptor,
+            &raw mut security_descriptor,
         )
     };
     if code != ERROR_SUCCESS {
@@ -658,10 +654,10 @@ fn add_explicit_aces(path: &Path, entries: &[(PSID, u32, i32)]) -> io::Result<()
     let mut new_dacl = ptr::null_mut();
     let code = unsafe {
         SetEntriesInAclW(
-            explicits.len() as u32,
+            u32::try_from(explicits.len()).expect("explicit ACL entry count fits in u32"),
             explicits.as_ptr(),
             dacl,
-            &mut new_dacl,
+            &raw mut new_dacl,
         )
     };
     if code != ERROR_SUCCESS {
@@ -673,7 +669,7 @@ fn add_explicit_aces(path: &Path, entries: &[(PSID, u32, i32)]) -> io::Result<()
     let _new_dacl = LocalMem(new_dacl);
     let code = unsafe {
         SetNamedSecurityInfoW(
-            path_wide.as_ptr() as *mut u16,
+            path_wide.as_ptr().cast_mut(),
             1,
             DACL_SECURITY_INFORMATION,
             ptr::null_mut(),
@@ -705,12 +701,12 @@ fn restore_acl_guard(guard: &AclGuard) -> io::Result<()> {
     let dacl = guard
         .original_dacl
         .as_ref()
-        .map_or(ptr::null_mut(), |bytes| {
-            bytes.as_ptr().cast::<ACL>().cast_mut()
+        .map_or(ptr::null_mut(), |words| {
+            words.as_ptr().cast::<ACL>().cast_mut()
         });
     let code = unsafe {
         SetNamedSecurityInfoW(
-            path_wide.as_ptr() as *mut u16,
+            path_wide.as_ptr().cast_mut(),
             1,
             DACL_SECURITY_INFORMATION,
             ptr::null_mut(),
@@ -728,7 +724,7 @@ fn restore_acl_guard(guard: &AclGuard) -> io::Result<()> {
     Ok(())
 }
 
-fn explicit_access(psid: PSID, mask: u32, mode: i32, inheritance: u32) -> EXPLICIT_ACCESS_W {
+const fn explicit_access(psid: PSID, mask: u32, mode: i32, inheritance: u32) -> EXPLICIT_ACCESS_W {
     EXPLICIT_ACCESS_W {
         grfAccessPermissions: mask,
         grfAccessMode: mode,
@@ -780,9 +776,9 @@ fn create_restricted_token(psid_capability: &LocalSid) -> io::Result<RestrictedT
             ptr::null(),
             0,
             ptr::null(),
-            restricted_sids.len() as u32,
+            u32::try_from(restricted_sids.len()).expect("restricted SID count fits in u32"),
             restricted_sids.as_mut_ptr(),
-            &mut token,
+            &raw mut token,
         )
     };
     if ok == 0 {
@@ -809,7 +805,7 @@ fn current_token_for_restriction() -> io::Result<OwnedHandle> {
         | TOKEN_ADJUST_SESSIONID
         | TOKEN_ADJUST_PRIVILEGES;
     let mut token = ptr::null_mut();
-    let ok = unsafe { OpenProcessToken(GetCurrentProcess(), desired, &mut token) };
+    let ok = unsafe { OpenProcessToken(GetCurrentProcess(), desired, &raw mut token) };
     if ok == 0 {
         Err(last_os_error("OpenProcessToken failed"))
     } else {
@@ -827,7 +823,7 @@ fn logon_sid_bytes(token: HANDLE) -> io::Result<Vec<u8>> {
 fn scan_token_groups_for_logon(token: HANDLE) -> Option<Vec<u8>> {
     let mut needed = 0;
     unsafe {
-        GetTokenInformation(token, TokenGroups, ptr::null_mut(), 0, &mut needed);
+        GetTokenInformation(token, TokenGroups, ptr::null_mut(), 0, &raw mut needed);
     }
     if needed == 0 {
         return None;
@@ -839,7 +835,7 @@ fn scan_token_groups_for_logon(token: HANDLE) -> Option<Vec<u8>> {
             TokenGroups,
             buffer.as_mut_ptr().cast::<c_void>(),
             needed,
-            &mut needed,
+            &raw mut needed,
         )
     };
     if ok == 0 || needed as usize <= std::mem::size_of::<u32>() {
@@ -852,7 +848,9 @@ fn scan_token_groups_for_logon(token: HANDLE) -> Option<Vec<u8>> {
     let groups = aligned as *const SID_AND_ATTRIBUTES;
     for index in 0..group_count {
         let entry = unsafe { ptr::read_unaligned(groups.add(index)) };
-        if (entry.Attributes & SE_GROUP_LOGON_ID as u32) == SE_GROUP_LOGON_ID as u32 {
+        if (entry.Attributes & SE_GROUP_LOGON_ID.cast_unsigned())
+            == SE_GROUP_LOGON_ID.cast_unsigned()
+        {
             let sid_len = unsafe { GetLengthSid(entry.Sid) };
             if sid_len == 0 {
                 return None;
@@ -871,7 +869,12 @@ fn scan_token_groups_for_logon(token: HANDLE) -> Option<Vec<u8>> {
 fn world_sid_bytes() -> io::Result<Vec<u8>> {
     let mut size = 0;
     unsafe {
-        CreateWellKnownSid(WIN_WORLD_SID, ptr::null_mut(), ptr::null_mut(), &mut size);
+        CreateWellKnownSid(
+            WIN_WORLD_SID,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &raw mut size,
+        );
     }
     if size == 0 {
         return Err(last_os_error("CreateWellKnownSid size query failed"));
@@ -882,7 +885,7 @@ fn world_sid_bytes() -> io::Result<Vec<u8>> {
             WIN_WORLD_SID,
             ptr::null_mut(),
             buffer.as_mut_ptr().cast::<c_void>(),
-            &mut size,
+            &raw mut size,
         )
     };
     if ok == 0 {
@@ -900,10 +903,10 @@ fn set_default_dacl(token: HANDLE, sids: &[PSID]) -> io::Result<()> {
     let mut new_dacl = ptr::null_mut();
     let code = unsafe {
         SetEntriesInAclW(
-            entries.len() as u32,
+            u32::try_from(entries.len()).expect("default DACL entry count fits in u32"),
             entries.as_ptr(),
             ptr::null(),
-            &mut new_dacl,
+            &raw mut new_dacl,
         )
     };
     if code != ERROR_SUCCESS {
@@ -920,8 +923,9 @@ fn set_default_dacl(token: HANDLE, sids: &[PSID]) -> io::Result<()> {
         SetTokenInformation(
             token,
             TokenDefaultDacl,
-            (&info as *const TOKEN_DEFAULT_DACL).cast::<c_void>(),
-            std::mem::size_of::<TOKEN_DEFAULT_DACL>() as u32,
+            (&raw const info).cast::<c_void>(),
+            u32::try_from(std::mem::size_of::<TOKEN_DEFAULT_DACL>())
+                .expect("token default DACL size fits in u32"),
         )
     };
     if ok == 0 {
@@ -939,7 +943,7 @@ fn enable_single_privilege(token: HANDLE, name: &str) -> io::Result<()> {
         HighPart: 0,
     };
     let name_wide = to_wide(name);
-    let ok = unsafe { LookupPrivilegeValueW(ptr::null(), name_wide.as_ptr(), &mut luid) };
+    let ok = unsafe { LookupPrivilegeValueW(ptr::null(), name_wide.as_ptr(), &raw mut luid) };
     if ok == 0 {
         return Err(last_os_error("LookupPrivilegeValueW failed"));
     }
@@ -951,7 +955,14 @@ fn enable_single_privilege(token: HANDLE, name: &str) -> io::Result<()> {
         }],
     };
     let ok = unsafe {
-        AdjustTokenPrivileges(token, 0, &privileges, 0, ptr::null_mut(), ptr::null_mut())
+        AdjustTokenPrivileges(
+            token,
+            0,
+            &raw const privileges,
+            0,
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
     };
     if ok == 0 {
         Err(last_os_error("AdjustTokenPrivileges failed"))
@@ -971,8 +982,9 @@ fn create_kill_on_close_job(process: HANDLE) -> io::Result<HANDLE> {
         SetInformationJobObject(
             job,
             JobObjectExtendedLimitInformation,
-            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast::<c_void>(),
-            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            (&raw const limits).cast::<c_void>(),
+            u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                .expect("job-object limit information size fits in u32"),
         )
     };
     if ok == 0 {
@@ -992,7 +1004,7 @@ fn create_kill_on_close_job(process: HANDLE) -> io::Result<HANDLE> {
 }
 
 impl RestrictedWindowsChild {
-    fn id(&self) -> u32 {
+    const fn id(&self) -> u32 {
         self.process_id
     }
 
@@ -1026,11 +1038,12 @@ impl RestrictedWindowsChild {
         }
     }
 
+    #[cfg(not(test))]
     fn wait(&mut self) -> io::Result<ExitStatus> {
         if let Some(status) = self.exit_status {
             return Ok(status);
         }
-        match unsafe { WaitForSingleObject(self.process, INFINITE) } {
+        match unsafe { WaitForSingleObject(self.process, u32::MAX) } {
             WAIT_OBJECT_0 => self.finish_after_exit(),
             WAIT_FAILED => Err(last_os_error("WaitForSingleObject failed")),
             other => Err(io::Error::other(format!("unexpected wait result {other}"))),
@@ -1039,7 +1052,7 @@ impl RestrictedWindowsChild {
 
     fn finish_after_exit(&mut self) -> io::Result<ExitStatus> {
         let mut code = 1;
-        let ok = unsafe { GetExitCodeProcess(self.process, &mut code) };
+        let ok = unsafe { GetExitCodeProcess(self.process, &raw mut code) };
         if ok == 0 {
             return Err(last_os_error("GetExitCodeProcess failed"));
         }
@@ -1098,7 +1111,7 @@ impl LocalSid {
     fn from_string(sid: &str) -> io::Result<Self> {
         let wide = to_wide(sid);
         let mut ptr = ptr::null_mut();
-        let ok = unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut ptr) };
+        let ok = unsafe { ConvertStringSidToSidW(wide.as_ptr(), &raw mut ptr) };
         if ok == 0 {
             Err(last_os_error("ConvertStringSidToSidW failed"))
         } else {
@@ -1106,7 +1119,7 @@ impl LocalSid {
         }
     }
 
-    fn as_ptr(&self) -> PSID {
+    const fn as_ptr(&self) -> PSID {
         self.ptr
     }
 }
@@ -1134,7 +1147,7 @@ impl<T> Drop for LocalMem<T> {
 }
 
 impl OwnedHandle {
-    fn raw(&self) -> HANDLE {
+    const fn raw(&self) -> HANDLE {
         self.0
     }
 
@@ -1157,7 +1170,8 @@ impl Drop for OwnedHandle {
 }
 
 impl StartupHandles {
-    fn new(options: SandboxProcessOptions) -> io::Result<Self> {
+    #[cfg(not(test))]
+    fn new(options: &SandboxProcessOptions) -> io::Result<Self> {
         let mut owned = Vec::new();
         let stdin = stdio_handle(options.stdin, STD_INPUT_HANDLE, true, &mut owned)?;
         let stdout = stdio_handle(options.stdout, STD_OUTPUT_HANDLE, false, &mut owned)?;
@@ -1171,7 +1185,7 @@ impl StartupHandles {
     }
 
     fn new_with_parent_pipes(
-        options: SandboxProcessOptions,
+        options: &SandboxProcessOptions,
     ) -> io::Result<(Self, ParentPipeHandles)> {
         let mut owned = Vec::new();
         let mut parent = ParentPipeHandles::default();
@@ -1226,16 +1240,16 @@ impl StartupHandles {
 impl ParentPipeHandles {
     fn into_async_files(
         self,
-    ) -> io::Result<(
+    ) -> (
         Option<tokio::fs::File>,
         Option<tokio::fs::File>,
         Option<tokio::fs::File>,
-    )> {
-        Ok((
+    ) {
+        (
             owned_handle_to_async_file(self.stdin),
             owned_handle_to_async_file(self.stdout),
             owned_handle_to_async_file(self.stderr),
-        ))
+        )
     }
 }
 
@@ -1247,7 +1261,8 @@ fn owned_handle_to_async_file(handle: Option<OwnedHandle>) -> Option<tokio::fs::
 
 fn startup_info(handles: &StartupHandles) -> STARTUPINFOW {
     STARTUPINFOW {
-        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        cb: u32::try_from(std::mem::size_of::<STARTUPINFOW>())
+            .expect("startup information size fits in u32"),
         dwFlags: STARTF_USESTDHANDLES,
         hStdInput: handles.stdin,
         hStdOutput: handles.stdout,
@@ -1285,7 +1300,7 @@ fn stdio_handle(
 fn create_pipe_pair(label: &str) -> io::Result<(OwnedHandle, OwnedHandle)> {
     let mut read: HANDLE = ptr::null_mut();
     let mut write: HANDLE = ptr::null_mut();
-    let ok = unsafe { CreatePipe(&mut read, &mut write, ptr::null_mut(), 0) };
+    let ok = unsafe { CreatePipe(&raw mut read, &raw mut write, ptr::null_mut(), 0) };
     if ok == 0 {
         return Err(last_os_error(&format!("CreatePipe({label}) failed")));
     }
@@ -1329,10 +1344,10 @@ fn open_nul(read_access: bool, owned: &mut Vec<OwnedHandle>) -> io::Result<HANDL
 }
 
 fn command_argv(program: &Path, args: Vec<String>) -> Vec<String> {
-    let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push(program.to_string_lossy().into_owned());
-    argv.extend(args);
-    argv
+    let mut command_line = Vec::with_capacity(args.len() + 1);
+    command_line.push(program.to_string_lossy().into_owned());
+    command_line.extend(args);
+    command_line
 }
 
 fn environment_block(policy: &RuntimeSandboxPolicy) -> Vec<u16> {
@@ -1423,7 +1438,7 @@ fn last_os_error(context: &str) -> io::Error {
     let err = unsafe { GetLastError() };
     io::Error::other(format!(
         "{context}: {}",
-        io::Error::from_raw_os_error(err as i32)
+        io::Error::from_raw_os_error(err.cast_signed())
     ))
 }
 
@@ -1431,7 +1446,7 @@ fn win32_error(code: u32, context: impl Into<String>) -> io::Error {
     let message = format!(
         "{}: {}",
         context.into(),
-        io::Error::from_raw_os_error(code as i32)
+        io::Error::from_raw_os_error(code.cast_signed())
     );
     if code == ERROR_ACCESS_DENIED {
         io::Error::new(io::ErrorKind::PermissionDenied, message)

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::reasoning::runtime::AgentToolCall;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct CodingSourceLineKey {
+pub struct CodingSourceLineKey {
     pub(crate) path: String,
     pub(crate) anchor: String,
 }
@@ -28,7 +28,7 @@ struct CodingSourceElider<'a> {
     visible_full_lines: &'a mut HashSet<CodingSourceLineKey>,
 }
 
-pub(crate) fn elide_tool_model_content(
+pub fn elide_tool_model_content(
     visible_lines: &mut HashSet<CodingSourceLineKey>,
     call: &AgentToolCall,
     content: &str,

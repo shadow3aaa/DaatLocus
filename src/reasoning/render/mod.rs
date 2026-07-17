@@ -6,7 +6,7 @@ use super::{
 
 pub mod openai_tools;
 
-pub trait Renderer {
+pub trait Renderer: Sync {
     fn render<P: Program>(
         &self,
         context: &Context,

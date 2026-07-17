@@ -63,6 +63,33 @@ pub struct DashboardActivityHistoryPage {
     pub has_more_after: bool,
 }
 
+pub const WORKFLOW_WORKER_ACTIVITY_INITIAL_LIMIT: usize = 80;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowWorkerActivityItem {
+    pub cursor: i64,
+    pub event: SessionActivityEvent,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowWorkerActivityPage {
+    pub run_id: String,
+    pub worker_id: String,
+    pub items: Vec<WorkflowWorkerActivityItem>,
+    pub oldest_cursor: Option<i64>,
+    pub newest_cursor: Option<i64>,
+    pub has_more_before: bool,
+    pub has_more_after: bool,
+    pub activity_count: usize,
+    pub revision: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkflowWorkerActivityAppendResult {
+    pub activity_count: usize,
+    pub revision: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DashboardActivityHistoryItem {
     pub id: String,
@@ -89,7 +116,7 @@ pub struct DashboardInputHistory {
 }
 
 impl DashboardActivityHistoryStore {
-    pub async fn with_session(session_id: &str) -> Result<Self> {
+    pub fn with_session(session_id: &str) -> Result<Self> {
         let paths = DaatLocusPaths::for_session(session_id);
         Self::open_at_path(paths.memory_file(DASHBOARD_ACTIVITY_HISTORY_DB_FILE))
     }
@@ -101,6 +128,11 @@ impl DashboardActivityHistoryStore {
         };
         store.initialize()?;
         Ok(store)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_at_path_for_test(db_path: PathBuf) -> Result<Self> {
+        Self::open_at_path(db_path)
     }
 
     pub fn empty_window() -> DashboardActivityHistoryWindow {
@@ -129,15 +161,175 @@ impl DashboardActivityHistoryStore {
         self.try_append_items(items)
     }
 
-    pub fn clear_all(&self) -> Result<usize> {
+    pub fn register_workflow_worker(&self, run_id: &str, worker_id: &str) -> Result<()> {
         let _guard = self
             .write_lock
             .lock()
             .map_err(|_| miette::miette!("dashboard activity history lock poisoned"))?;
         let conn = self.open_connection()?;
-        conn.execute("DELETE FROM dashboard_activity", [])
+        register_workflow_worker_state(&conn, run_id, worker_id)
+    }
+
+    pub fn append_workflow_worker_activity(
+        &self,
+        run_id: &str,
+        worker_id: &str,
+        event: &SessionActivityEvent,
+    ) -> Result<WorkflowWorkerActivityAppendResult> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| miette::miette!("dashboard activity history lock poisoned"))?;
+        let mut conn = self.open_connection()?;
+        let transaction = conn
+            .transaction()
             .into_diagnostic()
-            .wrap_err("clear dashboard activity history failed")
+            .wrap_err("begin workflow worker activity transaction failed")?;
+        let result =
+            append_workflow_worker_activity_in_transaction(&transaction, run_id, worker_id, event)?;
+        transaction
+            .commit()
+            .into_diagnostic()
+            .wrap_err("commit workflow worker activity transaction failed")?;
+        Ok(result)
+    }
+
+    pub fn query_workflow_worker_activity(
+        &self,
+        run_id: &str,
+        worker_id: &str,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<Option<WorkflowWorkerActivityPage>> {
+        if before.is_some() && after.is_some() {
+            return Err(miette::miette!(
+                "workflow worker activity query accepts either before or after, not both"
+            ));
+        }
+        let limit = i64::try_from(clamp_history_limit(limit))
+            .expect("workflow worker activity limit is clamped below i64::MAX");
+        let conn = self.open_connection()?;
+        let Some((activity_count, revision)) =
+            workflow_worker_activity_state(&conn, run_id, worker_id)?
+        else {
+            return Ok(None);
+        };
+
+        let rows = if let Some(after) = after {
+            let mut statement = conn
+                .prepare(
+                    "SELECT seq, event_json FROM workflow_worker_activity
+                     WHERE run_id = ?1 AND worker_id = ?2 AND seq > ?3
+                     ORDER BY seq ASC
+                     LIMIT ?4",
+                )
+                .into_diagnostic()
+                .wrap_err("prepare workflow worker activity after query failed")?;
+            statement
+                .query_map(
+                    params![run_id, worker_id, after, limit],
+                    decode_worker_activity_row,
+                )
+                .into_diagnostic()
+                .wrap_err("query workflow worker activity after failed")?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .into_diagnostic()
+                .wrap_err("decode workflow worker activity after failed")?
+        } else {
+            let mut statement = if before.is_some() {
+                conn.prepare(
+                    "SELECT seq, event_json FROM workflow_worker_activity
+                     WHERE run_id = ?1 AND worker_id = ?2 AND seq < ?3
+                     ORDER BY seq DESC
+                     LIMIT ?4",
+                )
+            } else {
+                conn.prepare(
+                    "SELECT seq, event_json FROM workflow_worker_activity
+                     WHERE run_id = ?1 AND worker_id = ?2
+                     ORDER BY seq DESC
+                     LIMIT ?3",
+                )
+            }
+            .into_diagnostic()
+            .wrap_err("prepare workflow worker activity before query failed")?;
+            let mapped = if let Some(before) = before {
+                statement.query_map(
+                    params![run_id, worker_id, before, limit],
+                    decode_worker_activity_row,
+                )
+            } else {
+                statement.query_map(
+                    params![run_id, worker_id, limit],
+                    decode_worker_activity_row,
+                )
+            }
+            .into_diagnostic()
+            .wrap_err("query workflow worker activity before failed")?;
+            let mut rows = mapped
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .into_diagnostic()
+                .wrap_err("decode workflow worker activity before failed")?;
+            rows.reverse();
+            rows
+        };
+
+        let oldest_cursor = rows.first().map(|(cursor, _)| *cursor);
+        let newest_cursor = rows.last().map(|(cursor, _)| *cursor);
+        Ok(Some(WorkflowWorkerActivityPage {
+            run_id: run_id.to_string(),
+            worker_id: worker_id.to_string(),
+            items: rows
+                .into_iter()
+                .map(|(cursor, event)| WorkflowWorkerActivityItem { cursor, event })
+                .collect(),
+            oldest_cursor,
+            newest_cursor,
+            has_more_before: workflow_worker_activity_exists_before(
+                &conn,
+                run_id,
+                worker_id,
+                oldest_cursor,
+            )?,
+            has_more_after: workflow_worker_activity_exists_after(
+                &conn,
+                run_id,
+                worker_id,
+                newest_cursor,
+            )?,
+            activity_count,
+            revision,
+        }))
+    }
+
+    pub fn clear_all(&self) -> Result<usize> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| miette::miette!("dashboard activity history lock poisoned"))?;
+        let mut conn = self.open_connection()?;
+        let transaction = conn
+            .transaction()
+            .into_diagnostic()
+            .wrap_err("begin dashboard activity history clear transaction failed")?;
+        let cleared = transaction
+            .execute("DELETE FROM dashboard_activity", [])
+            .into_diagnostic()
+            .wrap_err("clear dashboard activity history failed")?;
+        transaction
+            .execute("DELETE FROM workflow_worker_activity", [])
+            .into_diagnostic()
+            .wrap_err("clear workflow worker activity failed")?;
+        transaction
+            .execute("DELETE FROM workflow_worker_activity_state", [])
+            .into_diagnostic()
+            .wrap_err("clear workflow worker activity state failed")?;
+        transaction
+            .commit()
+            .into_diagnostic()
+            .wrap_err("commit dashboard activity history clear failed")?;
+        Ok(cleared)
     }
 
     pub fn query_before(
@@ -145,7 +337,8 @@ impl DashboardActivityHistoryStore {
         before: Option<i64>,
         limit: usize,
     ) -> Result<DashboardActivityHistoryPage> {
-        let limit = clamp_history_limit(limit);
+        let limit = i64::try_from(clamp_history_limit(limit))
+            .expect("history query limit is clamped below i64::MAX");
         let conn = self.open_connection()?;
         let mut statement = if before.is_some() {
             conn.prepare(
@@ -166,11 +359,11 @@ impl DashboardActivityHistoryStore {
 
         let rows = if let Some(before) = before {
             statement
-                .query_map(params![before, limit as i64], decode_history_row)
+                .query_map(params![before, limit], decode_history_row)
                 .into_diagnostic()
         } else {
             statement
-                .query_map(params![limit as i64], decode_history_row)
+                .query_map(params![limit], decode_history_row)
                 .into_diagnostic()
         }
         .wrap_err("query dashboard activity history before failed")?;
@@ -192,7 +385,8 @@ impl DashboardActivityHistoryStore {
             return self.query_before(None, limit);
         };
 
-        let limit = clamp_history_limit(limit);
+        let limit = i64::try_from(clamp_history_limit(limit))
+            .expect("history query limit is clamped below i64::MAX");
         let conn = self.open_connection()?;
         let mut statement = conn
             .prepare(
@@ -204,7 +398,7 @@ impl DashboardActivityHistoryStore {
             .into_diagnostic()
             .wrap_err("prepare dashboard activity history after query failed")?;
         let rows = statement
-            .query_map(params![after, limit as i64], decode_history_row)
+            .query_map(params![after, limit], decode_history_row)
             .into_diagnostic()
             .wrap_err("query dashboard activity history after failed")?;
         let rows = rows
@@ -312,7 +506,24 @@ impl DashboardActivityHistoryStore {
              CREATE INDEX IF NOT EXISTS idx_dashboard_activity_created_at
                  ON dashboard_activity(created_at_ms);
              CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_activity_item_id
-                 ON dashboard_activity(item_id);",
+                 ON dashboard_activity(item_id);
+             CREATE TABLE IF NOT EXISTS workflow_worker_activity (
+                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                 run_id TEXT NOT NULL,
+                 worker_id TEXT NOT NULL,
+                 created_at_ms INTEGER NOT NULL,
+                 updated_at_ms INTEGER NOT NULL,
+                 event_json TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_workflow_worker_activity_lookup
+                 ON workflow_worker_activity(run_id, worker_id, seq);
+             CREATE TABLE IF NOT EXISTS workflow_worker_activity_state (
+                 run_id TEXT NOT NULL,
+                 worker_id TEXT NOT NULL,
+                 activity_count INTEGER NOT NULL DEFAULT 0,
+                 revision INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY(run_id, worker_id)
+             );",
         )
         .into_diagnostic()
         .wrap_err("initialize dashboard activity history sqlite failed")?;
@@ -345,6 +556,7 @@ impl DashboardActivityHistoryStore {
 
             for item in items {
                 let mut item = item.clone();
+                normalize_legacy_workflow_worker_activity(&transaction, &mut item)?;
                 normalize_window_explored_item(&mut item, &existing_items);
                 let item_json = serde_json::to_string(&item)
                     .into_diagnostic()
@@ -444,11 +656,246 @@ impl DashboardActivityHistoryStore {
     }
 }
 
+fn normalize_legacy_workflow_worker_activity(
+    transaction: &rusqlite::Transaction<'_>,
+    item: &mut DashboardActivityHistoryItem,
+) -> Result<()> {
+    let SessionActivityEvent::Workflow(workflow) = &mut item.event else {
+        return Ok(());
+    };
+    let Some(snapshot) = workflow.snapshot.as_mut() else {
+        return Ok(());
+    };
+    for worker in &mut snapshot.workers {
+        if worker.activity.is_empty() {
+            continue;
+        }
+        let legacy = worker.activity.clone();
+        let legacy_activity_count = legacy.len();
+        let persisted_state =
+            workflow_worker_activity_state(transaction, &snapshot.run_id, &worker.worker_id)?;
+        let stream_was_empty =
+            persisted_state.is_none_or(|(activity_count, _)| activity_count == 0);
+        register_workflow_worker_state(transaction, &snapshot.run_id, &worker.worker_id)?;
+        if let Some((activity_count, revision)) = persisted_state {
+            worker.activity_count = worker.activity_count.max(activity_count);
+            worker.activity_revision = worker.activity_revision.max(revision);
+        }
+        if stream_was_empty {
+            for event in legacy {
+                let persisted = append_workflow_worker_activity_in_transaction(
+                    transaction,
+                    &snapshot.run_id,
+                    &worker.worker_id,
+                    &event,
+                )?;
+                worker.activity_count = worker.activity_count.max(persisted.activity_count);
+                worker.activity_revision = worker.activity_revision.max(persisted.revision);
+            }
+        }
+        if !stream_was_empty {
+            worker.activity_count = worker.activity_count.max(legacy_activity_count);
+            if worker.activity_revision == 0 {
+                worker.activity_revision = i64::try_from(legacy_activity_count).unwrap_or(i64::MAX);
+            }
+        }
+        transaction
+            .execute(
+                "UPDATE workflow_worker_activity_state
+                 SET activity_count = MAX(activity_count, ?1),
+                     revision = MAX(revision, ?2)
+                 WHERE run_id = ?3 AND worker_id = ?4",
+                params![
+                    i64::try_from(worker.activity_count).unwrap_or(i64::MAX),
+                    worker.activity_revision,
+                    &snapshot.run_id,
+                    &worker.worker_id,
+                ],
+            )
+            .into_diagnostic()
+            .wrap_err("synchronize legacy workflow worker activity state failed")?;
+        worker.activity =
+            crate::workflow::tail_worker_activity(std::mem::take(&mut worker.activity));
+    }
+    Ok(())
+}
+
+fn register_workflow_worker_state(conn: &Connection, run_id: &str, worker_id: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO workflow_worker_activity_state
+             (run_id, worker_id, activity_count, revision)
+         VALUES (?1, ?2, 0, 0)
+         ON CONFLICT(run_id, worker_id) DO NOTHING",
+        params![run_id, worker_id],
+    )
+    .into_diagnostic()
+    .wrap_err("register workflow worker activity state failed")?;
+    Ok(())
+}
+
+fn append_workflow_worker_activity_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    worker_id: &str,
+    event: &SessionActivityEvent,
+) -> Result<WorkflowWorkerActivityAppendResult> {
+    register_workflow_worker_state(transaction, run_id, worker_id)?;
+    let mut normalized = normalize_workflow_worker_activity_event(event);
+    let last = transaction
+        .query_row(
+            "SELECT seq, event_json FROM workflow_worker_activity
+             WHERE run_id = ?1 AND worker_id = ?2
+             ORDER BY seq DESC LIMIT 1",
+            params![run_id, worker_id],
+            decode_worker_activity_row,
+        )
+        .optional()
+        .into_diagnostic()
+        .wrap_err("load latest workflow worker activity failed")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut activity_count_delta = 1_i64;
+    if let Some((seq, previous)) = last {
+        let mut coalesced =
+            crate::dashboard::coalesce_activity_events(vec![previous, normalized.clone()]);
+        if coalesced.len() == 1 {
+            normalized = coalesced.pop().expect("coalesced worker activity item");
+            let event_json = serde_json::to_string(&normalized)
+                .into_diagnostic()
+                .wrap_err("encode coalesced workflow worker activity failed")?;
+            transaction
+                .execute(
+                    "UPDATE workflow_worker_activity
+                     SET updated_at_ms = ?1, event_json = ?2
+                     WHERE seq = ?3",
+                    params![now, event_json, seq],
+                )
+                .into_diagnostic()
+                .wrap_err("update workflow worker activity failed")?;
+            activity_count_delta = 0;
+        }
+    }
+    if activity_count_delta == 1 {
+        let event_json = serde_json::to_string(&normalized)
+            .into_diagnostic()
+            .wrap_err("encode workflow worker activity failed")?;
+        transaction
+            .execute(
+                "INSERT INTO workflow_worker_activity
+                     (run_id, worker_id, created_at_ms, updated_at_ms, event_json)
+                 VALUES (?1, ?2, ?3, ?3, ?4)",
+                params![run_id, worker_id, now, event_json],
+            )
+            .into_diagnostic()
+            .wrap_err("insert workflow worker activity failed")?;
+    }
+    transaction
+        .execute(
+            "UPDATE workflow_worker_activity_state
+             SET activity_count = activity_count + ?1,
+                 revision = revision + 1
+             WHERE run_id = ?2 AND worker_id = ?3",
+            params![activity_count_delta, run_id, worker_id],
+        )
+        .into_diagnostic()
+        .wrap_err("update workflow worker activity state failed")?;
+    let (activity_count, revision) =
+        workflow_worker_activity_state(transaction, run_id, worker_id)?
+            .expect("workflow worker activity state was registered");
+    Ok(WorkflowWorkerActivityAppendResult {
+        activity_count,
+        revision,
+    })
+}
+
+fn normalize_workflow_worker_activity_event(event: &SessionActivityEvent) -> SessionActivityEvent {
+    let mut event = event.clone();
+    if let SessionActivityEvent::Workflow(workflow) = &mut event {
+        workflow.snapshot = None;
+    }
+    event
+}
+
+fn workflow_worker_activity_state(
+    conn: &Connection,
+    run_id: &str,
+    worker_id: &str,
+) -> Result<Option<(usize, i64)>> {
+    conn.query_row(
+        "SELECT activity_count, revision FROM workflow_worker_activity_state
+         WHERE run_id = ?1 AND worker_id = ?2",
+        params![run_id, worker_id],
+        |row| {
+            let activity_count: i64 = row.get(0)?;
+            let revision: i64 = row.get(1)?;
+            Ok((
+                usize::try_from(activity_count).unwrap_or(usize::MAX),
+                revision,
+            ))
+        },
+    )
+    .optional()
+    .into_diagnostic()
+    .wrap_err("query workflow worker activity state failed")
+}
+
+fn decode_worker_activity_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(i64, SessionActivityEvent)> {
+    let seq: i64 = row.get(0)?;
+    let event_json: String = row.get(1)?;
+    let event = serde_json::from_str::<SessionActivityEvent>(&event_json).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    Ok((seq, event))
+}
+
+fn workflow_worker_activity_exists_before(
+    conn: &Connection,
+    run_id: &str,
+    worker_id: &str,
+    cursor: Option<i64>,
+) -> Result<bool> {
+    let Some(cursor) = cursor else {
+        return Ok(false);
+    };
+    conn.query_row(
+        "SELECT 1 FROM workflow_worker_activity
+         WHERE run_id = ?1 AND worker_id = ?2 AND seq < ?3 LIMIT 1",
+        params![run_id, worker_id, cursor],
+        |_| Ok(()),
+    )
+    .optional()
+    .into_diagnostic()
+    .wrap_err("query older workflow worker activity existence failed")
+    .map(|value| value.is_some())
+}
+
+fn workflow_worker_activity_exists_after(
+    conn: &Connection,
+    run_id: &str,
+    worker_id: &str,
+    cursor: Option<i64>,
+) -> Result<bool> {
+    let Some(cursor) = cursor else {
+        return Ok(false);
+    };
+    conn.query_row(
+        "SELECT 1 FROM workflow_worker_activity
+         WHERE run_id = ?1 AND worker_id = ?2 AND seq > ?3 LIMIT 1",
+        params![run_id, worker_id, cursor],
+        |_| Ok(()),
+    )
+    .optional()
+    .into_diagnostic()
+    .wrap_err("query newer workflow worker activity existence failed")
+    .map(|value| value.is_some())
+}
+
 fn clamp_history_limit(limit: usize) -> usize {
     limit.clamp(1, DASHBOARD_ACTIVITY_HISTORY_LIMIT_MAX)
 }
 
-fn history_item_is_user_input(item: &DashboardActivityHistoryItem) -> bool {
+const fn history_item_is_user_input(item: &DashboardActivityHistoryItem) -> bool {
     matches!(item.event, SessionActivityEvent::User(_))
 }
 
@@ -503,7 +950,7 @@ fn normalize_window_explored_item(
     if let Some(active_group_item) = existing_items.last().and_then(|item| {
         (explored_stable_id(item) == Some(group_stable_id.as_str())).then_some(item)
     }) {
-        item.id = active_group_item.id.clone();
+        item.id.clone_from(&active_group_item.id);
         if let (
             SessionActivityEvent::Explored(active_group),
             SessionActivityEvent::Explored(incoming_group),
@@ -533,7 +980,7 @@ fn normalize_window_explored_item(
     item.id = format!("{}-segment-{segment}", item.id);
 }
 
-fn explored_stable_id(item: &DashboardActivityHistoryItem) -> Option<&str> {
+const fn explored_stable_id(item: &DashboardActivityHistoryItem) -> Option<&str> {
     match &item.event {
         SessionActivityEvent::Explored(group) => Some(group.stable_id.as_str()),
         _ => None,
@@ -567,14 +1014,15 @@ mod tests {
     use crate::dashboard::cells::SessionActivityEvent;
     use crate::reasoning::runtime::HistoryMessage;
 
-    fn activity_item(id: &str, cell: SessionActivityEvent) -> DashboardActivityHistoryItem {
-        DashboardActivityHistoryItem::from_event_with_id(&cell, id)
+    fn activity_item(id: &str, cell: &SessionActivityEvent) -> DashboardActivityHistoryItem {
+        DashboardActivityHistoryItem::from_event_with_id(cell, id)
     }
 
     fn non_user_item(id: &str) -> DashboardActivityHistoryItem {
         activity_item(
             id,
-            crate::dashboard::assistant_activity_cell("non-user").expect("assistant activity cell"),
+            &crate::dashboard::assistant_activity_cell("non-user")
+                .expect("assistant activity cell"),
         )
     }
 
@@ -585,7 +1033,7 @@ mod tests {
         .into_iter()
         .next()
         .expect("user activity cell");
-        activity_item(id, cell)
+        activity_item(id, &cell)
     }
 
     fn explored_group(stable_id: &str, summary: &str) -> SessionActivityEvent {
@@ -611,6 +1059,44 @@ mod tests {
             }
             .into(),
         )
+    }
+
+    #[test]
+    fn workflow_worker_history_is_bounded_in_transport_and_pageable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = DashboardActivityHistoryStore::open_at_path_for_test(
+            temp.path().join("history.sqlite3"),
+        )
+        .expect("history store");
+        let run_id = "run-session";
+        let worker_id = "worker-1";
+        store
+            .register_workflow_worker(run_id, worker_id)
+            .expect("register worker");
+        for index in 0..100 {
+            store
+                .append_workflow_worker_activity(
+                    run_id,
+                    worker_id,
+                    &crate::dashboard::assistant_activity_cell(&format!("activity-{index:03}"))
+                        .expect("activity event"),
+                )
+                .expect("append worker activity");
+        }
+        let page = store
+            .query_workflow_worker_activity(run_id, worker_id, None, None, 20)
+            .expect("query worker activity")
+            .expect("worker stream");
+        assert_eq!(page.items.len(), 20);
+        assert_eq!(page.activity_count, 100);
+        assert!(page.has_more_before);
+        assert_eq!(page.items.first().map(|item| item.cursor), Some(81));
+        assert_eq!(page.items.last().map(|item| item.cursor), Some(100));
+        let older = store
+            .query_workflow_worker_activity(run_id, worker_id, page.oldest_cursor, None, 20)
+            .expect("query older worker activity")
+            .expect("older worker page");
+        assert_eq!(older.items.first().map(|item| item.cursor), Some(61));
     }
 
     #[test]
@@ -640,11 +1126,11 @@ mod tests {
         let mut window = DashboardActivityHistoryWindow::default();
         window.merge_new_items(vec![activity_item(
             "activity-explored",
-            explored_group("explored", "first"),
+            &explored_group("explored", "first"),
         )]);
         window.merge_new_items(vec![activity_item(
             "activity-explored",
-            explored_group("explored", "second"),
+            &explored_group("explored", "second"),
         )]);
 
         assert_eq!(window.items.len(), 1);
@@ -664,7 +1150,7 @@ mod tests {
         window.merge_new_items(vec![non_user_item("activity-boundary")]);
         window.merge_new_items(vec![activity_item(
             "activity-explored",
-            explored_group("explored", "third"),
+            &explored_group("explored", "third"),
         )]);
 
         assert_eq!(window.items.len(), 3);
@@ -680,11 +1166,11 @@ mod tests {
         let mut window = DashboardActivityHistoryWindow::default();
         window.merge_new_items(vec![activity_item(
             item_id,
-            explored_group(stable_id, "first"),
+            &explored_group(stable_id, "first"),
         )]);
         window.merge_new_items(vec![activity_item(
             item_id,
-            explored_group(stable_id, "second"),
+            &explored_group(stable_id, "second"),
         )]);
 
         assert_eq!(window.items.len(), 1);
@@ -713,11 +1199,11 @@ mod tests {
 
         window.merge_new_items(vec![activity_item(
             item_id,
-            explored_group_with_summaries(stable_id, &first_refs),
+            &explored_group_with_summaries(stable_id, &first_refs),
         )]);
         window.merge_new_items(vec![activity_item(
             item_id,
-            explored_group_with_summaries(stable_id, &second_refs),
+            &explored_group_with_summaries(stable_id, &second_refs),
         )]);
 
         assert_eq!(window.items.len(), 1);
@@ -727,5 +1213,192 @@ mod tests {
         assert_eq!(group.calls.len(), 32);
         assert_eq!(group.calls[0].summary, "call-00");
         assert_eq!(group.calls[31].summary, "call-31");
+    }
+
+    #[test]
+    fn workflow_worker_activity_is_normalized_coalesced_and_paged() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store =
+            DashboardActivityHistoryStore::open_at_path(temp.path().join("history.sqlite3"))
+                .expect("history store");
+        let run_id = "run-1";
+        let worker_id = "worker-1";
+        store
+            .register_workflow_worker(run_id, worker_id)
+            .expect("register worker");
+        store
+            .append_workflow_worker_activity(
+                run_id,
+                worker_id,
+                &explored_group("worker-explored", "first"),
+            )
+            .expect("append first explored");
+        let coalesced = store
+            .append_workflow_worker_activity(
+                run_id,
+                worker_id,
+                &explored_group("worker-explored", "second"),
+            )
+            .expect("append second explored");
+        assert_eq!(coalesced.activity_count, 1);
+        assert_eq!(coalesced.revision, 2);
+        let after_page = store
+            .query_workflow_worker_activity(run_id, worker_id, None, Some(0), 2)
+            .expect("query after cursor")
+            .expect("known worker");
+        assert_eq!(after_page.items.len(), 1);
+        assert_eq!(after_page.oldest_cursor, after_page.newest_cursor);
+        assert!(!after_page.has_more_after);
+
+        let nested_snapshot = crate::workflow::WorkflowRunSnapshot {
+            run_id: run_id.to_string(),
+            workflow_id: "nested".to_string(),
+            status: crate::workflow::WorkflowNodeStatus::Running,
+            started_at_ms: 1,
+            completed_at_ms: None,
+            input: serde_json::json!({}),
+            output: None,
+            error: None,
+            await_groups: Vec::new(),
+            transitions: Vec::new(),
+            workers: Vec::new(),
+        };
+        let workflow_event =
+            SessionActivityEvent::Workflow(crate::dashboard::WorkflowActivityData {
+                workflow_id: "nested".to_string(),
+                status: crate::workflow::WorkflowInvocationStatus::Running,
+                output: None,
+                message: "nested workflow".to_string(),
+                snapshot: Some(nested_snapshot),
+            });
+        store
+            .append_workflow_worker_activity(run_id, worker_id, &workflow_event)
+            .expect("append normalized workflow");
+        store
+            .append_workflow_worker_activity(
+                run_id,
+                worker_id,
+                &crate::dashboard::assistant_activity_cell("boundary").expect("assistant event"),
+            )
+            .expect("append boundary");
+
+        let newest = store
+            .query_workflow_worker_activity(run_id, worker_id, None, None, 2)
+            .expect("query newest")
+            .expect("known worker");
+        assert_eq!(newest.activity_count, 3);
+        assert_eq!(newest.items.len(), 2);
+        assert!(newest.has_more_before);
+        let SessionActivityEvent::Workflow(workflow) = &newest.items[0].event else {
+            panic!("expected workflow worker event");
+        };
+        assert!(workflow.snapshot.is_none());
+
+        let older = store
+            .query_workflow_worker_activity(run_id, worker_id, newest.oldest_cursor, None, 2)
+            .expect("query older")
+            .expect("known worker");
+        assert_eq!(older.items.len(), 1);
+        assert!(!older.has_more_before);
+        assert!(older.has_more_after);
+        let SessionActivityEvent::Explored(group) = &older.items[0].event else {
+            panic!("expected coalesced explored event");
+        };
+        assert_eq!(group.calls.len(), 2);
+    }
+
+    #[test]
+    fn workflow_worker_activity_rejects_unknown_worker() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store =
+            DashboardActivityHistoryStore::open_at_path(temp.path().join("history.sqlite3"))
+                .expect("history store");
+        assert!(
+            store
+                .query_workflow_worker_activity("missing-run", "missing-worker", None, None, 80)
+                .expect("query unknown worker")
+                .is_none()
+        );
+        assert!(
+            store
+                .query_workflow_worker_activity(
+                    "missing-run",
+                    "missing-worker",
+                    Some(2),
+                    Some(1),
+                    80,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn workflow_snapshot_persists_and_restores_from_history() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store =
+            DashboardActivityHistoryStore::open_at_path(temp.path().join("history.sqlite3"))
+                .expect("history store");
+        let snapshot = crate::workflow::WorkflowRunSnapshot {
+            run_id: "workflow-run-1".to_string(),
+            workflow_id: "research".to_string(),
+            status: crate::workflow::WorkflowNodeStatus::Completed,
+            started_at_ms: 1,
+            completed_at_ms: Some(3),
+            input: serde_json::json!({ "topic": "persistence" }),
+            output: Some(serde_json::json!({ "summary": "restored" })),
+            error: None,
+            await_groups: vec![crate::workflow::WorkflowAwaitGroupSnapshot {
+                group_id: "await-1".to_string(),
+                sequence: 1,
+                status: crate::workflow::WorkflowNodeStatus::Completed,
+                started_at_ms: 1,
+                completed_at_ms: Some(3),
+                worker_ids: vec!["worker-1".to_string()],
+            }],
+            transitions: Vec::new(),
+            workers: vec![crate::workflow::WorkflowWorkerSnapshot {
+                worker_id: "worker-1".to_string(),
+                await_group_id: "await-1".to_string(),
+                role: "agent".to_string(),
+                model: "main".to_string(),
+                status: crate::workflow::WorkflowNodeStatus::Completed,
+                started_at_ms: 1,
+                completed_at_ms: Some(2),
+                input: serde_json::json!({ "query": "persist" }),
+                output: Some(serde_json::json!({ "answer": "yes" })),
+                error: None,
+                activity_count: 1,
+                activity_revision: 1,
+                activity: vec![
+                    crate::dashboard::thinking_activity_cell("checking history")
+                        .expect("thinking event"),
+                ],
+            }],
+        };
+        let event = SessionActivityEvent::Workflow(crate::dashboard::WorkflowActivityData {
+            workflow_id: snapshot.workflow_id.clone(),
+            status: crate::workflow::WorkflowInvocationStatus::Completed,
+            output: snapshot.output.clone(),
+            message: "workflow completed".to_string(),
+            snapshot: Some(snapshot.clone()),
+        });
+        store
+            .append_items(&[activity_item("activity-workflow-run-1", &event)])
+            .expect("persist workflow activity");
+
+        let window = store.load_initial_window();
+        let SessionActivityEvent::Workflow(workflow) = &window.items[0].event else {
+            panic!("expected persisted workflow activity");
+        };
+        assert_eq!(workflow.snapshot.as_ref(), Some(&snapshot));
+        let restored = workflow.snapshot.as_ref().expect("restored snapshot");
+        assert_eq!(restored.workers[0].activity_count, 1);
+        assert_eq!(restored.workers[0].activity.len(), 1);
+        let worker_page = store
+            .query_workflow_worker_activity("workflow-run-1", "worker-1", None, None, 80)
+            .expect("query restored worker activity")
+            .expect("registered worker stream");
+        assert_eq!(worker_page.activity_count, 1);
+        assert_eq!(worker_page.items.len(), 1);
     }
 }

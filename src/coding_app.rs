@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{
     collections::HashSet,
     fs,
@@ -114,7 +115,7 @@ pub enum CodingSearchCaseSchema {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ProjectInstructionDocument {
+pub struct ProjectInstructionDocument {
     path: PathBuf,
     scope_dir: PathBuf,
     name: String,
@@ -159,8 +160,7 @@ impl CodingConfigHintSummary {
             tree_sitter_languages: hints
                 .get("tree_sitter_languages")
                 .and_then(|value| value.as_array())
-                .map(|items| items.len())
-                .unwrap_or(0),
+                .map_or(0, std::vec::Vec::len),
             lsp_languages: lsp_entries.len(),
             lsp_setup_hints: lsp_entries
                 .iter()
@@ -212,7 +212,7 @@ impl CodingLspSetupHint {
             lsp_binary: json_string(entry, "lsp_binary"),
             lsp_available: entry
                 .get("lsp_available")
-                .and_then(|value| value.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
             setup_hints: json_string(entry, "setup_hints"),
             install_command: format_install_command(entry.get("install_command")),
@@ -240,10 +240,10 @@ impl CodingLspSetupHint {
             self.language, self.lsp_server, self.lsp_binary, self.lsp_available, self.setup_hints
         );
         if let Some(install_command) = self.install_command.as_ref() {
-            line.push_str(&format!("\n  install_command: {install_command}"));
+            let _ = write!(line, "\n  install_command: {install_command}");
         }
         if let Some(download_url) = self.download_url.as_ref() {
-            line.push_str(&format!("\n  download_url: {download_url}"));
+            let _ = write!(line, "\n  download_url: {download_url}");
         }
         line
     }
@@ -257,9 +257,7 @@ fn json_string(entry: &Value, key: &str) -> String {
         .to_string()
 }
 
-pub(crate) fn load_instruction_documents_in_dir(
-    dir: &Path,
-) -> Result<Vec<ProjectInstructionDocument>> {
+pub fn load_instruction_documents_in_dir(dir: &Path) -> Result<Vec<ProjectInstructionDocument>> {
     let mut documents = Vec::new();
     for name in PROJECT_INSTRUCTION_FILENAMES {
         let path = dir.join(name);
@@ -336,9 +334,7 @@ fn instruction_payload(instruction: &ProjectInstructionDocument) -> Value {
     })
 }
 
-pub(crate) fn project_instruction_fingerprint(
-    instructions: &[ProjectInstructionDocument],
-) -> String {
+pub fn project_instruction_fingerprint(instructions: &[ProjectInstructionDocument]) -> String {
     let mut hasher = Sha256::new();
     for instruction in instructions {
         hasher.update(instruction.name.as_bytes());
@@ -353,7 +349,7 @@ fn short_hash(hash: &str) -> &str {
     hash.get(..12).unwrap_or(hash)
 }
 
-pub(crate) fn render_project_instructions(
+pub fn render_project_instructions(
     label: &str,
     instructions: &[ProjectInstructionDocument],
 ) -> String {
@@ -418,13 +414,12 @@ impl CodingApp {
     fn project_root_display(&self) -> String {
         self.project_root
             .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "none".to_string())
+            .map_or_else(|| "none".to_string(), |path| path.display().to_string())
     }
 
     fn open_project(
         &mut self,
-        args: CodingOpenProjectArgs,
+        args: &CodingOpenProjectArgs,
         context: &AppToolExecutionContext,
     ) -> Result<AppToolExecutionResult> {
         let requested = Path::new(&args.project_root);
@@ -480,7 +475,7 @@ impl CodingApp {
                 project_instruction_fingerprint(&root_instructions),
                 root_instruction_fingerprint
             );
-            self.root_instructions = root_instructions.clone();
+            self.root_instructions.clone_from(&root_instructions);
             self.root_instruction_fingerprint = Some(root_instruction_fingerprint.clone());
             self.last_action = Some("reloaded project instructions".to_string());
             let mut ui_lines = vec![
@@ -531,7 +526,7 @@ impl CodingApp {
 
         self.project_root = Some(project_root.clone());
         self.config_hint_summary = Some(config_hint_summary.clone());
-        self.root_instructions = root_instructions.clone();
+        self.root_instructions.clone_from(&root_instructions);
         self.root_instruction_fingerprint = Some(root_instruction_fingerprint.clone());
         self.delivered_scoped_instructions.clear();
         self.last_action = Some("opened project".to_string());
@@ -539,8 +534,7 @@ impl CodingApp {
         let model_parts = [
             config_hint_summary.model_content(),
             format!(
-                "root_project_instruction_fingerprint={}\nproject_instruction_context=available_in_next_preturn_context",
-                root_instruction_fingerprint
+                "root_project_instruction_fingerprint={root_instruction_fingerprint}\nproject_instruction_context=available_in_next_preturn_context"
             ),
         ];
         let model_content = truncate_text_to_token_budget(
@@ -652,12 +646,12 @@ impl CodingApp {
         }
         let rendered =
             render_project_instructions("scoped_project_instructions", &scoped_instructions);
-        let content = match result.model_content.take() {
+        let model_text = match result.model_content.take() {
             Some(existing) if !existing.trim().is_empty() => format!("{rendered}\n\n{existing}"),
             _ => rendered,
         };
         result.model_content = Some(truncate_text_to_token_budget(
-            &content,
+            &model_text,
             context.tool_output_max_tokens,
         ));
         if let Some(payload_object) = result.payload.as_object_mut() {
@@ -693,7 +687,6 @@ impl CodingApp {
     }
 
     fn explored_event(
-        &self,
         tool_name: impl Into<String>,
         action: ExploredCallActivityAction,
         target: Option<String>,
@@ -873,10 +866,10 @@ impl App for CodingApp {
             }
             "next_review" => {
                 let args: CodingNextReviewArgs = parse_coding_tool_args(call)?;
-                match args.limit {
-                    Some(limit) => format!("propagation review batch limit={limit}"),
-                    None => "next propagation review".to_string(),
-                }
+                args.limit.map_or_else(
+                    || "next propagation review".to_string(),
+                    |limit| format!("propagation review batch limit={limit}"),
+                )
             }
             _ => return Err(miette!("unknown coding tool `{}`", call.name)),
         };
@@ -912,12 +905,12 @@ impl App for CodingApp {
         match call.name.as_str() {
             "open_project" => {
                 let args: CodingOpenProjectArgs = parse_coding_tool_args(call)?;
-                self.open_project(args, context)
+                self.open_project(&args, context)
             }
             "search_code" => {
                 self.require_project()?;
                 let args: CodingSearchCodeArgs = parse_coding_tool_args(call)?;
-                let result = self.scope.search_code(args.clone())?;
+                let result = self.scope.search_code(&args.clone())?;
                 self.last_action = Some(format!("searched {}", args.query));
                 let mut detail_lines = Vec::new();
                 if !args.include.is_empty() {
@@ -946,7 +939,7 @@ impl App for CodingApp {
                         &model_content,
                         context.tool_output_max_tokens,
                     )),
-                    Some(self.explored_event(
+                    Some(Self::explored_event(
                         "Search",
                         ExploredCallActivityAction::Search,
                         Some(args.query.clone()),
@@ -978,7 +971,7 @@ impl App for CodingApp {
                         CodingReadCodeMode::Full => scope_engine::api::ReadCodeMode::Full,
                     },
                 };
-                let result = self.scope.read_code(input)?;
+                let result = self.scope.read_code(&input)?;
                 self.last_action = Some(format!("read {summary_target}"));
                 let model_content =
                     truncate_text_to_token_budget(&result.content, context.tool_output_max_tokens);
@@ -986,7 +979,7 @@ impl App for CodingApp {
                     format!("read code {summary_target}"),
                     serde_json::to_value(&result).unwrap(),
                     Some(model_content),
-                    Some(self.explored_event(
+                    Some(Self::explored_event(
                         "Read",
                         ExploredCallActivityAction::Read,
                         Some(args.path.clone()),
@@ -1020,7 +1013,7 @@ impl App for CodingApp {
                 let impact_lines = build_coding_edit_impact_lines(&results);
                 let summary = format!("edited code; propagation_results={}", results.len());
                 let mut output = AppToolExecutionResult::from_activity_event(
-                    summary.clone(),
+                    summary,
                     json!({ "propagation_results": &results }),
                     None,
                     Some(SessionActivityEvent::CodingEdit(
@@ -1129,13 +1122,15 @@ fn coding_target_summary(selector: &str) -> String {
 fn coding_review_title(output: &scope_engine::api::ReviewBatch) -> String {
     match output.returned {
         0 => "No review pending".to_string(),
-        1 => match output.review.as_ref() {
-            Some(review) => format!(
-                "Reviewing impact of {}",
-                coding_target_summary(review_modified_symbol(review))
-            ),
-            None => "Reviewing impact target".to_string(),
-        },
+        1 => output.review.as_ref().map_or_else(
+            || "Reviewing impact target".to_string(),
+            |review| {
+                format!(
+                    "Reviewing impact of {}",
+                    coding_target_summary(review_modified_symbol(review))
+                )
+            },
+        ),
         returned => format!("Reviewing {returned} impact targets"),
     }
 }
@@ -1593,7 +1588,7 @@ mod tests {
 
         let first = app
             .open_project(
-                CodingOpenProjectArgs {
+                &CodingOpenProjectArgs {
                     project_root: temp.path().display().to_string(),
                 },
                 &context,
@@ -1617,7 +1612,7 @@ mod tests {
 
         let second = app
             .open_project(
-                CodingOpenProjectArgs {
+                &CodingOpenProjectArgs {
                     project_root: temp.path().display().to_string(),
                 },
                 &context,
@@ -1655,7 +1650,7 @@ mod tests {
         let mut app = CodingApp::new();
 
         app.open_project(
-            CodingOpenProjectArgs {
+            &CodingOpenProjectArgs {
                 project_root: temp.path().display().to_string(),
             },
             &context,
@@ -1676,7 +1671,7 @@ mod tests {
         std::fs::write(temp.path().join("AGENTS.md"), "Root rule v2\n").expect("update root");
         let second = app
             .open_project(
-                CodingOpenProjectArgs {
+                &CodingOpenProjectArgs {
                     project_root: temp.path().display().to_string(),
                 },
                 &context,

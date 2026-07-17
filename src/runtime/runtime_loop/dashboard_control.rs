@@ -1,10 +1,14 @@
 use super::sleep_driver::{SleepTrigger, start_background_sleep};
-use super::*;
+use super::{
+    Context, DashboardActivityHistoryWindow, DashboardControlCommand, DashboardState,
+    RuntimeStatusLevel, SleepStatusSnapshot, SleepTaskResult, set_runtime_status,
+    set_runtime_status_only, sync_dashboard_state,
+};
 use crate::daemon::DaemonControlCommand;
 use crate::openskills::{reload_openskills_for_runtime, set_openskill_auto_use};
 use crate::workflow::{WorkflowInvocation, invoke as invoke_workflow};
 
-pub(crate) async fn handle_dashboard_control_command(
+pub async fn handle_dashboard_control_command(
     context: &mut Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
@@ -74,7 +78,8 @@ pub(crate) async fn handle_dashboard_control_command(
             match result {
                 Ok(result) => {
                     let level = match result.status {
-                        crate::workflow::WorkflowInvocationStatus::Completed => {
+                        crate::workflow::WorkflowInvocationStatus::Completed
+                        | crate::workflow::WorkflowInvocationStatus::Running => {
                             RuntimeStatusLevel::Info
                         }
                         crate::workflow::WorkflowInvocationStatus::Failed
@@ -148,18 +153,19 @@ pub(crate) async fn handle_dashboard_control_command(
                 live_drafts.clear();
                 count
             };
-            let cleared_dashboard_history = match context.dashboard_history.as_ref() {
-                Some(history) => match history.clear_all() {
-                    Ok(count) => count,
-                    Err(err) => {
-                        tracing::error!(
-                            "failed to clear dashboard activity history during /clear: {err:?}"
-                        );
-                        0
-                    }
-                },
-                None => 0,
-            };
+            let cleared_dashboard_history =
+                context
+                    .dashboard_history
+                    .as_ref()
+                    .map_or(0, |history| match history.clear_all() {
+                        Ok(count) => count,
+                        Err(err) => {
+                            tracing::error!(
+                                "failed to clear dashboard activity history during /clear: {err:?}"
+                            );
+                            0
+                        }
+                    });
             if let Some(session) = context.active_skill_run.as_mut() {
                 session.final_summary = "abandoned by dashboard /clear".to_string();
             }
@@ -200,7 +206,7 @@ pub(crate) async fn handle_dashboard_control_command(
                 set_runtime_status(
                     Some(tx),
                     RuntimeStatusLevel::Info,
-                    format!("runtime turn interrupted (events={})", failed_events),
+                    format!("runtime turn interrupted (events={failed_events})"),
                 );
             } else {
                 set_runtime_status(

@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, Context, DashboardState,
+    FORCE_SLEEP_ERROR_BACKLOG_THRESHOLD, Result, RuntimeStatusLevel, SleepStatusSnapshot,
+    build_eval_context_with_compiled, load_compiled_prompts_only, persist_sleep_status_snapshot,
+    refresh_sleep_status_queues, run_sleep, set_runtime_status, set_runtime_status_only,
+    summarize_sleep_summary, sync_dashboard_state,
+};
 
 #[derive(Default)]
 pub(super) enum SleepTrigger {
@@ -7,13 +13,13 @@ pub(super) enum SleepTrigger {
     Idle,
 }
 
-pub(crate) struct SleepTaskResult {
+pub struct SleepTaskResult {
     trigger: SleepTrigger,
     result: Result<crate::reasoning::sleep::SleepSummary>,
 }
 
 pub(super) async fn maybe_start_forced_sleep(
-    context: &mut Context,
+    context: &Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
     sleep_running: &mut bool,
@@ -26,10 +32,8 @@ pub(super) async fn maybe_start_forced_sleep(
     if error_backlog < FORCE_SLEEP_ERROR_BACKLOG_THRESHOLD {
         return None;
     }
-    let status = format!(
-        "backlog too high (runtime_errors={}): background sleep started",
-        error_backlog
-    );
+    let status =
+        format!("backlog too high (runtime_errors={error_backlog}): background sleep started");
     start_background_sleep(
         context,
         tx,
@@ -41,8 +45,7 @@ pub(super) async fn maybe_start_forced_sleep(
     )
     .await;
     Some(format!(
-        "backlog too high (runtime_errors={}): background sleep started",
-        error_backlog
+        "backlog too high (runtime_errors={error_backlog}): background sleep started"
     ))
 }
 
@@ -81,7 +84,7 @@ pub(super) async fn maybe_start_idle_sleep(
 }
 
 pub(super) async fn start_background_sleep(
-    context: &mut Context,
+    context: &Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
     sleep_running: &mut bool,
@@ -111,7 +114,7 @@ pub(super) async fn start_background_sleep(
     });
 }
 
-pub(crate) async fn handle_sleep_task_result(
+pub async fn handle_sleep_task_result(
     context: &mut Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_status: &mut SleepStatusSnapshot,

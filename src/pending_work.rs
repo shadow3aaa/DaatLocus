@@ -58,7 +58,7 @@ impl PartialEq for PendingWork {
 impl Eq for PendingWork {}
 
 impl PendingWork {
-    fn priority(&self) -> u8 {
+    const fn priority(&self) -> u8 {
         match self {
             Self::Event { .. } => 0,
         }
@@ -117,6 +117,7 @@ impl PendingWorkQueue {
             state: PendingWorkEntryState::Pending,
         });
         persist_locked(&inner)?;
+        drop(inner);
         Ok(true)
     }
 
@@ -138,21 +139,23 @@ impl PendingWorkQueue {
         if !claimed.is_empty() {
             persist_locked(&inner)?;
         }
+        drop(inner);
         Ok(claimed)
     }
 
-    pub fn consume(&self, work: PendingWork) -> Result<bool> {
+    pub fn consume(&self, work: &PendingWork) -> Result<bool> {
         let mut inner = self.inner.lock();
         let Some(index) = inner
             .state
             .queue
             .iter()
-            .position(|entry| entry.work == work)
+            .position(|entry| entry.work == *work)
         else {
             return Ok(false);
         };
         inner.state.queue.remove(index);
         persist_locked(&inner)?;
+        drop(inner);
         Ok(true)
     }
 
@@ -180,6 +183,7 @@ impl PendingWorkQueue {
             state: PendingWorkEntryState::Pending,
         });
         persist_locked(&inner)?;
+        drop(inner);
         Ok(true)
     }
 
@@ -201,7 +205,7 @@ impl PendingWorkQueue {
     pub fn move_pending_event(
         &self,
         event_id: Uuid,
-        direction: PendingEventMoveDirection,
+        direction: &PendingEventMoveDirection,
     ) -> Result<bool> {
         let mut inner = self.inner.lock();
         let event_indices = pending_event_indices(&inner.state.queue);
@@ -227,6 +231,7 @@ impl PendingWorkQueue {
             .queue
             .swap(event_indices[position], event_indices[target_position]);
         persist_locked(&inner)?;
+        drop(inner);
         Ok(true)
     }
     pub fn move_pending_event_to_position(
@@ -266,6 +271,7 @@ impl PendingWorkQueue {
         };
         inner.state.queue.insert(insert_index, entry);
         persist_locked(&inner)?;
+        drop(inner);
         Ok(true)
     }
 
@@ -294,6 +300,7 @@ impl PendingWorkQueue {
             .unwrap_or(inner.state.queue.len());
         inner.state.queue.insert(insert_index, entry);
         persist_locked(&inner)?;
+        drop(inner);
         Ok(true)
     }
 
@@ -308,10 +315,11 @@ impl PendingWorkQueue {
         if cleared > 0 {
             persist_locked(&inner)?;
         }
+        drop(inner);
         Ok(cleared)
     }
 
-    pub async fn shutdown(self) {
+    pub fn shutdown(self) {
         let inner = self.inner.lock();
         let _ = persist_locked(&inner);
     }
@@ -479,7 +487,7 @@ mod tests {
         );
         assert!(
             queue
-                .move_pending_event(third_event_id, PendingEventMoveDirection::Up)
+                .move_pending_event(third_event_id, &PendingEventMoveDirection::Up)
                 .expect("move third event up")
         );
         assert_eq!(
@@ -488,7 +496,7 @@ mod tests {
         );
         assert!(
             queue
-                .move_pending_event(first_event_id, PendingEventMoveDirection::Down)
+                .move_pending_event(first_event_id, &PendingEventMoveDirection::Down)
                 .expect("move first event down")
         );
         assert_eq!(

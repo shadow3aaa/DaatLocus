@@ -79,7 +79,7 @@ pub enum AgentToolInputSpec {
     },
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct AgentToolCall {
     pub id: String,
     pub name: String,
@@ -96,13 +96,13 @@ impl AgentToolCall {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentContent {
     text: String,
     parts: Vec<AgentContentPart>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentContentPart {
     Text {
@@ -151,7 +151,7 @@ impl AgentContent {
         &self.parts
     }
 
-    pub fn is_plain_text(&self) -> bool {
+    pub const fn is_plain_text(&self) -> bool {
         self.parts.is_empty()
     }
 
@@ -200,7 +200,7 @@ impl<'de> Deserialize<'de> for AgentContent {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind")]
 pub enum AgentMessage {
     System {
@@ -255,7 +255,7 @@ impl AgentTurnStreamResult {
         for item in self.items {
             match item {
                 AgentTurnItem::AssistantMessage { content } if !content.trim().is_empty() => {
-                    assistant_messages.push(content)
+                    assistant_messages.push(content);
                 }
                 AgentTurnItem::ToolCall { call } => tool_calls.push(call),
                 AgentTurnItem::AssistantMessage { .. } => {}
@@ -350,32 +350,33 @@ impl HistoryMessage {
         }
     }
 
-    pub fn role_name(&self) -> &'static str {
+    pub const fn role_name(&self) -> &'static str {
         match &self.message {
             AgentMessage::System { .. } => "system",
             AgentMessage::User { .. } => "user",
-            AgentMessage::Assistant { .. } => "assistant",
-            AgentMessage::AssistantToolCallProtocol { .. } => "assistant",
+            AgentMessage::Assistant { .. } | AgentMessage::AssistantToolCallProtocol { .. } => {
+                "assistant"
+            }
             AgentMessage::Tool { .. } => "tool",
         }
     }
 
-    pub fn is_user(&self) -> bool {
+    pub const fn is_user(&self) -> bool {
         matches!(self.message, AgentMessage::User { .. })
     }
 
-    pub fn is_assistant(&self) -> bool {
+    pub const fn is_assistant(&self) -> bool {
         matches!(
             self.message,
             AgentMessage::Assistant { .. } | AgentMessage::AssistantToolCallProtocol { .. }
         )
     }
 
-    pub fn is_system(&self) -> bool {
+    pub const fn is_system(&self) -> bool {
         matches!(self.message, AgentMessage::System { .. })
     }
 
-    pub fn is_tool(&self) -> bool {
+    pub const fn is_tool(&self) -> bool {
         matches!(self.message, AgentMessage::Tool { .. })
     }
 
@@ -466,7 +467,7 @@ impl AgentMessage {
         }
     }
 
-    pub fn assistant_tool_call_protocol_with_reasoning(
+    pub const fn assistant_tool_call_protocol_with_reasoning(
         content: Option<String>,
         reasoning_content: Option<String>,
         calls: Vec<AgentToolCall>,
@@ -503,10 +504,10 @@ pub fn summarize_assistant_tool_call_protocol(
     let note = content
         .map(summarize_agent_inline_text)
         .filter(|text| !text.is_empty());
-    match note {
-        Some(note) => format!("assistant tool-call protocol [{tool_names}] with note: {note}"),
-        None => format!("assistant tool-call protocol [{tool_names}]"),
-    }
+    note.map_or_else(
+        || format!("assistant tool-call protocol [{tool_names}]"),
+        |note| format!("assistant tool-call protocol [{tool_names}] with note: {note}"),
+    )
 }
 
 pub fn assistant_tool_call_protocol_char_count(
@@ -561,7 +562,7 @@ pub fn render_assistant_tool_call_protocol_dump(
     for (index, call) in calls.iter().enumerate() {
         lines.push(format!("tool_call[{}].id={}", index, call.id));
         lines.push(format!("tool_call[{}].name={}", index, call.name));
-        lines.push(format!("tool_call[{}].arguments=", index));
+        lines.push(format!("tool_call[{index}].arguments="));
         lines.push(
             serde_json::to_string_pretty(&call.arguments)
                 .unwrap_or_else(|_| call.arguments.to_string()),
@@ -662,8 +663,8 @@ async fn execute_program_with_ir_report_with_retry_hook_and_validator<
     mut on_retry: F,
 ) -> Result<ProgramExecutionOutcome<P::Output>>
 where
-    V: FnMut(&P::Output) -> std::result::Result<(), String>,
-    F: FnMut(&PromptRequest),
+    V: FnMut(&P::Output) -> std::result::Result<(), String> + Send,
+    F: FnMut(&PromptRequest) + Send,
 {
     let ProgramExecutionRequest {
         model_provider,

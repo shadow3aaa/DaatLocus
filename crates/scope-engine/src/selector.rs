@@ -52,7 +52,8 @@ pub struct SymbolSelector {
 }
 
 impl ParsedSelector {
-    pub fn as_symbol(&self) -> Option<&SymbolSelector> {
+    #[must_use]
+    pub const fn as_symbol(&self) -> Option<&SymbolSelector> {
         match &self.target {
             SelectorTarget::Symbol(symbol) => Some(symbol),
             _ => None,
@@ -60,16 +61,19 @@ impl ParsedSelector {
     }
 
     /// Legacy accessor for callers/tests that still operate on symbol selectors.
+    #[must_use]
     pub fn kind(&self) -> Option<&SymbolKind> {
         self.as_symbol().map(|symbol| &symbol.kind)
     }
 
     /// Legacy accessor for callers/tests that still operate on symbol selectors.
+    #[must_use]
     pub fn name(&self) -> Option<&str> {
         self.as_symbol().map(|symbol| symbol.name.as_str())
     }
 
     /// Legacy accessor for callers/tests that still operate on symbol selectors.
+    #[must_use]
     pub fn line_range(&self) -> Option<(usize, usize)> {
         self.as_symbol().and_then(|symbol| symbol.line_range)
     }
@@ -92,65 +96,49 @@ impl SymbolKind {
     fn from_prefix(prefix: &str) -> Self {
         match prefix {
             // Rust
-            "fn" => SymbolKind::Function,
-            "struct" => SymbolKind::Struct,
-            "enum" => SymbolKind::Enum,
-            "trait" => SymbolKind::Trait,
-            "impl" => SymbolKind::Impl,
-            "const" => SymbolKind::Unknown,
-            "let" => SymbolKind::Unknown,
-            "var" => SymbolKind::Unknown,
+            "struct" | "type" => Self::Struct,
+            "enum" => Self::Enum,
+            "trait" | "interface" => Self::Trait,
+            "impl" => Self::Impl,
             // Go
-            "func" => SymbolKind::Function,
-            "type" => SymbolKind::Struct,
-            "method" => SymbolKind::Function,
-            "package" => SymbolKind::Unknown,
             // Java/C++/C#/Ruby/PHP
-            "class" => SymbolKind::Class,
-            "interface" => SymbolKind::Trait,
-            "constructor" => SymbolKind::Function,
-            "def" => SymbolKind::Function,
-            "module" => SymbolKind::Unknown,
-            _ => SymbolKind::Unknown,
+            "class" => Self::Class,
+            "fn" | "func" | "method" | "constructor" | "def" => Self::Function,
+            _ => Self::Unknown,
         }
     }
 
     /// Heuristic: guess the kind from a tree-sitter node kind string.
-    /// Used to map tree-sitter parse results back to SymbolKind.
+    /// Used to map tree-sitter parse results back to `SymbolKind`.
+    #[must_use]
     pub fn from_ts_node_kind(kind: &str) -> Self {
         match kind {
-            "function_item" => SymbolKind::Function,
-            "struct_item" => SymbolKind::Struct,
-            "enum_item" => SymbolKind::Enum,
-            "trait_item" => SymbolKind::Trait,
-            "impl_item" => SymbolKind::Impl,
+            "struct_item"
+            | "type_alias_declaration"
+            | "type_declaration"
+            | "type_identifier"
+            | "struct_specifier" => Self::Struct,
+            "enum_item" | "enum_declaration" => Self::Enum,
+            "trait_item" | "interface_declaration" => Self::Trait,
+            "impl_item" => Self::Impl,
             // Python tree-sitter node types
-            "function_definition" => SymbolKind::Function,
-            "class_definition" => SymbolKind::Class,
-            "decorated_definition" => SymbolKind::Function,
+            "class_definition" | "class_declaration" | "class_specifier" => Self::Class,
             // TypeScript/JavaScript node types
-            "function_declaration" => SymbolKind::Function,
-            "class_declaration" => SymbolKind::Class,
-            "interface_declaration" => SymbolKind::Trait,
-            "enum_declaration" => SymbolKind::Enum,
-            "method_definition" => SymbolKind::Function,
-            "arrow_function" => SymbolKind::Function,
-            "variable_declarator" => SymbolKind::Function,
-            "type_alias_declaration" => SymbolKind::Struct,
             // Go tree-sitter node types
-            "method_declaration" => SymbolKind::Function,
-            "type_declaration" => SymbolKind::Struct,
-            "type_identifier" => SymbolKind::Struct,
             // Java tree-sitter node types
-            "constructor_declaration" => SymbolKind::Function,
-            "field_declaration" => SymbolKind::Unknown,
-            "local_variable_declaration" => SymbolKind::Unknown,
             // C/C++ tree-sitter node types
-            "class_specifier" => SymbolKind::Class,
-            "struct_specifier" => SymbolKind::Struct,
             // Ruby tree-sitter node types
-            "singleton_method" => SymbolKind::Function,
-            _ => SymbolKind::Unknown,
+            "function_item"
+            | "function_definition"
+            | "decorated_definition"
+            | "function_declaration"
+            | "method_definition"
+            | "arrow_function"
+            | "variable_declarator"
+            | "method_declaration"
+            | "constructor_declaration"
+            | "singleton_method" => Self::Function,
+            _ => Self::Unknown,
         }
     }
 }
@@ -158,13 +146,13 @@ impl SymbolKind {
 impl std::fmt::Display for SymbolKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SymbolKind::Function => write!(f, "fn"),
-            SymbolKind::Struct => write!(f, "struct"),
-            SymbolKind::Enum => write!(f, "enum"),
-            SymbolKind::Trait => write!(f, "trait"),
-            SymbolKind::Impl => write!(f, "impl"),
-            SymbolKind::Class => write!(f, "class"),
-            SymbolKind::Unknown => write!(f, "symbol"),
+            Self::Function => write!(f, "fn"),
+            Self::Struct => write!(f, "struct"),
+            Self::Enum => write!(f, "enum"),
+            Self::Trait => write!(f, "trait"),
+            Self::Impl => write!(f, "impl"),
+            Self::Class => write!(f, "class"),
+            Self::Unknown => write!(f, "symbol"),
         }
     }
 }
@@ -386,6 +374,10 @@ fn parse_symbol_expr(expr: &str) -> (SymbolKind, String) {
 
 /// Resolve a selector's file path against a project root, and return the absolute path
 /// along with the file extension (for language detection).
+///
+/// # Errors
+///
+/// Returns an error if the selected file does not exist or has no extension.
 pub fn resolve_file(
     selector: &ParsedSelector,
     project_root: &Path,

@@ -86,16 +86,18 @@ pub struct PendingOutboundMessage {
 
 impl TelegramTransportState {
     pub fn new() -> Self {
-        Self::with_persistence(PersistenceStore::runtime_sync())
+        let persistence = PersistenceStore::runtime_sync();
+        Self::with_persistence(&persistence)
     }
 
     pub fn with_session(session_id: &str) -> Self {
-        Self::with_persistence(PersistenceStore::for_session_sync(Some(session_id)))
+        let persistence = PersistenceStore::for_session_sync(Some(session_id));
+        Self::with_persistence(&persistence)
     }
 
-    fn with_persistence(persistence: PersistenceStore) -> Self {
-        let state = load_telegram_state(&persistence);
-        let update_offset = load_telegram_update_offset(&persistence);
+    fn with_persistence(persistence: &PersistenceStore) -> Self {
+        let state = load_telegram_state(persistence);
+        let update_offset = load_telegram_update_offset(persistence);
         let persistence_path = persistence.state_file(TELEGRAM_TRANSPORT_STATE_FILE_NAME);
         let update_offset_path = persistence.state_file(TELEGRAM_UPDATE_OFFSET_STATE_FILE_NAME);
         Self::with_state(state, update_offset, persistence_path, update_offset_path)
@@ -136,14 +138,16 @@ impl TelegramTransportStateHandle {
             *next_update_offset = Some(offset);
             persist_telegram_update_offset_result(&self.inner, *next_update_offset)?;
         }
+        drop(next_update_offset);
         Ok(())
     }
 
     pub fn register_known_chat(&self, chat_id: impl Into<String>, chat_title: impl Into<String>) {
         let chat_id = chat_id.into();
         let mut state = self.inner.state.lock();
-        state.ensure_chat(chat_id, chat_title.into());
+        state.ensure_chat(&chat_id, chat_title.into());
         persist_telegram_state(&self.inner, &state);
+        drop(state);
     }
 
     pub fn observe_incoming_message(
@@ -153,8 +157,9 @@ impl TelegramTransportStateHandle {
     ) {
         let chat_id = chat_id.into();
         let mut state = self.inner.state.lock();
-        state.ensure_chat(chat_id, chat_title.into());
+        state.ensure_chat(&chat_id, chat_title.into());
         persist_telegram_state(&self.inner, &state);
+        drop(state);
     }
 
     pub fn take_next_outbound(&self) -> Option<PendingOutboundMessage> {
@@ -163,30 +168,31 @@ impl TelegramTransportStateHandle {
         if outbound.is_some() {
             persist_telegram_state(&self.inner, &state);
         }
+        drop(state);
         outbound
     }
 
     pub fn enqueue_outgoing_message(
         &self,
-        chat_id: String,
-        text: String,
-        related_event_id: Option<String>,
+        chat_id: &str,
+        text: &str,
+        related_event_id: Option<&String>,
         settle_status_on_delivery: Option<EventStatus>,
-        settle_note_on_delivery: Option<String>,
+        settle_note_on_delivery: Option<&String>,
     ) -> Result<()> {
         let mut state = self.inner.state.lock();
-        state.ensure_chat(chat_id.clone(), chat_id.clone());
-        let chunks = split_telegram_message_text(&text);
+        state.ensure_chat(chat_id, chat_id.to_string());
+        let chunks = split_telegram_message_text(text);
         let last_index = chunks.len().saturating_sub(1);
         for (index, chunk) in chunks.into_iter().enumerate() {
             let is_last = index == last_index;
             state.outbox.push_back(PendingOutboundMessage {
                 local_message_id: Uuid::new_v4().to_string(),
-                chat_id: chat_id.clone(),
+                chat_id: chat_id.to_string(),
                 text: chunk,
                 draft_id: None,
                 related_event_id: if is_last {
-                    related_event_id.clone()
+                    related_event_id.cloned()
                 } else {
                     None
                 },
@@ -196,13 +202,14 @@ impl TelegramTransportStateHandle {
                     None
                 },
                 settle_note_on_delivery: if is_last {
-                    settle_note_on_delivery.clone()
+                    settle_note_on_delivery.cloned()
                 } else {
                     None
                 },
             });
         }
         persist_telegram_state_result(&self.inner, &state)?;
+        drop(state);
         self.inner.outbound_notify.notify_one();
         Ok(())
     }
@@ -214,7 +221,7 @@ impl TelegramTransportStateHandle {
         text: String,
     ) -> Result<()> {
         let mut state = self.inner.state.lock();
-        state.ensure_chat(chat_id.clone(), chat_id.clone());
+        state.ensure_chat(&chat_id, chat_id.clone());
         if let Some(existing) = state
             .outbox
             .iter_mut()
@@ -222,6 +229,7 @@ impl TelegramTransportStateHandle {
         {
             existing.text = text;
             persist_telegram_state_result(&self.inner, &state)?;
+            drop(state);
             self.inner.outbound_notify.notify_one();
             return Ok(());
         }
@@ -235,6 +243,7 @@ impl TelegramTransportStateHandle {
             settle_note_on_delivery: None,
         });
         persist_telegram_state_result(&self.inner, &state)?;
+        drop(state);
         self.inner.outbound_notify.notify_one();
         Ok(())
     }
@@ -243,6 +252,7 @@ impl TelegramTransportStateHandle {
         let mut state = self.inner.state.lock();
         state.outbox.push_front(message);
         persist_telegram_state_result(&self.inner, &state)?;
+        drop(state);
         self.inner.outbound_notify.notify_one();
         Ok(())
     }
@@ -255,6 +265,7 @@ impl TelegramTransportStateHandle {
         }
         state.outbox.clear();
         persist_telegram_state_result(&self.inner, &state)?;
+        drop(state);
         Ok(cleared)
     }
 
@@ -281,7 +292,7 @@ impl TelegramTransportStateHandle {
     }
 }
 
-pub(crate) fn split_telegram_message_text(text: &str) -> Vec<String> {
+pub fn split_telegram_message_text(text: &str) -> Vec<String> {
     if text.chars().count() <= TELEGRAM_MESSAGE_CHAR_LIMIT {
         return vec![text.to_string()];
     }
@@ -346,22 +357,22 @@ fn push_hard_wrapped_segment(chunks: &mut Vec<String>, segment: &str) {
 }
 
 impl TelegramState {
-    fn ensure_chat(&mut self, chat_id: String, title: String) -> &mut TelegramChat {
-        if !self.chats.contains_key(&chat_id) {
-            self.order.push(chat_id.clone());
+    fn ensure_chat(&mut self, chat_id: &str, title: String) -> &mut TelegramChat {
+        if !self.chats.contains_key(chat_id) {
+            self.order.push(chat_id.to_string());
             self.chats.insert(
-                chat_id.clone(),
+                chat_id.to_string(),
                 TelegramChat {
-                    id: chat_id.clone(),
+                    id: chat_id.to_string(),
                     title,
                 },
             );
-        } else if let Some(chat) = self.chats.get_mut(&chat_id) {
+        } else if let Some(chat) = self.chats.get_mut(chat_id) {
             chat.title = title;
         }
 
         self.chats
-            .get_mut(&chat_id)
+            .get_mut(chat_id)
             .expect("chat should exist after ensure_chat")
     }
 
@@ -635,11 +646,11 @@ mod tests {
 
         handle
             .enqueue_outgoing_message(
-                "1".to_string(),
-                "x".repeat(TELEGRAM_MESSAGE_CHAR_LIMIT + 1),
-                Some("event-1".to_string()),
+                "1",
+                &"x".repeat(TELEGRAM_MESSAGE_CHAR_LIMIT + 1),
+                Some(&"event-1".to_string()),
                 Some(EventStatus::Resolved),
-                Some("done".to_string()),
+                Some(&"done".to_string()),
             )
             .expect("enqueue");
 
@@ -733,9 +744,9 @@ mod tests {
 
         handle
             .enqueue_outgoing_message(
-                "1".to_string(),
-                "queued".to_string(),
-                Some("event-1".to_string()),
+                "1",
+                "queued",
+                Some(&"event-1".to_string()),
                 Some(EventStatus::Resolved),
                 None,
             )

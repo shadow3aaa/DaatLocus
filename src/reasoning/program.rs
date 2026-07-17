@@ -5,8 +5,8 @@ use crate::schema_utils::{ModelSchema, model_schema_for};
 
 use super::{examples::ProgramExample, optimizer::PromptTuningConfig, signature::Signature};
 
-pub trait Program {
-    type Output: DeserializeOwned + Serialize + JsonSchema + ModelSchema + Clone;
+pub trait Program: Sync {
+    type Output: DeserializeOwned + Serialize + JsonSchema + ModelSchema + Clone + Send + Sync;
 
     fn name(&self) -> &'static str;
 

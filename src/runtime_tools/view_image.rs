@@ -78,9 +78,10 @@ fn execute_view_image_runtime_tool<'a>(
 
         let args: ViewImageArgs = parse_tool_args(call)?;
         let requested_path = args.path;
-        let resolved = context
-            .sandbox_policy
-            .resolve_path(Path::new(&requested_path), Some(&context.execution_cwd));
+        let resolved = crate::sandbox::RuntimeSandboxPolicy::resolve_path(
+            Path::new(&requested_path),
+            Some(&context.execution_cwd),
+        );
         let canonical_path = resolved
             .canonicalize()
             .map_err(|err| miette!("unable to resolve image `{}`: {err}", resolved.display()))?;
@@ -119,7 +120,7 @@ fn execute_view_image_runtime_tool<'a>(
         }))
     })
 }
-pub(crate) async fn execute_worker_view_image(
+pub fn execute_worker_view_image(
     execution_cwd: &Path,
     sandbox_policy: &crate::sandbox::RuntimeSandboxPolicy,
     image_state_dir: &Path,
@@ -133,7 +134,10 @@ pub(crate) async fn execute_worker_view_image(
     }
     let args: ViewImageArgs = parse_tool_args(call)?;
     let requested_path = args.path;
-    let resolved = sandbox_policy.resolve_path(Path::new(&requested_path), Some(execution_cwd));
+    let resolved = crate::sandbox::RuntimeSandboxPolicy::resolve_path(
+        Path::new(&requested_path),
+        Some(execution_cwd),
+    );
     let canonical_path = resolved
         .canonicalize()
         .map_err(|err| miette!("unable to resolve image `{}`: {err}", resolved.display()))?;
@@ -177,10 +181,7 @@ fn snapshot_worker_viewed_image(
 ) -> Result<PathBuf> {
     fs::create_dir_all(image_state_dir)
         .map_err(|err| miette!("unable to create worker viewed-image cache: {err}"))?;
-    let digest = Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let digest = hex::encode(Sha256::digest(bytes));
     let path = image_state_dir.join(format!(
         "view-{digest}.{}",
         image_extension_for_media_type(media_type)
@@ -198,8 +199,7 @@ fn active_model_supports_vision(context: &Context) -> bool {
     let model = context.config.main_model_config();
     model.supports_vision.unwrap_or_else(|| {
         crate::model_catalog::catalog_model_capacity(&model.model_id)
-            .map(|capacity| capacity.supports_vision)
-            .unwrap_or(true)
+            .is_none_or(|capacity| capacity.supports_vision)
     })
 }
 
@@ -218,7 +218,8 @@ fn read_view_image_bytes(path: &Path) -> Result<Vec<u8>> {
         ));
     }
 
-    let capacity = usize::try_from(metadata.len()).unwrap_or(MAX_VIEW_IMAGE_BYTES as usize);
+    let capacity = usize::try_from(metadata.len())
+        .unwrap_or_else(|_| usize::try_from(MAX_VIEW_IMAGE_BYTES).unwrap_or(usize::MAX));
     let mut bytes = Vec::with_capacity(capacity);
     fs::File::open(path)
         .map_err(|err| miette!("unable to read image `{}`: {err}", path.display()))?
@@ -239,16 +240,12 @@ fn snapshot_viewed_image(context: &Context, bytes: &[u8], media_type: &str) -> R
     let paths = context
         .session_id
         .as_deref()
-        .map(DaatLocusPaths::for_session)
-        .unwrap_or_else(daat_locus_paths_sync);
+        .map_or_else(daat_locus_paths_sync, DaatLocusPaths::for_session);
     let dir = paths.state_dir().join("viewed_images");
     fs::create_dir_all(&dir)
         .map_err(|err| miette!("unable to create viewed-image cache: {err}"))?;
 
-    let digest = Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let digest = hex::encode(Sha256::digest(bytes));
     let path = dir.join(format!(
         "view-{digest}.{}",
         image_extension_for_media_type(media_type)

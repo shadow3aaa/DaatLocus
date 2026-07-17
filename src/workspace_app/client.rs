@@ -182,7 +182,7 @@ impl WorkspaceAppWorkerClient {
 
     fn ensure_started(&mut self) -> Result<()> {
         if let Some(handle) = self.handle.as_mut()
-            && handle.is_running(&self.app_id)?
+            && handle.is_running(&self.app_id)
             && self.reader.is_some()
             && self.writer.is_some()
         {
@@ -216,15 +216,16 @@ impl WorkspaceAppWorkerClient {
                 self.state_dir.display()
             )
         })?;
+        let worker_args = WorkspaceAppWorkerArgs {
+            app_id: self.app_id.to_string(),
+            app_dir: self.app_dir.clone(),
+            state_dir: self.state_dir.clone(),
+            entry: self.entry_relative_path.clone(),
+            connect_addr: addr.to_string(),
+            token: token.clone(),
+        };
         let mut handle = spawn_worker_handle(
-            WorkspaceAppWorkerArgs {
-                app_id: self.app_id.to_string(),
-                app_dir: self.app_dir.clone(),
-                state_dir: self.state_dir.clone(),
-                entry: self.entry_relative_path.clone(),
-                connect_addr: addr.to_string(),
-                token: token.clone(),
-            },
+            &worker_args,
             &self.app_id,
             &self.protected_env_vars,
             self.strong_filesystem,
@@ -302,7 +303,7 @@ impl WorkspaceAppWorkerClient {
                 return Err(err);
             }
         };
-        self.apply_config(config);
+        self.apply_config(&config);
         if let Err(err) = self.send_request(WorkerRequestOp::Initialize, self.cold_start_timeout) {
             self.terminate();
             return Err(err);
@@ -310,7 +311,7 @@ impl WorkspaceAppWorkerClient {
         Ok(())
     }
 
-    fn apply_config(&mut self, config: WorkspaceAppConfigOutput) {
+    fn apply_config(&mut self, config: &WorkspaceAppConfigOutput) {
         if let Some(timeout_ms) = config.request_timeout_ms {
             self.request_timeout = Duration::from_millis(timeout_ms.max(1));
         }
@@ -368,7 +369,7 @@ fn accept_worker_connection(
                 ));
             }
         }
-        if let Some(status) = handle.exit_status(app_id)? {
+        if let Some(status) = handle.exit_status(app_id) {
             return Err(miette!(
                 "workspace app `{app_id}` worker exited during startup with {status}"
             ));
@@ -385,51 +386,63 @@ fn accept_worker_connection(
 }
 
 impl WorkspaceAppWorkerHandle {
-    fn is_running(&mut self, app_id: &AppId) -> Result<bool> {
-        Ok(self.exit_status(app_id)?.is_none())
+    fn is_running(&mut self, app_id: &AppId) -> bool {
+        self.exit_status(app_id).is_none()
     }
 
-    fn exit_status(&mut self, _app_id: &AppId) -> Result<Option<String>> {
+    fn exit_status(&mut self, app_id: &AppId) -> Option<String> {
+        #[cfg(test)]
+        let _ = app_id;
         match self {
             #[cfg(not(test))]
-            Self::Process(child) => Ok(child
+            Self::Process(child) => child
                 .try_wait()
                 .map_err(|err| {
-                    miette!("failed to inspect workspace app `{_app_id}` worker process: {err}")
-                })?
-                .map(|status| format!("status {status}"))),
+                    miette!("failed to inspect workspace app `{app_id}` worker process: {err}")
+                })
+                .expect("workspace app worker process status should be inspectable")
+                .map(|status| format!("status {status}")),
             #[cfg(test)]
             Self::Thread(handle) => {
                 if handle.is_finished() {
-                    Ok(Some("worker thread exit".to_string()))
+                    Some("worker thread exit".to_string())
                 } else {
-                    Ok(None)
+                    None
                 }
             }
         }
     }
 
+    #[cfg(not(test))]
     fn terminate(&mut self) {
         match self {
-            #[cfg(not(test))]
             Self::Process(child) => {
                 if child.try_wait().ok().flatten().is_none() {
                     let _ = child.kill();
                 }
             }
-            #[cfg(test)]
-            Self::Thread(_) => {}
         }
     }
 
+    #[cfg(test)]
+    const fn terminate(&self) {
+        let Self::Thread(_) = self;
+    }
+
+    #[cfg(not(test))]
     fn terminate_and_wait(mut self) {
         self.terminate();
         match self {
-            #[cfg(not(test))]
             Self::Process(mut child) => {
                 let _ = child.wait();
             }
-            #[cfg(test)]
+        }
+    }
+
+    #[cfg(test)]
+    fn terminate_and_wait(self) {
+        self.terminate();
+        match self {
             Self::Thread(handle) => {
                 if handle.is_finished() {
                     let _ = handle.join();
@@ -441,7 +454,7 @@ impl WorkspaceAppWorkerHandle {
 
 #[cfg(not(test))]
 fn spawn_worker_handle(
-    args: WorkspaceAppWorkerArgs,
+    args: &WorkspaceAppWorkerArgs,
     app_id: &AppId,
     protected_env_vars: &[String],
     strong_filesystem: StrongFilesystemSandboxMode,
@@ -450,12 +463,12 @@ fn spawn_worker_handle(
     let executable = std::env::current_exe()
         .map_err(|err| miette!("failed to locate current executable for app worker: {err}"))?;
     let worker_policy = workspace_app_worker_sandbox_policy(
-        &args,
+        args,
         protected_env_vars,
         strong_filesystem,
         sandbox_disabled,
     );
-    let spawn_args = workspace_worker_command_args(&args);
+    let spawn_args = workspace_worker_command_args(args);
     let child = SandboxChild::spawn_strong(
         &worker_policy,
         executable,
@@ -550,13 +563,14 @@ fn protected_runtime_read_paths_for_worker(state_dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 fn spawn_worker_handle(
-    args: WorkspaceAppWorkerArgs,
+    args: &WorkspaceAppWorkerArgs,
     app_id: &AppId,
     _protected_env_vars: &[String],
     _strong_filesystem: StrongFilesystemSandboxMode,
     _sandbox_disabled: bool,
 ) -> Result<WorkspaceAppWorkerHandle> {
     let app_id_for_log = app_id.clone();
+    let args = args.clone();
     let handle = std::thread::Builder::new()
         .name(format!("workspace-app-worker-{app_id_for_log}"))
         .spawn(move || {

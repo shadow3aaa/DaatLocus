@@ -1,9 +1,17 @@
-use super::*;
+use super::{
+    AgentMessage, AgentTurnRequest, AgentTurnStreamResult, Context, DashboardState, Duration,
+    Result, RuntimeStatusLevel, clear_runtime_status, render_dashboard_footer_context,
+    set_runtime_status, set_runtime_status_only, write_current_turn_messages_dump,
+    write_current_turn_response_dump, write_current_turn_response_error_dump,
+};
 use crate::{
     context_budget::{
         TokenEstimateBaseline, estimate_agent_message_tokens, estimate_tool_spec_tokens,
     },
-    core::{ModelProgressSink, ModelRequestOptions},
+    core::{
+        AgentTurnRetryObserver, ModelProgressSink, ModelRequestOptions,
+        complete_agent_turn_with_retry_with_observer,
+    },
     dashboard::{
         DashboardContextCompositionPrefixUnit, DashboardContextCompositionSegment,
         DashboardContextCompositionSnapshot,
@@ -12,6 +20,7 @@ use crate::{
     reasoning::runtime::AgentToolSpec,
     runtime::bootstrap::save_token_estimate_baseline,
 };
+
 use sha2::{Digest, Sha256};
 
 pub(super) async fn run_agent_turn_with_retry(
@@ -50,76 +59,66 @@ pub(super) async fn run_agent_turn_with_retry(
             state.context_composition = Some(context_composition.clone());
         });
     }
-    const MAX_RETRIES: usize = 6;
-    const BASE_REQUEST_TIMEOUT_SECS: u64 = 300;
-    const MAX_REQUEST_TIMEOUT_SECS: u64 = 1200;
-
-    let mut attempt = 1usize;
-    loop {
-        set_runtime_status_only(tx, "Working");
-        let timeout_shift = (attempt.saturating_sub(1)).min(6) as u32;
-        let request_timeout_secs = BASE_REQUEST_TIMEOUT_SECS
-            .saturating_mul(1u64 << timeout_shift)
-            .min(MAX_REQUEST_TIMEOUT_SECS);
-        let turn_result = match tokio::time::timeout(
-            Duration::from_secs(request_timeout_secs),
-            context
-                .model_provider
-                .complete_agent_turn(request.clone(), options.clone()),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_elapsed) => Err(miette!(
-                "model request timed out after {request_timeout_secs}s"
-            )),
-        };
-        match turn_result {
-            Ok(response) => {
-                write_current_turn_response_dump(session_id.as_deref(), &response, attempt).await;
-                let info = context.model_provider.token_usage_info();
-                let observed_input =
-                    usize::try_from(info.last_token_usage.input_tokens.max(0)).unwrap_or(0);
-                if observed_input > 0 {
-                    context.token_estimate_baseline = TokenEstimateBaseline {
-                        estimated_input_tokens,
-                        observed_input_tokens: Some(observed_input),
-                    };
-                    save_token_estimate_baseline(&context.token_estimate_baseline).await;
-                }
-                clear_runtime_status(tx);
-                return Ok(response);
+    set_runtime_status_only(tx, "Working");
+    let on_attempt_started = |_: usize| set_runtime_status_only(tx, "Working");
+    let on_attempt_failed =
+        |error_detail: &str, attempt: usize, retry_backoff: Option<Duration>| {
+            if let Some(backoff) = retry_backoff {
+                set_runtime_status(
+                    tx,
+                    RuntimeStatusLevel::Warn,
+                    format!(
+                        "request failed; retry #{attempt} after {:.1}s",
+                        backoff.as_secs_f64()
+                    ),
+                );
             }
-            Err(err) => {
-                let will_retry = should_retry_agent_turn_error(&err) && attempt < MAX_RETRIES;
-                let error_detail = plain_report_text(&err);
+            let session_id = session_id.clone();
+            let error_detail = error_detail.to_string();
+            tokio::spawn(async move {
                 write_current_turn_response_error_dump(
                     session_id.as_deref(),
                     &error_detail,
                     attempt,
-                    will_retry,
+                    retry_backoff.is_some(),
                 )
                 .await;
-                if !will_retry {
-                    clear_runtime_status(tx);
-                    return Err(err);
-                }
-                let capped_shift = (attempt.saturating_sub(1)).min(6) as u32;
-                let backoff_ms = 300u64.saturating_mul(1u64 << capped_shift).min(30_000);
-                let summary = format!(
-                    "request failed; retry #{attempt} after {:.1}s",
-                    backoff_ms as f64 / 1000.0
-                );
-                set_runtime_status(tx, RuntimeStatusLevel::Warn, summary);
-                tracing::warn!(
-                    "complete_agent_turn retry #{attempt} after {backoff_ms}ms (model={}, messages={}, tools={}, estimated_input_tokens={estimated_input_tokens}): {error_detail}",
-                    model_name,
-                    request.messages.len(),
-                    request.tools.len(),
-                );
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                attempt += 1;
+            });
+        };
+    match complete_agent_turn_with_retry_with_observer(
+        context.model_provider.as_ref(),
+        request,
+        options,
+        AgentTurnRetryObserver {
+            on_attempt_started: Some(&on_attempt_started),
+            on_attempt_failed: Some(&on_attempt_failed),
+        },
+    )
+    .await
+    {
+        Ok(success) => {
+            write_current_turn_response_dump(
+                session_id.as_deref(),
+                &success.response,
+                success.attempts,
+            )
+            .await;
+            let info = context.model_provider.token_usage_info();
+            let observed_input =
+                usize::try_from(info.last_token_usage.input_tokens.max(0)).unwrap_or(0);
+            if observed_input > 0 {
+                context.token_estimate_baseline = TokenEstimateBaseline {
+                    estimated_input_tokens,
+                    observed_input_tokens: Some(observed_input),
+                };
+                save_token_estimate_baseline(&context.token_estimate_baseline).await;
             }
+            clear_runtime_status(tx);
+            Ok(success.response)
+        }
+        Err(failure) => {
+            clear_runtime_status(tx);
+            Err(failure.error)
         }
     }
 }
@@ -131,38 +130,6 @@ fn current_model_progress_sink(context: &Context) -> Option<ModelProgressSink> {
         .as_ref()
         .cloned()
         .map(ModelProgressSink::new)
-}
-
-fn plain_report_text(err: &miette::Report) -> String {
-    let mut lines = vec![err.to_string()];
-    let mut causes = Vec::new();
-    let mut current = err.source();
-    while let Some(source) = current {
-        let cause = source.to_string();
-        if !cause.trim().is_empty() {
-            causes.push(cause);
-        }
-        current = source.source();
-    }
-    if !causes.is_empty() {
-        lines.push("causes:".to_string());
-        lines.extend(causes.into_iter().map(|cause| format!("- {cause}")));
-    }
-    lines.join("\n")
-}
-
-fn should_retry_agent_turn_error(err: &miette::Report) -> bool {
-    if is_context_budget_exceeded(err) {
-        return false;
-    }
-    !is_permanent_model_request_error(&err.to_string())
-}
-
-pub(super) fn is_permanent_model_request_error(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    lower.contains("http 400 bad request")
-        || lower.contains("invalid_request_error")
-        || lower.contains("invalid_value")
 }
 
 fn build_context_composition_snapshot(
@@ -198,9 +165,8 @@ fn build_context_composition_snapshot(
             tokens: segment.tokens,
         })
         .collect::<Vec<_>>();
-    let previous_units = previous
-        .map(|snapshot| snapshot.prefix_units.as_slice())
-        .unwrap_or(&[]);
+    let previous_units: &[DashboardContextCompositionPrefixUnit] =
+        previous.map_or(&[], |snapshot| snapshot.prefix_units.as_slice());
     let common_unit_count = prefix_units
         .iter()
         .zip(previous_units.iter())
@@ -284,7 +250,7 @@ fn context_composition_tool_segment(
     }
 }
 
-fn context_composition_message_source(message: &AgentMessage) -> &'static str {
+const fn context_composition_message_source(message: &AgentMessage) -> &'static str {
     match message {
         AgentMessage::System { .. } => "system",
         AgentMessage::User { .. } => "user",
@@ -340,7 +306,9 @@ fn percent_of(value: usize, total: usize) -> f64 {
     if total == 0 {
         0.0
     } else {
-        (value as f64 / total as f64) * 100.0
+        let value = u32::try_from(value).unwrap_or(u32::MAX);
+        let total = u32::try_from(total).unwrap_or(u32::MAX);
+        (f64::from(value) / f64::from(total)) * 100.0
     }
 }
 
@@ -360,7 +328,8 @@ fn hash_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::core::{model_request_error_detail, should_retry_agent_turn_error};
+    use miette::miette;
 
     #[test]
     fn invalid_request_errors_are_not_retried() {
@@ -381,7 +350,7 @@ mod tests {
     #[test]
     fn retry_error_detail_is_plain_text_not_fancy_diagnostic() {
         let err = miette!("provider stream failed\nkind=stream_body_read");
-        let detail = plain_report_text(&err);
+        let detail = model_request_error_detail(&err);
 
         assert!(detail.contains("provider stream failed"));
         assert!(detail.contains("kind=stream_body_read"));

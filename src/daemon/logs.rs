@@ -169,11 +169,11 @@ async fn session_log_sources(sessions_dir: PathBuf) -> Vec<LogSourceEntry> {
         if !file_type.is_dir() {
             continue;
         }
-        let session_dir = entry.path();
-        let Some(session_id) = session_dir.file_name().and_then(|name| name.to_str()) else {
+        let candidate_dir = entry.path();
+        let Some(session_id) = candidate_dir.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        let path = session_dir.join("logs").join(SESSION_LOG);
+        let path = candidate_dir.join("logs").join(SESSION_LOG);
         let Ok(metadata) = tokio::fs::metadata(&path).await else {
             continue;
         };
@@ -212,11 +212,8 @@ async fn log_source_entry(
         label: label.into(),
         description: description.into(),
         path: path.display().to_string(),
-        exists: metadata.as_ref().is_some_and(|metadata| metadata.is_file()),
-        size_bytes: metadata
-            .as_ref()
-            .map(|metadata| metadata.len())
-            .unwrap_or(0),
+        exists: metadata.as_ref().is_some_and(std::fs::Metadata::is_file),
+        size_bytes: metadata.as_ref().map_or(0, std::fs::Metadata::len),
         modified_at_ms,
     }
 }
@@ -352,12 +349,13 @@ async fn read_forward(
     }
 
     let mut lines = lines_from_bytes(&buffer, false);
-    let mut truncated_start = false;
-    if lines.len() > limit {
+    let truncated_start = if lines.len() > limit {
         let keep_from = lines.len() - limit;
         lines.drain(0..keep_from);
-        truncated_start = true;
-    }
+        true
+    } else {
+        false
+    };
 
     Ok(LogFileRead {
         lines,
@@ -379,7 +377,7 @@ fn lines_from_bytes(buffer: &[u8], starts_mid_line: bool) -> Vec<String> {
         text.as_ref()
     };
 
-    text.lines().map(|line| line.to_string()).collect()
+    text.lines().map(std::string::ToString::to_string).collect()
 }
 
 #[cfg(test)]

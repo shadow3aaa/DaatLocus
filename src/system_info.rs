@@ -32,10 +32,12 @@ impl SystemSampler {
 
     fn sample(&mut self) -> SystemInfo {
         let elapsed = self.last_refresh.elapsed();
-        let elapsed_secs = elapsed.as_secs_f64().max(0.001); // Avoid division by zero
         let used_memory = self.sysinfo.used_memory() / 1024 / 1024; // Convert to MB
         let total_memory = self.sysinfo.total_memory() / 1024 / 1024; // Convert to MB
-        let memory_usage = used_memory as f32 / total_memory as f32 * 100.0; // Percentage
+        let memory_usage_hundredths = used_memory
+            .saturating_mul(10_000)
+            .checked_div(total_memory)
+            .unwrap_or(0);
 
         let mut total_received = 0;
         let mut total_transmitted = 0;
@@ -44,17 +46,22 @@ impl SystemSampler {
             total_transmitted += data.transmitted();
         }
 
-        let network_upload_speed =
-            ((total_transmitted as f64 / elapsed_secs) / 1024.0 / 1024.0 * 8.0) as u64;
+        let elapsed_millis = u64::try_from(elapsed.as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let network_upload_speed = total_transmitted.saturating_mul(8).saturating_mul(1_000)
+            / elapsed_millis
+            / 1024
+            / 1024;
         let network_download_speed =
-            ((total_received as f64 / elapsed_secs) / 1024.0 / 1024.0 * 8.0) as u64;
+            total_received.saturating_mul(8).saturating_mul(1_000) / elapsed_millis / 1024 / 1024;
 
         self.refresh();
 
         SystemInfo {
             used_memory,
             total_memory,
-            memory_usage,
+            memory_usage_hundredths,
             network_upload_speed,
             network_download_speed,
         }
@@ -66,8 +73,8 @@ pub struct SystemInfo {
     used_memory: u64,
     /// Mb of total Memory
     total_memory: u64,
-    /// Percentage of Memory usage
-    memory_usage: f32,
+    /// Percentage of memory usage, represented in hundredths of a percent.
+    memory_usage_hundredths: u64,
     /// Mbps
     network_upload_speed: u64,
     /// Mbps
@@ -82,10 +89,12 @@ impl SystemInfo {
 
 impl Display for SystemInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let memory_usage_whole = self.memory_usage_hundredths / 100;
+        let memory_usage_fraction = self.memory_usage_hundredths % 100;
         writeln!(
             f,
-            "Memory Usage: {:.2}% ({} MB / {} MB)",
-            self.memory_usage, self.used_memory, self.total_memory
+            "Memory Usage: {memory_usage_whole}.{memory_usage_fraction:02}% ({} MB / {} MB)",
+            self.used_memory, self.total_memory
         )?;
         writeln!(
             f,

@@ -24,7 +24,7 @@ use crate::{
 pub const PROMPT_PERSONA_FILE_NAME: &str = "persona.md";
 const PROMPT_PERSONA_CONFIGURED_LOCALE_LANGUAGE: &str = "configured-locale";
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PromptPersonaSpec {
     pub name: String,
@@ -247,14 +247,14 @@ mod tests {
     #[test]
     fn parse_prompt_persona_markdown_uses_frontmatter_and_body() {
         let parsed = parse_prompt_persona_markdown(
-            r#"---
+            r"---
 name: Test Persona
 language: en-US
 ---
 
 Be concise.
 Preserve intent.
-"#,
+",
         )
         .expect("persona markdown should parse");
 
@@ -266,12 +266,12 @@ Preserve intent.
     #[test]
     fn parse_prompt_persona_markdown_defaults_language() {
         let parsed = parse_prompt_persona_markdown(
-            r#"---
+            r"---
 name: Test Persona
 ---
 
 Use the configured locale by default.
-"#,
+",
         )
         .expect("persona markdown should parse");
 

@@ -155,7 +155,10 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
             context,
             &renderer,
             &program,
-            program.dataset_ir(current_additions, runtime_error_cases_json),
+            RuntimeErrorCorrectionPlannerProgram::dataset_ir(
+                current_additions,
+                runtime_error_cases_json,
+            ),
             &tuning,
             TraceOrigin::Sleep,
         )
@@ -173,7 +176,7 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
 const MAX_SKILL_RUN_RECORDS_PER_SLEEP: usize = 200;
 
 async fn run_skill_improvement_pipeline(
-    context: &mut Context,
+    context: &Context,
     batch: &SkillRunBatch,
 ) -> Result<WorkflowImprovementSummary> {
     if batch.is_empty() {
@@ -207,14 +210,18 @@ async fn run_skill_improvement_pipeline(
             continue;
         }
         let skill_content = match tokio::fs::read_to_string(&skill_file).await {
-            Ok(content) => content,
+            Ok(text) => text,
             Err(err) => {
                 warn!("failed to read skill file {}: {err}", skill_file.display());
                 continue;
             }
         };
         let evidence_json = serde_json::to_string_pretty(records).into_diagnostic()?;
-        let ir = program.dataset_ir(skill_name.clone(), skill_content.clone(), evidence_json);
+        let ir = SkillImprovementPlannerProgram::dataset_ir(
+            skill_name.clone(),
+            skill_content.clone(),
+            evidence_json,
+        );
         let outcome = match execute_program_with_ir_report(
             context.efficient_model_provider.as_ref(),
             context,
@@ -256,7 +263,7 @@ async fn run_skill_improvement_pipeline(
             additions_text
         );
         match tokio::fs::write(&skill_file, updated).await {
-            Ok(_) => {
+            Ok(()) => {
                 tracing::info!(
                     "[sleep] applied improvement to skill {skill_name}: {}",
                     selected.title

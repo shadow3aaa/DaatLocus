@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeSet,
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
@@ -10,9 +12,12 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     emit_build_target();
     download_models_dev_catalog();
-    build_embedded_webui(&manifest_dir);
+    if env::var_os("DAAT_LOCUS_SKIP_WEBUI_BUILD").is_none() {
+        build_embedded_webui(&manifest_dir);
+    }
     write_prompt_bindings(&manifest_dir);
     write_builtin_skill_bindings(&manifest_dir);
+    write_builtin_workflow_bindings(&manifest_dir);
 }
 
 fn emit_build_target() {
@@ -24,33 +29,37 @@ const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 
 fn download_models_dev_catalog() {
     let out_path = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("models-dev-api.json");
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .user_agent("daat-locus-build")
-        .build()
-        .unwrap_or_else(|err| panic!("failed to create models.dev client: {err}"));
-    let response = client
-        .get(MODELS_DEV_API_URL)
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
+    let body = fetch_models_dev_catalog()
         .unwrap_or_else(|err| panic!("failed to download {MODELS_DEV_API_URL}: {err}"));
-    let body = response
-        .text()
-        .unwrap_or_else(|err| panic!("failed to read {MODELS_DEV_API_URL}: {err}"));
-    let root: serde_json::Value = serde_json::from_str(&body)
-        .unwrap_or_else(|err| panic!("{MODELS_DEV_API_URL} returned invalid JSON: {err}"));
-    if root
-        .as_object()
-        .is_none_or(|providers| providers.is_empty())
-    {
-        panic!("{MODELS_DEV_API_URL} returned an empty provider catalog");
-    }
+    validate_models_dev_catalog(&body);
     fs::write(&out_path, body).unwrap_or_else(|err| {
         panic!(
             "failed to write models.dev catalog {}: {err}",
             out_path.display()
         )
     });
+}
+
+fn fetch_models_dev_catalog() -> Result<String, reqwest::Error> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("daat-locus-build")
+        .build()?;
+    client
+        .get(MODELS_DEV_API_URL)
+        .send()?
+        .error_for_status()?
+        .text()
+}
+
+fn validate_models_dev_catalog(body: &str) {
+    let root: serde_json::Value = serde_json::from_str(body)
+        .unwrap_or_else(|err| panic!("{MODELS_DEV_API_URL} returned invalid JSON: {err}"));
+    assert!(
+        root.as_object()
+            .is_some_and(|providers| !providers.is_empty()),
+        "{MODELS_DEV_API_URL} returned an empty provider catalog"
+    );
 }
 
 fn build_embedded_webui(manifest_dir: &Path) {
@@ -61,9 +70,11 @@ fn build_embedded_webui(manifest_dir: &Path) {
     let webui_dist = out_dir.join("webui-dist");
     emit_webui_rerun_inputs(&webui_dir, &assets_dir);
 
-    if !webui_dir.join("package.json").is_file() {
-        panic!("WebUI package.json not found: {}", webui_dir.display());
-    }
+    assert!(
+        webui_dir.join("package.json").is_file(),
+        "WebUI package.json not found: {}",
+        webui_dir.display()
+    );
 
     prepare_webui_worktree(&webui_dir, &webui_work);
     let bun_command = webui_bun_command();
@@ -71,12 +82,11 @@ fn build_embedded_webui(manifest_dir: &Path) {
     run_webui_build_command(&bun_command, &webui_work, &webui_dist, &assets_dir);
 
     let dist_index = webui_dist.join("index.html");
-    if !dist_index.is_file() {
-        panic!(
-            "WebUI build did not produce required entry {}",
-            dist_index.display()
-        );
-    }
+    assert!(
+        dist_index.is_file(),
+        "WebUI build did not produce required entry {}",
+        dist_index.display()
+    );
 }
 
 fn emit_webui_rerun_inputs(webui_dir: &Path, assets_dir: &Path) {
@@ -193,9 +203,10 @@ fn emit_rerun_if_changed_recursively(path: &Path) {
 
 #[cfg(windows)]
 fn webui_bun_command() -> Vec<String> {
-    if resolve_command("bun").is_none() {
-        panic!("Bun is required to build the embedded WebUI.");
-    }
+    assert!(
+        resolve_command("bun").is_some(),
+        "Bun is required to build the embedded WebUI."
+    );
 
     vec!["cmd".to_string(), "/C".to_string(), "bun".to_string()]
 }
@@ -237,10 +248,11 @@ fn run_webui_command(bun_command: &[String], args: &[&str], webui_dir: &Path) {
 fn run_webui_command_status(mut command: Command, label: &str) {
     let status = command
         .status()
-        .unwrap_or_else(|err| panic!("failed to run {label} {:?}: {err}", command));
-    if !status.success() {
-        panic!("{label} {:?} failed with status {status}", command);
-    }
+        .unwrap_or_else(|err| panic!("failed to run {label} {command:?}: {err}"));
+    assert!(
+        status.success(),
+        "{label} {command:?} failed with status {status}"
+    );
 }
 
 fn resolve_command(command: &str) -> Option<PathBuf> {
@@ -304,35 +316,20 @@ struct PersonaPromptBinding {
     identity_summary: String,
 }
 
-fn write_prompt_bindings(manifest_dir: &Path) {
-    let prompts_dir = manifest_dir.join("prompts");
-    println!("cargo:rerun-if-changed={}", prompts_dir.display());
-    if !prompts_dir.is_dir() {
-        panic!("prompt directory not found: {}", prompts_dir.display());
-    }
-
-    let mut prompt_files = Vec::<PathBuf>::new();
-    collect_prompt_markdown_files(&prompts_dir, &mut prompt_files);
-    prompt_files.sort();
-    if prompt_files.is_empty() {
-        panic!(
-            "prompt directory contains no markdown files: {}",
-            prompts_dir.display()
-        );
-    }
-
+fn collect_prompt_bindings(prompts_dir: &Path, prompt_files: Vec<PathBuf>) -> Vec<PromptBinding> {
     let mut const_names = BTreeSet::new();
     let mut prompts = Vec::<PromptBinding>::new();
     for path in prompt_files {
         println!("cargo:rerun-if-changed={}", path.display());
         let relative = path
-            .strip_prefix(&prompts_dir)
+            .strip_prefix(prompts_dir)
             .expect("prompt file under prompt dir");
         let prompt_id = prompt_id_from_relative_path(relative);
         let const_name = prompt_const_name_from_relative_path(relative);
-        if !const_names.insert(const_name.clone()) {
-            panic!("duplicate generated prompt constant name {const_name}");
-        }
+        assert!(
+            const_names.insert(const_name.clone()),
+            "duplicate generated prompt constant name {const_name}"
+        );
         let content = fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("failed to read prompt {}: {err}", path.display()));
         let content = trim_trailing_line_endings(&content).to_string();
@@ -348,9 +345,10 @@ fn write_prompt_bindings(manifest_dir: &Path) {
             PromptBindingKind::App(_) | PromptBindingKind::Persona(_)
         ) {
             let source_const_name = format!("{const_name}_SOURCE");
-            if !const_names.insert(source_const_name.clone()) {
-                panic!("duplicate generated prompt constant name {source_const_name}");
-            }
+            assert!(
+                const_names.insert(source_const_name.clone()),
+                "duplicate generated prompt constant name {source_const_name}"
+            );
             source_const_name
         } else {
             const_name.clone()
@@ -363,56 +361,100 @@ fn write_prompt_bindings(manifest_dir: &Path) {
             kind,
         });
     }
+    prompts
+}
 
-    let out_path = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("prompt_bindings.rs");
+fn render_prompt_bindings(prompts: &[PromptBinding]) -> String {
     let mut code = String::from("// @generated by build.rs. Do not edit by hand.\n\n");
-    for prompt in &prompts {
+    for prompt in prompts {
         match &prompt.kind {
             PromptBindingKind::Raw => {
-                code.push_str(&format!(
-                    "pub(crate) const {}: &str = {:?};\n\n",
+                writeln!(
+                    code,
+                    "pub const {}: &str = {:?};\n",
                     prompt.const_name, prompt.content
-                ));
+                )
+                .expect("write raw prompt binding");
             }
             PromptBindingKind::App(app) => {
-                code.push_str(&format!(
-                    "pub(crate) const {}: &str = {:?};\n\n",
+                writeln!(
+                    code,
+                    "#[cfg(test)]\npub const {}: &str = {:?};\n",
                     prompt.source_const_name, prompt.content
-                ));
-                code.push_str(&format!(
-                    "pub(crate) const {}: super::AppPrompt = super::AppPrompt {{\n",
+                )
+                .expect("write app prompt source binding");
+                writeln!(
+                    code,
+                    "pub const {}: super::AppPrompt = super::AppPrompt {{",
                     prompt.const_name
-                ));
-                code.push_str(&format!("    docs: {:?},\n", app.docs));
+                )
+                .expect("write app prompt binding");
+                writeln!(code, "    docs: {:?},", app.docs).expect("write app prompt docs");
                 code.push_str("};\n\n");
             }
             PromptBindingKind::Persona(persona) => {
-                code.push_str(&format!(
-                    "pub(crate) const {}: &str = {:?};\n\n",
+                writeln!(
+                    code,
+                    "#[cfg(test)]\npub const {}: &str = {:?};\n",
                     prompt.source_const_name, prompt.content
-                ));
-                code.push_str(&format!(
-                    "pub(crate) const {}: super::PromptPersona = super::PromptPersona {{\n",
+                )
+                .expect("write persona prompt source binding");
+                writeln!(
+                    code,
+                    "pub const {}: super::PromptPersona = super::PromptPersona {{",
                     prompt.const_name
-                ));
-                code.push_str(&format!("    name: {:?},\n", persona.name));
-                code.push_str(&format!("    language: {:?},\n", persona.language));
-                code.push_str(&format!(
-                    "    identity_summary: {:?},\n",
+                )
+                .expect("write persona prompt binding");
+                writeln!(code, "    name: {:?},", persona.name).expect("write persona name");
+                writeln!(code, "    language: {:?},", persona.language)
+                    .expect("write persona language");
+                writeln!(
+                    code,
+                    "    identity_summary: {:?},",
                     persona.identity_summary
-                ));
+                )
+                .expect("write persona identity summary");
                 code.push_str("};\n\n");
             }
         }
     }
-    code.push_str("#[allow(dead_code)]\npub(crate) const PROMPT_SOURCES: &[(&str, &str)] = &[\n");
-    for prompt in &prompts {
-        code.push_str(&format!(
-            "    ({:?}, {}),\n",
+    code.push_str("#[cfg(test)]\npub const PROMPT_SOURCES: &[(&str, &str)] = &[\n");
+    for prompt in prompts {
+        writeln!(
+            code,
+            "    ({:?}, {}),",
             prompt.prompt_id, prompt.source_const_name
-        ));
+        )
+        .expect("write prompt source entry");
     }
-    code.push_str("];\n");
+    code.push_str(
+        "];
+",
+    );
+    code
+}
+
+fn write_prompt_bindings(manifest_dir: &Path) {
+    let prompts_dir = manifest_dir.join("prompts");
+    println!("cargo:rerun-if-changed={}", prompts_dir.display());
+    assert!(
+        prompts_dir.is_dir(),
+        "prompt directory not found: {}",
+        prompts_dir.display()
+    );
+
+    let mut prompt_files = Vec::<PathBuf>::new();
+    collect_prompt_markdown_files(&prompts_dir, &mut prompt_files);
+    prompt_files.sort();
+    assert!(
+        !prompt_files.is_empty(),
+        "prompt directory contains no markdown files: {}",
+        prompts_dir.display()
+    );
+
+    let prompts = collect_prompt_bindings(&prompts_dir, prompt_files);
+    let code = render_prompt_bindings(&prompts);
+    let out_path = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("prompt_bindings.rs");
     fs::write(out_path, code).expect("write prompt bindings");
 }
 
@@ -510,9 +552,10 @@ fn sanitize_const_name(raw: &str) -> String {
         }
     }
     let name = name.trim_matches('_').to_string();
-    if name.is_empty() {
-        panic!("prompt path produced empty constant name from {raw:?}");
-    }
+    assert!(
+        !name.is_empty(),
+        "prompt path produced empty constant name from {raw:?}"
+    );
     name
 }
 
@@ -581,7 +624,7 @@ fn parse_persona_prompt_binding_inner(content: &str) -> Result<PersonaPromptBind
     })
 }
 
-fn default_prompt_persona_language() -> &'static str {
+const fn default_prompt_persona_language() -> &'static str {
     "configured-locale"
 }
 
@@ -631,10 +674,50 @@ fn write_builtin_skill_bindings(manifest_dir: &Path) {
     sources.sort_by(|left, right| left.0.cmp(&right.0));
 
     let out_path = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("builtin_skills.rs");
-    let mut code = String::from("pub(crate) const BUILTIN_SKILL_SOURCES: &[(&str, &str)] = &[\n");
+    let mut code = String::from("pub(super) const BUILTIN_SKILL_SOURCES: &[(&str, &str)] = &[\n");
     for (id, path) in &sources {
-        code.push_str(&format!("    ({id:?}, include_str!({:?})),\n", path));
+        let path = path.to_string_lossy().replace('\\', "/");
+        writeln!(code, "    ({id:?}, include_str!(r\"{path}\")),")
+            .expect("write built-in skill source entry");
     }
     code.push_str("];\n");
     fs::write(out_path, code).expect("write builtin skill bindings");
+}
+
+fn write_builtin_workflow_bindings(manifest_dir: &Path) {
+    let workflows_dir = manifest_dir.join("workflows");
+    println!("cargo:rerun-if-changed={}", workflows_dir.display());
+
+    let mut sources = Vec::<(String, PathBuf)>::new();
+    if let Ok(entries) = fs::read_dir(&workflows_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("lua") {
+                continue;
+            }
+            println!("cargo:rerun-if-changed={}", path.display());
+            let id = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .expect("workflow file stem")
+                .to_string();
+            let canonical = path
+                .canonicalize()
+                .unwrap_or_else(|_| workflows_dir.join(format!("{id}.lua")));
+            sources.push((id, canonical));
+        }
+    }
+    sources.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let out_path =
+        PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("builtin_workflows.rs");
+    let mut code =
+        String::from("pub(super) const BUILTIN_WORKFLOW_SOURCES: &[(&str, &str)] = &[\n");
+    for (id, path) in &sources {
+        let path = path.to_string_lossy().replace('\\', "/");
+        writeln!(code, "    ({id:?}, include_str!(r\"{path}\")),")
+            .expect("write built-in workflow source entry");
+    }
+    code.push_str("];\n");
+    fs::write(out_path, code).expect("write builtin workflow bindings");
 }

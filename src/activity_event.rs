@@ -289,7 +289,7 @@ pub enum TelegramActivityAction {
 }
 
 impl ToolCallActivityEvent {
-    pub fn coding_edit(data: CodingEditActivityDescriptor) -> Self {
+    pub const fn coding_edit(data: CodingEditActivityDescriptor) -> Self {
         Self::CodingEdit(data)
     }
 
@@ -306,7 +306,7 @@ impl ToolCallActivityEvent {
         })
     }
 
-    pub fn plan(data: PlanActivityDescriptor) -> Self {
+    pub const fn plan(data: PlanActivityDescriptor) -> Self {
         Self::Plan(data)
     }
 
@@ -327,7 +327,7 @@ impl ToolCallActivityEvent {
 
 pub fn compact_body_lines(text: &str, max_lines: usize) -> Vec<String> {
     text.lines()
-        .map(|line| line.trim_end())
+        .map(str::trim_end)
         .filter(|line| !line.is_empty())
         .take(max_lines)
         .map(ToString::to_string)
@@ -355,7 +355,7 @@ pub fn compact_preserved_body_lines(text: &str, max_lines: usize) -> Vec<String>
         }
     }
 
-    while lines.last().is_some_and(|line| line.is_empty()) {
+    while lines.last().is_some_and(std::string::String::is_empty) {
         lines.pop();
     }
 

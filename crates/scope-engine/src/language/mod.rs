@@ -11,6 +11,7 @@ pub mod typescript;
 use tree_sitter::{Language, Parser};
 
 /// Language-specific queries for tree-sitter symbol extraction.
+///
 /// Each language provides patterns for finding definitions and references.
 /// Language-specific queries for tree-sitter symbol extraction.
 /// Each language provides patterns for finding definitions and references.
@@ -40,6 +41,7 @@ pub struct LanguageRegistry {
 }
 
 impl LanguageRegistry {
+    #[must_use]
     pub fn new() -> Self {
         let mut r = Self {
             adapters: Vec::new(),
@@ -67,12 +69,14 @@ impl LanguageRegistry {
         self.adapters.push(adapter);
     }
 
+    #[must_use]
     pub fn get(&self, ext: &str) -> Option<&dyn LanguageAdapter> {
         let idx = self.by_ext.get(ext)?;
         Some(self.adapters[*idx].as_ref())
     }
 
-    /// Return a list of (language_name, extensions) for all registered adapters.
+    /// Return a list of (`language_name`, extensions) for all registered adapters.
+    #[must_use]
     pub fn list_languages(&self) -> Vec<(&str, &[&str])> {
         self.adapters
             .iter()

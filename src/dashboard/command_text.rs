@@ -116,7 +116,7 @@ pub(super) fn resolve_skill_target<'a>(
     }
 }
 
-fn skill_status_label(skill: &OpenSkillDashboardSummary) -> &'static str {
+const fn skill_status_label(skill: &OpenSkillDashboardSummary) -> &'static str {
     if skill.auto_use_enabled {
         "auto"
     } else {
@@ -195,11 +195,13 @@ pub(super) fn render_app_status_text(state: &DashboardState, target: &str) -> St
         .app_status_outputs
         .iter()
         .find(|(name, _)| name == &target)
-        .map(|(_, output)| output.clone())
-        .unwrap_or_else(|| {
-            let apps = render_available_app_statuses(state);
-            format!("unknown app: {target}\n{apps}")
-        })
+        .map_or_else(
+            || {
+                let apps = render_available_app_statuses(state);
+                format!("unknown app: {target}\n{apps}")
+            },
+            |(_, output)| output.clone(),
+        )
 }
 
 pub(super) fn fallback_output(output: &str) -> String {

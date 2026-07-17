@@ -56,10 +56,9 @@ impl CopilotClient {
 
         let needs_exchange = {
             let cached = self.cached.lock().await;
-            match cached.as_ref() {
-                None => true,
-                Some(t) => now_secs + 60 >= t.expires_at_secs,
-            }
+            cached
+                .as_ref()
+                .is_none_or(|t| now_secs + 60 >= t.expires_at_secs)
         };
 
         if !needs_exchange {
@@ -78,10 +77,11 @@ impl CopilotClient {
         );
 
         let mut inner = self.inner.lock().await;
-        inner.api_key = token.clone();
-        inner.base_url = base_url.clone();
+        inner.api_key.clone_from(&token);
+        inner.base_url.clone_from(&base_url);
         inner.completions_path = "/chat/completions";
         inner.extra_headers = hdrs;
+        drop(inner);
 
         *self.cached.lock().await = Some(CopilotSessionToken { expires_at_secs });
         Ok(())
@@ -99,7 +99,7 @@ async fn exchange_copilot_session_token_with_client(
     tracing::debug!("copilot: exchanging github token for session token");
     let resp = auth_client
         .get("https://api.github.com/copilot_internal/v2/token")
-        .header("Authorization", format!("Bearer {}", github_token))
+        .header("Authorization", format!("Bearer {github_token}"))
         .header("Accept", "application/json")
         .header("User-Agent", COPILOT_USER_AGENT)
         .header("Editor-Version", COPILOT_EDITOR_VERSION)
@@ -180,14 +180,14 @@ impl ModelProvider for CopilotClient {
     }
 
     fn request_budget_limits(&self) -> crate::context_budget::RequestBudgetLimits {
-        self.inner
-            .try_lock()
-            .map(|inner| inner.request_budget_limits())
-            .unwrap_or(crate::context_budget::RequestBudgetLimits {
+        self.inner.try_lock().map_or(
+            crate::context_budget::RequestBudgetLimits {
                 context_window_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
                 auto_compact_threshold_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
                 reserved_output_tokens: crate::context_budget::DEFAULT_MAX_COMPLETION_TOKENS,
-            })
+            },
+            |inner| inner.request_budget_limits(),
+        )
     }
 
     fn token_usage_info(&self) -> TokenUsageInfo {

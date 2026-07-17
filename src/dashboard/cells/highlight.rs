@@ -71,7 +71,7 @@ fn find_syntax_for_path(path: &str) -> Option<&'static SyntaxReference> {
         })
 }
 
-fn convert_color(color: syntect::highlighting::Color) -> Option<Color> {
+const fn convert_color(color: syntect::highlighting::Color) -> Option<Color> {
     match color.a {
         0 => None,
         _ => Some(Color::Rgb(color.r, color.g, color.b)),
@@ -148,8 +148,7 @@ pub(super) fn highlight_patch_lines(
                     crate::activity_event::PatchDiffLineKind::HunkBreak
                 )
             })
-            .map(|offset| segment_start + offset)
-            .unwrap_or(lines.len());
+            .map_or(lines.len(), |offset| segment_start + offset);
         let code = lines[segment_start..segment_end]
             .iter()
             .map(|line| line.text.as_str())

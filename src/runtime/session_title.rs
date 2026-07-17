@@ -10,7 +10,13 @@ use crate::{
     core::ModelRequestOptions,
     dashboard::{DashboardSessionTitle, DashboardState},
     events::{EventPayload, EventView},
-    reasoning::runtime::{HistoryMessage, PromptRequest},
+    reasoning::{
+        prompts::{
+            SESSION_TITLE_SYSTEM_REQUIREMENTS, SESSION_TITLE_SYSTEM_ROLE,
+            SESSION_TITLE_TOOL_DESCRIPTION, SESSION_TITLE_USER_MESSAGE_PREFIX,
+        },
+        runtime::{HistoryMessage, PromptRequest},
+    },
     schema_utils::model_schema_for,
 };
 
@@ -18,13 +24,10 @@ const MAX_TITLE_CHARS: usize = 64;
 const MAX_EXCERPT_ITEMS: usize = 16;
 const MAX_EXCERPT_ITEM_CHARS: usize = 360;
 
-const TITLE_GENERATION_SYSTEM_PROMPT: &str = "Generate a concise session title (≤64 characters) that captures the \
-     main topic, task, or question from the conversation below. Output a short \
-     label in the conversation language. Do not include prefixes like 'Title:' \
-     or quotes.";
-
-const TITLE_GENERATION_USER_PROMPT: &str =
-    "Generate a short title for this session based on the conversation above.";
+fn title_generation_system_prompt() -> String {
+    format!("{SESSION_TITLE_SYSTEM_ROLE}\n\n{SESSION_TITLE_SYSTEM_REQUIREMENTS}")
+}
+const TITLE_GENERATION_USER_PROMPT: &str = SESSION_TITLE_USER_MESSAGE_PREFIX;
 
 #[model_schema]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -139,7 +142,7 @@ pub struct SessionTitleGenerationResult {
 }
 
 impl SessionTitleGenerationResult {
-    fn from_output(activity_signature: String, output: SessionTitleOutput) -> Self {
+    fn from_output(activity_signature: String, output: &SessionTitleOutput) -> Self {
         Self {
             activity_signature,
             title: normalize_session_title(&output.title),
@@ -169,10 +172,9 @@ pub fn spawn_session_title_generation(
 
     let request = PromptRequest {
         tool_name: "session_title".to_string(),
-        tool_description:
-            "Generate a concise title (≤64 chars) summarizing the session conversation.".to_string(),
+        tool_description: SESSION_TITLE_TOOL_DESCRIPTION.to_string(),
         output_schema: model_schema_for::<SessionTitleOutput>(),
-        system_messages: vec![TITLE_GENERATION_SYSTEM_PROMPT.to_string()],
+        system_messages: vec![title_generation_system_prompt()],
         long_term_memory_messages: Vec::new(),
         history_messages: vec![HistoryMessage::user(&excerpt)],
         current_user_message: TITLE_GENERATION_USER_PROMPT.to_string(),
@@ -196,7 +198,7 @@ pub fn spawn_session_title_generation(
         match model_provider.complete_json(request, options).await {
             Ok(value) => match serde_json::from_value::<SessionTitleOutput>(value) {
                 Ok(output) => {
-                    let result = SessionTitleGenerationResult::from_output(signature, output);
+                    let result = SessionTitleGenerationResult::from_output(signature, &output);
                     if let Some(title) = result.title.as_deref() {
                         debug!(title, "session title generated");
                     }
@@ -336,10 +338,7 @@ fn first_sentence_title(text: impl AsRef<str>) -> Option<String> {
     let sentence_end = compact.char_indices().find_map(|(index, ch)| {
         matches!(ch, '.' | '!' | '?' | '。' | '！' | '？').then_some(index)
     });
-    let candidate = match sentence_end {
-        Some(index) => compact[..index].trim(),
-        None => compact.trim(),
-    };
+    let candidate = sentence_end.map_or_else(|| compact.trim(), |index| compact[..index].trim());
     normalize_session_title(candidate)
 }
 

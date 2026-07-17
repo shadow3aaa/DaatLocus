@@ -21,19 +21,20 @@ mod transcript_overlay;
 mod tui_animation;
 pub mod tui_event;
 #[cfg(feature = "tui-perf-cmd")]
-pub(crate) mod tui_perf;
+pub mod tui_perf;
 mod view_state;
 
-pub(crate) use cells::sync_dashboard_runtime_status_live_cell;
+pub use cells::sync_dashboard_runtime_status_live_cell;
 pub use cells::{
     ActivityFeedRenderArgs, CachedActivityLines, DashboardActivityEvent, LiveActivityEvent,
     ReducedMotion, SessionActivityEvent, WorkflowActivityData,
     activity_event_from_tool_call_activity_event, activity_events_from_history_items,
-    apply_activity_event, assistant_activity_cell, render_activity_feed_cached,
-    render_activity_from_messages, terminal_activity_event_from_terminal_data,
-    thinking_activity_cell, user_activity_cell_from_event,
+    apply_activity_event, assistant_activity_cell, coalesce_activity_events,
+    render_activity_feed_cached, render_activity_from_messages,
+    terminal_activity_event_from_terminal_data, thinking_activity_cell,
+    user_activity_cell_from_event,
 };
-pub(crate) use command_flow::{dashboard_command_is_manager_owned, execute_control_command};
+pub use command_flow::{dashboard_command_is_manager_owned, execute_control_command};
 pub use commands::{
     DashboardAction, DashboardActionResult, DashboardCommandAttachment, DashboardCommandRunner,
     DashboardControlCommand, DashboardPendingUserInputMoveDirection,
@@ -41,8 +42,11 @@ pub use commands::{
 pub use history::{
     DashboardActivityHistoryCount, DashboardActivityHistoryItem, DashboardActivityHistoryPage,
     DashboardActivityHistoryStore, DashboardActivityHistoryWindow, DashboardInputHistory,
+    WORKFLOW_WORKER_ACTIVITY_INITIAL_LIMIT, WorkflowWorkerActivityPage,
 };
 
+#[cfg(test)]
+pub use history::WorkflowWorkerActivityItem;
 #[cfg(test)]
 use std::path::PathBuf;
 use std::{
@@ -59,9 +63,12 @@ use crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use futures_util::StreamExt;
-use ratatui::prelude::*;
-#[cfg(test)]
 use ratatui::style::Color;
+use ratatui::{
+    prelude::*,
+    style::Modifier,
+    widgets::{Clear, Paragraph, Wrap},
+};
 
 use crate::{
     core::TokenUsageInfo,
@@ -82,7 +89,7 @@ use command_panels::{
     CommandFeedback, CommandFeedbackLevel, CommandPanel, SkillsListPanel, SkillsListPanelItem,
     SkillsTogglePanel,
 };
-pub(crate) use command_registry::remote_dashboard_commands;
+pub use command_registry::remote_dashboard_commands;
 #[cfg(test)]
 use command_render::render_command_panel;
 use command_render::{
@@ -91,7 +98,7 @@ use command_render::{
 };
 #[cfg(test)]
 use command_text::render_skills_list;
-pub(crate) use commands::{dashboard_action_is_manager_owned, execute_dashboard_action};
+pub use commands::{dashboard_action_is_manager_owned, execute_dashboard_action};
 use frame_profiler::{TuiFrameProfiler, TuiFrameTiming};
 use serde::{Deserialize, Serialize};
 use terminal_hyperlinks::{
@@ -100,7 +107,7 @@ use terminal_hyperlinks::{
 };
 use transcript_overlay::render_transcript_overlay;
 use tui_animation::dashboard_state_needs_animation;
-use view_state::TuiViewState;
+use view_state::{TuiViewState, WorkflowInspectorPage, WorkflowInspectorState};
 
 const TUI_ANIMATION_INTERVAL: Duration = Duration::from_millis(32);
 const TUI_COMMAND_HISTORY_LIMIT: usize = 100;
@@ -331,6 +338,8 @@ pub struct DashboardState {
     pub activity_events: Vec<SessionActivityEvent>,
     pub live_activity_events: Vec<LiveActivityEvent>,
     #[serde(default)]
+    pub active_workflow_runs: Vec<crate::workflow::WorkflowRunSnapshot>,
+    #[serde(default)]
     pub activity_history: DashboardActivityHistoryWindow,
     pub last_cycle_elapsed_ms: Option<u64>,
     pub runtime_status: Option<String>,
@@ -374,6 +383,15 @@ pub trait DashboardHistoryLoader: Send + Sync {
         before: Option<i64>,
         limit: usize,
     ) -> Result<DashboardActivityHistoryPage, String>;
+
+    async fn load_workflow_worker_activity(
+        &self,
+        run_id: &str,
+        worker_id: &str,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<WorkflowWorkerActivityPage, String>;
 
     async fn load_recent_user_inputs(&self, limit: usize) -> Result<DashboardInputHistory, String>;
 }
@@ -437,10 +455,7 @@ pub async fn run_tui_dashboard(
     loop {
         tokio::select! {
                     event = event_stream.next() => {
-                        let event = match event {
-                            Some(Ok(e)) => e,
-                            _ => continue,
-                        };
+                        let Some(Ok(event)) = event else { continue };
                         let Some(tui_event) = tui_event::TuiEvent::from_crossterm(event) else {
                             continue;
                         };
@@ -477,11 +492,17 @@ pub async fn run_tui_dashboard(
                         if view.selection_dragging() {
                             continue;
                         }
-                        if view.transcript_overlay.is_some() {
+                        if view.workflow_inspector.is_some() {
+                            if view.handle_workflow_inspector_scroll_rows(rows) {
+                                frame_requester.schedule_frame();
+                            }
+                        } else if view.transcript_overlay.is_some() {
                             if view.handle_transcript_overlay_scroll_rows(rows) {
                                 frame_requester.schedule_frame();
                             }
-                        } else if view.command_panel.is_none() && view.handle_activity_scroll_rows(rows) {
+                        } else if view.command_panel.is_none()
+                            && view.handle_activity_scroll_rows(rows)
+                        {
                             frame_requester.schedule_frame();
                         }
                     }
@@ -513,10 +534,62 @@ pub async fn run_tui_dashboard(
             }
         }
 
-        let state = rx.borrow_and_update();
+        let state = rx.borrow_and_update().clone();
         view.sync_visible_clear_from_state(&state);
         view.seed_command_history_from_state(&state);
         view.sync_transcript_overlay(&state);
+        view.sync_workflow_inspector(&state);
+        if let Some(inspector) = view.workflow_inspector.as_mut() {
+            let activity_pane_visible = terminal
+                .size()
+                .map(|area| area.width >= 100)
+                .unwrap_or(false);
+            let should_load_initial = inspector
+                .should_start_worker_activity_load(history_loader.is_some(), activity_pane_visible);
+            let should_load_older =
+                inspector.should_start_older_worker_activity_load(history_loader.is_some());
+            if (should_load_initial || should_load_older)
+                && let Some(loader) = history_loader.clone()
+                && let Some((run_id, worker_id, oldest_cursor)) =
+                    inspector.worker_activity_request()
+            {
+                let before = should_load_older.then_some(oldest_cursor).flatten();
+                let (load_tx, load_rx) = tokio::sync::oneshot::channel();
+                inspector.begin_worker_activity_load(load_rx);
+                let frame_requester = frame_requester.clone();
+                tokio::spawn(async move {
+                    let result = loader
+                        .load_workflow_worker_activity(
+                            &run_id,
+                            &worker_id,
+                            before,
+                            None,
+                            WORKFLOW_WORKER_ACTIVITY_INITIAL_LIMIT,
+                        )
+                        .await;
+                    let _ = load_tx.send(result);
+                    frame_requester.schedule_frame();
+                });
+            }
+
+            if let Some(mut load_rx) = inspector.take_worker_activity_load_rx() {
+                match load_rx.try_recv() {
+                    Ok(Ok(page)) => inspector.apply_worker_activity_page(&page),
+                    Ok(Err(err)) => {
+                        tracing::warn!("TUI workflow worker activity load failed: {err}");
+                        inspector.finish_worker_activity_load_without_page(Some(err));
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                        inspector.keep_worker_activity_load_rx(load_rx);
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                        inspector.finish_worker_activity_load_without_page(Some(
+                            "workflow worker activity request was cancelled".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
         view.sync_pending_user_input_edit(&state);
         if let Some(panel) = view.command_panel.as_mut() {
             panel.sync_state(&state);
@@ -542,7 +615,7 @@ pub async fn run_tui_dashboard(
         if let Some(mut rx) = view.take_history_load_rx() {
             match rx.try_recv() {
                 Ok(Ok(page)) => {
-                    view.apply_loaded_history_page(page);
+                    view.apply_loaded_history_page(&page);
                 }
                 Ok(Err(err)) => {
                     tracing::warn!("TUI history lazy load failed: {err}");
@@ -569,7 +642,7 @@ pub async fn run_tui_dashboard(
             &frame_render.hyperlink_overlays,
         )?;
         restore_terminal_cursor(&mut terminal, view.last_cursor_pos)?;
-        frame_profiler.record(frame_render.timing);
+        frame_profiler.record(&frame_render.timing);
         if dashboard_state_needs_animation(&state) {
             frame_requester.schedule_frame_in(TUI_ANIMATION_INTERVAL);
         }
@@ -600,6 +673,258 @@ fn restore_terminal_cursor<W: std::io::Write>(
     Ok(())
 }
 
+const fn workflow_status_label(status: crate::workflow::WorkflowNodeStatus) -> &'static str {
+    match status {
+        crate::workflow::WorkflowNodeStatus::Pending => "pending",
+        crate::workflow::WorkflowNodeStatus::Running => "running",
+        crate::workflow::WorkflowNodeStatus::Completed => "completed",
+        crate::workflow::WorkflowNodeStatus::Failed => "failed",
+        crate::workflow::WorkflowNodeStatus::Interrupted => "interrupted",
+    }
+}
+
+fn workflow_status_style(status: crate::workflow::WorkflowNodeStatus) -> Style {
+    match status {
+        crate::workflow::WorkflowNodeStatus::Pending => Style::default().fg(Color::DarkGray),
+        crate::workflow::WorkflowNodeStatus::Running => Style::default().fg(Color::LightCyan),
+        crate::workflow::WorkflowNodeStatus::Completed => Style::default().fg(Color::LightGreen),
+        crate::workflow::WorkflowNodeStatus::Failed
+        | crate::workflow::WorkflowNodeStatus::Interrupted => Style::default().fg(Color::LightRed),
+    }
+}
+
+fn render_workflow_inspector(
+    frame: &mut Frame,
+    area: Rect,
+    inspector: &mut WorkflowInspectorState,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    frame.render_widget(Clear, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    let header = Line::from(vec![
+        Span::styled(
+            "W O R K F L O W   I N S P E C T O R",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            inspector.snapshot.workflow_id.clone(),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            workflow_status_label(inspector.snapshot.status),
+            workflow_status_style(inspector.snapshot.status),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(header), rows[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("run {}", inspector.snapshot.run_id),
+            Style::default().fg(Color::DarkGray),
+        ))),
+        Rect {
+            x: rows[0].x,
+            y: rows[0].y.saturating_add(1),
+            width: rows[0].width,
+            height: 1,
+        },
+    );
+
+    if area.width >= 100 {
+        render_workflow_inspector_wide(frame, rows[1], inspector);
+    } else {
+        render_workflow_inspector_narrow(frame, rows[1], inspector);
+    }
+
+    let footer = if area.width >= 100 {
+        "Esc/q close   Up/Down worker   PgUp/PgDn activity   Tab/←/→ switch pane"
+    } else if inspector.page == WorkflowInspectorPage::Outline {
+        "Esc/q close   Up/Down worker   Enter/Tab/→ activity"
+    } else {
+        "Esc/q back   PgUp/PgDn scroll   Tab/← outline"
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            footer,
+            Style::default().fg(Color::DarkGray),
+        ))),
+        rows[2],
+    );
+}
+
+fn render_workflow_inspector_wide(
+    frame: &mut Frame,
+    area: Rect,
+    inspector: &mut WorkflowInspectorState,
+) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .split(area);
+    render_workflow_inspector_outline(frame, columns[0], inspector);
+    render_workflow_inspector_activity(frame, columns[1], inspector);
+}
+
+fn render_workflow_inspector_narrow(
+    frame: &mut Frame,
+    area: Rect,
+    inspector: &mut WorkflowInspectorState,
+) {
+    match inspector.page {
+        WorkflowInspectorPage::Outline => {
+            render_workflow_inspector_outline(frame, area, inspector);
+        }
+        WorkflowInspectorPage::Activity => {
+            render_workflow_inspector_activity(frame, area, inspector);
+        }
+    }
+}
+
+fn render_workflow_inspector_outline(
+    frame: &mut Frame,
+    area: Rect,
+    inspector: &WorkflowInspectorState,
+) {
+    let block = ratatui::widgets::Block::bordered().title(" Agents ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut lines = Vec::new();
+    if inspector.snapshot.workers.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Waiting for the first agent...",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (worker_index, worker) in inspector.snapshot.workers.iter().enumerate() {
+        let selected = worker_index == inspector.selected_worker;
+        let attempt = inspector.snapshot.workers[..=worker_index]
+            .iter()
+            .filter(|candidate| candidate.role == worker.role)
+            .count();
+        lines.push(Line::from(vec![
+            Span::styled(
+                if selected { "› " } else { "  " },
+                if selected {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                },
+            ),
+            Span::styled(
+                format!("{} · attempt {} · {}", worker.role, attempt, worker.model),
+                if selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ),
+            Span::raw("  "),
+            Span::styled(
+                workflow_status_label(worker.status),
+                workflow_status_style(worker.status),
+            ),
+            Span::styled(
+                format!(
+                    "  {} activities",
+                    worker.activity_count.max(worker.activity.len())
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_workflow_inspector_activity(
+    frame: &mut Frame,
+    area: Rect,
+    inspector: &mut WorkflowInspectorState,
+) {
+    let Some(worker) = inspector.selected_worker().cloned() else {
+        let block = ratatui::widgets::Block::bordered().title(" Worker activity ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(
+            Paragraph::new("No worker has started yet.")
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    };
+    let attempt = inspector.snapshot.workers[..=inspector.selected_worker]
+        .iter()
+        .filter(|candidate| candidate.role == worker.role)
+        .count();
+    let title = format!(
+        " {} · attempt {} · {} · {} ",
+        worker.role,
+        attempt,
+        worker.model,
+        workflow_status_label(worker.status)
+    );
+    let block = ratatui::widgets::Block::bordered().title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let activity = inspector.displayed_worker_activity().to_vec();
+    if activity.is_empty() {
+        let message = if inspector.worker_activity_loading {
+            format!(
+                "Loading {} activities...",
+                worker.activity_count.max(worker.activity.len())
+            )
+        } else if let Some(error) = inspector.worker_activity_error.as_deref() {
+            format!("Unable to load worker activity: {error}")
+        } else if worker.activity_count.max(worker.activity.len()) == 0 {
+            "No worker activity yet.".to_string()
+        } else {
+            format!(
+                "{} activities are available; scroll or reopen to retry loading.",
+                worker.activity_count.max(worker.activity.len())
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(message).style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+    let mut hyperlink_areas = Vec::new();
+    let selection = selection::SelectionRegistry::default();
+    let mut selectable_regions = Vec::new();
+    inspector.activity_scroll.set_render_metrics(
+        render_activity_feed_cached(
+            frame.buffer_mut(),
+            inner,
+            ActivityFeedRenderArgs {
+                cells: &activity,
+                live_cells: &[],
+                expanded_thinking: &inspector.expanded_thinking,
+                scroll_offset: inspector.activity_scroll.display_scroll(),
+                cache: &mut inspector.activity_cache,
+                user_hyperlink_areas: &mut hyperlink_areas,
+                selection: &selection,
+                selectable_regions: &mut selectable_regions,
+            },
+        ),
+        inner.height.saturating_sub(1),
+    );
+}
+
 struct TuiFrameRender {
     timing: TuiFrameTiming,
     hyperlink_clears: Vec<terminal_hyperlinks::TerminalPlainTextOverlay>,
@@ -613,14 +938,14 @@ fn render_tui_dashboard_frame<B: Backend>(
 ) -> Result<TuiFrameRender, B::Error> {
     let frame_start = Instant::now();
     let prep_start = Instant::now();
-    let overlay_open = view.transcript_overlay.is_some();
+    let overlay_open = view.transcript_overlay.is_some() || view.workflow_inspector.is_some();
     let panel_open =
         view.command_panel.is_some() || view.editing_pending_user_input.is_some() || overlay_open;
-    let live_command_feedback = if !panel_open {
+    let live_command_feedback = if panel_open {
+        None
+    } else {
         let command_context = DashboardCommandContext { state };
         command_live_feedback(view.command_input.as_str(), &command_context)
-    } else {
-        None
     };
     let active_command_feedback = if view.editing_pending_user_input.is_some() {
         view.command_feedback.as_ref()
@@ -632,15 +957,15 @@ fn render_tui_dashboard_frame<B: Backend>(
         None
     };
     let feedback_rows = command_feedback_row_count(active_command_feedback);
-    let popup_rows = if !panel_open {
+    let popup_rows = if panel_open {
+        0
+    } else {
         let command_context = DashboardCommandContext { state };
         command_popup_row_count(view.command_input.as_str(), &command_context)
-    } else {
-        0
     };
     let term_size = terminal.size().ok();
-    let term_width = term_size.map(|size| size.width).unwrap_or(80);
-    let term_height = term_size.map(|size| size.height).unwrap_or(24);
+    let term_width = term_size.map_or(80, |size| size.width);
+    let term_height = term_size.map_or(24, |size| size.height);
     let pending_user_input_rows =
         if view.command_panel.is_none() && view.editing_pending_user_input.is_none() {
             pending_user_input_preview_row_count(&state.pending_user_inputs)
@@ -684,7 +1009,15 @@ fn render_tui_dashboard_frame<B: Backend>(
         terminal.draw(|f| {
             view.last_cursor_pos = None;
             let activity_start = Instant::now();
-            if let Some(overlay) = view.transcript_overlay.as_mut() {
+            if let Some(inspector) = view.workflow_inspector.as_mut() {
+                render_workflow_inspector(f, f.area(), inspector);
+                hyperlink_clears = collect_removed_terminal_hyperlink_clears(
+                    f.buffer_mut(),
+                    &view.previous_hyperlink_overlays,
+                    &[],
+                );
+                view.previous_hyperlink_overlays.clear();
+            } else if let Some(overlay) = view.transcript_overlay.as_mut() {
                 render_transcript_overlay(
                     f,
                     f.area(),
@@ -731,9 +1064,10 @@ fn render_tui_dashboard_frame<B: Backend>(
                 ),
             ])
             .split(f.area());
-        // max_scroll now returned directly from render (no double traversal)
+        // The canonical activity renderer returns the current scroll bounds;
+        // all activity surfaces retain those bounds in ActivityScrollState.
         let activity_start = Instant::now();
-        view.max_scroll = render_activity_feed_cached(
+        let max_scroll = render_activity_feed_cached(
             f.buffer_mut(),
             root[0],
             ActivityFeedRenderArgs {
@@ -747,9 +1081,9 @@ fn render_tui_dashboard_frame<B: Backend>(
                 selectable_regions: &mut selectable_regions,
             },
         );
+        view.activity_scroll
+            .set_render_metrics(max_scroll, root[0].height.saturating_sub(1));
         activity_elapsed = activity_start.elapsed();
-        // Update page height for PageUp/PageDown
-        view.page_height = root[0].height.saturating_sub(1);
 
         let command_start = Instant::now();
         render_command_bar(
@@ -792,7 +1126,8 @@ fn render_tui_dashboard_frame<B: Backend>(
                 &view.previous_hyperlink_overlays,
                 &hyperlink_overlays,
             );
-            view.previous_hyperlink_overlays = hyperlink_overlays.clone();
+            view.previous_hyperlink_overlays
+                .clone_from(&hyperlink_overlays);
         }
     })?;
     view.set_selectable_regions(selectable_regions);
@@ -853,6 +1188,135 @@ mod tests {
             .map(str::trim_end)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn workflow_inspector_wide_view_reuses_canonical_activity_renderer() {
+        let snapshot = crate::workflow::WorkflowRunSnapshot {
+            run_id: "run-1".to_string(),
+            workflow_id: "research".to_string(),
+            status: crate::workflow::WorkflowNodeStatus::Completed,
+            started_at_ms: 10,
+            completed_at_ms: Some(30),
+            input: serde_json::json!({ "topic": "rust" }),
+            output: Some(serde_json::json!({ "summary": "done" })),
+            error: None,
+            await_groups: vec![crate::workflow::WorkflowAwaitGroupSnapshot {
+                group_id: "await-1".to_string(),
+                sequence: 1,
+                status: crate::workflow::WorkflowNodeStatus::Completed,
+                started_at_ms: 11,
+                completed_at_ms: Some(29),
+                worker_ids: vec!["worker-1".to_string()],
+            }],
+            transitions: Vec::new(),
+            workers: vec![crate::workflow::WorkflowWorkerSnapshot {
+                worker_id: "worker-1".to_string(),
+                await_group_id: "await-1".to_string(),
+                role: "researcher".to_string(),
+                model: "main".to_string(),
+                status: crate::workflow::WorkflowNodeStatus::Completed,
+                started_at_ms: 12,
+                completed_at_ms: Some(28),
+                input: serde_json::json!({ "query": "rust" }),
+                output: Some(serde_json::json!({ "answer": "ok" })),
+                error: None,
+                activity_count: 2,
+                activity_revision: 2,
+                activity: vec![
+                    thinking_activity_cell("considering sources").expect("thinking activity"),
+                    assistant_activity_cell("## Worker result\nFound the answer.")
+                        .expect("assistant activity"),
+                ],
+            }],
+        };
+        let state = DashboardState {
+            active_workflow_runs: vec![snapshot],
+            ..DashboardState::default()
+        };
+        let mut view = TuiViewState::new();
+        assert!(view.open_latest_workflow_inspector(&state));
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        render_tui_dashboard_frame(&mut terminal, &mut view, &state)
+            .expect("render workflow inspector");
+
+        let output = trimmed_buffer_text(terminal.backend().buffer());
+        assert!(output.contains("Agents"));
+        assert!(!output.contains("await 1"));
+        assert!(output.contains("researcher · attempt 1 · main"));
+        assert!(output.contains("considering sources"));
+        assert!(output.contains("Worker result"));
+        assert!(output.contains("Found the answer."));
+    }
+
+    #[test]
+    fn workflow_inspector_narrow_view_pages_back_to_outline() {
+        let snapshot = crate::workflow::WorkflowRunSnapshot {
+            run_id: "run-1".to_string(),
+            workflow_id: "research".to_string(),
+            status: crate::workflow::WorkflowNodeStatus::Running,
+            started_at_ms: 10,
+            completed_at_ms: None,
+            input: serde_json::json!({}),
+            output: None,
+            error: None,
+            await_groups: vec![crate::workflow::WorkflowAwaitGroupSnapshot {
+                group_id: "await-1".to_string(),
+                sequence: 1,
+                status: crate::workflow::WorkflowNodeStatus::Running,
+                started_at_ms: 11,
+                completed_at_ms: None,
+                worker_ids: vec!["worker-1".to_string()],
+            }],
+            transitions: Vec::new(),
+            workers: vec![crate::workflow::WorkflowWorkerSnapshot {
+                worker_id: "worker-1".to_string(),
+                await_group_id: "await-1".to_string(),
+                role: "reviewer".to_string(),
+                model: "efficient".to_string(),
+                status: crate::workflow::WorkflowNodeStatus::Running,
+                started_at_ms: 12,
+                completed_at_ms: None,
+                input: serde_json::json!({}),
+                output: None,
+                error: None,
+                activity_count: 0,
+                activity_revision: 0,
+                activity: vec![],
+            }],
+        };
+        let state = DashboardState {
+            active_workflow_runs: vec![snapshot],
+            ..DashboardState::default()
+        };
+        let mut view = TuiViewState::new();
+        assert!(view.open_latest_workflow_inspector(&state));
+        assert!(
+            view.handle_workflow_inspector_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ))
+        );
+        assert_eq!(
+            view.workflow_inspector
+                .as_ref()
+                .map(|inspector| inspector.page),
+            Some(WorkflowInspectorPage::Activity)
+        );
+        assert!(
+            view.handle_workflow_inspector_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ))
+        );
+        assert_eq!(
+            view.workflow_inspector
+                .as_ref()
+                .map(|inspector| inspector.page),
+            Some(WorkflowInspectorPage::Outline)
+        );
     }
 
     #[test]

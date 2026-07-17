@@ -13,7 +13,7 @@ use std::{
 use async_trait::async_trait;
 use miette::{Context as _, Result, miette};
 use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Table};
-use notify::{Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, PollWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -32,7 +32,7 @@ use crate::{
 use client::WorkspaceAppWorkerClient;
 use protocol::{WorkerRequestOp, WorkerResponsePayload};
 
-const WORKSPACE_APP_COLD_START_TIMEOUT: Duration = Duration::from_secs(120);
+const WORKSPACE_APP_COLD_START_TIMEOUT: Duration = Duration::from_mins(2);
 const WORKSPACE_APP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct WorkspaceAppBootstrap {
@@ -76,7 +76,7 @@ pub struct WorkspaceAppSyncReport {
 }
 
 impl WorkspaceAppSyncReport {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.added.is_empty()
             && self.reloaded.is_empty()
             && self.removed.is_empty()
@@ -84,10 +84,9 @@ impl WorkspaceAppSyncReport {
     }
 }
 
-#[allow(dead_code)]
-pub enum WorkspaceAppWatcherHandle {
-    Recommended(RecommendedWatcher),
-    Poll(PollWatcher),
+pub struct WorkspaceAppWatcherHandle {
+    #[cfg(any(not(test), all(test, target_os = "windows")))]
+    _watcher: Box<dyn notify::Watcher + Send>,
 }
 
 #[derive(Debug)]
@@ -118,7 +117,7 @@ struct WorkspaceAppHandleState {
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
-pub(crate) struct WorkspaceAppConfigOutput {
+pub struct WorkspaceAppConfigOutput {
     request_timeout_ms: Option<u64>,
     cold_start_timeout_ms: Option<u64>,
 }
@@ -172,7 +171,7 @@ fn bootstrap_workspace_apps_with_state_root(
     )
 }
 
-pub(crate) fn bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
+pub fn bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
     workspace_root: &Path,
     state_root: &Path,
     protected_env_vars: &[String],
@@ -209,10 +208,10 @@ pub(crate) fn bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
     };
 
     for app_dir in app_dirs {
-        let folder_name = app_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "<unknown>".to_string());
+        let folder_name = app_dir.file_name().map_or_else(
+            || "<unknown>".to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
         let digest = match workspace_app_source_digest(&app_dir) {
             Ok(digest) => digest,
             Err(err) => {
@@ -395,28 +394,30 @@ impl WorkspaceAppRegistry {
 }
 
 pub fn start_workspace_app_watcher(
-    apps_root: PathBuf,
+    apps_root: &Path,
     tx: UnboundedSender<WorkspaceAppInvalidation>,
 ) -> Result<WorkspaceAppWatcherHandle> {
-    let recommended_callback = build_watcher_callback(apps_root.clone(), tx.clone());
+    let recommended_callback = build_watcher_callback(apps_root.to_path_buf(), tx.clone());
     match notify::recommended_watcher(recommended_callback) {
         Ok(mut watcher) => {
             watcher
-                .watch(&apps_root, RecursiveMode::Recursive)
+                .watch(apps_root, RecursiveMode::Recursive)
                 .map_err(|err| {
                     miette!(
                         "failed to watch workspace app directory {}: {err}",
                         apps_root.display()
                     )
                 })?;
-            Ok(WorkspaceAppWatcherHandle::Recommended(watcher))
+            Ok(WorkspaceAppWatcherHandle {
+                _watcher: Box::new(watcher),
+            })
         }
         Err(recommended_err) => {
             tracing::warn!(
                 "failed to start native workspace app watcher for {}: {recommended_err}; falling back to poll watcher",
                 apps_root.display()
             );
-            let poll_callback = build_watcher_callback(apps_root.clone(), tx);
+            let poll_callback = build_watcher_callback(apps_root.to_path_buf(), tx);
             let mut watcher = PollWatcher::new(
                 poll_callback,
                 notify::Config::default().with_poll_interval(Duration::from_millis(500)),
@@ -428,14 +429,16 @@ pub fn start_workspace_app_watcher(
                 )
             })?;
             watcher
-                .watch(&apps_root, RecursiveMode::Recursive)
+                .watch(apps_root, RecursiveMode::Recursive)
                 .map_err(|err| {
                     miette!(
                         "failed to watch workspace app directory {} with poll watcher: {err}",
                         apps_root.display()
                     )
                 })?;
-            Ok(WorkspaceAppWatcherHandle::Poll(watcher))
+            Ok(WorkspaceAppWatcherHandle {
+                _watcher: Box::new(watcher),
+            })
         }
     }
 }
@@ -530,7 +533,7 @@ fn discover_workspace_app_folder_names(apps_root: &Path) -> Result<BTreeSet<Stri
 
 fn workspace_app_source_digest(app_dir: &Path) -> Result<String> {
     let mut files = Vec::new();
-    collect_digest_file(&mut files, app_dir, app_dir.join("app.toml"))?;
+    collect_digest_file(&mut files, app_dir, &app_dir.join("app.toml"))?;
     collect_digest_files_under(&mut files, app_dir, &app_dir.join("runtime"), "lua")?;
     collect_digest_files_under(&mut files, app_dir, &app_dir.join("prompt"), "md")?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
@@ -575,7 +578,7 @@ fn collect_digest_files_under(
         if path.extension().and_then(|ext| ext.to_str()) != Some(extension) {
             continue;
         }
-        collect_digest_file(files, app_dir, path)?;
+        collect_digest_file(files, app_dir, &path)?;
     }
     Ok(())
 }
@@ -583,7 +586,7 @@ fn collect_digest_files_under(
 fn collect_digest_file(
     files: &mut Vec<(String, Vec<u8>)>,
     app_dir: &Path,
-    path: PathBuf,
+    path: &PathBuf,
 ) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -600,18 +603,17 @@ fn collect_digest_file(
         .to_string_lossy()
         .into_owned();
     let content =
-        fs::read(&path).map_err(|err| miette!("failed to read {}: {err}", path.display()))?;
+        fs::read(path).map_err(|err| miette!("failed to read {}: {err}", path.display()))?;
     files.push((relative, content));
     Ok(())
 }
 
 fn new_workspace_app_lua_runtime(app_dir: &Path, app_id: Option<&AppId>) -> Result<Lua> {
     let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default()).map_err(|err| {
-        if let Some(app_id) = app_id {
-            miette!("failed to create lua runtime for app `{app_id}`: {err}")
-        } else {
-            miette!("failed to create workspace app lua runtime: {err}")
-        }
+        app_id.map_or_else(
+            || miette!("failed to create workspace app lua runtime: {err}"),
+            |app_id| miette!("failed to create lua runtime for app `{app_id}`: {err}"),
+        )
     })?;
     configure_workspace_app_lua_runtime(&lua, app_dir)
         .wrap_err("failed to configure workspace app lua runtime")?;
@@ -723,7 +725,6 @@ fn validate_value_against_schema(value: &JsonValue, schema: &JsonValue, label: &
             "boolean" if value.is_boolean() => {
                 matched = true;
             }
-            "null" => {}
             _ => {}
         }
     }
@@ -829,13 +830,13 @@ fn validate_array_value(
     let items = value
         .as_array()
         .ok_or_else(|| miette!("{label} must be an array"))?;
-    if let Some(min_items) = schema.get("minItems").and_then(|value| value.as_u64())
-        && items.len() < min_items as usize
+    if let Some(min_items) = schema.get("minItems").and_then(serde_json::Value::as_u64)
+        && u64::try_from(items.len()).is_ok_and(|length| length < min_items)
     {
         return Err(miette!("{label} must contain at least {min_items} item(s)"));
     }
-    if let Some(max_items) = schema.get("maxItems").and_then(|value| value.as_u64())
-        && items.len() > max_items as usize
+    if let Some(max_items) = schema.get("maxItems").and_then(serde_json::Value::as_u64)
+        && u64::try_from(items.len()).map_or(true, |length| length > max_items)
     {
         return Err(miette!("{label} must contain at most {max_items} item(s)"));
     }
@@ -856,13 +857,13 @@ fn validate_string_value(
         .as_str()
         .ok_or_else(|| miette!("{label} must be a string"))?;
     let char_len = string.chars().count();
-    if let Some(min_length) = schema.get("minLength").and_then(|value| value.as_u64())
-        && char_len < min_length as usize
+    if let Some(min_length) = schema.get("minLength").and_then(serde_json::Value::as_u64)
+        && u64::try_from(char_len).is_ok_and(|length| length < min_length)
     {
         return Err(miette!("{label} must be at least {min_length} characters"));
     }
-    if let Some(max_length) = schema.get("maxLength").and_then(|value| value.as_u64())
-        && char_len > max_length as usize
+    if let Some(max_length) = schema.get("maxLength").and_then(serde_json::Value::as_u64)
+        && u64::try_from(char_len).map_or(true, |length| length > max_length)
     {
         return Err(miette!("{label} must be at most {max_length} characters"));
     }
@@ -878,7 +879,33 @@ fn validate_integer_value(
         .as_i64()
         .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
         .ok_or_else(|| miette!("{label} must be an integer"))?;
-    validate_numeric_bounds(number as f64, schema, label)
+    validate_integer_bounds(number, schema, label)
+}
+
+fn validate_integer_bounds(
+    value: i64,
+    schema: &serde_json::Map<String, JsonValue>,
+    label: &str,
+) -> Result<()> {
+    if let Some(minimum) = schema.get("minimum") {
+        let below_minimum = minimum.as_i64().is_some_and(|minimum| value < minimum)
+            || minimum
+                .as_u64()
+                .is_some_and(|minimum| u64::try_from(value).map_or(true, |value| value < minimum));
+        if below_minimum {
+            return Err(miette!("{label} must be >= {minimum}"));
+        }
+    }
+    if let Some(maximum) = schema.get("maximum") {
+        let above_maximum = maximum.as_i64().is_some_and(|maximum| value > maximum)
+            || maximum
+                .as_u64()
+                .is_some_and(|maximum| u64::try_from(value).is_ok_and(|value| value > maximum));
+        if above_maximum {
+            return Err(miette!("{label} must be <= {maximum}"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_number_value(
@@ -897,12 +924,12 @@ fn validate_numeric_bounds(
     schema: &serde_json::Map<String, JsonValue>,
     label: &str,
 ) -> Result<()> {
-    if let Some(minimum) = schema.get("minimum").and_then(|value| value.as_f64())
+    if let Some(minimum) = schema.get("minimum").and_then(serde_json::Value::as_f64)
         && value < minimum
     {
         return Err(miette!("{label} must be >= {minimum}"));
     }
-    if let Some(maximum) = schema.get("maximum").and_then(|value| value.as_f64())
+    if let Some(maximum) = schema.get("maximum").and_then(serde_json::Value::as_f64)
         && value > maximum
     {
         return Err(miette!("{label} must be <= {maximum}"));
@@ -998,14 +1025,14 @@ impl WorkspaceApp {
     }
 
     #[cfg(test)]
-    fn set_request_timeout_for_tests(&mut self, timeout: Duration) {
+    fn set_request_timeout_for_tests(&self, timeout: Duration) {
         let mut state = self.handle_state.lock();
         state.worker.set_request_timeout_for_tests(timeout);
         state.last_error = None;
     }
 
     #[cfg(test)]
-    fn restart_worker_for_tests(&mut self) {
+    fn restart_worker_for_tests(&self) {
         let mut state = self.handle_state.lock();
         state.worker.restart_for_tests();
         state.last_error = None;
@@ -1044,6 +1071,7 @@ impl App for WorkspaceApp {
                 .lines
                 .push(format!("worker_error={}", error.replace('\n', " | ")));
         }
+        drop(state);
         render
     }
 
@@ -1083,6 +1111,7 @@ impl App for WorkspaceApp {
         if let Err(err) = Self::refresh_worker_cache(&mut state) {
             state.last_error = Some(err.to_string());
         }
+        drop(state);
         Ok(result)
     }
 
@@ -1130,9 +1159,8 @@ fn resolve_relative_child_path(root: &Path, relative: &str) -> Result<PathBuf> {
 }
 
 fn load_runtime_state(path: &Path) -> JsonValue {
-    PersistenceStore::runtime_sync()
-        .read_json_file_sync(path, "workspace app state")
-        .unwrap_or_else(|| JsonValue::Object(Default::default()))
+    PersistenceStore::read_json_file_sync(path, "workspace app state")
+        .unwrap_or_else(|| JsonValue::Object(serde_json::Map::default()))
 }
 
 #[cfg(test)]
@@ -1363,7 +1391,7 @@ return app
         );
 
         let app_dir = root.path().join("apps").join("cold_init");
-        let mut app = WorkspaceApp::load_from_dir(
+        let app = WorkspaceApp::load_from_dir(
             &app_dir,
             state_root.path(),
             "cold_init",

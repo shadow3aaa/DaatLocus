@@ -4,7 +4,8 @@ use tree_sitter::Language;
 pub struct PhpAdapter;
 
 impl PhpAdapter {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -27,16 +28,16 @@ impl LanguageAdapter for PhpAdapter {
     }
     fn queries(&self) -> LanguageQueries {
         LanguageQueries {
-            definitions: r#"
+            definitions: r"
                 (function_definition name: (name) @name) @def
                 (class_declaration name: (name) @name) @def
                 (interface_declaration name: (name) @name) @def
                 (method_declaration name: (name) @name) @def
-            "#,
-            references: r#"
+            ",
+            references: r"
                 (function_call_expression function: (name) @ref) @call
                 (name) @ref
-            "#,
+            ",
         }
     }
 }

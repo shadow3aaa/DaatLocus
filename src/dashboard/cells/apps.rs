@@ -44,11 +44,10 @@ impl From<BrowserActivityDescriptor> for BrowserActivityData {
 impl From<BrowserActivityDescriptor> for LiveBrowserActivityData {
     fn from(data: BrowserActivityDescriptor) -> Self {
         let title = match data.action {
-            BrowserActivityAction::OpenPage => data
-                .url
-                .as_deref()
-                .map(|url| format!("Opening URL: {}", compact_browser_url(url)))
-                .unwrap_or_else(|| "Opening Page".to_string()),
+            BrowserActivityAction::OpenPage => data.url.as_deref().map_or_else(
+                || "Opening Page".to_string(),
+                |url| format!("Opening URL: {}", compact_browser_url(url)),
+            ),
             BrowserActivityAction::Wait => "Waiting for Page".to_string(),
             BrowserActivityAction::Click => "Clicking Element".to_string(),
             BrowserActivityAction::Fill => "Filling Element".to_string(),

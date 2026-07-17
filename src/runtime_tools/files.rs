@@ -124,90 +124,30 @@ fn execute_read_file_runtime_tool<'a>(
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        let args: ReadFileArgs = parse_tool_args(call)?;
-        let resolved = resolve_runtime_file_path(context, &args.path);
-        context
-            .sandbox_policy
-            .ensure_path_readable(&resolved, "read_file target")?;
-        let content = tokio::fs::read_to_string(&resolved)
-            .await
-            .map_err(|err| miette!("failed to read {}: {err}", resolved.display()))?;
-        let start_line = args.start_line.unwrap_or(1);
-        if start_line == 0 {
-            return Err(miette!("read_file `start_line` must be >= 1"));
-        }
-        let line_count = args.line_count.unwrap_or(DEFAULT_READ_LINE_COUNT).max(1);
-        let total_lines = content.lines().count();
-        if total_lines == 0 {
-            if start_line != 1 {
-                return Err(miette!(
-                    "read_file line range starts after end of empty file: {start_line}"
-                ));
-            }
-        } else if start_line > total_lines {
-            return Err(miette!(
-                "read_file line range starts after end of file: {start_line} > {total_lines}"
-            ));
-        }
-        let end_line = if total_lines == 0 {
-            0
-        } else {
-            start_line
-                .saturating_add(line_count)
-                .saturating_sub(1)
-                .min(total_lines)
-        };
-        let model_content = prefix_file_lines_with_hash(&content, start_line, line_count);
-        let display_path = display_tool_path(&args.path, &resolved);
-        let actual_line_count = if total_lines == 0 {
-            0
-        } else {
-            end_line - start_line + 1
-        };
-        let summary = if total_lines == 0 {
-            format!("read {display_path} (empty file)")
-        } else {
-            format!("read {display_path}#L{start_line}-L{end_line}")
-        };
-        let ui_summary = if total_lines == 0 {
-            format!("{display_path} (empty file)")
-        } else {
-            format!("{display_path}#L{start_line}-L{end_line}")
-        };
-        let skip_elision = args.force_no_elide.unwrap_or(false);
-        Ok(ToolExecutionResult::from_activity_event(
-            summary,
-            json!({
-                "path": args.path,
-                "resolved_path": resolved.display().to_string(),
-                "start_line": start_line,
-                "end_line": end_line,
-                "line_count": actual_line_count,
-                "total_lines": total_lines,
-                "content": model_content,
-            }),
-            Some(explored_tool_event(
-                "Read",
-                Some(ExploredCallActivityAction::Read),
-                Some(args.path.clone()),
-                None,
-                ui_summary,
-                vec![format!("{actual_line_count} lines")],
-            )),
-        )
-        .with_model_content(model_content)
-        .with_skip_source_elision(skip_elision))
+        execute_read_file(&context.execution_cwd, &context.sandbox_policy, call).await
     })
 }
-pub(crate) async fn execute_worker_read_file(
+
+pub async fn execute_worker_read_file(
+    execution_cwd: &Path,
+    sandbox_policy: &crate::sandbox::RuntimeSandboxPolicy,
+    call: &AgentToolCall,
+) -> Result<ToolExecutionResult> {
+    execute_read_file(execution_cwd, sandbox_policy, call).await
+}
+
+async fn execute_read_file(
     execution_cwd: &Path,
     sandbox_policy: &crate::sandbox::RuntimeSandboxPolicy,
     call: &AgentToolCall,
 ) -> Result<ToolExecutionResult> {
     let args: ReadFileArgs = parse_tool_args(call)?;
-    let resolved = sandbox_policy.resolve_path(Path::new(&args.path), Some(execution_cwd));
+    let resolved = crate::sandbox::RuntimeSandboxPolicy::resolve_path(
+        Path::new(&args.path),
+        Some(execution_cwd),
+    );
     sandbox_policy.ensure_path_readable(&resolved, "read_file target")?;
-    let content = tokio::fs::read_to_string(&resolved)
+    let file_text = tokio::fs::read_to_string(&resolved)
         .await
         .map_err(|err| miette!("failed to read {}: {err}", resolved.display()))?;
     let start_line = args.start_line.unwrap_or(1);
@@ -215,7 +155,7 @@ pub(crate) async fn execute_worker_read_file(
         return Err(miette!("read_file `start_line` must be >= 1"));
     }
     let line_count = args.line_count.unwrap_or(DEFAULT_READ_LINE_COUNT).max(1);
-    let total_lines = content.lines().count();
+    let total_lines = file_text.lines().count();
     if total_lines == 0 {
         if start_line != 1 {
             return Err(miette!(
@@ -235,7 +175,7 @@ pub(crate) async fn execute_worker_read_file(
             .saturating_sub(1)
             .min(total_lines)
     };
-    let model_content = prefix_file_lines_with_hash(&content, start_line, line_count);
+    let model_content = prefix_file_lines_with_hash(&file_text, start_line, line_count);
     let display_path = display_tool_path(&args.path, &resolved);
     let actual_line_count = if total_lines == 0 {
         0
@@ -247,6 +187,12 @@ pub(crate) async fn execute_worker_read_file(
     } else {
         format!("read {display_path}#L{start_line}-L{end_line}")
     };
+    let ui_summary = if total_lines == 0 {
+        format!("{display_path} (empty file)")
+    } else {
+        format!("{display_path}#L{start_line}-L{end_line}")
+    };
+    let skip_elision = args.force_no_elide.unwrap_or(false);
     Ok(ToolExecutionResult::from_activity_event(
         summary,
         json!({
@@ -258,13 +204,20 @@ pub(crate) async fn execute_worker_read_file(
             "total_lines": total_lines,
             "content": model_content,
         }),
-        None,
+        Some(explored_tool_event(
+            "Read",
+            Some(ExploredCallActivityAction::Read),
+            Some(args.path.clone()),
+            None,
+            ui_summary,
+            vec![format!("{actual_line_count} lines")],
+        )),
     )
     .with_model_content(model_content)
-    .with_skip_source_elision(args.force_no_elide.unwrap_or(false)))
+    .with_skip_source_elision(skip_elision))
 }
 
-pub(crate) async fn execute_worker_edit_file(
+pub fn execute_worker_edit_file(
     execution_cwd: &Path,
     sandbox_policy: &crate::sandbox::RuntimeSandboxPolicy,
     call: &AgentToolCall,
@@ -274,7 +227,10 @@ pub(crate) async fn execute_worker_edit_file(
         return Err(miette!("edit_file `edits` must not be empty"));
     }
     for edit in &args.edits {
-        let resolved = sandbox_policy.resolve_path(Path::new(&edit.path), Some(execution_cwd));
+        let resolved = crate::sandbox::RuntimeSandboxPolicy::resolve_path(
+            Path::new(&edit.path),
+            Some(execution_cwd),
+        );
         if resolved.exists() {
             sandbox_policy.ensure_path_readable(&resolved, "edit_file target")?;
         }
@@ -416,9 +372,10 @@ fn explored_tool_event(
 }
 
 fn resolve_runtime_file_path(context: &Context, path: &str) -> PathBuf {
-    context
-        .sandbox_policy
-        .resolve_path(Path::new(path), Some(&context.execution_cwd))
+    crate::sandbox::RuntimeSandboxPolicy::resolve_path(
+        Path::new(path),
+        Some(&context.execution_cwd),
+    )
 }
 
 fn read_file_target_summary(args: &ReadFileArgs) -> String {

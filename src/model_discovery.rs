@@ -1,4 +1,4 @@
-//! Provider model discovery shared by the CLI/TUI config wizard and WebUI setup.
+//! Provider model discovery shared by the CLI/TUI config wizard and `WebUI` setup.
 
 use std::time::Duration;
 
@@ -34,14 +34,14 @@ const COPILOT_DEFAULT_MODELS: &[&str] = &[
     "o1-mini",
 ];
 
-/// Static fallback for OpenAI Codex. The ChatGPT Codex backend may return an
+/// Static fallback for `OpenAI` Codex. The `ChatGPT` Codex backend may return an
 /// empty `/models` list while still accepting current Codex model slugs.
 const CODEX_OAUTH_DEFAULT_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini"];
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// Model metadata returned by the provider API.
 #[derive(Debug, Clone)]
-pub(crate) struct DiscoveredModel {
+pub struct DiscoveredModel {
     pub(crate) id: String,
     pub(crate) context_window: Option<usize>,
     pub(crate) max_output_tokens: Option<usize>,
@@ -78,7 +78,7 @@ fn copilot_fallback_models() -> Vec<DiscoveredModel> {
         .collect()
 }
 
-pub(crate) fn resolve_model_capacity(
+pub fn resolve_model_capacity(
     provider: &ProviderConfig,
     model_id: &str,
     detected_context_window: Option<usize>,
@@ -86,11 +86,10 @@ pub(crate) fn resolve_model_capacity(
     detected_supports_vision: Option<bool>,
 ) -> ModelCapacity {
     let catalog_provider_id = catalog_provider_id_for_model(provider, model_id);
-    let catalog = if let Some(provider_id) = catalog_provider_id.as_deref() {
-        catalog_model_capacity_for_provider(provider_id, model_id)
-    } else {
-        catalog_model_capacity(model_id)
-    };
+    let catalog = catalog_provider_id.as_deref().map_or_else(
+        || catalog_model_capacity(model_id),
+        |provider_id| catalog_model_capacity_for_provider(provider_id, model_id),
+    );
     let fallback = conservative_model_capacity();
 
     ModelCapacity {
@@ -100,24 +99,21 @@ pub(crate) fn resolve_model_capacity(
         max_completion_tokens: detected_max_output
             .or_else(|| catalog.map(|capacity| capacity.max_completion_tokens))
             .unwrap_or(fallback.max_completion_tokens),
-        supports_vision: detected_supports_vision.unwrap_or_else(|| {
-            catalog
-                .map(|c| c.supports_vision)
-                .unwrap_or(fallback.supports_vision)
-        }),
-        supports_tool_call: catalog
-            .map(|c| c.supports_tool_call)
-            .unwrap_or(fallback.supports_tool_call),
+        supports_vision: detected_supports_vision
+            .unwrap_or_else(|| catalog.map_or(fallback.supports_vision, |c| c.supports_vision)),
+        supports_tool_call: catalog.map_or(fallback.supports_tool_call, |c| c.supports_tool_call),
     }
 }
 
 fn catalog_provider_id_for_model(provider: &ProviderConfig, model_id: &str) -> Option<String> {
     match provider {
-        ProviderConfig::Openai { base_url, .. } => match base_url.as_deref() {
-            Some(base_url) => catalog_provider_id_for_base_url_and_model(base_url, model_id)
-                .or_else(|| Some("openai".to_string())),
-            None => Some("openai".to_string()),
-        },
+        ProviderConfig::Openai { base_url, .. } => base_url.as_deref().map_or_else(
+            || Some("openai".to_string()),
+            |base_url| {
+                catalog_provider_id_for_base_url_and_model(base_url, model_id)
+                    .or_else(|| Some("openai".to_string()))
+            },
+        ),
         ProviderConfig::GithubCopilot { .. } => Some("github-copilot".to_string()),
         // models.dev has no separate ChatGPT Codex provider. The model slugs
         // line up with OpenAI entries for capacity metadata; Codex-specific
@@ -152,7 +148,7 @@ fn catalog_provider_id_for_base_url_and_model(base_url: &str, model_id: &str) ->
 }
 
 /// Fetch provider model IDs. Failures return an empty list.
-pub(crate) async fn fetch_model_ids(
+pub async fn fetch_model_ids(
     provider_name: &str,
     provider: &ProviderConfig,
 ) -> Vec<DiscoveredModel> {
@@ -170,7 +166,7 @@ pub(crate) async fn fetch_model_ids(
 }
 
 /// Discover provider model IDs. Failures are returned to callers.
-pub(crate) async fn discover_model_ids(
+pub async fn discover_model_ids(
     provider_name: &str,
     provider: &ProviderConfig,
 ) -> Result<Vec<DiscoveredModel>> {
@@ -196,10 +192,10 @@ pub(crate) async fn discover_model_ids(
             fetch_openai_models(base_url, &api_key).await
         }
         ProviderConfig::Ollama { host, .. } => {
-            let host = host
-                .as_deref()
-                .map(|h| h.to_string())
-                .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
+            let host = host.as_deref().map_or_else(
+                || "http://127.0.0.1:11434".to_string(),
+                std::string::ToString::to_string,
+            );
             fetch_ollama_models(&host).await
         }
     }
@@ -358,27 +354,24 @@ async fn fetch_ollama_models(host: &str) -> Result<Vec<DiscoveredModel>> {
         .filter_map(|m| {
             m.get("model")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
         })
         .collect();
 
-    let show_client = match reqwest::Client::builder()
+    let Ok(show_client) = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
-    {
-        Ok(c) => c,
-        Err(_) => {
-            return Ok(model_ids
-                .into_iter()
-                .map(|id| DiscoveredModel {
-                    id,
-                    context_window: None,
-                    max_output_tokens: None,
-                    supports_vision: None,
-                    reasoning_options: None,
-                })
-                .collect());
-        }
+    else {
+        return Ok(model_ids
+            .into_iter()
+            .map(|id| DiscoveredModel {
+                id,
+                context_window: None,
+                max_output_tokens: None,
+                supports_vision: None,
+                reasoning_options: None,
+            })
+            .collect());
     };
 
     let mut handles = Vec::new();
@@ -444,13 +437,13 @@ fn extract_vision_from_capabilities(response: &serde_json::Value) -> Option<bool
 
 fn extract_context_value(key: &str, val: &serde_json::Value) -> Option<usize> {
     if key.ends_with("context_length") {
-        if let Some(n) = val.as_u64() {
-            return Some(n as usize);
+        if let Some(n) = val.as_u64().and_then(|value| usize::try_from(value).ok()) {
+            return Some(n);
         }
         if let Some(n) = val.as_i64()
             && n > 0
         {
-            return Some(n as usize);
+            return usize::try_from(n).ok();
         }
     }
     if let Some(inner) = val.as_object() {
@@ -551,11 +544,8 @@ async fn fetch_copilot_internal_models(
     Ok(parse_models_response(Some(json)))
 }
 
-pub(crate) fn parse_models_response(json: Option<serde_json::Value>) -> Vec<DiscoveredModel> {
-    let json = match json {
-        Some(j) => j,
-        None => return vec![],
-    };
+pub fn parse_models_response(json: Option<serde_json::Value>) -> Vec<DiscoveredModel> {
+    let Some(json) = json else { return vec![] };
     let items = json
         .get("data")
         .or_else(|| json.get("models"))
@@ -576,11 +566,11 @@ pub(crate) fn parse_models_response(json: Option<serde_json::Value>) -> Vec<Disc
                 .as_u64()
                 .or_else(|| m["context_window"].as_u64())
                 .or_else(|| m["max_context_window"].as_u64())
-                .map(|v| v as usize);
+                .and_then(|value| usize::try_from(value).ok());
             let max_output_tokens = limits["max_output_tokens"]
                 .as_u64()
                 .or_else(|| m["max_output_tokens"].as_u64())
-                .map(|v| v as usize);
+                .and_then(|value| usize::try_from(value).ok());
             let reasoning_options = discovered_reasoning_options(m);
             Some(DiscoveredModel {
                 id,
@@ -620,7 +610,7 @@ fn discovered_reasoning_options(model: &serde_json::Value) -> Option<Vec<Reasoni
     })
 }
 
-pub(crate) fn reasoning_options_for_prompt(
+pub fn reasoning_options_for_prompt(
     provider: &ProviderConfig,
     model_id: &str,
     detected_options: Option<&[ReasoningOption]>,

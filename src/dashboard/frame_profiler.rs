@@ -56,7 +56,7 @@ impl TuiFrameProfiler {
         }
     }
 
-    pub(super) fn record(&mut self, timing: TuiFrameTiming) {
+    pub(super) fn record(&mut self, timing: &TuiFrameTiming) {
         self.frames = self.frames.saturating_add(1);
         if timing.frame >= TUI_SLOW_FRAME_WARN_THRESHOLD {
             self.slow_frames = self.slow_frames.saturating_add(1);
@@ -75,10 +75,11 @@ impl TuiFrameProfiler {
         if elapsed < TUI_PROFILE_SUMMARY_INTERVAL {
             return;
         }
-        let fps = self.frames as f64 / elapsed.as_secs_f64().max(0.001);
+        let frame_count = u32::try_from(self.frames).unwrap_or(u32::MAX);
+        let fps = f64::from(frame_count) / elapsed.as_secs_f64().max(0.001);
         let should_warn = fps >= TUI_HIGH_FPS_WARN_THRESHOLD || self.slow_frames > 0;
         if self.enabled || should_warn {
-            let frame_count = self.frames.max(1) as f64;
+            let frame_count = f64::from(frame_count.max(1));
             let message = format!(
                 "tui frame profile fps={fps:.1} frames={} slow_frames={} avg_frame_ms={:.2} max_frame_ms={:.2} avg_prep_ms={:.2} avg_draw_ms={:.2} avg_activity_ms={:.2} max_activity_ms={:.2} avg_command_ms={:.2} committed_cells={} live_cells={}",
                 self.frames,

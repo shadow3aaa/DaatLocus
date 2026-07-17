@@ -128,6 +128,7 @@ workflow.tool({
 })
 
 local researcher = workflow.agent({
+  role = "research",
   model = "efficient",
   input = Input,
   output = ResearchOutput,
@@ -170,17 +171,28 @@ The supported workflow API is intentionally small:
 ```lua
 workflow.define({ input = InputSchema, output = OutputSchema,
   run = function(input, ctx) ... end })
-workflow.agent({ model, input, output, instruction, extra_tools })
-workflow.await(handle)
-workflow.await_all(handles)
+workflow.agent({ role, model, input, output, instruction, extra_tools })
+workflow.await(handle[, transition])
+workflow.await_all(handles[, transition])
 workflow.tool({ name, input, output, run })
 ```
 
+`role` is required and must be a non-empty string. It names the worker attempt
+in the workflow inspector; it does not select a hidden host profile. The
+inspector keeps repeated executions as separate attempts, even when they use
+the same role.
+
 `workflow.agent(...)` returns a worker factory. `factory:run(value)` creates a
-handle, `workflow.await(handle)` returns the worker's typed output, and
-`workflow.await_all({ handle_a, handle_b })` returns outputs in handle order.
-Create handles before waiting when the script needs to coordinate a batch.
-A handle can be awaited only once.
+handle, `workflow.await(handle[, transition])` returns the worker's typed
+output, and `workflow.await_all({ handle_a, handle_b }[, transition])` runs the
+workers concurrently and returns outputs in handle order. If any worker fails or
+the workflow is interrupted, the whole group stops and the error or interruption
+is propagated. Each concurrent worker owns separate runtime and App instances;
+only explicitly shared external resources and workflow-local tool effects are
+shared. `transition` is optional and defaults to `"await"`;
+use `"verify"`, `"revision"`, or `"retry"` when the next worker has that
+relationship to the prior awaited group. Create handles before waiting when the
+script needs to coordinate a batch. A handle can be awaited only once.
 
 ## Portable schemas
 
@@ -209,7 +221,7 @@ the main-agent tool contract.
 
 Each worker is an isolated agent turn. It receives only:
 
-- its `instruction` and typed input;
+- its required non-empty `role`, instruction, and typed input;
 - its declared `model` (`"main"` or `"efficient"`);
 - host-provided runtime and App tools; and
 - local tools named in `extra_tools`.
@@ -259,10 +271,11 @@ needed, and make recovery an explicit branch in your own Lua code.
 
 1. Choose a lower-snake-case filename under `~/.daat-locus/workflows`.
 2. Declare portable input and output schemas, then call `workflow.define` once.
-3. Give every worker a focused instruction, typed input/output, an explicit
+3. Give every worker a required non-empty role, focused instruction, typed input/output, an explicit
    model, and only the workflow-local tools it needs.
 4. Use `worker:run(...)`, `await`, and `await_all` for the control flow that
-   belongs in Lua; keep Session event completion outside the workflow.
+   belongs in Lua. Label verification, revision, and retry handoffs with the
+   optional transition argument; keep Session event completion outside the workflow.
 5. Treat file and shell operations as real side effects under the sandbox;
    implement idempotence or checkpoints yourself.
 6. Reload through `/skills reload`, resolve any load errors in `/workflows`, and

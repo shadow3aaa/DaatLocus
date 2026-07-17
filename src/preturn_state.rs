@@ -18,10 +18,10 @@ pub struct PreTurnState {
 }
 
 impl PreTurnState {
-    pub async fn new(_context: &mut Context) -> Self {
+    pub fn new(context: &Context) -> Self {
         Self {
             sensory: Sensory::new(),
-            plan: _context.plan.clone(),
+            plan: context.plan.clone(),
         }
     }
 

@@ -77,6 +77,13 @@ pub enum SessionIpcRequest {
         after: Option<i64>,
         limit: usize,
     },
+    WorkflowWorkerActivityPage {
+        run_id: String,
+        worker_id: String,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: usize,
+    },
     DashboardInputHistory {
         limit: usize,
     },
@@ -97,7 +104,7 @@ pub enum SessionIpcRequest {
 }
 
 impl SessionIpcRequest {
-    pub fn kind(&self) -> &'static str {
+    pub const fn kind(&self) -> &'static str {
         match self {
             Self::Status => "status",
             Self::StatusSummary => "status_summary",
@@ -107,6 +114,7 @@ impl SessionIpcRequest {
             Self::EnqueueTelegramEvent { .. } => "enqueue_telegram_event",
             Self::DashboardSnapshot => "dashboard_snapshot",
             Self::DashboardHistoryPage { .. } => "dashboard_history_page",
+            Self::WorkflowWorkerActivityPage { .. } => "workflow_worker_activity_page",
             Self::DashboardInputHistory { .. } => "dashboard_input_history",
             Self::DashboardHistoryCount => "dashboard_history_count",
             Self::DrainTelegramOutbox => "drain_telegram_outbox",
@@ -127,7 +135,7 @@ pub enum UserInputOrigin {
 }
 
 impl UserInputOrigin {
-    pub fn terminal_origin_label(self) -> &'static str {
+    pub const fn terminal_origin_label(self) -> &'static str {
         match self {
             Self::WebUi => "webui",
             Self::Tui => "tui",
@@ -199,6 +207,9 @@ pub enum SessionIpcResponse {
     },
     DashboardHistoryPage {
         page: DashboardActivityHistoryPage,
+    },
+    WorkflowWorkerActivityPage {
+        page: crate::dashboard::WorkflowWorkerActivityPage,
     },
     DashboardInputHistory {
         history: DashboardInputHistory,
@@ -294,7 +305,7 @@ pub struct SessionIpcClient {
 }
 
 impl SessionIpcClient {
-    pub fn new(session_id: SessionId, ipc_name: String, ipc_token: String) -> Self {
+    pub const fn new(session_id: SessionId, ipc_name: String, ipc_token: String) -> Self {
         Self {
             session_id,
             ipc_name,
@@ -303,7 +314,7 @@ impl SessionIpcClient {
         }
     }
 
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
@@ -374,7 +385,7 @@ pub struct SessionIpcServer {
 }
 
 impl SessionIpcServer {
-    pub async fn bind(ipc_name: impl AsRef<str>) -> Result<Self> {
+    pub fn bind(ipc_name: impl AsRef<str>) -> Result<Self> {
         let ipc_name = ipc_name.as_ref();
         let name = build_local_socket_name(ipc_name)?;
         let listener = ListenerOptions::new()
@@ -410,8 +421,8 @@ async fn connect_local_socket(ipc_name: &str) -> Result<LocalSocketStream> {
 
 async fn write_json_frame<W, T>(writer: &mut W, value: &T) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
-    T: Serialize + ?Sized,
+    W: AsyncWrite + Unpin + Send,
+    T: Serialize + ?Sized + Sync,
 {
     let bytes =
         serde_json::to_vec(value).map_err(|err| miette!("encode IPC JSON frame failed: {err}"))?;
@@ -456,7 +467,7 @@ pub async fn read_stream_event(stream: &mut LocalSocketStream) -> Result<Session
 
 pub async fn write_stream_event<W>(writer: &mut W, event: &SessionIpcStreamEvent) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin + Send,
 {
     write_json_frame(writer, event).await
 }
@@ -491,7 +502,7 @@ mod tests {
     use tokio::io::{AsyncWriteExt, duplex};
 
     fn fixed_session_id() -> SessionId {
-        SessionId::from_string("session-test".to_string()).expect("valid session id")
+        SessionId::from_string("session-test").expect("valid session id")
     }
 
     fn test_ipc_name() -> String {
@@ -587,14 +598,17 @@ mod tests {
         let (mut writer, mut reader) = duplex(4);
         let write_task = tokio::spawn(async move {
             writer
-                .write_all(&((MAX_IPC_FRAME_BYTES + 1) as u32).to_be_bytes())
+                .write_all(
+                    &u32::try_from(MAX_IPC_FRAME_BYTES + 1)
+                        .expect("maximum IPC frame size fits in u32")
+                        .to_be_bytes(),
+                )
                 .await
                 .expect("write oversized length");
         });
 
-        let err = match read_json_frame::<_, IpcResponseEnvelope>(&mut reader).await {
-            Ok(_) => panic!("oversized frame unexpectedly decoded"),
-            Err(err) => err,
+        let Err(err) = read_json_frame::<_, IpcResponseEnvelope>(&mut reader).await else {
+            panic!("oversized frame unexpectedly decoded");
         };
         write_task.await.expect("writer task");
         assert!(
@@ -606,9 +620,7 @@ mod tests {
     #[tokio::test]
     async fn ipc_client_rejects_mismatched_response_request_id() {
         let ipc_name = test_ipc_name();
-        let server = SessionIpcServer::bind(&ipc_name)
-            .await
-            .expect("bind IPC server");
+        let server = SessionIpcServer::bind(&ipc_name).expect("bind IPC server");
         let client = SessionIpcClient::new(fixed_session_id(), ipc_name, "ipc-token".to_string())
             .with_timeout(Duration::from_secs(2));
 
@@ -639,9 +651,8 @@ mod tests {
         assert_eq!(request.session_id, "session-test");
         assert_eq!(request.ipc_token, "ipc-token");
         assert!(matches!(request.body, SessionIpcRequest::Status));
-        let err = match client_result {
-            Ok(_) => panic!("mismatched response id unexpectedly accepted"),
-            Err(err) => err,
+        let Err(err) = client_result else {
+            panic!("mismatched response id unexpectedly accepted")
         };
         assert!(
             err.to_string().contains("response id mismatch"),
@@ -652,9 +663,7 @@ mod tests {
     #[tokio::test]
     async fn ipc_client_can_wait_for_long_response_without_response_timeout() {
         let ipc_name = test_ipc_name();
-        let server = SessionIpcServer::bind(&ipc_name)
-            .await
-            .expect("bind IPC server");
+        let server = SessionIpcServer::bind(&ipc_name).expect("bind IPC server");
         let client = SessionIpcClient::new(fixed_session_id(), ipc_name, "ipc-token".to_string())
             .with_timeout(Duration::from_millis(25));
 
@@ -683,7 +692,7 @@ mod tests {
                 attachments: Vec::new(),
                 wait_for_reply: true,
             });
-        let (_, client_result) = tokio::join!(server_future, client_future);
+        let ((), client_result) = tokio::join!(server_future, client_future);
 
         match client_result.expect("client waits for delayed response") {
             SessionIpcResponse::Submitted {

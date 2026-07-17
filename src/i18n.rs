@@ -11,21 +11,21 @@ pub enum Locale {
 }
 
 impl Locale {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::EnUs => "en-US",
             Self::ZhCn => "zh-CN",
         }
     }
 
-    pub fn display_name(self) -> &'static str {
+    pub const fn display_name(self) -> &'static str {
         match self {
             Self::EnUs => "English",
             Self::ZhCn => "简体中文",
         }
     }
 
-    pub fn from_language_setup_index(index: usize) -> Self {
+    pub const fn from_language_setup_index(index: usize) -> Self {
         match index {
             1 => Self::ZhCn,
             _ => Self::EnUs,

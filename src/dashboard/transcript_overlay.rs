@@ -50,10 +50,13 @@ pub(super) fn render_transcript_overlay(
     let body = rows[1];
     let lines = activity_transcript_lines(&overlay.cells, &overlay.live_cells, body.width);
     let plain_lines = lines.iter().map(line_plain_text).collect::<Vec<_>>();
-    let max_scroll = lines
-        .len()
-        .saturating_sub(body.height as usize)
-        .min(u16::MAX as usize) as u16;
+    let max_scroll = u16::try_from(
+        lines
+            .len()
+            .saturating_sub(usize::from(body.height))
+            .min(usize::from(u16::MAX)),
+    )
+    .expect("transcript scroll is capped at u16::MAX");
     overlay.set_render_metrics(max_scroll, body.height);
     let selectable_region = SelectableRegion::new(
         SelectableId::new("transcript"),

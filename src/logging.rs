@@ -26,7 +26,7 @@ pub enum RuntimeStatusLevel {
 }
 
 impl RuntimeStatusLevel {
-    fn dashboard_level(self) -> DashboardRuntimeStatusLevel {
+    const fn dashboard_level(self) -> DashboardRuntimeStatusLevel {
         match self {
             Self::Info => DashboardRuntimeStatusLevel::Info,
             Self::Warn => DashboardRuntimeStatusLevel::Warn,
@@ -115,26 +115,26 @@ pub fn set_runtime_status(
         RuntimeStatusLevel::Warn => tracing::warn!("{message}"),
         RuntimeStatusLevel::Error => tracing::error!("{message}"),
     }
-    set_dashboard_runtime_status(tx, message, Some(level.dashboard_level()));
+    set_dashboard_runtime_status(tx, &message, Some(level.dashboard_level()));
 }
 
 pub fn set_runtime_status_only(tx: Option<&Sender<DashboardState>>, message: impl Into<String>) {
-    set_dashboard_runtime_status(tx, message.into(), None);
+    set_dashboard_runtime_status(tx, &message.into(), None);
 }
 
 fn set_dashboard_runtime_status(
     tx: Option<&Sender<DashboardState>>,
-    message: String,
+    message: &str,
     level: Option<DashboardRuntimeStatusLevel>,
 ) {
     if let Some(tx) = tx {
         tx.send_if_modified(|state| {
-            if state.runtime_status.as_deref() == Some(message.as_str())
+            if state.runtime_status.as_deref() == Some(message)
                 && state.runtime_status_level == level
             {
                 false
             } else {
-                state.runtime_status = Some(message.clone());
+                state.runtime_status = Some(message.to_string());
                 state.runtime_status_level = level;
                 true
             }

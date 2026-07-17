@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -262,7 +263,7 @@ impl PendingSetupProviderAuthFlow {
         }
     }
 
-    pub fn expires_at_ms(&self) -> i64 {
+    pub const fn expires_at_ms(&self) -> i64 {
         match self {
             Self::GithubDevice { expires_at_ms, .. } | Self::CodexDevice { expires_at_ms, .. } => {
                 *expires_at_ms
@@ -339,7 +340,7 @@ pub async fn ensure_config_readiness() -> ConfigReadinessReport {
             if let Err(err) = update_config_backup(&config_path, &backup_path).await {
                 tracing::warn!("failed to update config backup: {err}");
             }
-            report(parts, config_path, backup_path, None)
+            report(parts, &config_path, &backup_path, None)
         }
         ConfigReadOutcome::Missing => {
             let note = match write_setup_safe_default_config(&config_path, default_port).await {
@@ -361,8 +362,8 @@ pub async fn ensure_config_readiness() -> ConfigReadinessReport {
                     port: default_port,
                     message: "configuration has not been initialized".to_string(),
                 },
-                config_path,
-                backup_path,
+                &config_path,
+                &backup_path,
                 note,
             )
         }
@@ -431,8 +432,8 @@ pub async fn preview_setup_config(request: SetupConfigRequest) -> Result<ConfigR
     let paths = daat_locus_paths().await;
     Ok(report(
         parts,
-        paths.config_file(CONFIG_FILE_NAME),
-        paths.config_file(CONFIG_BACKUP_FILE_NAME),
+        &paths.config_file(CONFIG_FILE_NAME),
+        &paths.config_file(CONFIG_BACKUP_FILE_NAME),
         None,
     ))
 }
@@ -1059,8 +1060,8 @@ async fn start_github_device_auth()
         .verification_uri
         .unwrap_or_else(|| "https://github.com/login/device".to_string());
     let interval_secs = device.interval.unwrap_or(5).max(5);
-    let expires_at_ms =
-        chrono::Utc::now().timestamp_millis() + (device.expires_in.unwrap_or(900) as i64 * 1000);
+    let expires_at_ms = chrono::Utc::now().timestamp_millis()
+        + (device.expires_in.unwrap_or(900).cast_signed() * 1000);
     let flow_id = Uuid::new_v4().to_string();
     let _ = open_url(&verification_url);
 
@@ -1335,7 +1336,9 @@ fn urlenc(value: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 encoded.push(byte as char);
             }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
+            _ => {
+                let _ = write!(encoded, "%{byte:02X}");
+            }
         }
     }
     encoded
@@ -1529,9 +1532,7 @@ fn expand_user_path(path: &str) -> PathBuf {
         return std::env::home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
     }
     if let Some(rest) = trimmed.strip_prefix("~/") {
-        return std::env::home_dir()
-            .map(|home| home.join(rest))
-            .unwrap_or_else(|| PathBuf::from(trimmed));
+        return std::env::home_dir().map_or_else(|| PathBuf::from(trimmed), |home| home.join(rest));
     }
     PathBuf::from(trimmed)
 }
@@ -1565,7 +1566,7 @@ async fn recover_damaged_config(
                     backup_path.display()
                 )),
             }
-            return report(parts, config_path, backup_path, Some(notes.join("; ")));
+            return report(parts, &config_path, &backup_path, Some(notes.join("; ")));
         }
         ConfigReadOutcome::Missing => {
             notes.push("config backup was missing".to_string());
@@ -1604,8 +1605,8 @@ async fn recover_damaged_config(
             port: fallback_port,
             message: "configuration recovery fell back to setup-safe defaults".to_string(),
         },
-        config_path,
-        backup_path,
+        &config_path,
+        &backup_path,
         Some(notes.join("; ")),
     )
 }
@@ -1872,7 +1873,7 @@ async fn write_setup_safe_default_config(path: &Path, port: u16) -> std::io::Res
     .await
 }
 
-async fn quarantine_file(path: &PathBuf, label: &str) -> std::io::Result<Option<PathBuf>> {
+async fn quarantine_file(path: &Path, label: &str) -> std::io::Result<Option<PathBuf>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -1888,8 +1889,8 @@ async fn quarantine_file(path: &PathBuf, label: &str) -> std::io::Result<Option<
 
 fn report(
     parts: ReadinessParts,
-    config_path: PathBuf,
-    backup_path: PathBuf,
+    config_path: &Path,
+    backup_path: &Path,
     recovery_note: Option<String>,
 ) -> ConfigReadinessReport {
     ConfigReadinessReport {
@@ -2049,12 +2050,11 @@ model_id = "gpt-4.1-mini"
             Some("$TELEGRAM_BOT_TOKEN")
         );
 
-        let mut next_request = request.clone();
+        let mut next_request = request;
         next_request.telegram_enabled = Some(true);
         next_request.telegram_bot_token = Some("123456789:bot-token".to_string());
 
-        let next_config =
-            config_from_setup_request_with_base(&next_request, base_config.clone()).unwrap();
+        let next_config = config_from_setup_request_with_base(&next_request, base_config).unwrap();
 
         assert!(next_config.telegram.enabled);
         assert_eq!(next_config.telegram.bot_token, "123456789:bot-token");

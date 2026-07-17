@@ -28,19 +28,19 @@ pub enum TuiMouseSelectionKind {
 const MOUSE_WHEEL_ROWS: i16 = 3;
 
 impl TuiEvent {
-    /// Map a raw crossterm Event into a TuiEvent, returning None for uninteresting events.
+    /// Map a raw crossterm Event into a `TuiEvent`, returning None for uninteresting events.
     pub fn from_crossterm(event: crossterm::event::Event) -> Option<Self> {
         match event {
-            crossterm::event::Event::Key(key) => Some(TuiEvent::Key(key)),
+            crossterm::event::Event::Key(key) => Some(Self::Key(key)),
             crossterm::event::Event::Mouse(mouse) => match mouse.kind {
-                crossterm::event::MouseEventKind::ScrollUp => Some(TuiEvent::MouseWheel {
+                crossterm::event::MouseEventKind::ScrollUp => Some(Self::MouseWheel {
                     rows: -MOUSE_WHEEL_ROWS,
                 }),
-                crossterm::event::MouseEventKind::ScrollDown => Some(TuiEvent::MouseWheel {
+                crossterm::event::MouseEventKind::ScrollDown => Some(Self::MouseWheel {
                     rows: MOUSE_WHEEL_ROWS,
                 }),
                 crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                    Some(TuiEvent::MouseSelection {
+                    Some(Self::MouseSelection {
                         kind: TuiMouseSelectionKind::Down,
                         x: mouse.column,
                         y: mouse.row,
@@ -48,7 +48,7 @@ impl TuiEvent {
                     })
                 }
                 crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                    Some(TuiEvent::MouseSelection {
+                    Some(Self::MouseSelection {
                         kind: TuiMouseSelectionKind::Drag,
                         x: mouse.column,
                         y: mouse.row,
@@ -56,7 +56,7 @@ impl TuiEvent {
                     })
                 }
                 crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
-                    Some(TuiEvent::MouseSelection {
+                    Some(Self::MouseSelection {
                         kind: TuiMouseSelectionKind::Up,
                         x: mouse.column,
                         y: mouse.row,
@@ -65,8 +65,8 @@ impl TuiEvent {
                 }
                 _ => None,
             },
-            crossterm::event::Event::Paste(data) => Some(TuiEvent::Paste(data)),
-            crossterm::event::Event::Resize(..) => Some(TuiEvent::Resize),
+            crossterm::event::Event::Paste(data) => Some(Self::Paste(data)),
+            crossterm::event::Event::Resize(..) => Some(Self::Resize),
             // FocusGained, FocusLost, and non-wheel mouse events are ignored for now.
             _ => None,
         }

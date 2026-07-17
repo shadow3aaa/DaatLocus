@@ -24,7 +24,7 @@ impl SessionId {
         Self(Uuid::new_v4().to_string())
     }
 
-    pub fn from_string(value: String) -> Result<Self> {
+    pub fn from_string(value: &str) -> Result<Self> {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             return Err(miette!("session_id cannot be empty"));
@@ -68,7 +68,7 @@ pub enum SessionStatus {
 }
 
 impl SessionStatus {
-    pub fn is_process_backed(self) -> bool {
+    pub const fn is_process_backed(self) -> bool {
         matches!(self, Self::Starting | Self::Ready | Self::Stopping)
     }
 }
@@ -219,7 +219,9 @@ impl SessionRegistry {
                 return Ok(false);
             };
             info.title = normalize_title(Some(title));
-            true
+            let changed = true;
+            drop(inner);
+            changed
         };
         self.persist().await?;
         Ok(changed)
@@ -271,6 +273,7 @@ impl SessionRegistry {
                 return Err(miette!("unknown session `{session_id}`"));
             };
             update(info);
+            drop(inner);
         }
         self.persist().await
     }
@@ -425,11 +428,7 @@ pub fn generate_ipc_token() -> String {
 pub fn hash_ipc_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
-    let digest = hasher.finalize();
-    digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
+    hex::encode(hasher.finalize())
 }
 
 pub fn session_ipc_name(session_id: &SessionId) -> String {
@@ -479,7 +478,7 @@ mod tests {
     use super::*;
 
     fn fixed_session_id(value: &str) -> SessionId {
-        SessionId::from_string(value.to_string()).expect("valid session id")
+        SessionId::from_string(value).expect("valid session id")
     }
 
     #[test]
@@ -489,7 +488,11 @@ mod tests {
         assert_eq!(name, "daat-locus-session-session-a");
         assert!(!name.contains('\\'));
         assert!(!name.contains('/'));
-        assert!(!name.ends_with(".sock"));
+        assert!(
+            !std::path::Path::new(&name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("sock"))
+        );
     }
 
     #[tokio::test]
@@ -618,7 +621,7 @@ mod tests {
                 registry
                     .mark_starting(
                         &session_id,
-                        10_000 + index as u32,
+                        10_000 + u32::try_from(index).expect("test session index fits in u32"),
                         session_ipc_name(&session_id),
                         &format!("token-{index}"),
                     )

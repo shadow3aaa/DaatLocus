@@ -1,5 +1,6 @@
 use crate::analyzer::Analyzer;
 use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -10,8 +11,8 @@ use std::time::{Duration, Instant};
 use crate::api::{PropagationResult, PropagationSource};
 use crate::treesitter::TreeSitterAnalyzer;
 
-const LSP_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
-const LSP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const LSP_INITIALIZE_TIMEOUT: Duration = Duration::from_mins(2);
+const LSP_REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
 const LSP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 type LspResponse = Result<serde_json::Value, String>;
@@ -62,7 +63,7 @@ pub trait LspServerConfig: Send + Sync {
 
     /// Optional command to install the server when not found on PATH or cache.
     /// Returns `(command, args)` — e.g. `("go", vec!["install", "golang.org/x/tools/gopls@v0.21.1"])`.
-    /// The locate_or_download logic will run this and then re-check PATH.
+    /// The `locate_or_download` logic will run this and then re-check PATH.
     fn install_command(&self) -> Option<(String, Vec<String>)> {
         None
     }
@@ -86,13 +87,13 @@ pub struct RustAnalyzerConfig;
 const RA_VERSION: &str = "2025-05-05";
 
 impl LspServerConfig for RustAnalyzerConfig {
-    fn server_name(&self) -> &str {
+    fn server_name(&self) -> &'static str {
         "rust-analyzer"
     }
-    fn binary_name(&self) -> &str {
+    fn binary_name(&self) -> &'static str {
         "rust-analyzer"
     }
-    fn language_id(&self) -> &str {
+    fn language_id(&self) -> &'static str {
         "rust"
     }
     fn cached_binary_name(&self) -> String {
@@ -115,13 +116,13 @@ impl LspServerConfig for RustAnalyzerConfig {
 pub struct PyrightConfig;
 
 impl LspServerConfig for PyrightConfig {
-    fn server_name(&self) -> &str {
+    fn server_name(&self) -> &'static str {
         "pyright-langserver"
     }
-    fn binary_name(&self) -> &str {
+    fn binary_name(&self) -> &'static str {
         "pyright-langserver"
     }
-    fn language_id(&self) -> &str {
+    fn language_id(&self) -> &'static str {
         "python"
     }
     fn cached_binary_name(&self) -> String {
@@ -147,13 +148,13 @@ impl LspServerConfig for PyrightConfig {
 pub struct TsJsConfig;
 
 impl LspServerConfig for TsJsConfig {
-    fn server_name(&self) -> &str {
+    fn server_name(&self) -> &'static str {
         "typescript-language-server"
     }
-    fn binary_name(&self) -> &str {
+    fn binary_name(&self) -> &'static str {
         "typescript-language-server"
     }
-    fn language_id(&self) -> &str {
+    fn language_id(&self) -> &'static str {
         "typescript"
     }
     fn cached_binary_name(&self) -> String {
@@ -181,13 +182,13 @@ const GOPLS_VERSION: &str = "v0.21.1";
 pub struct GoplsConfig;
 
 impl LspServerConfig for GoplsConfig {
-    fn server_name(&self) -> &str {
+    fn server_name(&self) -> &'static str {
         "gopls"
     }
-    fn binary_name(&self) -> &str {
+    fn binary_name(&self) -> &'static str {
         "gopls"
     }
-    fn language_id(&self) -> &str {
+    fn language_id(&self) -> &'static str {
         "go"
     }
     fn cached_binary_name(&self) -> String {
@@ -218,13 +219,13 @@ impl LspServerConfig for GoplsConfig {
 pub struct JdtlsConfig;
 
 impl LspServerConfig for JdtlsConfig {
-    fn server_name(&self) -> &str {
+    fn server_name(&self) -> &'static str {
         "jdtls"
     }
-    fn binary_name(&self) -> &str {
+    fn binary_name(&self) -> &'static str {
         "jdtls"
     }
-    fn language_id(&self) -> &str {
+    fn language_id(&self) -> &'static str {
         "java"
     }
     fn cached_binary_name(&self) -> String {
@@ -247,7 +248,7 @@ impl LspServerConfig for JdtlsConfig {
 
 // ── LspClient (was LspAnalyzer) ───────────────────────────────
 
-/// Internal mutable state for LspClient, wrapped in RefCell for interior mutability.
+/// Internal mutable state for `LspClient`, wrapped in `RefCell` for interior mutability.
 struct LspClientInner {
     process: Option<Child>,
     stdin_writer: Option<BufWriter<ChildStdin>>,
@@ -346,22 +347,96 @@ impl LspClient {
 
     // ── Binary location ─────────────────────────────────────────
 
+    fn find_binary_on_path(binary_name: &str) -> Option<PathBuf> {
+        let output = Command::new("which").arg(binary_name).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!path.is_empty()).then(|| PathBuf::from(path))
+    }
+
+    fn find_go_binary(config: &dyn LspServerConfig) -> Option<PathBuf> {
+        let candidate_dirs = [
+            std::env::var("GOBIN").ok().map(PathBuf::from),
+            std::env::var("GOPATH")
+                .ok()
+                .map(|go_path| PathBuf::from(go_path).join("bin")),
+            Command::new("go")
+                .args(["env", "GOPATH"])
+                .output()
+                .ok()
+                .map(|output| {
+                    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()).join("bin")
+                }),
+            Command::new("go")
+                .args(["env", "GOBIN"])
+                .output()
+                .ok()
+                .and_then(|output| {
+                    let directory = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    (!directory.is_empty()).then(|| PathBuf::from(directory))
+                }),
+        ];
+        candidate_dirs.into_iter().flatten().find_map(|directory| {
+            let candidate = directory.join(config.binary_name());
+            candidate.is_file().then_some(candidate)
+        })
+    }
+
+    fn install_server(config: &dyn LspServerConfig) -> Result<PathBuf, String> {
+        let (command, arguments) = config.install_command().ok_or_else(|| {
+            format!(
+                "{} not found on PATH and no download URL or install command configured",
+                config.server_name()
+            )
+        })?;
+        eprintln!(
+            "[scope-engine/lsp] attempting to install {} via: {} {}",
+            config.server_name(),
+            command,
+            arguments.join(" ")
+        );
+        let output = Command::new(&command)
+            .args(&arguments)
+            .output()
+            .map_err(|error| {
+                format!(
+                    "failed to run install command '{} {}': {error}",
+                    command,
+                    arguments.join(" ")
+                )
+            })?;
+        if !output.status.success() {
+            return Err(format!(
+                "install command for {} failed: {}",
+                config.server_name(),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        if let Some(path) = Self::find_binary_on_path(config.binary_name()) {
+            return Ok(path);
+        }
+        if let Some(path) = Self::find_go_binary(config) {
+            return Ok(path);
+        }
+        Err(format!(
+            "{} was installed via '{}' but could not be found on PATH, GOPATH/bin, or GOBIN",
+            config.server_name(),
+            command
+        ))
+    }
+
     fn locate_or_download(config: &dyn LspServerConfig) -> Result<PathBuf, String> {
-        // 1. Check PATH
-        if let Ok(output) = Command::new("which").arg(config.binary_name()).output()
-            && output.status.success()
-        {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                eprintln!(
-                    "[scope-engine/lsp] found {} on PATH: {path}",
-                    config.server_name()
-                );
-                return Ok(PathBuf::from(path));
-            }
+        if let Some(path) = Self::find_binary_on_path(config.binary_name()) {
+            eprintln!(
+                "[scope-engine/lsp] found {} on PATH: {}",
+                config.server_name(),
+                path.display()
+            );
+            return Ok(path);
         }
 
-        // 2. Check cache
         let cache_dir = Self::cache_dir()?;
         let cached = cache_dir.join(config.cached_binary_name());
         if cached.is_file() {
@@ -373,98 +448,10 @@ impl LspClient {
             return Ok(cached);
         }
 
-        // 3. Download (if available)
-        match config.download_url() {
-            Some(url) => Self::download_binary(&cache_dir, &cached, &url, config.server_name()),
-            None => {
-                // 3b. Try install command (e.g. "go install golang.org/x/tools/gopls@v0.x")
-                if let Some((cmd, args)) = config.install_command() {
-                    eprintln!(
-                        "[scope-engine/lsp] attempting to install {} via: {} {}",
-                        config.server_name(),
-                        cmd,
-                        args.join(" ")
-                    );
-                    let install_output = Command::new(&cmd).args(&args).output().map_err(|e| {
-                        format!(
-                            "failed to run install command '{} {}': {e}",
-                            cmd,
-                            args.join(" ")
-                        )
-                    })?;
-                    if !install_output.status.success() {
-                        let stderr = String::from_utf8_lossy(&install_output.stderr);
-                        return Err(format!(
-                            "install command for {} failed: {stderr}",
-                            config.server_name()
-                        ));
-                    }
-                    // Re-check PATH after installation
-                    if let Ok(output) = Command::new("which").arg(config.binary_name()).output()
-                        && output.status.success()
-                    {
-                        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        if !path.is_empty() {
-                            eprintln!(
-                                "[scope-engine/lsp] installed {} and found on PATH: {path}",
-                                config.server_name()
-                            );
-                            return Ok(PathBuf::from(path));
-                        }
-                    }
-                    // If not on PATH, check GOPATH/bin and GOBIN (go install puts binaries there)
-                    let go_bin_dirs: Vec<PathBuf> = [
-                        std::env::var("GOBIN").ok().map(PathBuf::from),
-                        std::env::var("GOPATH")
-                            .ok()
-                            .map(|g| PathBuf::from(g).join("bin")),
-                        Command::new("go")
-                            .args(["env", "GOPATH"])
-                            .output()
-                            .ok()
-                            .map(|o| {
-                                PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("bin")
-                            }),
-                        Command::new("go")
-                            .args(["env", "GOBIN"])
-                            .output()
-                            .ok()
-                            .and_then(|o| {
-                                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                                if s.is_empty() {
-                                    None
-                                } else {
-                                    Some(PathBuf::from(s))
-                                }
-                            }),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .collect();
-                    for dir in go_bin_dirs {
-                        let candidate = dir.join(config.binary_name());
-                        if candidate.is_file() {
-                            eprintln!(
-                                "[scope-engine/lsp] installed {} and found at: {}",
-                                config.server_name(),
-                                candidate.display()
-                            );
-                            return Ok(candidate);
-                        }
-                    }
-                    Err(format!(
-                        "{} was installed via '{}' but could not be found on PATH, GOPATH/bin, or GOBIN",
-                        config.server_name(),
-                        cmd
-                    ))
-                } else {
-                    Err(format!(
-                        "{} not found on PATH and no download URL or install command configured",
-                        config.server_name()
-                    ))
-                }
-            }
-        }
+        config.download_url().map_or_else(
+            || Self::install_server(config),
+            |url| Self::download_binary(&cache_dir, &cached, &url, config.server_name()),
+        )
     }
 
     fn cache_dir() -> Result<PathBuf, String> {
@@ -486,7 +473,7 @@ impl LspClient {
         eprintln!("[scope-engine/lsp] downloading {name}...");
         let tmp = cache_dir.join("download.tmp");
         let mut resp = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_mins(2))
             .build()
             .map_err(|e| format!("HTTP client build failed: {e}"))?
             .get(url)
@@ -586,7 +573,7 @@ impl LspClient {
             &response_receiver,
             0,
             "initialize",
-            init_params,
+            &init_params,
             LSP_INITIALIZE_TIMEOUT,
         )
         .map_err(|e| {
@@ -600,7 +587,7 @@ impl LspClient {
         }
 
         // ── initialized notification ────────────────────────────
-        Self::send_notification(&mut writer, "initialized", serde_json::json!({})).map_err(
+        Self::send_notification(&mut writer, "initialized", &serde_json::json!({})).map_err(
             |e| {
                 let _ = child.kill();
                 format!("initialized notification failed: {e}")
@@ -636,7 +623,7 @@ impl LspClient {
             }
         });
         if let Some(ref mut writer) = inner.stdin_writer {
-            let _ = Self::send_notification(writer, "textDocument/didOpen", params);
+            let _ = Self::send_notification(writer, "textDocument/didOpen", &params);
         }
     }
 
@@ -651,7 +638,7 @@ impl LspClient {
             "contentChanges": [{ "text": text }]
         });
         if let Some(ref mut writer) = inner.stdin_writer {
-            let _ = Self::send_notification(writer, "textDocument/didChange", params);
+            let _ = Self::send_notification(writer, "textDocument/didChange", &params);
         }
     }
 
@@ -665,11 +652,97 @@ impl LspClient {
             "textDocument": { "uri": uri }
         });
         if let Some(ref mut writer) = inner.stdin_writer {
-            let _ = Self::send_notification(writer, "textDocument/didClose", params);
+            let _ = Self::send_notification(writer, "textDocument/didClose", &params);
         }
     }
 
     // ── LSP requests ──────────────────────────────────────────
+
+    fn request_references(
+        inner: &mut LspClientInner,
+        params: &serde_json::Value,
+    ) -> Option<Vec<serde_json::Value>> {
+        let (Some(writer), Some(response_receiver)) =
+            (&mut inner.stdin_writer, &inner.response_receiver)
+        else {
+            return None;
+        };
+        let id = inner.next_id;
+        inner.next_id += 1;
+        let response = Self::send_request_raw(
+            writer,
+            response_receiver,
+            id,
+            "textDocument/references",
+            params,
+            LSP_REQUEST_TIMEOUT,
+        )
+        .map_err(|error| {
+            eprintln!("[scope-engine/lsp] textDocument/references failed: {error}");
+            error
+        })
+        .ok()?;
+        if let Some(error) = response.get("error") {
+            eprintln!("[scope-engine/lsp] textDocument/references error: {error}");
+            return Some(Vec::new());
+        }
+        response
+            .get("result")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+    }
+
+    fn reference_results_from_locations(
+        locations: &[serde_json::Value],
+        project_root: &Path,
+    ) -> Vec<PropagationResult> {
+        let analyzer = TreeSitterAnalyzer::new();
+        locations
+            .iter()
+            .filter_map(|location| {
+                Self::reference_result_from_location(&analyzer, location, project_root)
+            })
+            .collect()
+    }
+
+    fn reference_result_from_location(
+        analyzer: &TreeSitterAnalyzer,
+        location: &serde_json::Value,
+        project_root: &Path,
+    ) -> Option<PropagationResult> {
+        let uri = location.get("uri")?.as_str()?;
+        let line = location
+            .get("range")?
+            .get("start")?
+            .get("line")?
+            .as_u64()
+            .and_then(|line| usize::try_from(line).ok())?;
+        let path = uri_to_path(uri);
+        if analyzer.is_import_only_reference(&path, line + 1) {
+            return None;
+        }
+        let relative_path = path.strip_prefix(project_root).ok().map_or_else(
+            || path.to_string_lossy().to_string(),
+            |relative| relative.to_string_lossy().to_string(),
+        );
+        let context_line = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| content.lines().nth(line).map(str::to_string))
+            .unwrap_or_default();
+        let selector = analyzer
+            .find_containing_symbol(&path, line + 1, project_root)
+            .unwrap_or_else(|| format!("{relative_path}::line {}", line + 1));
+        let reference = (selector.clone(), line + 1, context_line);
+        Some(PropagationResult {
+            selector,
+            reason: format!("LSP reference found at {relative_path}:{}", line + 1),
+            source: PropagationSource::Lsp,
+            lsp_references: Some(vec![reference]),
+            diff_summary: None,
+            file_snippet: None,
+            project_files: None,
+        })
+    }
 
     pub fn find_references_for_symbol(
         &self,
@@ -680,135 +753,30 @@ impl LspClient {
     ) -> Vec<PropagationResult> {
         let mut guard = self.inner.borrow_mut();
         let inner = &mut *guard;
-
         if !inner.initialized {
-            return vec![];
+            return Vec::new();
         }
-
-        let uri = path_to_file_uri(file_path);
         let params = serde_json::json!({
-            "textDocument": { "uri": uri },
+            "textDocument": { "uri": path_to_file_uri(file_path) },
             "position": { "line": line.saturating_sub(1), "character": character },
             "context": { "includeDeclaration": false }
         });
-
-        let (writer, response_receiver) = match (&mut inner.stdin_writer, &inner.response_receiver)
-        {
-            (Some(writer), Some(response_receiver)) => (writer, response_receiver),
-            _ => return vec![],
+        let Some(locations) = Self::request_references(inner, &params) else {
+            Self::disable(inner);
+            return Vec::new();
         };
-
-        let id = inner.next_id;
-        inner.next_id += 1;
-
-        let resp = match Self::send_request_raw(
-            writer,
-            response_receiver,
-            id,
-            "textDocument/references",
-            params.clone(),
-            LSP_REQUEST_TIMEOUT,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[scope-engine/lsp] textDocument/references failed: {e}");
-                Self::disable(inner);
-                return vec![];
-            }
+        let locations = if locations.is_empty() {
+            eprintln!("[scope-engine/lsp] references returned empty, waiting and retrying...");
+            std::thread::sleep(Duration::from_secs(2));
+            Self::request_references(inner, &params).unwrap_or_default()
+        } else {
+            locations
         };
-
-        if let Some(err) = resp.get("error") {
-            eprintln!("[scope-engine/lsp] textDocument/references error: {err}");
-            return vec![];
-        }
-
-        let locations = match resp.get("result") {
-            Some(serde_json::Value::Array(arr)) => arr.clone(),
-            Some(serde_json::Value::Null) | None => {
-                eprintln!("[scope-engine/lsp] references returned null, waiting and retrying...");
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                let retry_id = inner.next_id;
-                inner.next_id += 1;
-                let retry_resp = match Self::send_request_raw(
-                    writer,
-                    response_receiver,
-                    retry_id,
-                    "textDocument/references",
-                    params,
-                    LSP_REQUEST_TIMEOUT,
-                ) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!(
-                            "[scope-engine/lsp] retry textDocument/references also failed: {e}"
-                        );
-                        Self::disable(inner);
-                        return vec![];
-                    }
-                };
-                if let Some(err) = retry_resp.get("error") {
-                    eprintln!("[scope-engine/lsp] retry textDocument/references error: {err}");
-                    return vec![];
-                }
-                match retry_resp.get("result") {
-                    Some(serde_json::Value::Array(arr)) => arr.clone(),
-                    _ => return vec![],
-                }
-            }
-            _ => return vec![],
-        };
-
         eprintln!(
             "[scope-engine/lsp] found {} reference locations",
             locations.len()
         );
-
-        let ts = TreeSitterAnalyzer::new();
-        let mut results = Vec::new();
-
-        for loc in locations {
-            let loc_uri = loc.get("uri").and_then(|v| v.as_str()).unwrap_or("");
-            let loc_line = loc
-                .get("range")
-                .and_then(|r| r.get("start"))
-                .and_then(|s| s.get("line"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-
-            let loc_path = uri_to_path(loc_uri);
-            let rel_path = loc_path
-                .strip_prefix(project_root)
-                .ok()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| loc_path.to_string_lossy().to_string());
-
-            let context_line = std::fs::read_to_string(&loc_path)
-                .ok()
-                .and_then(|content| content.lines().nth(loc_line).map(|l| l.to_string()))
-                .unwrap_or_default();
-
-            if ts.is_import_only_reference(&loc_path, loc_line + 1) {
-                continue;
-            }
-
-            let selector = ts
-                .find_containing_symbol(&loc_path, loc_line + 1, project_root)
-                .unwrap_or_else(|| format!("{rel_path}::line {}", loc_line + 1));
-
-            let lsp_ref = (selector.clone(), loc_line + 1, context_line.clone());
-
-            results.push(PropagationResult {
-                selector,
-                reason: format!("LSP reference found at {}:{}", rel_path, loc_line + 1),
-                source: PropagationSource::Lsp,
-                lsp_references: Some(vec![lsp_ref]),
-                diff_summary: None,
-                file_snippet: None,
-                project_files: None,
-            });
-        }
-
-        results
+        Self::reference_results_from_locations(&locations, project_root)
     }
 
     // ── JSON-RPC transport ─────────────────────────────────────
@@ -818,7 +786,7 @@ impl LspClient {
         response_receiver: &Receiver<LspResponse>,
         id: u64,
         method: &str,
-        params: serde_json::Value,
+        params: &serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, String> {
         let request = serde_json::json!({
@@ -834,7 +802,7 @@ impl LspClient {
     fn send_notification(
         writer: &mut BufWriter<ChildStdin>,
         method: &str,
-        params: serde_json::Value,
+        params: &serde_json::Value,
     ) -> Result<(), String> {
         let notification = serde_json::json!({
             "jsonrpc": "2.0",
@@ -912,7 +880,7 @@ impl LspClient {
                 Ok(Ok(message)) => {
                     let is_response =
                         message.get("result").is_some() || message.get("error").is_some();
-                    if message.get("id").and_then(|value| value.as_u64()) == Some(expected_id)
+                    if message.get("id").and_then(serde_json::Value::as_u64) == Some(expected_id)
                         && is_response
                     {
                         return Ok(message);
@@ -958,10 +926,10 @@ impl Drop for LspClient {
                 response_receiver,
                 inner.next_id,
                 "shutdown",
-                serde_json::json!(null),
+                &serde_json::json!(null),
                 LSP_SHUTDOWN_TIMEOUT,
             );
-            let _ = Self::send_notification(writer, "exit", serde_json::json!(null));
+            let _ = Self::send_notification(writer, "exit", &serde_json::json!(null));
         }
         Self::disable(inner);
         eprintln!("[scope-engine/lsp] language server shut down");
@@ -1029,9 +997,11 @@ fn percent_encode_file_path(path: &str) -> String {
     for &byte in path.as_bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
-                encoded.push(byte as char)
+                encoded.push(byte as char);
             }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
+            _ => {
+                write!(encoded, "%{byte:02X}").expect("writing to String cannot fail");
+            }
         }
     }
     encoded
@@ -1056,7 +1026,7 @@ fn percent_decode_file_path(path: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
-fn hex_value(byte: u8) -> Option<u8> {
+const fn hex_value(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),
@@ -1093,19 +1063,19 @@ impl Analyzer for LspClient {
         character: usize,
         project_root: &Path,
     ) -> Vec<PropagationResult> {
-        LspClient::find_references_for_symbol(self, file_path, line, character, project_root)
+        Self::find_references_for_symbol(self, file_path, line, character, project_root)
     }
 
     fn notify_did_open(&self, file_path: &Path, text: &str) {
-        LspClient::notify_did_open(self, file_path, text);
+        Self::notify_did_open(self, file_path, text);
     }
 
     fn notify_did_change(&self, file_path: &Path, version: i32, text: &str) {
-        LspClient::notify_did_change(self, file_path, version, text);
+        Self::notify_did_change(self, file_path, version, text);
     }
 
     fn notify_did_close(&self, file_path: &Path) {
-        LspClient::notify_did_close(self, file_path);
+        Self::notify_did_close(self, file_path);
     }
 
     fn is_initialized(&self) -> bool {
@@ -1115,7 +1085,7 @@ impl Analyzer for LspClient {
 
 // ── Backward-compatible type alias ────────────────────────────
 
-/// LspAnalyzer is a type alias for LspClient, preserving API compatibility.
+/// `LspAnalyzer` is a type alias for `LspClient`, preserving API compatibility.
 pub type LspAnalyzer = LspClient;
 
 #[cfg(test)]

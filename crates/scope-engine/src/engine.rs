@@ -1,9 +1,15 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::analyzer::Analyzer;
-use crate::api::*;
+use crate::api::{
+    EditCodeInput, EditCodeOutput, OpenProjectOutput, ReadCodeInput, ReadCodeMode, ReadCodeOutput,
+    ReviewBatch, SearchCase, SearchCodeInput, SearchCodeOutput, SearchHit, SearchMode,
+    SourceResponsibility, SourceResponsibilityInput,
+};
 use crate::language::LanguageRegistry;
 use crate::lsp::TsJsConfig;
 use crate::lsp::{
@@ -150,6 +156,11 @@ fn open_existing_source_files_for_lsp(lsp: &dyn Analyzer, root: &Path, lsp_lang:
     }
 }
 
+/// Opens `project_root` and initializes its detected language server.
+///
+/// # Errors
+///
+/// Returns an error if the shared analyzer lock is poisoned.
 pub fn open_project(
     project_root: &Path,
     current_project_root: Option<&Path>,
@@ -170,6 +181,7 @@ pub fn open_project(
             .lock()
             .map_err(|_| "lock poisoned".to_string())?;
         *lsp_guard = None;
+        drop(lsp_guard);
         return Ok(OpenProjectOutput {
             status: "opened".to_string(),
             project_root: project_root.to_string_lossy().into_owned(),
@@ -204,6 +216,11 @@ pub fn open_project(
     })
 }
 
+/// Searches project source files using the supplied filters.
+///
+/// # Errors
+///
+/// Returns an error for invalid paths, patterns, search types, or regular expressions.
 pub fn search_code(
     project_root: &Path,
     params: &SearchCodeInput,
@@ -218,6 +235,11 @@ pub fn search_code(
     Ok(SearchCodeOutput { matches })
 }
 
+/// Determines whether a path belongs to source this engine can analyze.
+///
+/// # Errors
+///
+/// Returns an error if the path is invalid or escapes the project root.
 pub fn is_responsible_source(
     project_root: &Path,
     params: &SourceResponsibilityInput,
@@ -270,7 +292,7 @@ fn search_project_matches(
     let filters = SearchFileFilters::from_input(params)?;
     let mut matches = Vec::new();
 
-    for entry in project_files(project_root, target, &filters)? {
+    for entry in project_files(project_root, target, &filters) {
         let path = entry.path();
         let relative = relative_file_path(project_root, path);
         if !filters.matches(&relative, path) {
@@ -343,9 +365,9 @@ impl SearchFileFilters {
             exclude: build_optional_glob_set(&params.exclude)?,
             type_include_exts: build_optional_type_exts(&params.types)?,
             type_exclude_exts: build_optional_type_exts(&params.type_not)?.unwrap_or_default(),
-            hidden: params.hidden,
+            hidden: params.hidden.is_enabled(),
             respect_ignore: params.respect_ignore,
-            follow: params.follow,
+            follow: params.follow.is_enabled(),
         })
     }
 
@@ -363,7 +385,7 @@ impl SearchFileFilters {
         let ext = path
             .extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase());
+            .map(str::to_ascii_lowercase);
         if let Some(type_include_exts) = self.type_include_exts.as_ref()
             && !ext
                 .as_ref()
@@ -381,18 +403,7 @@ impl SearchFileFilters {
     }
 }
 
-fn project_files(
-    project_root: &Path,
-    target: Option<&str>,
-    filters: &SearchFileFilters,
-) -> Result<Vec<DirEntry>, String> {
-    let root = project_root.to_path_buf();
-    let walk_root = match target {
-        Some(target) => root.join(target),
-        None => root.clone(),
-    };
-
-    let mut entries = Vec::new();
+fn configure_project_walk(walk_root: &Path, filters: &SearchFileFilters) -> WalkBuilder {
     let mut builder = WalkBuilder::new(walk_root);
     builder
         .hidden(!filters.hidden)
@@ -406,24 +417,33 @@ fn project_files(
             .ignore(false)
             .parents(false);
     }
+    builder
+}
 
-    for entry in builder.build() {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        if !entry
-            .file_type()
-            .is_some_and(|file_type| file_type.is_file())
-        {
-            continue;
-        }
-        entries.push(entry);
-    }
+fn collect_project_files(builder: &WalkBuilder) -> Vec<DirEntry> {
+    builder
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_file())
+        })
+        .collect()
+}
 
+fn project_files(
+    project_root: &Path,
+    target: Option<&str>,
+    filters: &SearchFileFilters,
+) -> Vec<DirEntry> {
+    let root = project_root.to_path_buf();
+    let walk_root = target.map_or_else(|| root.clone(), |target| root.join(target));
+    let mut entries = collect_project_files(&configure_project_walk(&walk_root, filters));
     entries.sort_by(|left, right| {
         relative_file_path(&root, left.path()).cmp(&relative_file_path(&root, right.path()))
     });
-    Ok(entries)
+    entries
 }
 
 fn build_optional_glob_set(patterns: &[String]) -> Result<Option<GlobSet>, String> {
@@ -502,19 +522,18 @@ fn relative_file_path(project_root: &Path, path: &Path) -> String {
     normalized_path
         .strip_prefix(&normalized_root)
         .ok()
-        .map(|p| normalize_relative_path(&p.to_string_lossy()))
-        .unwrap_or_else(|| normalize_relative_path(&path.to_string_lossy()))
+        .map_or_else(
+            || normalize_relative_path(&path.to_string_lossy()),
+            |p| normalize_relative_path(&p.to_string_lossy()),
+        )
 }
 
 fn normalize_for_comparison(p: &Path) -> PathBuf {
     // Strip Windows extended-length prefix \\?\ for comparison; it is a
     // syntactic prefix that does not change the logical path.
     let s = p.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\") {
-        PathBuf::from(rest)
-    } else {
-        p.to_path_buf()
-    }
+    s.strip_prefix(r"\\?\")
+        .map_or_else(|| p.to_path_buf(), PathBuf::from)
 }
 
 fn project_relative_arg(root: &Path, path: Option<&str>) -> Result<Option<String>, String> {
@@ -572,6 +591,11 @@ fn read_line_range(content: &str, start_line: usize, end_line: usize) -> String 
     snippet
 }
 
+/// Reads source selected by a line-hash anchor or symbol selector.
+///
+/// # Errors
+///
+/// Returns an error if the path, anchor, selector, or requested range is invalid.
 pub fn read_code(project_root: &Path, params: &ReadCodeInput) -> Result<ReadCodeOutput, String> {
     let relative = project_relative_arg(project_root, Some(&params.path))?
         .ok_or_else(|| "path is required".to_string())?;
@@ -674,6 +698,11 @@ fn prefix_lines_with_hash(content: &str, start_line: usize) -> String {
         }
 }
 
+/// Applies line-hash anchored edits and records propagation review events.
+///
+/// # Errors
+///
+/// Returns an error if an edit is invalid or cannot be applied.
 pub fn edit_code(
     project_root: &Path,
     params: &EditCodeInput,
@@ -696,6 +725,7 @@ pub fn edit_code(
     }
 }
 
+#[must_use]
 pub fn config_hints() -> serde_json::Value {
     use crate::language::LanguageRegistry;
     use crate::lsp::{
@@ -730,8 +760,7 @@ pub fn config_hints() -> serde_json::Value {
         let binary_found = std::process::Command::new("which")
             .arg(cfg.binary_name())
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+            .is_ok_and(|o| o.status.success());
 
         let mut lang_entry = serde_json::json!({
             "language": cfg.language_id(),
@@ -761,6 +790,11 @@ pub fn config_hints() -> serde_json::Value {
     })
 }
 
+/// Acknowledges and returns pending propagation review events.
+///
+/// # Errors
+///
+/// Returns an error if the propagation-state lock is poisoned.
 pub fn ack_next_events(
     propagation_state: &Mutex<PropagationState>,
     limit: Option<usize>,
@@ -775,6 +809,7 @@ pub fn ack_next_events(
     let review = reviews.first().cloned();
     let returned = reviews.len();
     let remaining = state.pending_count();
+    drop(state);
     Ok(ReviewBatch {
         review,
         reviews,
@@ -786,6 +821,7 @@ pub fn ack_next_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{PropagationResult, PropagationSource, ReviewEvent};
     use crate::state::PropagationState;
     use std::sync::Mutex;
 
@@ -1054,7 +1090,7 @@ mod tests {
                 path: None,
                 include: vec!["*.rs".to_string()],
                 exclude: vec!["src/**".to_string()],
-                hidden: true,
+                hidden: true.into(),
                 respect_ignore: false,
                 ..SearchCodeInput::default()
             },
@@ -1228,7 +1264,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut source = String::new();
         for line in 1..=40 {
-            source.push_str(&format!("let value_{line} = {line};\n"));
+            writeln!(source, "let value_{line} = {line};").expect("writing to String cannot fail");
         }
         std::fs::write(dir.path().join("lib.rs"), source).unwrap();
         let anchor = format!("20#{}", patch::line_hash("let value_20 = 20;"));
@@ -1352,7 +1388,7 @@ mod tests {
             ReviewEvent::KnownReferences {
                 modified_symbol, ..
             } => assert_eq!(modified_symbol, "src/c.rs::fn baz"),
-            _ => panic!("expected KnownReferences review"),
+            ReviewEvent::InvestigateImpact { .. } => panic!("expected KnownReferences review"),
         }
     }
 

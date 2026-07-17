@@ -1,5 +1,31 @@
-use super::model_driver::{is_permanent_model_request_error, run_agent_turn_with_retry};
-use super::*;
+use super::model_driver::run_agent_turn_with_retry;
+use super::{
+    AfterClaimContextInput, AgentContent, AgentContentPart, AgentLoopStepExecution,
+    AgentLoopStepOutput, AgentMessage, AgentToolCall, AgentTurnRequest, AppId,
+    AppToolExecutionContext, ClaimedRuntimeInput, Context, DashboardActivityEvent,
+    DashboardActivityHistoryStore, DashboardActivityHistoryWindow, DashboardState, Duration,
+    EpisodeActionRecord, EventPayload, EventView, HistoryMessage,
+    MID_TURN_COMPACTION_MAX_RECOVERIES, PreTurnState, RUNTIME_EVENT_CLAIM_BATCH_SIZE,
+    RUNTIME_HISTORY_MIN_MESSAGES, RUNTIME_HISTORY_SUMMARY_MAX_TOKENS,
+    RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS, Result, RuntimeErrorActionContext, RuntimeErrorCase,
+    RuntimeErrorCaseParts, RuntimeErrorKind, RuntimeErrorObservation, RuntimeErrorRuntimeContext,
+    RuntimeErrorTaskContext, RuntimeStatusLevel, RuntimeTurnPhase, SessionActivityEvent,
+    TelegramLiveDraftSession, TextActivityDescriptor, TokenEstimateBaseline, ToolCallActivityEvent,
+    ToolExecutionResult, activity_event_from_tool_call_activity_event,
+    afterclaim_context_input_for_claimed_inputs, append_runtime_error_case, apply_activity_event,
+    assistant_activity_cell, build_afterclaim_context_text, build_preturn_context_text,
+    build_runtime_request_envelope, build_runtime_tool_specs, build_tool_call_activity_event,
+    claim_pending_runtime_inputs, claimed_events_are_terminal,
+    claimed_events_require_explicit_completion, claimed_runtime_input_fingerprint,
+    compact_preserved_body_lines, execute_agent_tool_call, execute_pre_turn_runtime_compaction,
+    finalize_claimed_runtime_events, handle_model_request_failure, handle_runtime_overflow,
+    is_context_budget_exceeded, json, maybe_compact_runtime_messages, maybe_record_skill_read,
+    maybe_start_telegram_live_draft_session, miette, record_runtime_history_messages,
+    record_skill_run_evidence, render_activity_from_messages, render_telegram_tool_result_status,
+    runtime_request_budget_limits, runtime_work_origin, set_runtime_status,
+    set_runtime_status_only, summarize_action_from_tool_call, thinking_activity_cell,
+    user_activity_cell_from_event,
+};
 use crate::memory::PlanCompactionInput;
 use crate::reasoning::prompt_parts::compact_horizontal_whitespace;
 use std::path::{Path, PathBuf};
@@ -254,7 +280,7 @@ fn coding_project_root_from_lines(lines: &[String]) -> Option<PathBuf> {
     })
 }
 
-pub(crate) async fn execute_agent_loop_step(
+pub async fn execute_agent_loop_step(
     context: &mut Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
 ) -> AgentLoopStepExecution {
@@ -266,7 +292,7 @@ pub(crate) async fn execute_agent_loop_step(
         .iter()
         .map(|input| input.event_id.to_string())
         .collect::<Vec<_>>();
-    context.claimed_event_ids = claimed_event_ids.clone();
+    context.claimed_event_ids.clone_from(&claimed_event_ids);
     append_claimed_input_activity_cells(context, tx, &claimed_inputs);
 
     let preflight_timeout = Duration::from_secs(RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS);
@@ -302,48 +328,46 @@ pub(crate) async fn execute_agent_loop_step(
         "runtime preflight stage started: {}",
         RuntimeTurnPhase::PreflightPreTurnContext.label()
     );
-    let preturn_state =
-        match tokio::time::timeout(preflight_timeout, PreTurnState::new(context)).await {
-            Ok(preturn_state) => {
-                tracing::debug!(
-                    elapsed_ms = preturn_started_at.elapsed().as_millis(),
-                    "runtime preflight stage completed: {}",
-                    RuntimeTurnPhase::PreflightPreTurnContext.label()
-                );
-                preturn_state
-            }
-            Err(_) => {
-                let err = miette!(
-                    "runtime preflight stage `{}` timed out after {}s",
-                    RuntimeTurnPhase::PreflightPreTurnContext.label(),
-                    preflight_timeout.as_secs()
-                );
-                set_runtime_status(
-                    tx,
-                    RuntimeStatusLevel::Error,
-                    format!(
-                        "runtime turn preflight timeout: {}",
-                        RuntimeTurnPhase::PreflightPreTurnContext.label()
-                    ),
-                );
-                tracing::error!(
-                    elapsed_ms = preturn_started_at.elapsed().as_millis(),
-                    timeout_secs = preflight_timeout.as_secs(),
-                    "runtime preflight stage timed out: {}",
-                    RuntimeTurnPhase::PreflightPreTurnContext.label()
-                );
-                return abort_runtime_turn_before_model(
-                    context,
-                    RuntimeTurnAbort {
-                        live_draft_session,
-                        claimed_event_ids: &claimed_event_ids,
-                        observation: format!("runtime preflight failed: {err}"),
-                        description: "Failed to build preturn context.".to_string(),
-                    },
-                )
-                .await;
-            }
-        };
+    let preturn_state = if let Ok(preturn_state) =
+        tokio::time::timeout(preflight_timeout, async { PreTurnState::new(context) }).await
+    {
+        tracing::debug!(
+            elapsed_ms = preturn_started_at.elapsed().as_millis(),
+            "runtime preflight stage completed: {}",
+            RuntimeTurnPhase::PreflightPreTurnContext.label()
+        );
+        preturn_state
+    } else {
+        let err = miette!(
+            "runtime preflight stage `{}` timed out after {}s",
+            RuntimeTurnPhase::PreflightPreTurnContext.label(),
+            preflight_timeout.as_secs()
+        );
+        set_runtime_status(
+            tx,
+            RuntimeStatusLevel::Error,
+            format!(
+                "runtime turn preflight timeout: {}",
+                RuntimeTurnPhase::PreflightPreTurnContext.label()
+            ),
+        );
+        tracing::error!(
+            elapsed_ms = preturn_started_at.elapsed().as_millis(),
+            timeout_secs = preflight_timeout.as_secs(),
+            "runtime preflight stage timed out: {}",
+            RuntimeTurnPhase::PreflightPreTurnContext.label()
+        );
+        return abort_runtime_turn_before_model(
+            context,
+            RuntimeTurnAbort {
+                live_draft_session,
+                claimed_event_ids: &claimed_event_ids,
+                observation: format!("runtime preflight failed: {err}"),
+                description: "Failed to build preturn context.".to_string(),
+            },
+        )
+        .await;
+    };
     let preturn_context_text = build_preturn_context_text(context, &preturn_state);
     let runtime_context_text = if afterclaim_context_input.is_empty() {
         preturn_context_text.clone()
@@ -356,7 +380,9 @@ pub(crate) async fn execute_agent_loop_step(
     };
     if let Some(tx) = tx {
         tx.send_modify(|state| {
-            state.preturn_context_output = preturn_context_text.clone();
+            state
+                .preturn_context_output
+                .clone_from(&preturn_context_text);
         });
     }
     let request_envelope = build_runtime_request_envelope(context);
@@ -380,8 +406,7 @@ pub(crate) async fn execute_agent_loop_step(
     }
     let runtime_conversation_summary_budget =
         RUNTIME_HISTORY_SUMMARY_MAX_TOKENS.min(runtime_conversation_budget);
-    let mut pre_turn_compacted = false;
-    if let Some(plan) = context
+    let pre_turn_compacted = if let Some(plan) = context
         .memory
         .plan_runtime_conversation_compaction_for_request(PlanCompactionInput {
             envelope: &request_envelope,
@@ -391,8 +416,9 @@ pub(crate) async fn execute_agent_loop_step(
             baseline: &context.token_estimate_baseline,
             min_messages: RUNTIME_HISTORY_MIN_MESSAGES,
             summary_max_tokens: runtime_conversation_summary_budget,
-        })
-    {
+        }) {
+        const COMPACTION_BACKOFF_TIMEOUTS_SECS: [u64; 3] = [180, 360, 600];
+
         enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightCompaction);
         let compaction_started_at = std::time::Instant::now();
         tracing::debug!(
@@ -401,7 +427,6 @@ pub(crate) async fn execute_agent_loop_step(
         );
         // Retry the main model with increasing request timeouts before aborting
         // the turn. No local history summary or trim is allowed on failure.
-        const COMPACTION_BACKOFF_TIMEOUTS_SECS: [u64; 3] = [180, 360, 600];
         let mut outcome = None;
         let mut failure = None;
         for (attempt, timeout_secs) in COMPACTION_BACKOFF_TIMEOUTS_SECS.iter().enumerate() {
@@ -486,11 +511,12 @@ pub(crate) async fn execute_agent_loop_step(
                 claimed_input_fingerprint.as_deref(),
             );
         }
-        context.token_estimate_baseline = TokenEstimateBaseline::default();
         context.delivered_root_instruction_fingerprint = None;
         context.visible_source_lines.clear();
-        pre_turn_compacted = true;
-    }
+        true
+    } else {
+        false
+    };
     let mut conversation_slice = context.memory.runtime_conversation_slice(
         runtime_conversation_budget,
         RUNTIME_HISTORY_MIN_MESSAGES,
@@ -593,13 +619,11 @@ pub(crate) async fn execute_agent_loop_step(
                                 tx,
                                 RuntimeStatusLevel::Warn,
                                 format!(
-                                    "Recovering from context overflow ({budget_recoveries}/{})",
-                                    MID_TURN_COMPACTION_MAX_RECOVERIES
+                                    "Recovering from context overflow ({budget_recoveries}/{MID_TURN_COMPACTION_MAX_RECOVERIES})"
                                 ),
                             );
                             break 'agent_loop runtime_context_compacted_output(format!(
-                                "runtime context compacted after context overflow recovery ({budget_recoveries}/{}); starting a new turn",
-                                MID_TURN_COMPACTION_MAX_RECOVERIES
+                                "runtime context compacted after context overflow recovery ({budget_recoveries}/{MID_TURN_COMPACTION_MAX_RECOVERIES}); starting a new turn"
                             ));
                         }
                         Ok(false) => {}
@@ -669,7 +693,8 @@ pub(crate) async fn execute_agent_loop_step(
                 }
                 if !is_overflow && !overflow_fuse_tripped {
                     let is_permanent_model_request =
-                        is_permanent_model_request_error(&err.to_string());
+                        !crate::core::should_retry_agent_turn_error(&err);
+                    let model_request_attempts = 1;
                     let model_request_fuse_tripped = handle_model_request_failure(
                         context,
                         claimed_input_fingerprint.as_deref(),
@@ -690,7 +715,7 @@ pub(crate) async fn execute_agent_loop_step(
                                 severity: 3,
                                 detected_by: "runtime_model_request",
                                 expected_behavior: "Model request should succeed or recover with adaptive retry. Repeated non-overflow failures should trip a fuse and terminate the claimed inputs instead of requeueing indefinitely.",
-                                actual_behavior: &format!("Model request failed repeatedly: {}", err),
+                                actual_behavior: &format!("Model request failed repeatedly: {err}"),
                                 evidence: &err.to_string(),
                                 recoverability: if is_permanent_model_request {
                                     "terminated_by_non_retryable_model_request"
@@ -700,7 +725,7 @@ pub(crate) async fn execute_agent_loop_step(
                                 retry_count: if is_permanent_model_request {
                                     0
                                 } else {
-                                    super::RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD
+                                    model_request_attempts
                                 },
                                 terminal_status: Some(if is_permanent_model_request {
                                     "non_retryable"
@@ -1004,8 +1029,8 @@ pub(crate) async fn execute_agent_loop_step(
             continue 'agent_loop;
         }
 
-        let content = response_assistant_content.unwrap_or_default();
-        let is_empty_reasoning = content.trim().is_empty()
+        let assistant_text = response_assistant_content.unwrap_or_default();
+        let is_empty_reasoning = assistant_text.trim().is_empty()
             && response_reasoning_content
                 .as_deref()
                 .is_some_and(|reasoning| !reasoning.trim().is_empty());
@@ -1076,11 +1101,11 @@ pub(crate) async fn execute_agent_loop_step(
                         detected_by: "runtime_follow_up_gate",
                         expected_behavior,
                         actual_behavior: "The model returned assistant text without the required completion tool.",
-                        evidence: &content,
+                        evidence: &assistant_text,
                         recoverability: "follow_up_message_inserted",
                         retry_count: 0,
                         terminal_status: None,
-                        assistant_text: Some(&content),
+                        assistant_text: Some(&assistant_text),
                         tool_calls: &[],
                         tool_results: &tool_results,
                         actions: &actions,
@@ -1088,14 +1113,15 @@ pub(crate) async fn execute_agent_loop_step(
                 )
                 .await;
             }
-            if !content.trim().is_empty() {
-                runtime_step.push_agent_message(AgentMessage::assistant(&content));
-                runtime_step.push_history_message(HistoryMessage::assistant(content.clone()));
+            if !assistant_text.trim().is_empty() {
+                runtime_step.push_agent_message(AgentMessage::assistant(&assistant_text));
+                runtime_step
+                    .push_history_message(HistoryMessage::assistant(assistant_text.clone()));
             }
             runtime_step.push_agent_message(AgentMessage::user(expected_behavior));
             continue 'agent_loop;
         }
-        let current_doing = content
+        let current_doing = assistant_text
             .lines()
             .next()
             .filter(|line| !line.trim().is_empty())
@@ -1107,20 +1133,20 @@ pub(crate) async fn execute_agent_loop_step(
         };
         actions.push(assistant_action);
         runtime_step.set_current_doing(current_doing.clone());
-        runtime_step.push_history_message(HistoryMessage::assistant(content.clone()));
-        if let Some(cell) = assistant_activity_cell(&content) {
+        runtime_step.push_history_message(HistoryMessage::assistant(assistant_text.clone()));
+        if let Some(cell) = assistant_activity_cell(&assistant_text) {
             append_committed_activity_cells(context, tx, vec![cell]);
         }
         break 'agent_loop AgentLoopStepOutput {
             observation: if tool_results.is_empty() {
-                content.clone()
+                assistant_text.clone()
             } else {
                 tool_results.join("\n")
             },
             description: if tool_results.is_empty() {
                 "The model returned assistant text without calling a tool.".to_string()
             } else {
-                content
+                assistant_text
             },
             current_doing,
             actions: actions.clone(),
@@ -1258,8 +1284,7 @@ async fn record_runtime_error_case(context: &Context, input: RuntimeErrorRecordI
 fn classify_tool_runtime_error(tool_name: &str, error_text: &str) -> RuntimeErrorKind {
     let tool_name = tool_name
         .split_once(crate::app::AppId::TOOL_NAME_SEPARATOR)
-        .map(|(_, app_tool_name)| app_tool_name)
-        .unwrap_or(tool_name);
+        .map_or(tool_name, |(_, app_tool_name)| app_tool_name);
     let lower = error_text.to_ascii_lowercase();
     if tool_name == "update_plan"
         || lower.contains("update_plan must contain")
@@ -1367,7 +1392,7 @@ fn compact_runtime_error_text(text: &str, max_chars: usize) -> String {
     value
 }
 
-pub(crate) fn append_workflow_activity_event(
+pub fn append_workflow_activity_event(
     context: &Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
     result: &crate::workflow::WorkflowInvocationResult,
@@ -1381,6 +1406,7 @@ pub(crate) fn append_workflow_activity_event(
                 status: result.status.clone(),
                 output: result.output.clone(),
                 message: result.message.clone(),
+                snapshot: Some(result.snapshot.clone()),
             },
         )],
     );
@@ -1406,10 +1432,10 @@ fn append_committed_activity_cells_with_ids(
     if cells.is_empty() {
         return;
     }
-    let history_items = match stable_ids {
-        Some(ids) => dashboard_activity_items_from_cells_with_ids(&cells, ids),
-        None => dashboard_activity_items_from_cells(&cells),
-    };
+    let history_items = stable_ids.map_or_else(
+        || dashboard_activity_items_from_cells(&cells),
+        |ids| dashboard_activity_items_from_cells_with_ids(&cells, ids),
+    );
     let persisted_window = context.dashboard_history.as_ref().and_then(|history| {
         persist_dashboard_activity_items(history, &history_items).map_or_else(
             |err| {
@@ -1503,6 +1529,10 @@ fn stable_dashboard_activity_id_for_cell(
         crate::dashboard::SessionActivityEvent::CodingEdit(edit) => {
             Some(format!("activity-{}", edit.stable_id))
         }
+        crate::dashboard::SessionActivityEvent::Workflow(workflow) => workflow
+            .snapshot
+            .as_ref()
+            .map(|snapshot| format!("activity-workflow-{}", snapshot.run_id)),
         _ => None,
     }
 }

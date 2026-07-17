@@ -57,7 +57,7 @@ type RefreshLockMap = HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>;
 static REFRESH_LOCKS_BY_AUTH_FILE: LazyLock<parking_lot::Mutex<RefreshLockMap>> =
     LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
-pub(crate) struct CodexOAuthClient {
+pub struct CodexOAuthClient {
     auth_file: PathBuf,
     auth_client: reqwest::Client,
     cached: tokio::sync::Mutex<Option<CodexOAuthAccess>>,
@@ -100,7 +100,7 @@ struct CodexRequestIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct CodexOAuthTokens {
+pub struct CodexOAuthTokens {
     pub id_token: String,
     pub access_token: String,
     pub refresh_token: String,
@@ -111,7 +111,7 @@ pub(crate) struct CodexOAuthTokens {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CodexOAuthAccess {
+pub struct CodexOAuthAccess {
     pub access_token: String,
     pub account_id: Option<String>,
     pub is_fedramp_account: bool,
@@ -177,12 +177,9 @@ impl CodexResponsesClient {
         let client_version = codex_oauth_client_version();
         let supports_vision_initial = {
             use crate::model_catalog::catalog_model_capacity;
-            match model_config.supports_vision {
-                Some(v) => v,
-                None => catalog_model_capacity(&model_config.model_id)
-                    .map(|c| c.supports_vision)
-                    .unwrap_or(false),
-            }
+            model_config.supports_vision.unwrap_or_else(|| {
+                catalog_model_capacity(&model_config.model_id).is_some_and(|c| c.supports_vision)
+            })
         };
         Self {
             client,
@@ -208,7 +205,7 @@ impl CodexResponsesClient {
             token_usage: std::sync::Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
-                model_context_window: Some(context_window_tokens as i64),
+                model_context_window: i64::try_from(context_window_tokens).ok(),
                 daily_token_usage: Vec::new(),
             }),
             client_version,
@@ -227,7 +224,7 @@ impl CodexResponsesClient {
         format!("{}/responses", self.base_url.trim_end_matches('/'))
     }
 
-    fn request_budget_limits(&self) -> RequestBudgetLimits {
+    const fn request_budget_limits(&self) -> RequestBudgetLimits {
         RequestBudgetLimits {
             context_window_tokens: self.effective_context_window_tokens,
             auto_compact_threshold_tokens: self.auto_compact_threshold_tokens,
@@ -249,7 +246,7 @@ impl CodexResponsesClient {
                 let mut timestamps = limiter.lock().await;
                 let now = Instant::now();
                 while let Some(front) = timestamps.front().copied() {
-                    if now.duration_since(front) >= Duration::from_secs(60) {
+                    if now.duration_since(front) >= Duration::from_mins(1) {
                         timestamps.pop_front();
                     } else {
                         break;
@@ -261,7 +258,7 @@ impl CodexResponsesClient {
                     None
                 } else {
                     timestamps.front().copied().map(|front| {
-                        Duration::from_secs(60).saturating_sub(now.duration_since(front))
+                        Duration::from_mins(1).saturating_sub(now.duration_since(front))
                     })
                 }
             };
@@ -342,9 +339,10 @@ impl CodexResponsesClient {
                     ));
                 }
 
-                let delay = retry_after
-                    .map(Duration::from_secs)
-                    .unwrap_or_else(|| default_rate_limit_backoff(rate_limit_attempt));
+                let delay = retry_after.map_or_else(
+                    || default_rate_limit_backoff(rate_limit_attempt),
+                    Duration::from_secs,
+                );
                 warn!(
                     "Codex Responses returned HTTP 429; retrying request in {} ms (attempt {}/{})\n{}",
                     delay.as_millis(),
@@ -404,8 +402,12 @@ impl CodexResponsesClient {
         let budget = &options.budget;
         let request_context = summarize_prompt_request(&request, Some(budget));
         let request_identity = codex_request_identity(options.conversation_id.as_deref());
-        let payload =
-            build_prompt_responses_payload(self, request, output_schema, request_identity.as_ref());
+        let payload = build_prompt_responses_payload(
+            self,
+            &request,
+            &output_schema,
+            request_identity.as_ref(),
+        );
         let response = self
             .post_responses_with_retry(&payload, &request_context, request_identity.as_ref())
             .await?;
@@ -619,8 +621,9 @@ impl CodexResponsesClient {
                             }
                         }
                     }
-                    Some("response.reasoning_summary_text.delta")
-                    | Some("response.reasoning_text.delta") => {
+                    Some(
+                        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta",
+                    ) => {
                         if let Some(delta) = value.get("delta").and_then(Value::as_str) {
                             reasoning_content.push_str(delta);
                             if emit_progress {
@@ -662,7 +665,7 @@ impl CodexResponsesClient {
                             self.record_last_usage(usage);
                         }
                     }
-                    Some("response.failed") | Some("response.incomplete") => {
+                    Some("response.failed" | "response.incomplete") => {
                         return Err(miette!(
                             "Codex Responses stream failed: {}",
                             truncate_for_json_error(&value)
@@ -724,7 +727,7 @@ impl CodexResponsesClient {
 
     fn record_last_usage(&self, usage: TokenUsage) {
         if let Ok(mut info) = self.token_usage.lock() {
-            info.model_context_window = Some(self.context_window_tokens as i64);
+            info.model_context_window = i64::try_from(self.context_window_tokens).ok();
             info.append_last_usage(usage);
         }
     }
@@ -806,6 +809,7 @@ impl CodexOAuthClient {
 
         let mut inner = self.inner.lock().await;
         inner.set_auth(access.access_token.clone(), headers);
+        drop(inner);
         *self.cached.lock().await = Some(access);
         Ok(())
     }
@@ -857,8 +861,8 @@ impl ModelProvider for CodexOAuthClient {
 
 fn build_prompt_responses_payload(
     client: &CodexResponsesClient,
-    request: PromptRequest,
-    output_schema: Value,
+    request: &PromptRequest,
+    output_schema: &Value,
     request_identity: Option<&CodexRequestIdentity>,
 ) -> Value {
     let messages = request.all_messages();
@@ -867,9 +871,9 @@ fn build_prompt_responses_payload(
     let (instructions, input) = history_messages_to_responses_parts(messages, false);
     let mut payload = base_responses_payload(
         client,
-        instructions,
-        input,
-        Vec::new(),
+        &instructions,
+        &input,
+        &Vec::new(),
         request_identity,
         "prompt",
     );
@@ -898,9 +902,9 @@ fn build_agent_responses_payload(
         .collect::<Vec<_>>();
     base_responses_payload(
         client,
-        instructions,
-        input,
-        tools,
+        &instructions,
+        &input,
+        &tools,
         request_identity,
         "agent",
     )
@@ -908,9 +912,9 @@ fn build_agent_responses_payload(
 
 fn base_responses_payload(
     client: &CodexResponsesClient,
-    instructions: String,
-    input: Vec<Value>,
-    tools: Vec<Value>,
+    instructions: &str,
+    input: &[Value],
+    tools: &[Value],
     request_identity: Option<&CodexRequestIdentity>,
     request_kind: &str,
 ) -> Value {
@@ -964,7 +968,8 @@ fn codex_reasoning_payload(client: &CodexResponsesClient, request_kind: &str) ->
 }
 
 fn codex_request_identity(conversation_id: Option<&str>) -> Option<CodexRequestIdentity> {
-    conversation_id.map(|conversation_id| CodexRequestIdentity {
+    let conversation_id = conversation_id?;
+    Some(CodexRequestIdentity {
         session_id: conversation_id.to_string(),
         thread_id: conversation_id.to_string(),
         window_id: format!("{conversation_id}:0"),
@@ -998,14 +1003,14 @@ fn agent_messages_to_responses_parts(
         match message {
             AgentMessage::System { content } => instructions.push(content),
             AgentMessage::User { content } => {
-                input.push(responses_user_message(content, strip_images))
+                input.push(responses_user_message(&content, strip_images));
             }
             AgentMessage::Assistant { content } => {
-                input.push(responses_message("assistant", "output_text", content));
+                input.push(responses_message("assistant", "output_text", &content));
             }
             AgentMessage::AssistantToolCallProtocol { content, calls, .. } => {
                 if let Some(content) = content.filter(|content| !content.trim().is_empty()) {
-                    input.push(responses_message("assistant", "output_text", content));
+                    input.push(responses_message("assistant", "output_text", &content));
                 }
                 for call in calls {
                     valid_tool_call_ids.insert(call.id.clone());
@@ -1032,7 +1037,7 @@ fn agent_messages_to_responses_parts(
                     input.push(responses_message(
                         "assistant",
                         "output_text",
-                        super::flatten_tool_result_as_assistant_text(&name, &content),
+                        &super::flatten_tool_result_as_assistant_text(&name, &content),
                     ));
                 }
             }
@@ -1042,7 +1047,7 @@ fn agent_messages_to_responses_parts(
     (instructions.join("\n\n"), input)
 }
 
-fn responses_message(role: &str, content_type: &str, text: String) -> Value {
+fn responses_message(role: &str, content_type: &str, text: &str) -> Value {
     json!({
         "type": "message",
         "role": role,
@@ -1053,9 +1058,9 @@ fn responses_message(role: &str, content_type: &str, text: String) -> Value {
     })
 }
 
-fn responses_user_message(content: AgentContent, strip_images: bool) -> Value {
+fn responses_user_message(content: &AgentContent, strip_images: bool) -> Value {
     if content.is_plain_text() {
-        return responses_message("user", "input_text", content.as_text().to_string());
+        return responses_message("user", "input_text", content.as_text());
     }
 
     let mut parts = Vec::new();
@@ -1185,7 +1190,7 @@ fn response_item_message_text(item: &Value) -> Option<String> {
         .into_iter()
         .flat_map(|content| content.iter())
         .filter_map(|part| match part.get("type").and_then(Value::as_str) {
-            Some("output_text") | Some("input_text") => part.get("text").and_then(Value::as_str),
+            Some("output_text" | "input_text") => part.get("text").and_then(Value::as_str),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -1297,15 +1302,15 @@ fn parse_responses_usage(usage: &Value) -> Option<TokenUsage> {
     if usage.is_zero() { None } else { Some(usage) }
 }
 
-pub(crate) fn codex_oauth_auth_file(provider_name: &str) -> PathBuf {
+pub fn codex_oauth_auth_file(provider_name: &str) -> PathBuf {
     default_codex_oauth_auth_file(provider_name)
 }
 
-pub(crate) fn codex_oauth_default_base_url() -> &'static str {
+pub const fn codex_oauth_default_base_url() -> &'static str {
     CODEX_RESPONSES_BASE_URL
 }
 
-pub(crate) fn codex_oauth_client_version() -> String {
+pub fn codex_oauth_client_version() -> String {
     std::env::var(CODEX_CLIENT_VERSION_OVERRIDE_ENV)
         .ok()
         .map(|value| value.trim().to_string())
@@ -1313,7 +1318,7 @@ pub(crate) fn codex_oauth_client_version() -> String {
         .unwrap_or_else(|| CODEX_CLIENT_VERSION.to_string())
 }
 
-pub(crate) fn default_codex_oauth_auth_file(provider_name: &str) -> PathBuf {
+pub fn default_codex_oauth_auth_file(provider_name: &str) -> PathBuf {
     let file_name = format!(
         "openai-codex-oauth-{}.json",
         sanitize_auth_file_component(provider_name)
@@ -1321,14 +1326,16 @@ pub(crate) fn default_codex_oauth_auth_file(provider_name: &str) -> PathBuf {
     PersistenceStore::runtime_sync().config_file(&file_name)
 }
 
-pub(crate) fn codex_cli_auth_file() -> PathBuf {
+pub fn codex_cli_auth_file() -> PathBuf {
     env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            env::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".codex")
-        })
+        .map_or_else(
+            || {
+                env::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".codex")
+            },
+            PathBuf::from,
+        )
         .join("auth.json")
 }
 
@@ -1349,10 +1356,7 @@ fn sanitize_auth_file_component(value: &str) -> String {
     }
 }
 
-pub(crate) async fn write_codex_oauth_tokens(
-    auth_file: &Path,
-    tokens: &CodexOAuthTokens,
-) -> Result<()> {
+pub async fn write_codex_oauth_tokens(auth_file: &Path, tokens: &CodexOAuthTokens) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(tokens)
         .map_err(|err| miette!("serialize OpenAI Codex tokens failed: {err}"))?;
     write_bytes_atomic(auth_file.to_path_buf(), bytes, PersistenceFileMode::Private)
@@ -1365,7 +1369,7 @@ pub(crate) async fn write_codex_oauth_tokens(
         })
 }
 
-pub(crate) async fn codex_oauth_access_from_file(auth_file: &Path) -> Result<CodexOAuthAccess> {
+pub async fn codex_oauth_access_from_file(auth_file: &Path) -> Result<CodexOAuthAccess> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -1373,7 +1377,7 @@ pub(crate) async fn codex_oauth_access_from_file(auth_file: &Path) -> Result<Cod
     codex_oauth_access_from_file_with_client(auth_file, &client).await
 }
 
-pub(crate) async fn import_codex_cli_oauth_tokens(auth_file: &Path) -> Result<CodexOAuthTokens> {
+pub async fn import_codex_cli_oauth_tokens(auth_file: &Path) -> Result<CodexOAuthTokens> {
     let bytes = tokio::fs::read(auth_file)
         .await
         .map_err(|err| miette!("read Codex auth file {} failed: {err}", auth_file.display()))?;
@@ -1410,12 +1414,12 @@ async fn codex_oauth_access_from_file_with_client(
         let _guard = refresh_lock.lock().await;
         tokens = read_codex_oauth_tokens(auth_file).await?;
         if !codex_oauth_tokens_need_refresh(&tokens) {
-            return codex_oauth_access_from_tokens(&tokens);
+            return Ok(codex_oauth_access_from_tokens(&tokens));
         }
         tokens = refresh_codex_oauth_tokens(client, &tokens).await?;
         write_codex_oauth_tokens(auth_file, &tokens).await?;
     }
-    codex_oauth_access_from_tokens(&tokens)
+    Ok(codex_oauth_access_from_tokens(&tokens))
 }
 
 fn refresh_lock_for_auth_file(auth_file: &Path) -> Arc<tokio::sync::Mutex<()>> {
@@ -1492,11 +1496,9 @@ async fn refresh_codex_oauth_tokens(
     Ok(next)
 }
 
-pub(crate) fn codex_oauth_access_from_tokens(
-    tokens: &CodexOAuthTokens,
-) -> Result<CodexOAuthAccess> {
+pub fn codex_oauth_access_from_tokens(tokens: &CodexOAuthTokens) -> CodexOAuthAccess {
     let claims = jwt_openai_auth_claims(&tokens.id_token);
-    Ok(CodexOAuthAccess {
+    CodexOAuthAccess {
         access_token: tokens.access_token.clone(),
         account_id: tokens.account_id.clone().or_else(|| {
             claims
@@ -1505,7 +1507,7 @@ pub(crate) fn codex_oauth_access_from_tokens(
         }),
         is_fedramp_account: claims.is_some_and(|claims| claims.chatgpt_account_is_fedramp),
         expires_at_ms: access_token_expires_at_ms(&tokens.access_token),
-    })
+    }
 }
 
 fn access_token_expires_at_ms(access_token: &str) -> Option<i64> {
@@ -1565,7 +1567,7 @@ mod tests {
     }
     use crate::config::{ModelConfig, ThinkingBudget};
 
-    fn jwt(payload: serde_json::Value) -> String {
+    fn jwt(payload: &serde_json::Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&payload).unwrap());
@@ -1598,13 +1600,13 @@ mod tests {
 
     #[test]
     fn codex_oauth_access_extracts_account_headers_from_id_token() {
-        let id_token = jwt(serde_json::json!({
+        let id_token = jwt(&serde_json::json!({
             "https://api.openai.com/auth": {
                 "chatgpt_account_id": "account-123",
                 "chatgpt_account_is_fedramp": true
             }
         }));
-        let access_token = jwt(serde_json::json!({
+        let access_token = jwt(&serde_json::json!({
             "exp": 4_102_444_800_i64
         }));
         let tokens = CodexOAuthTokens {
@@ -1615,7 +1617,7 @@ mod tests {
             last_refresh_at_ms: 0,
         };
 
-        let access = codex_oauth_access_from_tokens(&tokens).unwrap();
+        let access = codex_oauth_access_from_tokens(&tokens);
 
         assert_eq!(access.access_token, access_token);
         assert_eq!(access.account_id.as_deref(), Some("account-123"));
@@ -1625,7 +1627,7 @@ mod tests {
 
     #[test]
     fn codex_oauth_configured_account_id_overrides_id_token_claim() {
-        let id_token = jwt(serde_json::json!({
+        let id_token = jwt(&serde_json::json!({
             "https://api.openai.com/auth": {
                 "chatgpt_account_id": "claim-account"
             }
@@ -1638,7 +1640,7 @@ mod tests {
             last_refresh_at_ms: 0,
         };
 
-        let access = codex_oauth_access_from_tokens(&tokens).unwrap();
+        let access = codex_oauth_access_from_tokens(&tokens);
 
         assert_eq!(access.account_id.as_deref(), Some("configured-account"));
     }
@@ -1692,14 +1694,8 @@ mod tests {
 
     #[test]
     fn codex_payload_omits_unsupported_max_output_tokens_parameter() {
-        let payload = base_responses_payload(
-            &test_client(),
-            "instructions".to_string(),
-            vec![],
-            vec![],
-            None,
-            "agent",
-        );
+        let payload =
+            base_responses_payload(&test_client(), "instructions", &[], &[], None, "agent");
 
         assert!(payload.get("max_output_tokens").is_none(), "{payload:#}");
     }
@@ -1722,14 +1718,8 @@ mod tests {
 
     #[test]
     fn codex_prompt_payload_does_not_request_reasoning_summary() {
-        let payload = base_responses_payload(
-            &test_client(),
-            "instructions".to_string(),
-            vec![],
-            vec![],
-            None,
-            "prompt",
-        );
+        let payload =
+            base_responses_payload(&test_client(), "instructions", &[], &[], None, "prompt");
 
         assert!(payload.get("reasoning").is_none(), "{payload:#}");
     }
@@ -1746,14 +1736,7 @@ mod tests {
             },
         );
 
-        let payload = base_responses_payload(
-            &client,
-            "instructions".to_string(),
-            vec![],
-            vec![],
-            None,
-            "agent",
-        );
+        let payload = base_responses_payload(&client, "instructions", &[], &[], None, "agent");
 
         assert_eq!(payload["reasoning"]["effort"], "xhigh");
         assert_eq!(payload["reasoning"]["summary"], "auto");
@@ -1774,14 +1757,7 @@ mod tests {
             .supports_reasoning_summary
             .store(false, Ordering::Relaxed);
 
-        let payload = base_responses_payload(
-            &client,
-            "instructions".to_string(),
-            vec![],
-            vec![],
-            None,
-            "agent",
-        );
+        let payload = base_responses_payload(&client, "instructions", &[], &[], None, "agent");
 
         assert_eq!(payload["reasoning"]["effort"], "xhigh");
         assert!(payload["reasoning"].get("summary").is_none(), "{payload:#}");
@@ -1799,14 +1775,7 @@ mod tests {
             },
         );
 
-        let payload = base_responses_payload(
-            &client,
-            "instructions".to_string(),
-            vec![],
-            vec![],
-            None,
-            "agent",
-        );
+        let payload = base_responses_payload(&client, "instructions", &[], &[], None, "agent");
 
         assert_eq!(payload["reasoning"]["effort"], "none");
         assert!(payload["reasoning"].get("summary").is_none(), "{payload:#}");

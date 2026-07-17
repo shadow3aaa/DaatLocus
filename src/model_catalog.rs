@@ -21,7 +21,7 @@ pub struct ModelCapacity {
     pub supports_tool_call: bool,
 }
 
-pub fn conservative_model_capacity() -> ModelCapacity {
+pub const fn conservative_model_capacity() -> ModelCapacity {
     ModelCapacity {
         context_window_tokens: CONSERVATIVE_CONTEXT_WINDOW_TOKENS,
         max_completion_tokens: CONSERVATIVE_MAX_COMPLETION_TOKENS,
@@ -167,7 +167,7 @@ fn reasoning_options_candidate(model: &serde_json::Value) -> (usize, Vec<Reasoni
     (0, Vec::new())
 }
 
-pub(crate) fn parse_reasoning_options(raw: &serde_json::Value) -> Vec<ReasoningOption> {
+pub fn parse_reasoning_options(raw: &serde_json::Value) -> Vec<ReasoningOption> {
     let Some(arr) = raw.as_array() else {
         return Vec::new();
     };
@@ -183,8 +183,13 @@ pub(crate) fn parse_reasoning_options(raw: &serde_json::Value) -> Vec<ReasoningO
                 (!values.is_empty()).then_some(ReasoningOption::Effort { values })
             }
             "budget_tokens" => Some(ReasoningOption::BudgetTokens {
-                min: opt["min"].as_u64().map(|v| v as usize).unwrap_or(0),
-                max: opt["max"].as_u64().map(|v| v as usize),
+                min: opt["min"]
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or(0),
+                max: opt["max"]
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok()),
             }),
             _ => None,
         })
@@ -218,8 +223,8 @@ fn lookup_model_value_in_section<'a>(
 
 fn capacity_for_model(model: &serde_json::Value) -> Option<ModelCapacity> {
     let limit = &model["limit"];
-    let context = limit["context"].as_u64().map(|v| v as usize)?;
-    let output = limit["output"].as_u64().map(|v| v as usize)?;
+    let context = usize::try_from(limit["context"].as_u64()?).ok()?;
+    let output = usize::try_from(limit["output"].as_u64()?).ok()?;
     let modalities = &model["modalities"];
     Some(ModelCapacity {
         context_window_tokens: context,

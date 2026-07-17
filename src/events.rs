@@ -59,14 +59,14 @@ pub enum EventStatus {
 }
 
 impl EventStatus {
-    pub fn is_send_terminal_status(self) -> bool {
+    pub const fn is_send_terminal_status(self) -> bool {
         matches!(
             self,
             Self::AwaitingDelivery | Self::Resolved | Self::Dismissed | Self::Failed
         )
     }
 
-    pub fn as_snake_case(self) -> &'static str {
+    pub const fn as_snake_case(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Claimed => "claimed",
@@ -242,6 +242,7 @@ impl EventStore {
             },
         );
         persist_locked(&inner)?;
+        drop(inner);
         Ok(event_id)
     }
 
@@ -262,29 +263,33 @@ impl EventStore {
             },
         );
         persist_locked(&inner)?;
+        drop(inner);
         Ok(event_id)
     }
 
     pub fn claim_event_if_pending(&self, event_id: Uuid) -> Result<Option<EventView>> {
         let mut inner = self.inner.lock();
-        let Some(event) = inner.state.events.get_mut(&event_id) else {
-            return Ok(None);
-        };
-        if event.status != EventStatus::Pending {
-            return Ok(None);
-        }
+        let view = {
+            let Some(event) = inner.state.events.get_mut(&event_id) else {
+                return Ok(None);
+            };
+            if event.status != EventStatus::Pending {
+                return Ok(None);
+            }
 
-        event.status = EventStatus::Claimed;
-        event.last_updated_at_ms = Utc::now().timestamp_millis();
-        let view = EventView {
-            event_id,
-            status: event.status,
-            reply_message: event.reply_message.clone(),
-            arrived_at_ms: event.arrived_at_ms,
-            payload: event.payload.clone(),
-            last_error: event.last_error.clone(),
+            event.status = EventStatus::Claimed;
+            event.last_updated_at_ms = Utc::now().timestamp_millis();
+            EventView {
+                event_id,
+                status: event.status,
+                reply_message: event.reply_message.clone(),
+                arrived_at_ms: event.arrived_at_ms,
+                payload: event.payload.clone(),
+                last_error: event.last_error.clone(),
+            }
         };
         persist_locked(&inner)?;
+        drop(inner);
         Ok(Some(view))
     }
 
@@ -313,7 +318,9 @@ impl EventStore {
             .events
             .get(&event_id)
             .ok_or_else(|| miette!("unknown event: {event_id}"))?;
-        Ok(event_view(event_id, event))
+        let view = event_view(event_id, event);
+        drop(inner);
+        Ok(view)
     }
 
     pub fn views(&self) -> Vec<EventView> {
@@ -426,10 +433,11 @@ impl EventStore {
         inner.state.events.clear();
         inner.state.order.clear();
         persist_locked(&inner)?;
+        drop(inner);
         Ok(cleared)
     }
 
-    pub async fn shutdown(self) {
+    pub fn shutdown(self) {
         let inner = self.inner.lock();
         let _ = persist_locked(&inner);
     }
@@ -450,14 +458,18 @@ impl EventStore {
         f: impl FnOnce(&mut Event) -> Result<T>,
     ) -> Result<T> {
         let mut inner = self.inner.lock();
-        let event = inner
-            .state
-            .events
-            .get_mut(&event_id)
-            .ok_or_else(|| miette!("unknown event: {event_id}"))?;
-        let result = f(event)?;
-        event.last_updated_at_ms = Utc::now().timestamp_millis();
+        let result = {
+            let event = inner
+                .state
+                .events
+                .get_mut(&event_id)
+                .ok_or_else(|| miette!("unknown event: {event_id}"))?;
+            let result = f(event)?;
+            event.last_updated_at_ms = Utc::now().timestamp_millis();
+            result
+        };
         persist_locked(&inner)?;
+        drop(inner);
         Ok(result)
     }
 }

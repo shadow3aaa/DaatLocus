@@ -97,8 +97,10 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
             "session_new" => {
                 let title = command_remainder(command)
                     .filter(|title| !title.trim().is_empty())
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| default_telegram_session_title(chat_id, chat_title));
+                    .map_or_else(
+                        || default_telegram_session_title(chat_id, chat_title),
+                        ToString::to_string,
+                    );
                 let info = self
                     .sessions
                     .create(session::SessionScope::General, Some(title))
@@ -149,7 +151,7 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
                 )
                 .await?;
                 if !deleted {
-                    return Ok(Some(format!("session `{}` was not found", reference)));
+                    return Ok(Some(format!("session `{reference}` was not found")));
                 }
                 let removed_defaults = self
                     .telegram_defaults
@@ -303,11 +305,11 @@ fn session_scope_label(scope: &session::SessionScope) -> String {
     }
 }
 
-pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
+pub async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     run_daemon_serve_inner(config, None, None).await
 }
 
-pub(crate) async fn run_daemon_serve_with_tray(
+pub async fn run_daemon_serve_with_tray(
     config: crate::config::Config,
     tray_handle: DaemonTrayHandle,
     tray_startup_tx: oneshot::Sender<DaemonTrayStartup>,
@@ -535,11 +537,10 @@ async fn run_session_health_checks(
                 {
                     let _ = sessions.mark_ready(&info.session_id).await;
                 }
-                Ok(session_ipc::SessionIpcResponse::Status { .. }) => {}
                 Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => {
                     tracing::warn!("session {} health check error: {message}", info.session_id);
                 }
-                Ok(_) => {}
+                Ok(session_ipc::SessionIpcResponse::Status { .. } | _) => {}
                 Err(err) => {
                     if session_is_within_starting_health_grace(&info) {
                         tracing::debug!(
@@ -799,14 +800,14 @@ enum ManagerShutdownAction {
 }
 
 impl ManagerShutdownAction {
-    fn session_shutdown_reason(self) -> &'static str {
+    const fn session_shutdown_reason(self) -> &'static str {
         match self {
             Self::Stop => "daemon stop",
             Self::Restart => "daemon restart",
         }
     }
 
-    fn should_restart(self) -> bool {
+    const fn should_restart(self) -> bool {
         matches!(self, Self::Restart)
     }
 }
@@ -873,7 +874,7 @@ mod tests {
     #[test]
     fn starting_sessions_get_health_check_grace() {
         let mut info = session::SessionInfo::new(
-            session::SessionId::from_string("session-a".to_string()).unwrap(),
+            session::SessionId::from_string("session-a").unwrap(),
             session::SessionScope::General,
             None,
         );

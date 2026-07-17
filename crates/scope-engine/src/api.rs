@@ -62,6 +62,24 @@ pub enum SearchCase {
     Smart,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(transparent)]
+#[schemars(transparent)]
+pub struct SearchFlag(bool);
+
+impl SearchFlag {
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        self.0
+    }
+}
+
+impl From<bool> for SearchFlag {
+    fn from(value: bool) -> Self {
+        Self(value)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct SearchCodeInput {
     pub query: String,
@@ -83,11 +101,11 @@ pub struct SearchCodeInput {
     #[serde(default)]
     pub whole_line: bool,
     #[serde(default)]
-    pub hidden: bool,
+    pub hidden: SearchFlag,
     #[serde(default = "default_respect_ignore")]
     pub respect_ignore: bool,
     #[serde(default)]
-    pub follow: bool,
+    pub follow: SearchFlag,
     pub limit: Option<usize>,
 }
 
@@ -104,15 +122,15 @@ impl Default for SearchCodeInput {
             case_mode: SearchCase::default(),
             word: false,
             whole_line: false,
-            hidden: false,
+            hidden: false.into(),
             respect_ignore: true,
-            follow: false,
+            follow: false.into(),
             limit: None,
         }
     }
 }
 
-fn default_respect_ignore() -> bool {
+const fn default_respect_ignore() -> bool {
     true
 }
 
@@ -142,7 +160,7 @@ pub struct EditCodeInput {
 }
 
 /// Operation kind for a single structured edit.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum EditOp {
     Replace,
@@ -161,8 +179,8 @@ pub enum EditContent {
 impl EditContent {
     pub fn into_lines(self) -> Vec<String> {
         match self {
-            EditContent::Lines(lines) => lines,
-            EditContent::Text(text) => text.lines().map(str::to_string).collect(),
+            Self::Lines(lines) => lines,
+            Self::Text(text) => text.lines().map(str::to_string).collect(),
         }
     }
 }
@@ -175,7 +193,7 @@ pub struct StructuredEdit {
     /// Operation kind (auto-defaults to `append` for new files when omitted).
     #[serde(default)]
     pub op: Option<EditOp>,
-    /// `line#hash` anchor from read_code output.
+    /// `line#hash` anchor from `read_code` output.
     /// For new files this can be omitted (defaults to `"1#"`).
     #[serde(default)]
     pub start: Option<String>,
@@ -206,7 +224,7 @@ pub struct SourceResponsibility {
 
 // ── Propagation types ────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PropagationSource {
     Lsp,

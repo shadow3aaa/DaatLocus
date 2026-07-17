@@ -19,7 +19,7 @@ use crate::{
 };
 
 const TELEGRAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const TELEGRAM_FILE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const TELEGRAM_FILE_DOWNLOAD_TIMEOUT: Duration = Duration::from_mins(2);
 const TELEGRAM_LONG_POLL_TIMEOUT_GRACE: Duration = Duration::from_secs(10);
 
 #[async_trait]
@@ -240,7 +240,7 @@ impl TelegramTransport {
                 }
                 self.flush_outbox().await?;
             }
-            _ = self.handle.wait_for_outbound() => {
+            () = self.handle.wait_for_outbound() => {
                 self.flush_outbox().await?;
             }
         }
@@ -262,7 +262,7 @@ impl TelegramTransport {
         self.set_my_commands().await
     }
 
-    async fn flush_outbox(&mut self) -> Result<()> {
+    async fn flush_outbox(&self) -> Result<()> {
         while let Some(message) = self.handle.take_next_outbound() {
             let chat_id = message
                 .chat_id
@@ -614,9 +614,7 @@ impl TelegramTransport {
         } else {
             file.file_unique_id
         };
-        let message_id = message_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let message_id = message_id.map_or_else(|| "unknown".to_string(), |id| id.to_string());
         let file_name = format!(
             "update-{update_id}-message-{message_id}-{}.{}",
             sanitize_file_component(&file_unique_id),
@@ -1229,15 +1227,15 @@ fn parse_verify_command(command: &str) -> Option<&str> {
     Some(token)
 }
 
-fn telegram_verify_instructions() -> &'static str {
+const fn telegram_verify_instructions() -> &'static str {
     "This Telegram chat is not verified yet.\nRun `daat-locus token create telegram` locally, then send `/verify <token>` here."
 }
 
-fn telegram_verify_usage_message() -> &'static str {
+const fn telegram_verify_usage_message() -> &'static str {
     "Usage: /verify <token>\nRun `daat-locus token create telegram` locally to create a daemon auth token."
 }
 
-fn telegram_verify_failed_message() -> &'static str {
+const fn telegram_verify_failed_message() -> &'static str {
     "Telegram verification failed. Create a daemon auth token locally with `daat-locus token create telegram`, then send `/verify <token>` here."
 }
 

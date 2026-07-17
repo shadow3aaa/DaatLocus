@@ -4,7 +4,8 @@ use tree_sitter::Language;
 pub struct CAdapter;
 
 impl CAdapter {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -27,14 +28,14 @@ impl LanguageAdapter for CAdapter {
     }
     fn queries(&self) -> LanguageQueries {
         LanguageQueries {
-            definitions: r#"
+            definitions: r"
                 (function_definition declarator: (function_declarator declarator: (identifier) @name)) @def
                 (declaration declarator: (init_declarator declarator: (identifier) @name)) @def
-            "#,
-            references: r#"
+            ",
+            references: r"
                 (call_expression function: (identifier) @ref) @call
                 (identifier) @ref
-            "#,
+            ",
         }
     }
 }

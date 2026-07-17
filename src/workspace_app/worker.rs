@@ -23,7 +23,8 @@ use crate::{
 };
 use serde_json::Value as JsonValue;
 
-pub(crate) struct WorkspaceAppWorkerArgs {
+#[derive(Clone)]
+pub struct WorkspaceAppWorkerArgs {
     pub app_id: String,
     pub app_dir: PathBuf,
     pub state_dir: PathBuf,
@@ -32,7 +33,7 @@ pub(crate) struct WorkspaceAppWorkerArgs {
     pub token: String,
 }
 
-pub(crate) fn run_workspace_app_worker(args: WorkspaceAppWorkerArgs) -> Result<()> {
+pub fn run_workspace_app_worker(args: WorkspaceAppWorkerArgs) -> Result<()> {
     let app_id = AppId::from_workspace_folder(args.app_id)?;
     let app_id_label = app_id.to_string();
     let stream = TcpStream::connect(&args.connect_addr).map_err(|err| {
@@ -107,7 +108,12 @@ struct LuaWorkerHost {
 }
 
 impl LuaWorkerHost {
-    fn new(id: AppId, app_dir: PathBuf, state_dir: PathBuf, entry_relative_path: String) -> Self {
+    const fn new(
+        id: AppId,
+        app_dir: PathBuf,
+        state_dir: PathBuf,
+        entry_relative_path: String,
+    ) -> Self {
         Self {
             id,
             app_dir,
@@ -221,7 +227,7 @@ impl LuaWorkerRuntime {
             }
             WorkerRequestOp::ListTools => self.list_tools().map(WorkerResponsePayload::ToolSpecs),
             WorkerRequestOp::CallTool { name, arguments } => self
-                .call_tool(&name, arguments)
+                .call_tool(&name, &arguments)
                 .map(|result| WorkerResponsePayload::ToolResult(Box::new(result))),
             WorkerRequestOp::PollNotices => self.poll_notices().map(WorkerResponsePayload::Notice),
             WorkerRequestOp::Shutdown => Ok(WorkerResponsePayload::Unit),
@@ -349,7 +355,7 @@ impl LuaWorkerRuntime {
         })
     }
 
-    fn list_tools(&mut self) -> Result<Vec<AppToolSpec>> {
+    fn list_tools(&self) -> Result<Vec<AppToolSpec>> {
         Ok(self
             .load_tool_descriptors()?
             .into_iter()
@@ -405,7 +411,7 @@ impl LuaWorkerRuntime {
     fn call_tool(
         &mut self,
         name: &str,
-        arguments: serde_json::Value,
+        arguments: &serde_json::Value,
     ) -> Result<AppToolExecutionResult> {
         let descriptors = self.load_tool_descriptors()?;
         let descriptor = descriptors
@@ -413,7 +419,7 @@ impl LuaWorkerRuntime {
             .find(|descriptor| descriptor.name == name)
             .ok_or_else(|| miette!("workspace app `{}` does not declare tool `{name}`", self.id))?;
         validate_workspace_tool_value(
-            &arguments,
+            arguments,
             &descriptor.input_schema,
             &format!("arguments for workspace app tool `{}`", descriptor.name),
         )?;
@@ -508,14 +514,12 @@ impl LuaWorkerRuntime {
     }
 
     fn persist_runtime_state(&self) -> Result<()> {
-        PersistenceStore::runtime_sync()
-            .write_json_file_sync(&self.state_file, &self.runtime)
-            .map_err(|err| {
-                miette!(
-                    "failed to write app state {}: {err}",
-                    self.state_file.display()
-                )
-            })?;
+        PersistenceStore::write_json_file_sync(&self.state_file, &self.runtime).map_err(|err| {
+            miette!(
+                "failed to write app state {}: {err}",
+                self.state_file.display()
+            )
+        })?;
         Ok(())
     }
 

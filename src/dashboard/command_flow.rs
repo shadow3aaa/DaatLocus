@@ -54,10 +54,10 @@ pub(super) fn command_panel_for_input(
         )),
         ["debug"] => Some(debug_command_panel(context.state)),
         ["debug", "persona"] => Some(debug_persona_panel()),
-        ["debug", "system-prompt"] | ["debug", "system_prompt"] => {
+        ["debug", "system-prompt" | "system_prompt"] => {
             Some(debug_system_prompt_panel(context.state))
         }
-        ["debug", "context"] | ["debug", "preturn-context"] | ["debug", "preturn_context"] => {
+        ["debug", "context" | "preturn-context" | "preturn_context"] => {
             Some(debug_context_panel(context.state))
         }
         ["sleep"] => Some(sleep_command_panel(context.state)),
@@ -71,9 +71,9 @@ pub(super) fn command_panel_for_input(
         [verb] if workflows_command_accepts(verb) => Some(workflows_command_panel(context.state)),
         [verb, ..] if workflows_command_accepts(verb) => None,
         ["skills"] => Some(skills_command_panel(context.state)),
-        ["skills", "list"] | ["skills", "show"] => Some(CommandPanel::SkillsList(
-            SkillsListPanel::from_state(context.state),
-        )),
+        ["skills", "list" | "show"] => Some(CommandPanel::SkillsList(SkillsListPanel::from_state(
+            context.state,
+        ))),
         ["skills", "show", target] => skill_detail_panel(context.state, target),
         _ => None,
     }
@@ -107,7 +107,7 @@ pub(super) fn dashboard_action_for_input(
             action: DashboardAction::ReloadSkills,
             quiet_success: false,
         },
-        ["skills", "enable", target] | ["skills", "disable", target] => {
+        ["skills", "enable" | "disable", target] => {
             let enabled = parts[1] == "enable";
             let skill =
                 resolve_skill_target(context.state, target).map_err(|message| CommandFeedback {
@@ -130,7 +130,7 @@ pub(super) fn dashboard_action_for_input(
     Ok(Some(invocation))
 }
 
-pub(crate) fn execute_control_command(
+pub fn execute_control_command(
     command: &str,
     state: &DashboardState,
     control_tx: &tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
@@ -145,7 +145,7 @@ pub(crate) fn execute_control_command(
         return "empty command".to_string();
     };
 
-    if matches!(parts.as_slice(), ["quit"] | ["q"] | ["exit"]) {
+    if matches!(parts.as_slice(), ["quit" | "q" | "exit"]) {
         return "quit command is only available in the local dashboard".to_string();
     }
 
@@ -166,10 +166,10 @@ pub(crate) fn execute_control_command(
         ["status"] => fallback_output(&state.status_output),
         ["debug"] => "available views: persona, system-prompt, context".to_string(),
         ["debug", "persona"] => debug_persona_text(),
-        ["debug", "system-prompt"] | ["debug", "system_prompt"] => {
+        ["debug", "system-prompt" | "system_prompt"] => {
             fallback_output(&state.system_prompt_output)
         }
-        ["debug", "context"] | ["debug", "preturn-context"] | ["debug", "preturn_context"] => {
+        ["debug", "context" | "preturn-context" | "preturn_context"] => {
             fallback_output(&state.preturn_context_output)
         }
         [verb] if app_status_command_accepts(verb) => render_available_app_statuses(state),
@@ -177,7 +177,7 @@ pub(crate) fn execute_control_command(
         ["sleep"] => "available actions: status, run".to_string(),
         ["sleep", "status"] => fallback_output(&state.sleep_status_output),
         [verb] if workflows_command_accepts(verb) => render_workflows_list(state),
-        ["skills"] | ["skills", "list"] | ["skills", "show"] => render_skills_list(state),
+        ["skills"] | ["skills", "list" | "show"] => render_skills_list(state),
         ["skills", "show", target] => render_skill_detail(state, target),
         [verb, ..] if dashboard_command_is_known(verb) => {
             format!("unsupported command shape: /{}", parts.join(" "))
@@ -187,7 +187,7 @@ pub(crate) fn execute_control_command(
     }
 }
 
-pub(crate) fn dashboard_command_is_manager_owned(_command: &str) -> bool {
+pub const fn dashboard_command_is_manager_owned(_command: &str) -> bool {
     false
 }
 
@@ -231,10 +231,8 @@ fn debug_command_panel(state: &DashboardState) -> CommandPanel {
 
 fn debug_persona_text() -> String {
     let path = prompt_persona_path_sync();
-    match std::fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(_) => render_prompt_persona_markdown(&load_prompt_persona_spec_sync()),
-    }
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| render_prompt_persona_markdown(&load_prompt_persona_spec_sync()))
 }
 
 fn debug_persona_panel() -> CommandPanel {
@@ -543,7 +541,7 @@ pub(super) fn command_live_feedback(
         }
     } else if sleep_command_accepts(verb) {
         match parts.as_slice() {
-            ["sleep", "run"] | ["sleep", "status"] => {}
+            ["sleep", "run" | "status"] => {}
             ["sleep", subcommand, ..] => {
                 return Some(unknown_command_part_feedback(
                     "SLEEP",
@@ -555,7 +553,7 @@ pub(super) fn command_live_feedback(
         }
     } else if skills_command_accepts(verb) {
         match parts.as_slice() {
-            ["skills", "list"] | ["skills", "reload"] => {}
+            ["skills", "list" | "reload"] => {}
             ["skills", "show" | "enable" | "disable", target] => {
                 if let Err(message) = resolve_skill_target(context.state, target) {
                     return Some(CommandFeedback {
@@ -820,7 +818,7 @@ fn skill_completion_target(input: &str) -> Option<(usize, &str)> {
     Some((mention_start, prefix))
 }
 
-fn is_skill_mention_name_char(byte: u8) -> bool {
+const fn is_skill_mention_name_char(byte: u8) -> bool {
     matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b':')
 }
 
@@ -863,19 +861,18 @@ pub(super) fn adjusted_popup_scroll(
 pub(super) fn dashboard_parts_open_panel(parts: &[&str]) -> bool {
     matches!(
         parts,
-        ["status"]
-            | ["debug"]
-            | ["debug", "persona"]
-            | ["debug", "system-prompt"]
-            | ["debug", "system_prompt"]
-            | ["debug", "context"]
-            | ["debug", "preturn-context"]
-            | ["debug", "preturn_context"]
-            | ["sleep"]
+        ["status" | "debug" | "sleep" | "skills"]
+            | [
+                "debug",
+                "persona"
+                    | "system-prompt"
+                    | "system_prompt"
+                    | "context"
+                    | "preturn-context"
+                    | "preturn_context"
+            ]
             | ["sleep", "status"]
-            | ["skills"]
-            | ["skills", "list"]
-            | ["skills", "show"]
+            | ["skills", "list" | "show"]
             | ["skills", "show", _]
     ) || matches!(parts, [verb] if app_status_command_accepts(verb))
         || matches!(parts, [verb, _] if app_status_command_accepts(verb))
@@ -884,11 +881,9 @@ pub(super) fn dashboard_parts_open_panel(parts: &[&str]) -> bool {
 pub(super) fn dashboard_parts_run_action(parts: &[&str]) -> bool {
     matches!(
         parts,
-        ["clear"]
-            | ["restart"]
+        ["clear" | "restart"]
             | ["sleep", "run"]
             | ["skills", "reload"]
-            | ["skills", "enable", _]
-            | ["skills", "disable", _]
+            | ["skills", "enable" | "disable", _]
     )
 }

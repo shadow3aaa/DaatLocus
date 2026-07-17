@@ -32,7 +32,6 @@ pub struct ScopeEngineHandle {
     lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>>,
 }
 
-#[allow(dead_code)]
 impl ScopeEngineHandle {
     pub fn new() -> Self {
         Self {
@@ -59,17 +58,11 @@ impl ScopeEngineHandle {
             let mut state = self
                 .propagation_state
                 .lock()
-                .unwrap_or_else(|e| e.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *state = PropagationState::new();
         }
         self.project_root = Some(project_root);
         Ok(output)
-    }
-
-    /// The project root path, if a project has been opened.
-    #[cfg(test)]
-    pub fn project_root(&self) -> Option<&Path> {
-        self.project_root.as_deref()
     }
 
     fn require_project_root(&self) -> Result<&Path> {
@@ -87,22 +80,22 @@ impl ScopeEngineHandle {
         let mut state = self
             .propagation_state
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.accumulate(results);
         state.next_review()
     }
 
     /// Read code using a path plus line-hash anchor.
-    pub fn read_code(&self, input: api::ReadCodeInput) -> Result<api::ReadCodeOutput> {
+    pub fn read_code(&self, input: &api::ReadCodeInput) -> Result<api::ReadCodeOutput> {
         let root = self.require_project_root()?;
-        engine::read_code(root, &input)
+        engine::read_code(root, input)
             .map_err(|err| miette!("scope-engine read_code failed: {err}"))
     }
 
     /// Search code and return matched line-hash hits.
-    pub fn search_code(&self, input: api::SearchCodeInput) -> Result<api::SearchCodeOutput> {
+    pub fn search_code(&self, input: &api::SearchCodeInput) -> Result<api::SearchCodeOutput> {
         let root = self.require_project_root()?;
-        engine::search_code(root, &input)
+        engine::search_code(root, input)
             .map_err(|err| miette!("scope-engine search_code failed: {err}"))
     }
 
@@ -141,7 +134,7 @@ impl ScopeEngineHandle {
         let state = self
             .propagation_state
             .lock()
-            .unwrap_or_else(|err| err.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.pending_count()
     }
 
@@ -151,31 +144,9 @@ impl ScopeEngineHandle {
             .unwrap_or_else(|err| panic!("scope-engine ack_next_events failed: {err}"))
     }
 
-    /// Get the next accumulated propagation review event, if any.
-    #[cfg(test)]
-    pub fn ack_next_event(&self) -> Option<api::ReviewEvent> {
-        self.ack_next_events(None).review
-    }
-
     /// Get config hints for language servers and tree-sitter languages.
     pub fn get_config_hints() -> serde_json::Value {
         engine::config_hints()
-    }
-
-    #[cfg(test)]
-    /// Get the list of supported tree-sitter languages.
-    pub fn supported_languages() -> Vec<(String, Vec<String>)> {
-        let registry = scope_engine::language::LanguageRegistry::new();
-        registry
-            .list_languages()
-            .into_iter()
-            .map(|(name, exts)| {
-                (
-                    name.to_string(),
-                    exts.iter().map(|e| e.to_string()).collect(),
-                )
-            })
-            .collect()
     }
 }
 
@@ -233,7 +204,7 @@ mod tests {
         handle
             .propagation_state
             .lock()
-            .unwrap_or_else(|err| err.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .accumulate(vec![open_result("src/main.rs::fn main")]);
         assert_eq!(handle.pending_review_count(), 1);
 
@@ -243,7 +214,7 @@ mod tests {
         handle
             .propagation_state
             .lock()
-            .unwrap_or_else(|err| err.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .accumulate(vec![open_result("src/lib.rs::fn lib")]);
         assert_eq!(handle.pending_review_count(), 1);
 
@@ -270,7 +241,7 @@ mod tests {
         handle
             .propagation_state
             .lock()
-            .unwrap_or_else(|err| err.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .accumulate(vec![
                 open_result("src/a.rs::fn first"),
                 open_result("src/b.rs::fn second"),
@@ -286,7 +257,7 @@ mod tests {
             api::ReviewEvent::InvestigateImpact {
                 modified_symbol, ..
             } => assert_eq!(modified_symbol, "src/c.rs::fn third"),
-            _ => panic!("expected InvestigateImpact review"),
+            api::ReviewEvent::KnownReferences { .. } => panic!("expected InvestigateImpact review"),
         }
     }
 }

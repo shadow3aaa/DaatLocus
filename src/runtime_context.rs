@@ -119,11 +119,30 @@ pub async fn maybe_compact_runtime_messages(
     tools: &[AgentToolSpec],
     compact_for_overflow: bool,
 ) -> Result<bool> {
-    let compaction_result = runtime_step
+    maybe_compact_agent_messages(
+        context,
+        context.model_provider.as_ref(),
+        runtime_step,
+        tools,
+        &context.token_estimate_baseline,
+        compact_for_overflow,
+    )
+    .await
+}
+
+pub async fn maybe_compact_agent_messages(
+    context: &Context,
+    provider: &(dyn crate::core::ModelProvider + Send + Sync),
+    conversation: &mut RuntimeStepConversation,
+    tools: &[AgentToolSpec],
+    baseline: &crate::context_budget::TokenEstimateBaseline,
+    compact_for_overflow: bool,
+) -> Result<bool> {
+    let compaction_result = conversation
         .maybe_compact(
             tools,
-            runtime_request_budget_limits(context),
-            &context.token_estimate_baseline,
+            provider.request_budget_limits(),
+            baseline,
             compact_for_overflow,
             runtime_step_compaction_policy(),
             |messages, max_tokens| async move {
@@ -149,7 +168,7 @@ pub async fn maybe_compact_runtime_messages(
     }
 }
 
-fn runtime_step_compaction_policy() -> RuntimeStepCompactionPolicy {
+const fn runtime_step_compaction_policy() -> RuntimeStepCompactionPolicy {
     RuntimeStepCompactionPolicy {
         summary_max_tokens: MID_TURN_COMPACTION_SUMMARY_MAX_TOKENS,
         max_recoveries: MID_TURN_COMPACTION_MAX_RECOVERIES,
@@ -201,7 +220,7 @@ fn build_history_compaction_source_items(
 fn flatten_history_compaction_source_items(
     items: &[HistoryCompactionSourceItem],
 ) -> Vec<HistoryMessage> {
-    items.iter().flat_map(|item| item.clone()).collect()
+    items.iter().flat_map(std::clone::Clone::clone).collect()
 }
 
 fn collapse_history_compaction_source_item(
@@ -394,8 +413,7 @@ fn summarize_tool_message_content(content: &str) -> String {
     content
         .lines()
         .find(|line| !line.trim().is_empty())
-        .map(summarize_runtime_inline_text)
-        .unwrap_or_else(|| "<no content>".to_string())
+        .map_or_else(|| "<no content>".to_string(), summarize_runtime_inline_text)
 }
 
 fn summarize_runtime_inline_text(text: &str) -> String {
@@ -410,7 +428,7 @@ fn summarize_runtime_inline_text(text: &str) -> String {
     }
 }
 
-fn history_message_for_compaction(message: AgentMessage) -> HistoryMessage {
+const fn history_message_for_compaction(message: AgentMessage) -> HistoryMessage {
     HistoryMessage {
         message,
         activity_event: None,

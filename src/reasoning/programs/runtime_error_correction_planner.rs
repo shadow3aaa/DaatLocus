@@ -103,7 +103,6 @@ impl Program for RuntimeErrorCorrectionPlannerProgram {
 
 impl RuntimeErrorCorrectionPlannerProgram {
     pub fn dataset_ir(
-        &self,
         current_runtime_contract_additions: String,
         runtime_error_cases_json: String,
     ) -> PromptIR {

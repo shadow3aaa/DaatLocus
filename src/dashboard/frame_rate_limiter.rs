@@ -22,7 +22,7 @@ impl FrameRateLimiter {
     }
 
     /// Records that a draw notification was emitted at `emitted_at`.
-    pub fn mark_emitted(&mut self, emitted_at: Instant) {
+    pub const fn mark_emitted(&mut self, emitted_at: Instant) {
         self.last_emitted_at = Some(emitted_at);
     }
 }

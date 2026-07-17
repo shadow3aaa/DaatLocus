@@ -1,3 +1,8 @@
+use miette::{Result, miette};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+#[cfg(not(test))]
+use std::process::Command as StdCommand;
 use std::{
     ffi::OsString,
     path::{Component, Path, PathBuf},
@@ -6,9 +11,6 @@ use std::{
     task::{Context, Poll},
 };
 
-use miette::{Result, miette};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[cfg(target_os = "linux")]
@@ -155,12 +157,7 @@ impl SandboxChild {
             if policy.strong_filesystem != StrongFilesystemSandboxMode::Off
                 && filesystem_policy_requires_backend(&policy.filesystem)
             {
-                match windows::spawn_restricted(
-                    policy,
-                    program.clone(),
-                    args.clone(),
-                    options.clone(),
-                ) {
+                match windows::spawn_restricted(policy, &program, args.clone(), options.clone()) {
                     Ok(inner) => return Ok(Self { inner }),
                     Err(err)
                         if policy.strong_filesystem == StrongFilesystemSandboxMode::Required =>
@@ -174,7 +171,13 @@ impl SandboxChild {
                     }
                 }
             }
-            windows::spawn_plain(policy, program, args, options).map(|inner| Self { inner })
+            let mut command = StdCommand::new(program);
+            command.args(args);
+            apply_std_command_options(policy, &mut command, options);
+            command
+                .spawn()
+                .map(windows::WindowsSandboxChild::Plain)
+                .map(|inner| Self { inner })
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -182,7 +185,7 @@ impl SandboxChild {
             let spawn_spec = policy
                 .strong_command_spawn_spec(program, args)
                 .map_err(std::io::Error::other)?;
-            let mut command = std::process::Command::new(spawn_spec.program);
+            let mut command = StdCommand::new(spawn_spec.program);
             command.args(spawn_spec.args);
             apply_std_command_options(policy, &mut command, options);
             let inner = command.spawn()?;
@@ -229,12 +232,10 @@ impl SandboxAsyncChild {
             if policy.strong_filesystem != StrongFilesystemSandboxMode::Off
                 && filesystem_policy_requires_backend(&policy.filesystem)
             {
-                let spawn_spec = policy
-                    .shell_spawn_spec(program, args.clone())
-                    .map_err(std::io::Error::other)?;
+                let spawn_spec = policy.shell_spawn_spec(program, args.clone());
                 match windows::spawn_restricted_async(
                     policy,
-                    spawn_spec.program,
+                    &spawn_spec.program,
                     spawn_spec.args,
                     options.clone(),
                 ) {
@@ -266,9 +267,7 @@ impl SandboxAsyncChild {
         args: Vec<String>,
         options: SandboxProcessOptions,
     ) -> std::io::Result<Self> {
-        let spawn_spec = policy
-            .shell_spawn_spec(program, args)
-            .map_err(std::io::Error::other)?;
+        let spawn_spec = policy.shell_spawn_spec(program, args);
         let mut command = tokio::process::Command::new(spawn_spec.program);
         command.args(spawn_spec.args);
         apply_tokio_command_options(policy, &mut command, options);
@@ -363,7 +362,7 @@ impl From<tokio::process::ChildStderr> for SandboxChildStderr {
 
 impl SandboxChildStdin {
     #[cfg(target_os = "windows")]
-    fn from_file(file: tokio::fs::File) -> Self {
+    const fn from_file(file: tokio::fs::File) -> Self {
         Self {
             inner: SandboxChildStdinInner::File(file),
         }
@@ -372,7 +371,7 @@ impl SandboxChildStdin {
 
 impl SandboxChildStdout {
     #[cfg(target_os = "windows")]
-    fn from_file(file: tokio::fs::File) -> Self {
+    const fn from_file(file: tokio::fs::File) -> Self {
         Self {
             inner: SandboxChildStdoutInner::File(file),
         }
@@ -381,7 +380,7 @@ impl SandboxChildStdout {
 
 impl SandboxChildStderr {
     #[cfg(target_os = "windows")]
-    fn from_file(file: tokio::fs::File) -> Self {
+    const fn from_file(file: tokio::fs::File) -> Self {
         Self {
             inner: SandboxChildStderrInner::File(file),
         }
@@ -446,9 +445,8 @@ impl AsyncRead for SandboxChildStderr {
     }
 }
 
-#[allow(dead_code)]
-#[cfg(any(not(test), all(test, target_os = "windows")))]
-pub(super) fn apply_std_command_options(
+#[cfg(not(test))]
+pub fn apply_std_command_options(
     policy: &RuntimeSandboxPolicy,
     command: &mut std::process::Command,
     options: SandboxProcessOptions,
@@ -479,8 +477,7 @@ fn apply_tokio_command_options(
         .stderr(options.stderr.to_stdio());
 }
 
-#[allow(dead_code)]
-#[cfg(any(not(test), all(test, target_os = "windows")))]
+#[cfg(not(test))]
 fn strip_protected_env_from_std_command(
     policy: &RuntimeSandboxPolicy,
     command: &mut std::process::Command,
@@ -496,7 +493,7 @@ fn strip_protected_env_from_std_command(
 }
 
 #[cfg(target_os = "windows")]
-fn filesystem_policy_requires_backend(policy: &FileSystemSandboxPolicy) -> bool {
+const fn filesystem_policy_requires_backend(policy: &FileSystemSandboxPolicy) -> bool {
     !(policy.full_disk_read
         && policy.full_disk_write
         && policy.readable_roots.is_empty()
@@ -533,7 +530,7 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-pub(crate) fn resolve_path_for_check(path: &Path) -> PathBuf {
+pub fn resolve_path_for_check(path: &Path) -> PathBuf {
     let normalized = normalize_path(path);
     if !normalized.is_absolute() {
         return normalized;
@@ -564,7 +561,7 @@ pub(crate) fn resolve_path_for_check(path: &Path) -> PathBuf {
     }
 }
 
-pub(crate) fn policy_paths_with_resolved(paths: &[PathBuf]) -> Vec<PathBuf> {
+pub fn policy_paths_with_resolved(paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut expanded = paths
         .iter()
         .flat_map(|path| [normalize_path(path), resolve_path_for_check(path)])
@@ -596,14 +593,14 @@ fn path_is_or_descends_resolved(path: &Path, root: &Path) -> bool {
     path_is_or_descends(&resolved, &resolved_root)
 }
 
-pub(super) fn path_is_denied(path: &Path, denied_roots: &[PathBuf]) -> bool {
+pub fn path_is_denied(path: &Path, denied_roots: &[PathBuf]) -> bool {
     denied_roots
         .iter()
         .any(|denied| path_is_or_descends_logical_or_resolved(path, denied))
 }
 
 impl FileSystemSandboxPolicy {
-    pub fn unrestricted() -> Self {
+    pub const fn unrestricted() -> Self {
         Self {
             full_disk_read: true,
             full_disk_write: true,
@@ -614,7 +611,7 @@ impl FileSystemSandboxPolicy {
         }
     }
 
-    pub fn is_unrestricted(&self) -> bool {
+    pub const fn is_unrestricted(&self) -> bool {
         self.full_disk_read
             && self.full_disk_write
             && self.readable_roots.is_empty()
@@ -665,7 +662,7 @@ impl FileSystemSandboxPolicy {
 }
 
 impl RuntimeSandboxPolicy {
-    pub fn disabled() -> Self {
+    pub const fn disabled() -> Self {
         Self {
             filesystem: FileSystemSandboxPolicy::unrestricted(),
             protected_env_vars: Vec::new(),
@@ -734,7 +731,7 @@ impl RuntimeSandboxPolicy {
         }
     }
 
-    pub fn resolve_path(&self, path: &Path, base: Option<&Path>) -> PathBuf {
+    pub fn resolve_path(path: &Path, base: Option<&Path>) -> PathBuf {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -814,31 +811,33 @@ impl RuntimeSandboxPolicy {
         }
     }
 
-    pub fn shell_spawn_spec(&self, program: &str, args: Vec<String>) -> Result<SandboxSpawnSpec> {
+    pub fn shell_spawn_spec(&self, program: &str, args: Vec<String>) -> SandboxSpawnSpec {
         if self.is_disabled() {
-            return Ok(SandboxSpawnSpec {
+            return SandboxSpawnSpec {
                 program: PathBuf::from(program),
                 args,
-            });
+            };
         }
 
         #[cfg(target_os = "macos")]
         {
             macos::wrap_shell_command(self, program, args)
+                .expect("macOS shell sandbox command should be renderable")
         }
 
         #[cfg(target_os = "linux")]
         {
             linux::wrap_shell_command(self, program, args)
+                .expect("Linux shell sandbox command should be renderable")
         }
 
         #[cfg(not(target_os = "macos"))]
         #[cfg(not(target_os = "linux"))]
         {
-            Ok(SandboxSpawnSpec {
+            SandboxSpawnSpec {
                 program: PathBuf::from(program),
                 args,
-            })
+            }
         }
     }
 
@@ -991,9 +990,8 @@ mod tests {
         assert!(policy.is_path_writable(Path::new("/repo/src/main.rs")));
         assert!(!policy.is_env_var_protected("OPENAI_API_KEY"));
 
-        let shell_spec = policy
-            .shell_spawn_spec("/bin/sh", vec!["-lc".to_string(), "echo ok".to_string()])
-            .expect("shell spawn spec");
+        let shell_spec =
+            policy.shell_spawn_spec("/bin/sh", vec!["-lc".to_string(), "echo ok".to_string()]);
         assert_eq!(shell_spec.program, Path::new("/bin/sh"));
     }
 
@@ -1161,9 +1159,10 @@ exit 42
         public_file: &Path,
         workspace_output: &Path,
     ) -> (String, Vec<String>) {
-        let system_root = std::env::var_os("SystemRoot")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+        let system_root = std::env::var_os("SystemRoot").map_or_else(
+            || std::path::PathBuf::from(r"C:\Windows"),
+            std::path::PathBuf::from,
+        );
         let powershell = system_root
             .join("System32")
             .join("WindowsPowerShell")
@@ -1289,9 +1288,8 @@ exit 42
     fn shell_spawn_spec_uses_sandbox_exec_on_macos() {
         let policy =
             RuntimeSandboxPolicy::protect_daat_locus_runtime(Path::new("/Users/test/.daat-locus"));
-        let spawn_spec = policy
-            .shell_spawn_spec("bash", vec!["-lc".to_string(), "pwd".to_string()])
-            .expect("macOS sandbox wrapper should render");
+        let spawn_spec =
+            policy.shell_spawn_spec("bash", vec!["-lc".to_string(), "pwd".to_string()]);
         assert_eq!(spawn_spec.program, Path::new("/usr/bin/sandbox-exec"));
         assert!(spawn_spec.args.iter().any(|arg| arg == "--"));
     }

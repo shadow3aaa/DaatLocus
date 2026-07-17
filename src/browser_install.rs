@@ -70,7 +70,7 @@ fn browser_runtime_platform() -> Result<&'static str> {
 }
 
 /// Download and install the browser runtime when it is missing. Called automatically during daemon startup.
-pub(crate) async fn maybe_setup_browser_runtime() {
+pub async fn maybe_setup_browser_runtime() {
     let paths = daat_locus_paths().await;
     if paths.browser_executable_path().exists() {
         return;
@@ -165,7 +165,7 @@ async fn run_browser_runtime_setup() -> Result<()> {
             let enclosed = file
                 .enclosed_name()
                 .ok_or_else(|| miette!("browser runtime archive contained unsafe path"))?
-                .to_path_buf();
+                .clone();
             let destination = runtime_dir_for_extract.join(enclosed);
             if file.name().ends_with('/') {
                 std::fs::create_dir_all(&destination).map_err(|err| {

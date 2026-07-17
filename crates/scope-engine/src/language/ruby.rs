@@ -4,7 +4,8 @@ use tree_sitter::Language;
 pub struct RubyAdapter;
 
 impl RubyAdapter {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -27,16 +28,16 @@ impl LanguageAdapter for RubyAdapter {
     }
     fn queries(&self) -> LanguageQueries {
         LanguageQueries {
-            definitions: r#"
+            definitions: r"
                 (method name: (identifier) @name) @def
                 (singleton_method name: (identifier) @name) @def
                 (class name: (constant) @name) @def
                 (module name: (constant) @name) @def
-            "#,
-            references: r#"
+            ",
+            references: r"
                 (call method: (identifier) @ref) @call
                 (identifier) @ref
-            "#,
+            ",
         }
     }
 }

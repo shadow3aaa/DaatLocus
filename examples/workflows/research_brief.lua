@@ -52,6 +52,7 @@ workflow.tool({
 })
 
 local researcher = workflow.agent({
+  role = "research",
   model = "efficient",
   input = Input,
   output = ResearchOutput,

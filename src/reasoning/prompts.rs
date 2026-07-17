@@ -2,13 +2,27 @@ use crate::app::AppDocs;
 
 use super::prompt_text::{PromptTextBuilder, render_bullet_list};
 
-mod generated {
+pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/prompt_bindings.rs"));
 }
 
-pub(crate) use generated::*;
+pub use generated::PERSONA_DEFAULT;
+pub use generated::{
+    APP_BROWSER, APP_CODING, APP_TERMINAL, HISTORY_COMPACTION_PROMPT,
+    HISTORY_COMPACTION_SUMMARY_PREFIX, HISTORY_COMPACTION_TOOL_DESCRIPTION,
+    HISTORY_COMPACTION_USER_MESSAGE, MID_TURN_SUMMARY_PREFIX,
+    PROGRAM_RUNTIME_ERROR_CORRECTION_PLANNER_INSTRUCTIONS,
+    PROGRAM_RUNTIME_ERROR_CORRECTION_PLANNER_SYSTEM,
+    PROGRAM_SKILL_IMPROVEMENT_PLANNER_INSTRUCTIONS, PROGRAM_SKILL_IMPROVEMENT_PLANNER_SYSTEM,
+    RUNTIME_HISTORY_SUMMARY_PREFIX, SESSION_TITLE_SYSTEM_REQUIREMENTS, SESSION_TITLE_SYSTEM_ROLE,
+    SESSION_TITLE_TOOL_DESCRIPTION, SESSION_TITLE_USER_MESSAGE_PREFIX, SYSTEM_CORE,
+};
+#[cfg(test)]
+pub use generated::{
+    APP_BROWSER_SOURCE, APP_CODING_SOURCE, APP_TERMINAL_SOURCE, PERSONA_DEFAULT_SOURCE,
+};
 
-pub(crate) fn prompt_bullet_lines(markdown: &str) -> Vec<String> {
+pub fn prompt_bullet_lines(markdown: &str) -> Vec<String> {
     markdown
         .lines()
         .map(str::trim)
@@ -18,12 +32,12 @@ pub(crate) fn prompt_bullet_lines(markdown: &str) -> Vec<String> {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct AppPrompt {
+pub struct AppPrompt {
     pub docs: &'static str,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct PromptPersona {
+pub struct PromptPersona {
     pub name: &'static str,
     pub language: &'static str,
     pub identity_summary: &'static str,
@@ -83,6 +97,9 @@ mod tests {
     fn generated_app_prompt_structs_are_nonempty() {
         for prompt in [APP_BROWSER, APP_CODING, APP_TERMINAL] {
             assert!(!prompt.docs.is_empty());
+        }
+        for source in [APP_BROWSER_SOURCE, APP_CODING_SOURCE, APP_TERMINAL_SOURCE] {
+            assert!(!source.is_empty());
         }
     }
 

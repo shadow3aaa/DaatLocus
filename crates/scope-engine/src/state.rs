@@ -13,6 +13,7 @@ impl Default for PropagationState {
 }
 
 impl PropagationState {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             pending: Vec::new(),
@@ -28,7 +29,8 @@ impl PropagationState {
         }
     }
 
-    pub fn pending_count(&self) -> usize {
+    #[must_use]
+    pub const fn pending_count(&self) -> usize {
         self.pending.len()
     }
 
@@ -143,7 +145,7 @@ mod tests {
                 assert_eq!(references.len(), 1);
                 assert_eq!(references[0].selector, "src/b.rs::fn bar");
             }
-            _ => panic!("Expected KnownReferences variant"),
+            ReviewEvent::InvestigateImpact { .. } => panic!("Expected KnownReferences variant"),
         }
     }
 
@@ -163,7 +165,7 @@ mod tests {
                 assert_eq!(diff_summary, "test diff");
                 assert_eq!(project_files.len(), 1);
             }
-            _ => panic!("Expected InvestigateImpact variant"),
+            ReviewEvent::KnownReferences { .. } => panic!("Expected InvestigateImpact variant"),
         }
     }
 
@@ -190,13 +192,13 @@ mod tests {
             ReviewEvent::KnownReferences {
                 modified_symbol, ..
             } => assert_eq!(modified_symbol, "src/c.rs::fn baz"),
-            _ => panic!("Expected KnownReferences variant"),
+            ReviewEvent::InvestigateImpact { .. } => panic!("Expected KnownReferences variant"),
         }
         match &events[1] {
             ReviewEvent::KnownReferences {
                 modified_symbol, ..
             } => assert_eq!(modified_symbol, "src/b.rs::fn bar"),
-            _ => panic!("Expected KnownReferences variant"),
+            ReviewEvent::InvestigateImpact { .. } => panic!("Expected KnownReferences variant"),
         }
     }
 
@@ -212,15 +214,15 @@ mod tests {
             ReviewEvent::KnownReferences {
                 modified_symbol, ..
             } => assert_eq!(modified_symbol, "src/b.rs::fn bar"),
-            _ => panic!(),
-        };
+            ReviewEvent::InvestigateImpact { .. } => panic!(),
+        }
         let e2 = state.next_review().unwrap();
         match e2 {
             ReviewEvent::KnownReferences {
                 modified_symbol, ..
             } => assert_eq!(modified_symbol, "src/a.rs::fn foo"),
-            _ => panic!(),
-        };
+            ReviewEvent::InvestigateImpact { .. } => panic!(),
+        }
     }
 
     #[test]
@@ -239,7 +241,7 @@ mod tests {
                 assert_eq!(modified_symbol, "src/a.rs::fn foo");
                 assert_eq!(change_summary, "first");
             }
-            _ => panic!("Expected KnownReferences variant"),
+            ReviewEvent::InvestigateImpact { .. } => panic!("Expected KnownReferences variant"),
         }
 
         state.accumulate(vec![lsp_result("src/a.rs::fn foo", "second")]);
@@ -254,7 +256,7 @@ mod tests {
                 assert_eq!(modified_symbol, "src/a.rs::fn foo");
                 assert_eq!(change_summary, "second");
             }
-            _ => panic!("Expected KnownReferences variant"),
+            ReviewEvent::InvestigateImpact { .. } => panic!("Expected KnownReferences variant"),
         }
     }
 

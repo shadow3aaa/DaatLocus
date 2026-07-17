@@ -172,8 +172,7 @@ pub struct AppToolExecutionContext {
 
 impl AppToolExecutionContext {
     pub fn resolve_tool_path(&self, path: &Path, base: Option<&Path>) -> PathBuf {
-        self.sandbox_policy
-            .resolve_path(path, base.or(Some(&self.execution_cwd)))
+        RuntimeSandboxPolicy::resolve_path(path, base.or(Some(&self.execution_cwd)))
     }
 }
 
@@ -337,7 +336,7 @@ impl AppManager {
             let Some(app) = self.apps.get(id) else {
                 continue;
             };
-            let app_call = self.demangle_call_for_app(id, call);
+            let app_call = Self::demangle_call_for_app(id, call);
             app.before_runtime_tool_call(&app_call, context)?;
         }
         Ok(())
@@ -445,11 +444,10 @@ impl AppManager {
         Err(miette!("unknown app tool `{exposed_tool_name}`"))
     }
 
-    fn demangle_call_for_app(&self, app_id: &AppId, call: &AgentToolCall) -> AgentToolCall {
+    fn demangle_call_for_app(app_id: &AppId, call: &AgentToolCall) -> AgentToolCall {
         app_id
             .demangle_tool_name(&call.name)
-            .map(|name| call.with_name(name))
-            .unwrap_or_else(|| call.clone())
+            .map_or_else(|| call.clone(), |name| call.with_name(name))
     }
 
     pub async fn shutdown(mut self) -> Result<()> {

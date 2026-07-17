@@ -9,7 +9,8 @@ use super::tui_event::TuiMouseSelectionKind;
 use super::{
     CachedActivityLines, DashboardActivityHistoryItem, DashboardActivityHistoryPage,
     DashboardCommandAttachment, DashboardState, LiveActivityEvent, SessionActivityEvent,
-    activity_events_from_history_items, cells::sync_runtime_status_live_cell,
+    WorkflowWorkerActivityPage, activity_events_from_history_items,
+    cells::sync_runtime_status_live_cell,
 };
 
 use super::terminal_hyperlinks::TerminalHyperlinkOverlay;
@@ -32,14 +33,14 @@ pub(super) struct InputState {
 }
 
 impl InputState {
-    pub(super) fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             text: String::new(),
             cursor_pos: 0,
         }
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub(super) const fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
 
@@ -112,12 +113,10 @@ impl InputState {
         let cursor_pos = self.cursor_pos.min(self.text.len());
         let line_start = self.text[..cursor_pos]
             .rfind('\n')
-            .map(|index| index + 1)
-            .unwrap_or(0);
+            .map_or(0, |index| index + 1);
         let line_end = self.text[cursor_pos..]
             .find('\n')
-            .map(|index| cursor_pos + index)
-            .unwrap_or(self.text.len());
+            .map_or(self.text.len(), |index| cursor_pos + index);
         (line_start, line_end)
     }
 
@@ -128,8 +127,7 @@ impl InputState {
         let previous_line_end = line_start - 1;
         let previous_line_start = self.text[..previous_line_end]
             .rfind('\n')
-            .map(|index| index + 1)
-            .unwrap_or(0);
+            .map_or(0, |index| index + 1);
         Some((previous_line_start, previous_line_end))
     }
 
@@ -140,8 +138,7 @@ impl InputState {
         let next_line_start = line_end + 1;
         let next_line_end = self.text[next_line_start..]
             .find('\n')
-            .map(|index| next_line_start + index)
-            .unwrap_or(self.text.len());
+            .map_or(self.text.len(), |index| next_line_start + index);
         Some((next_line_start, next_line_end))
     }
 
@@ -182,11 +179,11 @@ impl InputState {
         line_end
     }
 
-    pub(super) fn move_home(&mut self) {
+    pub(super) const fn move_home(&mut self) {
         self.cursor_pos = 0;
     }
 
-    pub(super) fn move_end(&mut self) {
+    pub(super) const fn move_end(&mut self) {
         self.cursor_pos = self.text.len();
     }
 
@@ -202,46 +199,21 @@ impl InputState {
     }
 }
 
-pub(super) struct TranscriptOverlayState {
-    pub(super) cells: Vec<SessionActivityEvent>,
-    pub(super) live_cells: Vec<LiveActivityEvent>,
-    pub(super) history_prefix_len: usize,
+pub(super) struct ActivityScrollState {
     pub(super) scroll: u16,
     pub(super) follow_bottom: bool,
     pub(super) max_scroll: u16,
     pub(super) page_height: u16,
 }
 
-impl TranscriptOverlayState {
-    pub(super) fn new(
-        cells: Vec<SessionActivityEvent>,
-        live_cells: Vec<LiveActivityEvent>,
-        state_activity_len: usize,
-    ) -> Self {
+impl ActivityScrollState {
+    pub(super) const fn new(page_height: u16) -> Self {
         Self {
-            history_prefix_len: cells.len().saturating_sub(state_activity_len),
-            cells,
-            live_cells,
             scroll: 0,
             follow_bottom: true,
             max_scroll: 0,
-            page_height: 20,
+            page_height,
         }
-    }
-
-    pub(super) fn sync_state(&mut self, state: &DashboardState) {
-        let mut next_cells = self
-            .cells
-            .iter()
-            .take(self.history_prefix_len)
-            .cloned()
-            .collect::<Vec<_>>();
-        next_cells.extend(state.activity_events.clone());
-        self.cells = next_cells;
-        let mut live_cells = state.live_activity_events.clone();
-        sync_runtime_status_live_cell(&mut live_cells, state);
-        self.live_cells = live_cells;
-        self.clamp_scroll();
     }
 
     pub(super) fn set_render_metrics(&mut self, max_scroll: u16, page_height: u16) {
@@ -258,60 +230,79 @@ impl TranscriptOverlayState {
         }
     }
 
+    pub(super) fn display_scroll(&self) -> u16 {
+        if self.follow_bottom {
+            u16::MAX
+        } else {
+            self.scroll.min(self.max_scroll)
+        }
+    }
+
     pub(super) fn handle_scroll_rows(&mut self, rows: i16) -> bool {
+        if rows == 0 || self.max_scroll == 0 {
+            return false;
+        }
         match rows.cmp(&0) {
             std::cmp::Ordering::Less => {
                 let rows = rows.unsigned_abs();
-                self.leave_bottom_follow(rows);
+                if self.follow_bottom {
+                    self.follow_bottom = false;
+                    self.scroll = self.max_scroll;
+                }
+                let previous_scroll = self.scroll;
                 self.scroll = self.scroll.saturating_sub(rows);
-                true
+                self.scroll != previous_scroll || !self.follow_bottom
             }
             std::cmp::Ordering::Greater => {
                 if self.follow_bottom {
+                    return false;
+                }
+                let previous_scroll = self.scroll;
+                self.scroll = self.scroll.saturating_add(rows.cast_unsigned());
+                if self.scroll >= self.max_scroll {
+                    self.reset_to_bottom();
                     return true;
                 }
-                self.scroll = self.scroll.saturating_add(rows as u16);
-                if self.scroll >= self.max_scroll {
-                    self.follow_bottom = true;
-                    self.scroll = 0;
-                }
-                true
+                self.scroll != previous_scroll
             }
             std::cmp::Ordering::Equal => false,
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> bool {
+    pub(super) fn handle_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.handle_scroll_rows(-1),
             KeyCode::Down | KeyCode::Char('j') => self.handle_scroll_rows(1),
             KeyCode::PageUp => {
-                let page_height = self.page_height.min(i16::MAX as u16) as i16;
+                let page_height = self.page_height.min(i16::MAX as u16).cast_signed();
                 self.handle_scroll_rows(-page_height)
             }
             KeyCode::PageDown => {
-                let page_height = self.page_height.min(i16::MAX as u16) as i16;
+                let page_height = self.page_height.min(i16::MAX as u16).cast_signed();
                 self.handle_scroll_rows(page_height)
             }
             KeyCode::Home => {
+                if self.max_scroll == 0 || (!self.follow_bottom && self.scroll == 0) {
+                    return false;
+                }
                 self.follow_bottom = false;
                 self.scroll = 0;
                 true
             }
             KeyCode::End => {
-                self.follow_bottom = true;
-                self.scroll = 0;
+                if self.follow_bottom {
+                    return false;
+                }
+                self.reset_to_bottom();
                 true
             }
             _ => false,
         }
     }
 
-    fn leave_bottom_follow(&mut self, rows_from_bottom: u16) {
-        if self.follow_bottom {
-            self.follow_bottom = false;
-            self.scroll = self.max_scroll.saturating_sub(rows_from_bottom);
-        }
+    pub(super) const fn reset_to_bottom(&mut self) {
+        self.follow_bottom = true;
+        self.scroll = 0;
     }
 
     fn clamp_scroll(&mut self) {
@@ -319,6 +310,291 @@ impl TranscriptOverlayState {
             self.scroll = 0;
         } else {
             self.scroll = self.scroll.min(self.max_scroll);
+        }
+    }
+}
+
+pub(super) struct TranscriptOverlayState {
+    pub(super) cells: Vec<SessionActivityEvent>,
+    pub(super) live_cells: Vec<LiveActivityEvent>,
+    pub(super) history_prefix_len: usize,
+    pub(super) activity_scroll: ActivityScrollState,
+}
+
+impl TranscriptOverlayState {
+    pub(super) const fn new(
+        cells: Vec<SessionActivityEvent>,
+        live_cells: Vec<LiveActivityEvent>,
+        state_activity_len: usize,
+    ) -> Self {
+        Self {
+            history_prefix_len: cells.len().saturating_sub(state_activity_len),
+            cells,
+            live_cells,
+            activity_scroll: ActivityScrollState::new(20),
+        }
+    }
+
+    pub(super) fn sync_state(&mut self, state: &DashboardState) {
+        let mut next_cells = self
+            .cells
+            .iter()
+            .take(self.history_prefix_len)
+            .cloned()
+            .collect::<Vec<_>>();
+        next_cells.extend(state.activity_events.clone());
+        self.cells = next_cells;
+        let mut live_cells = state.live_activity_events.clone();
+        sync_runtime_status_live_cell(&mut live_cells, state);
+        self.live_cells = live_cells;
+    }
+
+    pub(super) fn set_render_metrics(&mut self, max_scroll: u16, page_height: u16) {
+        self.activity_scroll
+            .set_render_metrics(max_scroll, page_height);
+    }
+
+    pub(super) fn effective_scroll(&self) -> u16 {
+        self.activity_scroll.effective_scroll()
+    }
+
+    pub(super) fn handle_scroll_rows(&mut self, rows: i16) -> bool {
+        self.activity_scroll.handle_scroll_rows(rows)
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
+        self.activity_scroll.handle_key(key)
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WorkflowInspectorPage {
+    Outline,
+    Activity,
+}
+
+pub(super) struct WorkflowInspectorState {
+    pub(super) snapshot: crate::workflow::WorkflowRunSnapshot,
+    pub(super) selected_worker: usize,
+    pub(super) page: WorkflowInspectorPage,
+    pub(super) activity_scroll: ActivityScrollState,
+    pub(super) activity_cache: CachedActivityLines,
+    pub(super) expanded_thinking: HashSet<usize>,
+    pub(super) worker_activity: Vec<SessionActivityEvent>,
+    pub(super) worker_activity_oldest_cursor: Option<i64>,
+    pub(super) worker_activity_has_more_before: bool,
+    pub(super) worker_activity_loading: bool,
+    pub(super) worker_activity_loaded_revision: Option<i64>,
+    pub(super) worker_activity_error: Option<String>,
+    worker_activity_load_rx:
+        Option<tokio::sync::oneshot::Receiver<Result<WorkflowWorkerActivityPage, String>>>,
+}
+
+impl WorkflowInspectorState {
+    fn new(snapshot: crate::workflow::WorkflowRunSnapshot) -> Self {
+        let selected_worker = snapshot.workers.len().saturating_sub(1);
+        Self {
+            snapshot,
+            selected_worker,
+            page: WorkflowInspectorPage::Outline,
+            activity_scroll: ActivityScrollState::new(20),
+            activity_cache: CachedActivityLines::new(),
+            expanded_thinking: HashSet::new(),
+            worker_activity: Vec::new(),
+            worker_activity_oldest_cursor: None,
+            worker_activity_has_more_before: false,
+            worker_activity_loading: false,
+            worker_activity_loaded_revision: None,
+            worker_activity_error: None,
+            worker_activity_load_rx: None,
+        }
+    }
+
+    fn sync_snapshot(&mut self, snapshot: &crate::workflow::WorkflowRunSnapshot) {
+        let previous_worker_id = self
+            .selected_worker()
+            .map(|worker| worker.worker_id.clone());
+        let previous_revision = self
+            .selected_worker()
+            .map(|worker| worker.activity_revision);
+        self.snapshot = snapshot.clone();
+        self.selected_worker = self
+            .selected_worker
+            .min(self.snapshot.workers.len().saturating_sub(1));
+        let selected_worker_id = self
+            .selected_worker()
+            .map(|worker| worker.worker_id.clone());
+        let selected_revision = self
+            .selected_worker()
+            .map(|worker| worker.activity_revision);
+        if previous_worker_id != selected_worker_id {
+            self.reset_worker_activity();
+        } else if previous_revision != selected_revision
+            && self.worker_activity_loaded_revision.is_some()
+        {
+            self.worker_activity_loaded_revision = None;
+            self.worker_activity_oldest_cursor = None;
+            self.worker_activity_has_more_before = false;
+            self.worker_activity_error = None;
+        }
+        self.activity_cache = CachedActivityLines::new();
+    }
+
+    pub(super) fn selected_worker(&self) -> Option<&crate::workflow::WorkflowWorkerSnapshot> {
+        self.snapshot.workers.get(self.selected_worker)
+    }
+
+    pub(super) fn displayed_worker_activity(&self) -> &[SessionActivityEvent] {
+        if self.worker_activity_loaded_revision.is_some() {
+            &self.worker_activity
+        } else {
+            self.selected_worker()
+                .map_or(&[], |worker| worker.activity.as_slice())
+        }
+    }
+
+    pub(super) fn should_start_worker_activity_load(
+        &self,
+        has_history_loader: bool,
+        activity_pane_visible: bool,
+    ) -> bool {
+        let Some(worker) = self.selected_worker() else {
+            return false;
+        };
+        has_history_loader
+            && (activity_pane_visible || self.page == WorkflowInspectorPage::Activity)
+            && !self.worker_activity_loading
+            && self.worker_activity_error.is_none()
+            && self.worker_activity_loaded_revision != Some(worker.activity_revision)
+    }
+
+    pub(super) fn should_start_older_worker_activity_load(&self, has_history_loader: bool) -> bool {
+        has_history_loader
+            && self.page == WorkflowInspectorPage::Activity
+            && !self.worker_activity_loading
+            && self.worker_activity_error.is_none()
+            && self.worker_activity_loaded_revision.is_some()
+            && self.worker_activity_has_more_before
+            && self.activity_scroll.effective_scroll() <= 3
+    }
+
+    pub(super) fn worker_activity_request(&self) -> Option<(String, String, Option<i64>)> {
+        let worker = self.selected_worker()?;
+        Some((
+            self.snapshot.run_id.clone(),
+            worker.worker_id.clone(),
+            self.worker_activity_oldest_cursor,
+        ))
+    }
+
+    pub(super) fn begin_worker_activity_load(
+        &mut self,
+        rx: tokio::sync::oneshot::Receiver<Result<WorkflowWorkerActivityPage, String>>,
+    ) {
+        self.worker_activity_loading = true;
+        self.worker_activity_error = None;
+        self.worker_activity_load_rx = Some(rx);
+    }
+
+    pub(super) const fn take_worker_activity_load_rx(
+        &mut self,
+    ) -> Option<tokio::sync::oneshot::Receiver<Result<WorkflowWorkerActivityPage, String>>> {
+        self.worker_activity_load_rx.take()
+    }
+
+    pub(super) fn keep_worker_activity_load_rx(
+        &mut self,
+        rx: tokio::sync::oneshot::Receiver<Result<WorkflowWorkerActivityPage, String>>,
+    ) {
+        self.worker_activity_load_rx = Some(rx);
+    }
+
+    pub(super) fn apply_worker_activity_page(&mut self, page: &WorkflowWorkerActivityPage) {
+        let Some(worker) = self.selected_worker() else {
+            self.finish_worker_activity_load_without_page(None);
+            return;
+        };
+        if page.run_id != self.snapshot.run_id || page.worker_id != worker.worker_id {
+            self.finish_worker_activity_load_without_page(Some(
+                "workflow worker activity response did not match the selected worker".to_string(),
+            ));
+            return;
+        }
+
+        let loading_older = self.worker_activity_loaded_revision.is_some()
+            && self.worker_activity_oldest_cursor.is_some();
+        let page_events = page
+            .items
+            .iter()
+            .map(|item| item.event.clone())
+            .collect::<Vec<_>>();
+        if loading_older {
+            let mut merged = page_events;
+            merged.extend(std::mem::take(&mut self.worker_activity));
+            self.worker_activity = merged;
+            self.activity_scroll.follow_bottom = false;
+            self.activity_scroll.scroll = 0;
+        } else {
+            self.worker_activity = page_events;
+            self.activity_scroll.reset_to_bottom();
+        }
+        self.worker_activity_oldest_cursor = page.oldest_cursor;
+        self.worker_activity_has_more_before = page.has_more_before;
+        self.worker_activity_loaded_revision = Some(page.revision);
+        self.worker_activity_loading = false;
+        self.worker_activity_error = None;
+        self.activity_cache = CachedActivityLines::new();
+    }
+
+    pub(super) fn finish_worker_activity_load_without_page(&mut self, error: Option<String>) {
+        self.worker_activity_loading = false;
+        self.worker_activity_error = error;
+        self.worker_activity_load_rx = None;
+    }
+
+    fn reset_worker_activity(&mut self) {
+        self.worker_activity.clear();
+        self.worker_activity_oldest_cursor = None;
+        self.worker_activity_has_more_before = false;
+        self.worker_activity_loading = false;
+        self.worker_activity_loaded_revision = None;
+        self.worker_activity_error = None;
+        self.worker_activity_load_rx = None;
+        self.activity_scroll.reset_to_bottom();
+        self.activity_cache = CachedActivityLines::new();
+        self.expanded_thinking.clear();
+    }
+
+    fn select_worker(&mut self, worker_index: usize) {
+        if worker_index != self.selected_worker {
+            self.selected_worker = worker_index;
+            self.reset_worker_activity();
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') if self.page == WorkflowInspectorPage::Outline => {
+                self.select_worker(self.selected_worker.saturating_sub(1));
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.page == WorkflowInspectorPage::Outline => {
+                self.select_worker(
+                    (self.selected_worker + 1).min(self.snapshot.workers.len().saturating_sub(1)),
+                );
+                true
+            }
+            KeyCode::Enter | KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                self.page = WorkflowInspectorPage::Activity;
+                true
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                self.page = WorkflowInspectorPage::Outline;
+                true
+            }
+            _ if self.page == WorkflowInspectorPage::Activity => {
+                self.activity_scroll.handle_key(key)
+            }
+            _ => false,
         }
     }
 }
@@ -331,16 +607,14 @@ pub(super) struct TuiViewState {
     pub(super) command_popup_scroll: usize,
     pub(super) command_panel: Option<CommandPanel>,
     pub(super) transcript_overlay: Option<TranscriptOverlayState>,
+    pub(super) workflow_inspector: Option<WorkflowInspectorState>,
     pub(super) command_feedback: Option<CommandFeedback>,
     pub(super) ctrl_c_reminder: Option<CtrlCReminder>,
     pub(super) editing_pending_user_input: Option<PendingUserInputEditState>,
     command_history: Vec<String>,
     command_history_cursor: Option<usize>,
     command_history_recalled_text: Option<String>,
-    pub(super) scroll_offset: u16,
-    pub(super) auto_scroll: bool,
-    pub(super) max_scroll: u16,
-    pub(super) page_height: u16,
+    pub(super) activity_scroll: ActivityScrollState,
     pub(super) last_cursor_pos: Option<(u16, u16)>,
     pub(super) previous_hyperlink_overlays: Vec<TerminalHyperlinkOverlay>,
     pub(super) selection: SelectionRegistry,
@@ -366,16 +640,14 @@ impl TuiViewState {
             command_popup_scroll: 0,
             command_panel: None,
             transcript_overlay: None,
+            workflow_inspector: None,
             command_feedback: None,
             ctrl_c_reminder: None,
             editing_pending_user_input: None,
             command_history: Vec::new(),
             command_history_cursor: None,
             command_history_recalled_text: None,
-            scroll_offset: 0,
-            auto_scroll: true,
-            max_scroll: 0,
-            page_height: 20,
+            activity_scroll: ActivityScrollState::new(20),
             last_cursor_pos: None,
             previous_hyperlink_overlays: Vec::new(),
             selection: SelectionRegistry::default(),
@@ -391,7 +663,7 @@ impl TuiViewState {
         }
     }
 
-    pub(super) fn reset_command_popup(&mut self) {
+    pub(super) const fn reset_command_popup(&mut self) {
         self.command_popup_selection = 0;
         self.command_popup_scroll = 0;
     }
@@ -430,6 +702,82 @@ impl TuiViewState {
                 .is_some_and(|overlay| overlay.handle_key(key)),
         }
     }
+    pub(super) fn open_latest_workflow_inspector(&mut self, state: &DashboardState) -> bool {
+        let snapshot = state.active_workflow_runs.last().cloned().or_else(|| {
+            state
+                .activity_events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    SessionActivityEvent::Workflow(workflow) => workflow.snapshot.clone(),
+                    _ => None,
+                })
+        });
+        let Some(snapshot) = snapshot else {
+            return false;
+        };
+        self.workflow_inspector = Some(WorkflowInspectorState::new(snapshot));
+        self.transcript_overlay = None;
+        self.command_panel = None;
+        self.command_feedback = None;
+        self.reset_command_popup();
+        self.selection.clear_selection();
+        true
+    }
+
+    pub(super) fn sync_workflow_inspector(&mut self, state: &DashboardState) {
+        let Some(inspector) = self.workflow_inspector.as_mut() else {
+            return;
+        };
+        if let Some(snapshot) = state
+            .active_workflow_runs
+            .iter()
+            .find(|run| run.run_id == inspector.snapshot.run_id)
+            .or_else(|| {
+                state
+                    .activity_events
+                    .iter()
+                    .rev()
+                    .find_map(|event| match event {
+                        SessionActivityEvent::Workflow(workflow) => workflow
+                            .snapshot
+                            .as_ref()
+                            .filter(|snapshot| snapshot.run_id == inspector.snapshot.run_id),
+                        _ => None,
+                    })
+            })
+        {
+            inspector.sync_snapshot(snapshot);
+        }
+    }
+
+    pub(super) fn handle_workflow_inspector_key(&mut self, key: KeyEvent) -> bool {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+            if self
+                .workflow_inspector
+                .as_ref()
+                .is_some_and(|inspector| inspector.page == WorkflowInspectorPage::Activity)
+            {
+                if let Some(inspector) = self.workflow_inspector.as_mut() {
+                    inspector.page = WorkflowInspectorPage::Outline;
+                    inspector.activity_scroll.reset_to_bottom();
+                }
+            } else {
+                self.workflow_inspector = None;
+            }
+            return true;
+        }
+        self.workflow_inspector
+            .as_mut()
+            .is_some_and(|inspector| inspector.handle_key(key))
+    }
+
+    pub(super) fn handle_workflow_inspector_scroll_rows(&mut self, rows: i16) -> bool {
+        self.workflow_inspector.as_mut().is_some_and(|inspector| {
+            inspector.page == WorkflowInspectorPage::Activity
+                && inspector.activity_scroll.handle_scroll_rows(rows)
+        })
+    }
 
     pub(super) fn handle_transcript_overlay_scroll_rows(&mut self, rows: i16) -> bool {
         self.transcript_overlay
@@ -437,7 +785,7 @@ impl TuiViewState {
             .is_some_and(|overlay| overlay.handle_scroll_rows(rows))
     }
 
-    pub(super) fn clear_ctrl_c_reminder(&mut self) {
+    pub(super) const fn clear_ctrl_c_reminder(&mut self) {
         self.ctrl_c_reminder = None;
     }
 
@@ -538,11 +886,10 @@ impl TuiViewState {
             return false;
         }
         let total_entries = self.command_history.len();
-        let Some(next_index) = self
-            .command_history_cursor
-            .map(|index| index.checked_sub(1))
-            .unwrap_or_else(|| total_entries.checked_sub(1))
-        else {
+        let Some(next_index) = self.command_history_cursor.map_or_else(
+            || total_entries.checked_sub(1),
+            |index| index.checked_sub(1),
+        ) else {
             return false;
         };
         self.replace_command_input_from_history(next_index)
@@ -597,19 +944,11 @@ impl TuiViewState {
     }
 
     pub(super) fn effective_scroll(&self) -> u16 {
-        if self.auto_scroll {
-            self.max_scroll
-        } else {
-            self.scroll_offset
-        }
+        self.activity_scroll.effective_scroll()
     }
 
     pub(super) fn display_scroll(&self) -> u16 {
-        if self.auto_scroll {
-            u16::MAX
-        } else {
-            self.scroll_offset
-        }
+        self.activity_scroll.display_scroll()
     }
 
     pub(super) fn visible_activity_cells(
@@ -632,7 +971,7 @@ impl TuiViewState {
         (committed_cells, live_cells)
     }
 
-    pub(super) fn tick_history_load_cooldown(&mut self) {
+    pub(super) const fn tick_history_load_cooldown(&mut self) {
         self.load_cooldown = self.load_cooldown.saturating_sub(1);
     }
 
@@ -652,11 +991,11 @@ impl TuiViewState {
         self.history_load_rx = Some(rx);
     }
 
-    pub(super) fn oldest_history_cursor(&self) -> Option<i64> {
+    pub(super) const fn oldest_history_cursor(&self) -> Option<i64> {
         self.oldest_cursor
     }
 
-    pub(super) fn take_history_load_rx(
+    pub(super) const fn take_history_load_rx(
         &mut self,
     ) -> Option<tokio::sync::oneshot::Receiver<Result<DashboardActivityHistoryPage, String>>> {
         self.history_load_rx.take()
@@ -669,31 +1008,31 @@ impl TuiViewState {
         self.history_load_rx = Some(rx);
     }
 
-    pub(super) fn apply_loaded_history_page(&mut self, page: DashboardActivityHistoryPage) {
+    pub(super) fn apply_loaded_history_page(&mut self, page: &DashboardActivityHistoryPage) {
         let new_cells = activity_events_from_history_items(&page.items);
         let mut merged = new_cells;
         merged.extend(self.extra_history_cells.clone());
         self.extra_history_cells = merged;
-        self.auto_scroll = false;
-        self.scroll_offset = 0;
+        self.activity_scroll.follow_bottom = false;
+        self.activity_scroll.scroll = 0;
         self.oldest_cursor = page.oldest_cursor;
         self.has_more_before = page.has_more_before;
         self.loading_history = false;
         self.load_cooldown = 10;
     }
 
-    pub(super) fn finish_history_load_without_page(&mut self) {
+    pub(super) const fn finish_history_load_without_page(&mut self) {
         self.loading_history = false;
     }
 
-    pub(super) fn sync_history_cursor_from_state(&mut self, state: &DashboardState) {
+    pub(super) const fn sync_history_cursor_from_state(&mut self, state: &DashboardState) {
         if self.oldest_cursor.is_none() && !state.activity_history.items.is_empty() {
             self.oldest_cursor = state.activity_history.oldest_cursor;
             self.has_more_before = state.activity_history.has_more_before;
         }
     }
 
-    pub(super) fn sync_visible_clear_from_state(&mut self, state: &DashboardState) {
+    pub(super) const fn sync_visible_clear_from_state(&mut self, state: &DashboardState) {
         if self.visible_activity_cleared
             && state.activity_history.items.is_empty()
             && state.activity_events.is_empty()
@@ -713,8 +1052,7 @@ impl TuiViewState {
         self.pending_image_attachments.clear();
         self.ctrl_c_reminder = None;
         self.expanded_thinking.clear();
-        self.auto_scroll = true;
-        self.scroll_offset = 0;
+        self.activity_scroll.reset_to_bottom();
         self.visible_activity_cleared = true;
         self.transcript_overlay = None;
         self.selection.clear_regions();
@@ -777,67 +1115,15 @@ impl TuiViewState {
 
     pub(super) fn handle_activity_scroll_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::PageUp => {
-                let page_height = self.page_height.min(i16::MAX as u16) as i16;
-                self.handle_activity_scroll_rows(-page_height)
-            }
-            KeyCode::PageDown => {
-                let page_height = self.page_height.min(i16::MAX as u16) as i16;
-                self.handle_activity_scroll_rows(page_height)
-            }
-            KeyCode::Home => {
-                if self.max_scroll == 0 || (!self.auto_scroll && self.scroll_offset == 0) {
-                    return false;
-                }
-                self.auto_scroll = false;
-                self.scroll_offset = 0;
-                true
-            }
-            KeyCode::End => {
-                if self.auto_scroll {
-                    return false;
-                }
-                self.auto_scroll = true;
-                self.scroll_offset = 0;
-                true
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+                self.activity_scroll.handle_key(key)
             }
             _ => false,
         }
     }
 
     pub(super) fn handle_activity_scroll_rows(&mut self, rows: i16) -> bool {
-        if rows == 0 || self.max_scroll == 0 {
-            return false;
-        }
-
-        match rows.cmp(&0) {
-            std::cmp::Ordering::Less => {
-                let rows = rows.unsigned_abs();
-                if self.auto_scroll {
-                    self.auto_scroll = false;
-                    self.scroll_offset = self.max_scroll.saturating_sub(rows);
-                    return true;
-                }
-
-                let previous_scroll = self.scroll_offset;
-                self.scroll_offset = self.scroll_offset.saturating_sub(rows);
-                self.scroll_offset != previous_scroll
-            }
-            std::cmp::Ordering::Greater => {
-                if self.auto_scroll {
-                    return false;
-                }
-
-                let previous_scroll = self.scroll_offset;
-                let rows = rows as u16;
-                self.scroll_offset = self.scroll_offset.saturating_add(rows);
-                if self.scroll_offset >= self.max_scroll {
-                    self.auto_scroll = true;
-                }
-                self.auto_scroll || self.scroll_offset != previous_scroll
-            }
-            std::cmp::Ordering::Equal => false,
-        }
+        self.activity_scroll.handle_scroll_rows(rows)
     }
 }
 
@@ -878,8 +1164,9 @@ mod tests {
     use super::*;
     use crate::dashboard::selection::{SelectableId, SelectableRegion};
     use crate::dashboard::{
-        DashboardActivityHistoryWindow, DashboardRuntimeActivity, assistant_activity_cell,
-        render_activity_from_messages, sync_dashboard_runtime_status_live_cell,
+        DashboardActivityHistoryWindow, DashboardRuntimeActivity, WorkflowWorkerActivityItem,
+        assistant_activity_cell, render_activity_from_messages,
+        sync_dashboard_runtime_status_live_cell,
     };
     use crate::reasoning::runtime::HistoryMessage;
     use ratatui::layout::Rect;
@@ -960,15 +1247,14 @@ mod tests {
         assert_eq!(view.command_input.as_str(), "second command");
     }
     #[test]
-    fn scroll_rows_moves_up_from_auto_scroll_without_key_event() {
+    fn scroll_rows_moves_up_from_follow_bottom_without_key_event() {
         let mut view = TuiViewState::new();
-        view.max_scroll = 100;
-        view.auto_scroll = true;
+        view.activity_scroll.set_render_metrics(100, 20);
 
         assert!(view.handle_activity_scroll_rows(-3));
 
-        assert!(!view.auto_scroll);
-        assert_eq!(view.scroll_offset, 97);
+        assert!(!view.activity_scroll.follow_bottom);
+        assert_eq!(view.activity_scroll.scroll, 97);
     }
 
     #[test]
@@ -989,15 +1275,15 @@ mod tests {
     }
 
     #[test]
-    fn scroll_rows_reenters_auto_scroll_at_bottom() {
+    fn scroll_rows_rejoins_follow_bottom_at_end() {
         let mut view = TuiViewState::new();
-        view.max_scroll = 100;
-        view.auto_scroll = false;
-        view.scroll_offset = 98;
+        view.activity_scroll.set_render_metrics(100, 20);
+        view.activity_scroll.follow_bottom = false;
+        view.activity_scroll.scroll = 98;
 
         assert!(view.handle_activity_scroll_rows(3));
 
-        assert!(view.auto_scroll);
+        assert!(view.activity_scroll.follow_bottom);
     }
 
     #[test]
@@ -1005,15 +1291,14 @@ mod tests {
         let mut view = TuiViewState::new();
 
         assert!(!view.handle_activity_scroll_rows(0));
-        assert!(view.auto_scroll);
-        assert_eq!(view.scroll_offset, 0);
+        assert!(view.activity_scroll.follow_bottom);
+        assert_eq!(view.activity_scroll.scroll, 0);
     }
 
     #[test]
     fn up_down_keys_do_not_scroll_activity_feed() {
         let mut view = TuiViewState::new();
-        view.max_scroll = 100;
-        view.auto_scroll = true;
+        view.activity_scroll.set_render_metrics(100, 20);
 
         assert!(!view.handle_activity_scroll_key(KeyEvent::new(
             KeyCode::Up,
@@ -1024,28 +1309,204 @@ mod tests {
             crossterm::event::KeyModifiers::NONE
         )));
 
-        assert!(view.auto_scroll);
-        assert_eq!(view.scroll_offset, 0);
+        assert!(view.activity_scroll.follow_bottom);
+        assert_eq!(view.activity_scroll.scroll, 0);
     }
 
     #[test]
     fn page_keys_still_scroll_activity_feed() {
         let mut view = TuiViewState::new();
-        view.max_scroll = 100;
-        view.page_height = 20;
-        view.auto_scroll = true;
+        view.activity_scroll.set_render_metrics(100, 20);
 
         assert!(view.handle_activity_scroll_key(KeyEvent::new(
             KeyCode::PageUp,
             crossterm::event::KeyModifiers::NONE
         )));
 
-        assert!(!view.auto_scroll);
-        assert_eq!(view.scroll_offset, 80);
+        assert!(!view.activity_scroll.follow_bottom);
+        assert_eq!(view.activity_scroll.scroll, 80);
     }
 
     fn assistant_cell(text: &str) -> SessionActivityEvent {
         assistant_activity_cell(text).expect("assistant cell")
+    }
+
+    #[test]
+    fn activity_scroll_state_preserves_manual_position_and_rejoins_bottom() {
+        let mut scroll = ActivityScrollState::new(20);
+        scroll.set_render_metrics(100, 20);
+
+        assert!(scroll.follow_bottom);
+        assert!(scroll.handle_scroll_rows(-3));
+        assert!(!scroll.follow_bottom);
+        assert_eq!(scroll.scroll, 97);
+
+        scroll.set_render_metrics(120, 20);
+        assert_eq!(scroll.scroll, 97);
+        assert_eq!(scroll.display_scroll(), 97);
+
+        assert!(scroll.handle_key(KeyEvent::new(
+            KeyCode::End,
+            crossterm::event::KeyModifiers::NONE
+        )));
+        assert!(scroll.follow_bottom);
+        assert_eq!(scroll.display_scroll(), u16::MAX);
+    }
+
+    #[test]
+    fn activity_scroll_state_page_keys_follow_the_shared_policy() {
+        let mut scroll = ActivityScrollState::new(20);
+        scroll.set_render_metrics(100, 20);
+
+        assert!(scroll.handle_key(KeyEvent::new(
+            KeyCode::PageUp,
+            crossterm::event::KeyModifiers::NONE
+        )));
+        assert!(!scroll.follow_bottom);
+        assert_eq!(scroll.scroll, 80);
+    }
+
+    #[test]
+    fn workflow_inspector_wide_pane_starts_activity_lazy_load_before_activity_page() {
+        let snapshot = crate::workflow::WorkflowRunSnapshot {
+            run_id: "run-wide".to_string(),
+            workflow_id: "workflow".to_string(),
+            status: crate::workflow::WorkflowNodeStatus::Running,
+            started_at_ms: 1,
+            completed_at_ms: None,
+            input: serde_json::json!({}),
+            output: None,
+            error: None,
+            await_groups: Vec::new(),
+            transitions: Vec::new(),
+            workers: vec![crate::workflow::WorkflowWorkerSnapshot {
+                worker_id: "worker-1".to_string(),
+                await_group_id: "await-1".to_string(),
+                role: "researcher".to_string(),
+                model: "main".to_string(),
+                status: crate::workflow::WorkflowNodeStatus::Running,
+                started_at_ms: 1,
+                completed_at_ms: None,
+                input: serde_json::json!({}),
+                output: None,
+                error: None,
+                activity_count: 2,
+                activity_revision: 2,
+                activity: Vec::new(),
+            }],
+        };
+        let inspector = WorkflowInspectorState::new(snapshot);
+        assert!(inspector.should_start_worker_activity_load(true, true));
+        assert!(!inspector.should_start_worker_activity_load(true, false));
+    }
+
+    #[test]
+    fn workflow_inspector_worker_activity_pages_prepend_without_duplicates() {
+        let snapshot = crate::workflow::WorkflowRunSnapshot {
+            run_id: "run-1".to_string(),
+            workflow_id: "workflow".to_string(),
+            status: crate::workflow::WorkflowNodeStatus::Running,
+            started_at_ms: 1,
+            completed_at_ms: None,
+            input: serde_json::json!({}),
+            output: None,
+            error: None,
+            await_groups: Vec::new(),
+            transitions: Vec::new(),
+            workers: vec![crate::workflow::WorkflowWorkerSnapshot {
+                worker_id: "worker-1".to_string(),
+                await_group_id: "await-1".to_string(),
+                role: "researcher".to_string(),
+                model: "main".to_string(),
+                status: crate::workflow::WorkflowNodeStatus::Running,
+                started_at_ms: 1,
+                completed_at_ms: None,
+                input: serde_json::json!({}),
+                output: None,
+                error: None,
+                activity_count: 3,
+                activity_revision: 3,
+                activity: Vec::new(),
+            }],
+        };
+        let event = |text: &str| assistant_activity_cell(text).expect("assistant event");
+        let mut inspector = WorkflowInspectorState::new(snapshot);
+        inspector.page = WorkflowInspectorPage::Activity;
+
+        inspector.apply_worker_activity_page(&WorkflowWorkerActivityPage {
+            run_id: "run-1".to_string(),
+            worker_id: "worker-1".to_string(),
+            items: vec![
+                WorkflowWorkerActivityItem {
+                    cursor: 2,
+                    event: event("second"),
+                },
+                WorkflowWorkerActivityItem {
+                    cursor: 3,
+                    event: event("third"),
+                },
+            ],
+            oldest_cursor: Some(2),
+            newest_cursor: Some(3),
+            has_more_before: true,
+            has_more_after: false,
+            activity_count: 3,
+            revision: 3,
+        });
+        assert_eq!(inspector.worker_activity.len(), 2);
+        assert!(inspector.should_start_older_worker_activity_load(true));
+
+        inspector.apply_worker_activity_page(&WorkflowWorkerActivityPage {
+            run_id: "run-1".to_string(),
+            worker_id: "worker-1".to_string(),
+            items: vec![WorkflowWorkerActivityItem {
+                cursor: 1,
+                event: event("first"),
+            }],
+            oldest_cursor: Some(1),
+            newest_cursor: Some(1),
+            has_more_before: false,
+            has_more_after: true,
+            activity_count: 3,
+            revision: 3,
+        });
+
+        assert_eq!(inspector.worker_activity.len(), 3);
+        let rendered = inspector
+            .worker_activity
+            .iter()
+            .map(|event| match event {
+                SessionActivityEvent::Assistant(message) => message.content.as_str(),
+                _ => "unexpected",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rendered, vec!["first", "second", "third"]);
+        assert!(!inspector.worker_activity_has_more_before);
+    }
+
+    #[test]
+    fn workflow_inspector_activity_scroll_is_follow_bottom_by_default() {
+        let snapshot = crate::workflow::WorkflowRunSnapshot {
+            run_id: "run-1".to_string(),
+            workflow_id: "workflow".to_string(),
+            status: crate::workflow::WorkflowNodeStatus::Running,
+            started_at_ms: 1,
+            completed_at_ms: None,
+            input: serde_json::json!({}),
+            output: None,
+            error: None,
+            await_groups: Vec::new(),
+            transitions: Vec::new(),
+            workers: Vec::new(),
+        };
+        let mut inspector = WorkflowInspectorState::new(snapshot);
+        assert!(inspector.handle_key(KeyEvent::new(
+            KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE
+        )));
+        assert_eq!(inspector.page, WorkflowInspectorPage::Activity);
+        assert!(inspector.activity_scroll.follow_bottom);
+        assert_eq!(inspector.activity_scroll.display_scroll(), u16::MAX);
     }
 
     #[test]
@@ -1062,10 +1523,50 @@ mod tests {
 
         overlay.sync_state(&state);
 
-        assert!(overlay.follow_bottom);
+        assert!(overlay.activity_scroll.follow_bottom);
         assert_eq!(
             overlay.cells,
             vec![history, state.activity_events[0].clone(), second]
+        );
+    }
+
+    #[test]
+    fn workflow_inspector_scroll_rows_only_routes_on_activity_page() {
+        let snapshot = crate::workflow::WorkflowRunSnapshot {
+            run_id: "run-1".to_string(),
+            workflow_id: "workflow".to_string(),
+            status: crate::workflow::WorkflowNodeStatus::Running,
+            started_at_ms: 1,
+            completed_at_ms: None,
+            input: serde_json::json!({}),
+            output: None,
+            error: None,
+            await_groups: Vec::new(),
+            transitions: Vec::new(),
+            workers: Vec::new(),
+        };
+        let state = DashboardState {
+            active_workflow_runs: vec![snapshot],
+            ..DashboardState::default()
+        };
+        let mut view = TuiViewState::new();
+        assert!(view.open_latest_workflow_inspector(&state));
+        assert!(!view.handle_workflow_inspector_scroll_rows(-1));
+        assert!(view.handle_workflow_inspector_key(KeyEvent::new(
+            KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE
+        )));
+        view.workflow_inspector
+            .as_mut()
+            .expect("workflow inspector")
+            .activity_scroll
+            .set_render_metrics(100, 20);
+
+        assert!(view.handle_workflow_inspector_scroll_rows(-1));
+        assert!(
+            view.workflow_inspector
+                .as_ref()
+                .is_some_and(|inspector| !inspector.activity_scroll.follow_bottom)
         );
     }
 
@@ -1098,19 +1599,19 @@ mod tests {
         let mut overlay = TranscriptOverlayState::new(cells, Vec::new(), 30);
         overlay.set_render_metrics(100, 20);
 
-        assert!(overlay.follow_bottom);
+        assert!(overlay.activity_scroll.follow_bottom);
         assert!(overlay.handle_key(KeyEvent::new(
             KeyCode::Up,
             crossterm::event::KeyModifiers::NONE
         )));
 
-        assert!(!overlay.follow_bottom);
+        assert!(!overlay.activity_scroll.follow_bottom);
 
         assert!(overlay.handle_key(KeyEvent::new(
             KeyCode::End,
             crossterm::event::KeyModifiers::NONE
         )));
 
-        assert!(overlay.follow_bottom);
+        assert!(overlay.activity_scroll.follow_bottom);
     }
 }

@@ -63,7 +63,7 @@ fn reply_activity_event(
     )
 }
 
-fn event_disposition_kind(disposition: EventDisposition) -> &'static str {
+const fn event_disposition_kind(disposition: EventDisposition) -> &'static str {
     match disposition {
         EventDisposition::Resolved => "resolved",
         EventDisposition::Dismissed => "dismissed",
@@ -71,7 +71,7 @@ fn event_disposition_kind(disposition: EventDisposition) -> &'static str {
     }
 }
 
-fn status_for_event_disposition(disposition: EventDisposition) -> EventStatus {
+const fn status_for_event_disposition(disposition: EventDisposition) -> EventStatus {
     match disposition {
         EventDisposition::Resolved => EventStatus::Resolved,
         EventDisposition::Dismissed => EventStatus::Dismissed,
@@ -79,7 +79,7 @@ fn status_for_event_disposition(disposition: EventDisposition) -> EventStatus {
     }
 }
 
-fn disposition_requires_reply(disposition: EventDisposition) -> bool {
+const fn disposition_requires_reply(disposition: EventDisposition) -> bool {
     matches!(
         disposition,
         EventDisposition::Resolved | EventDisposition::Failed
@@ -132,7 +132,7 @@ fn execute_event_resolve_tool<'a>(
             .first()
             .ok_or_else(|| miette::miette!("no claimed event in current turn"))?
             .clone();
-        let reply_message = trim_optional_field(args.reply_message);
+        let reply_message = trim_optional_field(args.reply_message.as_ref());
         let event = context.events.view(&event_id)?;
         let required_reply_message = if disposition_requires_reply(args.disposition) {
             Some(reply_message.clone().ok_or_else(|| {
@@ -146,9 +146,8 @@ fn execute_event_resolve_tool<'a>(
         };
         let summary = match args.disposition {
             EventDisposition::Resolved | EventDisposition::Failed => {
-                let reply_message = required_reply_message
-                    .clone()
-                    .expect("reply requirement should be validated above");
+                let reply_message =
+                    required_reply_message.expect("reply requirement should be validated above");
                 let delivery_summary = match &event.payload {
                     EventPayload::TelegramIncoming(_) => {
                         format!(
@@ -196,8 +195,8 @@ fn execute_event_resolve_tool<'a>(
         let result_payload = json!({
             "event_id": event_id,
             "disposition": event_disposition_kind(args.disposition),
-            "reply_message": reply_message.clone(),
-            "note": args.note.clone(),
+            "reply_message": reply_message,
+            "note": args.note,
         });
         Ok(ToolExecutionResult::from_activity_event(
             summary,
@@ -235,7 +234,14 @@ fn render_update_plan_call_ui(call: &AgentToolCall) -> Result<ToolCallActivityEv
             .plan
             .into_iter()
             .take(8)
-            .map(plan_ui_step_from_args)
+            .map(|step| PlanStepActivityDescriptor {
+                status: match step.status {
+                    PlanStatus::Pending => PlanStepActivityStatus::Pending,
+                    PlanStatus::InProgress => PlanStepActivityStatus::InProgress,
+                    PlanStatus::Completed => PlanStepActivityStatus::Completed,
+                },
+                text: summarize_inline_text(&step.step),
+            })
             .collect(),
     }))
 }
@@ -253,31 +259,16 @@ fn execute_update_plan_tool<'a>(
             context.plan.sync_to_disk().await?;
         }
         let effective_steps = context.plan.steps().to_vec();
-        let summary = if effective_steps.is_empty() {
-            if changed {
-                "cleared plan after completion".to_string()
-            } else {
-                "plan already clear".to_string()
-            }
-        } else if changed {
-            format!("updated plan with {} steps", effective_steps.len())
-        } else {
-            format!("plan unchanged with {} steps", effective_steps.len())
-        };
+        let summary = plan_update_summary(&effective_steps, changed, "");
         if let Some(tx) = &context.dashboard_tx {
             let current_plan_step = current_plan_step_for_dashboard(context);
             let status_command = status_command_snapshot_for_dashboard(context);
             tx.send_modify(|state| {
-                state.current_plan_step = current_plan_step.clone();
+                state.current_plan_step.clone_from(&current_plan_step);
                 state.status_command = status_command.clone();
             });
         }
-        let plan_ui_steps = plan_ui_steps(&context.plan);
-        let plan_event = PlanActivityDescriptor {
-            kind: PlanActivityKind::Updated,
-            explanation: explanation.clone(),
-            steps: plan_ui_steps,
-        };
+        let plan_event = updated_plan_activity_event(explanation.as_ref(), &effective_steps);
         Ok(ToolExecutionResult::from_activity_event(
             summary,
             json!({
@@ -288,7 +279,7 @@ fn execute_update_plan_tool<'a>(
         ))
     })
 }
-pub(crate) async fn execute_worker_update_plan(
+pub fn execute_worker_update_plan(
     worker_plan: &mut Plan,
     call: &AgentToolCall,
 ) -> Result<ToolExecutionResult> {
@@ -297,43 +288,75 @@ pub(crate) async fn execute_worker_update_plan(
     let plan = build_plan_from_args(args)?;
     let changed = worker_plan.replace(plan.steps().to_vec());
     let effective_steps = worker_plan.steps().to_vec();
-    let summary = if effective_steps.is_empty() {
-        if changed {
-            "cleared worker plan after completion".to_string()
-        } else {
-            "worker plan already clear".to_string()
-        }
-    } else if changed {
-        format!("updated worker plan with {} steps", effective_steps.len())
-    } else {
-        format!("worker plan unchanged with {} steps", effective_steps.len())
-    };
+    let summary = plan_update_summary(&effective_steps, changed, "worker ");
+    let plan_event = updated_plan_activity_event(explanation.as_ref(), &effective_steps);
     Ok(ToolExecutionResult::from_activity_event(
         summary,
         json!({
             "explanation": explanation,
             "plan": effective_steps,
         }),
-        None,
+        Some(SessionActivityEvent::PlanResult(plan_event.into())),
     ))
 }
 
-fn trim_optional_field(value: Option<String>) -> Option<String> {
-    value.and_then(trim_required_field)
+fn plan_update_summary(steps: &[PlanStep], changed: bool, subject_prefix: &str) -> String {
+    let subject = format!("{subject_prefix}plan");
+    if steps.is_empty() {
+        if changed {
+            format!("cleared {subject} after completion")
+        } else {
+            format!("{subject} already clear")
+        }
+    } else if changed {
+        format!("updated {subject} with {} steps", steps.len())
+    } else {
+        format!("{subject} unchanged with {} steps", steps.len())
+    }
 }
 
-fn trim_required_field(value: String) -> Option<String> {
+fn updated_plan_activity_event(
+    explanation: Option<&String>,
+    steps: &[PlanStep],
+) -> PlanActivityDescriptor {
+    PlanActivityDescriptor {
+        kind: PlanActivityKind::Updated,
+        explanation: explanation.cloned(),
+        steps: plan_ui_steps_from_plan_steps(steps),
+    }
+}
+
+fn plan_ui_steps_from_plan_steps(steps: &[PlanStep]) -> Vec<PlanStepActivityDescriptor> {
+    steps
+        .iter()
+        .take(8)
+        .map(|step| PlanStepActivityDescriptor {
+            status: match step.status {
+                PlanStatus::Pending => PlanStepActivityStatus::Pending,
+                PlanStatus::InProgress => PlanStepActivityStatus::InProgress,
+                PlanStatus::Completed => PlanStepActivityStatus::Completed,
+            },
+            text: summarize_inline_text(&step.step),
+        })
+        .collect()
+}
+
+fn trim_optional_field(value: Option<&String>) -> Option<String> {
+    value.and_then(|value| trim_required_field(value))
+}
+
+fn trim_required_field(value: &str) -> Option<String> {
     let trimmed = value.trim().to_string();
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
-fn require_field(value: String, field_name: &str) -> miette::Result<String> {
+fn require_field(value: &str, field_name: &str) -> miette::Result<String> {
     trim_required_field(value)
         .ok_or_else(|| miette::miette!("missing required field: {field_name}"))
 }
 
 fn execute_event_resolve_with_reply(
-    context: &mut Context,
+    context: &Context,
     event_id: &str,
     event: &crate::events::EventView,
     disposition: EventDisposition,
@@ -344,11 +367,12 @@ fn execute_event_resolve_with_reply(
         EventPayload::TelegramIncoming(payload) => {
             context.events.prepare_telegram_delivery(event_id)?;
             context.telegram.enqueue_outgoing_message(
-                payload.chat_id.clone(),
-                reply_message,
-                Some(event_id.to_string()),
+                payload.chat_id.as_str(),
+                &reply_message,
+                Some(&event_id.to_string()),
                 Some(status_for_event_disposition(disposition)),
-                note.filter(|_| matches!(disposition, EventDisposition::Failed)),
+                note.filter(|_| matches!(disposition, EventDisposition::Failed))
+                    .as_ref(),
             )?;
             Ok(())
         }
@@ -371,7 +395,7 @@ fn build_plan_from_args(args: UpdatePlanArgs) -> miette::Result<Plan> {
         .into_iter()
         .map(|step| {
             Ok(PlanStep {
-                step: require_field(step.step, "plan[].step")?,
+                step: require_field(&step.step, "plan[].step")?,
                 status: step.status,
                 created_at_ms: now,
                 last_updated_at_ms: now,
@@ -412,32 +436,6 @@ fn validate_plan_steps(steps: &[PlanStep]) -> miette::Result<()> {
         ));
     }
     Ok(())
-}
-
-fn plan_ui_steps(plan: &Plan) -> Vec<PlanStepActivityDescriptor> {
-    plan.steps()
-        .iter()
-        .take(8)
-        .map(|step| PlanStepActivityDescriptor {
-            status: match step.status {
-                PlanStatus::Pending => PlanStepActivityStatus::Pending,
-                PlanStatus::InProgress => PlanStepActivityStatus::InProgress,
-                PlanStatus::Completed => PlanStepActivityStatus::Completed,
-            },
-            text: summarize_inline_text(&step.step),
-        })
-        .collect()
-}
-
-fn plan_ui_step_from_args(step: crate::core::UpdatePlanStepArgs) -> PlanStepActivityDescriptor {
-    PlanStepActivityDescriptor {
-        status: match step.status {
-            PlanStatus::Pending => PlanStepActivityStatus::Pending,
-            PlanStatus::InProgress => PlanStepActivityStatus::InProgress,
-            PlanStatus::Completed => PlanStepActivityStatus::Completed,
-        },
-        text: summarize_inline_text(&step.step),
-    }
 }
 
 #[cfg(test)]

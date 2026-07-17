@@ -302,7 +302,10 @@ fn schema_expr_for_type(ty: &Type) -> proc_macro2::TokenStream {
                 "Vec" => match first_generic_type(&segment.arguments) {
                     Ok(inner) => {
                         let inner_schema = schema_expr_for_type(inner);
-                        quote! { crate::schema_utils::array_schema(#inner_schema) }
+                        quote! {{
+                            let inner_schema = #inner_schema;
+                            crate::schema_utils::array_schema(&inner_schema)
+                        }}
                     }
                     Err(err) => err.to_compile_error(),
                 },

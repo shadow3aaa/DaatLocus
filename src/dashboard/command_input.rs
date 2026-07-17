@@ -10,7 +10,7 @@ use super::selection::{SelectableId, SelectableRegion, SelectableVisualRow};
 
 const COMMAND_INPUT_SELECTABLE_ID: &str = "command-input";
 
-pub(super) fn should_insert_newline_on_enter(modifiers: KeyModifiers) -> bool {
+pub(super) const fn should_insert_newline_on_enter(modifiers: KeyModifiers) -> bool {
     modifiers.contains(KeyModifiers::SHIFT) || modifiers.contains(KeyModifiers::ALT)
 }
 
@@ -64,7 +64,8 @@ fn display_line_height(display_width: usize, first_row_width: usize, wrap_width:
     if display_width <= first_row_width {
         1
     } else {
-        1 + (display_width - first_row_width).div_ceil(wrap_width) as u16
+        1 + u16::try_from((display_width - first_row_width).div_ceil(wrap_width))
+            .unwrap_or(u16::MAX)
     }
 }
 
@@ -187,11 +188,15 @@ fn cursor_line_row_col(
     prefix_width: u16,
 ) -> (u16, u16) {
     if display_width < first_row_width {
-        return (0, prefix_width.saturating_add(display_width as u16));
+        return (
+            0,
+            prefix_width.saturating_add(u16::try_from(display_width).unwrap_or(u16::MAX)),
+        );
     }
     let remaining = display_width - first_row_width;
-    let row = 1 + (remaining / wrap_width) as u16;
-    let col = prefix_width.saturating_add((remaining % wrap_width) as u16);
+    let row = 1u16.saturating_add(u16::try_from(remaining / wrap_width).unwrap_or(u16::MAX));
+    let col =
+        prefix_width.saturating_add(u16::try_from(remaining % wrap_width).unwrap_or(u16::MAX));
     (row, col)
 }
 
@@ -340,7 +345,7 @@ fn push_wrapped_input_display_lines(
     }
 }
 
-fn prefix_for_segment(first_input_line: bool, first_segment: bool) -> &'static str {
+const fn prefix_for_segment(first_input_line: bool, first_segment: bool) -> &'static str {
     if first_input_line && first_segment {
         "› "
     } else {
