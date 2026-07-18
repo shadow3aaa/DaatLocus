@@ -1364,6 +1364,7 @@ mod tests {
                 status: crate::workflow::WorkflowNodeStatus::Completed,
                 started_at_ms: 1,
                 completed_at_ms: Some(2),
+                agent_run_time_ms: 1_000,
                 input: serde_json::json!({ "query": "persist" }),
                 output: Some(serde_json::json!({ "answer": "yes" })),
                 error: None,

@@ -51,6 +51,7 @@ import {
   GripVerticalIcon,
   ImagePlusIcon,
   InfoIcon,
+  Maximize2Icon,
   MoreHorizontalIcon,
   PencilIcon,
   SendHorizontalIcon,
@@ -97,13 +98,6 @@ import {
   InputGroupAddon,
   InputGroupTextarea,
 } from "@/components/ui/input-group";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
@@ -218,26 +212,28 @@ export function AgentPage({
   }, [mockSnapshot]);
 
   return (
-    <section
-      id="agent"
-      aria-label="Agent"
-      className="relative flex h-screen min-h-screen w-full max-w-full flex-col overflow-hidden bg-background"
-    >
-      <AgentChatBubbles
-        sessionId={sessionId}
-        snapshot={snapshot}
-        panelRef={chatPanelRef}
-        composerHeight={chatComposerHeight}
-      />
-      <AgentChatComposer
-        sessionId={sessionId}
-        snapshot={snapshot}
-        agentName={snapshot?.agent_name}
-        supportsVision={supportsVision}
-        chatPanelRef={chatPanelRef}
-        onHeightChange={setChatComposerHeight}
-      />
-    </section>
+    <AgentChatMockDataContext.Provider value={Boolean(mockSnapshot)}>
+      <section
+        id="agent"
+        aria-label="Agent"
+        className="relative flex h-screen min-h-screen w-full max-w-full flex-col overflow-hidden bg-background"
+      >
+        <AgentChatBubbles
+          sessionId={sessionId}
+          snapshot={snapshot}
+          panelRef={chatPanelRef}
+          composerHeight={chatComposerHeight}
+        />
+        <AgentChatComposer
+          sessionId={sessionId}
+          snapshot={snapshot}
+          agentName={snapshot?.agent_name}
+          supportsVision={supportsVision}
+          chatPanelRef={chatPanelRef}
+          onHeightChange={setChatComposerHeight}
+        />
+      </section>
+    </AgentChatMockDataContext.Provider>
   );
 }
 
@@ -657,6 +653,7 @@ type AgentChatExpressionTransitionContextValue = {
 const AGENT_CHAT_EXPRESSION_TRANSITION_MS = 520;
 const AgentChatExpressionTransitionContext =
   createContext<AgentChatExpressionTransitionContextValue | null>(null);
+const AgentChatMockDataContext = createContext(false);
 
 function agentChatExpressionSlotKey(
   kind: AgentChatExpressionSlotKind,
@@ -5219,11 +5216,7 @@ function AgentChatFoldedActivityGroup({
       <div className="min-w-0 max-w-full">
         <div
           data-agent-chat-fold-header="true"
-          className={cn(
-            "min-w-0 max-w-full",
-            open &&
-              "sticky top-2 z-20 rounded-md bg-background/95 shadow-sm shadow-background/30 backdrop-blur-xl supports-[backdrop-filter]:bg-background/80",
-          )}
+          className="min-w-0 max-w-full"
         >
           <AgentChatWorkedDivider
             label={`Worked for ${workedDurationLabel}`}
@@ -5616,58 +5609,124 @@ function AgentChatWorkflowActivityCell({
   sessionId?: string;
   render: Extract<AgentChatSessionActivityRender, { kind: "workflow" }>;
 }) {
-  const status = render.status.toLowerCase();
-  const hasInspector = Boolean(render.snapshot);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
-  const tone = workflowStatusTextClass(status);
+  const hasInspector = Boolean(render.snapshot && sessionId);
+  const [previewOpen, setPreviewOpen] = useState(false);
 
   return (
     <>
-      <div className="grid min-w-0 grid-cols-[0.75rem_minmax(0,1fr)] items-start gap-x-3 px-2 sm:gap-x-[16px] sm:px-3">
-        <AgentChatActivityMarker
-          icon="activity"
-          tone={status === "failed" || status === "interrupted" ? "error" : "default"}
+      {render.snapshot ? (
+        <WorkflowInlinePreview
+          snapshot={render.snapshot}
+          onOpenPreview={hasInspector ? () => setPreviewOpen(true) : undefined}
         />
-        <div className="min-w-0 border-l border-border/60 pl-3">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <span className="truncate text-sm font-medium text-foreground">Workflow</span>
-            <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-              {render.workflowId}
-            </span>
-            <Badge variant="outline" className={cn("shrink-0 text-[0.65rem]", tone)}>
-              {render.status}
-            </Badge>
-            {hasInspector ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="xs"
-                className="ml-auto"
-                onClick={() => setInspectorOpen(true)}
-              >
-                Inspect run
-              </Button>
-            ) : null}
-          </div>
-          <p className="mt-1 break-words text-xs leading-5 text-muted-foreground">
-            {render.message}
-          </p>
-          {render.snapshot ? (
-            <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
-              {render.snapshot.workers.length} {render.snapshot.workers.length === 1 ? "agent" : "agents"}
+      ) : (
+        <div className="flex min-w-0 max-w-full flex-col gap-1 text-sm leading-6 text-foreground/90 [overflow-wrap:anywhere]">
+          <WorkflowActivityHeading
+            status={render.status}
+            workflowId={render.workflowId}
+          />
+          {render.message ? (
+            <p className="min-w-0 break-words pl-8 pr-2 text-xs leading-5 text-muted-foreground sm:pl-10 sm:pr-3">
+              {render.message}
             </p>
           ) : null}
         </div>
-      </div>
+      )}
       {render.snapshot && sessionId ? (
-        <WorkflowInspectorSheet
+        <WorkflowInspectorDialog
           sessionId={sessionId}
           snapshot={render.snapshot}
-          open={inspectorOpen}
-          onOpenChange={setInspectorOpen}
+          open={previewOpen}
+          onOpenChange={setPreviewOpen}
         />
       ) : null}
     </>
+  );
+}
+
+function WorkflowInlinePreview({
+  snapshot,
+  onOpenPreview,
+}: {
+  snapshot: WorkflowRunSnapshot;
+  onOpenPreview?: () => void;
+}) {
+  const graph = useMemo(() => workflowInspectorGraph(snapshot), [snapshot]);
+
+  return (
+    <div className="flex min-w-0 max-w-full flex-col gap-1 text-sm leading-6 text-foreground/90 [overflow-wrap:anywhere]">
+      <WorkflowActivityHeading
+        status={snapshot.status}
+        workflowId={snapshot.workflow_id}
+        onOpenPreview={onOpenPreview}
+      />
+      {snapshot.workers.length === 0 ? (
+        <p className="min-w-0 break-words pl-8 pr-2 text-xs leading-5 text-muted-foreground sm:pl-10 sm:pr-3">
+          Waiting for the first agent.
+        </p>
+      ) : (
+        <div className="min-w-0 pl-8 pr-2 sm:pl-10 sm:pr-3">
+          <div className="h-64 min-w-0 bg-muted/15">
+            <WorkflowInspectorGraphCanvas
+              nodes={graph.nodes}
+              edges={graph.edges}
+              interactive={false}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WorkflowActivityHeading({
+  status,
+  workflowId,
+  onOpenPreview,
+}: {
+  status: WorkflowNodeStatus | string;
+  workflowId: string;
+  onOpenPreview?: () => void;
+}) {
+  const normalizedStatus = status.toLowerCase();
+  const isError = normalizedStatus === "failed" || normalizedStatus === "interrupted";
+
+  return (
+    <div
+      className={cn(
+        AGENT_CHAT_ACTIVITY_ROW_CLASS,
+        "items-center text-sm leading-6 text-foreground/90 [overflow-wrap:anywhere]",
+      )}
+    >
+      <AgentChatActivityMarker
+        icon="activity"
+        tone={isError ? "error" : "default"}
+        className={cn(
+          normalizedStatus === "running" && "text-primary motion-safe:animate-pulse",
+        )}
+      />
+      <div className="flex min-w-0 items-center gap-x-2">
+        <p className="min-w-0 break-words font-semibold text-foreground">
+          <span className={workflowStatusTextClass(status)}>
+            {workflowActivityVerb(status)} Workflow
+          </span>{" "}
+          <span className="font-mono text-foreground/90">{workflowId}</span>
+        </p>
+        {onOpenPreview ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="ml-auto shrink-0"
+            aria-label="Open workflow preview"
+            title="Open workflow preview"
+            onClick={onOpenPreview}
+          >
+            <Maximize2Icon aria-hidden="true" />
+          </Button>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -5676,7 +5735,24 @@ type WorkflowInspectorNodeData = {
   label: string;
   detail: string;
   status: WorkflowNodeStatus;
-  activityCount: number;
+  agentRunTimeMs: number;
+  attemptCount: number;
+};
+
+type WorkflowInspectorAgent = {
+  role: string;
+  model: string;
+  status: WorkflowNodeStatus;
+  agentRunTimeMs: number;
+  attemptCount: number;
+  latestWorker: WorkflowWorkerSnapshot;
+};
+
+type WorkflowInspectorRoleTransition = {
+  sourceRole: string;
+  targetRole: string;
+  kind: WorkflowTransitionKind;
+  count: number;
 };
 
 type WorkflowInspectorGraphNode = FlowNode<WorkflowInspectorNodeData>;
@@ -5685,7 +5761,7 @@ const WORKFLOW_INSPECTOR_NODE_TYPES: NodeTypes = {
   workflowInspector: WorkflowInspectorGraphNodeView,
 };
 
-function WorkflowInspectorSheet({
+function WorkflowInspectorDialog({
   sessionId,
   snapshot,
   open,
@@ -5700,6 +5776,9 @@ function WorkflowInspectorSheet({
   const selectedWorker = snapshot.workers.find(
     (worker) => worker.worker_id === selectedWorkerId,
   ) ?? null;
+  const selectedWorkerAttempt = selectedWorker
+    ? workflowWorkerAttempt(snapshot.workers, selectedWorker)
+    : null;
   const graph = useMemo(() => workflowInspectorGraph(snapshot), [snapshot]);
 
   useEffect(() => {
@@ -5715,12 +5794,9 @@ function WorkflowInspectorSheet({
   }, [selectedWorkerId, snapshot.workers]);
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent
-        side="right"
-        className="w-[min(96vw,88rem)] gap-0 p-0 sm:max-w-none"
-      >
-        <SheetHeader className="border-b px-5 py-4 pr-12">
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex h-[min(94vh,60rem)] w-[min(96vw,88rem)] max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-w-none">
+        <DialogHeader className="border-b px-5 py-4 pr-12">
           <div className="flex min-w-0 items-center gap-3">
             {selectedWorker ? (
               <Button
@@ -5734,20 +5810,20 @@ function WorkflowInspectorSheet({
               </Button>
             ) : null}
             <div className="min-w-0">
-              <SheetTitle className="flex min-w-0 flex-wrap items-center gap-2">
-                <span>{selectedWorker ? "Agent activity" : "Workflow Inspector"}</span>
+              <DialogTitle className="flex min-w-0 flex-wrap items-center gap-2">
+                <span>{selectedWorker ? "Agent activity" : "Workflow preview"}</span>
                 <Badge variant="outline" className={workflowStatusTextClass(snapshot.status)}>
                   {workflowStatusLabel(snapshot.status)}
                 </Badge>
-              </SheetTitle>
-              <SheetDescription className="truncate font-mono text-xs">
+              </DialogTitle>
+              <DialogDescription className="truncate font-mono text-xs">
                 {selectedWorker
-                  ? `${selectedWorker.role} · ${selectedWorker.model}`
+                  ? `${selectedWorker.role} · ${selectedWorker.model} · attempt ${selectedWorkerAttempt ?? 1}`
                   : `${snapshot.workflow_id} · ${snapshot.run_id}`}
-              </SheetDescription>
+              </DialogDescription>
             </div>
           </div>
-        </SheetHeader>
+        </DialogHeader>
         {selectedWorker ? (
           <WorkflowInspectorAgentActivity
             sessionId={sessionId}
@@ -5762,8 +5838,8 @@ function WorkflowInspectorSheet({
             onSelectAgent={setSelectedWorkerId}
           />
         )}
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -5778,12 +5854,20 @@ function WorkflowInspectorGraph({
   edges: Edge[];
   onSelectAgent: (agentId: string) => void;
 }) {
+  const agentCount = nodes.length;
+  const runCount = snapshot.workers.length;
+  const agentRunTimeMs = snapshot.workers.reduce(
+    (elapsed, worker) => elapsed + workflowWorkerAgentRunTime(worker),
+    0,
+  );
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-5 py-3 text-xs text-muted-foreground">
-        <span>{snapshot.workers.length} {snapshot.workers.length === 1 ? "agent" : "agents"}</span>
-        <span>{formatWorkflowDuration(snapshot.started_at_ms, snapshot.completed_at_ms)}</span>
-        <span className="ml-auto">Select an agent to inspect its canonical activity stream.</span>
+        <span>{agentCount} {agentCount === 1 ? "agent role" : "agent roles"}</span>
+        <span>{runCount} {runCount === 1 ? "run" : "runs"}</span>
+        <span>Worked for {formatWorkflowAgentRunTime(agentRunTimeMs)} total</span>
+        <span className="ml-auto">Select an agent to inspect its latest attempt.</span>
       </div>
       {snapshot.workers.length === 0 ? (
         <Empty className="rounded-none border-0">
@@ -5799,36 +5883,74 @@ function WorkflowInspectorGraph({
         </Empty>
       ) : (
         <div className="min-h-0 flex-1 bg-muted/15">
-          <ReactFlow
+          <WorkflowInspectorGraphCanvas
             nodes={nodes}
             edges={edges}
-            nodeTypes={WORKFLOW_INSPECTOR_NODE_TYPES}
-            fitView
-            fitViewOptions={{ padding: 0.2, maxZoom: 1.15 }}
-            minZoom={0.2}
-            maxZoom={1.6}
-            nodesDraggable={false}
-            nodesConnectable={false}
-            elementsSelectable
-            onNodeClick={(_, node) => {
-              onSelectAgent(node.data.agentId);
-            }}
-            proOptions={{ hideAttribution: true }}
-          >
-            <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
-            <MiniMap
-              pannable
-              zoomable
-              nodeColor={(node) =>
-                workflowStatusGraphColor(String(node.data.status))
-              }
-              maskColor="color-mix(in oklab, var(--background) 72%, transparent)"
-            />
-            <Controls showInteractive={false} />
-          </ReactFlow>
+            interactive
+            onSelectAgent={onSelectAgent}
+          />
         </div>
       )}
     </div>
+  );
+}
+
+function WorkflowInspectorGraphCanvas({
+  nodes,
+  edges,
+  interactive,
+  onSelectAgent,
+}: {
+  nodes: WorkflowInspectorGraphNode[];
+  edges: Edge[];
+  interactive: boolean;
+  onSelectAgent?: (agentId: string) => void;
+}) {
+  return (
+    <ReactFlow
+      nodes={nodes}
+      edges={edges}
+      nodeTypes={WORKFLOW_INSPECTOR_NODE_TYPES}
+      fitView
+      fitViewOptions={{
+        padding: interactive ? 0.2 : 0.38,
+        maxZoom: interactive ? 1.15 : 1,
+      }}
+      minZoom={interactive ? 0.2 : 0.5}
+      maxZoom={interactive ? 1.6 : 1}
+      nodesDraggable={false}
+      nodesConnectable={false}
+      elementsSelectable={interactive}
+      nodesFocusable={interactive}
+      edgesFocusable={interactive}
+      panOnDrag={interactive}
+      panOnScroll={interactive}
+      zoomOnScroll={interactive}
+      zoomOnPinch={interactive}
+      zoomOnDoubleClick={interactive}
+      preventScrolling={!interactive}
+      onNodeClick={
+        interactive && onSelectAgent
+          ? (_, node) => {
+              onSelectAgent(node.data.agentId);
+            }
+          : undefined
+      }
+      proOptions={{ hideAttribution: true }}
+    >
+      <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
+      {interactive ? (
+        <>
+          <MiniMap
+            pannable
+            zoomable
+            nodeColor={(node) => workflowStatusGraphColor(String(node.data.status))}
+            maskColor="color-mix(in oklab, var(--background) 72%, transparent)"
+          />
+          <Controls showInteractive={false} />
+        </>
+      ) : null}
+    </ReactFlow>
   );
 }
 
@@ -5836,12 +5958,13 @@ function WorkflowInspectorGraphNodeView({ data }: NodeProps<WorkflowInspectorGra
   return (
     <div
       className={cn(
-        "min-w-48 cursor-pointer rounded-xl border bg-background px-4 py-3 text-left shadow-sm transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md",
+        "min-w-48 rounded-xl border bg-background px-4 py-3 text-left shadow-sm",
         data.status === "running" && "border-primary/40 shadow-primary/10",
         (data.status === "failed" || data.status === "interrupted") && "border-destructive/45",
       )}
     >
-      <Handle type="target" position={Position.Top} className="opacity-0" />
+      <Handle id="top-target" type="target" position={Position.Top} className="opacity-0" />
+      <Handle id="right-target" type="target" position={Position.Right} className="opacity-0" />
       <div className="flex items-center gap-2">
         <span className={cn("size-2 rounded-full", workflowStatusDotClass(data.status))} />
         <span className="truncate text-sm font-medium text-foreground">{data.label}</span>
@@ -5851,9 +5974,10 @@ function WorkflowInspectorGraphNodeView({ data }: NodeProps<WorkflowInspectorGra
         {data.detail}
       </p>
       <p className="mt-2 text-[0.68rem] text-muted-foreground/80">
-        {data.activityCount} {data.activityCount === 1 ? "activity" : "activities"}
+        {data.attemptCount} {data.attemptCount === 1 ? "attempt" : "attempts"} · Worked for {formatWorkflowAgentRunTime(data.agentRunTimeMs)}
       </p>
-      <Handle type="source" position={Position.Bottom} className="opacity-0" />
+      <Handle id="bottom-source" type="source" position={Position.Bottom} className="opacity-0" />
+      <Handle id="right-source" type="source" position={Position.Right} className="opacity-0" />
     </div>
   );
 }
@@ -5868,6 +5992,7 @@ function WorkflowInspectorAgentActivity({
   agent: WorkflowWorkerSnapshot;
 }) {
   const legacyActivity = agent.activity ?? [];
+  const isMockData = useContext(AgentChatMockDataContext);
   const [page, setPage] = useState<WorkflowWorkerActivityPage | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
@@ -5898,6 +6023,14 @@ function WorkflowInspectorAgentActivity({
   );
 
   useEffect(() => {
+    if (isMockData) {
+      setPage(null);
+      setActivityError(null);
+      setIsLoading(false);
+      setIsLoadingOlder(false);
+      return;
+    }
+
     const controller = new AbortController();
     const requestSequence = requestSequenceRef.current + 1;
     requestSequenceRef.current = requestSequence;
@@ -5926,7 +6059,7 @@ function WorkflowInspectorAgentActivity({
         }
       });
     return () => controller.abort();
-  }, [agent.activity_revision, agent.worker_id, runId, sessionId]);
+  }, [agent.activity_revision, agent.worker_id, isMockData, runId, sessionId]);
 
   const loadOlder = useCallback(async () => {
     if (!page?.has_more_before || page.oldest_cursor === null || isLoadingOlder) {
@@ -5967,7 +6100,7 @@ function WorkflowInspectorAgentActivity({
           {workflowStatusLabel(agent.status)}
         </Badge>
         <span className="text-xs text-muted-foreground">
-          {formatWorkflowDuration(agent.started_at_ms, agent.completed_at_ms)}
+          Worked for {formatWorkflowAgentRunTime(workflowWorkerAgentRunTime(agent))}
         </span>
         <span className="ml-auto text-xs text-muted-foreground">
           {activityCount} {activityCount === 1 ? "activity" : "activities"}
@@ -6061,44 +6194,69 @@ function workflowInspectorGraph(snapshot: WorkflowRunSnapshot): {
   const workersById = new Map(
     snapshot.workers.map((worker) => [worker.worker_id, worker] as const),
   );
-  const workerOrdinals = new Map<string, number>();
-  const roleAttemptCounts = new Map<string, number>();
-  for (const worker of snapshot.workers) {
-    const attempt = (roleAttemptCounts.get(worker.role) ?? 0) + 1;
-    roleAttemptCounts.set(worker.role, attempt);
-    workerOrdinals.set(worker.worker_id, attempt);
-  }
-  const nodes: WorkflowInspectorGraphNode[] = snapshot.workers.map((worker) => ({
-    id: worker.worker_id,
+  const agents = workflowInspectorAgents(snapshot);
+  const agentOrder = new Map(
+    agents.map((agent, index) => [agent.role, index] as const),
+  );
+  const graphEdges = workflowInspectorRoleTransitions(snapshot, workersById).map(
+    (transition, index) => {
+      const sourceOrder = agentOrder.get(transition.sourceRole);
+      const targetOrder = agentOrder.get(transition.targetRole);
+      const isLoopback =
+        sourceOrder !== undefined &&
+        targetOrder !== undefined &&
+        sourceOrder >= targetOrder;
+      return {
+        isLoopback,
+        edge: workflowInspectorEdge(
+          transition.sourceRole,
+          transition.targetRole,
+          `${transition.kind}:${transition.sourceRole}:${transition.targetRole}:${index}`,
+          workflowInspectorRoleTransitionLabel(transition),
+          isLoopback,
+        ),
+      };
+    },
+  );
+  const nodes: WorkflowInspectorGraphNode[] = agents.map((agent) => ({
+    id: agent.role,
     type: "workflowInspector",
     position: { x: 0, y: 0 },
     data: {
-      agentId: worker.worker_id,
-      label: `${worker.role} · attempt ${workerOrdinals.get(worker.worker_id) ?? 1}`,
-      detail: worker.model,
-      status: worker.status,
-      activityCount: Math.max(worker.activity_count ?? 0, worker.activity?.length ?? 0),
+      agentId: agent.latestWorker.worker_id,
+      label: agent.role,
+      detail: agent.model,
+      status: agent.status,
+      agentRunTimeMs: agent.agentRunTimeMs,
+      attemptCount: agent.attemptCount,
     },
   }));
-  const edges = workflowInspectorTransitions(snapshot, workersById).map((transition, index) =>
-    workflowInspectorEdge(
-      transition.source_worker_id,
-      transition.target_worker_id,
-      `${transition.kind}:${transition.source_worker_id}:${transition.target_worker_id}:${index}`,
-      transition.kind,
-    ),
-  );
 
+  let layoutEdgeCount = 0;
+  for (const { edge, isLoopback } of graphEdges) {
+    if (isLoopback || edge.source === edge.target) {
+      continue;
+    }
+    graph.setEdge(edge.source, edge.target);
+    layoutEdgeCount += 1;
+  }
+  if (layoutEdgeCount === 0) {
+    for (let index = 1; index < nodes.length; index += 1) {
+      graph.setEdge(nodes[index - 1].id, nodes[index].id);
+    }
+  }
   for (const node of nodes) {
     graph.setNode(node.id, { width: 224, height: 88 });
-  }
-  for (const edge of edges) {
-    graph.setEdge(edge.source, edge.target);
   }
   layoutDagreGraph(graph);
   return {
     nodes: nodes.map((node) => {
-      const position = graph.node(node.id) as { x: number; y: number; width: number; height: number };
+      const position = graph.node(node.id) as {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+      };
       return {
         ...node,
         position: {
@@ -6107,8 +6265,117 @@ function workflowInspectorGraph(snapshot: WorkflowRunSnapshot): {
         },
       };
     }),
-    edges,
+    edges: graphEdges.map(({ edge }) => edge),
   };
+}
+
+function workflowInspectorAgents(
+  snapshot: WorkflowRunSnapshot,
+): WorkflowInspectorAgent[] {
+  const workersByRole = new Map<string, WorkflowWorkerSnapshot[]>();
+  for (const worker of snapshot.workers) {
+    const role = workflowWorkerRole(worker);
+    const workers = workersByRole.get(role);
+    if (workers) {
+      workers.push(worker);
+    } else {
+      workersByRole.set(role, [worker]);
+    }
+  }
+
+  return [...workersByRole.entries()].map(([role, workers]) => {
+    const latestWorker = workers.reduce((latest, worker) =>
+      worker.started_at_ms >= latest.started_at_ms ? worker : latest,
+    );
+    return {
+      role,
+      model: latestWorker.model,
+      status: workflowInspectorAgentStatus(workers),
+      agentRunTimeMs: workers.reduce(
+        (elapsed, worker) => elapsed + workflowWorkerAgentRunTime(worker),
+        0,
+      ),
+      attemptCount: workers.length,
+      latestWorker,
+    };
+  });
+}
+
+function workflowInspectorAgentStatus(
+  workers: WorkflowWorkerSnapshot[],
+): WorkflowNodeStatus {
+  const statuses = workers.map((worker) => worker.status.toLowerCase());
+  if (statuses.includes("running")) {
+    return "running";
+  }
+  if (statuses.includes("failed")) {
+    return "failed";
+  }
+  if (statuses.includes("interrupted")) {
+    return "interrupted";
+  }
+  if (statuses.includes("pending")) {
+    return "pending";
+  }
+  return "completed";
+}
+
+function workflowWorkerRole(worker: WorkflowWorkerSnapshot) {
+  return worker.role.trim() || "agent";
+}
+
+function workflowWorkerAgentRunTime(worker: WorkflowWorkerSnapshot) {
+  return Math.max(worker.agent_run_time_ms ?? 0, 0);
+}
+
+function workflowWorkerAttempt(
+  workers: WorkflowWorkerSnapshot[],
+  selectedWorker: WorkflowWorkerSnapshot,
+) {
+  const attempts = workers
+    .filter((worker) => workflowWorkerRole(worker) === workflowWorkerRole(selectedWorker))
+    .sort((left, right) => left.started_at_ms - right.started_at_ms);
+  const index = attempts.findIndex(
+    (worker) => worker.worker_id === selectedWorker.worker_id,
+  );
+  return index === -1 ? attempts.length : index + 1;
+}
+
+function workflowInspectorRoleTransitions(
+  snapshot: WorkflowRunSnapshot,
+  workersById: Map<string, WorkflowWorkerSnapshot>,
+): WorkflowInspectorRoleTransition[] {
+  const transitionsByRole = new Map<string, WorkflowInspectorRoleTransition>();
+  for (const transition of workflowInspectorTransitions(snapshot, workersById)) {
+    const sourceWorker = workersById.get(transition.source_worker_id);
+    const targetWorker = workersById.get(transition.target_worker_id);
+    if (!sourceWorker || !targetWorker) {
+      continue;
+    }
+    const sourceRole = workflowWorkerRole(sourceWorker);
+    const targetRole = workflowWorkerRole(targetWorker);
+    const key = `${transition.kind}:${sourceRole}:${targetRole}`;
+    const existing = transitionsByRole.get(key);
+    if (existing) {
+      existing.count += 1;
+      continue;
+    }
+    transitionsByRole.set(key, {
+      sourceRole,
+      targetRole,
+      kind: transition.kind,
+      count: 1,
+    });
+  }
+  return [...transitionsByRole.values()];
+}
+
+function workflowInspectorRoleTransitionLabel(
+  transition: WorkflowInspectorRoleTransition,
+) {
+  return transition.count > 1
+    ? `${transition.kind} (${transition.count})`
+    : transition.kind;
 }
 
 function workflowInspectorTransitions(
@@ -6154,11 +6421,14 @@ function workflowInspectorEdge(
   target: string,
   id: string,
   label?: string,
+  loopback = false,
 ): Edge {
   return {
     id,
     source,
     target,
+    sourceHandle: loopback ? "right-source" : "bottom-source",
+    targetHandle: loopback ? "right-target" : "top-target",
     type: "smoothstep",
     label,
     markerEnd: { type: MarkerType.ArrowClosed },
@@ -6166,6 +6436,23 @@ function workflowInspectorEdge(
   };
 }
 
+
+function workflowActivityVerb(status: WorkflowNodeStatus | string) {
+  const normalized = status.toLowerCase();
+  if (normalized === "completed") {
+    return "Ran";
+  }
+  if (normalized === "failed") {
+    return "Failed";
+  }
+  if (normalized === "interrupted") {
+    return "Interrupted";
+  }
+  if (normalized === "pending") {
+    return "Queued";
+  }
+  return "Running";
+}
 
 function workflowStatusLabel(status: WorkflowNodeStatus | string) {
   const normalized = status.toLowerCase();
@@ -6202,8 +6489,8 @@ function workflowStatusGraphColor(status: WorkflowNodeStatus | string) {
   return "var(--foreground)";
 }
 
-function formatWorkflowDuration(startedAtMs: number, completedAtMs?: number | null) {
-  const elapsed = Math.max(0, (completedAtMs ?? Date.now()) - startedAtMs);
+function formatWorkflowAgentRunTime(agentRunTimeMs: number) {
+  const elapsed = Math.max(0, agentRunTimeMs);
   if (elapsed < 1_000) {
     return `${elapsed}ms`;
   }
@@ -9438,6 +9725,7 @@ function asWorkflowRunSnapshot(value: unknown): WorkflowRunSnapshot | null {
         status: stringValue(worker.status, "pending") as WorkflowNodeStatus,
         started_at_ms: numberValue(worker.started_at_ms, startedAtMs),
         completed_at_ms: nullableNumberValue(worker.completed_at_ms),
+        agent_run_time_ms: Math.max(numberValue(worker.agent_run_time_ms, 0), 0),
         input: worker.input,
         output: worker.output,
         error: nullableStringValue(worker.error),

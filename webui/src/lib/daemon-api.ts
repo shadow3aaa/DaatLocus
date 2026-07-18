@@ -321,6 +321,8 @@ export type WorkflowWorkerSnapshot = {
   status: WorkflowNodeStatus;
   started_at_ms: number;
   completed_at_ms?: number | null;
+  /** Backend-measured worker execution time from a monotonic clock. */
+  agent_run_time_ms?: number;
   input: unknown;
   output?: unknown | null;
   error?: string | null;

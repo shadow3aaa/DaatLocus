@@ -107,7 +107,9 @@ use terminal_hyperlinks::{
 };
 use transcript_overlay::render_transcript_overlay;
 use tui_animation::dashboard_state_needs_animation;
-use view_state::{TuiViewState, WorkflowInspectorPage, WorkflowInspectorState};
+use view_state::{
+    TuiViewState, WorkflowInspectorPage, WorkflowInspectorRoleTransition, WorkflowInspectorState,
+};
 
 const TUI_ANIMATION_INTERVAL: Duration = Duration::from_millis(32);
 const TUI_COMMAND_HISTORY_LIMIT: usize = 100;
@@ -793,6 +795,29 @@ fn render_workflow_inspector_narrow(
     }
 }
 
+fn workflow_transition_label(kind: crate::workflow::WorkflowTransitionKind) -> &'static str {
+    match kind {
+        crate::workflow::WorkflowTransitionKind::Await => "await",
+        crate::workflow::WorkflowTransitionKind::Verify => "verify",
+        crate::workflow::WorkflowTransitionKind::Revision => "revision",
+        crate::workflow::WorkflowTransitionKind::Retry => "retry",
+    }
+}
+
+fn format_workflow_agent_run_time(agent_run_time_ms: u64) -> String {
+    if agent_run_time_ms < 1_000 {
+        format!("{agent_run_time_ms}ms")
+    } else if agent_run_time_ms < 60_000 {
+        format!("{}s", agent_run_time_ms / 1_000)
+    } else {
+        format!(
+            "{}m {:02}s",
+            agent_run_time_ms / 60_000,
+            (agent_run_time_ms % 60_000) / 1_000
+        )
+    }
+}
+
 fn render_workflow_inspector_outline(
     frame: &mut Frame,
     area: Rect,
@@ -801,19 +826,33 @@ fn render_workflow_inspector_outline(
     let block = ratatui::widgets::Block::bordered().title(" Agents ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let mut lines = Vec::new();
-    if inspector.snapshot.workers.is_empty() {
+
+    let agents = inspector.agents();
+    let transitions = inspector.role_transitions();
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "{} agent role{} · {} run{} · Worked for {} total",
+            agents.len(),
+            if agents.len() == 1 { "" } else { "s" },
+            inspector.snapshot.workers.len(),
+            if inspector.snapshot.workers.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            format_workflow_agent_run_time(inspector.total_agent_run_time_ms())
+        ),
+        Style::default().fg(Color::DarkGray),
+    ))];
+
+    if agents.is_empty() {
         lines.push(Line::from(Span::styled(
             "Waiting for the first agent...",
             Style::default().fg(Color::DarkGray),
         )));
     }
-    for (worker_index, worker) in inspector.snapshot.workers.iter().enumerate() {
-        let selected = worker_index == inspector.selected_worker;
-        let attempt = inspector.snapshot.workers[..=worker_index]
-            .iter()
-            .filter(|candidate| candidate.role == worker.role)
-            .count();
+    for agent in &agents {
+        let selected = agent.latest_worker_index == inspector.selected_worker;
         lines.push(Line::from(vec![
             Span::styled(
                 if selected { "› " } else { "  " },
@@ -824,7 +863,16 @@ fn render_workflow_inspector_outline(
                 },
             ),
             Span::styled(
-                format!("{} · attempt {} · {}", worker.role, attempt, worker.model),
+                format!(
+                    "{} · {} · {}",
+                    agent.role,
+                    agent.model,
+                    if agent.attempt_count == 1 {
+                        "1 attempt".to_string()
+                    } else {
+                        format!("{} attempts", agent.attempt_count)
+                    }
+                ),
                 if selected {
                     Style::default()
                         .fg(Color::White)
@@ -835,19 +883,51 @@ fn render_workflow_inspector_outline(
             ),
             Span::raw("  "),
             Span::styled(
-                workflow_status_label(worker.status),
-                workflow_status_style(worker.status),
+                workflow_status_label(agent.status),
+                workflow_status_style(agent.status),
             ),
             Span::styled(
                 format!(
-                    "  {} activities",
-                    worker.activity_count.max(worker.activity.len())
+                    "  Worked for {}",
+                    format_workflow_agent_run_time(agent.agent_run_time_ms)
                 ),
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
     }
+
+    if !transitions.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Transitions",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.extend(transitions.iter().map(render_workflow_role_transition_line));
+    }
+
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_workflow_role_transition_line(
+    transition: &WorkflowInspectorRoleTransition,
+) -> Line<'static> {
+    let label = if transition.count > 1 {
+        format!(
+            "  {} → {} · {} ({})",
+            transition.source_role,
+            transition.target_role,
+            workflow_transition_label(transition.kind),
+            transition.count
+        )
+    } else {
+        format!(
+            "  {} → {} · {}",
+            transition.source_role,
+            transition.target_role,
+            workflow_transition_label(transition.kind)
+        )
+    };
+    Line::from(Span::styled(label, Style::default().fg(Color::DarkGray)))
 }
 
 fn render_workflow_inspector_activity(
@@ -871,11 +951,12 @@ fn render_workflow_inspector_activity(
         .filter(|candidate| candidate.role == worker.role)
         .count();
     let title = format!(
-        " {} · attempt {} · {} · {} ",
+        " {} · attempt {} · {} · {} · Worked for {} ",
         worker.role,
         attempt,
         worker.model,
-        workflow_status_label(worker.status)
+        workflow_status_label(worker.status),
+        format_workflow_agent_run_time(worker.agent_run_time_ms)
     );
     let block = ratatui::widgets::Block::bordered().title(title);
     let inner = block.inner(area);
@@ -1201,34 +1282,79 @@ mod tests {
             input: serde_json::json!({ "topic": "rust" }),
             output: Some(serde_json::json!({ "summary": "done" })),
             error: None,
-            await_groups: vec![crate::workflow::WorkflowAwaitGroupSnapshot {
-                group_id: "await-1".to_string(),
-                sequence: 1,
-                status: crate::workflow::WorkflowNodeStatus::Completed,
-                started_at_ms: 11,
-                completed_at_ms: Some(29),
-                worker_ids: vec!["worker-1".to_string()],
-            }],
+            await_groups: vec![
+                crate::workflow::WorkflowAwaitGroupSnapshot {
+                    group_id: "await-1".to_string(),
+                    sequence: 1,
+                    status: crate::workflow::WorkflowNodeStatus::Completed,
+                    started_at_ms: 11,
+                    completed_at_ms: Some(18),
+                    worker_ids: vec!["worker-1".to_string(), "worker-2".to_string()],
+                },
+                crate::workflow::WorkflowAwaitGroupSnapshot {
+                    group_id: "await-2".to_string(),
+                    sequence: 2,
+                    status: crate::workflow::WorkflowNodeStatus::Completed,
+                    started_at_ms: 19,
+                    completed_at_ms: Some(29),
+                    worker_ids: vec!["worker-3".to_string()],
+                },
+            ],
             transitions: Vec::new(),
-            workers: vec![crate::workflow::WorkflowWorkerSnapshot {
-                worker_id: "worker-1".to_string(),
-                await_group_id: "await-1".to_string(),
-                role: "researcher".to_string(),
-                model: "main".to_string(),
-                status: crate::workflow::WorkflowNodeStatus::Completed,
-                started_at_ms: 12,
-                completed_at_ms: Some(28),
-                input: serde_json::json!({ "query": "rust" }),
-                output: Some(serde_json::json!({ "answer": "ok" })),
-                error: None,
-                activity_count: 2,
-                activity_revision: 2,
-                activity: vec![
-                    thinking_activity_cell("considering sources").expect("thinking activity"),
-                    assistant_activity_cell("## Worker result\nFound the answer.")
-                        .expect("assistant activity"),
-                ],
-            }],
+            workers: vec![
+                crate::workflow::WorkflowWorkerSnapshot {
+                    worker_id: "worker-1".to_string(),
+                    await_group_id: "await-1".to_string(),
+                    role: "researcher".to_string(),
+                    model: "main".to_string(),
+                    status: crate::workflow::WorkflowNodeStatus::Completed,
+                    started_at_ms: 12,
+                    completed_at_ms: Some(16),
+                    agent_run_time_ms: 16,
+                    input: serde_json::json!({ "query": "rust" }),
+                    output: Some(serde_json::json!({ "answer": "ok" })),
+                    error: None,
+                    activity_count: 2,
+                    activity_revision: 2,
+                    activity: vec![
+                        thinking_activity_cell("considering sources").expect("thinking activity"),
+                        assistant_activity_cell("## Worker result\nFound the answer.")
+                            .expect("assistant activity"),
+                    ],
+                },
+                crate::workflow::WorkflowWorkerSnapshot {
+                    worker_id: "worker-2".to_string(),
+                    await_group_id: "await-1".to_string(),
+                    role: "researcher".to_string(),
+                    model: "main".to_string(),
+                    status: crate::workflow::WorkflowNodeStatus::Completed,
+                    started_at_ms: 13,
+                    completed_at_ms: Some(18),
+                    agent_run_time_ms: 24,
+                    input: serde_json::json!({ "query": "rust docs" }),
+                    output: Some(serde_json::json!({ "answer": "more" })),
+                    error: None,
+                    activity_count: 0,
+                    activity_revision: 0,
+                    activity: Vec::new(),
+                },
+                crate::workflow::WorkflowWorkerSnapshot {
+                    worker_id: "worker-3".to_string(),
+                    await_group_id: "await-2".to_string(),
+                    role: "reviewer".to_string(),
+                    model: "efficient".to_string(),
+                    status: crate::workflow::WorkflowNodeStatus::Completed,
+                    started_at_ms: 20,
+                    completed_at_ms: Some(28),
+                    agent_run_time_ms: 32,
+                    input: serde_json::json!({ "draft": "ok" }),
+                    output: Some(serde_json::json!({ "approved": true })),
+                    error: None,
+                    activity_count: 0,
+                    activity_revision: 0,
+                    activity: Vec::new(),
+                },
+            ],
         };
         let state = DashboardState {
             active_workflow_runs: vec![snapshot],
@@ -1236,19 +1362,18 @@ mod tests {
         };
         let mut view = TuiViewState::new();
         assert!(view.open_latest_workflow_inspector(&state));
-        let backend = TestBackend::new(120, 24);
+        let backend = TestBackend::new(140, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
 
         render_tui_dashboard_frame(&mut terminal, &mut view, &state)
             .expect("render workflow inspector");
 
         let output = trimmed_buffer_text(terminal.backend().buffer());
-        assert!(output.contains("Agents"));
-        assert!(!output.contains("await 1"));
-        assert!(output.contains("researcher · attempt 1 · main"));
-        assert!(output.contains("considering sources"));
-        assert!(output.contains("Worker result"));
-        assert!(output.contains("Found the answer."));
+        assert!(output.contains("2 agent roles · 3 runs · Worked for 72ms total"));
+        assert!(output.contains("researcher · main · 2 attempts"));
+        assert!(output.contains("researcher → reviewer · await (2)"));
+        assert!(output.contains("reviewer · attempt 1 · efficient"));
+        assert!(output.contains("Worked for 32ms"));
     }
 
     #[test]
@@ -1279,6 +1404,7 @@ mod tests {
                 status: crate::workflow::WorkflowNodeStatus::Running,
                 started_at_ms: 12,
                 completed_at_ms: None,
+                agent_run_time_ms: 0,
                 input: serde_json::json!({}),
                 output: None,
                 error: None,

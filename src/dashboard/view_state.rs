@@ -372,6 +372,24 @@ pub(super) enum WorkflowInspectorPage {
     Activity,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct WorkflowInspectorAgent {
+    pub(super) role: String,
+    pub(super) model: String,
+    pub(super) status: crate::workflow::WorkflowNodeStatus,
+    pub(super) agent_run_time_ms: u64,
+    pub(super) attempt_count: usize,
+    pub(super) latest_worker_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WorkflowInspectorRoleTransition {
+    pub(super) source_role: String,
+    pub(super) target_role: String,
+    pub(super) kind: crate::workflow::WorkflowTransitionKind,
+    pub(super) count: usize,
+}
+
 pub(super) struct WorkflowInspectorState {
     pub(super) snapshot: crate::workflow::WorkflowRunSnapshot,
     pub(super) selected_worker: usize,
@@ -390,6 +408,146 @@ pub(super) struct WorkflowInspectorState {
 }
 
 impl WorkflowInspectorState {
+    pub(super) fn agents(&self) -> Vec<WorkflowInspectorAgent> {
+        let mut agents = Vec::<WorkflowInspectorAgent>::new();
+        for (worker_index, worker) in self.snapshot.workers.iter().enumerate() {
+            let role = workflow_worker_role(worker);
+            if let Some(agent) = agents.iter_mut().find(|agent| agent.role == role) {
+                agent.attempt_count += 1;
+                agent.agent_run_time_ms = agent
+                    .agent_run_time_ms
+                    .saturating_add(worker.agent_run_time_ms);
+                if workflow_status_priority(worker.status) > workflow_status_priority(agent.status)
+                {
+                    agent.status = worker.status;
+                }
+                if worker.started_at_ms
+                    >= self.snapshot.workers[agent.latest_worker_index].started_at_ms
+                {
+                    agent.model = worker.model.clone();
+                    agent.latest_worker_index = worker_index;
+                }
+            } else {
+                agents.push(WorkflowInspectorAgent {
+                    role,
+                    model: worker.model.clone(),
+                    status: worker.status,
+                    agent_run_time_ms: worker.agent_run_time_ms,
+                    attempt_count: 1,
+                    latest_worker_index: worker_index,
+                });
+            }
+        }
+        agents
+    }
+
+    pub(super) fn role_transitions(&self) -> Vec<WorkflowInspectorRoleTransition> {
+        let mut transitions = Vec::<WorkflowInspectorRoleTransition>::new();
+        for transition in self.transitions() {
+            let Some(source_worker) = self
+                .snapshot
+                .workers
+                .iter()
+                .find(|worker| worker.worker_id == transition.source_worker_id)
+            else {
+                continue;
+            };
+            let Some(target_worker) = self
+                .snapshot
+                .workers
+                .iter()
+                .find(|worker| worker.worker_id == transition.target_worker_id)
+            else {
+                continue;
+            };
+            let source_role = workflow_worker_role(source_worker);
+            let target_role = workflow_worker_role(target_worker);
+            if let Some(existing) = transitions.iter_mut().find(|existing| {
+                existing.source_role == source_role
+                    && existing.target_role == target_role
+                    && existing.kind == transition.kind
+            }) {
+                existing.count += 1;
+            } else {
+                transitions.push(WorkflowInspectorRoleTransition {
+                    source_role,
+                    target_role,
+                    kind: transition.kind,
+                    count: 1,
+                });
+            }
+        }
+        transitions
+    }
+
+    pub(super) fn total_agent_run_time_ms(&self) -> u64 {
+        self.snapshot
+            .workers
+            .iter()
+            .map(|worker| worker.agent_run_time_ms)
+            .sum()
+    }
+
+    fn transitions(&self) -> Vec<crate::workflow::WorkflowTransitionSnapshot> {
+        let direct_transitions = self
+            .snapshot
+            .transitions
+            .iter()
+            .filter(|transition| {
+                transition.source_worker_id != transition.target_worker_id
+                    && self
+                        .snapshot
+                        .workers
+                        .iter()
+                        .any(|worker| worker.worker_id == transition.source_worker_id)
+                    && self
+                        .snapshot
+                        .workers
+                        .iter()
+                        .any(|worker| worker.worker_id == transition.target_worker_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !direct_transitions.is_empty() {
+            return direct_transitions;
+        }
+
+        let mut groups = self.snapshot.await_groups.iter().collect::<Vec<_>>();
+        groups.sort_by_key(|group| group.sequence);
+        let mut transitions = Vec::new();
+        let mut previous_worker_ids = None::<Vec<String>>;
+        for group in groups {
+            let worker_ids = group
+                .worker_ids
+                .iter()
+                .filter(|worker_id| {
+                    self.snapshot
+                        .workers
+                        .iter()
+                        .any(|worker| worker.worker_id == **worker_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Some(previous_worker_ids) = &previous_worker_ids {
+                for source_worker_id in previous_worker_ids {
+                    for target_worker_id in &worker_ids {
+                        if source_worker_id != target_worker_id {
+                            transitions.push(crate::workflow::WorkflowTransitionSnapshot {
+                                source_worker_id: source_worker_id.clone(),
+                                target_worker_id: target_worker_id.clone(),
+                                kind: crate::workflow::WorkflowTransitionKind::Await,
+                            });
+                        }
+                    }
+                }
+            }
+            if !worker_ids.is_empty() {
+                previous_worker_ids = Some(worker_ids);
+            }
+        }
+        transitions
+    }
+
     fn new(snapshot: crate::workflow::WorkflowRunSnapshot) -> Self {
         let selected_worker = snapshot.workers.len().saturating_sub(1);
         Self {
@@ -599,6 +757,23 @@ impl WorkflowInspectorState {
     }
 }
 
+fn workflow_worker_role(worker: &crate::workflow::WorkflowWorkerSnapshot) -> String {
+    if worker.role.trim().is_empty() {
+        "agent".to_string()
+    } else {
+        worker.role.clone()
+    }
+}
+
+const fn workflow_status_priority(status: crate::workflow::WorkflowNodeStatus) -> u8 {
+    match status {
+        crate::workflow::WorkflowNodeStatus::Running => 4,
+        crate::workflow::WorkflowNodeStatus::Failed => 3,
+        crate::workflow::WorkflowNodeStatus::Interrupted => 2,
+        crate::workflow::WorkflowNodeStatus::Pending => 1,
+        crate::workflow::WorkflowNodeStatus::Completed => 0,
+    }
+}
 pub(super) struct TuiViewState {
     pub(super) command_input: InputState,
     pub(super) pending_pastes: Vec<(String, String)>,
@@ -1367,6 +1542,105 @@ mod tests {
     }
 
     #[test]
+    fn workflow_inspector_groups_role_attempts_and_transitions() {
+        let snapshot = crate::workflow::WorkflowRunSnapshot {
+            run_id: "run-roles".to_string(),
+            workflow_id: "workflow".to_string(),
+            status: crate::workflow::WorkflowNodeStatus::Running,
+            started_at_ms: 1,
+            completed_at_ms: None,
+            input: serde_json::json!({}),
+            output: None,
+            error: None,
+            await_groups: Vec::new(),
+            transitions: vec![
+                crate::workflow::WorkflowTransitionSnapshot {
+                    source_worker_id: "worker-1".to_string(),
+                    target_worker_id: "worker-3".to_string(),
+                    kind: crate::workflow::WorkflowTransitionKind::Await,
+                },
+                crate::workflow::WorkflowTransitionSnapshot {
+                    source_worker_id: "worker-2".to_string(),
+                    target_worker_id: "worker-3".to_string(),
+                    kind: crate::workflow::WorkflowTransitionKind::Await,
+                },
+            ],
+            workers: vec![
+                crate::workflow::WorkflowWorkerSnapshot {
+                    worker_id: "worker-1".to_string(),
+                    await_group_id: "await-1".to_string(),
+                    role: "researcher".to_string(),
+                    model: "main".to_string(),
+                    status: crate::workflow::WorkflowNodeStatus::Completed,
+                    started_at_ms: 1,
+                    completed_at_ms: Some(2),
+                    agent_run_time_ms: 12,
+                    input: serde_json::json!({}),
+                    output: None,
+                    error: None,
+                    activity_count: 0,
+                    activity_revision: 0,
+                    activity: Vec::new(),
+                },
+                crate::workflow::WorkflowWorkerSnapshot {
+                    worker_id: "worker-2".to_string(),
+                    await_group_id: "await-1".to_string(),
+                    role: "researcher".to_string(),
+                    model: "efficient".to_string(),
+                    status: crate::workflow::WorkflowNodeStatus::Failed,
+                    started_at_ms: 3,
+                    completed_at_ms: Some(4),
+                    agent_run_time_ms: 18,
+                    input: serde_json::json!({}),
+                    output: None,
+                    error: Some("retry".to_string()),
+                    activity_count: 0,
+                    activity_revision: 0,
+                    activity: Vec::new(),
+                },
+                crate::workflow::WorkflowWorkerSnapshot {
+                    worker_id: "worker-3".to_string(),
+                    await_group_id: "await-2".to_string(),
+                    role: "reviewer".to_string(),
+                    model: "main".to_string(),
+                    status: crate::workflow::WorkflowNodeStatus::Running,
+                    started_at_ms: 5,
+                    completed_at_ms: None,
+                    agent_run_time_ms: 24,
+                    input: serde_json::json!({}),
+                    output: None,
+                    error: None,
+                    activity_count: 0,
+                    activity_revision: 0,
+                    activity: Vec::new(),
+                },
+            ],
+        };
+
+        let inspector = WorkflowInspectorState::new(snapshot);
+        let agents = inspector.agents();
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].role, "researcher");
+        assert_eq!(agents[0].model, "efficient");
+        assert_eq!(
+            agents[0].status,
+            crate::workflow::WorkflowNodeStatus::Failed
+        );
+        assert_eq!(agents[0].attempt_count, 2);
+        assert_eq!(agents[0].agent_run_time_ms, 30);
+        assert_eq!(inspector.total_agent_run_time_ms(), 54);
+        assert_eq!(
+            inspector.role_transitions(),
+            vec![WorkflowInspectorRoleTransition {
+                source_role: "researcher".to_string(),
+                target_role: "reviewer".to_string(),
+                kind: crate::workflow::WorkflowTransitionKind::Await,
+                count: 2,
+            }]
+        );
+    }
+
+    #[test]
     fn workflow_inspector_wide_pane_starts_activity_lazy_load_before_activity_page() {
         let snapshot = crate::workflow::WorkflowRunSnapshot {
             run_id: "run-wide".to_string(),
@@ -1387,6 +1661,7 @@ mod tests {
                 status: crate::workflow::WorkflowNodeStatus::Running,
                 started_at_ms: 1,
                 completed_at_ms: None,
+                agent_run_time_ms: 0,
                 input: serde_json::json!({}),
                 output: None,
                 error: None,
@@ -1421,6 +1696,7 @@ mod tests {
                 status: crate::workflow::WorkflowNodeStatus::Running,
                 started_at_ms: 1,
                 completed_at_ms: None,
+                agent_run_time_ms: 0,
                 input: serde_json::json!({}),
                 output: None,
                 error: None,

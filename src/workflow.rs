@@ -7,6 +7,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use miette::{Result, miette};
@@ -384,6 +385,11 @@ pub struct WorkflowWorkerSnapshot {
     pub started_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at_ms: Option<i64>,
+    /// Backend-measured time spent executing this worker. It is updated from a
+    /// monotonic clock while `run_worker` runs and excludes workflow waiting
+    /// after the worker completes.
+    #[serde(default)]
+    pub agent_run_time_ms: u64,
     pub input: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
@@ -632,6 +638,7 @@ impl WorkflowInspectorPublisher {
             status: WorkflowNodeStatus::Running,
             started_at_ms: current_time_ms(),
             completed_at_ms: None,
+            agent_run_time_ms: 0,
             input,
             output: None,
             error: None,
@@ -688,7 +695,32 @@ impl WorkflowInspectorPublisher {
         self.publish();
     }
 
-    fn finish_worker(&self, worker_id: &str, result: &Result<WorkflowWorkerResult>) {
+    fn update_worker_run_time(&self, worker_id: &str, agent_run_time_ms: u64) {
+        let mut updated = false;
+        if let Some(worker) = self
+            .snapshot
+            .lock()
+            .workers
+            .iter_mut()
+            .find(|worker| worker.worker_id == worker_id)
+        {
+            let next_run_time_ms = worker.agent_run_time_ms.max(agent_run_time_ms);
+            if worker.agent_run_time_ms != next_run_time_ms {
+                worker.agent_run_time_ms = next_run_time_ms;
+                updated = true;
+            }
+        }
+        if updated {
+            self.publish();
+        }
+    }
+
+    fn finish_worker(
+        &self,
+        worker_id: &str,
+        result: &Result<WorkflowWorkerResult>,
+        agent_run_time_ms: u64,
+    ) {
         if let Some(worker) = self
             .snapshot
             .lock()
@@ -697,6 +729,7 @@ impl WorkflowInspectorPublisher {
             .find(|worker| worker.worker_id == worker_id)
         {
             worker.completed_at_ms = Some(current_time_ms());
+            worker.agent_run_time_ms = worker.agent_run_time_ms.max(agent_run_time_ms);
             match result {
                 Ok(result) => {
                     worker.status = WorkflowNodeStatus::Completed;
@@ -1246,7 +1279,7 @@ async fn run_workflow_script(
                     &worker.definition,
                     worker.input.clone(),
                 );
-                let result = run_worker(
+                let result = run_worker_with_timing(
                     context,
                     worker.definition,
                     worker.input,
@@ -1256,7 +1289,6 @@ async fn run_workflow_script(
                     &worker_id,
                 )
                 .await;
-                inspector.finish_worker(&worker_id, &result);
                 inspector.finish_group(&group_id);
                 result?.output
             }
@@ -1282,7 +1314,7 @@ async fn run_workflow_script(
                             let local_tools = Arc::clone(&local_tools);
                             let worker_cancellation = worker_cancellation.clone();
                             async move {
-                                let result = run_worker(
+                                let result = run_worker_with_timing(
                                     context,
                                     worker.definition,
                                     worker.input,
@@ -1292,7 +1324,6 @@ async fn run_workflow_script(
                                     &worker_id,
                                 )
                                 .await;
-                                inspector.finish_worker(&worker_id, &result);
                                 let initiated_group_interrupt =
                                     result.is_err() && worker_cancellation.interrupt_group();
                                 (
@@ -1424,6 +1455,48 @@ fn worker_invocation_from_lua(lua: &Lua, handle: &Table) -> mlua::Result<WorkerI
     let definition = worker_definition_from_lua(lua, &handle.get("definition")?)?;
     let input: Value = lua.from_value(handle.get("input")?)?;
     Ok(WorkerInvocation { definition, input })
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+async fn run_worker_with_timing(
+    context: &Context,
+    definition: WorkerDefinition,
+    input: Value,
+    local_tools: &Arc<Mutex<BTreeMap<String, LocalToolDefinition>>>,
+    cancellation: Option<WorkflowCancellationRef<'_>>,
+    inspector: &WorkflowInspectorPublisher,
+    worker_id: &str,
+) -> Result<WorkflowWorkerResult> {
+    let started_at = Instant::now();
+    let worker = run_worker(
+        context,
+        definition,
+        input,
+        local_tools,
+        cancellation,
+        inspector,
+        worker_id,
+    );
+    tokio::pin!(worker);
+    let mut runtime_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
+    runtime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let result = loop {
+        tokio::select! {
+            result = &mut worker => break result,
+            _ = runtime_tick.tick() => {
+                inspector.update_worker_run_time(worker_id, duration_millis(started_at.elapsed()));
+            }
+        }
+    };
+    inspector.finish_worker(worker_id, &result, duration_millis(started_at.elapsed()));
+    result
 }
 
 async fn run_worker(
@@ -1911,6 +1984,7 @@ mod tests {
                 status: WorkflowNodeStatus::Completed,
                 started_at_ms: 12,
                 completed_at_ms: Some(28),
+                agent_run_time_ms: 12_345,
                 input: json!({ "query": "rust" }),
                 output: Some(json!({ "answer": "ok" })),
                 error: None,
@@ -1929,6 +2003,7 @@ mod tests {
         assert_eq!(decoded, snapshot);
         assert_eq!(decoded.workers[0].role, "researcher");
         assert_eq!(decoded.transitions[0].kind, WorkflowTransitionKind::Verify);
+        assert_eq!(decoded.workers[0].agent_run_time_ms, 12_345);
         assert_eq!(decoded.workers[0].activity_count, 1);
         assert_eq!(decoded.workers[0].activity.len(), 1);
         assert!(encoded.contains("considering sources"));
@@ -1992,7 +2067,7 @@ mod tests {
         let worker_id = worker_ids.first().expect("worker id").clone();
         inspector.begin_worker(&group_id, worker_id.clone(), &definition, json!({}));
         let local_tools = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
-        let result = run_worker(
+        let result = run_worker_with_timing(
             &isolated.context,
             definition,
             json!({}),
@@ -2003,6 +2078,7 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+        assert!(inspector.snapshot().workers[0].agent_run_time_ms < 1_000);
         assert_eq!(main_probe.requests().len(), 1);
     }
 
@@ -2465,6 +2541,7 @@ mod tests {
         release: Arc<tokio::sync::Notify>,
         fail_id: Option<String>,
         failure_released: Arc<AtomicBool>,
+        finish_delay: std::time::Duration,
     }
 
     #[async_trait]
@@ -2508,6 +2585,9 @@ mod tests {
                 ));
             }
             self.release.notified().await;
+            if !self.finish_delay.is_zero() {
+                tokio::time::sleep(self.finish_delay).await;
+            }
             Ok(AgentTurnStreamResult {
                 items: vec![AgentTurnItem::ToolCall {
                     call: AgentToolCall {
@@ -2551,6 +2631,7 @@ mod tests {
             release: Arc::clone(&release),
             fail_id: None,
             failure_released: Arc::new(AtomicBool::new(false)),
+            finish_delay: std::time::Duration::from_millis(20),
         });
         let source = r#"
 local Schema = {
@@ -2630,6 +2711,12 @@ workflow.define({
                 .iter()
                 .all(|worker| worker.status == WorkflowNodeStatus::Completed)
         );
+        assert!(
+            snapshot
+                .workers
+                .iter()
+                .all(|worker| worker.agent_run_time_ms > 0)
+        );
     }
     #[tokio::test]
     async fn await_all_propagates_failure_and_interrupts_siblings() {
@@ -2644,6 +2731,7 @@ workflow.define({
             release,
             fail_id: Some("job-first".to_string()),
             failure_released: Arc::clone(&failure_released),
+            finish_delay: std::time::Duration::ZERO,
         });
         let source = r#"
 local Schema = {
@@ -2738,6 +2826,7 @@ workflow.define({
             release,
             fail_id: None,
             failure_released: Arc::new(AtomicBool::new(false)),
+            finish_delay: std::time::Duration::ZERO,
         });
         let source = r#"
 local Schema = {
@@ -3026,7 +3115,7 @@ workflow.define({
         let worker_id = worker_ids.first().expect("worker id").clone();
         inspector.begin_worker(&group_id, worker_id.clone(), &definition, input.clone());
         let local_tools = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
-        let result = run_worker(
+        let result = run_worker_with_timing(
             &isolated.context,
             definition,
             input,
@@ -3036,7 +3125,6 @@ workflow.define({
             &worker_id,
         )
         .await;
-        inspector.finish_worker(&worker_id, &result);
         inspector.finish_group(&group_id);
         result?;
         Ok(inspector.snapshot())

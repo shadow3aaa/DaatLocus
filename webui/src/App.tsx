@@ -37,6 +37,7 @@ import {
   type SetupConfigRequest,
   type SetupConfigResponse,
   type StatusSummary,
+  type WorkflowRunSnapshot,
 } from "@/lib/daemon-api";
 import { setWebUiLanguage } from "@/lib/i18n";
 // Lazy-loaded page components for smaller initial bundle
@@ -1079,6 +1080,253 @@ const MOCK_LOGS_DATA: LogsPageMockData = {
 };
 
 const MOCK_ACTIVITY_STARTED_AT = 1_786_800_000_000;
+const MOCK_WORKFLOW_STARTED_AT = MOCK_NOW_MS - 94_000;
+
+const MOCK_WORKFLOW_RUN: WorkflowRunSnapshot = {
+  run_id: "mock-goal-workflow-run",
+  workflow_id: "goal",
+  status: "running",
+  started_at_ms: MOCK_WORKFLOW_STARTED_AT,
+  completed_at_ms: null,
+  input: {
+    goal: "Add Agent-page mock coverage for workflow visualizations.",
+  },
+  output: null,
+  error: null,
+  await_groups: [
+    {
+      group_id: "await-1",
+      sequence: 1,
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 17_000,
+      worker_ids: ["await-1-worker-1"],
+    },
+    {
+      group_id: "await-2",
+      sequence: 2,
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 18_000,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 31_000,
+      worker_ids: ["await-2-worker-1"],
+    },
+    {
+      group_id: "await-3",
+      sequence: 3,
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 32_000,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 60_000,
+      worker_ids: ["await-3-worker-1"],
+    },
+    {
+      group_id: "await-4",
+      sequence: 4,
+      status: "running",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 61_000,
+      completed_at_ms: null,
+      worker_ids: ["await-4-worker-1"],
+    },
+  ],
+  transitions: [
+    {
+      source_worker_id: "await-1-worker-1",
+      target_worker_id: "await-2-worker-1",
+      kind: "verify",
+    },
+    {
+      source_worker_id: "await-2-worker-1",
+      target_worker_id: "await-3-worker-1",
+      kind: "revision",
+    },
+    {
+      source_worker_id: "await-3-worker-1",
+      target_worker_id: "await-4-worker-1",
+      kind: "verify",
+    },
+  ],
+  workers: [
+    {
+      worker_id: "await-1-worker-1",
+      await_group_id: "await-1",
+      role: "implementation",
+      model: "main",
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 17_000,
+      agent_run_time_ms: 12_400,
+      input: {
+        goal: "Add Agent-page mock coverage for workflow visualizations.",
+        attempt: 1,
+        previous_summary: "",
+        verifier_feedback: "",
+      },
+      output: {
+        summary: "Located the Agent mock entry point and inspector data contract.",
+        evidence: [
+          "webui/src/App.tsx owns MOCK_DASHBOARD_SNAPSHOT",
+          "Workflow cards render from SessionActivityEvent.Workflow",
+        ],
+      },
+      error: null,
+      activity_count: 4,
+      activity_revision: 4,
+      activity: [
+        {
+          Thinking: {
+            content: "I will trace the Agent mock data into the workflow inspector.",
+          },
+        },
+        {
+          CodingOpenProject: {
+            project_root: MOCK_PROJECT_DIR,
+            detail_lines: ["workflow Inspector uses DashboardSnapshot activity events"],
+          },
+        },
+        {
+          ExecResult: {
+            title: "bun run typecheck",
+            meta: "exit=0",
+            output_lines: ["$ tsc -p tsconfig.json --noEmit", "Finished in 1.2s"],
+          },
+        },
+        {
+          Assistant: {
+            content: "Mapped the mock data path and the workflow inspector payload.",
+          },
+        },
+      ],
+    },
+    {
+      worker_id: "await-2-worker-1",
+      await_group_id: "await-2",
+      role: "verification",
+      model: "efficient",
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 18_000,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 31_000,
+      agent_run_time_ms: 9_600,
+      input: {
+        goal: "Add Agent-page mock coverage for workflow visualizations.",
+        attempt: 1,
+        worker_summary: "Located the Agent mock entry point and inspector data contract.",
+        worker_evidence: ["Workflow cards render from SessionActivityEvent.Workflow"],
+      },
+      output: {
+        achieved: false,
+        summary: "The workflow card is still absent from the mock snapshot.",
+        feedback: "Add a running Workflow event with a populated run snapshot.",
+        evidence: ["MOCK_DASHBOARD_SNAPSHOT has no Workflow activity"],
+      },
+      error: null,
+      activity_count: 3,
+      activity_revision: 3,
+      activity: [
+        {
+          Thinking: {
+            content: "I will verify that the mock can open the workflow visualization offline.",
+          },
+        },
+        {
+          ExecResult: {
+            title: "rg \"Workflow\" webui/src/App.tsx",
+            meta: "exit=1",
+            output_lines: ["No workflow activity fixture found."],
+          },
+        },
+        {
+          Assistant: {
+            content: "A realistic run snapshot and worker activity are required for visual debugging.",
+          },
+        },
+      ],
+    },
+    {
+      worker_id: "await-3-worker-1",
+      await_group_id: "await-3",
+      role: "implementation",
+      model: "main",
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 32_000,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 60_000,
+      agent_run_time_ms: 21_800,
+      input: {
+        goal: "Add Agent-page mock coverage for workflow visualizations.",
+        attempt: 2,
+        previous_summary: "Located the Agent mock entry point and inspector data contract.",
+        verifier_feedback: "Add a running Workflow event with a populated run snapshot.",
+      },
+      output: {
+        summary: "Added a live workflow fixture with worker activities.",
+        evidence: ["mock workflow run includes four await groups", "worker activity is embedded"],
+      },
+      error: null,
+      activity_count: 3,
+      activity_revision: 3,
+      activity: [
+        {
+          Thinking: {
+            content: "I will add a snapshot that exercises verification and revision transitions.",
+          },
+        },
+        {
+          Patch: {
+            summary_line: "added workflow visual mock fixture",
+            files: [
+              {
+                path: "webui/src/App.tsx",
+                operation: "update",
+                added_lines: 170,
+                removed_lines: 0,
+                diff_lines: [],
+              },
+            ],
+          },
+        },
+        {
+          Assistant: {
+            content: "The running workflow card now exposes the inspector graph and worker streams.",
+          },
+        },
+      ],
+    },
+    {
+      worker_id: "await-4-worker-1",
+      await_group_id: "await-4",
+      role: "verification",
+      model: "efficient",
+      status: "running",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 61_000,
+      completed_at_ms: null,
+      agent_run_time_ms: 14_300,
+      input: {
+        goal: "Add Agent-page mock coverage for workflow visualizations.",
+        attempt: 2,
+        worker_summary: "Added a live workflow fixture with worker activities.",
+        worker_evidence: ["mock workflow run includes four await groups"],
+      },
+      output: null,
+      error: null,
+      activity_count: 2,
+      activity_revision: 2,
+      activity: [
+        {
+          Thinking: {
+            content: "I am checking the live graph, transition labels, and worker detail view.",
+          },
+        },
+        {
+          LiveExec: {
+            title: "bun run typecheck",
+            call_lines: ["bun run typecheck"],
+            meta: null,
+            output_lines: ["$ tsc -p tsconfig.json --noEmit", "Checking workflow mock fixture"],
+            started_at_ms: MOCK_NOW_MS - 8_000,
+          },
+        },
+      ],
+    },
+  ],
+};
 
 const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
   agent_name: "Daat Locus",
@@ -1266,7 +1514,20 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
         },
       },
     },
+    {
+      key: `workflow:${MOCK_WORKFLOW_RUN.run_id}`,
+      event: {
+        Workflow: {
+          workflow_id: MOCK_WORKFLOW_RUN.workflow_id,
+          status: "running",
+          output: MOCK_WORKFLOW_RUN.output,
+          message: "running 4 workers across 4 await groups",
+          snapshot: MOCK_WORKFLOW_RUN,
+        },
+      },
+    },
   ],
+  active_workflow_runs: [MOCK_WORKFLOW_RUN],
   last_cycle_elapsed_ms: 2300,
   runtime_status: "Working",
   runtime_status_level: "info",

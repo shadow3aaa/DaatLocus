@@ -778,20 +778,24 @@ fn workflow_transcript_lines(cell: &super::WorkflowActivityData, width: u16) -> 
 fn workflow_snapshot_outline_lines(
     snapshot: &crate::workflow::WorkflowRunSnapshot,
 ) -> Vec<Line<'static>> {
-    let duration = snapshot
-        .completed_at_ms
-        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
-        .saturating_sub(snapshot.started_at_ms);
+    let total_agent_run_time_ms = snapshot
+        .workers
+        .iter()
+        .map(|worker| worker.agent_run_time_ms)
+        .sum::<u64>();
     let mut lines = vec![Line::from(format!(
-        "run {} · {:?} · {}ms · input {}",
-        snapshot.run_id, snapshot.status, duration, snapshot.input
+        "run {} · {:?} · Worked for {} total · input {}",
+        snapshot.run_id,
+        snapshot.status,
+        format_workflow_agent_run_time(total_agent_run_time_ms),
+        snapshot.input
     ))];
     let mut role_attempts = std::collections::BTreeMap::<&str, usize>::new();
     lines.extend(snapshot.workers.iter().map(|worker| {
         let attempt = role_attempts.entry(worker.role.as_str()).or_default();
         *attempt += 1;
         Line::from(format!(
-            "{} {} · attempt {} · {} · {:?} · {} activities",
+            "{} {} · attempt {} · {} · {:?} · Worked for {}",
             if worker.status == crate::workflow::WorkflowNodeStatus::Completed {
                 "✓"
             } else {
@@ -801,10 +805,24 @@ fn workflow_snapshot_outline_lines(
             attempt,
             worker.model,
             worker.status,
-            worker.activity_count.max(worker.activity.len())
+            format_workflow_agent_run_time(worker.agent_run_time_ms)
         ))
     }));
     lines
+}
+
+fn format_workflow_agent_run_time(agent_run_time_ms: u64) -> String {
+    if agent_run_time_ms < 1_000 {
+        format!("{agent_run_time_ms}ms")
+    } else if agent_run_time_ms < 60_000 {
+        format!("{}s", agent_run_time_ms / 1_000)
+    } else {
+        format!(
+            "{}m {:02}s",
+            agent_run_time_ms / 60_000,
+            (agent_run_time_ms % 60_000) / 1_000
+        )
+    }
 }
 
 fn exec_transcript_lines(cell: &ExecResultActivityData, width: u16) -> Vec<Line<'static>> {
