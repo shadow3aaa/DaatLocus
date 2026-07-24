@@ -3,6 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::persistence::{PersistenceFileMode, write_bytes_atomic_sync};
+
 const CONFIG_DIR_NAME: &str = "config";
 const STATE_DIR_NAME: &str = "state";
 const MEMORY_DIR_NAME: &str = "memory";
@@ -14,6 +16,7 @@ const LOGS_DIR_NAME: &str = "logs";
 const RAW_DIR_NAME: &str = "raw";
 const RUNTIME_DIR_NAME: &str = "runtime";
 const SESSIONS_DIR_NAME: &str = "sessions";
+const CODEX_AUTH_DIR_NAME: &str = "codex-auth";
 
 #[derive(Clone, Debug)]
 pub struct DaatLocusPaths {
@@ -59,6 +62,15 @@ impl DaatLocusPaths {
 
     pub fn config_file(&self, file_name: &str) -> PathBuf {
         self.config_dir().join(file_name)
+    }
+
+    /// Private, Daat-owned normalized Codex OAuth imports.
+    pub fn codex_auth_dir(&self) -> PathBuf {
+        self.root.join(CODEX_AUTH_DIR_NAME)
+    }
+
+    pub fn codex_auth_file(&self, file_name: &str) -> PathBuf {
+        self.codex_auth_dir().join(file_name)
     }
 
     pub fn state_file(&self, file_name: &str) -> PathBuf {
@@ -191,8 +203,8 @@ fn resolve_daat_locus_home_root() -> PathBuf {
 }
 
 fn ensure_layout_sync(paths: &DaatLocusPaths) {
-    let _ = std::fs::create_dir_all(paths.root());
     let _ = std::fs::create_dir_all(paths.config_dir());
+    let _ = std::fs::create_dir_all(paths.codex_auth_dir());
     let _ = std::fs::create_dir_all(paths.state_dir());
     let _ = std::fs::create_dir_all(paths.workflows_dir());
     let _ = std::fs::create_dir_all(paths.memory_dir());
@@ -214,6 +226,86 @@ fn migrate_legacy_path_sync(from: PathBuf, to: PathBuf) {
     let _ = std::fs::rename(from, to);
 }
 
+fn migrate_legacy_codex_auth_paths_sync(paths: &DaatLocusPaths) {
+    let config_path = paths.config_file("config.toml");
+    let Ok(text) = std::fs::read_to_string(&config_path) else {
+        return;
+    };
+    let Ok(mut config) = toml::from_str::<toml::Value>(&text) else {
+        return;
+    };
+    let Some(providers) = config
+        .get_mut("providers")
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return;
+    };
+
+    let mut changed = false;
+    for (provider_name, provider) in providers {
+        let Some(provider) = provider.as_table_mut() else {
+            continue;
+        };
+        if provider.get("type").and_then(toml::Value::as_str) != Some("openai-codex-oauth") {
+            continue;
+        }
+        let missing_auth_file = provider
+            .get("auth_file")
+            .and_then(toml::Value::as_str)
+            .is_none_or(|path| path.trim().is_empty());
+        if !missing_auth_file {
+            continue;
+        }
+
+        let component = sanitize_legacy_codex_auth_component(provider_name);
+        let old_config_file = paths.config_file(&format!("openai-codex-oauth-{component}.json"));
+        let migrated_file = paths.codex_auth_file(&format!("openai-codex-oauth-{component}.json"));
+        if old_config_file.is_file() && !migrated_file.exists() {
+            if let Some(parent) = migrated_file.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::rename(&old_config_file, &migrated_file);
+        }
+
+        let intermediate_file =
+            paths.codex_auth_file(&format!("codex-auth-provider-{component}.json"));
+        let auth_file = [&migrated_file, &old_config_file, &intermediate_file]
+            .into_iter()
+            .find(|path| path.is_file());
+        let Some(auth_file) = auth_file else {
+            continue;
+        };
+
+        provider.insert(
+            "auth_file".to_string(),
+            toml::Value::String(auth_file.display().to_string()),
+        );
+        changed = true;
+    }
+
+    if changed && let Ok(text) = toml::to_string_pretty(&config) {
+        let _ =
+            write_bytes_atomic_sync(&config_path, text.as_bytes(), PersistenceFileMode::Private);
+    }
+}
+
+fn sanitize_legacy_codex_auth_component(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "provider".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn migrate_legacy_layout_sync(paths: &DaatLocusPaths) {
     migrate_legacy_path_sync(
         paths.root.join("config.toml"),
@@ -223,6 +315,7 @@ fn migrate_legacy_layout_sync(paths: &DaatLocusPaths) {
         paths.root.join("telegram_acl.json"),
         paths.config_file("telegram_acl.json"),
     );
+    migrate_legacy_codex_auth_paths_sync(paths);
 
     migrate_legacy_path_sync(
         paths.root.join("runtime_conversation"),
@@ -287,4 +380,81 @@ pub async fn daat_locus_paths() -> DaatLocusPaths {
     ensure_layout_sync(&paths);
     migrate_legacy_layout_sync(&paths);
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_auth_files_live_in_a_daat_owned_directory() {
+        let root = PathBuf::from("/tmp/daat-locus");
+        let paths = DaatLocusPaths::from_root(root.clone());
+
+        assert_eq!(paths.codex_auth_dir(), root.join("codex-auth"));
+        assert_eq!(
+            paths.codex_auth_file("codex-auth-example.json"),
+            root.join("codex-auth").join("codex-auth-example.json")
+        );
+    }
+
+    #[test]
+    fn legacy_codex_auth_file_is_migrated_and_recorded() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let paths = DaatLocusPaths::from_root(temp.path().to_path_buf());
+        ensure_layout_sync(&paths);
+        let config_path = paths.config_file("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"[providers."Codex Local"]
+type = "openai-codex-oauth"
+"#,
+        )
+        .expect("write config");
+        let legacy_file = paths.config_file("openai-codex-oauth-Codex-Local.json");
+        std::fs::write(&legacy_file, b"legacy tokens").expect("write legacy auth");
+
+        migrate_legacy_codex_auth_paths_sync(&paths);
+
+        let migrated_file = paths.codex_auth_file("openai-codex-oauth-Codex-Local.json");
+        assert_eq!(
+            std::fs::read(&migrated_file).expect("read migrated auth"),
+            b"legacy tokens"
+        );
+        assert!(!legacy_file.exists());
+        let config = std::fs::read_to_string(config_path).expect("read config");
+        let config = toml::from_str::<toml::Value>(&config).expect("parse config");
+        assert_eq!(
+            config["providers"]["Codex Local"]["auth_file"].as_str(),
+            Some(migrated_file.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn explicit_codex_auth_file_is_preserved() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let paths = DaatLocusPaths::from_root(temp.path().to_path_buf());
+        ensure_layout_sync(&paths);
+        let config_path = paths.config_file("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"[providers.codex]
+type = "openai-codex-oauth"
+auth_file = "custom/auth.json"
+"#,
+        )
+        .expect("write config");
+        let legacy_file = paths.config_file("openai-codex-oauth-codex.json");
+        std::fs::write(&legacy_file, b"legacy tokens").expect("write legacy auth");
+
+        migrate_legacy_codex_auth_paths_sync(&paths);
+
+        let config = std::fs::read_to_string(config_path).expect("read config");
+        let config = toml::from_str::<toml::Value>(&config).expect("parse config");
+        assert_eq!(
+            config["providers"]["codex"]["auth_file"].as_str(),
+            Some("custom/auth.json")
+        );
+        assert!(legacy_file.exists());
+    }
 }

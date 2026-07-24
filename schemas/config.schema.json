@@ -10,7 +10,7 @@
       }
     },
     "efficient_model": {
-      "description": "Efficient model name; key reference into models.\nDefault for non-main-loop operations such as judge.\nWhen not set explicitly, defaults to the same value as main_model for backward compatibility.",
+      "description": "Efficient model name; key reference into models.\nDefault for non-main-loop operations such as judge.\nWhen not set explicitly, defaults to the same value as `main_model` for backward compatibility.",
       "type": "string",
       "default": "default"
     },
@@ -120,7 +120,7 @@
           "minimum": 0
         },
         "model": {
-          "description": "None = use main_model.",
+          "description": "None = use `main_model`.",
           "type": [
             "string",
             "null"
@@ -276,6 +276,10 @@
         {
           "type": "object",
           "properties": {
+            "auth_file": {
+              "type": "string",
+              "default": ""
+            },
             "base_url": {
               "type": [
                 "string",

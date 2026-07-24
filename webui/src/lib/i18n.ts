@@ -251,6 +251,7 @@ const resources = {
             githubAuthMethodLabel: "GitHub authentication method",
             selectAuthMethod: "Select authentication method",
             authFilePath: "auth.json path",
+            chooseAuthFile: "Choose auth.json…",
             githubToken: "GitHub token",
             authentication: "Authentication",
             restart: "Restart",
@@ -418,6 +419,8 @@ const resources = {
       dirBrowser: {
         title: "Select project directory",
         description: "Choose a directory on this machine to open as a project.",
+        fileTitle: "Select auth.json",
+        fileDescription: "Choose the external Codex auth.json file to import.",
         root: "This PC",
         pathPlaceholder: "Paste or type a path…",
         go: "Go",
@@ -425,6 +428,7 @@ const resources = {
         noDirs: "No subdirectories",
         cancel: "Cancel",
         select: "Select",
+        selectFile: "Select file",
       },
       theme: {
         switchToLight: "Switch to light mode",
@@ -696,6 +700,7 @@ const resources = {
             githubAuthMethodLabel: "GitHub 认证方式",
             selectAuthMethod: "选择认证方式",
             authFilePath: "auth.json 路径",
+            chooseAuthFile: "选择 auth.json…",
             githubToken: "GitHub 令牌",
             authentication: "认证",
             restart: "重新开始",
@@ -847,6 +852,8 @@ const resources = {
       dirBrowser: {
         title: "选择项目目录",
         description: "选择本机上的一个目录作为项目打开。",
+        fileTitle: "选择 auth.json",
+        fileDescription: "选择要导入的外部 Codex auth.json 文件。",
         root: "此电脑",
         pathPlaceholder: "粘贴或输入路径…",
         go: "跳转",
@@ -854,6 +861,7 @@ const resources = {
         noDirs: "无子目录",
         cancel: "取消",
         select: "选择",
+        selectFile: "选择文件",
       },
       theme: {
         switchToLight: "切换到浅色模式",

@@ -17,6 +17,7 @@ import {
   TriangleAlertIcon,
 } from "lucide-react";
 
+import { DirBrowserDialog } from "@/components/dir-browser-dialog";
 import { AgentExpression } from "@/components/agent-expression";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -1109,6 +1110,7 @@ function ProviderDialog({
   const [authState, setAuthState] = useState<ProviderAuthState>("idle");
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authFileBrowserOpen, setAuthFileBrowserOpen] = useState(false);
   const [deviceFlow, setDeviceFlow] =
     useState<SetupProviderAuthStartResponse | null>(null);
   const selectedKind = providerKindOption(draft.kind, t);
@@ -1125,14 +1127,17 @@ function ProviderDialog({
     draft.kind === "openai_codex_oauth" ||
     draft.kind === "ollama";
   const showKeepAlive = draft.kind === "ollama" || draft.kind === "ollama_cloud";
-  const showCodexAuthFile = draft.codexAuthMethod === "import_auth_file";
+  const showCodexAuthFile =
+    draft.codexAuthMethod === "import_auth_file" ||
+    draft.codexAuthMethod === "existing_auth_file";
   const usesDeviceAuth =
     (draft.kind === "openai_codex_oauth" &&
       draft.codexAuthMethod === "device_login") ||
     (draft.kind === "github_copilot" &&
       draft.githubAuthMethod === "device_login");
   const usesProviderAuthAction =
-    draft.kind === "openai_codex_oauth" ||
+    (draft.kind === "openai_codex_oauth" &&
+      draft.codexAuthMethod !== "import_auth_file") ||
     (draft.kind === "github_copilot" &&
       draft.githubAuthMethod === "device_login");
   const providerAuthButtonLabel = providerAuthActionLabel(draft, t);
@@ -1208,14 +1213,41 @@ function ProviderDialog({
     }));
   }
 
+
   function handleCodexAuthFileChange(value: string) {
-    if (value !== draft.codexAuthFile) {
-      resetProviderAuthStatus();
-    }
+    resetProviderAuthStatus();
     setDraft((current) => ({
       ...current,
       codexAuthFile: value,
     }));
+  }
+
+  async function handleCodexAuthFileSelection(path: string) {
+    setAuthFileBrowserOpen(false);
+    resetProviderAuthStatus();
+
+    const provider = {
+      ...draft,
+      codexAuthFile: path,
+    };
+    setDraft(provider);
+
+    if (!provider.name.trim()) {
+      setAuthState("error");
+      setAuthError(t("setup.modelAccess.providerDialog.errors.enterNameFirst"));
+      return;
+    }
+
+    setAuthState("running");
+    setAuthMessage(null);
+    setAuthError(null);
+    try {
+      const response = await runSetupProviderAuth(providerToRequest(provider));
+      applyProviderAuthResponse(response);
+    } catch (error) {
+      setAuthState("error");
+      setAuthError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   function resetProviderAuthStatus() {
@@ -1233,6 +1265,10 @@ function ProviderDialog({
     setDraft((current) => ({
       ...current,
       apiKey: response.api_key ?? current.apiKey,
+      codexAuthMethod:
+        current.kind === "openai_codex_oauth" && response.auth_file
+          ? "existing_auth_file"
+          : current.codexAuthMethod,
       codexAuthFile: response.auth_file ?? current.codexAuthFile,
     }));
     setAuthState("success");
@@ -1253,7 +1289,7 @@ function ProviderDialog({
     }
     if (
       draft.kind === "openai_codex_oauth" &&
-      draft.codexAuthMethod === "import_auth_file" &&
+      showCodexAuthFile &&
       !draft.codexAuthFile.trim()
     ) {
       setAuthState("error");
@@ -1349,7 +1385,8 @@ function ProviderDialog({
   }
 
   return (
-    <Dialog open={dialog !== null} onOpenChange={onOpenChange}>
+    <>
+      <Dialog open={dialog !== null} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
@@ -1446,15 +1483,28 @@ function ProviderDialog({
                     <FieldLabel htmlFor="setup-codex-auth-file">
                       {t("setup.modelAccess.providerDialog.authFilePath")}
                     </FieldLabel>
-                    <Input
-                      id="setup-codex-auth-file"
-                      value={draft.codexAuthFile}
-                      onChange={(event) =>
-                        handleCodexAuthFileChange(event.target.value)
-                      }
-                      placeholder="C:\Users\you\.codex\auth.json"
-                      spellCheck={false}
-                    />
+                    <div className="flex gap-2">
+                      <Input
+                        id="setup-codex-auth-file"
+                        value={draft.codexAuthFile}
+                        readOnly={draft.codexAuthMethod === "import_auth_file"}
+                        onChange={(event) =>
+                          handleCodexAuthFileChange(event.target.value)
+                        }
+                        placeholder="C:\\Users\\you\\.codex\\auth.json"
+                        spellCheck={false}
+                      />
+                      {draft.codexAuthMethod === "import_auth_file" ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          disabled={authState === "running"}
+                          onClick={() => setAuthFileBrowserOpen(true)}
+                        >
+                          {t("setup.modelAccess.providerDialog.chooseAuthFile")}
+                        </Button>
+                      ) : null}
+                    </div>
                   </Field>
                 ) : null}
               </>
@@ -1673,7 +1723,14 @@ function ProviderDialog({
           </DialogFooter>
         </form>
       </DialogContent>
-    </Dialog>
+      </Dialog>
+      <DirBrowserDialog
+        open={authFileBrowserOpen}
+        mode="file"
+        onOpenChange={setAuthFileBrowserOpen}
+        onSelect={handleCodexAuthFileSelection}
+      />
+    </>
   );
 }
 

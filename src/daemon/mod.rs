@@ -1982,6 +1982,8 @@ async fn restart_handler(
 #[derive(Deserialize)]
 struct DirListQuery {
     path: Option<String>,
+    #[serde(default)]
+    include_files: bool,
 }
 
 #[derive(Serialize)]
@@ -2009,7 +2011,7 @@ async fn dir_list_handler(
     let input = query.path.unwrap_or_default().trim().to_string();
 
     let result = if input.is_empty() {
-        default_dir_listing()
+        default_dir_listing(query.include_files)
     } else {
         let requested = PathBuf::from(&input);
         if !requested.is_dir() {
@@ -2020,7 +2022,7 @@ async fn dir_list_handler(
                 .into_response();
         }
         let parent = requested.parent().map(|p| p.display().to_string());
-        let entries = list_subdirs(&requested);
+        let entries = list_subdirs(&requested, query.include_files);
         DirListResponse {
             path: requested.display().to_string(),
             parent,
@@ -2031,7 +2033,7 @@ async fn dir_list_handler(
     (StatusCode::OK, Json(result)).into_response()
 }
 
-fn list_root_dirs() -> DirListResponse {
+fn list_root_dirs(_include_files: bool) -> DirListResponse {
     #[cfg(windows)]
     let mut entries: Vec<DirEntry> = Vec::new();
     #[cfg(windows)]
@@ -2053,7 +2055,7 @@ fn list_root_dirs() -> DirListResponse {
     }
     #[cfg(not(windows))]
     {
-        let entries = list_subdirs(StdPath::new("/"));
+        let entries = list_subdirs(StdPath::new("/"), _include_files);
         DirListResponse {
             path: String::new(),
             parent: None,
@@ -2062,31 +2064,48 @@ fn list_root_dirs() -> DirListResponse {
     }
 }
 
-fn default_dir_listing() -> DirListResponse {
+fn default_dir_listing(include_files: bool) -> DirListResponse {
     match crate::workspace_app::paths::resolve_runtime_workspace_dir() {
         Ok(ws) if ws.is_dir() => {
             let parent = ws.parent().map(|p| p.display().to_string());
-            let entries = list_subdirs(&ws);
+            let entries = list_subdirs(&ws, include_files);
             DirListResponse {
                 path: ws.display().to_string(),
                 parent,
                 entries,
             }
         }
-        _ => list_root_dirs(),
+        _ => list_root_dirs(include_files),
     }
 }
 
-fn list_subdirs(path: &StdPath) -> Vec<DirEntry> {
+fn list_subdirs(path: &StdPath, include_files: bool) -> Vec<DirEntry> {
     let mut entries: Vec<DirEntry> = std::fs::read_dir(path).map_or_else(
         |_| Vec::new(),
         |read_dir| {
             read_dir
                 .filter_map(std::result::Result::ok)
-                .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
-                .map(|e| DirEntry {
-                    name: e.file_name().to_string_lossy().to_string(),
-                    kind: "dir".to_string(),
+                .filter_map(|entry| {
+                    let file_type = entry.file_type().ok()?;
+                    if file_type.is_dir() {
+                        return Some(DirEntry {
+                            name: entry.file_name().to_string_lossy().to_string(),
+                            kind: "dir".to_string(),
+                        });
+                    }
+                    if include_files
+                        && file_type.is_file()
+                        && entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|name| name.eq_ignore_ascii_case("auth.json"))
+                    {
+                        return Some(DirEntry {
+                            name: entry.file_name().to_string_lossy().to_string(),
+                            kind: "file".to_string(),
+                        });
+                    }
+                    None
                 })
                 .collect()
         },
@@ -2752,10 +2771,11 @@ fn settings_provider_summary(name: &str, provider: &ProviderConfig) -> SettingsP
             credential: credential_summary(github_token, None),
             auth_file: None,
         },
-        ProviderConfig::OpenaiCodexOauth { base_url } => {
-            let auth_file = crate::providers::codex_oauth_auth_file(name)
-                .to_string_lossy()
-                .to_string();
+        ProviderConfig::OpenaiCodexOauth {
+            base_url,
+            auth_file,
+        } => {
+            let auth_file = auth_file.trim().to_string();
             SettingsProviderSummary {
                 name: name.to_string(),
                 provider_type: "openai-codex-oauth",
@@ -3975,6 +3995,33 @@ pub fn status_summary(status: &StatusResponse) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn file_directory_listing_exposes_only_auth_json_candidates() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(temp.path().join("nested")).expect("create nested directory");
+        std::fs::write(temp.path().join("auth.json"), b"{}").expect("write auth.json candidate");
+        std::fs::write(temp.path().join("other.json"), b"{}").expect("write unrelated json");
+        std::fs::write(temp.path().join("notes.txt"), b"notes").expect("write unrelated text");
+
+        let entries = list_subdirs(temp.path(), true);
+        let names = entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.kind.as_str()))
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&("nested", "dir")));
+        assert!(names.contains(&("auth.json", "file")));
+        assert!(!names.iter().any(|(name, _)| *name == "other.json"));
+        assert!(!names.iter().any(|(name, _)| *name == "notes.txt"));
+    }
+
+    #[test]
+    fn directory_listing_keeps_files_hidden_by_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("auth.json"), b"{}").expect("write auth.json candidate");
+
+        assert!(list_subdirs(temp.path(), false).is_empty());
+    }
     #[test]
     fn daemon_lifecycle_state_serializes_as_snake_case() {
         let encoded = serde_json::to_string(&DaemonLifecycleState::Initializing).unwrap();

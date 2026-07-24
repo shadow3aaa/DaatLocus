@@ -23,8 +23,8 @@ use crate::{
     open_url::open_url,
     persistence::{PersistenceFileMode, write_bytes_atomic},
     providers::{
-        CodexOAuthTokens, codex_cli_auth_file, codex_oauth_auth_file,
-        import_codex_cli_oauth_tokens, write_codex_oauth_tokens,
+        CodexOAuthTokens, codex_cli_auth_file, import_codex_cli_oauth_file,
+        write_codex_oauth_tokens,
     },
     reasoning::turn_compile::{
         PromptPersonaSpec, load_prompt_persona_spec_sync, prompt_persona_path_sync,
@@ -390,7 +390,6 @@ pub async fn load_complete_config() -> Result<Config> {
 }
 
 pub async fn write_setup_config(request: SetupConfigRequest) -> Result<ConfigReadinessReport> {
-    prepare_setup_provider_credentials(&request.providers).await?;
     let base_config = load_config().await.unwrap_or_else(|_| Config::default());
     let config = config_from_setup_request_with_base(&request, base_config)?;
     config
@@ -441,7 +440,6 @@ pub async fn preview_setup_config(request: SetupConfigRequest) -> Result<ConfigR
 pub async fn discover_setup_models(
     request: SetupDiscoverModelsRequest,
 ) -> Result<SetupDiscoverModelsResponse> {
-    prepare_setup_provider_credentials(std::slice::from_ref(&request.provider)).await?;
     let name = required_name(&request.provider.name, "provider.name")?;
     let provider = provider_from_setup_provider(&request.provider)?;
     let models = discover_model_ids(&name, &provider)
@@ -590,14 +588,17 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
                 SetupGithubAuthMethod::ManualToken
             }),
         },
-        ProviderConfig::OpenaiCodexOauth { base_url } => SetupProviderRequest {
+        ProviderConfig::OpenaiCodexOauth {
+            base_url,
+            auth_file,
+        } => SetupProviderRequest {
             kind: SetupProviderKind::OpenaiCodexOauth,
             name: name.to_string(),
             api_key: None,
             base_url: base_url.clone(),
             keep_alive: None,
             codex_auth_method: Some(SetupCodexAuthMethod::ExistingAuthFile),
-            codex_auth_file: Some(codex_oauth_auth_file(name).to_string_lossy().to_string()),
+            codex_auth_file: Some(auth_file.clone()),
             github_auth_method: None,
         },
         ProviderConfig::OpenaiCompatible {
@@ -883,9 +884,9 @@ fn provider_from_setup_legacy(
             base_url: required_string(base_url, "base_url")?,
             api_key,
         }),
-        SetupProviderKind::OpenaiCodexOauth => Ok(ProviderConfig::OpenaiCodexOauth {
-            base_url: optional_normalized_url(base_url),
-        }),
+        SetupProviderKind::OpenaiCodexOauth => Err(miette!(
+            "legacy Codex OAuth setup requires an imported Daat auth file"
+        )),
         SetupProviderKind::GithubCopilot => Ok(ProviderConfig::GithubCopilot {
             github_token: api_key,
         }),
@@ -916,6 +917,7 @@ fn provider_from_setup_provider(provider: &SetupProviderRequest) -> Result<Provi
         }),
         SetupProviderKind::OpenaiCodexOauth => Ok(ProviderConfig::OpenaiCodexOauth {
             base_url: optional_normalized_url(base_url),
+            auth_file: required_codex_auth_file(provider)?,
         }),
         SetupProviderKind::GithubCopilot => Ok(ProviderConfig::GithubCopilot {
             github_token: required_string(&api_key, "provider.github_token")?,
@@ -943,13 +945,17 @@ fn provider_from_setup_provider(provider: &SetupProviderRequest) -> Result<Provi
     }
 }
 
-async fn prepare_setup_provider_credentials(providers: &[SetupProviderRequest]) -> Result<()> {
-    for provider in providers {
-        prepare_setup_provider_credential(provider).await?;
-    }
-    Ok(())
+fn required_codex_auth_file(provider: &SetupProviderRequest) -> Result<String> {
+    let auth_file = provider
+        .codex_auth_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| miette!("provider.codex_auth_file is required"))?;
+    Ok(auth_file.to_string())
 }
 
+#[cfg(test)]
 async fn prepare_setup_provider_credential(provider: &SetupProviderRequest) -> Result<()> {
     if provider.kind != SetupProviderKind::OpenaiCodexOauth {
         return Ok(());
@@ -960,7 +966,9 @@ async fn prepare_setup_provider_credential(provider: &SetupProviderRequest) -> R
         .unwrap_or(SetupCodexAuthMethod::ExistingAuthFile)
     {
         SetupCodexAuthMethod::ImportLocalCodex => {
-            import_codex_auth_for_provider(provider, codex_cli_auth_file()).await
+            import_codex_auth_for_provider(codex_cli_auth_file())
+                .await
+                .map(|_| ())
         }
         SetupCodexAuthMethod::ImportAuthFile => {
             let path = provider
@@ -969,7 +977,9 @@ async fn prepare_setup_provider_credential(provider: &SetupProviderRequest) -> R
                 .map(str::trim)
                 .filter(|path| !path.is_empty())
                 .ok_or_else(|| miette!("provider.codex_auth_file is required"))?;
-            import_codex_auth_for_provider(provider, expand_user_path(path)).await
+            import_codex_auth_for_provider(expand_user_path(path))
+                .await
+                .map(|_| ())
         }
         SetupCodexAuthMethod::ExistingAuthFile
         | SetupCodexAuthMethod::BrowserLogin
@@ -1007,17 +1017,41 @@ async fn run_codex_setup_provider_auth(
                 message: "OpenAI Codex browser login completed".to_string(),
             })
         }
-        SetupCodexAuthMethod::ImportLocalCodex
-        | SetupCodexAuthMethod::ImportAuthFile
-        | SetupCodexAuthMethod::ExistingAuthFile => {
-            prepare_setup_provider_credential(provider).await?;
+        SetupCodexAuthMethod::ImportLocalCodex | SetupCodexAuthMethod::ImportAuthFile => {
+            let auth_file = import_codex_auth_for_provider(
+                if matches!(
+                    provider.codex_auth_method,
+                    Some(SetupCodexAuthMethod::ImportLocalCodex)
+                ) {
+                    codex_cli_auth_file()
+                } else {
+                    let path = provider
+                        .codex_auth_file
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|path| !path.is_empty())
+                        .ok_or_else(|| miette!("provider.codex_auth_file is required"))?;
+                    expand_user_path(path)
+                },
+            )
+            .await?;
             Ok(SetupProviderAuthResponse {
                 api_key: None,
-                auth_file: Some(
-                    codex_auth_file_for_provider(provider)?
-                        .display()
-                        .to_string(),
-                ),
+                auth_file: Some(auth_file.display().to_string()),
+                message: "OpenAI Codex auth file is ready".to_string(),
+            })
+        }
+        SetupCodexAuthMethod::ExistingAuthFile => {
+            let auth_file = codex_auth_file_for_provider(provider)?;
+            if !auth_file.exists() {
+                return Err(miette!(
+                    "Codex OAuth auth file does not exist: {}",
+                    auth_file.display()
+                ));
+            }
+            Ok(SetupProviderAuthResponse {
+                api_key: None,
+                auth_file: Some(auth_file.display().to_string()),
                 message: "OpenAI Codex auth file is ready".to_string(),
             })
         }
@@ -1235,36 +1269,24 @@ async fn complete_codex_device_auth(
     })
 }
 
-async fn import_codex_auth_for_provider(
-    provider: &SetupProviderRequest,
-    source_auth_file: PathBuf,
-) -> Result<()> {
-    let provider_name = required_name(&provider.name, "provider.name")?;
-    let destination_auth_file = codex_oauth_auth_file(&provider_name);
-    let tokens = import_codex_cli_oauth_tokens(&source_auth_file)
+async fn import_codex_auth_for_provider(source_auth_file: PathBuf) -> Result<PathBuf> {
+    import_codex_cli_oauth_file(&source_auth_file)
         .await
         .map_err(|err| {
             miette!(
                 "failed to import Codex OAuth auth file {}: {err}",
                 source_auth_file.display()
             )
-        })?;
-    write_codex_oauth_tokens(&destination_auth_file, &tokens)
-        .await
-        .map_err(|err| {
-            miette!(
-                "failed to write Codex OAuth auth file {}: {err}",
-                destination_auth_file.display()
-            )
-        })?;
-    Ok(())
+        })
 }
 
 async fn write_codex_tokens_for_provider(
-    provider: &SetupProviderRequest,
+    _provider: &SetupProviderRequest,
     tokens: &CodexOAuthTokens,
 ) -> Result<PathBuf> {
-    let auth_file = codex_auth_file_for_provider(provider)?;
+    let source_bytes = serde_json::to_vec(tokens)
+        .map_err(|err| miette!("serialize OpenAI Codex tokens failed: {err}"))?;
+    let auth_file = crate::providers::imported_codex_oauth_auth_file(&source_bytes);
     write_codex_oauth_tokens(&auth_file, tokens)
         .await
         .map_err(|err| {
@@ -1277,8 +1299,13 @@ async fn write_codex_tokens_for_provider(
 }
 
 fn codex_auth_file_for_provider(provider: &SetupProviderRequest) -> Result<PathBuf> {
-    let provider_name = required_name(&provider.name, "provider.name")?;
-    Ok(codex_oauth_auth_file(&provider_name))
+    let path = provider
+        .codex_auth_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| miette!("provider.codex_auth_file is required"))?;
+    Ok(PathBuf::from(path))
 }
 
 async fn exchange_codex_authorization_code_with_pkce(
@@ -1744,8 +1771,8 @@ fn provider_error(name: &str, provider: &ProviderConfig) -> Option<String> {
         ProviderConfig::GithubCopilot { github_token } => {
             credential_error(name, "github_token", github_token, None)
         }
-        ProviderConfig::OpenaiCodexOauth { .. } => {
-            let auth_file = crate::providers::codex_oauth_auth_file(name);
+        ProviderConfig::OpenaiCodexOauth { auth_file, .. } => {
+            let auth_file = PathBuf::from(auth_file);
             if auth_file.exists() {
                 None
             } else {
@@ -1995,7 +2022,10 @@ model_id = "gpt-4.1-mini"
 
     #[test]
     fn setup_discovered_model_fills_codex_reasoning_defaults() {
-        let provider = ProviderConfig::OpenaiCodexOauth { base_url: None };
+        let provider = ProviderConfig::OpenaiCodexOauth {
+            base_url: None,
+            auth_file: "C:/example/codex-auth.json".to_string(),
+        };
         let discovered = DiscoveredModel {
             id: "gpt-5.4".to_string(),
             context_window: None,
@@ -2059,6 +2089,69 @@ model_id = "gpt-4.1-mini"
         assert!(next_config.telegram.enabled);
         assert_eq!(next_config.telegram.bot_token, "123456789:bot-token");
         assert_eq!(next_config.telegram.poll_timeout_secs, 45);
+    }
+
+    #[tokio::test]
+    async fn import_auth_file_copies_cli_tokens_to_provider_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home_override =
+            crate::runtime::bootstrap::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
+        let codex_home = temp.path().join("codex-home");
+        let source_auth_file = codex_home.join("auth.json");
+        tokio::fs::create_dir_all(&codex_home)
+            .await
+            .expect("create Codex home");
+        tokio::fs::write(
+            &source_auth_file,
+            br#"{
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "id_token": "id-token",
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "account_id": "account-123"
+                }
+            }"#,
+        )
+        .await
+        .expect("write Codex auth file");
+
+        let provider = SetupProviderRequest {
+            kind: SetupProviderKind::OpenaiCodexOauth,
+            name: "codex-oauth".to_string(),
+            api_key: None,
+            base_url: None,
+            keep_alive: None,
+            codex_auth_method: Some(SetupCodexAuthMethod::ImportAuthFile),
+            codex_auth_file: Some(source_auth_file.display().to_string()),
+            github_auth_method: None,
+        };
+        prepare_setup_provider_credential(&provider)
+            .await
+            .expect("import Codex auth file");
+
+        let destination = crate::providers::imported_codex_oauth_auth_file(
+            &tokio::fs::read(&source_auth_file)
+                .await
+                .expect("read Codex auth source"),
+        );
+        let imported: CodexOAuthTokens = serde_json::from_slice(
+            &tokio::fs::read(&destination)
+                .await
+                .expect("read imported OAuth file"),
+        )
+        .expect("parse imported OAuth file");
+        assert_eq!(imported.id_token, "id-token");
+        assert_eq!(imported.access_token, "access-token");
+        assert_eq!(imported.refresh_token, "refresh-token");
+        assert_eq!(imported.account_id.as_deref(), Some("account-123"));
+        assert!(
+            destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("codex-auth-") && name.ends_with(".json"))
+        );
+        assert_ne!(destination, source_auth_file);
     }
 
     #[tokio::test]

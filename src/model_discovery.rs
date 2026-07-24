@@ -15,8 +15,7 @@ use crate::{
         parse_reasoning_options,
     },
     providers::{
-        codex_oauth_access_from_file, codex_oauth_auth_file, codex_oauth_client_version,
-        codex_oauth_default_base_url,
+        codex_oauth_access_from_file, codex_oauth_client_version, codex_oauth_default_base_url,
     },
 };
 
@@ -36,7 +35,14 @@ const COPILOT_DEFAULT_MODELS: &[&str] = &[
 
 /// Static fallback for `OpenAI` Codex. The `ChatGPT` Codex backend may return an
 /// empty `/models` list while still accepting current Codex model slugs.
-const CODEX_OAUTH_DEFAULT_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini"];
+const CODEX_OAUTH_DEFAULT_MODELS: &[&str] = &[
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+];
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// Model metadata returned by the provider API.
@@ -167,7 +173,7 @@ pub async fn fetch_model_ids(
 
 /// Discover provider model IDs. Failures are returned to callers.
 pub async fn discover_model_ids(
-    provider_name: &str,
+    _provider_name: &str,
     provider: &ProviderConfig,
 ) -> Result<Vec<DiscoveredModel>> {
     match provider {
@@ -179,11 +185,14 @@ pub async fn discover_model_ids(
             let api_key = resolve_env_reference(api_key);
             fetch_openai_models(base, &api_key).await
         }
-        ProviderConfig::OpenaiCodexOauth { base_url } => {
+        ProviderConfig::OpenaiCodexOauth {
+            base_url,
+            auth_file,
+        } => {
             let base = base_url
                 .as_deref()
                 .unwrap_or(codex_oauth_default_base_url());
-            fetch_codex_oauth_models(provider_name, base).await
+            fetch_codex_oauth_models(auth_file, base).await
         }
         ProviderConfig::OpenaiCompatible {
             base_url, api_key, ..
@@ -456,12 +465,9 @@ fn extract_context_value(key: &str, val: &serde_json::Value) -> Option<usize> {
     None
 }
 
-async fn fetch_codex_oauth_models(
-    provider_name: &str,
-    base_url: &str,
-) -> Result<Vec<DiscoveredModel>> {
-    let auth_file = codex_oauth_auth_file(provider_name);
-    let access = codex_oauth_access_from_file(&auth_file)
+async fn fetch_codex_oauth_models(auth_file: &str, base_url: &str) -> Result<Vec<DiscoveredModel>> {
+    let auth_file = std::path::Path::new(auth_file);
+    let access = codex_oauth_access_from_file(auth_file)
         .await
         .map_err(|err| {
             miette!(
@@ -644,4 +650,31 @@ fn codex_oauth_reasoning_options() -> Vec<ReasoningOption> {
             .map(str::to_string)
             .collect(),
     }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_oauth_fallback_models_include_current_gpt_5_6_variants() {
+        let ids = codex_oauth_fallback_models()
+            .into_iter()
+            .map(|model| model.id)
+            .collect::<Vec<_>>();
+
+        assert!(ids.contains(&"gpt-5.6-sol".to_string()));
+        assert!(ids.contains(&"gpt-5.6-terra".to_string()));
+        assert!(ids.contains(&"gpt-5.6-luna".to_string()));
+    }
+
+    #[test]
+    fn codex_oauth_reasoning_defaults_include_xhigh() {
+        let options = codex_oauth_reasoning_options();
+        let ReasoningOption::Effort { values } = &options[0] else {
+            panic!("expected Codex reasoning effort options");
+        };
+
+        assert!(values.contains(&"xhigh".to_string()));
+    }
 }

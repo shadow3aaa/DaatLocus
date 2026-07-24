@@ -1564,9 +1564,13 @@ export type DirListResponse = {
 
 export async function listDirs({
   path,
+  includeFiles = false,
   signal,
   token = getStoredDaemonToken(),
-}: FetchOptions & { path?: string } = {}): Promise<DirListResponse> {
+}: FetchOptions & {
+  path?: string;
+  includeFiles?: boolean;
+} = {}): Promise<DirListResponse> {
   const daemonToken = token.trim();
 
   if (!daemonToken) {
@@ -1576,6 +1580,9 @@ export async function listDirs({
   const url = new URL("/filesystem/dirs", window.location.origin);
   if (path) {
     url.searchParams.set("path", path);
+  }
+  if (includeFiles) {
+    url.searchParams.set("include_files", "true");
   }
 
   const response = await fetch(url.toString(), {

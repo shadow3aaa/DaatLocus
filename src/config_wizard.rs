@@ -1,12 +1,7 @@
 //! Interactive configuration wizard for first-run setup and `config` subcommands.
 
 use std::fmt::Write as _;
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use base64::Engine;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -32,8 +27,8 @@ use crate::{
     model_discovery::{fetch_model_ids, reasoning_options_for_prompt, resolve_model_capacity},
     open_url::open_url,
     providers::{
-        CodexOAuthTokens, codex_cli_auth_file, codex_oauth_auth_file, codex_oauth_default_base_url,
-        import_codex_cli_oauth_tokens, write_codex_oauth_tokens,
+        CodexOAuthTokens, codex_cli_auth_file, codex_oauth_default_base_url,
+        import_codex_cli_oauth_file, write_codex_oauth_tokens,
     },
 };
 use sha2::Digest;
@@ -718,15 +713,21 @@ fn expand_user_path(path: &str) -> PathBuf {
     PathBuf::from(trimmed)
 }
 
+async fn write_new_codex_oauth_tokens(tokens: &CodexOAuthTokens) -> Result<PathBuf> {
+    let source_bytes = serde_json::to_vec(tokens)
+        .map_err(|err| miette!("serialize OpenAI Codex tokens failed: {err}"))?;
+    let destination = crate::providers::imported_codex_oauth_auth_file(&source_bytes);
+    write_codex_oauth_tokens(&destination, tokens).await?;
+    Ok(destination)
+}
+
 async fn import_codex_cli_auth_file_for_provider(
     ui: &mut PromptUi,
-    source_auth_file: &Path,
-    destination_auth_file: &Path,
+    source_auth_file: &std::path::Path,
 ) -> Result<String> {
     let locale = ui.locale();
     let source = source_auth_file.display().to_string();
-    let destination = destination_auth_file.display().to_string();
-    let tokens = import_codex_cli_oauth_tokens(source_auth_file)
+    let destination = import_codex_cli_oauth_file(source_auth_file)
         .await
         .map_err(|err| {
             miette!(
@@ -739,19 +740,7 @@ async fn import_codex_cli_auth_file_for_provider(
                 )
             )
         })?;
-    write_codex_oauth_tokens(destination_auth_file, &tokens)
-        .await
-        .map_err(|err| {
-            miette!(
-                "{}",
-                crate::tr!(
-                    locale,
-                    "codex_oauth.import_write_failed",
-                    path = destination.clone(),
-                    error = err
-                )
-            )
-        })?;
+    let destination = destination.display().to_string();
     ui.status(
         &crate::tr!(locale, "codex_oauth.authorization"),
         &[crate::tr!(
@@ -1710,24 +1699,28 @@ async fn prompt_provider(
                 ],
                 0,
             )?;
-            let default_auth_file = codex_oauth_auth_file(&name);
-            if auth_method == 0 {
+            let auth_file = if auth_method == 0 {
                 let result = run_codex_oauth_browser_flow(locale, |prompt, lines| {
                     ui.status(&prompt, &lines)
                 })
                 .await;
                 let tokens = result?;
-                write_codex_oauth_tokens(&default_auth_file, &tokens).await?;
+                write_new_codex_oauth_tokens(&tokens)
+                    .await?
+                    .display()
+                    .to_string()
             } else if auth_method == 1 {
                 let result =
                     run_codex_oauth_device_flow(locale, |prompt, lines| ui.status(&prompt, &lines))
                         .await;
                 let tokens = result?;
-                write_codex_oauth_tokens(&default_auth_file, &tokens).await?;
+                write_new_codex_oauth_tokens(&tokens)
+                    .await?
+                    .display()
+                    .to_string()
             } else if auth_method == 2 {
                 let source_auth_file = codex_cli_auth_file();
-                import_codex_cli_auth_file_for_provider(ui, &source_auth_file, &default_auth_file)
-                    .await?;
+                import_codex_cli_auth_file_for_provider(ui, &source_auth_file).await?
             } else {
                 let default_codex_auth_file = codex_cli_auth_file();
                 let default_codex_auth_file_display =
@@ -1737,9 +1730,8 @@ async fn prompt_provider(
                     Some(&default_codex_auth_file_display),
                 )?;
                 let source_auth_file = expand_user_path(&source);
-                import_codex_cli_auth_file_for_provider(ui, &source_auth_file, &default_auth_file)
-                    .await?;
-            }
+                import_codex_cli_auth_file_for_provider(ui, &source_auth_file).await?
+            };
             let use_custom_url =
                 ui.confirm(&crate::tr!(locale, "config.custom_base_url"), false)?;
             let base_url = if use_custom_url {
@@ -1748,7 +1740,10 @@ async fn prompt_provider(
             } else {
                 None
             };
-            ProviderConfig::OpenaiCodexOauth { base_url }
+            ProviderConfig::OpenaiCodexOauth {
+                base_url,
+                auth_file,
+            }
         }
         ProviderKind::GithubCopilot => {
             let auth_method = ui.select(
@@ -2378,11 +2373,20 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
                 let masked = mask_secret(github_token);
                 ("github-copilot", vec![("github_token", masked)])
             }
-            ProviderConfig::OpenaiCodexOauth { base_url } => {
+            ProviderConfig::OpenaiCodexOauth {
+                base_url,
+                auth_file,
+            } => {
                 let url = base_url
                     .as_deref()
                     .unwrap_or(codex_oauth_default_base_url());
-                ("openai-codex-oauth", vec![("base_url", url.to_string())])
+                (
+                    "openai-codex-oauth",
+                    vec![
+                        ("base_url", url.to_string()),
+                        ("auth_file", auth_file.clone()),
+                    ],
+                )
             }
             ProviderConfig::OpenaiCompatible {
                 base_url, api_key, ..
@@ -3005,7 +3009,10 @@ mod tests {
 
     #[test]
     fn codex_oauth_reasoning_options_use_responses_effort_scale() {
-        let provider = ProviderConfig::OpenaiCodexOauth { base_url: None };
+        let provider = ProviderConfig::OpenaiCodexOauth {
+            base_url: None,
+            auth_file: "C:/example/codex-auth.json".to_string(),
+        };
         let options = reasoning_options_for_prompt(&provider, "gpt-5.5", None);
 
         assert_eq!(

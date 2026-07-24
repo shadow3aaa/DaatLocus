@@ -1944,7 +1944,8 @@ const MOCK_SETTINGS_SETUP_CONFIG: SetupConfigResponse = {
         kind: "openai_codex_oauth",
         base_url: null,
         codex_auth_method: "existing_auth_file",
-        codex_auth_file: "C:\\Users\\13940\\.codex\\auth.json",
+        codex_auth_file:
+          "C:\\Users\\13940\\.daat-locus\\codex-auth\\codex-auth-provider-codex-oauth.json",
       },
       {
         name: "local-ollama",

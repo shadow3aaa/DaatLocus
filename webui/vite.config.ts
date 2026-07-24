@@ -78,6 +78,10 @@ export default defineConfig({
         target: daemonTarget,
         changeOrigin: true,
       },
+      "/filesystem": {
+        target: daemonTarget,
+        changeOrigin: true,
+      },
       "/daemon": {
         target: daemonTarget,
         changeOrigin: true,

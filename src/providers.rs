@@ -33,8 +33,8 @@ pub use copilot::CopilotClient;
 mod codex_oauth;
 pub use codex_oauth::{
     CodexOAuthClient, CodexOAuthTokens, codex_cli_auth_file, codex_oauth_access_from_file,
-    codex_oauth_auth_file, codex_oauth_client_version, codex_oauth_default_base_url,
-    import_codex_cli_oauth_tokens, write_codex_oauth_tokens,
+    codex_oauth_client_version, codex_oauth_default_base_url, import_codex_cli_oauth_file,
+    imported_codex_oauth_auth_file, write_codex_oauth_tokens,
 };
 mod ollama;
 pub use ollama::OllamaClient;
@@ -1260,8 +1260,11 @@ pub fn build_model_provider(
             let resolved = resolve_env_reference(github_token);
             Ok(Box::new(CopilotClient::new(&resolved, model_config)))
         }
-        ProviderConfig::OpenaiCodexOauth { base_url } => Ok(Box::new(CodexOAuthClient::new(
-            &model_config.provider,
+        ProviderConfig::OpenaiCodexOauth {
+            base_url,
+            auth_file,
+        } => Ok(Box::new(CodexOAuthClient::new(
+            auth_file.into(),
             base_url.as_deref(),
             model_config,
         ))),

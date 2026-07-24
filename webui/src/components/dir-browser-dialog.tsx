@@ -1,5 +1,7 @@
 import {
   ArrowLeftIcon,
+  FileJsonIcon,
+  FileTextIcon,
   FolderIcon,
   FolderOpenIcon,
   HardDriveIcon,
@@ -29,33 +31,45 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { listDirs, type DirListResponse } from "@/lib/daemon-api";
 
+function joinPath(base: string, name: string) {
+  if (!base) return name;
+  const separator = base.includes("\\") ? "\\" : "/";
+  return `${base.replace(/[\\/]+$/, "")}${separator}${name}`;
+}
+
 function pathSegments(p: string): { label: string; full: string }[] {
   if (!p) return [];
   const parts = p.replace(/\\/g, "/").split("/").filter(Boolean);
   const segs: { label: string; full: string }[] = [];
+  const separator = p.includes("\\") ? "\\" : "/";
   for (let i = 0; i < parts.length; i++) {
     const full =
       p.match(/^[A-Z]:/i) && i === 0
         ? parts[0] + "\\"
-        : segs[i - 1]?.full.replace(/\\+$/, "") + "\\" + parts[i];
+        : segs[i - 1]?.full.replace(/[\\/]+$/, "") + separator + parts[i];
     segs.push({ label: parts[i], full });
   }
   return segs;
 }
 
+export type BrowserDialogMode = "directory" | "file";
+
 export function DirBrowserDialog({
   open,
   onOpenChange,
   onSelect,
+  mode = "directory",
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSelect: (dirPath: string) => void;
+  onSelect: (path: string) => void;
+  mode?: BrowserDialogMode;
 }) {
   const { t } = useTranslation();
   const [currentPath, setCurrentPath] = useState("");
   const [data, setData] = useState<DirListResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState("");
   const abortRef = useRef<AbortController | null>(null);
@@ -69,11 +83,16 @@ export function DirBrowserDialog({
     setLoading(true);
     setError(null);
     try {
-      const result = await listDirs({ path, signal: controller.signal });
+      const result = await listDirs({
+        path,
+        includeFiles: mode === "file",
+        signal: controller.signal,
+      });
       if (!controller.signal.aborted) {
         setData(result);
         setCurrentPath(result.path);
         setInputValue(result.path);
+        setSelectedFile(null);
       }
     } catch (err) {
       if (!controller.signal.aborted) {
@@ -84,7 +103,7 @@ export function DirBrowserDialog({
         setLoading(false);
       }
     }
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
     if (open && !firstLoadRef.current) {
@@ -102,9 +121,13 @@ export function DirBrowserDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>{t("dirBrowser.title")}</DialogTitle>
+          <DialogTitle>
+            {mode === "file" ? t("dirBrowser.fileTitle") : t("dirBrowser.title")}
+          </DialogTitle>
           <DialogDescription>
-            {t("dirBrowser.description")}
+            {mode === "file"
+              ? t("dirBrowser.fileDescription")
+              : t("dirBrowser.description")}
           </DialogDescription>
         </DialogHeader>
 
@@ -202,17 +225,36 @@ export function DirBrowserDialog({
                   </span>
                 </div>
               )}
-              {data.entries.map((entry) => (
-                <Button
-                  key={entry.name}
-                  variant="ghost"
-                  className="justify-start rounded-none"
-                  onClick={() => fetchDir(currentPath ? `${currentPath}\\${entry.name}` : entry.name)}
-                >
-                  <FolderIcon data-icon="inline-start" />
-                  <span className="truncate">{entry.name}</span>
-                </Button>
-              ))}
+              {data.entries.map((entry) => {
+                const entryPath = joinPath(currentPath, entry.name);
+                const isFile = entry.kind === "file";
+                return (
+                  <Button
+                    key={entry.name}
+                    type="button"
+                    variant={selectedFile === entryPath ? "secondary" : "ghost"}
+                    className="justify-start rounded-none"
+                    onClick={() => {
+                      if (isFile) {
+                        setSelectedFile(entryPath);
+                      } else {
+                        fetchDir(entryPath);
+                      }
+                    }}
+                  >
+                    {isFile ? (
+                      entry.name.toLowerCase().endsWith(".json") ? (
+                        <FileJsonIcon data-icon="inline-start" />
+                      ) : (
+                        <FileTextIcon data-icon="inline-start" />
+                      )
+                    ) : (
+                      <FolderIcon data-icon="inline-start" />
+                    )}
+                    <span className="truncate">{entry.name}</span>
+                  </Button>
+                );
+              })}
             </div>
           )}
         </ScrollArea>
@@ -226,13 +268,13 @@ export function DirBrowserDialog({
           <Button
             type="button"
             onClick={() => {
-              const selected = inputValue || currentPath;
+              const selected = mode === "file" ? selectedFile : inputValue || currentPath;
               if (selected) onSelect(selected);
             }}
-            disabled={!inputValue && !currentPath}
+            disabled={mode === "file" ? !selectedFile : !inputValue && !currentPath}
           >
             <FolderOpenIcon data-icon="inline-start" />
-            {t("dirBrowser.select")}
+            {mode === "file" ? t("dirBrowser.selectFile") : t("dirBrowser.select")}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -15,6 +15,7 @@ use futures_util::StreamExt;
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -22,7 +23,8 @@ use crate::{
     config::{ModelConfig, redact_secret_text},
     context_budget::{ContextBudgetExceededError, RequestBudgetLimits},
     core::{ModelProgressSink, ModelProvider, ModelRequestOptions, TokenUsage, TokenUsageInfo},
-    persistence::{PersistenceFileMode, PersistenceStore, write_bytes_atomic},
+    daat_locus_paths::daat_locus_paths_sync,
+    persistence::{PersistenceFileMode, write_bytes_atomic},
     providers::thinking::{responses_reasoning_effort, thinking_budget_is_none},
     reasoning::runtime::{
         AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec,
@@ -41,7 +43,7 @@ const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_OAUTH_REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_OAUTH_REFRESH_URL_OVERRIDE_ENV: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
 const CODEX_RESPONSES_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-const CODEX_CLIENT_VERSION: &str = "0.125.0";
+const CODEX_CLIENT_VERSION: &str = "0.145.0";
 const CODEX_CLIENT_VERSION_OVERRIDE_ENV: &str = "CODEX_CLIENT_VERSION_OVERRIDE";
 const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const CODEX_SESSION_ID_HEADER: &str = "session-id";
@@ -150,7 +152,10 @@ struct RefreshResponse {
 
 #[derive(Deserialize)]
 struct CodexCliAuthFile {
-    tokens: CodexCliAuthTokens,
+    #[serde(default)]
+    tokens: Option<CodexCliAuthTokens>,
+    #[serde(rename = "OPENAI_API_KEY", default)]
+    openai_api_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -751,11 +756,10 @@ fn codex_responses_http_client_builder() -> reqwest::ClientBuilder {
 
 impl CodexOAuthClient {
     pub(crate) fn new(
-        provider_name: &str,
+        auth_file: PathBuf,
         base_url: Option<&str>,
         model_config: &ModelConfig,
     ) -> Self {
-        let auth_file = codex_oauth_auth_file(provider_name);
         let auth_client = codex_http_client_builder(Duration::from_secs(15))
             .build()
             .expect("failed to build OpenAI Codex auth http client");
@@ -1302,8 +1306,12 @@ fn parse_responses_usage(usage: &Value) -> Option<TokenUsage> {
     if usage.is_zero() { None } else { Some(usage) }
 }
 
-pub fn codex_oauth_auth_file(provider_name: &str) -> PathBuf {
-    default_codex_oauth_auth_file(provider_name)
+/// Return the Daat-owned filename for one imported external Codex auth file.
+/// The hash is calculated from the source bytes before they are normalized, so
+/// each imported snapshot has a stable private destination.
+pub fn imported_codex_oauth_auth_file(source_bytes: &[u8]) -> PathBuf {
+    let digest = hex::encode(Sha256::digest(source_bytes));
+    daat_locus_paths_sync().codex_auth_file(&format!("codex-auth-{digest}.json"))
 }
 
 pub const fn codex_oauth_default_base_url() -> &'static str {
@@ -1318,14 +1326,6 @@ pub fn codex_oauth_client_version() -> String {
         .unwrap_or_else(|| CODEX_CLIENT_VERSION.to_string())
 }
 
-pub fn default_codex_oauth_auth_file(provider_name: &str) -> PathBuf {
-    let file_name = format!(
-        "openai-codex-oauth-{}.json",
-        sanitize_auth_file_component(provider_name)
-    );
-    PersistenceStore::runtime_sync().config_file(&file_name)
-}
-
 pub fn codex_cli_auth_file() -> PathBuf {
     env::var_os("CODEX_HOME")
         .map_or_else(
@@ -1337,23 +1337,6 @@ pub fn codex_cli_auth_file() -> PathBuf {
             PathBuf::from,
         )
         .join("auth.json")
-}
-
-fn sanitize_auth_file_component(value: &str) -> String {
-    let mut out = String::new();
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-            out.push(ch);
-        } else {
-            out.push('-');
-        }
-    }
-    let trimmed = out.trim_matches('-');
-    if trimmed.is_empty() {
-        "provider".to_string()
-    } else {
-        trimmed.to_string()
-    }
 }
 
 pub async fn write_codex_oauth_tokens(auth_file: &Path, tokens: &CodexOAuthTokens) -> Result<()> {
@@ -1377,16 +1360,21 @@ pub async fn codex_oauth_access_from_file(auth_file: &Path) -> Result<CodexOAuth
     codex_oauth_access_from_file_with_client(auth_file, &client).await
 }
 
-pub async fn import_codex_cli_oauth_tokens(auth_file: &Path) -> Result<CodexOAuthTokens> {
+/// Import an external Codex CLI `auth.json` into a Daat-owned, normalized
+/// token file. The CLI-specific nested `tokens` format is accepted only here.
+pub async fn import_codex_cli_oauth_file(auth_file: &Path) -> Result<PathBuf> {
     let bytes = tokio::fs::read(auth_file)
         .await
         .map_err(|err| miette!("read Codex auth file {} failed: {err}", auth_file.display()))?;
-    parse_codex_cli_oauth_tokens(&bytes).map_err(|err| {
+    let tokens = parse_codex_cli_oauth_tokens(&bytes).map_err(|err| {
         miette!(
             "parse Codex auth file {} failed: {err}",
             auth_file.display()
         )
-    })
+    })?;
+    let destination = imported_codex_oauth_auth_file(&bytes);
+    write_codex_oauth_tokens(&destination, &tokens).await?;
+    Ok(destination)
 }
 
 fn parse_codex_cli_oauth_tokens(bytes: &[u8]) -> Result<CodexOAuthTokens> {
@@ -1395,11 +1383,26 @@ fn parse_codex_cli_oauth_tokens(bytes: &[u8]) -> Result<CodexOAuthTokens> {
             "expected Codex CLI auth.json with a tokens object containing id_token, access_token, and refresh_token: {err}"
         )
     })?;
+    let tokens = auth.tokens.ok_or_else(|| {
+        let has_api_key = auth
+            .openai_api_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        if has_api_key {
+            miette!(
+                "this Codex auth.json uses OPENAI_API_KEY authentication and cannot be imported as Codex OAuth; configure it as an OpenAI API key provider instead"
+            )
+        } else {
+            miette!(
+                "expected Codex CLI auth.json with a tokens object containing id_token, access_token, and refresh_token"
+            )
+        }
+    })?;
     Ok(CodexOAuthTokens {
-        id_token: auth.tokens.id_token,
-        access_token: auth.tokens.access_token,
-        refresh_token: auth.tokens.refresh_token,
-        account_id: auth.tokens.account_id,
+        id_token: tokens.id_token,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        account_id: tokens.account_id,
         last_refresh_at_ms: now_ms(),
     })
 }
@@ -1567,6 +1570,34 @@ mod tests {
     }
     use crate::config::{ModelConfig, ThinkingBudget};
 
+    struct EnvOverride {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvOverride {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvOverride {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => unsafe {
+                    std::env::set_var(self.key, previous);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
+    }
+
     fn jwt(payload: &serde_json::Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1598,6 +1629,26 @@ mod tests {
         assert!(tokens.last_refresh_at_ms >= before);
     }
 
+    #[test]
+    fn parse_codex_cli_auth_file_rejects_api_key_authentication() {
+        let error = parse_codex_cli_oauth_tokens(
+            br#"{
+                "auth_mode": "api_key",
+                "OPENAI_API_KEY": "sk-example"
+            }"#,
+        )
+        .expect_err("API key auth must not be imported as OAuth");
+
+        assert!(error.to_string().contains("OPENAI_API_KEY authentication"));
+    }
+
+    #[test]
+    fn parse_codex_cli_auth_file_requires_tokens() {
+        let error = parse_codex_cli_oauth_tokens(br#"{"auth_mode":"chatgpt"}"#)
+            .expect_err("missing tokens must be rejected");
+
+        assert!(error.to_string().contains("tokens object"));
+    }
     #[test]
     fn codex_oauth_access_extracts_account_headers_from_id_token() {
         let id_token = jwt(&serde_json::json!({
@@ -1646,11 +1697,223 @@ mod tests {
     }
 
     #[test]
-    fn default_auth_file_sanitizes_provider_name() {
+    fn codex_oauth_client_version_defaults_to_latest_supported_cli() {
+        assert_eq!(codex_oauth_client_version(), "0.145.0");
+    }
+
+    #[test]
+    fn imported_auth_file_uses_source_hash() {
+        let source =
+            br#"{"tokens":{"id_token":"id","access_token":"access","refresh_token":"refresh"}}"#;
+        let destination = imported_codex_oauth_auth_file(source);
+
         assert_eq!(
-            sanitize_auth_file_component("OpenAI/Codex OAuth!"),
-            "OpenAI-Codex-OAuth"
+            destination.file_name().and_then(|name| name.to_str()),
+            Some(format!("codex-auth-{}.json", hex::encode(Sha256::digest(source))).as_str())
         );
+        assert_eq!(
+            destination.file_name(),
+            imported_codex_oauth_auth_file(source).file_name()
+        );
+    }
+    #[tokio::test]
+    async fn import_codex_cli_auth_file_rejects_a_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let error = import_codex_cli_oauth_file(temp.path())
+            .await
+            .expect_err("directories are not valid Codex auth files");
+
+        assert!(error.to_string().contains("read Codex auth file"));
+    }
+
+    #[tokio::test]
+    async fn import_codex_cli_auth_file_reports_malformed_json_without_tokens() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("auth.json");
+        tokio::fs::write(&source, b"not-json")
+            .await
+            .expect("write malformed source");
+
+        let error = import_codex_cli_oauth_file(&source)
+            .await
+            .expect_err("malformed auth file must fail");
+
+        let message = error.to_string();
+        assert!(message.contains("parse Codex auth file"));
+        assert!(message.contains("tokens object"));
+        assert!(!message.contains("not-json"));
+    }
+
+    #[tokio::test]
+    async fn provider_import_remains_available_after_external_source_is_deleted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home_override =
+            crate::runtime::bootstrap::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
+        let source = temp.path().join("external").join("auth.json");
+        tokio::fs::create_dir_all(source.parent().expect("source parent"))
+            .await
+            .expect("create source parent");
+        tokio::fs::write(
+            &source,
+            br#"{
+                "tokens": {
+                    "id_token": "id-token",
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token"
+                }
+            }"#,
+        )
+        .await
+        .expect("write external Codex auth");
+
+        let source_bytes = tokio::fs::read(&source)
+            .await
+            .expect("read external Codex auth");
+        let destination = import_codex_cli_oauth_file(&source)
+            .await
+            .expect("import external Codex auth");
+        tokio::fs::remove_file(&source)
+            .await
+            .expect("delete external Codex auth");
+
+        let access = codex_oauth_access_from_file(&destination)
+            .await
+            .expect("read imported Daat auth after source deletion");
+        assert_eq!(access.access_token, "access-token");
+        assert_eq!(destination, imported_codex_oauth_auth_file(&source_bytes));
+    }
+
+    #[tokio::test]
+    async fn refresh_of_imported_provider_auth_does_not_modify_external_source() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home_override =
+            crate::runtime::bootstrap::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
+        let source = temp.path().join("external").join("auth.json");
+        tokio::fs::create_dir_all(source.parent().expect("source parent"))
+            .await
+            .expect("create source parent");
+        let source_contents = br#"{
+            "tokens": {
+                "id_token": "external-id-token",
+                "access_token": "external-access-token",
+                "refresh_token": "external-refresh-token"
+            }
+        }"#;
+        tokio::fs::write(&source, source_contents)
+            .await
+            .expect("write external Codex auth");
+        let destination = import_codex_cli_oauth_file(&source)
+            .await
+            .expect("import external Codex auth");
+
+        let expired_access_token = jwt(&serde_json::json!({"exp": 1}));
+        write_codex_oauth_tokens(
+            &destination,
+            &CodexOAuthTokens {
+                id_token: "id-token".to_string(),
+                access_token: expired_access_token,
+                refresh_token: "refresh-token".to_string(),
+                account_id: None,
+                last_refresh_at_ms: 0,
+            },
+        )
+        .await
+        .expect("write expired imported auth");
+
+        let server = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind refresh server");
+        let endpoint = format!(
+            "http://{}/oauth/token",
+            server.local_addr().expect("server addr")
+        );
+        let refresh_body = r#"{"access_token":"refreshed-access-token","refresh_token":"refreshed-refresh-token"}"#;
+        let refresh_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            refresh_body.len(),
+            refresh_body
+        );
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = server.accept().await.expect("accept refresh request");
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let mut request = vec![0_u8; 4096];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("read refresh request");
+            stream
+                .write_all(refresh_response.as_bytes())
+                .await
+                .expect("write refresh response");
+        });
+        let _refresh_endpoint = EnvOverride::set(CODEX_OAUTH_REFRESH_URL_OVERRIDE_ENV, &endpoint);
+        let client = reqwest::Client::new();
+        let access = codex_oauth_access_from_file_with_client(&destination, &client)
+            .await
+            .expect("refresh imported provider auth");
+        server_task.await.expect("refresh server task");
+
+        assert_eq!(access.access_token, "refreshed-access-token");
+        assert_eq!(
+            tokio::fs::read(&source)
+                .await
+                .expect("read external source"),
+            source_contents
+        );
+        let refreshed: CodexOAuthTokens = serde_json::from_slice(
+            &tokio::fs::read(&destination)
+                .await
+                .expect("read refreshed Daat auth"),
+        )
+        .expect("parse refreshed Daat auth");
+        assert_eq!(refreshed.access_token, "refreshed-access-token");
+    }
+
+    #[tokio::test]
+    async fn import_codex_cli_auth_file_writes_only_flat_daat_tokens() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home_override =
+            crate::runtime::bootstrap::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
+        let source = temp.path().join("external").join("auth.json");
+        tokio::fs::create_dir_all(source.parent().expect("source parent"))
+            .await
+            .expect("create source parent");
+        tokio::fs::write(
+            &source,
+            br#"{
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "id_token": "id-token",
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token"
+                }
+            }"#,
+        )
+        .await
+        .expect("write external Codex auth");
+
+        let destination = import_codex_cli_oauth_file(&source)
+            .await
+            .expect("import external Codex auth");
+        let value: Value = serde_json::from_slice(
+            &tokio::fs::read(&destination)
+                .await
+                .expect("read imported Daat auth"),
+        )
+        .expect("parse imported Daat auth");
+
+        assert!(destination.starts_with(temp.path().join("codex-auth")));
+        assert!(
+            destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("codex-auth-"))
+        );
+        assert_eq!(value["id_token"], "id-token");
+        assert_eq!(value["access_token"], "access-token");
+        assert_eq!(value["refresh_token"], "refresh-token");
+        assert!(value.get("tokens").is_none());
+        assert!(value.get("auth_mode").is_none());
     }
 
     fn test_client() -> CodexResponsesClient {

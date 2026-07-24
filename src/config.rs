@@ -59,6 +59,8 @@ pub enum ProviderConfig {
     OpenaiCodexOauth {
         #[serde(default)]
         base_url: Option<String>,
+        #[serde(default)]
+        auth_file: String,
     },
     OpenaiCompatible {
         base_url: String,
@@ -744,14 +746,14 @@ enabled = false
     }
 
     #[test]
-    fn codex_oauth_config_ignores_auth_file_field() {
+    fn codex_oauth_config_persists_auth_file_field() {
         let config: Config = toml::from_str(
             r#"
 main_model = "default"
 
 [providers.codex-oauth]
 type = "openai-codex-oauth"
-auth_file = 'C:\Users\example\.daat-locus\config\old.json'
+auth_file = 'C:\\Users\\example\\.daat-locus\\codex-auth\\codex-auth-a1b2.json'
 
 [models.default]
 provider = "codex-oauth"
@@ -760,12 +762,16 @@ model_id = "gpt-5.5"
         )
         .expect("parse config");
 
-        assert!(matches!(
-            config.providers["codex-oauth"],
-            ProviderConfig::OpenaiCodexOauth { .. }
-        ));
+        let ProviderConfig::OpenaiCodexOauth { auth_file, .. } = &config.providers["codex-oauth"]
+        else {
+            panic!("expected Codex OAuth provider");
+        };
+        assert_eq!(
+            auth_file,
+            r"C:\\Users\\example\\.daat-locus\\codex-auth\\codex-auth-a1b2.json"
+        );
         let serialized = toml::to_string_pretty(&config).expect("serialize config");
-        assert!(!serialized.contains("auth_file"));
+        assert!(serialized.contains("auth_file"));
     }
 
     #[test]
