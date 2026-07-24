@@ -13,3 +13,8 @@
 /webui/node_modules/
 scope-engine.zip
 .DS_Store
+
+# Local verification and browser test artifacts
+/target-actor-verify/
+/target-live-rebuild/
+/webui/.tmp*
