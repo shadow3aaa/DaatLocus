@@ -25,6 +25,7 @@ struct PreparedFileEdits {
     original: String,
     new_content: String,
     planned: Vec<PlannedEdit>,
+    semantic_source: bool,
 }
 
 struct PreparedStructuredEdits {
@@ -255,17 +256,19 @@ pub fn edit_code_apply(
 
     let mut results = Vec::new();
     for file in &prepared.files {
-        results.extend(collect_propagation_results(
-            &PropagationCollectionContext {
-                full_path: &file.full_path,
-                original: &file.original,
-                new_content: &file.new_content,
-                project_root,
-                lsp_analyzer,
-                analyzer: &analyzer,
-            },
-            &file.planned,
-        ));
+        if file.semantic_source {
+            results.extend(collect_propagation_results(
+                &PropagationCollectionContext {
+                    full_path: &file.full_path,
+                    original: &file.original,
+                    new_content: &file.new_content,
+                    project_root,
+                    lsp_analyzer,
+                    analyzer: &analyzer,
+                },
+                &file.planned,
+            ));
+        }
     }
 
     Ok((results, applied_summary))
@@ -379,6 +382,7 @@ fn planned_edit_for(
     full_path: &Path,
     original: &str,
     context: &PreparedEditContext<'_>,
+    semantic_source: bool,
 ) -> Result<PlannedEdit, String> {
     let operation = edit_operation(edit, original.is_empty())?;
     let start = edit_start_anchor(edit, original.is_empty())?;
@@ -387,7 +391,7 @@ fn planned_edit_for(
         verify_line(original, start_line, &start_hash)?;
     }
 
-    let primary_symbol_name = if context.validate_parse && !original.is_empty() {
+    let primary_symbol_name = if semantic_source && !original.is_empty() {
         context
             .analyzer
             .find_containing_symbol(full_path, start_line, context.project_root)
@@ -446,18 +450,19 @@ fn prepare_file_edits(
     context: &PreparedEditContext<'_>,
 ) -> Result<PreparedFileEdits, String> {
     let (existed, original) = read_original_content(&group, &full_path)?;
+    let semantic_source =
+        context.validate_parse && context.analyzer.is_responsible_source_path(&full_path);
     let planned = group
         .edits
         .into_iter()
-        .map(|edit| planned_edit_for(edit, &full_path, &original, context))
+        .map(|edit| planned_edit_for(edit, &full_path, &original, context, semantic_source))
         .collect::<Result<Vec<_>, _>>()?;
     let new_content =
         apply_planned_edits_to_content(&original, &planned, &full_path.to_string_lossy())?;
     let extension = full_path
         .extension()
         .and_then(|extension| extension.to_str());
-    if context.validate_parse
-        && extension.is_some_and(|extension| !extension.is_empty())
+    if semantic_source
         && !new_content.is_empty()
         && let Some(diagnostic) = context
             .analyzer
@@ -477,6 +482,7 @@ fn prepare_file_edits(
         original,
         new_content,
         planned,
+        semantic_source,
     })
 }
 
@@ -517,7 +523,8 @@ fn write_prepared_structured_edits(
         }
         std::fs::write(&file.full_path, &file.new_content)
             .map_err(|e| format!("cannot write {}: {e}", file.full_path.display()))?;
-        if let Some(lsp_analyzer) = lsp_analyzer
+        if file.semantic_source
+            && let Some(lsp_analyzer) = lsp_analyzer
             && let Ok(lsp_guard) = lsp_analyzer.lock()
             && let Some(ref lsp) = *lsp_guard
         {
@@ -766,6 +773,78 @@ mod e2e_tests {
 
         let unchanged = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
         assert_eq!(unchanged, rust_code);
+    }
+
+    #[test]
+    fn unsupported_file_falls_back_to_plain_structured_edit() {
+        let dir = setup_temp_rust_project();
+        let markdown = "# Title\n\nOriginal text.\n";
+        let path = dir.path().join("README.md");
+        std::fs::write(&path, markdown).unwrap();
+        let start = format!("3#{}", line_hash("Original text."));
+        let edits = vec![api::StructuredEdit {
+            path: "README.md".to_string(),
+            op: Some(api::EditOp::Replace),
+            start: Some(start.clone()),
+            end: Some(start),
+            content: Some(api::EditContent::Text("Updated text.".to_string())),
+        }];
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+
+        let (propagation, applied_summary) =
+            edit_code_apply(&edits, dir.path(), &lsp).expect("edit unsupported file");
+
+        assert!(propagation.is_empty());
+        assert_eq!(applied_summary.files.len(), 1);
+        assert_eq!(applied_summary.files[0].path, "README.md");
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "# Title\n\nUpdated text.\n"
+        );
+    }
+
+    #[test]
+    fn mixed_supported_and_unsupported_files_keep_semantic_analysis_for_source() {
+        let dir = setup_temp_rust_project();
+        let rust_code = "pub fn hello() {\n    println!(\"hello\");\n}\n";
+        let (_, hashes) = write_rust_file(dir.path(), "lib.rs", rust_code);
+        let markdown = "Before\n";
+        std::fs::write(dir.path().join("README.md"), markdown).unwrap();
+        let markdown_anchor = format!("1#{}", line_hash("Before"));
+        let edits = vec![
+            api::StructuredEdit {
+                path: "src/lib.rs".to_string(),
+                op: Some(api::EditOp::Replace),
+                start: Some(hashes[0].clone()),
+                end: Some(hashes[2].clone()),
+                content: Some(api::EditContent::Text(
+                    "pub fn hello() {\n    println!(\"updated\");\n}\n".to_string(),
+                )),
+            },
+            api::StructuredEdit {
+                path: "README.md".to_string(),
+                op: Some(api::EditOp::Replace),
+                start: Some(markdown_anchor.clone()),
+                end: Some(markdown_anchor),
+                content: Some(api::EditContent::Text("After".to_string())),
+            },
+        ];
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+
+        let (propagation, applied_summary) =
+            edit_code_apply(&edits, dir.path(), &lsp).expect("edit mixed files");
+
+        assert!(!propagation.is_empty());
+        assert_eq!(applied_summary.files.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("README.md")).unwrap(),
+            "After\n"
+        );
+        assert!(
+            std::fs::read_to_string(dir.path().join("src/lib.rs"))
+                .unwrap()
+                .contains("updated")
+        );
     }
 
     #[test]

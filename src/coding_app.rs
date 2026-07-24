@@ -829,7 +829,7 @@ impl App for CodingApp {
             },
             AppToolSpec {
                 name: "edit_code".to_string(),
-                description: "Apply structured path + line-hash anchored edits and return propagation results.".to_string(),
+                description: "Apply structured path + line-hash anchored edits. SCOPE-owned source files receive parse validation and propagation review; unsupported files fall back to plain edit_file semantics.".to_string(),
                 input_schema: structured_edit_args_schema(),
             },
             AppToolSpec {

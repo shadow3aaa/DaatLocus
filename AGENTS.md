@@ -1682,9 +1682,10 @@ Operational constraints:
   called directly through the `coding__` namespace.
 - Use `read_file` for explicit path/range reads. Do not make `read_code`
   support arbitrary path/range compatibility.
-- Use `edit_file` for non-SCOPE files. When the current project scope is open,
-  `edit_file` must reject SCOPE-owned source files and require
-  `coding__edit_code`.
+- Prefer `edit_file` for non-SCOPE files, but `coding__edit_code` also accepts
+  them and transparently falls back to the same plain structured-edit semantics.
+  When the current project scope is open, `edit_file` must reject SCOPE-owned
+  source files and require `coding__edit_code`.
 - Coding `render_state()` must include: project_root, open_languages,
   lsp_status, propagation_pending_count, and up to N recent propagation events.
 - LSP process lifecycle (start, crash recovery, shutdown) belongs to Coding
@@ -1866,10 +1867,10 @@ name, such as `.ts` and `.tsx`.
 |---|---|---|
 | Target discovery | ✅ `search_code` | Content search returns path-scoped matched-line hits in `line#hash|source line` form. |
 | Read code | ✅ `read_code` | Reads a path plus line-hash anchor in `around` or `full` mode and returns hash-anchored source lines. Explicit path/range reads belong to `read_file`. |
-| Edit code | ✅ `edit_code` | Applies the same structured hash-anchored edits as `edit_file`, plus SCOPE parse validation and propagation review. |
+| Edit code | ✅ `edit_code` | Applies structured hash-anchored edits. SCOPE-owned source files receive parse validation and propagation review; unsupported files fall back to `edit_file` semantics. |
 | Propagation review | ✅ review tools | Edit impact is surfaced through propagation results and review events. |
 | New source files | ⚠️ explicit supported creation paths | Use supported creation/edit paths; SCOPE has no template system. |
-| Non-source/config files | Outside SCOPE | Use `read_file` and `edit_file` for `.toml`, `.yaml`, `.md`, `.json`, `.sh`, and other non-source files. |
+| Non-source/config files | Transparent fallback | Prefer `read_file` and `edit_file` for `.toml`, `.yaml`, `.md`, `.json`, `.sh`, and other non-source files; `edit_code` still applies them without semantic validation or propagation review. |
 
 **Static file edit boundary:**
 
@@ -1879,10 +1880,11 @@ SCOPE owns (for example `.rs`, `.py`, `.go`, `.ts`, `.js`, `.java`, `.c`,
 `coding__edit_code` instead.
 
 For non-source-code files (`.toml`, `.yaml`, `.md`, `.json`, `.sh`, etc.) or
-unsupported cases outside SCOPE responsibility, `edit_file` is allowed.
-Propagation review is then limited to what Coding can observe through its own
-semantic operations and explicit review events; do not assume plain file edits
-silently receive the same propagation analysis as `edit_code`.
+unsupported cases outside SCOPE responsibility, `edit_file` is allowed and
+`coding__edit_code` transparently falls back to the same structured-edit
+implementation. These fallback edits do not receive parse validation or
+propagation review; semantic analysis remains limited to SCOPE-owned source
+files.
 
 ## Third-Party App Package
 

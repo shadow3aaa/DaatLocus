@@ -2105,6 +2105,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coding_edit_code_falls_back_for_non_scope_file() {
+        let mut isolated = IsolatedTestContext::new().await;
+        let root = isolated.context.execution_cwd.clone();
+        std::fs::write(root.join("README.md"), "old\n").expect("write markdown fixture");
+
+        let open_call = AgentToolCall {
+            id: "call_open".to_string(),
+            name: "coding__open_project".to_string(),
+            arguments: json!({
+                "project_root": root,
+            }),
+        };
+        execute_agent_tool_call(&mut isolated.context, &open_call)
+            .await
+            .expect("open project");
+
+        let hash = scope_engine::patch::line_hash("old");
+        let edit_call = AgentToolCall {
+            id: "call_edit".to_string(),
+            name: "coding__edit_code".to_string(),
+            arguments: json!({
+                "edits": [{
+                    "path": "README.md",
+                    "op": "replace",
+                    "start": format!("1#{hash}"),
+                    "end": format!("1#{hash}"),
+                    "content": "new"
+                }]
+            }),
+        };
+
+        let result = execute_agent_tool_call(&mut isolated.context, &edit_call)
+            .await
+            .expect("unsupported file should fall back to a plain edit");
+        assert_eq!(result.payload["propagation_results"], json!([]));
+        assert_eq!(
+            std::fs::read_to_string(root.join("README.md")).expect("read markdown fixture"),
+            "new\n"
+        );
+        drop(isolated);
+    }
+
+    #[tokio::test]
     async fn generated_get_state_tool_reads_app_state() {
         let mut isolated = IsolatedTestContext::new().await;
         let call = AgentToolCall {
