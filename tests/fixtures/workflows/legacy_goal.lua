@@ -7,27 +7,15 @@ local Input = {
   additionalProperties = false,
 }
 
-local VerifierFinding = {
-  type = "object",
-  properties = {
-    requirement = { type = "string" },
-    observed = { type = "string" },
-    evidence = { type = "string" },
-    required_fix = { type = "string" },
-    recheck = { type = "string" },
-  },
-  required = { "requirement", "observed", "evidence", "required_fix", "recheck" },
-  additionalProperties = false,
-}
-
 local WorkerInput = {
   type = "object",
   properties = {
     goal = { type = "string" },
     attempt = { type = "integer" },
+    previous_summary = { type = "string" },
     verifier_feedback = { type = "string" },
   },
-  required = { "goal", "attempt", "verifier_feedback" },
+  required = { "goal", "attempt", "previous_summary", "verifier_feedback" },
   additionalProperties = false,
 }
 
@@ -64,16 +52,13 @@ local VerifierOutput = {
   properties = {
     achieved = { type = "boolean" },
     summary = { type = "string" },
-    findings = {
-      type = "array",
-      items = VerifierFinding,
-    },
+    feedback = { type = "string" },
     evidence = {
       type = "array",
       items = { type = "string" },
     },
   },
-  required = { "achieved", "summary", "findings", "evidence" },
+  required = { "achieved", "summary", "feedback", "evidence" },
   additionalProperties = false,
 }
 
@@ -110,12 +95,8 @@ local worker = workflow.agent({
 Act as the implementation worker. Actually accomplish the supplied goal in the
 invoking workspace or available external surfaces. Inspect current state before
 acting, use the available tools, make necessary changes, and run meaningful
-checks. On later attempts, verifier_feedback is formatted text containing only
-direct blocking findings. Each finding names the unmet requirement, observed
-state, evidence, required fix, and recheck. Treat every finding as a concrete
-repair request: inspect its cited evidence, address its unmet requirement, and
-run its named recheck. Do not redo a generic audit or perform commit/push work
-unless the supplied goal requires it. Do not merely propose a solution.
+checks. On later attempts, address every item in verifier_feedback and inspect
+the existing work rather than starting over. Do not merely propose a solution.
 Return a concise summary plus concrete evidence such as changed artifacts,
 observed state, or checks and results.
 ]],
@@ -127,25 +108,13 @@ local verifier = workflow.agent({
   input = VerifierInput,
   output = VerifierOutput,
   instruction = [[
-Act as an independent adversarial verifier. You own the verification work: inspect
-actual artifacts and state, and run the relevant read-only checks yourself before
-deciding. Treat the worker's summary and evidence only as untrusted leads. Do
-not repair the work, and do not reject it merely because the worker omitted a
-check, audit, document review, commit, push, or status report that you can
-inspect yourself. Do not add those process tasks as acceptance criteria unless
-the supplied goal explicitly requires them.
-
-Set achieved to false only for a requirement from the supplied goal that you
-directly observed to be unmet. Then return one or more blocking findings. Every
-finding must name the unmet requirement, the observed state or failure, direct
-evidence such as a path or command result, the minimal required fix, and the
-specific recheck you will perform. Do not include passed work, generic
-"review/run/ensure" checklists, or requests for the implementation worker to do
-your verification. If a required check is unavailable, record the actual block
-and its evidence as a finding instead of delegating a broad investigation.
-
-Set achieved to true when no directly observed blocking finding remains; then
-findings must be empty. Keep the verified evidence separate from findings.
+Act as an independent adversarial verifier. Decide whether the supplied goal is
+fully achieved in the current workspace or external state. Treat the worker's
+summary and evidence as untrusted leads: inspect the actual artifacts, state,
+and relevant checks yourself. Do not repair the work. Set achieved to true only
+when concrete evidence covers the whole goal. If it is false, provide a concise,
+actionable feedback list that another worker can execute. Keep feedback empty
+when achieved is true, and report the evidence you verified directly.
 ]],
 })
 
@@ -160,22 +129,11 @@ local function combined_evidence(worker_evidence, verifier_evidence)
   return evidence
 end
 
-local function findings_are_concrete(findings)
-  for _, finding in ipairs(findings) do
-    for _, field in ipairs({ "requirement", "observed", "evidence", "required_fix", "recheck" }) do
-      local value = finding[field]
-      if type(value) ~= "string" or value:match("%S") == nil then
-        return false
-      end
-    end
-  end
-  return true
-end
-
 workflow.define({
   input = Input,
   output = Output,
   run = function(input, ctx)
+    local previous_summary = ""
     local verifier_feedback = ""
     local attempt = 0
 
@@ -184,6 +142,7 @@ workflow.define({
       local latest_work = workflow.await(worker:run({
         goal = input.goal,
         attempt = attempt,
+        previous_summary = previous_summary,
         verifier_feedback = verifier_feedback,
       }), attempt == 1 and "await" or "revision")
 
@@ -195,9 +154,6 @@ workflow.define({
       }), "verify")
 
       if latest_verification.achieved then
-        if #latest_verification.findings ~= 0 then
-          error("verifier accepted the work while reporting blocking findings")
-        end
         return {
           achieved = true,
           attempts = attempt,
@@ -208,22 +164,10 @@ workflow.define({
         }
       end
 
-      if #latest_verification.findings == 0 then
-        error("verifier rejected the work without direct blocking findings: " .. latest_verification.summary)
-      end
-      if not findings_are_concrete(latest_verification.findings) then
-        error("verifier rejected the work with incomplete blocking findings: " .. latest_verification.summary)
-      end
-      verifier_feedback = ""
-      for _, finding in ipairs(latest_verification.findings) do
-        verifier_feedback = verifier_feedback .. string.format(
-          "Requirement: %s\nObserved: %s\nEvidence: %s\nRequired fix: %s\nRecheck: %s\n\n",
-          finding.requirement,
-          finding.observed,
-          finding.evidence,
-          finding.required_fix,
-          finding.recheck
-        )
+      previous_summary = latest_work.summary
+      verifier_feedback = latest_verification.feedback
+      if verifier_feedback == "" then
+        verifier_feedback = latest_verification.summary
       end
     end
   end,

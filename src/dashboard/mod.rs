@@ -31,7 +31,7 @@ pub use cells::{
     activity_event_from_tool_call_activity_event, activity_events_from_history_items,
     apply_activity_event, assistant_activity_cell, coalesce_activity_events,
     render_activity_feed_cached, render_activity_from_messages,
-    terminal_activity_event_from_terminal_data, thinking_activity_cell,
+    terminal_activity_event_from_terminal_data, thinking_activity_cell, user_activity_cell,
     user_activity_cell_from_event,
 };
 pub use command_flow::{dashboard_command_is_manager_owned, execute_control_command};
@@ -108,7 +108,7 @@ use terminal_hyperlinks::{
 use transcript_overlay::render_transcript_overlay;
 use tui_animation::dashboard_state_needs_animation;
 use view_state::{
-    TuiViewState, WorkflowInspectorPage, WorkflowInspectorRoleTransition, WorkflowInspectorState,
+    TuiViewState, WorkflowInspectorActorTransition, WorkflowInspectorPage, WorkflowInspectorState,
 };
 
 const TUI_ANIMATION_INTERVAL: Duration = Duration::from_millis(32);
@@ -752,9 +752,9 @@ fn render_workflow_inspector(
     }
 
     let footer = if area.width >= 100 {
-        "Esc/q close   Up/Down worker   PgUp/PgDn activity   Tab/←/→ switch pane"
+        "Esc/q close   Up/Down actor   PgUp/PgDn activity   Tab/←/→ switch pane"
     } else if inspector.page == WorkflowInspectorPage::Outline {
-        "Esc/q close   Up/Down worker   Enter/Tab/→ activity"
+        "Esc/q close   Up/Down actor   Enter/Tab/→ activity"
     } else {
         "Esc/q back   PgUp/PgDn scroll   Tab/← outline"
     };
@@ -827,13 +827,13 @@ fn render_workflow_inspector_outline(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let agents = inspector.agents();
-    let transitions = inspector.role_transitions();
+    let actors = inspector.actors();
+    let transitions = inspector.actor_transitions();
     let mut lines = vec![Line::from(Span::styled(
         format!(
-            "{} agent role{} · {} run{} · Worked for {} total",
-            agents.len(),
-            if agents.len() == 1 { "" } else { "s" },
+            "{} actor{} · {} run{} · Worked for {} total",
+            actors.len(),
+            if actors.len() == 1 { "" } else { "s" },
             inspector.snapshot.workers.len(),
             if inspector.snapshot.workers.len() == 1 {
                 ""
@@ -845,14 +845,14 @@ fn render_workflow_inspector_outline(
         Style::default().fg(Color::DarkGray),
     ))];
 
-    if agents.is_empty() {
+    if actors.is_empty() {
         lines.push(Line::from(Span::styled(
-            "Waiting for the first agent...",
+            "Waiting for the first actor...",
             Style::default().fg(Color::DarkGray),
         )));
     }
-    for agent in &agents {
-        let selected = agent.latest_worker_index == inspector.selected_worker;
+    for actor in &actors {
+        let selected = actor.latest_worker_index == inspector.selected_worker;
         lines.push(Line::from(vec![
             Span::styled(
                 if selected { "› " } else { "  " },
@@ -865,12 +865,12 @@ fn render_workflow_inspector_outline(
             Span::styled(
                 format!(
                     "{} · {} · {}",
-                    agent.role,
-                    agent.model,
-                    if agent.attempt_count == 1 {
+                    actor.label,
+                    actor.model,
+                    if actor.attempt_count == 1 {
                         "1 attempt".to_string()
                     } else {
-                        format!("{} attempts", agent.attempt_count)
+                        format!("{} attempts", actor.attempt_count)
                     }
                 ),
                 if selected {
@@ -883,13 +883,13 @@ fn render_workflow_inspector_outline(
             ),
             Span::raw("  "),
             Span::styled(
-                workflow_status_label(agent.status),
-                workflow_status_style(agent.status),
+                workflow_status_label(actor.status),
+                workflow_status_style(actor.status),
             ),
             Span::styled(
                 format!(
                     "  Worked for {}",
-                    format_workflow_agent_run_time(agent.agent_run_time_ms)
+                    format_workflow_agent_run_time(actor.agent_run_time_ms)
                 ),
                 Style::default().fg(Color::DarkGray),
             ),
@@ -902,28 +902,32 @@ fn render_workflow_inspector_outline(
             "Transitions",
             Style::default().fg(Color::DarkGray),
         )));
-        lines.extend(transitions.iter().map(render_workflow_role_transition_line));
+        lines.extend(
+            transitions
+                .iter()
+                .map(render_workflow_actor_transition_line),
+        );
     }
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-fn render_workflow_role_transition_line(
-    transition: &WorkflowInspectorRoleTransition,
+fn render_workflow_actor_transition_line(
+    transition: &WorkflowInspectorActorTransition,
 ) -> Line<'static> {
     let label = if transition.count > 1 {
         format!(
             "  {} → {} · {} ({})",
-            transition.source_role,
-            transition.target_role,
+            transition.source_label,
+            transition.target_label,
             workflow_transition_label(transition.kind),
             transition.count
         )
     } else {
         format!(
             "  {} → {} · {}",
-            transition.source_role,
-            transition.target_role,
+            transition.source_label,
+            transition.target_label,
             workflow_transition_label(transition.kind)
         )
     };
@@ -1304,6 +1308,7 @@ mod tests {
             workers: vec![
                 crate::workflow::WorkflowWorkerSnapshot {
                     worker_id: "worker-1".to_string(),
+                    actor_id: "researcher-actor-1".to_string(),
                     await_group_id: "await-1".to_string(),
                     role: "researcher".to_string(),
                     model: "main".to_string(),
@@ -1324,6 +1329,7 @@ mod tests {
                 },
                 crate::workflow::WorkflowWorkerSnapshot {
                     worker_id: "worker-2".to_string(),
+                    actor_id: "researcher-actor-2".to_string(),
                     await_group_id: "await-1".to_string(),
                     role: "researcher".to_string(),
                     model: "main".to_string(),
@@ -1340,6 +1346,7 @@ mod tests {
                 },
                 crate::workflow::WorkflowWorkerSnapshot {
                     worker_id: "worker-3".to_string(),
+                    actor_id: "reviewer-actor-1".to_string(),
                     await_group_id: "await-2".to_string(),
                     role: "reviewer".to_string(),
                     model: "efficient".to_string(),
@@ -1369,11 +1376,12 @@ mod tests {
             .expect("render workflow inspector");
 
         let output = trimmed_buffer_text(terminal.backend().buffer());
-        assert!(output.contains("2 agent roles · 3 runs · Worked for 72ms total"));
-        assert!(output.contains("researcher · main · 2 attempts"));
-        assert!(output.contains("researcher → reviewer · await (2)"));
+        assert!(output.contains("3 actors · 3 runs · Worked for 72ms total"));
+        assert!(output.contains("researcher #1 · main · 1 attempt"));
+        assert!(output.contains("researcher #2 · main · 1 attempt"));
+        assert!(output.contains("researcher #1 → reviewer · await"));
+        assert!(output.contains("researcher #2 → reviewer · await"));
         assert!(output.contains("reviewer · attempt 1 · efficient"));
-        assert!(output.contains("Worked for 32ms"));
     }
 
     #[test]
@@ -1398,6 +1406,7 @@ mod tests {
             transitions: Vec::new(),
             workers: vec![crate::workflow::WorkflowWorkerSnapshot {
                 worker_id: "worker-1".to_string(),
+                actor_id: "reviewer-actor-1".to_string(),
                 await_group_id: "await-1".to_string(),
                 role: "reviewer".to_string(),
                 model: "efficient".to_string(),

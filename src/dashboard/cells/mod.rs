@@ -290,6 +290,16 @@ pub fn assistant_activity_cell(content: &str) -> Option<SessionActivityEvent> {
         trimmed.to_string(),
     )))
 }
+
+pub fn user_activity_cell(content: &str) -> Option<SessionActivityEvent> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(SessionActivityEvent::User(user_message_data(
+        trimmed.to_string(),
+    )))
+}
 pub fn thinking_activity_cell(reasoning_content: &str) -> Option<SessionActivityEvent> {
     let trimmed = reasoning_content.trim();
     if trimmed.is_empty() {

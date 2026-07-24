@@ -460,6 +460,31 @@ export default function App() {
 function MockAgentApp() {
   const { t } = useTranslation();
   const { themeMode, toggleThemeMode } = useThemeMode();
+  const mockWorkflow =
+    typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search).get("workflow")
+      : null;
+  const mockSnapshot =
+    mockWorkflow === "actor-split"
+      ? {
+          ...MOCK_DASHBOARD_SNAPSHOT,
+          active_workflow_runs: [MOCK_WORKFLOW_ACTOR_SPLIT_RUN],
+          live_activity_events: [
+            {
+              key: `workflow:${MOCK_WORKFLOW_ACTOR_SPLIT_RUN.run_id}`,
+              event: {
+                Workflow: {
+                  workflow_id: MOCK_WORKFLOW_ACTOR_SPLIT_RUN.workflow_id,
+                  status: "Completed",
+                  output: MOCK_WORKFLOW_ACTOR_SPLIT_RUN.output,
+                  message: "verified same-role actors remain separate in the graph",
+                  snapshot: MOCK_WORKFLOW_ACTOR_SPLIT_RUN,
+                },
+              },
+            },
+          ],
+        }
+      : MOCK_DASHBOARD_SNAPSHOT;
   useEffect(() => {
     document.title = pageDocumentTitle("agent", MOCK_SESSION, true, t);
   }, [t]);
@@ -482,7 +507,7 @@ function MockAgentApp() {
         <SidebarInset className="min-h-screen">
           <AgentPage
             sessionId={MOCK_SESSION.session_id}
-            mockSnapshot={MOCK_DASHBOARD_SNAPSHOT}
+            mockSnapshot={mockSnapshot}
           />
         </SidebarInset>
       </SidebarProvider>
@@ -1147,6 +1172,7 @@ const MOCK_WORKFLOW_RUN: WorkflowRunSnapshot = {
   workers: [
     {
       worker_id: "await-1-worker-1",
+      actor_id: "implementation-actor",
       await_group_id: "await-1",
       role: "implementation",
       model: "main",
@@ -1157,7 +1183,6 @@ const MOCK_WORKFLOW_RUN: WorkflowRunSnapshot = {
       input: {
         goal: "Add Agent-page mock coverage for workflow visualizations.",
         attempt: 1,
-        previous_summary: "",
         verifier_feedback: "",
       },
       output: {
@@ -1198,6 +1223,7 @@ const MOCK_WORKFLOW_RUN: WorkflowRunSnapshot = {
     },
     {
       worker_id: "await-2-worker-1",
+      actor_id: "verification-actor",
       await_group_id: "await-2",
       role: "verification",
       model: "efficient",
@@ -1212,10 +1238,15 @@ const MOCK_WORKFLOW_RUN: WorkflowRunSnapshot = {
         worker_evidence: ["Workflow cards render from SessionActivityEvent.Workflow"],
       },
       output: {
-        achieved: false,
-        summary: "The workflow card is still absent from the mock snapshot.",
-        feedback: "Add a running Workflow event with a populated run snapshot.",
-        evidence: ["MOCK_DASHBOARD_SNAPSHOT has no Workflow activity"],
+        findings: [
+          {
+            requirement: "A running Workflow event has a populated run snapshot.",
+            observed: "The mock lacks a live Workflow event.",
+            evidence: "MOCK_DASHBOARD_SNAPSHOT has no running workflow activity.",
+            required_fix: "Add the live workflow fixture.",
+            recheck: "Open the Agent page and inspect the running workflow card.",
+          },
+        ],
       },
       error: null,
       activity_count: 3,
@@ -1242,6 +1273,7 @@ const MOCK_WORKFLOW_RUN: WorkflowRunSnapshot = {
     },
     {
       worker_id: "await-3-worker-1",
+      actor_id: "implementation-actor",
       await_group_id: "await-3",
       role: "implementation",
       model: "main",
@@ -1252,8 +1284,8 @@ const MOCK_WORKFLOW_RUN: WorkflowRunSnapshot = {
       input: {
         goal: "Add Agent-page mock coverage for workflow visualizations.",
         attempt: 2,
-        previous_summary: "Located the Agent mock entry point and inspector data contract.",
-        verifier_feedback: "Add a running Workflow event with a populated run snapshot.",
+        verifier_feedback:
+          "Requirement: A running Workflow event has a populated run snapshot.\nObserved: The mock lacks a live Workflow event.\nEvidence: MOCK_DASHBOARD_SNAPSHOT has no running workflow activity.\nRequired fix: Add the live workflow fixture.\nRecheck: Open the Agent page and inspect the running workflow card.\n\n",
       },
       output: {
         summary: "Added a live workflow fixture with worker activities.",
@@ -1291,6 +1323,7 @@ const MOCK_WORKFLOW_RUN: WorkflowRunSnapshot = {
     },
     {
       worker_id: "await-4-worker-1",
+      actor_id: "verification-actor",
       await_group_id: "await-4",
       role: "verification",
       model: "efficient",
@@ -1324,6 +1357,171 @@ const MOCK_WORKFLOW_RUN: WorkflowRunSnapshot = {
           },
         },
       ],
+    },
+  ],
+};
+
+const MOCK_WORKFLOW_ACTOR_SPLIT_RUN_ID = "mock-actor-split-workflow-run";
+
+const MOCK_WORKFLOW_ACTOR_SPLIT_RUN: WorkflowRunSnapshot = {
+  run_id: MOCK_WORKFLOW_ACTOR_SPLIT_RUN_ID,
+  workflow_id: "actor-split",
+  status: "completed",
+  started_at_ms: MOCK_WORKFLOW_STARTED_AT,
+  completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 44_000,
+  input: {
+    goal: "Verify same-role workflow actors render as separate graph nodes.",
+  },
+  output: {
+    verified: true,
+  },
+  error: null,
+  await_groups: [
+    {
+      group_id: "await-1",
+      sequence: 1,
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 10_000,
+      worker_ids: ["planner-worker"],
+    },
+    {
+      group_id: "await-2",
+      sequence: 2,
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 11_000,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 22_000,
+      worker_ids: ["search-alpha-worker", "search-beta-worker"],
+    },
+    {
+      group_id: "await-3",
+      sequence: 3,
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 23_000,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 33_000,
+      worker_ids: ["search-alpha-followup-worker"],
+    },
+    {
+      group_id: "await-4",
+      sequence: 4,
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 34_000,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 44_000,
+      worker_ids: ["review-worker"],
+    },
+  ],
+  transitions: [
+    {
+      source_worker_id: "planner-worker",
+      target_worker_id: "search-alpha-worker",
+      kind: "await",
+    },
+    {
+      source_worker_id: "planner-worker",
+      target_worker_id: "search-beta-worker",
+      kind: "await",
+    },
+    {
+      source_worker_id: "search-alpha-worker",
+      target_worker_id: "search-alpha-followup-worker",
+      kind: "revision",
+    },
+    {
+      source_worker_id: "search-alpha-followup-worker",
+      target_worker_id: "review-worker",
+      kind: "verify",
+    },
+    {
+      source_worker_id: "search-beta-worker",
+      target_worker_id: "review-worker",
+      kind: "verify",
+    },
+  ],
+  workers: [
+    {
+      worker_id: "planner-worker",
+      actor_id: "planner-actor",
+      await_group_id: "await-1",
+      role: "planning",
+      model: "main",
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 10_000,
+      agent_run_time_ms: 10_000,
+      input: { goal: "Plan the actor split verification." },
+      output: { routes: 2 },
+      error: null,
+      activity_count: 0,
+      activity_revision: 0,
+      activity: [],
+    },
+    {
+      worker_id: "search-alpha-worker",
+      actor_id: "search-alpha-actor",
+      await_group_id: "await-2",
+      role: "search",
+      model: "efficient",
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 11_000,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 16_000,
+      agent_run_time_ms: 5_000,
+      input: { query: "alpha" },
+      output: { result: "alpha first pass" },
+      error: null,
+      activity_count: 0,
+      activity_revision: 0,
+      activity: [],
+    },
+    {
+      worker_id: "search-beta-worker",
+      actor_id: "search-beta-actor",
+      await_group_id: "await-2",
+      role: "search",
+      model: "efficient",
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 12_000,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 22_000,
+      agent_run_time_ms: 10_000,
+      input: { query: "beta" },
+      output: { result: "beta first pass" },
+      error: null,
+      activity_count: 0,
+      activity_revision: 0,
+      activity: [],
+    },
+    {
+      worker_id: "search-alpha-followup-worker",
+      actor_id: "search-alpha-actor",
+      await_group_id: "await-3",
+      role: "search",
+      model: "efficient",
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 23_000,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 33_000,
+      agent_run_time_ms: 10_000,
+      input: { query: "alpha follow-up" },
+      output: { result: "alpha verified" },
+      error: null,
+      activity_count: 0,
+      activity_revision: 0,
+      activity: [],
+    },
+    {
+      worker_id: "review-worker",
+      actor_id: "review-actor",
+      await_group_id: "await-4",
+      role: "review",
+      model: "main",
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 34_000,
+      completed_at_ms: MOCK_WORKFLOW_STARTED_AT + 44_000,
+      agent_run_time_ms: 10_000,
+      input: { goal: "Review alpha and beta results." },
+      output: { approved: true },
+      error: null,
+      activity_count: 0,
+      activity_revision: 0,
+      activity: [],
     },
   ],
 };
@@ -1519,7 +1717,7 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
       event: {
         Workflow: {
           workflow_id: MOCK_WORKFLOW_RUN.workflow_id,
-          status: "running",
+          status: "Running",
           output: MOCK_WORKFLOW_RUN.output,
           message: "running 4 workers across 4 await groups",
           snapshot: MOCK_WORKFLOW_RUN,

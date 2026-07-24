@@ -35,7 +35,13 @@ tool:
    an underscore, and never use `__`.
 3. Put all metadata in the Lua file. Do not add a manifest, sidecar schema,
    profile catalog, predeclared job list, or task vocabulary.
-4. Reload through the Dashboard `/skills reload` action after editing. It
+4. The runtime loads built-in workflow ids from the binary without writing them
+   here. A file whose id matches a built-in workflow explicitly overrides that
+   built-in; delete or rename it and reload to restore the built-in version.
+   On the first reload after upgrading from the old installer, untouched legacy
+   `goal.lua` and `search.lua` copies are moved to
+   `legacy-builtin-workflows/`; non-matching files remain explicit overrides.
+5. Reload through the Dashboard `/skills reload` action after editing. It
    reloads workflows as well as skills. Inspect `/workflows` for load errors and
    use its generated form for the first manual test.
 
@@ -183,14 +189,20 @@ workflow.define({
 ```
 
 Use `worker:run(value)` with a colon, not `worker.run(value)`. It creates a
-handle. Await each handle once with `workflow.await(handle[, transition])`, or
-create a list of handles and use `workflow.await_all(handles[, transition])`
-to run them concurrently and obtain outputs in matching order. A failed worker
-or workflow interruption stops the group; each worker has separate runtime and
-App instances, so only external resources and workflow-local tool effects are
-shared. `transition` defaults to `"await"`; use `"verify"`, `"revision"`, or
-`"retry"` when that accurately describes the handoff from the prior awaited
-group. `ctx` is host-owned and currently exposes no stable public Session API.
+handle. The `workflow.agent(...)` result is one actor for the current workflow
+invocation: its later sequential `run(...)` calls retain worker-local
+conversation history, isolated App instances, plan, and runtime state. Calls to
+separate actors and separate workflow invocations remain isolated. To discard an
+actor's state, call `worker:reset()` explicitly; it yields through the runner,
+returns no worker output, and must not race a running handle. Await each handle
+once with `workflow.await(handle[, transition])`, or create a list of handles
+and use `workflow.await_all(handles[, transition])` to run them concurrently
+and obtain outputs in matching order. A failed worker or workflow interruption
+stops the group; each concurrent actor has separate runtime and App instances,
+so only external resources and workflow-local tool effects are shared.
+`transition` defaults to `"await"`; use `"verify"`, `"revision"`, or `"retry"`
+when that accurately describes the handoff from the prior awaited group. `ctx`
+is host-owned and currently exposes no stable public Session API.
 
 Return only a JSON-compatible value that matches the workflow's declared
 output schema. Do not use the worker output as an unvalidated final result.

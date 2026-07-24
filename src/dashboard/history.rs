@@ -1358,6 +1358,7 @@ mod tests {
             transitions: Vec::new(),
             workers: vec![crate::workflow::WorkflowWorkerSnapshot {
                 worker_id: "worker-1".to_string(),
+                actor_id: "history-actor-1".to_string(),
                 await_group_id: "await-1".to_string(),
                 role: "agent".to_string(),
                 model: "main".to_string(),

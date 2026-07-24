@@ -315,6 +315,8 @@ export type WorkflowTransitionSnapshot = {
 
 export type WorkflowWorkerSnapshot = {
   worker_id: string;
+  /** Opaque identity of the `workflow.agent(...)` actor that owns this run. */
+  actor_id?: string;
   await_group_id: string;
   role: string;
   model: string;

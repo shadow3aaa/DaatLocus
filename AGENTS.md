@@ -1130,15 +1130,21 @@ the removed workflow/primitive mechanism. A workflow may use skills as
 instructions and host-provided App tools, but neither relationship changes the
 object boundary.
 
-A workflow is one Lua 5.4 source file in the global workflow directory:
+User-authored workflows are Lua 5.4 source files in the global workflow directory:
 
 ```text
 ~/.daat-locus/workflows/<name>.lua
 ```
 
 When `DAAT_LOCUS_HOME` is set, the directory is `$DAAT_LOCUS_HOME/workflows`.
-All Sessions load this shared catalog, while each invocation still uses its
-Session workspace and sandbox.
+Built-in workflows are compiled into the binary and loaded from memory; they
+are never written into the global workflow directory. A same-id Lua file in
+that directory explicitly overrides the built-in definition. When upgrading
+from the older automatic installer, an untouched legacy `goal.lua` or
+`search.lua` copy is moved into `legacy-builtin-workflows/` on reload so it
+does not silently override the current built-in; non-matching files remain
+user overrides. All Sessions load this shared catalog, while each invocation
+still uses its Session workspace and sandbox.
 
 The filename stem is the workflow id. There is no `workflow.toml`, manifest,
 sidecar metadata, profile catalog, or predeclared job/task vocabulary. The Lua
@@ -1198,6 +1204,7 @@ workflow.agent({ role, model, input, output, instruction, extra_tools })
 workflow.await(handle[, transition])
 workflow.await_all(handles[, transition])
 workflow.tool({ name, input, output, run })
+-- every returned actor also supports actor:reset()
 ```
 
 `role` is required and must be a non-empty string. It identifies a visible
@@ -1211,18 +1218,26 @@ its workers concurrently, retains result ordering by handle, stops the group on
 any failure or interruption, and gives every worker separate runtime and App
 instances. Concurrent groups produce all-to-all barrier edges.
 
-`workflow.agent(...)` creates an isolated worker specification. The script
-passes the actual task input to the resulting handle; worker outputs are
-validated against the declared output schema before Lua receives them. The host
-automatically exposes allowed installed App operations to each worker; the
-script does not enumerate App tool names. `workflow.tool(...)` defines a local
-workflow tool with declared schemas; it is available only where the workflow
-explicitly grants it through `extra_tools`. The host owns validation, routing,
-lifecycle, cancellation, result transport, and all unavoidable policy
-enforcement; it must not substitute hidden role profiles, task ids, node ids,
-budgets, thinking levels, timeouts, retries, or pre-enumerated jobs for script
-decisions. Opaque run/node identifiers may exist internally for scheduling and
-journaling but are not script-visible API.
+`workflow.agent(...)` creates one isolated worker actor for the current
+workflow invocation. Calling that actor's `run(...)` again preserves its
+worker-local conversation history, isolated App instances, plan, and other
+worker runtime state; it does not reset after completion. Actors created by
+separate `workflow.agent(...)` calls, including those with the same role, and
+actors from separate workflow invocations are isolated. Call `actor:reset()`
+explicitly when a fresh worker-local conversation, App instances, plan, and
+runtime state are required. `actor:reset()` yields like `await`, returns no
+worker output, and must not be used while one of that actor's handles is
+running. The script passes the actual task input to a `run(...)` handle; worker
+outputs are validated against the declared output schema before Lua receives
+them. The host automatically exposes allowed installed App operations to each
+actor; the script does not enumerate App tool names. `workflow.tool(...)`
+defines a local workflow tool with declared schemas; it is available only where
+the workflow explicitly grants it through `extra_tools`. The host owns
+validation, routing, lifecycle, cancellation, result transport, and all
+unavoidable policy enforcement; it must not substitute hidden role profiles,
+task ids, node ids, budgets, thinking levels, timeouts, retries, or
+pre-enumerated jobs for script decisions. Opaque run/node identifiers may exist
+internally for scheduling and journaling but are not script-visible API.
 
 Lua workflows are deliberately side-effectful: ordinary I/O, file operations,
 and shell execution such as `io.popen` or `os.execute` are permitted. This does
@@ -1238,11 +1253,14 @@ debugging, attribution, and result correlation, not automatic recovery.
 
 ### Workflow Worker Boundaries
 
-A workflow worker is an isolated agent turn. It receives only its declared
-instruction, typed input, host-provided App tools, explicitly granted
-workflow-local tools, and worker-local message history. It must not inherit the
-Session main agent's full `Context`, claimed event ids, event-completion
-authority, or conversation history.
+A workflow worker actor is isolated from the Session main agent. It receives
+only its declared instruction, the typed input for each `run(...)`,
+host-provided App tools, explicitly granted workflow-local tools, and its own
+worker-local message history. It must not inherit the Session main agent's full
+`Context`, claimed event ids, event-completion authority, or conversation
+history. The actor's own history, isolated App state, and worker-local plan
+persist between its sequential `run(...)` calls until `actor:reset()` is called
+explicitly.
 
 Worker tools are ordinary named, schema-validated tools. The host automatically
 provides `read_file`, `edit_file`, `update_plan`, and, when the selected model

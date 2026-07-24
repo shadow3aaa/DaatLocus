@@ -16,14 +16,14 @@ Workflow 与运行时的其他对象刻意保持不同边界：
 
 ## 发现与重新加载
 
-运行时会在 Session 启动时扫描以下全局目录：
+运行时会在 Session 启动时扫描以下全局目录中的用户工作流文件：
 
 ```text
 ~/.daat-locus/workflows/*.lua
 ```
 
 设置 `DAAT_LOCUS_HOME` 时，该位置为 `$DAAT_LOCUS_HOME/workflows`。目录不存在时会自动创建。
-所有 Session 都从此目录加载同一套工作流源文件；但工作流执行仍使用发起调用的 Session 工作区和沙箱。
+所有 Session 都从此目录加载同一套外部工作流目录；但工作流执行仍使用发起调用的 Session 工作区和沙箱。
 
 文件名去掉 `.lua` 后就是工作流 id，且必须是 lower snake case。例如
 `research_brief.lua` 的 id 为 `research_brief`。工作流不使用 manifest、sidecar metadata 或预先
@@ -31,6 +31,21 @@ Workflow 与运行时的其他对象刻意保持不同边界：
 
 某个文件无效不会阻止其他有效工作流加载；错误会显示在工作流选择器中。新增或修改文件后，使用
 Dashboard 的 `/skills reload` 动作重新加载；该动作会同时重新加载 skills 和 workflows。
+
+每个发布版本还会在源码目录中提供两个内置 workflow：
+
+- `goal` 会反复实现一个工作区目标，并交给独立 verifier 判断是否完成。
+- `search` 用于开放式证据研究：planner 创建彼此独立的搜索 route，不同的 searcher actor 并发执行这些
+  route；verifier 要么把尚缺的证据交回 planner，要么在证据充分后把已验证材料交给 analyzer 生成最终结果。
+  该 workflow 刻意不设尝试次数或 route 数量上限；中断、错误和运行时预算仍然生效。
+
+内置 workflow 会编译进 binary 并从内存加载；它们绝不会复制到
+`~/.daat-locus/workflows`。该目录中同 id 的文件会显式覆盖内置定义；删除或重命名该文件后重新加载，
+即可恢复使用内置版本。
+
+从旧版自动安装机制升级后的首次重新加载中，未修改的旧 `goal.lua` 或 `search.lua` 副本会被移动到
+`~/.daat-locus/workflows/legacy-builtin-workflows/`，从而不会意外覆盖当前内置版本。与这些旧副本不匹配的
+文件会保留为显式用户覆盖。迁移绝不会覆盖已有备份；若出现该冲突，请先手动处理后再重新加载。
 
 ## 启动工作流
 
@@ -156,19 +171,25 @@ workflow.agent({ role, model, input, output, instruction, extra_tools })
 workflow.await(handle[, transition])
 workflow.await_all(handles[, transition])
 workflow.tool({ name, input, output, run })
+-- 每个返回的 actor 还支持 actor:reset()
 ```
 
 `role` 为必填且不可为空的字符串。它用于在工作流检查器中标识 worker attempt，不会选择宿主隐藏
 profile。即使多个执行使用同一个 role，检查器仍会将它们保留为独立 attempt。
 
-`workflow.agent(...)` 返回 worker factory。`factory:run(value)` 创建 handle，
-`workflow.await(handle[, transition])` 返回 worker 的类型化输出，
-`workflow.await_all({ handle_a, handle_b }[, transition])` 会并发运行这些 worker，并按 handle
-顺序返回输出。任一 worker 失败或工作流被中断时，整个 group 都会停止并传播该失败或中断。每个并发 worker
-都有独立的 runtime 与 App 实例；只有显式共享的外部资源和工作流局部工具效果是共享的。
-`transition` 可省略，默认是 `"await"`；当下一个 worker 与上一 await group 是验证、返工或重试关系时，
-请使用 `"verify"`、`"revision"` 或 `"retry"`。需要协调一组 worker 时，请先创建 handles 再等待。
-一个 handle 只能被等待一次。
+`workflow.agent(...)` 会为当前工作流调用返回一个隔离的 worker actor。`actor:run(value)`
+创建 handle；同一 actor 的后续、顺序执行会保留其 worker-local 会话历史、隔离 App 实例、Plan
+以及其他 worker 运行状态，完成一次 run 后**不会**自动重置。`workflow.await(handle[, transition])`
+返回 worker 的类型化输出；`workflow.await_all({ handle_a, handle_b }[, transition])` 并发运行
+handles 并按顺序返回输出。任一 worker 失败或工作流被中断时，整个 group 都会停止并传播该失败或
+中断。每次独立的 `workflow.agent(...)` 调用（即使 role 相同）都会创建独立 runtime 与 App 实例；
+不同 workflow invocation 的 actor 也彼此隔离。只有显式共享的外部资源和工作流局部工具效果会共享。
+
+只有在需要全新的 worker-local 会话、App 实例、Plan 和运行状态时才调用 `actor:reset()`。reset 是显式
+操作、不返回 worker 输出，并像 `await` 一样通过 workflow runner yield；一个 actor 的 handle 正在运行
+时不要 reset。`transition` 可省略，默认是 `"await"`；当下一个 worker 与上一 await group 是验证、返工
+或重试关系时，请使用 `"verify"`、`"revision"` 或 `"retry"`。需要协调一组 worker 时，请先创建
+handles 再等待。一个 handle 只能被等待一次。
 
 ## 可移植 Schema
 

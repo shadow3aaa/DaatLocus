@@ -783,32 +783,109 @@ fn workflow_snapshot_outline_lines(
         .iter()
         .map(|worker| worker.agent_run_time_ms)
         .sum::<u64>();
+    let actors = snapshot
+        .workers
+        .iter()
+        .map(workflow_snapshot_actor_id)
+        .collect::<std::collections::HashSet<_>>();
     let mut lines = vec![Line::from(format!(
-        "run {} · {:?} · Worked for {} total · input {}",
+        "run {} · {:?} · {} actor{} · Worked for {} total · input {}",
         snapshot.run_id,
         snapshot.status,
+        actors.len(),
+        if actors.len() == 1 { "" } else { "s" },
         format_workflow_agent_run_time(total_agent_run_time_ms),
         snapshot.input
     ))];
-    let mut role_attempts = std::collections::BTreeMap::<&str, usize>::new();
-    lines.extend(snapshot.workers.iter().map(|worker| {
-        let attempt = role_attempts.entry(worker.role.as_str()).or_default();
-        *attempt += 1;
+    let mut actors = Vec::<WorkflowSnapshotActor>::new();
+    for worker in &snapshot.workers {
+        let actor_id = workflow_snapshot_actor_id(worker);
+        if let Some(actor) = actors.iter_mut().find(|actor| actor.actor_id == actor_id) {
+            actor.attempt_count += 1;
+            actor.agent_run_time_ms = actor
+                .agent_run_time_ms
+                .saturating_add(worker.agent_run_time_ms);
+            if worker.started_at_ms >= actor.latest_started_at_ms {
+                actor.latest_started_at_ms = worker.started_at_ms;
+                actor.model = worker.model.clone();
+                actor.status = worker.status;
+            }
+        } else {
+            actors.push(WorkflowSnapshotActor {
+                actor_id,
+                role: workflow_snapshot_worker_role(worker),
+                label: String::new(),
+                model: worker.model.clone(),
+                status: worker.status,
+                agent_run_time_ms: worker.agent_run_time_ms,
+                attempt_count: 1,
+                latest_started_at_ms: worker.started_at_ms,
+            });
+        }
+    }
+
+    let mut role_counts = std::collections::BTreeMap::<String, usize>::new();
+    for actor in &actors {
+        *role_counts.entry(actor.role.clone()).or_default() += 1;
+    }
+    let mut role_ordinals = std::collections::BTreeMap::<String, usize>::new();
+    for actor in &mut actors {
+        if role_counts.get(&actor.role).copied().unwrap_or_default() > 1 {
+            let ordinal = role_ordinals.entry(actor.role.clone()).or_default();
+            *ordinal += 1;
+            actor.label = format!("{} #{}", actor.role, ordinal);
+        } else {
+            actor.label = actor.role.clone();
+        }
+    }
+
+    lines.extend(actors.into_iter().map(|actor| {
         Line::from(format!(
-            "{} {} · attempt {} · {} · {:?} · Worked for {}",
-            if worker.status == crate::workflow::WorkflowNodeStatus::Completed {
+            "{} {} · {} · {:?} · Worked for {}",
+            if actor.status == crate::workflow::WorkflowNodeStatus::Completed {
                 "✓"
             } else {
                 "○"
             },
-            worker.role,
-            attempt,
-            worker.model,
-            worker.status,
-            format_workflow_agent_run_time(worker.agent_run_time_ms)
+            actor.label,
+            if actor.attempt_count == 1 {
+                "1 attempt".to_string()
+            } else {
+                format!("{} attempts", actor.attempt_count)
+            },
+            actor.status,
+            format_workflow_agent_run_time(actor.agent_run_time_ms)
         ))
     }));
     lines
+}
+
+struct WorkflowSnapshotActor {
+    actor_id: String,
+    role: String,
+    label: String,
+    model: String,
+    status: crate::workflow::WorkflowNodeStatus,
+    agent_run_time_ms: u64,
+    attempt_count: usize,
+    latest_started_at_ms: i64,
+}
+
+fn workflow_snapshot_actor_id(worker: &crate::workflow::WorkflowWorkerSnapshot) -> String {
+    let actor_id = worker.actor_id.trim();
+    if actor_id.is_empty() {
+        worker.worker_id.clone()
+    } else {
+        actor_id.to_string()
+    }
+}
+
+fn workflow_snapshot_worker_role(worker: &crate::workflow::WorkflowWorkerSnapshot) -> String {
+    if worker.role.trim().is_empty() {
+        "agent".to_string()
+    } else {
+        worker.role.clone()
+    }
 }
 
 fn format_workflow_agent_run_time(agent_run_time_ms: u64) -> String {
@@ -2030,8 +2107,15 @@ fn render_workflow_cell_lines(
         Span::styled("  [w inspect]", dim_style()),
     ])];
     if let Some(snapshot) = cell.snapshot.as_ref() {
+        let actors = snapshot
+            .workers
+            .iter()
+            .map(workflow_snapshot_actor_id)
+            .collect::<std::collections::HashSet<_>>();
         let summary = format!(
-            "{} agent{} · run {}",
+            "{} actor{} · {} run{} · {}",
+            actors.len(),
+            if actors.len() == 1 { "" } else { "s" },
             snapshot.workers.len(),
             if snapshot.workers.len() == 1 { "" } else { "s" },
             snapshot.run_id,
@@ -2856,6 +2940,92 @@ mod tests {
     };
     use crate::dashboard::assistant_activity_cell;
 
+    #[test]
+    fn workflow_transcript_groups_sequential_runs_by_actor() {
+        let snapshot = crate::workflow::WorkflowRunSnapshot {
+            run_id: "run-actors".to_string(),
+            workflow_id: "research".to_string(),
+            status: crate::workflow::WorkflowNodeStatus::Completed,
+            started_at_ms: 1,
+            completed_at_ms: Some(4),
+            input: serde_json::json!({}),
+            output: None,
+            error: None,
+            await_groups: Vec::new(),
+            transitions: Vec::new(),
+            workers: vec![
+                crate::workflow::WorkflowWorkerSnapshot {
+                    worker_id: "worker-1".to_string(),
+                    actor_id: "researcher-actor-1".to_string(),
+                    await_group_id: "await-1".to_string(),
+                    role: "researcher".to_string(),
+                    model: "main".to_string(),
+                    status: crate::workflow::WorkflowNodeStatus::Completed,
+                    started_at_ms: 1,
+                    completed_at_ms: Some(2),
+                    agent_run_time_ms: 12,
+                    input: serde_json::json!({}),
+                    output: None,
+                    error: None,
+                    activity_count: 0,
+                    activity_revision: 0,
+                    activity: Vec::new(),
+                },
+                crate::workflow::WorkflowWorkerSnapshot {
+                    worker_id: "worker-2".to_string(),
+                    actor_id: "researcher-actor-2".to_string(),
+                    await_group_id: "await-1".to_string(),
+                    role: "researcher".to_string(),
+                    model: "efficient".to_string(),
+                    status: crate::workflow::WorkflowNodeStatus::Completed,
+                    started_at_ms: 2,
+                    completed_at_ms: Some(3),
+                    agent_run_time_ms: 18,
+                    input: serde_json::json!({}),
+                    output: None,
+                    error: None,
+                    activity_count: 0,
+                    activity_revision: 0,
+                    activity: Vec::new(),
+                },
+                crate::workflow::WorkflowWorkerSnapshot {
+                    worker_id: "worker-3".to_string(),
+                    actor_id: "researcher-actor-1".to_string(),
+                    await_group_id: "await-2".to_string(),
+                    role: "researcher".to_string(),
+                    model: "main".to_string(),
+                    status: crate::workflow::WorkflowNodeStatus::Completed,
+                    started_at_ms: 3,
+                    completed_at_ms: Some(4),
+                    agent_run_time_ms: 24,
+                    input: serde_json::json!({}),
+                    output: None,
+                    error: None,
+                    activity_count: 0,
+                    activity_revision: 0,
+                    activity: Vec::new(),
+                },
+            ],
+        };
+        let rendered = workflow_snapshot_outline_lines(&snapshot)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| {
+            line.contains("researcher #1 · 2 attempts") && line.contains("Worked for 36ms")
+        }));
+        assert!(rendered.iter().any(|line| {
+            line.contains("researcher #2 · 1 attempt") && line.contains("Worked for 18ms")
+        }));
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|line| line.contains("researcher #"))
+                .count(),
+            2
+        );
+    }
     /// Verify that fenced code blocks inside an assistant cell hide their
     /// delimiters while preserving syntax-highlighted code spans.
     #[test]
