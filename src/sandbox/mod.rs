@@ -816,6 +816,7 @@ impl RuntimeSandboxPolicy {
         }
     }
 
+    #[cfg(any(target_os = "windows", test))]
     pub fn shell_spawn_spec(&self, program: &str, args: Vec<String>) -> SandboxSpawnSpec {
         if self.is_disabled() {
             return SandboxSpawnSpec {
