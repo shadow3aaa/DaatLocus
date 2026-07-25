@@ -85,7 +85,6 @@ impl WorkspaceAppSyncReport {
 }
 
 pub struct WorkspaceAppWatcherHandle {
-    #[cfg(any(not(test), all(test, target_os = "windows")))]
     _watcher: Box<dyn notify::Watcher + Send>,
 }
 

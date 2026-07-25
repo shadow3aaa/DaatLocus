@@ -387,7 +387,8 @@ fn builtin_workflow_path(id: &str) -> PathBuf {
 }
 
 fn is_legacy_builtin_workflow_source(id: &str, source: &str) -> bool {
-    let digest = hex::encode(Sha256::digest(source.as_bytes()));
+    let normalized_source = source.replace("\r\n", "\n");
+    let digest = hex::encode(Sha256::digest(normalized_source.as_bytes()));
     match id {
         "goal" => digest == LEGACY_BUILTIN_GOAL_SHA256,
         "search" => digest == LEGACY_BUILTIN_SEARCH_SHA256,
@@ -2734,6 +2735,23 @@ mod tests {
         assert!(catalog.get("global_only").is_some());
         assert!(catalog.get("session_only").is_none());
         assert!(catalog.errors().is_empty());
+    }
+
+    #[test]
+    fn legacy_builtin_workflow_detection_ignores_line_endings() {
+        let goal =
+            include_str!("../tests/fixtures/workflows/legacy_goal.lua").replace("\r\n", "\n");
+        let search =
+            include_str!("../tests/fixtures/workflows/legacy_search.lua").replace("\r\n", "\n");
+
+        assert!(is_legacy_builtin_workflow_source(
+            "goal",
+            &goal.replace('\n', "\r\n")
+        ));
+        assert!(is_legacy_builtin_workflow_source(
+            "search",
+            &search.replace('\n', "\r\n")
+        ));
     }
 
     #[test]

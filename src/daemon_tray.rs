@@ -73,7 +73,7 @@ mod platform_tray {
         TrayIcon(TrayIconEvent),
     }
 
-    pub(super) const fn gui_session_available() -> bool {
+    pub(super) fn gui_session_available() -> bool {
         #[cfg(target_os = "linux")]
         {
             std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()

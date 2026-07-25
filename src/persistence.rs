@@ -377,7 +377,7 @@ pub fn append_bytes_durable_sync(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-pub const fn set_private_file_permissions(path: &Path) {
+pub fn set_private_file_permissions(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -447,7 +447,7 @@ fn quarantine_corrupt_file_sync(path: &Path, label: &str) {
     }
 }
 
-const fn sync_parent_dir(path: &Path) {
+fn sync_parent_dir(path: &Path) {
     #[cfg(unix)]
     {
         fs::File::open(path)
