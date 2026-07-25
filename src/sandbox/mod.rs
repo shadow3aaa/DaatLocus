@@ -267,7 +267,12 @@ impl SandboxAsyncChild {
         args: Vec<String>,
         options: SandboxProcessOptions,
     ) -> std::io::Result<Self> {
+        #[cfg(target_os = "windows")]
         let spawn_spec = policy.shell_spawn_spec(program, args);
+        #[cfg(not(target_os = "windows"))]
+        let spawn_spec = policy
+            .strong_command_spawn_spec(PathBuf::from(program), args)
+            .map_err(std::io::Error::other)?;
         let mut command = tokio::process::Command::new(spawn_spec.program);
         command.args(spawn_spec.args);
         apply_tokio_command_options(policy, &mut command, options);
