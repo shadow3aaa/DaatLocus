@@ -148,7 +148,7 @@ impl DaemonTokenRegistryHandle {
         if changed || !self.path.exists() {
             write_registry(&self.path, &registry).await?;
         } else {
-            harden_private_file_permissions(&self.path);
+            harden_private_file_permissions(&self.path)?;
         }
         Ok(())
     }
@@ -350,7 +350,7 @@ async fn load_local_daemon_auth_token_at(path: &Path) -> Result<DaemonAuthToken>
     let raw = tokio::fs::read_to_string(path)
         .await
         .map_err(|err| miette!("read daemon auth token {} failed: {err}", path.display()))?;
-    harden_private_file_permissions(path);
+    harden_private_file_permissions(path)?;
     DaemonAuthToken::parse(raw.trim())
         .map_err(|err| miette!("invalid daemon auth token at {}: {err}", path.display()))
 }
@@ -384,7 +384,9 @@ fn harden_private_file_permissions(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-const fn harden_private_file_permissions(_path: &Path) {}
+const fn harden_private_file_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
 
 fn normalize_token_name(name: &str) -> Result<String> {
     let name = name.trim();
