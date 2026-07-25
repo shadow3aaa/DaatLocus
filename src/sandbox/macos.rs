@@ -29,6 +29,7 @@ const SEATBELT_BASE_POLICY: &str = r#"(version 1)
 (allow network-outbound)
 "#;
 
+#[cfg(test)]
 pub fn wrap_shell_command(
     policy: &RuntimeSandboxPolicy,
     program: &str,

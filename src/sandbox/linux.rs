@@ -12,6 +12,7 @@ use super::{
 
 const BWRAP_PROGRAM: &str = "bwrap";
 
+#[cfg(test)]
 pub fn wrap_shell_command(
     policy: &RuntimeSandboxPolicy,
     program: &str,
