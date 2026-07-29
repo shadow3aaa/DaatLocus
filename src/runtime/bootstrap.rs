@@ -253,15 +253,18 @@ impl PersistedTokenUsageRole {
     }
 }
 
-pub async fn load_token_estimate_baseline() -> TokenEstimateBaseline {
-    let persistence = PersistenceStore::runtime().await;
+pub async fn load_token_estimate_baseline(session_id: Option<&str>) -> TokenEstimateBaseline {
+    let persistence = PersistenceStore::for_session(session_id).await;
     persistence
         .read_json_state_or_default(TOKEN_ESTIMATE_BASELINE_FILE, "token estimate baseline")
         .await
 }
 
-pub async fn save_token_estimate_baseline(baseline: &TokenEstimateBaseline) {
-    let persistence = PersistenceStore::runtime().await;
+pub async fn save_token_estimate_baseline(
+    session_id: Option<&str>,
+    baseline: &TokenEstimateBaseline,
+) {
+    let persistence = PersistenceStore::for_session(session_id).await;
     if let Err(err) = persistence
         .write_json_state(TOKEN_ESTIMATE_BASELINE_FILE, baseline)
         .await
@@ -463,7 +466,7 @@ pub async fn build_eval_context_with_compiled(
         idle_since: None,
         last_idle_sleep_at: None,
         session_title: crate::runtime::session_title::SessionTitleState::default(),
-        token_estimate_baseline: load_token_estimate_baseline().await,
+        token_estimate_baseline: load_token_estimate_baseline(None).await,
     }
 }
 
@@ -604,5 +607,30 @@ mod tests {
         let ignored = reloaded.baseline_for_role(PersistentTokenUsageRole::Efficient, "model-b");
         assert!(ignored.total_token_usage.is_zero());
         assert!(ignored.daily_token_usage.is_empty());
+    }
+
+    #[tokio::test]
+    async fn token_estimate_baseline_is_isolated_per_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
+        let baseline = TokenEstimateBaseline {
+            estimated_input_tokens: 214_336,
+            observed_input_tokens: Some(245_477),
+        };
+
+        save_token_estimate_baseline(Some("session-a"), &baseline).await;
+
+        assert_eq!(
+            load_token_estimate_baseline(Some("session-a")).await,
+            baseline
+        );
+        assert_eq!(
+            load_token_estimate_baseline(Some("session-b")).await,
+            TokenEstimateBaseline::default()
+        );
+        assert_eq!(
+            load_token_estimate_baseline(None).await,
+            TokenEstimateBaseline::default()
+        );
     }
 }

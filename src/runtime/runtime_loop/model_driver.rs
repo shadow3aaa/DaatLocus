@@ -111,7 +111,11 @@ pub(super) async fn run_agent_turn_with_retry(
                     estimated_input_tokens,
                     observed_input_tokens: Some(observed_input),
                 };
-                save_token_estimate_baseline(&context.token_estimate_baseline).await;
+                save_token_estimate_baseline(
+                    context.session_id.as_deref(),
+                    &context.token_estimate_baseline,
+                )
+                .await;
             }
             clear_runtime_status(tx);
             Ok(success.response)

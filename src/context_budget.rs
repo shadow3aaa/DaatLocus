@@ -26,7 +26,7 @@ pub struct BudgetSection {
     pub tokens: usize,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenEstimateBaseline {
     pub estimated_input_tokens: usize,
     pub observed_input_tokens: Option<usize>,
@@ -75,8 +75,8 @@ impl TokenEstimateBaseline {
         if self.estimated_input_tokens == 0 {
             return current_estimated_input_tokens;
         }
-        let delta = current_estimated_input_tokens.saturating_sub(self.estimated_input_tokens);
-        observed.saturating_add(delta)
+        let underestimated_tokens = observed.saturating_sub(self.estimated_input_tokens);
+        current_estimated_input_tokens.saturating_add(underestimated_tokens)
     }
 
     pub fn conservative_total_input_tokens(&self, current_estimated_input_tokens: usize) -> usize {
@@ -520,7 +520,7 @@ mod tests {
             observed_input_tokens: Some(50),
         };
 
-        assert_eq!(baseline.calibrated_total_input_tokens(200), 150);
+        assert_eq!(baseline.calibrated_total_input_tokens(200), 200);
         assert_eq!(baseline.conservative_total_input_tokens(200), 200);
     }
 
@@ -575,7 +575,26 @@ mod tests {
             estimated_input_tokens: 545_000,
             observed_input_tokens: Some(0),
         };
-        assert_eq!(baseline.calibrated_total_input_tokens(600_000), 55_000);
+        assert_eq!(baseline.calibrated_total_input_tokens(600_000), 600_000);
+    }
+
+    #[test]
+    fn token_estimate_baseline_does_not_make_observed_tokens_a_request_floor() {
+        let baseline = TokenEstimateBaseline {
+            estimated_input_tokens: 214_336,
+            observed_input_tokens: Some(245_477),
+        };
+        let limits = RequestBudgetLimits {
+            context_window_tokens: 258_400,
+            auto_compact_threshold_tokens: 244_800,
+            reserved_output_tokens: 13_600,
+        };
+
+        assert_eq!(baseline.calibrated_total_input_tokens(10_000), 41_141);
+        let breakdown =
+            breakdown_for(10_000, limits).with_conservative_calibrated_input_tokens(&baseline);
+        assert_eq!(breakdown.total_input_tokens, 41_141);
+        assert!(!breakdown.above_auto_compact_threshold());
     }
 
     #[test]

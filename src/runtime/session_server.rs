@@ -242,7 +242,7 @@ pub async fn run_session_serve(
         idle_since: None,
         last_idle_sleep_at: None,
         session_title: crate::runtime::session_title::SessionTitleState::default(),
-        token_estimate_baseline: load_token_estimate_baseline().await,
+        token_estimate_baseline: load_token_estimate_baseline(Some(session_id.as_str())).await,
     };
 
     let mut sleep_status = load_sleep_status_snapshot().await;

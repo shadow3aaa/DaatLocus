@@ -1168,6 +1168,11 @@ pub async fn execute_agent_loop_step(
         context.afterclaim_context_fingerprint = None;
         context.visible_source_lines.clear();
         context.token_estimate_baseline = TokenEstimateBaseline::default();
+        crate::runtime::bootstrap::save_token_estimate_baseline(
+            context.session_id.as_deref(),
+            &context.token_estimate_baseline,
+        )
+        .await;
     }
     context.claimed_event_ids.clear();
     if !runtime_step.is_history_empty() {
