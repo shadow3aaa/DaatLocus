@@ -47,6 +47,11 @@ mod builtin_workflow_bindings {
 }
 
 const WORKFLOW_TOOL_PREFIX: &str = "workflow__";
+const DEFAULT_WORKFLOW_TOOL_DESCRIPTION: &str = "Run this typed Lua workflow. It orchestrates isolated workers and returns the workflow's declared output.";
+
+fn default_workflow_tool_description() -> String {
+    DEFAULT_WORKFLOW_TOOL_DESCRIPTION.to_string()
+}
 const LEGACY_BUILTIN_WORKFLOW_BACKUP_DIR: &str = "legacy-builtin-workflows";
 const LEGACY_BUILTIN_GOAL_SHA256: &str =
     "d4b85cc9d7174465293e63c3dc08d99e0fb949e36b70c0edb765633771d13f84";
@@ -204,6 +209,8 @@ pub struct WorkflowDefinition {
     pub path: PathBuf,
     #[serde(skip)]
     source: String,
+    #[serde(default = "default_workflow_tool_description")]
+    pub description: String,
     pub input_schema: Value,
     pub output_schema: Value,
 }
@@ -1261,6 +1268,18 @@ fn load_workflow_definition(path: &Path) -> Result<WorkflowDefinition> {
     load_workflow_definition_from_source(path, &source)
 }
 
+fn workflow_description_from_lua(table: &Table) -> mlua::Result<String> {
+    let description = table
+        .get::<Option<String>>("description")?
+        .unwrap_or_else(default_workflow_tool_description);
+    if description.trim().is_empty() {
+        return Err(mlua::Error::external(
+            "workflow.define description must be a non-empty string when provided",
+        ));
+    }
+    Ok(description.trim().to_string())
+}
+
 fn load_workflow_definition_from_source(path: &Path, source: &str) -> Result<WorkflowDefinition> {
     let lua = new_lua().map_err(|err| lua_error(&err))?;
     let definition_slot = Arc::new(Mutex::new(None::<WorkflowDefinition>));
@@ -1275,6 +1294,7 @@ fn load_workflow_definition_from_source(path: &Path, source: &str) -> Result<Wor
         workflow.set(
             "define",
             scope.create_function(move |lua, table: Table| {
+                let description = workflow_description_from_lua(&table)?;
                 let input_schema: Value = lua.from_value(table.get("input")?)?;
                 let output_schema: Value = lua.from_value(table.get("output")?)?;
                 validate_model_facing_schema(&input_schema).map_err(mlua::Error::external)?;
@@ -1306,6 +1326,7 @@ fn load_workflow_definition_from_source(path: &Path, source: &str) -> Result<Wor
                     id,
                     path: definition_path.clone(),
                     source: definition_source.clone(),
+                    description,
                     input_schema,
                     output_schema,
                 });
@@ -1375,9 +1396,11 @@ async fn run_workflow_script(
         .set(
             "define",
             lua.create_function(move |lua, table: Table| {
+                let description = workflow_description_from_lua(&table)?;
                 let input_schema: Value = lua.from_value(table.get("input")?)?;
                 let output_schema: Value = lua.from_value(table.get("output")?)?;
-                if input_schema != define_definition.input_schema
+                if description != define_definition.description
+                    || input_schema != define_definition.input_schema
                     || output_schema != define_definition.output_schema
                 {
                     return Err(mlua::Error::external(
@@ -2719,6 +2742,27 @@ mod tests {
             ])
         );
 
+        let investigate = catalog
+            .get("investigate")
+            .expect("builtin investigate workflow");
+        assert_eq!(investigate.path, builtin_workflow_path("investigate"));
+        assert_eq!(
+            investigate.source,
+            include_str!("../workflows/investigate.lua")
+        );
+        assert!(!global_workflows.join("investigate.lua").exists());
+        assert_eq!(
+            investigate.input_schema["required"],
+            serde_json::json!(["goals"])
+        );
+        assert_eq!(
+            investigate.output_schema["required"],
+            serde_json::json!(["summary", "investigations", "sources"])
+        );
+        assert!(investigate.description.contains("read-only"));
+        assert!(investigate.description.contains("workflow__goal"));
+        assert!(goal.description.contains("read-only"));
+
         let search = catalog.get("search").expect("builtin search workflow");
         assert_eq!(search.path, builtin_workflow_path("search"));
         assert_eq!(search.source, include_str!("../workflows/search.lua"));
@@ -2911,7 +2955,7 @@ mod tests {
     struct ScriptedWorkerProvider {
         role: &'static str,
         responses: Arc<std::sync::Mutex<VecDeque<ScriptedWorkerResponse>>>,
-        summaries: Arc<std::sync::Mutex<VecDeque<Value>>>,
+        summaries: Arc<std::sync::Mutex<VecDeque<String>>>,
         inputs: Arc<std::sync::Mutex<Vec<Value>>>,
         requests: Arc<std::sync::Mutex<Vec<AgentTurnRequest>>>,
         budgets: RequestBudgetLimits,
@@ -2940,7 +2984,7 @@ mod tests {
         fn with_script(
             role: &'static str,
             responses: Vec<ScriptedWorkerResponse>,
-            summaries: Vec<Value>,
+            summaries: Vec<String>,
             budgets: RequestBudgetLimits,
         ) -> Self {
             Self {
@@ -2980,16 +3024,9 @@ mod tests {
             _request: PromptRequest,
             _options: ModelRequestOptions,
         ) -> Result<Value> {
-            self.summaries
-                .lock()
-                .expect("scripted summaries lock")
-                .pop_front()
-                .ok_or_else(|| {
-                    miette!(
-                        "scripted {} worker ran out of compaction summaries",
-                        self.role
-                    )
-                })
+            Err(miette!(
+                "workflow compaction must not use a structured request"
+            ))
         }
 
         async fn complete_agent_turn(
@@ -2997,6 +3034,28 @@ mod tests {
             request: AgentTurnRequest,
             _options: ModelRequestOptions,
         ) -> Result<AgentTurnStreamResult> {
+            if request.tools.is_empty() {
+                let summary = self
+                    .summaries
+                    .lock()
+                    .expect("scripted summaries lock")
+                    .pop_front()
+                    .ok_or_else(|| {
+                        miette!(
+                            "scripted {} worker ran out of compaction summaries",
+                            self.role
+                        )
+                    })?;
+                return Ok(AgentTurnStreamResult {
+                    items: vec![AgentTurnItem::AssistantMessage {
+                        content: summary.clone(),
+                    }],
+                    raw_stream_follow_up: false,
+                    last_assistant_message: Some(summary),
+                    last_reasoning_content: None,
+                });
+            }
+
             self.requests
                 .lock()
                 .expect("scripted requests lock")
@@ -4050,6 +4109,106 @@ workflow.define({
         assert_eq!(search_inputs[2]["query"], "second route");
     }
 
+    #[tokio::test]
+    async fn investigate_workflow_runs_parallel_investigators_and_synthesizes_results() {
+        let main = ScriptedWorkerProvider::new(
+            "main",
+            vec![json!({
+                "summary": "combined investigation",
+                "sources": ["path/alpha", "path/beta"]
+            })],
+        );
+        let efficient = ScriptedWorkerProvider::new(
+            "efficient",
+            vec![
+                json!({
+                    "findings": "alpha finding",
+                    "sources": ["path/alpha"]
+                }),
+                json!({
+                    "findings": "beta finding",
+                    "sources": ["path/beta"]
+                }),
+            ],
+        );
+        let main_probe = main.clone();
+        let efficient_probe = efficient.clone();
+        let isolated = IsolatedWorkflowContext::new(main, efficient).await;
+
+        let result = invoke(
+            &isolated.context,
+            WorkflowInvocation {
+                workflow_id: "investigate".to_string(),
+                input: json!({
+                    "goals": ["inspect alpha", "inspect beta"]
+                }),
+            },
+        )
+        .await
+        .expect("invoke investigate workflow");
+        drop(isolated);
+
+        assert_eq!(
+            result.status,
+            WorkflowInvocationStatus::Completed,
+            "{}",
+            result.message
+        );
+        assert_eq!(
+            result.output,
+            Some(json!({
+                "summary": "combined investigation",
+                "investigations": [
+                    {
+                        "goal": "inspect alpha",
+                        "findings": "alpha finding",
+                        "sources": ["path/alpha"]
+                    },
+                    {
+                        "goal": "inspect beta",
+                        "findings": "beta finding",
+                        "sources": ["path/beta"]
+                    }
+                ],
+                "sources": ["path/alpha", "path/beta"]
+            }))
+        );
+        assert_eq!(
+            result
+                .snapshot
+                .workers
+                .iter()
+                .map(|worker| worker.role.as_str())
+                .collect::<Vec<_>>(),
+            vec!["investigation", "investigation", "synthesis"]
+        );
+        assert_eq!(
+            efficient_probe.inputs(),
+            vec![
+                json!({ "goal": "inspect alpha" }),
+                json!({ "goal": "inspect beta" })
+            ]
+        );
+        assert_eq!(
+            main_probe.inputs(),
+            vec![json!({
+                "goals": ["inspect alpha", "inspect beta"],
+                "investigations": [
+                    {
+                        "goal": "inspect alpha",
+                        "findings": "alpha finding",
+                        "sources": ["path/alpha"]
+                    },
+                    {
+                        "goal": "inspect beta",
+                        "findings": "beta finding",
+                        "sources": ["path/beta"]
+                    }
+                ]
+            })]
+        );
+    }
+
     #[test]
     fn reset_rejects_a_running_actor() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
@@ -4271,7 +4430,7 @@ workflow.define({{
         let main = ScriptedWorkerProvider::with_script(
             "main",
             vec![ScriptedWorkerResponse::finish(json!({ "value": "second" }))],
-            vec![json!({ "summary": "worker context retained" })],
+            vec!["worker context retained".to_string()],
             RequestBudgetLimits {
                 context_window_tokens: 32_000,
                 auto_compact_threshold_tokens: 30_000,
@@ -4370,7 +4529,7 @@ workflow.define({{
                 ScriptedWorkerResponse::ContextBudgetError,
                 ScriptedWorkerResponse::finish(json!({ "value": "done" })),
             ],
-            vec![json!({ "summary": "overflow-recovered worker context" })],
+            vec!["overflow-recovered worker context".to_string()],
             RequestBudgetLimits {
                 context_window_tokens: 32_000,
                 auto_compact_threshold_tokens: 30_000,

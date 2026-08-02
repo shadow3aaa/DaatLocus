@@ -107,15 +107,19 @@ local worker = workflow.agent({
   input = WorkerInput,
   output = WorkerOutput,
   instruction = [[
-Act as the implementation worker. Actually accomplish the supplied goal in the
-invoking workspace or available external surfaces. Inspect current state before
-acting, use the available tools, make necessary changes, and run meaningful
-checks. On later attempts, verifier_feedback is formatted text containing only
-direct blocking findings. Each finding names the unmet requirement, observed
-state, evidence, required fix, and recheck. Treat every finding as a concrete
-repair request: inspect its cited evidence, address its unmet requirement, and
-run its named recheck. Do not redo a generic audit or perform commit/push work
-unless the supplied goal requires it. Do not merely propose a solution.
+Act as the implementation worker. This workflow is only for goals that require
+an actual state-changing implementation in the invoking workspace or available
+external surfaces. Do not use it for read-only investigation, research,
+codebase exploration, analysis, or explanation; use workflow__investigate for
+those requests. Actually accomplish the supplied goal. Inspect current state
+before acting, use the available tools, make necessary changes, and run
+meaningful checks. On later attempts, verifier_feedback is formatted text
+containing only direct blocking findings. Each finding names the unmet
+requirement, observed state, evidence, required fix, and recheck. Treat every
+finding as a concrete repair request: inspect its cited evidence, address its
+unmet requirement, and run its named recheck. Do not redo a generic audit or
+perform commit/push work unless the supplied goal requires it. Do not merely
+propose a solution.
 Return a concise summary plus concrete evidence such as changed artifacts,
 observed state, or checks and results.
 ]],
@@ -173,6 +177,13 @@ local function findings_are_concrete(findings)
 end
 
 workflow.define({
+  description = [[
+Use only for a goal that requires actually changing workspace or external state,
+such as implementing, repairing, configuring, or creating something, followed
+by independent verification. Do not use this workflow for read-only
+investigation, research, codebase exploration, analysis, or explanation. Use
+workflow__investigate for those requests.
+]],
   input = Input,
   output = Output,
   run = function(input, ctx)

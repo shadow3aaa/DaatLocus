@@ -32,12 +32,14 @@ Workflow 与运行时的其他对象刻意保持不同边界：
 某个文件无效不会阻止其他有效工作流加载；错误会显示在工作流选择器中。新增或修改文件后，使用
 Dashboard 的 `/skills reload` 动作重新加载；该动作会同时重新加载 skills 和 workflows。
 
-每个发布版本还会在源码目录中提供两个内置 workflow：
+每个发布版本还会在源码目录中提供三个内置 workflow：
 
-- `goal` 会反复实现一个工作区目标，并交给独立 verifier 判断是否完成。
-- `search` 用于开放式证据研究：planner 创建彼此独立的搜索 route，不同的 searcher actor 并发执行这些
-  route；verifier 要么把尚缺的证据交回 planner，要么在证据充分后把已验证材料交给 analyzer 生成最终结果。
-  该 workflow 刻意不设尝试次数或 route 数量上限；中断、错误和运行时预算仍然生效。
+- `goal` 会反复实现一个工作区目标，并交给独立 verifier 判断是否完成。它只适用于需要实际改变工作区或外部状态的任务，
+  例如实现、修复、配置或创建；不要将它用于只读调查、研究、代码库探索、分析或解释。
+- `investigate` 接受一个或多个只读调查目标，为每个目标并发启动一个隔离 investigator，随后启动独立的 synthesis worker。
+  它返回汇总报告、每个目标的调查结果以及来源标识；调查 worker 和汇总 worker 都不得修改状态。
+- `search` 用于开放式证据研究：planner 创建彼此独立的搜索 route，不同的 searcher actor 并发执行这些 route；verifier 要么把尚缺的证据交回 planner，
+  要么在证据充分后把已验证材料交给 analyzer 生成最终结果。该 workflow 刻意不设尝试次数或 route 数量上限；中断、错误和运行时预算仍然生效。
 
 内置 workflow 会编译进 binary 并从内存加载；它们绝不会复制到
 `~/.daat-locus/workflows`。该目录中同 id 的文件会显式覆盖内置定义；删除或重命名该文件后重新加载，

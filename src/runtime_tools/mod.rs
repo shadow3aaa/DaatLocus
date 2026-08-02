@@ -489,6 +489,7 @@ impl RuntimeTool for AppRuntimeTool {
 struct WorkflowRuntimeTool {
     workflow_id: String,
     name: String,
+    description: String,
     input_spec: AgentToolInputSpec,
 }
 
@@ -497,6 +498,7 @@ impl WorkflowRuntimeTool {
         Self {
             workflow_id: definition.id.clone(),
             name: definition.tool_name(),
+            description: definition.description.clone(),
             input_spec: AgentToolInputSpec::JsonSchema {
                 schema: definition.input_schema.clone(),
             },
@@ -510,8 +512,8 @@ impl RuntimeTool for WorkflowRuntimeTool {
         &self.name
     }
 
-    fn description(&self) -> &'static str {
-        "Run this typed Lua workflow. It orchestrates isolated workers and returns the workflow's declared output."
+    fn description(&self) -> &str {
+        &self.description
     }
 
     fn input_spec(&self) -> AgentToolInputSpec {
@@ -1878,6 +1880,28 @@ mod tests {
         assert!(!names.contains("coding_open_project"));
         assert!(!names.contains("terminal_exec"));
         assert!(!names.contains("browser_open_page"));
+    }
+
+    #[tokio::test]
+    async fn workflow_tools_expose_declared_purpose_descriptions() {
+        let isolated = IsolatedTestContext::new().await;
+        let specs = build_runtime_tool_specs(&isolated.context);
+        drop(isolated);
+
+        let goal = specs
+            .iter()
+            .find(|tool| tool.name == "workflow__goal")
+            .expect("goal workflow tool");
+        assert!(goal.description.contains("actually changing"));
+        assert!(goal.description.contains("read-only"));
+        assert!(goal.description.contains("workflow__investigate"));
+
+        let investigate = specs
+            .iter()
+            .find(|tool| tool.name == "workflow__investigate")
+            .expect("investigate workflow tool");
+        assert!(investigate.description.contains("read-only"));
+        assert!(investigate.description.contains("workflow__goal"));
     }
 
     #[tokio::test]

@@ -43,10 +43,17 @@ Invalid files do not prevent valid workflows from loading. Their load errors
 appear in the workflow picker. After adding or changing a file, use the
 Dashboard's `/skills reload` action; it reloads both skills and workflows.
 
-Each release also includes two built-in workflows in the source catalog:
+Each release also includes three built-in workflows in the source catalog:
 
 - `goal` repeatedly implements a workspace goal and asks an independent verifier
-  whether it is complete.
+  whether it is complete. Use it only for goals that require changing workspace
+  or external state, such as implementing, repairing, configuring, or creating
+  something. Do not use it for read-only investigation, research, codebase
+  exploration, analysis, or explanation.
+- `investigate` accepts one or more read-only targets, starts one isolated
+  investigator for each target concurrently, then starts a separate synthesis
+  worker. It returns the synthesized report, each target's findings, and source
+  identifiers. Investigators and the synthesizer must not make changes.
 - `search` performs open-ended evidence research. A planner creates independent
   search routes, separate searcher actors run those routes concurrently, and a
   verifier either sends the remaining evidence gap back to the planner or, once
