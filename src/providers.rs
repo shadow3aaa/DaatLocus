@@ -95,6 +95,12 @@ enum PromptToolChoiceMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolStrictMode {
+    Enabled,
+    Omitted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ThinkingBudgetMode {
     ReasoningEffortString,
     NestedReasoningObject,
@@ -120,6 +126,7 @@ enum ReasoningContentMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ChatCompletionsAdapterState {
     prompt_tool_choice_mode: PromptToolChoiceMode,
+    tool_strict_mode: ToolStrictMode,
     thinking_budget_mode: ThinkingBudgetMode,
     vision_mode: VisionMode,
     reasoning_content_mode: ReasoningContentMode,
@@ -129,6 +136,7 @@ impl Default for ChatCompletionsAdapterState {
     fn default() -> Self {
         Self {
             prompt_tool_choice_mode: PromptToolChoiceMode::NamedFunction,
+            tool_strict_mode: ToolStrictMode::Enabled,
             thinking_budget_mode: ThinkingBudgetMode::ReasoningEffortString,
             vision_mode: VisionMode::Enabled,
             reasoning_content_mode: ReasoningContentMode::Enabled,
@@ -182,7 +190,9 @@ impl OpenAIClient {
         let context_window_tokens = model_config.context_window_tokens();
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
-        let reserved_output_tokens = model_config.reserved_output_tokens();
+        // Chat Completions requires a positive output limit. Keep the runtime
+        // budget and the serialized max_tokens field on the same minimum.
+        let reserved_output_tokens = model_config.reserved_output_tokens().max(1);
         let max_completion_tokens = model_config.max_completion_tokens();
         Self {
             client,
@@ -435,13 +445,18 @@ impl OpenAIClient {
     }
 
     /// Step adapter state to the next downgrade level on a 400 response.
-    /// Order: `tool_choice` (`NamedFunction` → `RequiredString` → Omit),
-    /// then thinking budget (`ReasoningEffortString` → `NestedReasoningObject` → Unsupported).
+    /// Order: omit function `strict`, downgrade `tool_choice`
+    /// (`NamedFunction` → `RequiredString` → Omit), then downgrade the
+    /// thinking budget (`ReasoningEffortString` → `NestedReasoningObject` → Unsupported).
     /// Returns false when no further downgrade is available.
     fn step_adapter_state_for_bad_request(
         state: &mut ChatCompletionsAdapterState,
         has_thinking_budget: bool,
+        allow_tool_strict_downgrade: bool,
     ) -> bool {
+        if allow_tool_strict_downgrade && Self::disable_tool_strict_for_bad_request(state, true) {
+            return true;
+        }
         if state.prompt_tool_choice_mode == PromptToolChoiceMode::NamedFunction {
             state.prompt_tool_choice_mode = PromptToolChoiceMode::RequiredString;
             return true;
@@ -459,6 +474,17 @@ impl OpenAIClient {
                 state.thinking_budget_mode = ThinkingBudgetMode::Unsupported;
                 return true;
             }
+        }
+        false
+    }
+
+    fn disable_tool_strict_for_bad_request(
+        state: &mut ChatCompletionsAdapterState,
+        has_tools: bool,
+    ) -> bool {
+        if has_tools && state.tool_strict_mode == ToolStrictMode::Enabled {
+            state.tool_strict_mode = ToolStrictMode::Omitted;
+            return true;
         }
         false
     }
@@ -512,17 +538,19 @@ impl OpenAIClient {
             }
 
             // On 400, step through adapter compatibility modes in order:
-            // tool_choice downgrade first, then thinking budget downgrade.
+            // Omit function strict first, then downgrade tool_choice and the thinking budget.
             // Providers may reject parameters with generic error messages
             // that don't name the specific parameter, so we always try the
             // next mode instead of matching error text.
             if Self::step_adapter_state_for_bad_request(
                 &mut adapter_state,
                 self.thinking_budget.is_some(),
+                !is_standard_openai_base_url(&self.base_url),
             ) {
                 self.update_adapter_state(adapter_state);
                 warn!(
-                    "llm api returned 400; retrying prompt request with downgraded adapter (tool_choice={:?}, thinking={:?})\n{}",
+                    "llm api returned 400; retrying prompt request with downgraded adapter (tool_strict={:?}, tool_choice={:?}, thinking={:?})\n{}",
+                    adapter_state.tool_strict_mode,
                     adapter_state.prompt_tool_choice_mode,
                     adapter_state.thinking_budget_mode,
                     request_context.join("\n")
@@ -592,6 +620,7 @@ impl OpenAIClient {
         let url = self.url();
         let budget = &options.budget;
         let request_context = summarize_agent_turn_request(&request, Some(budget));
+        let request_has_tools = !request.tools.is_empty();
         let request_has_reasoning_content = request.messages.iter().any(|message| {
             matches!(
                 message,
@@ -693,6 +722,18 @@ impl OpenAIClient {
                 self.update_adapter_state(adapter_state);
                 warn!(
                     "llm provider rejected image input; retrying agent turn without images\n{}",
+                    request_context.join("\n")
+                );
+                continue;
+            }
+
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && !is_standard_openai_base_url(&self.base_url)
+                && Self::disable_tool_strict_for_bad_request(&mut adapter_state, request_has_tools)
+            {
+                self.update_adapter_state(adapter_state);
+                warn!(
+                    "llm provider returned HTTP 400; retrying agent turn without function strict\n{}",
                     request_context.join("\n")
                 );
                 continue;
@@ -1029,7 +1070,14 @@ impl ChatCompletionsAdapter for StandardChatCompletionsAdapter {
         request: AgentTurnRequest,
         stream: bool,
     ) -> serde_json::Value {
-        build_agent_turn_payload_common(client, request, stream, false, false)
+        build_agent_turn_payload_common(
+            client,
+            request,
+            stream,
+            false,
+            false,
+            ToolStrictMode::Enabled,
+        )
     }
 }
 
@@ -1058,6 +1106,11 @@ impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
             "temperature": client.temperature,
             "max_tokens": max_completion_tokens_for_chat_payload(client),
         });
+        if self.state.tool_strict_mode == ToolStrictMode::Omitted
+            && let Some(function) = payload["tools"][0]["function"].as_object_mut()
+        {
+            function.remove("strict");
+        }
         match self.state.prompt_tool_choice_mode {
             PromptToolChoiceMode::NamedFunction => {
                 payload["tool_choice"] = json!({
@@ -1091,6 +1144,7 @@ impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
             stream,
             true,
             self.state.reasoning_content_mode == ReasoningContentMode::Enabled,
+            self.state.tool_strict_mode,
         )
     }
 }
@@ -1547,6 +1601,114 @@ mod tests {
     }
 
     #[test]
+    fn compatible_agent_payload_omits_tool_strict_after_downgrade() {
+        let client = OpenAIClient::from_parts(
+            "test-key",
+            "https://compatible.example/v1",
+            &ModelConfig::default(),
+        );
+        let request = AgentTurnRequest {
+            messages: vec![AgentMessage::user("hello")],
+            tools: vec![AgentToolSpec {
+                name: "demo".to_string(),
+                description: "demo tool".to_string(),
+                input_spec: AgentToolInputSpec::JsonSchema {
+                    schema: json!({
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": false
+                    }),
+                },
+            }],
+        };
+
+        let enabled = CompatibleChatCompletionsAdapter {
+            state: ChatCompletionsAdapterState::default(),
+        }
+        .build_agent_turn_payload(&client, request.clone(), true);
+        let omitted = CompatibleChatCompletionsAdapter {
+            state: ChatCompletionsAdapterState {
+                tool_strict_mode: ToolStrictMode::Omitted,
+                ..ChatCompletionsAdapterState::default()
+            },
+        }
+        .build_agent_turn_payload(&client, request, true);
+
+        assert_eq!(enabled["tools"][0]["function"]["strict"], true);
+        assert!(omitted["tools"][0]["function"].get("strict").is_none());
+    }
+
+    #[test]
+    fn compatible_prompt_payload_omits_tool_strict_after_downgrade() {
+        let client = OpenAIClient::from_parts(
+            "test-key",
+            "https://compatible.example/v1",
+            &ModelConfig::default(),
+        );
+        let request = PromptRequest {
+            tool_name: "demo".to_string(),
+            tool_description: "demo tool".to_string(),
+            output_schema: json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }),
+            system_messages: vec![],
+            long_term_memory_messages: vec![],
+            history_messages: vec![],
+            current_user_message: "hello".to_string(),
+            retry_messages: vec![],
+        };
+        let adapter = CompatibleChatCompletionsAdapter {
+            state: ChatCompletionsAdapterState {
+                tool_strict_mode: ToolStrictMode::Omitted,
+                ..ChatCompletionsAdapterState::default()
+            },
+        };
+
+        let payload =
+            adapter.build_prompt_payload(&client, &request, request.output_schema.clone());
+
+        assert!(payload["tools"][0]["function"].get("strict").is_none());
+    }
+
+    #[test]
+    fn generic_bad_request_downgrades_tool_strict_first() {
+        let mut state = ChatCompletionsAdapterState::default();
+
+        assert!(OpenAIClient::step_adapter_state_for_bad_request(
+            &mut state, true, true
+        ));
+
+        assert_eq!(state.tool_strict_mode, ToolStrictMode::Omitted);
+        assert_eq!(
+            state.prompt_tool_choice_mode,
+            PromptToolChoiceMode::NamedFunction
+        );
+        assert_eq!(
+            state.thinking_budget_mode,
+            ThinkingBudgetMode::ReasoningEffortString
+        );
+    }
+
+    #[test]
+    fn standard_openai_bad_request_keeps_tool_strict_enabled() {
+        let mut state = ChatCompletionsAdapterState::default();
+
+        assert!(OpenAIClient::step_adapter_state_for_bad_request(
+            &mut state, true, false
+        ));
+
+        assert_eq!(state.tool_strict_mode, ToolStrictMode::Enabled);
+        assert_eq!(
+            state.prompt_tool_choice_mode,
+            PromptToolChoiceMode::RequiredString
+        );
+    }
+
+    #[test]
     fn thinking_budget_is_injected_as_reasoning_effort_by_default() {
         let model_config = ModelConfig {
             thinking_budget: Some(thinking_budget("medium")),
@@ -1563,6 +1725,7 @@ mod tests {
             true,
             false,
             false,
+            ToolStrictMode::Enabled,
         );
 
         assert_eq!(payload["reasoning_effort"], "medium");
@@ -1573,6 +1736,8 @@ mod tests {
         let model_config = ModelConfig {
             model_id: "deepseek-reasoner".to_string(),
             thinking_budget: Some(thinking_budget("medium")),
+            context_window_tokens: 1_000_000,
+            effective_context_window_percent: 100,
             max_completion_tokens: 393_216,
             ..Default::default()
         };
@@ -1588,12 +1753,71 @@ mod tests {
             true,
             false,
             false,
+            ToolStrictMode::Enabled,
         );
 
         assert_eq!(payload["thinking"]["type"], "enabled");
         assert_eq!(payload["reasoning_effort"], "high");
         assert_eq!(payload["max_tokens"], DEEPSEEK_THINKING_MAX_TOKENS);
         assert!(payload.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn chat_payload_max_tokens_does_not_exceed_reserved_output_budget() {
+        let model_config = ModelConfig {
+            model_id: "deepseek-v4-flash".to_string(),
+            context_window_tokens: 1_000_000,
+            effective_context_window_percent: 95,
+            max_completion_tokens: 384_000,
+            ..Default::default()
+        };
+        let client =
+            OpenAIClient::from_parts("test-key", "https://compatible.example/v1", &model_config);
+
+        let payload = build_agent_turn_payload_common(
+            &client,
+            AgentTurnRequest {
+                messages: vec![AgentMessage::user("hello")],
+                tools: vec![],
+            },
+            true,
+            false,
+            false,
+            ToolStrictMode::Enabled,
+        );
+
+        assert_eq!(
+            client.request_budget_limits().reserved_output_tokens,
+            50_000
+        );
+        assert_eq!(payload["max_tokens"], 50_000);
+    }
+
+    #[test]
+    fn chat_payload_and_budget_share_positive_minimum_output_limit() {
+        let model_config = ModelConfig {
+            context_window_tokens: 200_000,
+            effective_context_window_percent: 50,
+            ..Default::default()
+        };
+        assert_eq!(model_config.reserved_output_tokens(), 0);
+        let client =
+            OpenAIClient::from_parts("test-key", "https://compatible.example/v1", &model_config);
+
+        let payload = build_agent_turn_payload_common(
+            &client,
+            AgentTurnRequest {
+                messages: vec![AgentMessage::user("hello")],
+                tools: vec![],
+            },
+            true,
+            false,
+            false,
+            ToolStrictMode::Enabled,
+        );
+
+        assert_eq!(client.request_budget_limits().reserved_output_tokens, 1);
+        assert_eq!(payload["max_tokens"], 1);
     }
 
     #[test]

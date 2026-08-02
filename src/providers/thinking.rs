@@ -3,13 +3,14 @@ use super::{OpenAIClient, ThinkingBudgetMode, json};
 pub(super) const DEEPSEEK_THINKING_MAX_TOKENS: usize = 65_536;
 
 pub(super) fn max_completion_tokens_for_chat_payload(client: &OpenAIClient) -> usize {
-    if is_deepseek_thinking_request(client) {
+    let model_limit = if is_deepseek_thinking_request(client) {
         client
             .max_completion_tokens
             .min(DEEPSEEK_THINKING_MAX_TOKENS)
     } else {
         client.max_completion_tokens
-    }
+    };
+    model_limit.min(client.reserved_output_tokens.max(1))
 }
 
 pub(super) fn is_deepseek_api_base_url(base_url: &str) -> bool {

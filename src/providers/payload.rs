@@ -8,6 +8,7 @@ pub(super) fn build_agent_turn_payload_common(
     stream: bool,
     flatten_orphan_tool_messages: bool,
     include_reasoning_content: bool,
+    tool_strict_mode: ToolStrictMode,
 ) -> serde_json::Value {
     let strip_images = client.adapter_state_guard().vision_mode == VisionMode::Disabled;
     let messages = agent_turn_request_to_openai_messages(
@@ -39,14 +40,17 @@ pub(super) fn build_agent_turn_payload_common(
                     false,
                 ),
             };
+            let mut function = json!({
+                "name": tool.name,
+                "description": description,
+                "parameters": parameters,
+            });
+            if tool_strict_mode == ToolStrictMode::Enabled {
+                function["strict"] = json!(strict);
+            }
             json!({
                 "type": "function",
-                "function": {
-                    "strict": strict,
-                    "name": tool.name,
-                    "description": description,
-                    "parameters": parameters,
-                }
+                "function": function,
             })
         })
         .collect::<Vec<_>>();
