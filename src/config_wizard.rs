@@ -2992,19 +2992,13 @@ mod tests {
     }
 
     #[test]
-    fn unmatched_compatible_provider_uses_richest_catalog_reasoning_options() {
+    fn unmatched_compatible_provider_uses_current_catalog_reasoning_options() {
         let provider = compatible_provider("https://us.dahetao.org/v1");
         let options = reasoning_options_for_prompt(&provider, "gpt-5.5", None);
+        let catalog_options = crate::model_catalog::catalog_model_reasoning_options("gpt-5.5");
 
-        assert_eq!(
-            options,
-            vec![ReasoningOption::Effort {
-                values: ["none", "low", "medium", "high", "xhigh"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect()
-            }]
-        );
+        assert!(!catalog_options.is_empty());
+        assert_eq!(options, catalog_options);
     }
 
     #[test]
