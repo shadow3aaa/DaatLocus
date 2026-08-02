@@ -203,6 +203,7 @@ pub async fn handle_dashboard_control_command(
                     context,
                     "dashboard interrupt",
                 );
+                context.memory.sync_runtime_conversation().await;
                 set_runtime_status(
                     Some(tx),
                     RuntimeStatusLevel::Info,

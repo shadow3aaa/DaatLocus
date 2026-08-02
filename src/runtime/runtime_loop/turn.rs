@@ -26,7 +26,7 @@ use super::{
     set_runtime_status_only, summarize_action_from_tool_call, thinking_activity_cell,
     user_activity_cell_from_event,
 };
-use crate::memory::PlanCompactionInput;
+use crate::memory::{PlanCompactionInput, RuntimeStepConversation};
 use crate::reasoning::prompt_parts::compact_horizontal_whitespace;
 use std::path::{Path, PathBuf};
 use tracing::warn;
@@ -217,6 +217,15 @@ fn output_is_runtime_context_compaction_boundary(output: &AgentLoopStepOutput) -
         .actions
         .iter()
         .any(|action| action.kind == "runtime_context_compacted")
+}
+
+fn checkpoint_runtime_step_history(
+    context: &mut Context,
+    runtime_step: &mut RuntimeStepConversation,
+) {
+    context
+        .memory
+        .checkpoint_runtime_turn(runtime_step.take_turn_checkpoint());
 }
 
 fn should_prepare_coding_project_for_claimed_input(
@@ -543,14 +552,9 @@ pub async fn execute_agent_loop_step(
         runtime_step.push_history_message(message.clone());
         append_committed_activity_cells(context, tx, committed_cells);
     }
-    // Pre-commit injected context so it survives select! cancellation.
-    // Duplicates from the final commit are removed by normalize_runtime_prompt_messages.
+    // Checkpoint completed history so it survives select! cancellation.
     if !injected_context_messages.is_empty() {
-        context.memory.runtime_conversation_mut().append_turn(
-            String::new(),
-            injected_context_messages,
-            Vec::new(),
-        );
+        checkpoint_runtime_step_history(context, &mut runtime_step);
     }
     let mut tool_results = Vec::new();
     let mut actions = Vec::new();
@@ -622,9 +626,9 @@ pub async fn execute_agent_loop_step(
                                     "Recovering from context overflow ({budget_recoveries}/{MID_TURN_COMPACTION_MAX_RECOVERIES})"
                                 ),
                             );
-                            break 'agent_loop runtime_context_compacted_output(format!(
-                                "runtime context compacted after context overflow recovery ({budget_recoveries}/{MID_TURN_COMPACTION_MAX_RECOVERIES}); starting a new turn"
-                            ));
+                            // Retry in this step so the compacted in-memory conversation is
+                            // actually used and the recovery limit cannot reset at a turn boundary.
+                            continue 'agent_loop;
                         }
                         Ok(false) => {}
                         Err(compaction_err) => {
@@ -749,6 +753,7 @@ pub async fn execute_agent_loop_step(
                 let mut terminal_actions = actions.clone();
                 terminal_actions.push(terminal_action);
                 runtime_step.push_history_message(HistoryMessage::assistant(observation.clone()));
+                checkpoint_runtime_step_history(context, &mut runtime_step);
                 if let Some(cell) = assistant_activity_cell(&observation) {
                     append_committed_activity_cells(context, tx, vec![cell]);
                 }
@@ -794,11 +799,6 @@ pub async fn execute_agent_loop_step(
                     })
                 })
                 .collect::<Vec<_>>();
-            let tool_call_activity_events = tool_call_previews
-                .iter()
-                .cloned()
-                .filter_map(activity_event_from_tool_call_activity_event)
-                .collect::<Vec<_>>();
             runtime_step.push_agent_message(
                 AgentMessage::assistant_tool_call_protocol_with_reasoning(
                     assistant_text.clone(),
@@ -810,16 +810,8 @@ pub async fn execute_agent_loop_step(
                 && !content.trim().is_empty()
             {
                 runtime_step.push_history_message(HistoryMessage::assistant(content));
+                checkpoint_runtime_step_history(context, &mut runtime_step);
             }
-            runtime_step.push_history_message(HistoryMessage {
-                message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
-                    None,
-                    response_reasoning_content.clone(),
-                    calls.clone(),
-                ),
-                activity_event: None,
-                tool_call_activity_events,
-            });
             let mut committed_cells = Vec::new();
             if let Some(content) = assistant_text.clone()
                 && let Some(cell) = assistant_activity_cell(&content)
@@ -827,7 +819,9 @@ pub async fn execute_agent_loop_step(
                 committed_cells.push(cell);
             }
             append_committed_activity_cells(context, tx, committed_cells);
-            for (call, call_activity_event) in calls.iter().zip(tool_call_previews.iter()) {
+            for (call_index, (call, call_activity_event)) in
+                calls.iter().zip(tool_call_previews.iter()).enumerate()
+            {
                 let action_record =
                     summarize_action_from_tool_call(context, call).unwrap_or_else(|_| {
                         EpisodeActionRecord {
@@ -999,12 +993,28 @@ pub async fn execute_agent_loop_step(
                         ),
                     ));
                 }
+                let tool_call_activity_events =
+                    activity_event_from_tool_call_activity_event(call_activity_event.clone())
+                        .into_iter()
+                        .collect();
+                runtime_step.push_history_message(HistoryMessage {
+                    message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                        None,
+                        (call_index == 0)
+                            .then(|| response_reasoning_content.clone())
+                            .flatten(),
+                        vec![call.clone()],
+                    ),
+                    activity_event: None,
+                    tool_call_activity_events,
+                });
                 runtime_step.push_history_message(HistoryMessage::tool(
                     call.id.clone(),
                     call.name.clone(),
                     history_content,
                     activity_event.clone(),
                 ));
+                checkpoint_runtime_step_history(context, &mut runtime_step);
                 append_committed_activity_cells(context, tx, activity_event.into_iter().collect());
                 tool_results.push(format!("{} => {}", call.name, result.summary));
                 if claimed_events_are_terminal(context, &claimed_event_ids) {
@@ -1073,6 +1083,7 @@ pub async fn execute_agent_loop_step(
                     summary: observation.to_string(),
                 });
                 runtime_step.push_history_message(HistoryMessage::assistant(observation));
+                checkpoint_runtime_step_history(context, &mut runtime_step);
                 if let Some(cell) = assistant_activity_cell(observation) {
                     append_committed_activity_cells(context, tx, vec![cell]);
                 }
@@ -1117,6 +1128,7 @@ pub async fn execute_agent_loop_step(
                 runtime_step.push_agent_message(AgentMessage::assistant(&assistant_text));
                 runtime_step
                     .push_history_message(HistoryMessage::assistant(assistant_text.clone()));
+                checkpoint_runtime_step_history(context, &mut runtime_step);
             }
             runtime_step.push_agent_message(AgentMessage::user(expected_behavior));
             continue 'agent_loop;
@@ -1134,6 +1146,7 @@ pub async fn execute_agent_loop_step(
         actions.push(assistant_action);
         runtime_step.set_current_doing(current_doing.clone());
         runtime_step.push_history_message(HistoryMessage::assistant(assistant_text.clone()));
+        checkpoint_runtime_step_history(context, &mut runtime_step);
         if let Some(cell) = assistant_activity_cell(&assistant_text) {
             append_committed_activity_cells(context, tx, vec![cell]);
         }
@@ -1175,9 +1188,7 @@ pub async fn execute_agent_loop_step(
         .await;
     }
     context.claimed_event_ids.clear();
-    if !runtime_step.is_history_empty() {
-        record_runtime_history_messages(context, runtime_step.into_turn_draft()).await;
-    }
+    record_runtime_history_messages(context, runtime_step.into_turn_draft()).await;
     record_skill_run_evidence(context, &output).await;
     context.current_work_origin = None;
     AgentLoopStepExecution

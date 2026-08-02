@@ -125,7 +125,10 @@ mod tests {
         memory::Memory,
         openskills::OpenSkillsCatalog,
         plan::Plan,
-        reasoning::{compiled::CompiledPromptStore, runtime::PromptRequest},
+        reasoning::{
+            compiled::CompiledPromptStore,
+            runtime::{AgentTurnItem, PromptRequest},
+        },
         runtime::bootstrap::DaatLocusHomeOverride,
         sandbox::RuntimeSandboxPolicy,
         telegram_acl::TelegramAclHandle,
@@ -135,28 +138,45 @@ mod tests {
 
     struct UnusedModelProvider;
 
-    struct JsonCompactionModelProvider {
+    struct TextCompactionModelProvider {
         summary: &'static str,
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
+    struct OverflowRecoveryModelProvider {
+        agent_requests: Arc<std::sync::Mutex<Vec<AgentTurnRequest>>>,
+        compaction_calls: Arc<std::sync::atomic::AtomicUsize>,
+        succeed_on_agent_request: Option<usize>,
+    }
+
+    struct InterruptCheckpointModelProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        second_request_started: Arc<tokio::sync::Notify>,
+    }
+
     #[async_trait]
-    impl ModelProvider for JsonCompactionModelProvider {
+    impl ModelProvider for TextCompactionModelProvider {
         async fn complete_json(
             &self,
             _request: PromptRequest,
             _options: ModelRequestOptions,
         ) -> Result<serde_json::Value> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(serde_json::json!({ "summary": self.summary }))
+            Err(miette!("compaction must not use a structured tool request"))
         }
 
         async fn complete_agent_turn(
             &self,
-            _request: AgentTurnRequest,
+            request: AgentTurnRequest,
             _options: ModelRequestOptions,
         ) -> Result<AgentTurnStreamResult> {
-            Err(miette!("unused test model provider"))
+            assert!(request.tools.is_empty());
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(AgentTurnStreamResult {
+                items: Vec::new(),
+                raw_stream_follow_up: false,
+                last_assistant_message: Some(self.summary.to_string()),
+                last_reasoning_content: None,
+            })
         }
 
         fn request_budget_limits(&self) -> crate::context_budget::RequestBudgetLimits {
@@ -172,7 +192,135 @@ mod tests {
         }
 
         fn model_name(&self) -> String {
-            "json-compaction-test".to_string()
+            "text-compaction-test".to_string()
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for OverflowRecoveryModelProvider {
+        async fn complete_json(
+            &self,
+            _request: PromptRequest,
+            _options: ModelRequestOptions,
+        ) -> Result<serde_json::Value> {
+            Err(miette!(
+                "overflow recovery must use a text compaction request"
+            ))
+        }
+
+        async fn complete_agent_turn(
+            &self,
+            request: AgentTurnRequest,
+            options: ModelRequestOptions,
+        ) -> Result<AgentTurnStreamResult> {
+            if request.tools.is_empty() {
+                self.compaction_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(AgentTurnStreamResult {
+                    items: Vec::new(),
+                    raw_stream_follow_up: false,
+                    last_assistant_message: Some("overflow recovery summary".to_string()),
+                    last_reasoning_content: None,
+                });
+            }
+
+            let request_count = {
+                let mut requests = self.agent_requests.lock().expect("agent requests lock");
+                requests.push(request);
+                requests.len()
+            };
+            if self.succeed_on_agent_request != Some(request_count) {
+                return Err(
+                    crate::context_budget::ContextBudgetExceededError::for_request(
+                        "test agent turn",
+                        &self.model_name(),
+                        &options.budget,
+                        Some("simulated provider overflow"),
+                    )
+                    .into(),
+                );
+            }
+
+            Ok(AgentTurnStreamResult {
+                items: Vec::new(),
+                raw_stream_follow_up: false,
+                last_assistant_message: Some("recovered".to_string()),
+                last_reasoning_content: None,
+            })
+        }
+
+        fn request_budget_limits(&self) -> crate::context_budget::RequestBudgetLimits {
+            crate::context_budget::RequestBudgetLimits {
+                context_window_tokens: 1_000_000,
+                auto_compact_threshold_tokens: 900_000,
+                reserved_output_tokens: 50_000,
+            }
+        }
+
+        fn token_usage_info(&self) -> crate::core::TokenUsageInfo {
+            crate::core::TokenUsageInfo::default()
+        }
+
+        fn model_name(&self) -> String {
+            "overflow-recovery-test".to_string()
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for InterruptCheckpointModelProvider {
+        async fn complete_json(
+            &self,
+            _request: PromptRequest,
+            _options: ModelRequestOptions,
+        ) -> Result<serde_json::Value> {
+            Err(miette!("checkpoint test does not use structured output"))
+        }
+
+        async fn complete_agent_turn(
+            &self,
+            _request: AgentTurnRequest,
+            _options: ModelRequestOptions,
+        ) -> Result<AgentTurnStreamResult> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                return Ok(AgentTurnStreamResult {
+                    items: vec![AgentTurnItem::ToolCall {
+                        call: AgentToolCall {
+                            id: "checkpoint-plan".to_string(),
+                            name: "update_plan".to_string(),
+                            arguments: json!({
+                                "explanation": "Preserve completed work before interruption.",
+                                "plan": [{
+                                    "step": "Checkpoint completed turn messages",
+                                    "status": "in_progress"
+                                }]
+                            }),
+                        },
+                    }],
+                    raw_stream_follow_up: false,
+                    last_assistant_message: None,
+                    last_reasoning_content: None,
+                });
+            }
+
+            self.second_request_started.notify_one();
+            std::future::pending().await
+        }
+
+        fn request_budget_limits(&self) -> crate::context_budget::RequestBudgetLimits {
+            crate::context_budget::RequestBudgetLimits {
+                context_window_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
+                auto_compact_threshold_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
+                reserved_output_tokens: crate::context_budget::DEFAULT_MAX_COMPLETION_TOKENS,
+            }
+        }
+
+        fn token_usage_info(&self) -> crate::core::TokenUsageInfo {
+            crate::core::TokenUsageInfo::default()
+        }
+
+        fn model_name(&self) -> String {
+            "interrupt-checkpoint-test".to_string()
         }
     }
 
@@ -285,8 +433,8 @@ mod tests {
         let mut isolated = IsolatedRuntimeContext::new().await;
         let context = &mut isolated.context;
         let main_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        context.model_provider = Box::new(JsonCompactionModelProvider {
-            summary: "main model summary",
+        context.model_provider = Box::new(TextCompactionModelProvider {
+            summary: "## Current state\n\nmain model summary",
             calls: main_calls.clone(),
         });
         context.efficient_model_provider = Arc::new(UnusedModelProvider);
@@ -311,6 +459,58 @@ mod tests {
 
         assert_eq!(main_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(outcome.summary.contains("main model summary"));
+        drop(isolated);
+    }
+
+    #[tokio::test]
+    async fn overflow_recovery_retries_with_compacted_messages_in_the_same_step() {
+        let mut isolated = IsolatedRuntimeContext::new().await;
+        let context = &mut isolated.context;
+        let agent_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let compaction_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        context.model_provider = Box::new(OverflowRecoveryModelProvider {
+            agent_requests: agent_requests.clone(),
+            compaction_calls: compaction_calls.clone(),
+            succeed_on_agent_request: Some(2),
+        });
+
+        execute_agent_loop_step(context, None).await;
+
+        assert_eq!(
+            compaction_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let requests = agent_requests.lock().expect("agent requests lock");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].messages.iter().any(|message| {
+            matches!(message, AgentMessage::Assistant { content } if content.contains("overflow recovery summary"))
+        }));
+        drop(requests);
+        drop(isolated);
+    }
+
+    #[tokio::test]
+    async fn overflow_recovery_stops_after_three_compactions() {
+        let mut isolated = IsolatedRuntimeContext::new().await;
+        let context = &mut isolated.context;
+        let agent_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let compaction_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        context.model_provider = Box::new(OverflowRecoveryModelProvider {
+            agent_requests: agent_requests.clone(),
+            compaction_calls: compaction_calls.clone(),
+            succeed_on_agent_request: None,
+        });
+
+        execute_agent_loop_step(context, None).await;
+
+        assert_eq!(
+            compaction_calls.load(std::sync::atomic::Ordering::SeqCst),
+            MID_TURN_COMPACTION_MAX_RECOVERIES
+        );
+        assert_eq!(
+            agent_requests.lock().expect("agent requests lock").len(),
+            MID_TURN_COMPACTION_MAX_RECOVERIES + 1
+        );
         drop(isolated);
     }
     fn terminal_event(text: &str) -> crate::events::TerminalIncomingEvent {
@@ -366,6 +566,58 @@ mod tests {
                 .expect("claim after interrupt")
                 .is_empty()
         );
+        drop(isolated);
+    }
+
+    #[tokio::test]
+    async fn interrupted_turn_preserves_completed_tool_protocol_for_next_turn() {
+        let mut isolated = IsolatedRuntimeContext::new().await;
+        let context = &mut isolated.context;
+        let second_request_started = Arc::new(tokio::sync::Notify::new());
+        context.model_provider = Box::new(InterruptCheckpointModelProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            second_request_started: second_request_started.clone(),
+        });
+        context.active_runtime_turn = true;
+        context.runtime_turn_started_at = Some(Instant::now());
+        context.runtime_turn_started_at_ms = Some(42);
+
+        let mut turn = Box::pin(execute_agent_loop_step(context, None));
+        tokio::select! {
+            () = second_request_started.notified() => {}
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                panic!("turn did not reach the second model request");
+            }
+            _ = &mut turn => panic!("turn completed before interruption"),
+        }
+        drop(turn);
+
+        interrupt_active_runtime_turn(context, "test interrupt after tool result");
+
+        let messages = context.memory.runtime_conversation_messages();
+        let tool_call_count = messages
+            .iter()
+            .filter(|message| {
+                matches!(
+                    &message.message,
+                    AgentMessage::AssistantToolCallProtocol { calls, .. }
+                        if calls.iter().any(|call| call.id == "checkpoint-plan")
+                )
+            })
+            .count();
+        let tool_result_count = messages
+            .iter()
+            .filter(|message| {
+                matches!(
+                    &message.message,
+                    AgentMessage::Tool { tool_call_id, .. }
+                        if tool_call_id == "checkpoint-plan"
+                )
+            })
+            .count();
+
+        assert_eq!(tool_call_count, 1);
+        assert_eq!(tool_result_count, 1);
         drop(isolated);
     }
 

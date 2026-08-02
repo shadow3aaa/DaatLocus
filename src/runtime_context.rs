@@ -2,7 +2,7 @@
 use crate::{
     context::Context,
     context_budget::{
-        RequestBudgetLimits, approx_token_count, estimate_prompt_request,
+        RequestBudgetLimits, approx_token_count, estimate_agent_turn_request,
         truncate_text_to_token_budget, truncate_text_to_token_budget_with_notice,
     },
     daat_locus_paths::daat_locus_paths,
@@ -20,20 +20,17 @@ use crate::{
         prompt_renderer::LlmPromptRenderer,
         prompts::{
             HISTORY_COMPACTION_PROMPT, HISTORY_COMPACTION_SUMMARY_PREFIX,
-            HISTORY_COMPACTION_TOOL_DESCRIPTION, HISTORY_COMPACTION_USER_MESSAGE,
+            HISTORY_COMPACTION_USER_MESSAGE,
         },
         runtime::{
-            AgentMessage, AgentToolSpec, HistoryMessage, PromptRequest,
+            AgentMessage, AgentToolSpec, AgentTurnRequest, HistoryMessage,
             summarize_assistant_tool_call_protocol,
         },
     },
-    schema_utils::model_schema_for,
 };
 use chrono::Utc;
-use daat_locus_macros::model_schema;
 use miette::{Result, miette};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::OnceLock;
 use tracing::{error, warn};
 
@@ -41,12 +38,6 @@ const MID_TURN_COMPACTION_SUMMARY_MAX_TOKENS: usize = 900;
 pub const MID_TURN_COMPACTION_MAX_RECOVERIES: usize = 3;
 const RUNTIME_COMPACTION_EVENT_FILE_NAME: &str = "runtime_compaction_events.jsonl";
 static RUNTIME_COMPACTION_IO_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-
-#[model_schema]
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct HistoryCompactionOutput {
-    summary: String,
-}
 
 type HistoryCompactionSourceItem = Vec<HistoryMessage>;
 
@@ -175,16 +166,14 @@ const fn runtime_step_compaction_policy() -> RuntimeStepCompactionPolicy {
     }
 }
 
-fn build_history_compaction_request(messages: Vec<HistoryMessage>) -> PromptRequest {
-    PromptRequest {
-        tool_name: "history_compaction_summary".to_string(),
-        tool_description: HISTORY_COMPACTION_TOOL_DESCRIPTION.to_string(),
-        output_schema: model_schema_for::<HistoryCompactionOutput>(),
-        system_messages: vec![HISTORY_COMPACTION_PROMPT.to_string()],
-        long_term_memory_messages: Vec::new(),
-        history_messages: messages,
-        current_user_message: HISTORY_COMPACTION_USER_MESSAGE.to_string(),
-        retry_messages: Vec::new(),
+fn build_history_compaction_request(messages: Vec<HistoryMessage>) -> AgentTurnRequest {
+    let mut request_messages = Vec::with_capacity(messages.len().saturating_add(2));
+    request_messages.push(AgentMessage::system(HISTORY_COMPACTION_PROMPT));
+    request_messages.extend(messages.into_iter().map(|message| message.message));
+    request_messages.push(AgentMessage::user(HISTORY_COMPACTION_USER_MESSAGE));
+    AgentTurnRequest {
+        messages: request_messages,
+        tools: Vec::new(),
     }
 }
 
@@ -241,12 +230,31 @@ fn collapse_history_compaction_source_item(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let truncated_content = truncate_text_to_token_budget_with_notice(
-        rendered.trim(),
-        available_history_tokens,
-        "... [compaction input truncated to fit main model context]",
-    );
-    (!truncated_content.trim().is_empty()).then(|| HistoryMessage::assistant(truncated_content))
+    let mut content_budget = available_history_tokens;
+    loop {
+        let truncated_content = truncate_text_to_token_budget_with_notice(
+            rendered.trim(),
+            content_budget,
+            "... [compaction input truncated to fit main model context]",
+        );
+        if truncated_content.trim().is_empty() {
+            return None;
+        }
+
+        let message = HistoryMessage::assistant(truncated_content);
+        let message_tokens = history_message_token_cost(&message);
+        if message_tokens <= available_history_tokens {
+            return Some(message);
+        }
+        if content_budget == 0 {
+            return None;
+        }
+        content_budget = content_budget
+            .saturating_mul(available_history_tokens)
+            .checked_div(message_tokens)
+            .unwrap_or_default()
+            .min(content_budget.saturating_sub(1));
+    }
 }
 
 fn trim_compaction_source_items_to_fit_budget(
@@ -259,7 +267,7 @@ fn trim_compaction_source_items_to_fit_budget(
     loop {
         let flattened = flatten_history_compaction_source_items(&trimmed_items);
         let request = build_history_compaction_request(flattened.clone());
-        let budget = estimate_prompt_request(&request, limits);
+        let budget = estimate_agent_turn_request(&request.messages, &request.tools, limits);
         if budget.within_context_window() {
             return TrimmedHistoryCompactionInput {
                 messages: flattened,
@@ -273,15 +281,14 @@ fn trim_compaction_source_items_to_fit_budget(
             continue;
         }
 
-        let history_tokens = budget
-            .sections
-            .iter()
-            .find_map(|section| (section.name == "history_messages").then_some(section.tokens))
-            .unwrap_or(0);
-        let non_history_tokens = budget.total_input_tokens.saturating_sub(history_tokens);
+        let fixed_request = build_history_compaction_request(Vec::new());
+        let fixed_tokens =
+            estimate_agent_turn_request(&fixed_request.messages, &fixed_request.tools, limits)
+                .total_input_tokens;
         let available_history_tokens = budget
             .input_budget_tokens()
-            .saturating_sub(non_history_tokens);
+            .saturating_sub(fixed_tokens)
+            .saturating_sub(32);
         let messages = trimmed_items
             .first()
             .and_then(|item| {
@@ -337,32 +344,25 @@ async fn execute_runtime_compaction(
     }
 
     let request = build_history_compaction_request(trimmed.messages.clone());
-    let options = crate::core::ModelRequestOptions::for_prompt(
+    let options = crate::core::ModelRequestOptions::for_agent_turn(
         context.model_provider.as_ref(),
         &request,
         context.session_id.clone(),
     )?;
-    let value = context
+    let response = context
         .model_provider
-        .complete_json(request, options)
+        .complete_agent_turn(request, options)
         .await
         .map_err(|err| {
             miette!("main model failed to generate runtime compaction summary: {err}")
         })?;
-    let output = serde_json::from_value::<HistoryCompactionOutput>(value).map_err(|err| {
-        miette!("main model returned an invalid runtime compaction summary: {err}")
-    })?;
-    if output.summary.trim().is_empty() {
-        return Err(miette!(
-            "main model returned an empty runtime compaction summary"
-        ));
-    }
+    let output = response
+        .protocol()
+        .final_assistant_message
+        .filter(|content| !content.trim().is_empty())
+        .ok_or_else(|| miette!("main model returned an empty runtime compaction summary"))?;
     let summary = truncate_text_to_token_budget(
-        &format!(
-            "{}\n{}",
-            HISTORY_COMPACTION_SUMMARY_PREFIX,
-            output.summary.trim()
-        ),
+        &format!("{}\n{}", HISTORY_COMPACTION_SUMMARY_PREFIX, output.trim()),
         max_tokens.max(1),
     );
 
@@ -549,7 +549,46 @@ mod tests {
         );
 
         let request = build_history_compaction_request(trimmed.messages);
-        let budget = estimate_prompt_request(&request, limits);
+        let budget = estimate_agent_turn_request(&request.messages, &request.tools, limits);
+        assert!(budget.within_context_window());
+    }
+
+    #[test]
+    fn history_compaction_request_is_a_tool_free_text_turn() {
+        let request = build_history_compaction_request(vec![
+            HistoryMessage::user("original request"),
+            HistoryMessage::assistant("work completed"),
+        ]);
+
+        assert!(request.tools.is_empty());
+        assert!(matches!(
+            request.messages.first(),
+            Some(AgentMessage::System { .. })
+        ));
+        assert!(matches!(
+            request.messages.last(),
+            Some(AgentMessage::User { .. })
+        ));
+        assert!(request.messages.iter().any(|message| {
+            matches!(message, AgentMessage::Assistant { content } if content == "work completed")
+        }));
+    }
+
+    #[test]
+    fn trim_compaction_messages_keeps_multibyte_text_within_budget() {
+        let limits = RequestBudgetLimits {
+            context_window_tokens: 512,
+            auto_compact_threshold_tokens: 448,
+            reserved_output_tokens: 16,
+        };
+        let messages = vec![HistoryMessage::assistant("中".repeat(8_000))];
+
+        let items = build_history_compaction_source_items(&messages);
+        let trimmed = trim_compaction_source_items_to_fit_budget(&items, limits);
+        assert!(!trimmed.messages.is_empty());
+
+        let request = build_history_compaction_request(trimmed.messages);
+        let budget = estimate_agent_turn_request(&request.messages, &request.tools, limits);
         assert!(budget.within_context_window());
     }
 }

@@ -132,6 +132,16 @@ impl Memory {
         self.sync_to_disk().await;
     }
 
+    pub fn checkpoint_runtime_turn(&mut self, draft: RuntimeTurnDraft) {
+        let (current_doing, messages, compaction_records) = draft.into_parts();
+        self.runtime_conversation_mut()
+            .append_turn(current_doing, messages, compaction_records);
+    }
+
+    pub async fn sync_runtime_conversation(&self) {
+        self.sync_to_disk().await;
+    }
+
     pub fn current_thread_focus(&self) -> Option<String> {
         self.runtime_conversation().current_focus()
     }
@@ -249,16 +259,20 @@ impl RuntimeTurnDraft {
         self.messages.push(message);
     }
 
-    pub const fn is_empty(&self) -> bool {
-        self.messages.is_empty()
-    }
-
     pub fn record_compaction(&mut self, record: RuntimeCompactionRecord) {
         self.compaction_records.push(record);
     }
 
     fn into_parts(self) -> (String, Vec<HistoryMessage>, Vec<RuntimeCompactionRecord>) {
         (self.current_doing, self.messages, self.compaction_records)
+    }
+
+    fn take_checkpoint(&mut self) -> Self {
+        Self {
+            current_doing: self.current_doing.clone(),
+            messages: std::mem::take(&mut self.messages),
+            compaction_records: std::mem::take(&mut self.compaction_records),
+        }
     }
 }
 
@@ -369,12 +383,12 @@ impl RuntimeStepConversation {
         self.turn_draft.set_current_doing(current_doing);
     }
 
-    pub const fn is_history_empty(&self) -> bool {
-        self.turn_draft.is_empty()
-    }
-
     pub fn into_turn_draft(self) -> RuntimeTurnDraft {
         self.turn_draft
+    }
+
+    pub fn take_turn_checkpoint(&mut self) -> RuntimeTurnDraft {
+        self.turn_draft.take_checkpoint()
     }
 
     pub async fn maybe_compact<F, Fut>(
@@ -710,6 +724,16 @@ fn normalize_runtime_prompt_messages(messages: Vec<HistoryMessage>) -> Vec<Histo
 }
 
 fn normalize_runtime_prompt_message(mut message: HistoryMessage) -> Option<HistoryMessage> {
+    if let AgentMessage::AssistantToolCallProtocol { content, calls, .. } = &mut message.message
+        && !calls.is_empty()
+    {
+        *content = content
+            .take()
+            .map(|content| content.trim().to_string())
+            .filter(|content| !content.is_empty());
+        return Some(message);
+    }
+
     let visible_content = history_message_content(&message).trim().to_string();
     if visible_content.is_empty() {
         if !message.tool_call_activity_events.is_empty() {
@@ -1072,6 +1096,30 @@ mod tests {
             }
             _ => panic!("expected assistant tool-call protocol"),
         }
+    }
+
+    #[test]
+    fn normalizing_tool_call_history_preserves_protocol_without_visible_text() {
+        let message = HistoryMessage {
+            message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                None,
+                Some("provider reasoning".to_string()),
+                vec![crate::reasoning::runtime::AgentToolCall {
+                    id: "call_1".to_string(),
+                    name: "terminal_exec".to_string(),
+                    arguments: serde_json::json!({ "cmd": "pwd" }),
+                }],
+            ),
+            activity_event: None,
+            tool_call_activity_events: Vec::new(),
+        };
+
+        let normalized = normalize_runtime_prompt_message(message).expect("message should remain");
+        assert!(matches!(
+            normalized.message,
+            AgentMessage::AssistantToolCallProtocol { content: None, calls, .. }
+                if calls.len() == 1 && calls[0].id == "call_1"
+        ));
     }
 
     #[test]

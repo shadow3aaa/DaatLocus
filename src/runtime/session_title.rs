@@ -1,7 +1,4 @@
 use chrono::Utc;
-use daat_locus_macros::model_schema;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
@@ -13,11 +10,10 @@ use crate::{
     reasoning::{
         prompts::{
             SESSION_TITLE_SYSTEM_REQUIREMENTS, SESSION_TITLE_SYSTEM_ROLE,
-            SESSION_TITLE_TOOL_DESCRIPTION, SESSION_TITLE_USER_MESSAGE_PREFIX,
+            SESSION_TITLE_USER_MESSAGE_PREFIX,
         },
-        runtime::{HistoryMessage, PromptRequest},
+        runtime::{AgentMessage, AgentTurnRequest, HistoryMessage},
     },
-    schema_utils::model_schema_for,
 };
 
 const MAX_TITLE_CHARS: usize = 64;
@@ -29,10 +25,14 @@ fn title_generation_system_prompt() -> String {
 }
 const TITLE_GENERATION_USER_PROMPT: &str = SESSION_TITLE_USER_MESSAGE_PREFIX;
 
-#[model_schema]
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct SessionTitleOutput {
-    title: String,
+fn build_session_title_request(excerpt: &str) -> AgentTurnRequest {
+    AgentTurnRequest {
+        messages: vec![
+            AgentMessage::system(title_generation_system_prompt()),
+            AgentMessage::user(format!("{TITLE_GENERATION_USER_PROMPT}\n{excerpt}")),
+        ],
+        tools: Vec::new(),
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -142,10 +142,10 @@ pub struct SessionTitleGenerationResult {
 }
 
 impl SessionTitleGenerationResult {
-    fn from_output(activity_signature: String, output: &SessionTitleOutput) -> Self {
+    fn from_text(activity_signature: String, output: &str) -> Self {
         Self {
             activity_signature,
-            title: normalize_session_title(&output.title),
+            title: normalize_session_title(output),
         }
     }
 }
@@ -170,19 +170,10 @@ pub fn spawn_session_title_generation(
     context.session_title.last_generated_signature = Some(signature.clone());
     context.session_title.last_generated_at_ms = Some(now_ms);
 
-    let request = PromptRequest {
-        tool_name: "session_title".to_string(),
-        tool_description: SESSION_TITLE_TOOL_DESCRIPTION.to_string(),
-        output_schema: model_schema_for::<SessionTitleOutput>(),
-        system_messages: vec![title_generation_system_prompt()],
-        long_term_memory_messages: Vec::new(),
-        history_messages: vec![HistoryMessage::user(&excerpt)],
-        current_user_message: TITLE_GENERATION_USER_PROMPT.to_string(),
-        retry_messages: Vec::new(),
-    };
+    let request = build_session_title_request(&excerpt);
 
     let model_provider = context.efficient_model_provider.clone();
-    let options = match ModelRequestOptions::for_prompt(
+    let options = match ModelRequestOptions::for_agent_turn(
         model_provider.as_ref(),
         &request,
         context.session_id.clone(),
@@ -195,19 +186,18 @@ pub fn spawn_session_title_generation(
     };
     let results_tx = results_tx.clone();
     tokio::spawn(async move {
-        match model_provider.complete_json(request, options).await {
-            Ok(value) => match serde_json::from_value::<SessionTitleOutput>(value) {
-                Ok(output) => {
-                    let result = SessionTitleGenerationResult::from_output(signature, &output);
-                    if let Some(title) = result.title.as_deref() {
-                        debug!(title, "session title generated");
-                    }
-                    let _ = results_tx.send(result);
+        match model_provider.complete_agent_turn(request, options).await {
+            Ok(response) => {
+                let Some(output) = response.protocol().final_assistant_message else {
+                    warn!("session title generation returned empty assistant content");
+                    return;
+                };
+                let result = SessionTitleGenerationResult::from_text(signature, &output);
+                if let Some(title) = result.title.as_deref() {
+                    debug!(title, "session title generated");
                 }
-                Err(err) => {
-                    warn!("failed to parse session title JSON: {err:?}");
-                }
-            },
+                let _ = results_tx.send(result);
+            }
             Err(err) => {
                 warn!("session title generation failed: {err:?}");
             }
@@ -425,6 +415,32 @@ mod tests {
             first_visible_history_title(&messages).as_deref(),
             Some("Fix the Telegram session routing")
         );
+    }
+
+    #[test]
+    fn title_generation_request_is_a_tool_free_text_turn() {
+        let request = build_session_title_request("User: Design hidden-state memory compaction");
+
+        assert!(request.tools.is_empty());
+        assert!(matches!(
+            request.messages.first(),
+            Some(AgentMessage::System { .. })
+        ));
+        assert!(matches!(
+            request.messages.last(),
+            Some(AgentMessage::User { content })
+                if content.as_text().contains("Design hidden-state memory compaction")
+        ));
+    }
+
+    #[test]
+    fn title_generation_accepts_plain_assistant_text() {
+        let result = SessionTitleGenerationResult::from_text(
+            "activity".to_string(),
+            "  \"隐状态压缩记忆方案\"  ",
+        );
+
+        assert_eq!(result.title.as_deref(), Some("隐状态压缩记忆方案"));
     }
 
     #[test]
