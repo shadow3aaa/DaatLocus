@@ -32,6 +32,7 @@ import {
   type CSSProperties,
   type DragEvent,
   type FormEvent,
+  type MouseEvent,
   type ReactNode,
   type RefObject,
   type UIEvent,
@@ -109,6 +110,7 @@ import {
   fetchWorkflowWorkerActivity,
   fetchSettingsSummary,
   getDashboardAttachmentUrl,
+  openLocalPath,
   runDashboardAction,
   runDashboardCommand,
   type DashboardAction,
@@ -7805,14 +7807,12 @@ function AgentChatBlock({
     const url = stringValue(record.url, "");
     const label = stringValue(record.label, url);
     return url ? (
-      <a
+      <AgentChatLink
         href={url}
-        target="_blank"
-        rel="noreferrer"
         className="break-all text-primary underline-offset-4 hover:underline"
       >
         {label}
-      </a>
+      </AgentChatLink>
     ) : null;
   }
 
@@ -7826,14 +7826,12 @@ function AgentChatBlock({
       );
     }
     return uri ? (
-      <a
+      <AgentChatLink
         href={uri}
-        target="_blank"
-        rel="noreferrer"
         className="break-all text-primary underline-offset-4 hover:underline"
       >
         {label}
-      </a>
+      </AgentChatLink>
     ) : (
       <p className="break-words text-muted-foreground">{label}</p>
     );
@@ -7906,6 +7904,53 @@ function markdownPreCodeProps(children: ReactNode) {
     return null;
   }
   return child.props as MarkdownCodeElementProps;
+}
+
+function isLocalFileTarget(href: string): boolean {
+  const trimmed = href.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (trimmed.startsWith("file://")) {
+    return true;
+  }
+  // Any explicit scheme (http:, https:, mailto:, ...) is not a local file.
+  return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+}
+
+function AgentChatLink({
+  href,
+  children,
+  className,
+}: {
+  href: string;
+  children?: ReactNode;
+  className?: string;
+}) {
+  const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (!isLocalFileTarget(href)) {
+      return;
+    }
+    // Local files cannot be opened by the browser from an http page; ask the
+    // daemon to open them with the system default application instead of
+    // navigating the current WebUI page.
+    event.preventDefault();
+    void openLocalPath(href).catch((error) => {
+      console.error("Failed to open local path", href, error);
+    });
+  };
+
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      onClick={handleClick}
+      className={className}
+    >
+      {children}
+    </a>
+  );
 }
 
 const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
@@ -8061,14 +8106,12 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
           a: (props: any) => {
             const { children, href } = props;
             return (
-              <a
+              <AgentChatLink
                 href={href}
-                target="_blank"
-                rel="noreferrer"
                 className="break-all text-primary underline-offset-4 hover:underline"
               >
                 {children}
-              </a>
+              </AgentChatLink>
             );
           },
           strong: ({ children }: any) => (
@@ -8123,14 +8166,12 @@ function AgentChatMarkdownInline({ text }: { text: string }) {
         a: (props: any) => {
           const { children, href } = props;
           return (
-            <a
+            <AgentChatLink
               href={href}
-              target="_blank"
-              rel="noreferrer"
               className="break-all text-primary underline-offset-4 hover:underline"
             >
               {children}
-            </a>
+            </AgentChatLink>
           );
         },
         strong: ({ children }: any) => (

@@ -1047,8 +1047,8 @@ const MOCK_LOGS_DATA: LogsPageMockData = {
     },
     {
       id: "session-log-mock-agent-session",
-      label: "Session mock-agent-session log",
-      description: "Session process tracing plus stdout/stderr output.",
+      label: "Find legacy arg helper remnants",
+      description: "mock-agent-session",
       path: "C:\\Users\\13940\\.daat-locus\\sessions\\mock-agent-session\\logs\\session.log",
       exists: true,
       size_bytes: 321_408,
@@ -1056,8 +1056,8 @@ const MOCK_LOGS_DATA: LogsPageMockData = {
     },
     {
       id: "session-log-render-slot",
-      label: "Session render-slot log",
-      description: "Older session log with warning-heavy output.",
+      label: "Make render slot behavior stable",
+      description: "render-slot",
       path: "C:\\Users\\13940\\.daat-locus\\sessions\\render-slot\\logs\\session.log",
       exists: true,
       size_bytes: 174_336,

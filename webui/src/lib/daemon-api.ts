@@ -1596,6 +1596,33 @@ export async function listDirs({
   return parseJsonResponse<DirListResponse>(response, "List directories");
 }
 
+export async function openLocalPath(
+  target: string,
+  {
+    signal,
+    token = getStoredDaemonToken(),
+  }: FetchOptions = {},
+): Promise<void> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for opening local path.");
+  }
+
+  const response = await fetch("/filesystem/open", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ target }),
+    signal,
+  });
+
+  await parseJsonResponse<{ ok: boolean }>(response, "Open local path");
+}
+
 export async function deleteSession({
   sessionId,
   signal,

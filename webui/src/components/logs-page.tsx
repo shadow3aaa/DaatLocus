@@ -5,9 +5,10 @@ import {
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import CodeMirror from "@uiw/react-codemirror";
+import type { Range } from "@codemirror/state";
+import { Decoration, EditorView } from "@codemirror/view";
 import { FileTextIcon, ListFilterIcon, SearchIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -43,6 +44,117 @@ const LOG_READ_LIMIT = 1_000;
 const FOLLOW_POLL_MS = 1_500;
 const MAX_RENDERED_LINES = 5_000;
 const LEVEL_FILTER_STORAGE_KEY = "daat-locus.logs.level-filter";
+
+const logEditorTheme = EditorView.theme({
+  "&": {
+    height: "100%",
+    backgroundColor: "transparent",
+    color: "var(--foreground)",
+    fontSize: "12px",
+  },
+  "&.cm-focused": {
+    outline: "none",
+  },
+  ".cm-editor": {
+    height: "100%",
+  },
+  ".cm-scroller": {
+    overflow: "auto",
+    scrollbarWidth: "thin",
+    scrollbarColor: "var(--border) transparent",
+  },
+  ".cm-scroller::-webkit-scrollbar": {
+    width: "10px",
+    height: "10px",
+  },
+  ".cm-scroller::-webkit-scrollbar-track": {
+    backgroundColor: "transparent",
+  },
+  ".cm-scroller::-webkit-scrollbar-thumb": {
+    backgroundColor: "var(--border)",
+    borderRadius: "5px",
+  },
+  ".cm-scroller::-webkit-scrollbar-thumb:hover": {
+    backgroundColor: "var(--muted-foreground)",
+  },
+  ".cm-content": {
+    fontFamily:
+      "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    caretColor: "var(--foreground)",
+  },
+  ".cm-line": {
+    padding: "0 0.5rem",
+  },
+  ".cm-gutters": {
+    backgroundColor: "transparent",
+    color: "var(--muted-foreground)",
+    borderRight: "1px solid var(--border)",
+  },
+  ".cm-activeLine": {
+    backgroundColor: "var(--muted)",
+  },
+  ".cm-activeLineGutter": {
+    backgroundColor: "transparent",
+  },
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
+    backgroundColor: "var(--primary)",
+    opacity: "0.25",
+  },
+  ".cm-searchMatch": {
+    backgroundColor: "var(--primary)",
+    opacity: "0.3",
+  },
+  ".cm-searchMatch.cm-searchMatch-selected": {
+    backgroundColor: "var(--primary)",
+    opacity: "0.5",
+  },
+  ".log-ts": {
+    color: "var(--muted-foreground)",
+  },
+  ".log-target": {
+    color: "var(--primary)",
+  },
+  ".log-level-error": {
+    color: "var(--destructive)",
+    fontWeight: "600",
+  },
+  ".log-level-warn": {
+    color: "#f59e0b",
+  },
+  ".log-level-info": {
+    color: "#3b82f6",
+  },
+  ".log-level-debug": {
+    color: "var(--muted-foreground)",
+  },
+  ".log-level-trace": {
+    color: "var(--muted-foreground)",
+    opacity: "0.75",
+  },
+});
+
+const logEditorBasicSetup = {
+  lineNumbers: true,
+  highlightActiveLine: false,
+  highlightActiveLineGutter: false,
+  foldGutter: false,
+  dropCursor: false,
+  allowMultipleSelections: false,
+  indentOnInput: false,
+  bracketMatching: false,
+  closeBrackets: false,
+  autocompletion: false,
+  rectangularSelection: false,
+  crosshairCursor: false,
+  highlightSelectionMatches: false,
+  closeBracketsKeymap: false,
+  defaultKeymap: true,
+  searchKeymap: true,
+  historyKeymap: false,
+  foldKeymap: false,
+  completionKeymap: false,
+  lintKeymap: false,
+} as const;
 
 const LOG_LEVEL_FILTERS = [
   { value: "trace", label: "TRACE" },
@@ -104,7 +216,7 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
   const [levelFilter, setLevelFilter] = useState<LogLevelFilter>(
     readStoredLevelFilter,
   );
-  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const editorViewRef = useRef<EditorView | null>(null);
 
   const selectedSource =
     sources.find((source) => source.id === selectedSourceId) ?? null;
@@ -135,12 +247,30 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
     );
   }, [entries, levelFilter, query]);
 
-  const virtualizer = useVirtualizer({
-    count: filteredEntries.length,
-    getScrollElement: () => viewportRef.current,
-    estimateSize: () => 76,
-    overscan: 16,
-  });
+  const editorValue = useMemo(
+    () => filteredEntries.map((entry) => entry.raw).join("\n"),
+    [filteredEntries],
+  );
+
+  const logHighlightDecorations = useMemo(() => {
+    const ranges: Array<Range<Decoration>> = [];
+    let lineStart = 0;
+    for (const entry of filteredEntries) {
+      for (const span of logEntryHighlightSpans(entry)) {
+        if (span.to <= span.from) {
+          continue;
+        }
+        ranges.push(
+          Decoration.mark({ class: span.className }).range(
+            lineStart + span.from,
+            lineStart + span.to,
+          ),
+        );
+      }
+      lineStart += entry.raw.length + 1;
+    }
+    return Decoration.set(ranges, true);
+  }, [filteredEntries]);
 
   useEffect(() => {
     if (!isSearchVisible) {
@@ -242,10 +372,19 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
       return;
     }
 
+    const view = editorViewRef.current;
+    if (!view) {
+      return;
+    }
+
     requestAnimationFrame(() => {
-      virtualizer.scrollToIndex(filteredEntries.length - 1, { align: "end" });
+      const lastLine = view.state.doc.line(view.state.doc.lines);
+      view.dispatch({
+        effects: EditorView.scrollIntoView(lastLine.from, { y: "end" }),
+        selection: { anchor: lastLine.from },
+      });
     });
-  }, [filteredEntries.length, query, virtualizer]);
+  }, [filteredEntries.length, query]);
 
   useEffect(() => {
     try {
@@ -327,7 +466,7 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
     setCursor(response.next_cursor);
   }
 
-  const visibleItems = virtualizer.getVirtualItems();
+  // Log rows are rendered by the read-only CodeMirror viewer below.
   const emptyMessage = emptyStateMessage({
     sourceLoadState,
     sourceError,
@@ -345,7 +484,7 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
     <section
       id="logs"
       aria-label={t("logs.pageAria")}
-      className="h-screen overflow-hidden bg-background pt-20"
+      className="flex h-screen flex-col overflow-hidden bg-background"
     >
       <div className="fixed top-4 right-4 z-50 flex max-w-[calc(100vw-5rem)] items-center justify-end gap-2 md:top-6 md:right-6">
         <DropdownMenu>
@@ -474,69 +613,29 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
         </Button>
       </div>
 
-      <div ref={viewportRef} className="h-full overflow-auto px-3 pb-6 md:px-6">
-        <div
-          className="relative w-full"
-          style={{
-            height:
-              filteredEntries.length > 0
-                ? `${virtualizer.getTotalSize()}px`
-                : "100%",
-          }}
-        >
-          {emptyMessage ? (
-            <EmptyLogState title={t("logs.title")} message={emptyMessage} />
-          ) : null}
-
-          {visibleItems.map((virtualItem) => {
-            const entry = filteredEntries[virtualItem.index];
-            if (!entry) {
-              return null;
-            }
-
-            return (
-              <div
-                key={virtualItem.key}
-                data-index={virtualItem.index}
-                ref={virtualizer.measureElement}
-                className="absolute top-0 left-0 w-full"
-                style={{
-                  transform: `translateY(${virtualItem.start}px)`,
-                }}
-              >
-                <LogEntryRow entry={entry} query={query} />
-              </div>
-            );
-          })}
-        </div>
+      <div className="relative min-h-0 flex-1 overflow-hidden px-3 pb-6 pt-20 md:px-6">
+        {emptyMessage ? (
+          <EmptyLogState title={t("logs.title")} message={emptyMessage} />
+        ) : (
+          <CodeMirror
+            className="h-full"
+            value={editorValue}
+            readOnly
+            height="100%"
+            theme={logEditorTheme}
+            basicSetup={logEditorBasicSetup}
+            extensions={[
+              EditorView.decorations.of(logHighlightDecorations),
+            ]}
+            aria-label={t("logs.pageAria")}
+          />
+        )}
       </div>
     </section>
   );
 }
 
-function LogEntryRow({ entry, query }: { entry: LogEntry; query: string }) {
-  return (
-    <article className="grid gap-1 border-b border-border/60 px-1 py-3 transition hover:bg-muted/35 md:grid-cols-[9.5rem_5rem_minmax(8rem,16rem)_1fr] md:gap-3 md:px-0">
-      <time className="min-w-0 truncate text-xs text-muted-foreground md:pt-1">
-        {entry.timestamp ?? "—"}
-      </time>
-      <div className="md:pt-0.5">
-        <Badge
-          variant={levelBadgeVariant(entry.level)}
-          className="font-mono text-[0.68rem] uppercase tracking-wide"
-        >
-          {displayLevel(entry.level)}
-        </Badge>
-      </div>
-      <div className="min-w-0 truncate text-xs text-muted-foreground md:pt-1">
-        {entry.target ?? "—"}
-      </div>
-      <p className="min-w-0 whitespace-pre-wrap break-words text-sm leading-6">
-        {highlightText(entry.message, query)}
-      </p>
-    </article>
-  );
-}
+// LogEntryRow was replaced by the read-only CodeMirror viewer.
 
 function EmptyLogState({ message, title }: { message: string; title: string }) {
   return (
@@ -646,6 +745,79 @@ function parseLogEntry(line: LogLine, blankMessage: string): LogEntry {
   return fallback;
 }
 
+type LogHighlightSpan = {
+  from: number;
+  to: number;
+  className: string;
+};
+
+function logLevelHighlightClass(level: string | null | undefined): string | null {
+  switch (normalizeLevel(level)) {
+    case "error":
+      return "log-level-error";
+    case "warn":
+      return "log-level-warn";
+    case "info":
+      return "log-level-info";
+    case "debug":
+      return "log-level-debug";
+    case "trace":
+      return "log-level-trace";
+    default:
+      return null;
+  }
+}
+
+export function logEntryHighlightSpans(entry: LogEntry): LogHighlightSpan[] {
+  const raw = entry.raw;
+  if (!raw) {
+    return [];
+  }
+
+  const spans: LogHighlightSpan[] = [];
+  const pushSpan = (needle: string, className: string, searchFrom = 0) => {
+    const index = raw.indexOf(needle, searchFrom);
+    if (index !== -1) {
+      spans.push({ from: index, to: index + needle.length, className });
+    }
+    return index === -1 ? searchFrom : index + needle.length;
+  };
+
+  const pythonMatch = raw.match(
+    /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[,.]\d+)?)\s+-\s+([A-Z]+)\s+-\s+(.+?)\s+-\s+(.*)$/,
+  );
+  if (pythonMatch) {
+    let searchFrom = pushSpan(pythonMatch[1], "log-ts");
+    const levelClass = logLevelHighlightClass(pythonMatch[2]);
+    searchFrom = levelClass
+      ? pushSpan(pythonMatch[2], levelClass, searchFrom)
+      : pushSpan(pythonMatch[2], "log-ts", searchFrom);
+    pushSpan(pythonMatch[3], "log-target", searchFrom);
+    return spans;
+  }
+
+  const tracingMatch = raw.match(
+    /^(\d{4}-\d{2}-\d{2}[T ][^\s]+)\s+([A-Z]+)\s+(?:ThreadId\([^)]+\)\s+)?(?:([^:]+):\s*)?(.*)$/,
+  );
+  if (tracingMatch) {
+    let searchFrom = pushSpan(tracingMatch[1], "log-ts");
+    const levelClass = logLevelHighlightClass(tracingMatch[2]);
+    searchFrom = levelClass
+      ? pushSpan(tracingMatch[2], levelClass, searchFrom)
+      : pushSpan(tracingMatch[2], "log-ts", searchFrom);
+    if (tracingMatch[3]) {
+      pushSpan(tracingMatch[3], "log-target", searchFrom);
+    }
+    return spans;
+  }
+
+  const inferred = logLevelHighlightClass(inferLevel(raw));
+  if (inferred) {
+    pushSpan(inferred.toUpperCase(), inferred);
+  }
+  return spans;
+}
+
 function inferLevel(text: string): string | null {
   const match = text.match(/\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR)\b/i);
   return match ? normalizeLevel(match[1]) : null;
@@ -733,60 +905,7 @@ function logLevelFilterFromValue(
   }
 }
 
-function levelBadgeVariant(
-  level: string | null,
-): "default" | "secondary" | "destructive" | "outline" | "ghost" {
-  switch (normalizeLevel(level)) {
-    case "error":
-      return "destructive";
-    case "warn":
-      return "secondary";
-    case "info":
-      return "outline";
-    case "debug":
-      return "ghost";
-    case "trace":
-      return "secondary";
-    default:
-      return "secondary";
-  }
-}
-
-function highlightText(text: string, query: string): ReactNode {
-  const needle = query.trim();
-  if (!needle) {
-    return text;
-  }
-
-  const lowerText = text.toLowerCase();
-  const lowerNeedle = needle.toLowerCase();
-  const parts: ReactNode[] = [];
-  let cursor = 0;
-
-  while (cursor < text.length) {
-    const index = lowerText.indexOf(lowerNeedle, cursor);
-    if (index === -1) {
-      parts.push(text.slice(cursor));
-      break;
-    }
-
-    if (index > cursor) {
-      parts.push(text.slice(cursor, index));
-    }
-
-    parts.push(
-      <mark
-        key={`${index}-${lowerNeedle}`}
-        className="rounded bg-primary/20 px-0.5 text-foreground"
-      >
-        {text.slice(index, index + needle.length)}
-      </mark>,
-    );
-    cursor = index + needle.length;
-  }
-
-  return parts;
-}
+// levelBadgeVariant and highlightText were removed with LogEntryRow.
 
 function readMockLogSource({
   mockData,
