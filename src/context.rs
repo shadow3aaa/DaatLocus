@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 
 use crate::{
     app::AppManager,
+    catalog_hot_reload::CatalogFileEntry,
     config::Config,
     context_budget::TokenEstimateBaseline,
     core::ModelProvider,
@@ -92,6 +93,7 @@ pub struct Context {
     pub telegram_live_drafts: TelegramLiveDraftRegistry,
     pub claimed_event_ids: Vec<String>,
     pub afterclaim_context_fingerprint: Option<String>,
+    pub catalog_hot_reload_fingerprint: Option<Vec<CatalogFileEntry>>,
     pub delivered_root_instruction_fingerprint: Option<String>,
     pub visible_source_lines:
         HashSet<crate::runtime::runtime_loop::coding_source_elision::CodingSourceLineKey>,

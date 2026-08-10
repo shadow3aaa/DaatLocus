@@ -4,6 +4,7 @@ mod activity_event;
 mod app;
 mod browser_app;
 mod browser_install;
+mod catalog_hot_reload;
 mod cli;
 mod coding_app;
 mod commands;

@@ -461,6 +461,7 @@ pub async fn build_eval_context_with_compiled(
         telegram_live_drafts: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         claimed_event_ids: Vec::new(),
         afterclaim_context_fingerprint: None,
+        catalog_hot_reload_fingerprint: None,
         visible_source_lines: HashSet::new(),
         delivered_root_instruction_fingerprint: None,
         idle_since: None,

@@ -293,6 +293,7 @@ pub async fn execute_agent_loop_step(
     context: &mut Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
 ) -> AgentLoopStepExecution {
+    crate::catalog_hot_reload::maybe_hot_reload_catalogs(context);
     let runtime_turn_id = format!("runtime-turn-{}", uuid::Uuid::new_v4());
     let claimed_inputs = claim_pending_runtime_inputs(context, RUNTIME_EVENT_CLAIM_BATCH_SIZE);
     context.current_work_origin = runtime_work_origin(&claimed_inputs);

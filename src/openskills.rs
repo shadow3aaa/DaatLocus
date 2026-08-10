@@ -81,8 +81,8 @@ pub struct OpenSkillInjection {
 }
 
 #[derive(Debug, Clone)]
-struct SkillRoot {
-    path: PathBuf,
+pub(crate) struct SkillRoot {
+    pub(crate) path: PathBuf,
     scope: OpenSkillScope,
 }
 
@@ -346,7 +346,7 @@ pub fn set_openskill_auto_use(path: &Path, enabled: bool) -> Result<(), String> 
     save_openskills_user_config(&mut config)
 }
 
-fn skill_roots(execution_cwd: &Path) -> Vec<SkillRoot> {
+pub(crate) fn skill_roots(execution_cwd: &Path) -> Vec<SkillRoot> {
     let mut roots = Vec::new();
 
     roots.extend(project_skill_roots(execution_cwd));

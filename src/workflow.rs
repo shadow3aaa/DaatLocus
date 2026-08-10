@@ -3185,6 +3185,7 @@ mod tests {
                 telegram_live_drafts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 claimed_event_ids: Vec::new(),
                 afterclaim_context_fingerprint: None,
+                catalog_hot_reload_fingerprint: None,
                 delivered_root_instruction_fingerprint: None,
                 visible_source_lines: std::collections::HashSet::new(),
                 idle_since: None,
