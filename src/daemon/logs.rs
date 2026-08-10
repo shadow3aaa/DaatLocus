@@ -17,7 +17,7 @@ use tokio::{
 
 use crate::daat_locus_paths::daat_locus_paths;
 
-use super::{DAEMON_MAIN_LOG, SESSION_LOG, ServerState};
+use super::{session, DAEMON_MAIN_LOG, SESSION_LOG, ServerState};
 
 const DEFAULT_LOG_LINE_LIMIT: usize = 500;
 const MAX_LOG_LINE_LIMIT: usize = 2_000;
@@ -92,7 +92,7 @@ pub(super) async fn sources_handler(
     }
 
     Json(LogSourcesResponse {
-        sources: log_sources().await,
+        sources: log_sources(&state.sessions).await,
     })
     .into_response()
 }
@@ -106,7 +106,7 @@ pub(super) async fn read_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let Some(source) = log_sources()
+    let Some(source) = log_sources(&state.sessions)
         .await
         .into_iter()
         .find(|source| source.id == query.source)
@@ -142,7 +142,7 @@ pub(super) async fn read_handler(
     }
 }
 
-async fn log_sources() -> Vec<LogSourceEntry> {
+async fn log_sources(sessions: &session::SessionRegistry) -> Vec<LogSourceEntry> {
     let paths = daat_locus_paths().await;
     let mut sources = vec![
         log_source_entry(
@@ -153,11 +153,14 @@ async fn log_sources() -> Vec<LogSourceEntry> {
         )
         .await,
     ];
-    sources.extend(session_log_sources(paths.sessions_dir()).await);
+    sources.extend(session_log_sources(paths.sessions_dir(), sessions.list()).await);
     sources
 }
 
-async fn session_log_sources(sessions_dir: PathBuf) -> Vec<LogSourceEntry> {
+async fn session_log_sources(
+    sessions_dir: PathBuf,
+    sessions: Vec<session::SessionInfo>,
+) -> Vec<LogSourceEntry> {
     let Ok(mut entries) = tokio::fs::read_dir(sessions_dir).await else {
         return Vec::new();
     };
@@ -183,8 +186,8 @@ async fn session_log_sources(sessions_dir: PathBuf) -> Vec<LogSourceEntry> {
         sources.push(
             log_source_entry(
                 format!("session-log-{session_id}"),
-                format!("Session {session_id} log"),
-                "Session process tracing plus stdout/stderr output.",
+                session_log_label(session_id, &sessions),
+                session_id.to_string(),
                 path,
             )
             .await,
@@ -192,6 +195,17 @@ async fn session_log_sources(sessions_dir: PathBuf) -> Vec<LogSourceEntry> {
     }
     sources.sort_by(|left, right| left.label.cmp(&right.label));
     sources
+}
+
+fn session_log_label(session_id: &str, sessions: &[session::SessionInfo]) -> String {
+    sessions
+        .iter()
+        .find(|info| info.session_id.as_str() == session_id)
+        .and_then(|info| info.title.as_deref())
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Untitled session")
+        .to_string()
 }
 
 async fn log_source_entry(
@@ -402,12 +416,24 @@ mod tests {
             .await
             .expect("write main log");
 
-        let sources = session_log_sources(sessions_dir).await;
+        let sessions = vec![session::SessionInfo {
+            session_id: session::SessionId::from_string("abc").expect("session id"),
+            scope: session::SessionScope::General,
+            pid: None,
+            status: session::SessionStatus::Dormant,
+            ipc_name: None,
+            ipc_token_hash: None,
+            project_dir: None,
+            title: Some("Fix render slot label".to_string()),
+            started_at_ms: 0,
+            last_seen_at_ms: None,
+        }];
+        let sources = session_log_sources(sessions_dir, sessions).await;
 
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].id, "session-log-abc");
-        assert_eq!(sources[0].label, "Session abc log");
-        assert!(sources[0].exists);
+        assert_eq!(sources[0].label, "Fix render slot label");
+        assert_eq!(sources[0].description, "abc");
         assert!(
             PathBuf::from(&sources[0].path)
                 .ends_with(Path::new("abc").join("logs").join("session.log"))

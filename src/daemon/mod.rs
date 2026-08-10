@@ -694,6 +694,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/daemon/shutdown", post(shutdown_handler))
         .route("/daemon/restart", post(restart_handler))
         .route("/filesystem/dirs", get(dir_list_handler))
+        .route("/filesystem/open", post(open_path_handler))
         .route("/sessions", get(session_list_handler))
         .route("/sessions", post(session_create_handler))
         .route("/sessions/{session_id}", delete(session_delete_handler))
@@ -2031,6 +2032,95 @@ async fn dir_list_handler(
     };
 
     (StatusCode::OK, Json(result)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenPathRequest {
+    target: String,
+}
+
+async fn open_path_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<OpenPathRequest>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let target = request.target.trim();
+    if target.is_empty() || target.len() > 8 * 1024 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid target" })),
+        )
+            .into_response();
+    }
+
+    let resolved = resolve_local_open_target(target);
+    match crate::open_url::open_url(&resolved) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Normalize a local file target before handing it to the system opener.
+/// `file://` URLs are unwrapped, and relative paths are resolved against the
+/// daemon working directory so the opener always receives a usable target.
+fn resolve_local_open_target(target: &str) -> String {
+    let trimmed = target.trim();
+    if let Some(rest) = trimmed.strip_prefix("file://") {
+        return unwrap_file_url_path(rest);
+    }
+    if is_absolute_local_path(trimmed) {
+        return trimmed.to_string();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(trimmed).to_string_lossy().to_string(),
+        Err(_) => trimmed.to_string(),
+    }
+}
+
+fn unwrap_file_url_path(rest: &str) -> String {
+    #[cfg(windows)]
+    {
+        if is_windows_drive_path(rest) {
+            return rest.to_string();
+        }
+        if let Some(stripped) = rest.strip_prefix('/') {
+            if is_windows_drive_path(stripped) {
+                return stripped.to_string();
+            }
+        }
+    }
+    rest.to_string()
+}
+
+fn is_absolute_local_path(value: &str) -> bool {
+    if value.starts_with('/') || value.starts_with('\\') {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        return is_windows_drive_path(value);
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn is_windows_drive_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
 fn list_root_dirs(_include_files: bool) -> DirListResponse {
@@ -4269,5 +4359,29 @@ mod tests {
             &mut deadline,
         );
         assert_eq!(deadline, stopping_deadline);
+    }
+
+    #[test]
+    fn resolve_local_open_target_unwraps_file_urls_and_keeps_absolutes() {
+        assert_eq!(
+            resolve_local_open_target("file:///C:/Users/me/a.md"),
+            "C:/Users/me/a.md"
+        );
+        assert_eq!(
+            resolve_local_open_target("file:///home/user/a.md"),
+            "/home/user/a.md"
+        );
+        assert_eq!(
+            resolve_local_open_target("C:\\Users\\me\\a.md"),
+            "C:\\Users\\me\\a.md"
+        );
+        assert_eq!(
+            resolve_local_open_target("/home/user/a.md"),
+            "/home/user/a.md"
+        );
+
+        let cwd = std::env::current_dir().expect("current dir");
+        let relative = resolve_local_open_target("./notes.md");
+        assert_eq!(PathBuf::from(relative), cwd.join("./notes.md"));
     }
 }
