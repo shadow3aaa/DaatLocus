@@ -169,6 +169,7 @@ const AGENT_CHAT_TERMINAL_WAIT_LINE_LIMIT = 6;
 const AGENT_CHAT_ERROR_LINE_LIMIT = 12;
 const AGENT_CHAT_THINKING_PREVIEW_LINE_LIMIT = 3;
 const AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX = 72;
+const AGENT_CHAT_LEAVE_BOTTOM_THRESHOLD_PX = 16;
 const AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX = 160;
 const AGENT_CHAT_MAX_IMAGE_ATTACHMENTS = 4;
 const AGENT_CHAT_MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
@@ -4261,7 +4262,7 @@ function useActivityFollowBottom<T extends HTMLElement>(
   const isNearBottom = useCallback((viewport: T) => {
     return (
       viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <=
-      AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX
+      AGENT_CHAT_LEAVE_BOTTOM_THRESHOLD_PX
     );
   }, []);
 
@@ -4300,7 +4301,7 @@ function useActivityFollowBottom<T extends HTMLElement>(
       manualScrollTopRef.current = boundedTop;
       followBottomRef.current =
         Math.max(0, viewport.scrollHeight - viewport.clientHeight) - boundedTop <=
-        AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX;
+        AGENT_CHAT_LEAVE_BOTTOM_THRESHOLD_PX;
     },
     [viewportRef],
   );
