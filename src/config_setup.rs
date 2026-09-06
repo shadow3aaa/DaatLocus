@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use crate::{
     config::{
-        Config, DaemonConfig, ModelConfig, ProviderConfig, TelegramConfig, ThinkingBudget,
-        load_config, normalize_provider_base_url, write_config,
+        Config, DaemonConfig, ModelConfig, ProviderConfig, SleepConfig, TelegramConfig,
+        ThinkingBudget, load_config, normalize_provider_base_url, write_config,
     },
     daat_locus_paths::daat_locus_paths,
     i18n::Locale,
@@ -116,6 +116,8 @@ pub struct SetupConfigRequest {
     pub telegram_enabled: Option<bool>,
     #[serde(default)]
     pub telegram_bot_token: Option<String>,
+    #[serde(default)]
+    pub sleep_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -558,6 +560,7 @@ fn setup_config_from_config(config: &Config) -> SetupConfigRequest {
         daemon_port: Some(config.daemon.port),
         telegram_enabled: Some(config.telegram.enabled),
         telegram_bot_token: Some(config.telegram.bot_token.clone()),
+        sleep_enabled: Some(config.sleep.enabled),
         ..SetupConfigRequest::default()
     }
 }
@@ -708,6 +711,9 @@ fn config_from_setup_request_with_base(
         efficient_model,
         daemon: DaemonConfig { port: daemon_port },
         telegram,
+        sleep: SleepConfig {
+            enabled: request.sleep_enabled.unwrap_or(base.sleep.enabled),
+        },
         ..base
     })
 }

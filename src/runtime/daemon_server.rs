@@ -8,7 +8,7 @@ use crate::{
         DAEMON_HOST_DISPLAY, DaemonControlCommand, DaemonLifecycleHandle, DaemonLifecycleState,
         DaemonLock, DaemonServerStartParams, SessionTokenStore, delete_session_by_id, session,
         session_client_for_id, session_ipc, spawn_detached_daemon_process, start_server,
-        terminate_process_backed_sessions,
+        terminate_process_backed_sessions, probe_persisted_session_ipc_token,
     },
     daemon_tray::{DaemonTrayHandle, DaemonTrayStartup},
     dashboard::{
@@ -371,14 +371,14 @@ async fn run_daemon_serve_inner(
         }
     });
 
-    let telegram_transport = if config.telegram.enabled && config.telegram.has_real_credentials() {
+    let mut telegram_transport = if config.telegram.enabled && config.telegram.has_real_credentials() {
         let telegram = TelegramTransportState::new();
         let telegram_handle = telegram.handle();
         bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
         let telegram_router = Arc::new(ManagerTelegramInputRouter {
-            sessions: telegram_sessions,
-            session_tokens: telegram_session_tokens,
-            telegram_defaults,
+            sessions: telegram_sessions.clone(),
+            session_tokens: telegram_session_tokens.clone(),
+            telegram_defaults: telegram_defaults.clone(),
         });
         let telegram_auth_verifier = Arc::new(ManagerTelegramAuthVerifier {
             auth_registry: daemon_token_registry.clone(),
@@ -397,7 +397,7 @@ async fn run_daemon_serve_inner(
     } else {
         None
     };
-    let telegram_outbox_delivery =
+    let mut telegram_outbox_delivery =
         if config.telegram.enabled && config.telegram.has_real_credentials() {
             Some(tokio::spawn(run_session_telegram_outbox_delivery(
                 TelegramDeliveryClient::new(config.telegram.clone(), telegram_acl.clone()),
@@ -413,6 +413,10 @@ async fn run_daemon_serve_inner(
     ));
 
     daemon_lifecycle.mark_ready();
+
+    let mut config_fingerprint = crate::config_hot_reload::current_config_fingerprint();
+    let mut config_watch_interval = tokio::time::interval(Duration::from_secs(3));
+    let mut last_telegram_config = toml::to_string(&config.telegram).ok();
 
     #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -448,9 +452,29 @@ async fn run_daemon_serve_inner(
                     }
                     DashboardControlCommand::ReloadSkills
                     | DashboardControlCommand::RunWorkflow { .. }
-                    | DashboardControlCommand::SetSkillAutoUse { .. } => {
-                        tracing::warn!("manager received skills command, but skills state is session-scoped");
+                    | DashboardControlCommand::SetSkillAutoUse { .. }
+                    | DashboardControlCommand::SetSleepEnabled { .. } => {
+                        tracing::warn!("manager received session-scoped command, but dashboard state is session-scoped");
                     }
+                }
+            }
+            _ = config_watch_interval.tick() => {
+                let fingerprint = crate::config_hot_reload::current_config_fingerprint();
+                if fingerprint.is_some() && fingerprint != config_fingerprint {
+                    config_fingerprint = fingerprint;
+                    reload_telegram_transport(
+                        &mut telegram_transport,
+                        &mut telegram_outbox_delivery,
+                        &mut last_telegram_config,
+                        &telegram_sessions,
+                        &telegram_session_tokens,
+                        &telegram_defaults,
+                        &sessions,
+                        &session_tokens,
+                        &telegram_acl,
+                        &daemon_token_registry,
+                    )
+                    .await;
                 }
             }
             signal = tokio::signal::ctrl_c(), if !ctrl_c_disabled => {
@@ -539,6 +563,9 @@ async fn run_session_health_checks(
                 }
                 Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => {
                     tracing::warn!("session {} health check error: {message}", info.session_id);
+                    if probe_persisted_session_ipc_token(&session_tokens, &info).await {
+                        continue;
+                    }
                 }
                 Ok(session_ipc::SessionIpcResponse::Status { .. } | _) => {}
                 Err(err) => {
@@ -550,6 +577,9 @@ async fn run_session_health_checks(
                         continue;
                     }
                     tracing::warn!("session {} health check failed: {err:?}", info.session_id);
+                    if probe_persisted_session_ipc_token(&session_tokens, &info).await {
+                        continue;
+                    }
                     session_tokens.write().remove(&info.session_id);
                     let _ = sessions.mark_dead(&info.session_id).await;
                 }
@@ -825,6 +855,76 @@ fn apply_daemon_control_command(
             *shutdown_action = ManagerShutdownAction::Restart;
         }
     }
+}
+
+/// Rebuild the manager Telegram transport (and outbox delivery) from the
+/// current config on disk. Used by the config hot-reload watcher.
+async fn reload_telegram_transport(
+    telegram_transport: &mut Option<tokio::task::JoinHandle<()>>,
+    telegram_outbox_delivery: &mut Option<tokio::task::JoinHandle<()>>,
+    last_telegram_config: &mut Option<String>,
+    telegram_sessions: &session::SessionRegistry,
+    telegram_session_tokens: &SessionTokenStore,
+    telegram_defaults: &session::TelegramSessionDefaults,
+    sessions: &session::SessionRegistry,
+    session_tokens: &SessionTokenStore,
+    telegram_acl: &TelegramAclHandle,
+    daemon_token_registry: &crate::daemon::DaemonTokenRegistryHandle,
+) {
+    let config = match crate::config::load_config().await {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::warn!("telegram transport hot reload skipped; config reload failed: {err}");
+            return;
+        }
+    };
+    let telegram_toml = match toml::to_string(&config.telegram) {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::warn!("telegram transport hot reload skipped; serialize failed: {err}");
+            return;
+        }
+    };
+    if last_telegram_config.as_deref() == Some(telegram_toml.as_str()) {
+        return;
+    }
+    *last_telegram_config = Some(telegram_toml);
+    if let Some(handle) = telegram_transport.take() {
+        handle.abort();
+    }
+    if let Some(handle) = telegram_outbox_delivery.take() {
+        handle.abort();
+    }
+    if config.telegram.enabled && config.telegram.has_real_credentials() {
+        let telegram = TelegramTransportState::new();
+        let telegram_handle = telegram.handle();
+        bootstrap_telegram_transport_state_from_acl(&telegram_handle, telegram_acl);
+        let telegram_router = Arc::new(ManagerTelegramInputRouter {
+            sessions: telegram_sessions.clone(),
+            session_tokens: telegram_session_tokens.clone(),
+            telegram_defaults: telegram_defaults.clone(),
+        });
+        let telegram_auth_verifier = Arc::new(ManagerTelegramAuthVerifier {
+            auth_registry: daemon_token_registry.clone(),
+        });
+        *telegram_transport = Some(tokio::spawn(
+            TelegramTransport::new(
+                config.telegram.clone(),
+                telegram_handle,
+                telegram_acl.clone(),
+                telegram_auth_verifier,
+                telegram_router.clone(),
+                telegram_router,
+            )
+            .run(),
+        ));
+        *telegram_outbox_delivery = Some(tokio::spawn(run_session_telegram_outbox_delivery(
+            TelegramDeliveryClient::new(config.telegram.clone(), telegram_acl.clone()),
+            sessions.clone(),
+            session_tokens.clone(),
+        )));
+    }
+    emit_startup_progress("[manager] telegram transport hot-reloaded from config".to_string());
 }
 
 #[cfg(test)]

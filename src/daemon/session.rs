@@ -463,6 +463,18 @@ pub async fn load_session_ipc_token(session_id: &SessionId) -> Result<Option<Str
     }
 }
 
+pub async fn clear_session_ipc_token(session_id: &SessionId) -> Result<()> {
+    let path = session_state_paths(session_id).state_file(SESSION_IPC_TOKEN_FILE_NAME);
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(miette!(
+            "remove session IPC token {} failed: {err}",
+            path.display()
+        )),
+    }
+}
+
 fn session_registry_path(paths: &DaatLocusPaths) -> PathBuf {
     paths.runtime_dir().join(SESSION_REGISTRY_FILE_NAME)
 }

@@ -21,6 +21,9 @@ pub enum DashboardControlCommand {
         path: PathBuf,
         enabled: bool,
     },
+    SetSleepEnabled {
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,6 +47,9 @@ pub enum DashboardAction {
     },
     SetSkillAutoUse {
         path: PathBuf,
+        enabled: bool,
+    },
+    SetSleepEnabled {
         enabled: bool,
     },
     DismissPendingUserInput {
@@ -176,6 +182,17 @@ pub fn execute_dashboard_action(
                 Err(err) => {
                     DashboardActionResult::error(format!("failed to queue skills auto-use: {err}"))
                 }
+            }
+        }
+        DashboardAction::SetSleepEnabled { enabled } => {
+            match control_tx.send(DashboardControlCommand::SetSleepEnabled { enabled }) {
+                Ok(()) => {
+                    let action = if enabled { "enable" } else { "disable" };
+                    DashboardActionResult::ok(format!("queued sleep auto-{action}"))
+                }
+                Err(err) => DashboardActionResult::error(format!(
+                    "failed to queue sleep auto toggle: {err}"
+                )),
             }
         }
         DashboardAction::DismissPendingUserInput { .. }

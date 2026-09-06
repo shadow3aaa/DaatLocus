@@ -1970,6 +1970,24 @@ mod tests {
     }
 
     #[test]
+    fn sleep_enabled_action_is_queued_on_the_session_control_channel() {
+        let (control_tx, mut control_rx) =
+            tokio::sync::mpsc::unbounded_channel::<DashboardControlCommand>();
+
+        let result = execute_dashboard_action(
+            DashboardAction::SetSleepEnabled { enabled: false },
+            &control_tx,
+        );
+
+        assert!(result.success);
+        assert_eq!(result.message, "queued sleep auto-disable");
+        assert!(matches!(
+            control_rx.try_recv(),
+            Ok(DashboardControlCommand::SetSleepEnabled { enabled: false })
+        ));
+    }
+
+    #[test]
     fn skills_toggle_panel_shows_only_error_feedback() {
         let mut panel = CommandPanel::SkillsToggle(SkillsTogglePanel {
             items: Vec::new(),

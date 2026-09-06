@@ -102,6 +102,17 @@ pub(super) fn dashboard_action_for_input(
             action: DashboardAction::RunSleep,
             quiet_success: false,
         },
+        ["sleep", "auto" | "toggle"] | ["sleep", "auto" | "toggle", "on" | "off"] => {
+            let enabled = match parts.as_slice() {
+                ["sleep", "auto" | "toggle"] => !context.state.runtime_optimization.enabled,
+                _ => parts[2] == "on",
+            };
+            DashboardActionInvocation {
+                title: "SLEEP".to_string(),
+                action: DashboardAction::SetSleepEnabled { enabled },
+                quiet_success: false,
+            }
+        }
         ["skills", "reload"] => DashboardActionInvocation {
             title: "SKILLS".to_string(),
             action: DashboardAction::ReloadSkills,
@@ -273,6 +284,22 @@ fn sleep_command_panel(state: &DashboardState) -> CommandPanel {
                 action: CommandSelectionAction::RunAction {
                     title: "SLEEP".to_string(),
                     action: DashboardAction::RunSleep,
+                    keep_panel: false,
+                },
+                disabled: false,
+            },
+            CommandSelectionItem {
+                name: "Automatic sleep".to_string(),
+                description: if state.runtime_optimization.enabled {
+                    "automatic sleep is enabled; select to disable it".to_string()
+                } else {
+                    "automatic sleep is disabled; select to enable it".to_string()
+                },
+                action: CommandSelectionAction::RunAction {
+                    title: "SLEEP".to_string(),
+                    action: DashboardAction::SetSleepEnabled {
+                        enabled: !state.runtime_optimization.enabled,
+                    },
                     keep_panel: false,
                 },
                 disabled: false,
@@ -542,6 +569,7 @@ pub(super) fn command_live_feedback(
     } else if sleep_command_accepts(verb) {
         match parts.as_slice() {
             ["sleep", "run" | "status"] => {}
+            ["sleep", "auto" | "toggle"] | ["sleep", "auto" | "toggle", "on" | "off"] => {}
             ["sleep", subcommand, ..] => {
                 return Some(unknown_command_part_feedback(
                     "SLEEP",
@@ -654,6 +682,12 @@ fn command_extra_argument_feedback(parts: &[&str]) -> Option<CommandFeedback> {
             title: "SLEEP".to_string(),
             message: format!("sleep {} does not take extra arguments.", parts[1]),
             detail: Some(format!("usage: /sleep {}", parts[1])),
+            level: CommandFeedbackLevel::Error,
+        }),
+        ["sleep", "auto" | "toggle", extra, ..] if parts.len() > 3 => Some(CommandFeedback {
+            title: "SLEEP".to_string(),
+            message: format!("sleep {} accepts on or off after it.", parts[1]),
+            detail: Some(format!("usage: /sleep {} <on|off>", parts[1])),
             level: CommandFeedbackLevel::Error,
         }),
         ["skills", "list" | "reload", ..] if parts.len() > 2 => Some(CommandFeedback {
@@ -883,6 +917,8 @@ pub(super) fn dashboard_parts_run_action(parts: &[&str]) -> bool {
         parts,
         ["clear" | "restart"]
             | ["sleep", "run"]
+            | ["sleep", "auto" | "toggle"]
+            | ["sleep", "auto" | "toggle", "on" | "off"]
             | ["skills", "reload"]
             | ["skills", "enable" | "disable", _]
     )

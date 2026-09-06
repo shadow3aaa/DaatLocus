@@ -125,6 +125,52 @@ pub async fn handle_dashboard_control_command(
             }
             sync_dashboard_state(context, tx, sleep_status, None);
         }
+        DashboardControlCommand::SetSleepEnabled { enabled } => {
+            if context.config.sleep.enabled == enabled {
+                let state = if enabled { "enabled" } else { "disabled" };
+                set_runtime_status_only(
+                    Some(tx),
+                    &format!("sleep self-improvement is already {state}"),
+                );
+                sync_dashboard_state(context, tx, sleep_status, None);
+                return;
+            }
+            match crate::config::load_config().await {
+                Ok(mut config) => {
+                    config.sleep.enabled = enabled;
+                    match crate::config::write_config(&config).await {
+                        Ok(()) => {
+                            context.config = config;
+                            crate::config_hot_reload::refresh_config_fingerprint(context);
+                            let action = if enabled { "enabled" } else { "disabled" };
+                            set_runtime_status(
+                                Some(tx),
+                                RuntimeStatusLevel::Info,
+                                format!(
+                                    "sleep self-improvement {action}; automatic background sleep will {}",
+                                    if enabled {
+                                        "start when idle"
+                                    } else {
+                                        "not start"
+                                    }
+                                ),
+                            );
+                        }
+                        Err(err) => set_runtime_status(
+                            Some(tx),
+                            RuntimeStatusLevel::Error,
+                            format!("failed to persist sleep toggle: {err}"),
+                        ),
+                    }
+                }
+                Err(err) => set_runtime_status(
+                    Some(tx),
+                    RuntimeStatusLevel::Error,
+                    format!("failed to load config for sleep toggle: {err}"),
+                ),
+            }
+            sync_dashboard_state(context, tx, sleep_status, None);
+        }
         DashboardControlCommand::ClearConversation => {
             let cleared_events = match context.events.clear_all() {
                 Ok(count) => count,
