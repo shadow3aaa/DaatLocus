@@ -87,8 +87,6 @@ type SessionTree = {
   projectGroups: SessionProjectGroup[];
 };
 
-const PROJECT_VISIBLE_SESSION_COUNT = 4;
-const GENERAL_VISIBLE_SESSION_COUNT = 8;
 
 const navigationItems: NavigationItem[] = [
   {
@@ -149,6 +147,9 @@ function AppSidebarBody({
   const { setOpenMobile } = useSidebar();
   const { t } = useTranslation();
   const sessionTree = buildSessionTree(sessions);
+  const selectedProjectDir =
+    sessions.find((session) => session.session_id === selectedSessionId)?.project_dir ??
+    null;
   const [projectsOpen, setProjectsOpen] = useState(true);
   const [conversationsOpen, setConversationsOpen] = useState(true);
   const [deleteCandidate, setDeleteCandidate] = useState<SessionInfo | null>(
@@ -182,7 +183,7 @@ function AppSidebarBody({
 
   return (
     <>
-      <SidebarContent className="px-2 py-2">
+      <SidebarContent className="gap-1 px-2 py-2">
         {sessionError ? (
           <Alert variant="destructive" className="mb-2">
             <AlertDescription className="text-xs">
@@ -194,6 +195,7 @@ function AppSidebarBody({
         <SidebarSessionSection
           label={t("sidebar.projects")}
           open={projectsOpen}
+          highlighted={selectedProjectDir !== null}
           onOpenChange={setProjectsOpen}
           actions={
             <NewCodingSessionMenu
@@ -213,6 +215,7 @@ function AppSidebarBody({
                   key={group.projectDir}
                   group={group}
                   selectedSessionId={selectedSessionId}
+                  highlighted={group.projectDir === selectedProjectDir}
                   isCreatingSession={isCreatingSession}
                   deletingSessionId={deletingSessionId}
                   onCreateSession={() => {
@@ -235,6 +238,7 @@ function AppSidebarBody({
         <ConversationSessionGroup
           sessions={sessionTree.general}
           selectedSessionId={selectedSessionId}
+          highlighted={selectedSessionId !== null && selectedProjectDir === null}
           open={conversationsOpen}
           isCreatingSession={isCreatingSession}
           deletingSessionId={deletingSessionId}
@@ -316,22 +320,24 @@ function AppSidebarBody({
 function SidebarSessionSection({
   label,
   open,
+  highlighted = false,
   actions,
   children,
   onOpenChange,
 }: {
   label: string;
   open: boolean;
+  highlighted?: boolean;
   actions?: ReactNode;
   children: ReactNode;
   onOpenChange: (open: boolean) => void;
 }) {
   return (
-    <SidebarGroup className="gap-1 p-0">
+    <SidebarGroup className={cn("gap-1 p-0", open && "min-h-0")}>
       <div
         className={cn(
           "flex h-8 min-w-0 w-full items-center rounded-md hover:bg-muted hover:text-foreground focus-within:bg-muted focus-within:text-foreground",
-          open && "bg-muted text-foreground",
+          highlighted && "bg-muted text-foreground",
         )}
       >
         <Button
@@ -353,7 +359,7 @@ function SidebarSessionSection({
         ) : null}
       </div>
       {open ? (
-        <SidebarGroupContent className="pt-2">{children}</SidebarGroupContent>
+        <SidebarGroupContent className="min-h-0 flex-1 overflow-y-auto scrollbar-none pt-2">{children}</SidebarGroupContent>
       ) : null}
     </SidebarGroup>
   );
@@ -423,6 +429,7 @@ function NewCodingSessionMenu({
 function ProjectSessionGroup({
   group,
   selectedSessionId,
+  highlighted,
   isCreatingSession,
   deletingSessionId,
   onCreateSession,
@@ -431,6 +438,7 @@ function ProjectSessionGroup({
 }: {
   group: SessionProjectGroup;
   selectedSessionId: string | null;
+  highlighted: boolean;
   isCreatingSession: boolean;
   deletingSessionId: string | null;
   onCreateSession: () => void;
@@ -438,25 +446,35 @@ function ProjectSessionGroup({
   onRequestDeleteSession: (session: SessionInfo) => void;
 }) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
-  const visibleSessions = expanded
-    ? group.sessions
-    : group.sessions.slice(0, PROJECT_VISIBLE_SESSION_COUNT);
-  const hiddenSessionCount = group.sessions.length - visibleSessions.length;
+  const [open, setOpen] = useState(true);
   const newSessionLabel = t("sidebar.newSessionInProject", {
     project: group.label,
   });
 
   return (
     <div className="min-w-0 w-full">
-      <div className="flex h-9 min-w-0 w-full items-center rounded-md hover:bg-muted/60 focus-within:bg-muted/60">
-        <div
-          className="flex min-w-0 flex-1 items-center gap-2 px-2 text-sm font-medium"
+      <div
+        className={cn(
+          "flex h-9 min-w-0 w-full items-center rounded-md hover:bg-muted/60 focus-within:bg-muted/60",
+          highlighted && "bg-muted/60",
+        )}
+      >
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
           title={group.projectDir}
+          className="h-9 min-w-0 flex-1 justify-start gap-2 bg-transparent px-2 text-left text-sm font-medium hover:bg-transparent aria-expanded:bg-transparent"
         >
+          <ChevronDownIcon
+            data-icon="inline-end"
+            className={cn("shrink-0 transition-transform", !open && "-rotate-90")}
+          />
           <FolderIcon className="size-4 shrink-0 text-sidebar-foreground/75" />
-          <span className="min-w-0 truncate">{group.label}</span>
-        </div>
+          <span className="min-w-0 flex-1 truncate">{group.label}</span>
+        </Button>
         <Button
           type="button"
           variant="ghost"
@@ -471,31 +489,17 @@ function ProjectSessionGroup({
         </Button>
       </div>
 
-      <SessionRows
-        buttonClassName="pl-8"
-        sessions={visibleSessions}
-        selectedSessionId={selectedSessionId}
-        deletingSessionId={deletingSessionId}
-        onSelectSession={onSelectSession}
-        onRequestDeleteSession={onRequestDeleteSession}
-      />
-
-      {hiddenSessionCount > 0 ? (
-        <button
-          type="button"
-          className="h-8 w-full rounded-md pr-2 pl-8 text-left text-sm text-sidebar-foreground/45 hover:bg-muted/50 hover:text-sidebar-foreground"
-          onClick={() => setExpanded(true)}
-        >
-          {t("sidebar.showMore")}
-        </button>
-      ) : expanded && group.sessions.length > PROJECT_VISIBLE_SESSION_COUNT ? (
-        <button
-          type="button"
-          className="h-8 w-full rounded-md pr-2 pl-8 text-left text-sm text-sidebar-foreground/45 hover:bg-muted/50 hover:text-sidebar-foreground"
-          onClick={() => setExpanded(false)}
-        >
-          {t("sidebar.showLess")}
-        </button>
+      {open ? (
+        <div className="min-h-0 max-h-56 overflow-y-auto scrollbar-none">
+          <SessionRows
+            buttonClassName="pl-9"
+            sessions={group.sessions}
+            selectedSessionId={selectedSessionId}
+            deletingSessionId={deletingSessionId}
+            onSelectSession={onSelectSession}
+            onRequestDeleteSession={onRequestDeleteSession}
+          />
+        </div>
       ) : null}
     </div>
   );
@@ -504,6 +508,7 @@ function ProjectSessionGroup({
 function ConversationSessionGroup({
   sessions,
   selectedSessionId,
+  highlighted = false,
   open,
   isCreatingSession,
   deletingSessionId,
@@ -514,6 +519,7 @@ function ConversationSessionGroup({
 }: {
   sessions: SessionInfo[];
   selectedSessionId: string | null;
+  highlighted?: boolean;
   open: boolean;
   isCreatingSession: boolean;
   deletingSessionId: string | null;
@@ -523,16 +529,12 @@ function ConversationSessionGroup({
   onRequestDeleteSession: (session: SessionInfo) => void;
 }) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
-  const visibleSessions = expanded
-    ? sessions
-    : sessions.slice(0, GENERAL_VISIBLE_SESSION_COUNT);
-  const hiddenSessionCount = sessions.length - visibleSessions.length;
 
   return (
     <SidebarSessionSection
       label={t("sidebar.conversations")}
       open={open}
+      highlighted={highlighted}
       onOpenChange={onOpenChange}
       actions={
         <Button
@@ -548,35 +550,17 @@ function ConversationSessionGroup({
         </Button>
       }
     >
-        {visibleSessions.length > 0 ? (
-          <SessionRows
-            sessions={visibleSessions}
-            selectedSessionId={selectedSessionId}
-            deletingSessionId={deletingSessionId}
-            onSelectSession={onSelectSession}
-            onRequestDeleteSession={onRequestDeleteSession}
-          />
-        ) : (
-          <SidebarEmptyText>{t("sidebar.noChats")}</SidebarEmptyText>
-        )}
-
-        {hiddenSessionCount > 0 ? (
-          <button
-            type="button"
-            className="h-8 w-full rounded-md px-2 text-left text-sm text-sidebar-foreground/45 hover:bg-muted/50 hover:text-sidebar-foreground"
-            onClick={() => setExpanded(true)}
-          >
-            {t("sidebar.showMore")}
-          </button>
-        ) : expanded && sessions.length > GENERAL_VISIBLE_SESSION_COUNT ? (
-          <button
-            type="button"
-            className="h-8 w-full rounded-md px-2 text-left text-sm text-sidebar-foreground/45 hover:bg-muted/50 hover:text-sidebar-foreground"
-            onClick={() => setExpanded(false)}
-          >
-            {t("sidebar.showLess")}
-          </button>
-        ) : null}
+      {sessions.length > 0 ? (
+        <SessionRows
+          sessions={sessions}
+          selectedSessionId={selectedSessionId}
+          deletingSessionId={deletingSessionId}
+          onSelectSession={onSelectSession}
+          onRequestDeleteSession={onRequestDeleteSession}
+        />
+      ) : (
+        <SidebarEmptyText>{t("sidebar.noChats")}</SidebarEmptyText>
+      )}
     </SidebarSessionSection>
   );
 }

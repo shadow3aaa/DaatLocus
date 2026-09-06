@@ -62,6 +62,10 @@ type TelegramSettingsValue = {
   botToken: string;
 };
 
+type SleepSettingsValue = {
+  enabled: boolean;
+};
+
 type SettingsPageProps = {
   mockSetupConfig?: SetupConfigResponse;
   onSaveSetupConfig?: (
@@ -106,6 +110,11 @@ export function SettingsPage({
         ? setupConfigRequestToTelegramSettingsValue(mockSetupConfig.config)
         : createDefaultTelegramSettingsValue(),
     );
+  const [sleepSettings, setSleepSettings] = useState<SleepSettingsValue>(() =>
+    mockSetupConfig
+      ? setupConfigRequestToSleepSettingsValue(mockSetupConfig.config)
+      : createDefaultSleepSettingsValue(),
+  );
   const [loadState, setLoadState] = useState<LoadState>(
     () => (mockSetupConfig ? "idle" : "loading"),
   );
@@ -188,6 +197,7 @@ export function SettingsPage({
     isLoading,
     modelAccess,
     onSaveSetupConfig,
+    sleepSettings,
     telegramSettings,
     t,
   ]);
@@ -207,6 +217,7 @@ export function SettingsPage({
     setInterfaceSettings(nextInterfaceSettings);
     void setWebUiLanguage(nextInterfaceSettings.locale);
     setTelegramSettings(setupConfigRequestToTelegramSettingsValue(config));
+    setSleepSettings(setupConfigRequestToSleepSettingsValue(config));
     setLoadState("idle");
     setLoadError(null);
     setSaveState("idle");
@@ -248,6 +259,7 @@ export function SettingsPage({
       ...modelAccessEditorValueToSetupRequest(modelAccess),
       ...interfaceSettingsValueToSetupRequest(interfaceSettings),
       ...telegramSettingsValueToSetupRequest(telegramSettings),
+      ...sleepSettingsValueToSetupRequest(sleepSettings),
     };
     delete request.daemon_port;
     return request;
@@ -261,7 +273,9 @@ export function SettingsPage({
     >
       <div aria-hidden="true" className="h-20 md:h-8" />
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-12">
-
+        <p className="max-w-2xl text-sm text-muted-foreground">
+          {t("settings.hotReloadNote")}
+        </p>
         {showSettingsAlerts ? (
           <div className="flex flex-col gap-4">
             {loadError ? (
@@ -328,6 +342,14 @@ export function SettingsPage({
               value={telegramSettings}
               onChange={(nextValue) => {
                 setTelegramSettings(nextValue);
+                markDirty();
+              }}
+            />
+
+            <SleepSettingsEditor
+              value={sleepSettings}
+              onChange={(nextValue) => {
+                setSleepSettings(nextValue);
                 markDirty();
               }}
             />
@@ -443,6 +465,28 @@ function telegramSettingsValueToSetupRequest(
   };
 }
 
+function createDefaultSleepSettingsValue(): SleepSettingsValue {
+  return {
+    enabled: true,
+  };
+}
+
+function setupConfigRequestToSleepSettingsValue(
+  request: SetupConfigRequest,
+): SleepSettingsValue {
+  return {
+    enabled: request.sleep_enabled ?? true,
+  };
+}
+
+function sleepSettingsValueToSetupRequest(
+  value: SleepSettingsValue,
+): Pick<SetupConfigRequest, "sleep_enabled"> {
+  return {
+    sleep_enabled: value.enabled,
+  };
+}
+
 function TelegramSettingsEditor({
   value,
   onChange,
@@ -510,6 +554,48 @@ function TelegramSettingsEditor({
               }}
             />
           </FieldDescription>
+        </Field>
+      </FieldGroup>
+    </section>
+  );
+}
+
+function SleepSettingsEditor({
+  value,
+  onChange,
+}: {
+  value: SleepSettingsValue;
+  onChange: (value: SleepSettingsValue) => void;
+}) {
+  const { t } = useTranslation();
+
+  return (
+    <section className="flex flex-col gap-6">
+      <div className="flex flex-col gap-2">
+        <h2 className="text-3xl font-medium tracking-normal">
+          {t("settings.sleep.title")}
+        </h2>
+        <p className="max-w-2xl text-base text-muted-foreground">
+          {t("settings.sleep.description")}
+        </p>
+      </div>
+
+      <FieldGroup>
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel htmlFor="sleep-settings-enabled">
+              {t("settings.sleep.enableLabel")}
+            </FieldLabel>
+            <FieldDescription>
+              {t("settings.sleep.enableDescription")}
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="sleep-settings-enabled"
+            checked={value.enabled}
+            onCheckedChange={(enabled) => onChange({ ...value, enabled })}
+            aria-label={t("settings.sleep.enableAria")}
+          />
         </Field>
       </FieldGroup>
     </section>

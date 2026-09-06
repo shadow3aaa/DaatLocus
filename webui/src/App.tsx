@@ -1204,7 +1204,6 @@ const MOCK_WORKFLOW_RUN: WorkflowRunSnapshot = {
         {
           CodingOpenProject: {
             project_root: MOCK_PROJECT_DIR,
-            detail_lines: ["workflow Inspector uses DashboardSnapshot activity events"],
           },
         },
         {
@@ -1761,6 +1760,7 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
     total_primitive_optimization_rounds: 2,
   },
   runtime_optimization: {
+    enabled: true,
     running: false,
     current_trigger: null,
     last_result: "no runtime error cases",
@@ -1776,6 +1776,23 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
   },
   footer_context: "gpt-5.5 · Coding · 42k/128k used",
   footer_estimated_input_tokens: 42_000,
+  context_composition: mockContextCompositionSnapshot({
+    model: "gpt-5.5",
+    messageCount: 42,
+    toolCount: 18,
+    stablePrefixTokens: 26_000,
+    changedPrefixTokens: 8_000,
+    newSuffixTokens: 18_000,
+    segments: [
+      mockContextSegment("system_messages", "System messages", "system", 8_400, "prefix"),
+      mockContextSegment("afterclaim_context", "Afterclaim context", "user", 4_800, "history"),
+      mockContextSegment("preturn_context", "Preturn context", "user", 9_600, "history"),
+      mockContextSegment("conversation_history", "Conversation history", "user", 12_300, "history"),
+      mockContextSegment("assistant_messages", "Assistant messages", "assistant", 7_400, "history"),
+      mockContextSegment("tool_messages", "Tool outputs", "tool", 5_700, "history"),
+      mockContextSegment("tools_schema", "Tools schema", "request_tools", 13_100, "tools"),
+    ],
+  }),
 };
 
 const MOCK_STATUS_SUMMARY: StatusSummary = {

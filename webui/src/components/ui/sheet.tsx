@@ -4,6 +4,9 @@ import { XIcon } from "lucide-react"
 import { Dialog as SheetPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
+import { useTranslation } from "react-i18next"
+
+import { Button } from "@/components/ui/button"
 
 function Sheet({
   ...props
@@ -80,13 +83,30 @@ function SheetContent({
         {...props}
       >
         {children}
-        <SheetPrimitive.Close className="absolute top-4 right-4 rounded-xs opacity-70 transition-opacity hover:opacity-100 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-1 disabled:pointer-events-none">
-          <XIcon aria-hidden="true" />
-          <span className="sr-only">Close</span>
-        </SheetPrimitive.Close>
+      <SheetPrimitive.Close
+        className="absolute top-4 right-4 rounded-xs opacity-70 transition-opacity hover:opacity-100 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-1 disabled:pointer-events-none"
+        asChild
+      >
+        <SheetCloseButton />
+      </SheetPrimitive.Close>
       </SheetPrimitive.Content>
     </SheetPortal>
   )
+}
+
+function SheetCloseButton() {
+  const { t } = useTranslation();
+  return (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      className="h-6 w-6 shrink-0 rounded-xs p-0 opacity-70 transition-opacity hover:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-hidden"
+      aria-label={t("common.close")}
+    >
+      <XIcon className="size-4" aria-hidden="true" />
+      <span className="sr-only">{t("common.close")}</span>
+    </Button>
+  );
 }
 
 function SheetHeader({ className, ...props }: React.ComponentProps<"div">) {

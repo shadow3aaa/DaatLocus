@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/sheet";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 const SIDEBAR_WIDTH = "18rem";
 const SIDEBAR_WIDTH_MOBILE = "100vw";
@@ -103,6 +104,7 @@ function Sidebar({
 }: React.ComponentProps<"div"> & {
   side?: "left" | "right";
 }) {
+  const { t } = useTranslation();
   const { isMobile, openMobile, setOpenMobile } = useSidebar();
 
   if (isMobile) {
@@ -119,8 +121,8 @@ function Sidebar({
           )}
         >
           <SheetHeader className="sr-only">
-            <SheetTitle>Sidebar</SheetTitle>
-            <SheetDescription>Displays the mobile sidebar.</SheetDescription>
+            <SheetTitle>{t("common.sidebarLabel")}</SheetTitle>
+            <SheetDescription>{t("common.sidebarMobileDescription")}</SheetDescription>
           </SheetHeader>
           <div className="flex h-full min-w-0 w-full flex-col overflow-hidden">{children}</div>
         </SheetContent>
@@ -149,6 +151,7 @@ function SidebarTrigger({
   onClick,
   ...props
 }: React.ComponentProps<typeof Button>) {
+  const { t } = useTranslation();
   const { toggleSidebar } = useSidebar();
 
   return (
@@ -165,7 +168,7 @@ function SidebarTrigger({
       {...props}
     >
       <PanelLeftIcon aria-hidden="true" />
-      <span className="sr-only">Toggle Sidebar</span>
+      <span className="sr-only">{t("common.toggleSidebar")}</span>
     </Button>
   );
 }
@@ -199,7 +202,7 @@ function SidebarContent({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="sidebar-content"
       data-sidebar="content"
-      className={cn("flex min-h-0 min-w-0 flex-1 flex-col gap-0 overflow-x-hidden overflow-y-auto", className)}
+      className={cn("flex min-h-0 min-w-0 flex-1 flex-col gap-0 overflow-hidden", className)}
       {...props}
     />
   );

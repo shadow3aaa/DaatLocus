@@ -38,12 +38,14 @@ import {
   type UIEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 
 import {
   ArrowLeftIcon,
   ArrowDownIcon,
   AlertTriangleIcon,
   CheckIcon,
+  ChevronsUpDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CopyIcon,
@@ -83,6 +85,9 @@ import {
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -107,12 +112,14 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   fetchDashboardActivityHistory,
+  fetchSetupConfig,
   fetchWorkflowWorkerActivity,
   fetchSettingsSummary,
   getDashboardAttachmentUrl,
   openLocalPath,
   runDashboardAction,
   runDashboardCommand,
+  saveSetupConfig,
   type DashboardAction,
   type DashboardActionResult,
   type DashboardActivityHistoryItem,
@@ -123,6 +130,7 @@ import {
   type DashboardPlanStep,
   type TokenUsageInfo,
   type SessionActivityEvent,
+  type SetupConfigRequest,
   type WorkflowAwaitGroupSnapshot,
   type WorkflowNodeStatus,
   type WorkflowRunSnapshot,
@@ -180,6 +188,7 @@ export function AgentPage({
   sessionId: string;
   mockSnapshot?: DashboardSnapshot;
 }) {
+  const { t } = useTranslation();
   const { snapshot } = useDashboardSnapshot(sessionId, {
     disabled: Boolean(mockSnapshot),
     initialSnapshot: mockSnapshot ?? null,
@@ -217,7 +226,7 @@ export function AgentPage({
     <AgentChatMockDataContext.Provider value={Boolean(mockSnapshot)}>
       <section
         id="agent"
-        aria-label="Agent"
+        aria-label={t("chat.agentPanelAria")}
         className="relative flex h-screen min-h-screen w-full max-w-full flex-col overflow-hidden bg-background"
       >
         <AgentChatBubbles
@@ -720,8 +729,12 @@ function AgentChatComposer({
   chatPanelRef: RefObject<HTMLDivElement | null>;
   onHeightChange: (height: number) => void;
 }) {
-  const chatPlaceholder = `Chat with ${agentName?.trim() || "Agent"}`;
+  const { t } = useTranslation();
+  const chatPlaceholder = t("chat.openChatWith", {
+    agent: agentName?.trim() || "Agent",
+  });
   const formRef = useRef<HTMLFormElement>(null);
+  const composerContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [message, setMessage] = useState("");
@@ -747,7 +760,9 @@ function AgentChatComposer({
   );
   const queuedInputLimitReached =
     pendingUserInputs.length >= AGENT_CHAT_MAX_QUEUED_INPUTS;
-  const queuedInputLimitMessage = `You can queue up to ${AGENT_CHAT_MAX_QUEUED_INPUTS} inputs. Wait for the agent to handle one or clear the queue.`;
+  const queuedInputLimitMessage = t("chat.queueLimit", {
+    count: AGENT_CHAT_MAX_QUEUED_INPUTS,
+  });
 
   const inputSuggestions = useMemo(
     () => webInputSuggestions(message, snapshot),
@@ -798,13 +813,13 @@ function AgentChatComposer({
   }, []);
 
   useEffect(() => {
-    const form = formRef.current;
-    if (!form) {
+    const container = composerContainerRef.current;
+    if (!container) {
       return;
     }
 
     const updateHeight = () => {
-      onHeightChange(Math.ceil(form.getBoundingClientRect().height));
+      onHeightChange(Math.ceil(container.getBoundingClientRect().height));
     };
 
     updateHeight();
@@ -815,7 +830,7 @@ function AgentChatComposer({
     }
 
     const resizeObserver = new ResizeObserver(updateHeight);
-    resizeObserver.observe(form);
+    resizeObserver.observe(container);
 
     return () => resizeObserver.disconnect();
   }, [onHeightChange]);
@@ -880,7 +895,7 @@ function AgentChatComposer({
 
       if (rejectedForCount > 0) {
         setSendError(
-          `You can attach up to ${AGENT_CHAT_MAX_IMAGE_ATTACHMENTS} images.`,
+          t("chat.imageLimit", { count: AGENT_CHAT_MAX_IMAGE_ATTACHMENTS }),
         );
       } else if (oversized) {
         setSendError(
@@ -1159,9 +1174,17 @@ function AgentChatComposer({
   }
 
   return (
+    <div
+      ref={composerContainerRef}
+      className={cn(
+        "fixed inset-x-4 bottom-4 z-30 rounded-t-xl rounded-b-2xl border border-border/70 bg-background/92 shadow-xl shadow-background/30 backdrop-blur-xl transition-all duration-300 md:right-auto md:left-[calc(18rem+(100vw-18rem)/2)] md:w-[min(56rem,calc(100vw-18rem-2rem))] md:-translate-x-1/2",
+        isDraggingImage && "border-primary/70 ring-4 ring-primary/15",
+        "focus-within:border-primary/45 focus-within:ring-4 focus-within:ring-primary/10 hover:border-primary/30",
+      )}
+    >
     <form
       ref={formRef}
-      aria-label="Send message to agent"
+      aria-label={t("chat.sendMessageToAgent")}
       onSubmit={handleSubmit}
       onDragEnter={(event) => {
         if (!supportsVision) {
@@ -1188,11 +1211,7 @@ function AgentChatComposer({
         }
       }}
       onDrop={handleDrop}
-      className={cn(
-        "fixed inset-x-4 bottom-4 z-30 rounded-xl border bg-background/92 p-2 shadow-xl shadow-background/30 backdrop-blur-xl transition-all duration-300 md:right-auto md:left-[calc(18rem+(100vw-18rem)/2)] md:w-[min(56rem,calc(100vw-18rem-2rem))] md:-translate-x-1/2",
-        isDraggingImage && "border-primary/70 ring-4 ring-primary/15",
-        "border-border/70 focus-within:border-primary/45 focus-within:ring-4 focus-within:ring-primary/10 hover:border-primary/30",
-      )}
+      className="p-2"
     >
       <WebSlashCommandPanel
         panel={slashPanel}
@@ -1217,7 +1236,7 @@ function AgentChatComposer({
           accept="image/*"
           multiple
           className="sr-only"
-          aria-label="Attach images"
+          aria-label={t("chat.attachImages")}
           onChange={(event) => {
             addImageFiles(event.target.files ?? []);
             event.currentTarget.value = "";
@@ -1249,14 +1268,16 @@ function AgentChatComposer({
                     className="size-4 shrink-0"
                     aria-hidden="true"
                   />
-                  <span className="max-w-full truncate">Image selected</span>
+                  <span className="max-w-full truncate">{t("chat.imageSelected")}</span>
                 </div>
               )}
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-xs"
-                aria-label={`Remove ${attachment.file.name || "image"}`}
+                aria-label={t("chat.removeAttachment", {
+                  name: attachment.file.name || t("chat.imageFallback"),
+                })}
                 onClick={() => removeImageAttachment(attachment.id)}
                 className="absolute right-1 top-1 rounded-full bg-background/90 text-muted-foreground opacity-90 shadow-sm hover:text-foreground group-hover:opacity-100"
               >
@@ -1314,7 +1335,7 @@ function AgentChatComposer({
           value={message}
           rows={1}
           placeholder={chatPlaceholder}
-          aria-label="Message"
+          aria-label={t("chat.message")}
           onChange={(event) => {
             setMessage(event.target.value);
             setSendError(null);
@@ -1375,7 +1396,7 @@ function AgentChatComposer({
             type="button"
             variant="ghost"
             size="icon-sm"
-            aria-label="Attach image"
+            aria-label={t("chat.attachImage")}
             onClick={() => fileInputRef.current?.click()}
             className="rounded-full text-muted-foreground hover:text-foreground"
             disabled={
@@ -1429,6 +1450,201 @@ function AgentChatComposer({
         </Alert>
       ) : null}
     </form>
+    <AgentChatModelBar snapshot={snapshot} />
+    </div>
+  );
+}
+
+function formatCompactTokenCount(
+  tokens: number | null | undefined,
+): string {
+  if (tokens == null || !Number.isFinite(tokens)) {
+    return "—";
+  }
+  if (tokens >= 1_000_000) {
+    return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+  }
+  if (tokens >= 1_000) {
+    return `${(tokens / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  return String(Math.round(tokens));
+}
+
+function ContextUsageRing({
+  used,
+  total,
+}: {
+  used: number | null | undefined;
+  total: number | null | undefined;
+}) {
+  const ratio =
+    used != null && total != null && total > 0
+      ? Math.min(1, Math.max(0, used / total))
+      : 0;
+  const size = 14;
+  const strokeWidth = 2.5;
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference * (1 - ratio);
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      aria-hidden="true"
+      className="-rotate-90 shrink-0 text-muted-foreground"
+    >
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        strokeWidth={strokeWidth}
+        fill="none"
+        stroke="currentColor"
+        className="opacity-30"
+      />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        strokeWidth={strokeWidth}
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeDasharray={circumference}
+        strokeDashoffset={offset}
+        className={cn(
+          "stroke-foreground transition-[stroke-dashoffset] duration-300",
+          ratio >= 0.85 && "stroke-destructive",
+        )}
+      />
+    </svg>
+  );
+}
+
+function AgentChatModelBar({ snapshot }: { snapshot: DashboardSnapshot | null }) {
+  const { t } = useTranslation();
+  const [setupConfig, setSetupConfig] = useState<SetupConfigRequest | null>(null);
+  const [modelsLoadFailed, setModelsLoadFailed] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const [switchError, setSwitchError] = useState<string | null>(null);
+
+  const composition = snapshot?.context_composition;
+  const usedTokens = composition?.total_estimated_tokens;
+  const totalTokens = composition?.model_context_window;
+  const snapshotModel = composition?.model || null;
+  const currentModel =
+    setupConfig?.main_model || snapshotModel || t("modelSwitch.unknownModel");
+
+  const loadModels = useCallback(async () => {
+    try {
+      const setup = await fetchSetupConfig();
+      setSetupConfig(setup.config);
+      setModelsLoadFailed(false);
+    } catch {
+      setModelsLoadFailed(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadModels();
+  }, [loadModels]);
+
+  async function switchToModel(modelName: string) {
+    if (switching || !setupConfig || setupConfig.main_model === modelName) {
+      return;
+    }
+    setSwitching(true);
+    setSwitchError(null);
+    try {
+      const nextConfig: SetupConfigRequest = {
+        ...setupConfig,
+        main_model: modelName,
+      };
+      delete nextConfig.daemon_port;
+      await saveSetupConfig(nextConfig);
+      setSetupConfig(nextConfig);
+    } catch (error) {
+      setSwitchError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSwitching(false);
+    }
+  }
+
+  const modelEntries = (setupConfig?.models ?? []).map((model) => ({
+    name: model.name,
+    modelId: model.model_id,
+  }));
+
+  return (
+    <div className="flex w-full flex-col gap-1">
+      <div className="flex h-9 w-full items-center justify-between gap-3 rounded-b-2xl bg-muted/70 px-3 text-xs text-muted-foreground">
+        <span className="flex min-w-0 items-center gap-2">
+          <ContextUsageRing used={usedTokens} total={totalTokens} />
+          <span className="tabular-nums">
+            {formatCompactTokenCount(usedTokens)}
+            <span className="mx-0.5 opacity-70">/</span>
+            {formatCompactTokenCount(totalTokens)}
+          </span>
+        </span>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label={t("modelSwitch.openAria", { model: currentModel })}
+              title={t("modelSwitch.title")}
+              className="group -mx-1 flex min-w-0 items-center gap-1.5 rounded-lg px-1.5 py-1 outline-none transition-colors hover:bg-foreground/10 focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate font-medium text-foreground">
+                  {currentModel}
+                </span>
+                {switching ? (
+                  <Spinner data-icon="inline-end" className="size-3.5" />
+                ) : (
+                  <ChevronsUpDownIcon
+                    data-icon="inline-end"
+                    className="size-3.5 opacity-70"
+                    aria-hidden="true"
+                  />
+                )}
+              </span>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" side="top" className="w-56">
+            <DropdownMenuLabel>{t("modelSwitch.title")}</DropdownMenuLabel>
+            {modelEntries.length > 0 ? (
+              <DropdownMenuRadioGroup
+                value={setupConfig?.main_model ?? ""}
+                onValueChange={(value) => void switchToModel(value)}
+              >
+                {modelEntries.map((model) => (
+                  <DropdownMenuRadioItem
+                    key={model.name}
+                    value={model.name}
+                    className="gap-2"
+                  >
+                    <span className="min-w-0 flex-1 truncate">{model.name}</span>
+                    <span className="truncate text-muted-foreground">
+                      {model.modelId}
+                    </span>
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            ) : (
+              <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                {modelsLoadFailed
+                  ? t("modelSwitch.unavailable")
+                  : t("modelSwitch.loading")}
+              </div>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      {switchError ? (
+        <p className="px-1 text-xs text-destructive">{switchError}</p>
+      ) : null}
+    </div>
   );
 }
 
@@ -1494,6 +1710,7 @@ function PendingUserInputQueue({
     targetPosition: number,
   ) => void;
 }) {
+  const { t } = useTranslation();
   const [draggingEventId, setDraggingEventId] = useState<string | null>(null);
   const [dragOverEventId, setDragOverEventId] = useState<string | null>(null);
   const [editingInput, setEditingInput] =
@@ -1602,7 +1819,7 @@ function PendingUserInputQueue({
     <>
       <section
         role="region"
-        aria-label="Pending user inputs"
+        aria-label={t("chat.pendingUserInputs")}
         aria-busy={queueBusy || undefined}
         className="mb-2 border-b border-border/60 pb-2"
       >
@@ -1640,8 +1857,8 @@ function PendingUserInputQueue({
                     variant="ghost"
                     size="icon-xs"
                     draggable={canReorder && !queueBusy}
-                    aria-label={`Drag pending input ${position}`}
-                    title={canReorder ? "Drag to reorder" : "Only one queued input"}
+                    aria-label={t("chat.dragPendingInput", { position })}
+                    title={canReorder ? t("chat.dragToReorderTitle") : t("chat.onlyOneQueuedInput")}
                     disabled={queueBusy || !canReorder}
                     onDragStart={(event) => handleDragStart(event, input)}
                     onDragEnd={resetDragState}
@@ -1660,8 +1877,8 @@ function PendingUserInputQueue({
                     type="button"
                     variant="ghost"
                     size="icon-xs"
-                    aria-label={`Run pending input ${position} now`}
-                    title="Run this queued input now"
+                    aria-label={t("chat.runPendingInputNow", { position })}
+                    title={t("chat.runQueuedInputNow")}
                     disabled={queueBusy}
                     onClick={() => onPreempt(input)}
                     className="rounded-full text-muted-foreground hover:text-foreground"
@@ -1678,8 +1895,8 @@ function PendingUserInputQueue({
                         type="button"
                         variant="ghost"
                         size="icon-xs"
-                        aria-label={`More actions for pending input ${position}`}
-                        title="More actions"
+                        aria-label={t("chat.moreActionsForPendingInput", { position })}
+                        title={t("chat.moreActions")}
                         disabled={queueBusy}
                         className="rounded-full text-muted-foreground hover:text-foreground"
                       >
@@ -1700,7 +1917,7 @@ function PendingUserInputQueue({
                           onSelect={() => openEditDialog(input)}
                         >
                           <PencilIcon />
-                          <span>Edit message</span>
+                          <span>{t("chat.editMessage")}</span>
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           disabled={queueBusy}
@@ -1708,7 +1925,7 @@ function PendingUserInputQueue({
                           onSelect={() => onDismiss(input)}
                         >
                           <Trash2Icon />
-                          <span>Dismiss message</span>
+                          <span>{t("chat.dismissMessage")}</span>
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           disabled={queueBusy}
@@ -1716,7 +1933,7 @@ function PendingUserInputQueue({
                           onSelect={onClear}
                         >
                           <Trash2Icon />
-                          <span>Clear queue</span>
+                          <span>{t("chat.clearQueue")}</span>
                         </DropdownMenuItem>
                       </DropdownMenuGroup>
                     </DropdownMenuContent>
@@ -1738,15 +1955,15 @@ function PendingUserInputQueue({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Edit queued message</DialogTitle>
+            <DialogTitle>{t("chat.editQueuedMessage")}</DialogTitle>
             <DialogDescription>
-              Update this pending input before the agent handles it.
+              {t("chat.editQueuedMessageDescription")}
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleEditSubmit} className="flex flex-col gap-4">
             <FieldGroup className="gap-3">
               <Field>
-                <FieldLabel htmlFor={editTextareaId}>Message</FieldLabel>
+                <FieldLabel htmlFor={editTextareaId}>{t("chat.message")}</FieldLabel>
                 <Textarea
                   id={editTextareaId}
                   value={editText}
@@ -1847,6 +2064,7 @@ function WebSlashCommandPanel({
     action: DashboardAction,
   ) => Promise<DashboardActionResult | null>;
 }) {
+  const { t } = useTranslation();
   const hasContent =
     Boolean(panel) ||
     Boolean(actionFeedback) ||
@@ -1884,7 +2102,7 @@ function WebSlashCommandPanel({
 
       {!panel && suggestions.length > 0 ? (
         <section
-          aria-label="Command suggestions"
+          aria-label={t("chat.commandSuggestions")}
           className="flex flex-col gap-1"
         >
           {suggestions.slice(0, 6).map((suggestion, index) => {
@@ -2010,6 +2228,7 @@ function WebSlashPanelShell({
   children: ReactNode;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <section aria-label={title} className="flex min-h-0 flex-col gap-2 text-sm">
       <div className="flex min-w-0 items-start gap-2">
@@ -2023,7 +2242,7 @@ function WebSlashPanelShell({
           type="button"
           variant="ghost"
           size="icon"
-          aria-label={`Close ${title}`}
+          aria-label={t("chat.closePanel", { title })}
           onClick={onClose}
           className="shrink-0 rounded-full text-muted-foreground hover:text-foreground"
         >
@@ -2057,18 +2276,19 @@ function WebSlashWorkflowFormPanel({
     action: DashboardAction,
   ) => Promise<DashboardActionResult | null>;
 }) {
+  const { t } = useTranslation();
   const workflow = webSlashWorkflowById(snapshot, panel.workflowId);
   if (!workflow) {
     return (
       <WebSlashPanelShell
-        title="Workflow"
-        subtitle="The selected workflow is no longer loaded."
+        title={t("chat.workflows")}
+        subtitle={t("chat.workflowNotLoaded")}
         onClose={onClose}
       >
         <Alert>
           <InfoIcon className="size-4" aria-hidden="true" />
           <AlertDescription className="text-xs">
-            Return to /workflows and choose a currently loaded workflow.
+            {t("chat.returnToWorkflows")}
           </AlertDescription>
         </Alert>
       </WebSlashPanelShell>
@@ -2383,9 +2603,9 @@ function WebSlashSelectionPanel({
     action: DashboardAction,
   ) => Promise<DashboardActionResult | null>;
 }) {
+  const { t } = useTranslation();
   const meta = webSlashSelectionMeta(panel, snapshot);
   const items = webSlashSelectionItems(panel, snapshot);
-
   return (
     <WebSlashPanelShell
       title={meta.title}
@@ -2434,7 +2654,7 @@ function WebSlashSelectionPanel({
             </Button>
           ))
         ) : (
-          <p className="px-2 py-3 text-sm text-muted-foreground">No items.</p>
+          <p className="px-2 py-3 text-sm text-muted-foreground">{t("status.noItems")}</p>
         )}
       </div>
     </WebSlashPanelShell>
@@ -2448,13 +2668,13 @@ function WebSlashStatusPanel({
   snapshot: DashboardSnapshot | null;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   const status = webSlashStatusSnapshot(snapshot);
   const tokenUsageSections = webSlashStatusTokenUsageSections(snapshot);
-
   return (
     <WebSlashPanelShell
-      title="STATUS"
-      subtitle="Current session runtime facts."
+      title={t("status.statusTitle")}
+      subtitle={t("status.statusSubtitle")}
       onClose={onClose}
     >
       <div className="flex min-w-0 flex-col gap-3">
@@ -2468,8 +2688,8 @@ function WebSlashStatusPanel({
         ) : null}
 
 
-        <section className="flex flex-col gap-2" aria-label="Model usage">
-          <p className="text-sm font-medium text-foreground">Model usage</p>
+        <section className="flex flex-col gap-2" aria-label={t("status.modelUsage")}>
+          <p className="text-sm font-medium text-foreground">{t("status.modelUsage")}</p>
           <div className="flex flex-col gap-3">
             {tokenUsageSections.length > 0 ? (
               tokenUsageSections.map((section, index) => (
@@ -2481,7 +2701,7 @@ function WebSlashStatusPanel({
             ) : (
               <Empty className="py-3">
                 <EmptyHeader>
-                  <EmptyTitle>No token usage recorded yet.</EmptyTitle>
+                  <EmptyTitle>{t("status.noTokenUsageRecordedYet")}</EmptyTitle>
                 </EmptyHeader>
               </Empty>
             )}
@@ -2490,8 +2710,8 @@ function WebSlashStatusPanel({
 
         <Separator />
 
-        <section className="flex flex-col gap-2" aria-label="Plan">
-          <p className="text-sm font-medium text-foreground">Plan</p>
+        <section className="flex flex-col gap-2" aria-label={t("status.planSection")}>
+          <p className="text-sm font-medium text-foreground">{t("status.planSection")}</p>
           {status.planSteps.length > 0 ? (
             <ul className="flex flex-col gap-1">
               {status.planSteps.map((step, index) => (
@@ -2517,7 +2737,7 @@ function WebSlashStatusPanel({
           ) : (
             <Empty className="py-3">
               <EmptyHeader>
-                <EmptyTitle>No active plan items.</EmptyTitle>
+                <EmptyTitle>{t("status.noActivePlanItems")}</EmptyTitle>
               </EmptyHeader>
             </Empty>
           )}
@@ -2556,8 +2776,9 @@ function WebSlashStatusTokenUsageSection({
 }: {
   section: WebSlashStatusTokenUsageSectionData;
 }) {
+  const { t } = useTranslation();
   return (
-    <section className="flex flex-col gap-2" aria-label={`${section.role} model usage`}>
+    <section className="flex flex-col gap-2" aria-label={t("status.modelUsageAria", { role: section.role })}>
       <div className="flex min-w-0 items-center gap-2">
         <Badge variant="outline" className="shrink-0">
           {section.role}
@@ -2569,7 +2790,7 @@ function WebSlashStatusTokenUsageSection({
       {section.context ? (
         <div className="flex flex-col gap-1">
           <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-            <span>Context</span>
+            <span>{t("status.contextSection")}</span>
             <span>{section.context.text}</span>
           </div>
           <div className="h-1.5 overflow-hidden rounded-full bg-muted">
@@ -2584,11 +2805,11 @@ function WebSlashStatusTokenUsageSection({
       ) : null}
       {section.lastTurnParts.length > 0 ? (
         <p className="text-xs text-muted-foreground">
-          Last turn: {section.lastTurnParts.join(" · ")}
+          {t("status.lastTurn", { parts: section.lastTurnParts.join(" · ") })}
         </p>
       ) : null}
       <p className="text-xs text-muted-foreground">
-        Total: {section.totalText}
+        {t("status.totalLabel", { text: section.totalText })}
         {section.cachedText ? ` · ${section.cachedText}` : ""}
       </p>
     </section>
@@ -2602,10 +2823,11 @@ function WebSlashSleepStatusPanel({
   snapshot: DashboardSnapshot | null;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <WebSlashPanelShell
-      title="SLEEP STATUS"
-      subtitle="Background optimization state."
+      title={t("status.sleepStatus")}
+      subtitle={t("status.sleepStatusSubtitle")}
       onClose={onClose}
     >
       <div className="flex min-w-0 flex-col gap-3">
@@ -2668,16 +2890,16 @@ function WebSlashSkillsListPanel({
   onClose: () => void;
   onSetPanel: (panel: WebSlashPanel | null) => void;
 }) {
+  const { t } = useTranslation();
   const skills = webSlashFilteredSkills(snapshot, panel.search);
   const errors = snapshot?.skill_errors ?? [];
-
   return (
     <WebSlashPanelShell
-      title="Skills"
+      title={t("chat.skills")}
       subtitle={
         (snapshot?.skills ?? []).length > 0
-          ? `${snapshot?.skills?.length ?? 0} loaded. Choose a skill to inspect.`
-          : "No skills loaded."
+          ? t("chat.skillsLoaded", { count: snapshot?.skills?.length ?? 0 })
+          : t("chat.noSkillsLoaded")
       }
       onClose={onClose}
     >
@@ -2686,7 +2908,7 @@ function WebSlashSkillsListPanel({
         onChange={(event) =>
           onSetPanel({ kind: "skills-list", search: event.target.value })
         }
-        placeholder="Type to search skills"
+        placeholder={t("chat.typeToSearchSkills")}
         className="h-8"
       />
       {errors.length > 0 ? (
@@ -2745,7 +2967,7 @@ function WebSlashSkillsListPanel({
           ))
         ) : (
           <p className="px-2 py-3 text-sm text-muted-foreground">
-            {panel.search.trim() ? "No matches." : "No skills loaded."}
+            {panel.search.trim() ? t("chat.noMatches") : t("chat.noSkillsLoaded")}
           </p>
         )}
       </div>
@@ -2768,15 +2990,15 @@ function WebSlashSkillsTogglePanel({
   onSetPanel: (panel: WebSlashPanel | null) => void;
   onRunDashboardAction: (action: DashboardAction) => void;
 }) {
+  const { t } = useTranslation();
   const skills = webSlashFilteredSkills(snapshot, panel.search);
-
   return (
     <WebSlashPanelShell
-      title="Skills"
+      title={t("chat.skills")}
       subtitle={
         (snapshot?.skills ?? []).length > 0
-          ? "Toggle automatic use for loaded skills."
-          : "No skills loaded."
+          ? t("chat.toggleAutoUse")
+          : t("chat.noSkillsLoaded")
       }
       onClose={onClose}
     >
@@ -2789,7 +3011,7 @@ function WebSlashSkillsTogglePanel({
             feedback: panel.feedback ?? null,
           })
         }
-        placeholder="Type to search skills"
+        placeholder={t("chat.typeToSearchSkills")}
         className="h-8"
       />
       {panel.feedback ? (
@@ -2839,7 +3061,7 @@ function WebSlashSkillsTogglePanel({
           ))
         ) : (
           <p className="px-2 py-3 text-sm text-muted-foreground">
-            {panel.search.trim() ? "No matches." : "No skills loaded."}
+            {panel.search.trim() ? t("chat.noMatches") : t("chat.noSkillsLoaded")}
           </p>
         )}
       </div>
@@ -2874,6 +3096,7 @@ function WebSlashCommandFeedbackView({
   feedback: WebSlashCommandFeedback;
   onClose?: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="flex min-w-0 items-start gap-2 text-sm">
       <WebSlashCommandLevelIcon level={feedback.level} />
@@ -2892,7 +3115,7 @@ function WebSlashCommandFeedbackView({
           type="button"
           variant="ghost"
           size="icon"
-          aria-label="Dismiss command feedback"
+          aria-label={t("chat.dismissCommandFeedback")}
           onClick={onClose}
           className="shrink-0 rounded-full text-muted-foreground hover:text-foreground"
         >
@@ -3164,11 +3387,25 @@ function webSlashCommandFeedback(
 
   if (verb === "sleep") {
     const action = parsed.parts[1];
-    if (action && !["run", "status"].includes(action)) {
+    if (action && !["run", "status", "auto", "toggle"].includes(action)) {
       return {
         title: "SLEEP",
         message: `Unknown sleep action '${action}'.`,
         detail: "Use /sleep to choose an action.",
+        level: "error",
+        blocksSubmit: true,
+      };
+    }
+    if (
+      (action === "auto" || action === "toggle") &&
+      parsed.parts.length === 3 &&
+      parsed.parts[2] !== "on" &&
+      parsed.parts[2] !== "off"
+    ) {
+      return {
+        title: "SLEEP",
+        message: `sleep ${action} accepts on or off.`,
+        detail: `usage: /sleep ${action} <on|off>`,
         level: "error",
         blocksSubmit: true,
       };
@@ -3203,11 +3440,28 @@ function webSlashExtraArgumentFeedback(
       blocksSubmit: true,
     };
   }
-  if (parts[0] === "sleep" && parts.length > 2) {
+  if (
+    parts[0] === "sleep" &&
+    (parts[1] === "run" || parts[1] === "status") &&
+    parts.length > 2
+  ) {
     return {
       title: "SLEEP",
       message: `sleep ${parts[1]} does not take extra arguments.`,
       detail: `usage: /sleep ${parts[1]}`,
+      level: "error",
+      blocksSubmit: true,
+    };
+  }
+  if (
+    parts[0] === "sleep" &&
+    (parts[1] === "auto" || parts[1] === "toggle") &&
+    parts.length > 3
+  ) {
+    return {
+      title: "SLEEP",
+      message: `sleep ${parts[1]} accepts at most on or off.`,
+      detail: `usage: /sleep ${parts[1]} <on|off>`,
       level: "error",
       blocksSubmit: true,
     };
@@ -3366,6 +3620,17 @@ function webSlashActionForInput(
   }
   if (parts[0] === "sleep" && parts[1] === "run") {
     return { kind: "run_sleep" };
+  }
+  if (parts[0] === "sleep" && (parts[1] === "auto" || parts[1] === "toggle")) {
+    if (parts.length === 2) {
+      return {
+        kind: "set_sleep_enabled",
+        enabled: !(snapshot?.runtime_optimization?.enabled ?? true),
+      };
+    }
+    if (parts.length === 3 && (parts[2] === "on" || parts[2] === "off")) {
+      return { kind: "set_sleep_enabled", enabled: parts[2] === "on" };
+    }
   }
   if (parts[0] === "skills" && parts[1] === "reload") {
     return { kind: "reload_skills" };
@@ -3542,6 +3807,7 @@ function webSlashSelectionItems(
     ];
   }
   if (panel === "sleep") {
+    const enabled = snapshot?.runtime_optimization?.enabled ?? true;
     return [
       {
         id: "sleep-status",
@@ -3552,6 +3818,13 @@ function webSlashSelectionItems(
         id: "sleep-run",
         name: "Start sleep run",
         description: "start a background sleep run",
+      },
+      {
+        id: "sleep-auto",
+        name: "Automatic sleep",
+        description: enabled
+          ? "automatic sleep is enabled; select to disable it"
+          : "automatic sleep is disabled; select to enable it",
       },
     ];
   }
@@ -3628,6 +3901,9 @@ function webSlashRunSelectionItem(
     onSetPanel({ kind: "sleep-status" });
   } else if (itemId === "sleep-run") {
     void onRunDashboardAction({ kind: "run_sleep" });
+  } else if (itemId === "sleep-auto") {
+    const enabled = snapshot?.runtime_optimization?.enabled ?? true;
+    void onRunDashboardAction({ kind: "set_sleep_enabled", enabled: !enabled });
   } else if (itemId === "skills-list") {
     onSetPanel({ kind: "skills-list", search: "" });
   } else if (itemId === "skills-toggle") {
@@ -3780,6 +4056,7 @@ function webSlashRuntimeOptimizationRows(
 ): Array<[string, string | number | null | undefined]> {
   const runtime = snapshot?.runtime_optimization;
   return [
+    ["Automatic sleep", runtime?.enabled ? "enabled" : "disabled"],
     ["Running", runtime?.running ? "yes" : "no"],
     ["Trigger", runtime?.current_trigger],
     ["Last result", runtime?.last_result],
@@ -4099,6 +4376,7 @@ function AgentChatBubbles({
   panelRef: RefObject<HTMLDivElement | null>;
   composerHeight: number;
 }) {
+  const { t } = useTranslation();
   const snapshotBubbles = useMemo(
     () => agentChatBubblesFromSnapshot(snapshot),
     [snapshot],
@@ -4939,10 +5217,9 @@ function AgentChatBubbles({
             <div className="mx-auto flex min-h-[40vh] w-full min-w-0 max-w-3xl items-center justify-center px-6 text-center">
               <Empty className="border border-dashed bg-card/60">
                 <EmptyHeader>
-                  <EmptyTitle>No activity yet</EmptyTitle>
+                  <EmptyTitle>{t("status.noActivityYet")}</EmptyTitle>
                   <EmptyDescription>
-                    Messages and tool activity will appear here as the session
-                    starts working.
+                    {t("status.noActivityDescription")}
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
@@ -4978,8 +5255,8 @@ function AgentChatBubbles({
         type="button"
         variant="secondary"
         size="icon-lg"
-        aria-label="Back to bottom"
-        title="Back to bottom"
+        aria-label={t("chat.backToBottom")}
+        title={t("chat.backToBottom")}
         onMouseDown={(event) => {
           event.preventDefault();
         }}
@@ -5031,6 +5308,7 @@ function AgentChatQuickNavigation({
   onNearTop: () => void;
   onSelect: (id: string) => void;
 }) {
+  const { t } = useTranslation();
   const navListRef = useRef<HTMLDivElement>(null);
   const initializedScrollResetKeyRef = useRef<string | null>(null);
   const restoreAfterPrependRef = useRef<{
@@ -5135,8 +5413,8 @@ function AgentChatQuickNavigation({
   }
 
   const quickNavToggleLabel = isQuickNavOpen
-    ? "Collapse quick navigation"
-    : "Open quick navigation";
+    ? t("chat.closeQuickNav")
+    : t("chat.openQuickNav");
 
   return (
     <nav
@@ -5255,6 +5533,7 @@ function AgentChatFoldedActivityGroup({
   onOpenChange: (open: boolean) => void;
   isFocused?: boolean;
 }) {
+  const { t } = useTranslation();
   const { toggle } = useCollapsibleState(false, open, onOpenChange);
   const activityCount = bubbles.length;
   const workedDurationLabel = formatAgentChatWorkedDuration(bubbles, outputBubble);
@@ -5276,7 +5555,7 @@ function AgentChatFoldedActivityGroup({
           className="min-w-0 max-w-full"
         >
           <AgentChatWorkedDivider
-            label={`Worked for ${workedDurationLabel}`}
+            label={t("chat.workedFor", { duration: workedDurationLabel })}
             open={open}
             onToggle={isFocused ? toggle : undefined}
           />
@@ -7564,6 +7843,7 @@ function AgentChatMessageActivityLine({
   detailLimit: number;
   messageLimit: number;
 }) {
+  const { t } = useTranslation();
   const visibleDetailLines = detailLines.slice(0, detailLimit);
   const hiddenDetailCount = detailLines.length - visibleDetailLines.length;
   const visibleMessageLines = messageLines.slice(0, messageLimit);
@@ -7586,7 +7866,7 @@ function AgentChatMessageActivityLine({
             </p>
           ))}
           {hiddenDetailCount > 0 ? (
-            <p>… {hiddenDetailCount} more line(s)</p>
+            <p>{t("chat.moreLines", { count: hiddenDetailCount })}</p>
           ) : null}
         </div>
       ) : null}
@@ -7600,7 +7880,7 @@ function AgentChatMessageActivityLine({
           ) : null}
           {hiddenMessageCount > 0 ? (
             <p className="text-xs text-muted-foreground">
-              … {hiddenMessageCount} more line(s)
+              {t("chat.moreLines", { count: hiddenMessageCount })}
             </p>
           ) : null}
         </div>
@@ -7624,6 +7904,7 @@ function AgentChatReplyActivityLine({
   subject: string;
   isLatestReply?: boolean;
 }) {
+  const { t } = useTranslation();
   const [hasCopiedReply, setHasCopiedReply] = useState(false);
   const originalText = messageLines.join("\n");
   async function handleCopyReply() {
@@ -7662,7 +7943,7 @@ function AgentChatReplyActivityLine({
             type="button"
             onClick={handleCopyReply}
             className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[0.7rem] text-muted-foreground/60 transition-colors hover:bg-muted/50 hover:text-muted-foreground"
-            aria-label="Copy"
+            aria-label={t("chat.copy")}
           >
             {hasCopiedReply ? (
               <CheckIcon className="h-3 w-3" aria-hidden="true" />
@@ -7718,7 +7999,7 @@ function AgentChatReplyActivityLine({
             type="button"
             onClick={handleCopyReply}
             className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[0.7rem] text-muted-foreground/60 transition-colors hover:bg-muted/50 hover:text-muted-foreground"
-            aria-label="Copy"
+            aria-label={t("chat.copy")}
           >
             {hasCopiedReply ? (
               <CheckIcon className="h-3 w-3" aria-hidden="true" />
@@ -7964,6 +8245,7 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
   tone?: "default" | "error" | "muted";
   preserveSoftBreaks?: boolean;
 }) {
+  const { t } = useTranslation();
   const limitedText = limitMarkdownInput(text, limit);
   const markdownId = useId();
 
@@ -8034,7 +8316,7 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
           hr: () => <Separator />,
           table: ({ children }: any) => (
             <div
-              aria-label="Scrollable markdown table"
+              aria-label={t("chat.scrollableMarkdownTable")}
               className="my-2 min-w-0 max-w-full overflow-x-auto rounded-xl border border-border/80 bg-background/70 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin]"
               tabIndex={0}
             >
@@ -8309,6 +8591,7 @@ const AgentChatCodeBlock = memo(function AgentChatCodeBlock({
   code: string;
   language: string;
 }) {
+  const { t } = useTranslation();
   const [hasCopied, setHasCopied] = useState(false);
   const label = agentChatCodeLanguageLabel(language);
   const canCopy =
@@ -8354,7 +8637,7 @@ const AgentChatCodeBlock = memo(function AgentChatCodeBlock({
             type="button"
             variant="ghost"
             size="icon-sm"
-            aria-label={`Copy ${label} code`}
+            aria-label={t("chat.copyCode", { label })}
             onClick={handleCopyCode}
           >
             {hasCopied ? (
@@ -9267,8 +9550,8 @@ function agentChatSessionActivityRenderForBubble(
     return {
       kind: "text",
       icon: "activity",
-      title: `Opened Project: ${stringValue(codingOpenProject.project_root, "unknown")}`,
-      bodyLines: stringArrayValuePreserveWhitespace(codingOpenProject.detail_lines),
+      title: `Opened Project At ${stringValue(codingOpenProject.project_root, "unknown")}`,
+      bodyLines: [],
     };
   }
 

@@ -97,6 +97,7 @@ export type DashboardPrimitiveOptimizationSnapshot = {
 };
 
 export type DashboardRuntimeOptimizationSnapshot = {
+  enabled: boolean;
   running: boolean;
   current_trigger: string | null;
   last_result: string | null;
@@ -200,7 +201,6 @@ export type SessionActivityWebSearch = {
 
 export type SessionActivityCodingOpenProject = {
   project_root: string;
-  detail_lines?: string[];
 };
 
 export type SessionActivityLiveExec = {
@@ -760,6 +760,7 @@ export type SetupConfigRequest = {
   daemon_port?: number | null;
   telegram_enabled?: boolean | null;
   telegram_bot_token?: string | null;
+  sleep_enabled?: boolean | null;
 };
 export type SetupConfigResponse = {
   config: SetupConfigRequest;
@@ -798,6 +799,7 @@ export type DashboardAction =
   | { kind: "reload_skills" }
   | { kind: "run_workflow"; workflow_id: string; input: unknown }
   | { kind: "set_skill_auto_use"; path: string; enabled: boolean }
+  | { kind: "set_sleep_enabled"; enabled: boolean }
   | { kind: "dismiss_pending_user_input"; event_id: string }
   | { kind: "clear_pending_user_inputs" }
   | {
