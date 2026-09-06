@@ -487,11 +487,6 @@ fn build_optional_type_exts(types: &[String]) -> Result<Option<HashSet<String>>,
 
     let registry = LanguageRegistry::new();
     let languages = registry.list_languages();
-    let supported = languages
-        .iter()
-        .map(|(name, _)| *name)
-        .collect::<Vec<_>>()
-        .join(", ");
     let mut exts = HashSet::new();
     for requested_type in requested {
         let matching_language_exts = languages
@@ -505,13 +500,10 @@ fn build_optional_type_exts(types: &[String]) -> Result<Option<HashSet<String>>,
             exts.extend(matching_language_exts);
             continue;
         }
-        if registry.get(&requested_type).is_some() {
-            exts.insert(requested_type);
-            continue;
-        }
-        return Err(format!(
-            "unknown search type `{requested_type}`; supported SCOPE types: {supported}"
-        ));
+        // Not a SCOPE language name: treat the requested value as a literal
+        // file suffix (e.g. "css", "md", "toml") and degrade naturally to a
+        // plain suffix-based file search instead of rejecting it.
+        exts.insert(requested_type);
     }
     Ok(Some(exts))
 }
@@ -1130,6 +1122,60 @@ mod tests {
                 .map(|hit| hit.path.as_str())
                 .collect::<Vec<_>>(),
             vec!["component.ts", "component.tsx"]
+        );
+    }
+
+    #[test]
+    fn search_code_unknown_type_falls_back_to_suffix_file_search() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("styles.css"), ".title { color: red; }\n").unwrap();
+        std::fs::write(dir.path().join("readme.md"), "# red pills\n").unwrap();
+        std::fs::write(dir.path().join("main.ts"), "const red = 1;\n").unwrap();
+
+        let output = search_code(
+            dir.path(),
+            &SearchCodeInput {
+                query: "red".to_string(),
+                types: vec!["css".to_string()],
+                ..SearchCodeInput::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            output
+                .matches
+                .iter()
+                .map(|hit| hit.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["styles.css"]
+        );
+    }
+
+    #[test]
+    fn search_code_unknown_types_combine_multiple_suffixes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("styles.css"), ".title { color: red; }\n").unwrap();
+        std::fs::write(dir.path().join("readme.md"), "# red pills\n").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "red herring\n").unwrap();
+
+        let output = search_code(
+            dir.path(),
+            &SearchCodeInput {
+                query: "red".to_string(),
+                types: vec!["CSS".to_string(), ".md".to_string()],
+                ..SearchCodeInput::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            output
+                .matches
+                .iter()
+                .map(|hit| hit.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["readme.md", "styles.css"]
         );
     }
 
