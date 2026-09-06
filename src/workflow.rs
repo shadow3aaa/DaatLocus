@@ -2173,6 +2173,7 @@ async fn execute_worker_tool(
             turn_epoch,
             output_schema: &definition.output_schema,
             worker_plan: &mut worker_runtime.worker_plan,
+            dashboard_history: context.dashboard_history.as_ref(),
         },
     )
     .await
@@ -2259,29 +2260,6 @@ fn worker_definition_from_lua(lua: &Lua, table: &Table) -> mlua::Result<WorkerDe
         instruction,
         extra_tools,
     })
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn worker_definition_to_lua(lua: &Lua, definition: &WorkerDefinition) -> mlua::Result<Table> {
-    let table = lua.create_table()?;
-    table.set("role", definition.role.clone())?;
-    table.set(
-        "model",
-        match definition.model {
-            WorkerModel::Main => "main",
-            WorkerModel::Efficient => "efficient",
-        },
-    )?;
-    table.set("input", lua.to_value(&definition.input_schema)?)?;
-    table.set("output", lua.to_value(&definition.output_schema)?)?;
-    table.set("instruction", definition.instruction.clone())?;
-    let extra_tools = lua.create_table()?;
-    for local_tool in &definition.extra_tools {
-        extra_tools.push(local_tool.clone())?;
-    }
-    table.set("extra_tools", extra_tools)?;
-    Ok(table)
 }
 
 #[cfg(test)]
@@ -3147,11 +3125,16 @@ mod tests {
             let home_override = DaatLocusHomeOverride::set(home.path().to_path_buf()).await;
             let telegram = TelegramTransportState::new();
             let (daemon_control_tx, _daemon_control_rx) = tokio::sync::mpsc::unbounded_channel();
-            let context = Context {
+            let mut context = Context {
                 session_id: None,
                 model_provider: Box::new(main),
                 efficient_model_provider: Arc::new(efficient),
                 config: Config::default(),
+                token_usage_store: crate::runtime::bootstrap::load_persistent_token_usage_store(
+                    None,
+                )
+                .await,
+                config_hot_reload_fingerprint: None,
                 memory: Memory::new().await,
                 plan: Plan::new().await,
                 events: EventStore::new().await,
@@ -3193,6 +3176,11 @@ mod tests {
                 session_title: crate::runtime::session_title::SessionTitleState::default(),
                 token_estimate_baseline: TokenEstimateBaseline::default(),
             };
+            let dashboard_history = crate::dashboard::DashboardActivityHistoryStore::open_at_path_for_test(
+                home.path().join("dashboard_activity.sqlite3"),
+            )
+            .expect("test dashboard history store");
+            context.dashboard_history = Some(dashboard_history);
             Self {
                 context,
                 _home_override: home_override,
@@ -4507,7 +4495,10 @@ workflow.define({{
         assert_eq!(user_json_values(&requests[0]), Vec::<Value>::new());
         assert!(requests[0].messages.iter().any(|message| matches!(
             message,
-            AgentMessage::Assistant { content } if content.contains("worker context retained")
+            AgentMessage::User { content }
+                if content
+                    .as_text()
+                    .contains(crate::runtime_context::HISTORY_ARCHIVE_PROMPT_MESSAGE)
         )));
         let actor = actor.lock().await;
         assert_eq!(actor.runtime.worker_plan.steps().len(), 1);
@@ -4519,7 +4510,7 @@ workflow.define({{
             .conversation
             .agent_messages()
             .iter()
-            .any(|message| matches!(message, AgentMessage::Assistant { content } if content.contains("worker context retained"))));
+            .any(|message| matches!(message, AgentMessage::User { content } if content.as_text().contains(crate::runtime_context::HISTORY_ARCHIVE_PROMPT_MESSAGE))));
     }
 
     #[tokio::test]
@@ -4592,7 +4583,10 @@ workflow.define({{
         assert_eq!(user_json_values(&requests[1]), Vec::<Value>::new());
         assert!(requests[1].messages.iter().any(|message| matches!(
             message,
-            AgentMessage::Assistant { content } if content.contains("overflow-recovered worker context")
+            AgentMessage::User { content }
+                if content
+                    .as_text()
+                    .contains(crate::runtime_context::HISTORY_ARCHIVE_PROMPT_MESSAGE)
         )));
     }
 

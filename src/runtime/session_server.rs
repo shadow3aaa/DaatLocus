@@ -28,7 +28,7 @@ use crate::{
         render_status_command_output_for_dashboard, render_system_prompt_output_for_dashboard,
         render_telegram_status_for_dashboard, runtime_activity_for_dashboard,
         runtime_optimization_snapshot_for_dashboard, skill_optimization_snapshot_for_dashboard,
-        status_command_snapshot_for_dashboard, token_usage_snapshot_for_dashboard,
+        status_command_snapshot_for_dashboard, sync_dashboard_state, token_usage_snapshot_for_dashboard,
     },
     dashboard::{
         DashboardAction, DashboardActivityHistoryStore, DashboardControlCommand,
@@ -42,6 +42,7 @@ use crate::{
         EventPayload, EventStatus, EventStore, TelegramIncomingEvent, TerminalIncomingAttachment,
         TerminalIncomingAttachmentKind, TerminalIncomingEvent,
     },
+    logging::{RuntimeStatusLevel, set_runtime_status},
     memory::Memory,
     openskills::load_openskills_for_runtime,
     pending_work::{PendingEventMoveDirection, PendingWork, PendingWorkQueue},
@@ -164,7 +165,7 @@ pub async fn run_session_serve(
         PersistentTokenUsageRole::Efficient,
         config.efficient_model_config().model_id.clone(),
         efficient_client,
-        token_usage_store,
+        token_usage_store.clone(),
     );
     let coding_project_dir = args.project_dir;
     let execution_cwd = if let Some(project_dir) = coding_project_dir.as_ref() {
@@ -204,6 +205,8 @@ pub async fn run_session_serve(
         model_provider: client,
         efficient_model_provider: std::sync::Arc::from(efficient_client),
         config,
+        token_usage_store: token_usage_store.clone(),
+        config_hot_reload_fingerprint: crate::config_hot_reload::current_config_fingerprint(),
         memory,
         plan,
         events,
@@ -286,8 +289,14 @@ pub async fn run_session_serve(
             runtime_activity: runtime_activity_for_dashboard(&context, &sleep_status, None, None),
             current_plan_step: current_plan_step_for_dashboard(&context),
             token_usage: token_usage_snapshot_for_dashboard(&context),
-            runtime_optimization: runtime_optimization_snapshot_for_dashboard(&sleep_status),
-            skill_optimization: skill_optimization_snapshot_for_dashboard(&sleep_status),
+            runtime_optimization: runtime_optimization_snapshot_for_dashboard(
+                &sleep_status,
+                context.config.sleep.enabled,
+            ),
+            skill_optimization: skill_optimization_snapshot_for_dashboard(
+                &sleep_status,
+                context.config.sleep.enabled,
+            ),
             context_composition: None,
             reduced_motion: ReducedMotion::default(),
             footer_context: render_dashboard_footer_context(&context, None),
@@ -318,6 +327,8 @@ pub async fn run_session_serve(
     let mut ctrl_c_disabled = false;
     let mut restart_requested = false;
     let mut runtime_idle = false;
+    let mut session_config_watch = tokio::time::interval(std::time::Duration::from_secs(3));
+    session_config_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         if drain_workspace_app_invalidations(&mut context, &mut workspace_app_invalidation_rx) {
             runtime_idle = false;
@@ -360,6 +371,14 @@ pub async fn run_session_serve(
                 &mut sleep_status,
             ), if !runtime_idle => {
                 runtime_idle = matches!(cycle, RuntimeLoopCycle::Idle);
+            }
+            _ = session_config_watch.tick(), if runtime_idle => {
+                let outcome = crate::config_hot_reload::maybe_reload_config(&mut context).await;
+                if let Some(text) = crate::config_hot_reload::config_reload_status_text(&outcome)
+                {
+                    set_runtime_status(Some(&tx), RuntimeStatusLevel::Info, text);
+                    sync_dashboard_state(&mut context, &tx, &sleep_status, None);
+                }
             }
             Some(()) = runtime_wake_rx.recv(), if runtime_idle => {
                 runtime_idle = false;

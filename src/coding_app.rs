@@ -456,14 +456,6 @@ impl CodingApp {
                     Some(SessionActivityEvent::CodingOpenProject(
                         CodingOpenProjectActivityDescriptor {
                             project_root: project_root.display().to_string(),
-                            detail_lines: vec![
-                                "status=already_open".to_string(),
-                                format!("project_root={}", project_root.display()),
-                                format!(
-                                    "root_project_instruction_fingerprint={}",
-                                    short_hash(&root_instruction_fingerprint)
-                                ),
-                            ],
                         }
                         .into(),
                     )),
@@ -478,21 +470,6 @@ impl CodingApp {
             self.root_instructions.clone_from(&root_instructions);
             self.root_instruction_fingerprint = Some(root_instruction_fingerprint.clone());
             self.last_action = Some("reloaded project instructions".to_string());
-            let mut ui_lines = vec![
-                "status=project_instructions_reloaded".to_string(),
-                format!("project_root={}", project_root.display()),
-                format!(
-                    "root_project_instruction_fingerprint={}",
-                    short_hash(&root_instruction_fingerprint)
-                ),
-            ];
-            ui_lines.extend(root_instructions.iter().map(|instruction| {
-                format!(
-                    "root_instruction file={} sha256={}",
-                    instruction.path.display(),
-                    short_hash(&instruction.sha256)
-                )
-            }));
             return Ok(AppToolExecutionResult::from_activity_event(
                 format!(
                     "reloaded coding project instructions {}",
@@ -511,7 +488,6 @@ impl CodingApp {
                 Some(SessionActivityEvent::CodingOpenProject(
                     CodingOpenProjectActivityDescriptor {
                         project_root: project_root.display().to_string(),
-                        detail_lines: ui_lines,
                     }
                     .into(),
                 )),
@@ -541,19 +517,6 @@ impl CodingApp {
             &model_parts.join("\n\n"),
             context.tool_output_max_tokens,
         );
-        let mut ui_lines = vec![format!("project_root={}", project_root.display())];
-        ui_lines.extend(config_hint_summary.state_lines());
-        ui_lines.push(format!(
-            "root_project_instruction_fingerprint={}",
-            short_hash(&root_instruction_fingerprint)
-        ));
-        ui_lines.extend(root_instructions.iter().map(|instruction| {
-            format!(
-                "root_instruction file={} sha256={}",
-                instruction.path.display(),
-                short_hash(&instruction.sha256)
-            )
-        }));
 
         Ok(AppToolExecutionResult::from_activity_event(
             format!("opened coding project {}", project_root.display()),
@@ -568,7 +531,6 @@ impl CodingApp {
             Some(SessionActivityEvent::CodingOpenProject(
                 CodingOpenProjectActivityDescriptor {
                     project_root: project_root.display().to_string(),
-                    detail_lines: ui_lines,
                 }
                 .into(),
             )),

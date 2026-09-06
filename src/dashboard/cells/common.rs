@@ -62,7 +62,6 @@ pub struct GenericAppActivityData {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodingOpenProjectActivityData {
     pub project_root: String,
-    pub detail_lines: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -356,7 +355,6 @@ impl From<crate::activity_event::CodingOpenProjectActivityDescriptor>
     fn from(data: crate::activity_event::CodingOpenProjectActivityDescriptor) -> Self {
         Self {
             project_root: data.project_root,
-            detail_lines: data.detail_lines,
         }
     }
 }

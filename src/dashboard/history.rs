@@ -3,11 +3,16 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use daat_locus_macros::model_schema;
 use miette::{Context as _, IntoDiagnostic, Result};
 use rusqlite::{Connection, OptionalExtension, params};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-use crate::{daat_locus_paths::DaatLocusPaths, dashboard::SessionActivityEvent};
+use crate::{
+    daat_locus_paths::DaatLocusPaths,
+    dashboard::SessionActivityEvent,
+    reasoning::runtime::{AgentMessage, HistoryMessage},
+};
 
 const DASHBOARD_ACTIVITY_HISTORY_DB_FILE: &str = "dashboard_activity.sqlite3";
 const DASHBOARD_ACTIVITY_HISTORY_LIMIT_MAX: usize = 200;
@@ -19,6 +24,25 @@ pub struct DashboardActivityHistoryStore {
     write_lock: Arc<Mutex<()>>,
 }
 
+#[model_schema]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryArchiveQueryMode {
+    Recent,
+    Range,
+    Search,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryArchiveItem {
+    pub seq: i64,
+    pub role: String,
+    pub tool_name: Option<String>,
+    pub content: String,
+}
+
+/// How many most-recent compaction archive batches are retained per session.
+pub const HISTORY_ARCHIVE_BATCH_KEEP_LIMIT: usize = 32;
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct DashboardActivityHistoryWindow {
     pub items: Vec<DashboardActivityHistoryItem>,
@@ -332,6 +356,181 @@ impl DashboardActivityHistoryStore {
         Ok(cleared)
     }
 
+    pub fn archive_history_messages(
+        &self,
+        batch_id: &str,
+        messages: &[HistoryMessage],
+    ) -> Result<usize> {
+        if messages.is_empty() {
+            return Ok(0);
+        }
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| miette::miette!("dashboard activity history lock poisoned"))?;
+        let mut conn = self.open_connection()?;
+        let transaction = conn
+            .transaction()
+            .into_diagnostic()
+            .wrap_err("begin history archive transaction failed")?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut statement = transaction
+            .prepare(
+                "INSERT INTO history_archive
+                    (batch_id, created_at_ms, role, tool_name, content_text, message_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .into_diagnostic()
+            .wrap_err("prepare history archive insert failed")?;
+        for message in messages {
+            let message_json = serde_json::to_string(message)
+                .into_diagnostic()
+                .wrap_err("encode history archive message failed")?;
+            let tool_name = match &message.message {
+                AgentMessage::Tool { name, .. } => Some(name.clone()),
+                _ => None,
+            };
+            statement
+                .execute(params![
+                    batch_id,
+                    now_ms,
+                    message.role_name(),
+                    tool_name,
+                    message.text_content().unwrap_or_default(),
+                    message_json,
+                ])
+                .into_diagnostic()
+                .wrap_err("insert history archive message failed")?;
+        }
+        drop(statement);
+        transaction
+            .commit()
+            .into_diagnostic()
+            .wrap_err("commit history archive transaction failed")?;
+        Ok(messages.len())
+    }
+
+    pub fn query_history_archive(
+        &self,
+        mode: HistoryArchiveQueryMode,
+        limit: usize,
+        before_seq: Option<i64>,
+        start_seq: Option<i64>,
+        query: &str,
+    ) -> Result<Vec<HistoryArchiveItem>> {
+        let limit = i64::try_from(clamp_history_limit(limit))
+            .expect("history archive query limit is clamped below i64::MAX");
+        let conn = self.open_connection()?;
+        let null_value = rusqlite::types::Value::Null;
+        let (sql, params): (String, Vec<rusqlite::types::Value>) = match mode {
+            HistoryArchiveQueryMode::Recent => (
+                "SELECT seq, role, tool_name, content_text FROM history_archive
+                 WHERE (?1 IS NULL OR seq < ?1)
+                   AND (?2 = '' OR content_text LIKE '%' || ?2 || '%')
+                 ORDER BY seq DESC
+                 LIMIT ?3"
+                    .to_string(),
+                vec![
+                    before_seq.map(i64::into).unwrap_or(null_value),
+                    rusqlite::types::Value::Text(query.to_string()),
+                    limit.into(),
+                ],
+            ),
+            HistoryArchiveQueryMode::Range => (
+                "SELECT seq, role, tool_name, content_text FROM history_archive
+                 WHERE seq >= ?1
+                   AND (?2 = '' OR content_text LIKE '%' || ?2 || '%')
+                 ORDER BY seq ASC
+                 LIMIT ?3"
+                    .to_string(),
+                vec![
+                    start_seq.unwrap_or(1).into(),
+                    rusqlite::types::Value::Text(query.to_string()),
+                    limit.into(),
+                ],
+            ),
+            HistoryArchiveQueryMode::Search => (
+                "SELECT seq, role, tool_name, content_text FROM history_archive
+                 WHERE content_text LIKE '%' || ?1 || '%'
+                   AND (?2 IS NULL OR seq < ?2)
+                 ORDER BY seq DESC
+                 LIMIT ?3"
+                    .to_string(),
+                vec![
+                    rusqlite::types::Value::Text(query.to_string()),
+                    before_seq.map(i64::into).unwrap_or(null_value),
+                    limit.into(),
+                ],
+            ),
+        };
+        let mut statement = conn
+            .prepare(&sql)
+            .into_diagnostic()
+            .wrap_err("prepare history archive query failed")?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(params.iter()), decode_history_archive_row)
+            .into_diagnostic()
+            .wrap_err("query history archive failed")?;
+        let mut items = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .into_diagnostic()
+            .wrap_err("decode history archive rows failed")?;
+        if matches!(
+            mode,
+            HistoryArchiveQueryMode::Recent | HistoryArchiveQueryMode::Search
+        ) {
+            items.reverse();
+        }
+        Ok(items)
+    }
+
+    pub fn count_history_archive(&self, mode: HistoryArchiveQueryMode, query: &str) -> Result<usize> {
+        let conn = self.open_connection()?;
+        let sql = match mode {
+            HistoryArchiveQueryMode::Recent | HistoryArchiveQueryMode::Range => {
+                "SELECT COUNT(*) FROM history_archive
+                 WHERE (?1 = '' OR content_text LIKE '%' || ?1 || '%')"
+                    .to_string()
+            }
+            HistoryArchiveQueryMode::Search => {
+                "SELECT COUNT(*) FROM history_archive
+                 WHERE content_text LIKE '%' || ?1 || '%'"
+                    .to_string()
+            }
+        };
+        let count = conn
+            .query_row(&sql, params![query], |row| row.get::<_, i64>(0))
+            .into_diagnostic()
+            .wrap_err("count history archive failed")?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn prune_history_archive(&self, keep_batch_count: usize) -> Result<usize> {
+        if keep_batch_count == 0 {
+            return Ok(0);
+        }
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| miette::miette!("dashboard activity history lock poisoned"))?;
+        let conn = self.open_connection()?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM history_archive WHERE batch_id IN (
+                    SELECT batch_id FROM (
+                        SELECT batch_id, MAX(seq) AS max_seq
+                        FROM history_archive
+                        GROUP BY batch_id
+                        ORDER BY max_seq DESC
+                        LIMIT -1 OFFSET ?1
+                    )
+                )",
+                params![keep_batch_count as i64],
+            )
+            .into_diagnostic()
+            .wrap_err("prune history archive failed")?;
+        Ok(deleted)
+    }
     pub fn query_before(
         &self,
         before: Option<i64>,
@@ -523,7 +722,18 @@ impl DashboardActivityHistoryStore {
                  activity_count INTEGER NOT NULL DEFAULT 0,
                  revision INTEGER NOT NULL DEFAULT 0,
                  PRIMARY KEY(run_id, worker_id)
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS history_archive (
+                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                 batch_id TEXT NOT NULL,
+                 created_at_ms INTEGER NOT NULL,
+                 role TEXT NOT NULL,
+                 tool_name TEXT,
+                 content_text TEXT NOT NULL DEFAULT '',
+                 message_json TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_history_archive_batch
+                 ON history_archive(batch_id, seq);",
         )
         .into_diagnostic()
         .wrap_err("initialize dashboard activity history sqlite failed")?;
@@ -918,6 +1128,14 @@ fn decode_history_row(
     Ok((seq, item))
 }
 
+fn decode_history_archive_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryArchiveItem> {
+    Ok(HistoryArchiveItem {
+        seq: row.get(0)?,
+        role: row.get(1)?,
+        tool_name: row.get(2)?,
+        content: row.get(3)?,
+    })
+}
 fn load_all_history_items(
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<Vec<DashboardActivityHistoryItem>> {
@@ -1036,6 +1254,98 @@ mod tests {
         activity_item(id, &cell)
     }
 
+    #[test]
+    fn history_archive_round_trip_recent_range_search_and_prune() {
+        let temp = tempfile::tempdir().expect("test temp dir");
+        let store = DashboardActivityHistoryStore::open_at_path_for_test(
+            temp.path().join("archive.sqlite3"),
+        )
+        .expect("store");
+        let messages = vec![
+            HistoryMessage::user("user one"),
+            HistoryMessage::assistant("assistant one"),
+            HistoryMessage::tool("call-1", "read_file", "tool output one", None),
+            HistoryMessage::user("user two with needle"),
+            HistoryMessage::assistant("assistant two"),
+        ];
+        assert_eq!(
+            store
+                .archive_history_messages("batch-1", &messages)
+                .expect("archive batch 1"),
+            5
+        );
+        assert_eq!(
+            store
+                .archive_history_messages("batch-2", &[HistoryMessage::user("batch two only")])
+                .expect("archive batch 2"),
+            1
+        );
+
+        let recent = store
+            .query_history_archive(HistoryArchiveQueryMode::Recent, 10, None, None, "")
+            .expect("recent query");
+        assert_eq!(recent.len(), 6);
+        assert_eq!(recent[0].seq, 1);
+        assert_eq!(recent[5].seq, 6);
+        assert_eq!(recent[5].role, "user");
+        assert!(recent[5].content.contains("batch two only"));
+
+        let paged = store
+            .query_history_archive(HistoryArchiveQueryMode::Recent, 2, None, None, "")
+            .expect("paged query");
+        assert_eq!(paged.len(), 2);
+        assert_eq!(paged[0].seq, 5);
+        assert_eq!(paged[1].seq, 6);
+        let older = store
+            .query_history_archive(
+                HistoryArchiveQueryMode::Recent,
+                2,
+                Some(paged[0].seq),
+                None,
+                "",
+            )
+            .expect("older page");
+        assert_eq!(older.len(), 2);
+        assert!(older.iter().all(|item| item.seq < paged[0].seq));
+        assert_eq!(older[0].seq, 3);
+        assert_eq!(older[1].seq, 4);
+
+        let range = store
+            .query_history_archive(HistoryArchiveQueryMode::Range, 3, None, Some(3), "")
+            .expect("range query");
+        assert_eq!(range.len(), 3);
+        assert_eq!(range[0].seq, 3);
+        assert_eq!(range[2].seq, 5);
+
+        let search = store
+            .query_history_archive(HistoryArchiveQueryMode::Search, 10, None, None, "needle")
+            .expect("search query");
+        assert_eq!(search.len(), 1);
+        assert_eq!(search[0].seq, 4);
+        assert_eq!(search[0].role, "user");
+        assert!(search[0].content.contains("needle"));
+        assert_eq!(
+            store
+                .count_history_archive(HistoryArchiveQueryMode::Search, "needle")
+                .expect("search count"),
+            1
+        );
+
+        let tool = store
+            .query_history_archive(HistoryArchiveQueryMode::Recent, 10, None, None, "")
+            .expect("tool query");
+        assert_eq!(tool[2].role, "tool");
+        assert_eq!(tool[2].tool_name.as_deref(), Some("read_file"));
+        assert!(tool[2].content.contains("tool output one"));
+
+        let pruned = store.prune_history_archive(1).expect("prune to one batch");
+        assert_eq!(pruned, 5);
+        let remaining = store
+            .query_history_archive(HistoryArchiveQueryMode::Recent, 10, None, None, "")
+            .expect("remaining query");
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].content.contains("batch two only"));
+    }
     fn explored_group(stable_id: &str, summary: &str) -> SessionActivityEvent {
         explored_group_with_summaries(stable_id, &[summary])
     }

@@ -44,7 +44,6 @@ pub struct RuntimeStepConversation {
 
 pub struct RuntimeConversationCompactionPlan {
     source_messages: Vec<HistoryMessage>,
-    summary_max_tokens: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -96,7 +95,6 @@ pub struct PlanCompactionInput<'a> {
     pub limits: RequestBudgetLimits,
     pub baseline: &'a TokenEstimateBaseline,
     pub min_messages: usize,
-    pub summary_max_tokens: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -454,20 +452,9 @@ impl RuntimeConversationCompactionPlan {
     pub fn source_messages(&self) -> &[HistoryMessage] {
         &self.source_messages
     }
-
-    pub const fn summary_max_tokens(&self) -> usize {
-        self.summary_max_tokens
-    }
-
     #[cfg(test)]
-    pub(crate) const fn for_test(
-        source_messages: Vec<HistoryMessage>,
-        summary_max_tokens: usize,
-    ) -> Self {
-        Self {
-            source_messages,
-            summary_max_tokens,
-        }
+    pub(crate) const fn for_test(source_messages: Vec<HistoryMessage>) -> Self {
+        Self { source_messages }
     }
 }
 
@@ -480,7 +467,7 @@ fn rebuild_compacted_agent_messages(
         .filter(|message| matches!(message, AgentMessage::System { .. }))
         .cloned()
         .collect::<Vec<_>>();
-    rebuilt.push(AgentMessage::assistant(summary));
+    rebuilt.push(AgentMessage::user(summary));
     rebuilt
 }
 
@@ -610,24 +597,16 @@ impl RuntimeConversation {
         if !breakdown.above_auto_compact_threshold() {
             return None;
         }
-        let summary_max_tokens = input
-            .summary_max_tokens
-            .min(breakdown.input_budget_tokens())
-            .min(breakdown.auto_compact_input_threshold_tokens());
-        Self::compaction_plan_from_messages(all_messages, summary_max_tokens)
+        Self::compaction_plan_from_messages(all_messages)
     }
 
     fn compaction_plan_from_messages(
         source_messages: Vec<HistoryMessage>,
-        summary_max_tokens: usize,
     ) -> Option<RuntimeConversationCompactionPlan> {
-        if source_messages.is_empty() || summary_max_tokens == 0 {
+        if source_messages.is_empty() {
             return None;
         }
-        Some(RuntimeConversationCompactionPlan {
-            source_messages,
-            summary_max_tokens,
-        })
+        Some(RuntimeConversationCompactionPlan { source_messages })
     }
 
     fn apply_compaction(
@@ -636,8 +615,7 @@ impl RuntimeConversation {
         outcome: RuntimeCompactionOutcome,
     ) -> bool {
         self.messages.clear();
-        self.messages
-            .push(HistoryMessage::assistant(outcome.summary));
+        self.messages.push(HistoryMessage::user(outcome.summary));
         self.messages = normalize_runtime_prompt_messages(std::mem::take(&mut self.messages));
         self.push_compaction_record(outcome.record);
         true
@@ -899,7 +877,6 @@ mod tests {
                     limits,
                     baseline: &TokenEstimateBaseline::default(),
                     min_messages: 0,
-                    summary_max_tokens: 80,
                 })
                 .is_some()
         );
@@ -934,7 +911,6 @@ mod tests {
                     limits,
                     baseline: &baseline,
                     min_messages: 0,
-                    summary_max_tokens: 80,
                 })
                 .is_some()
         );
@@ -1007,7 +983,7 @@ mod tests {
         };
 
         let all_messages = conversation.messages();
-        let plan = RuntimeConversation::compaction_plan_from_messages(all_messages, 8)
+        let plan = RuntimeConversation::compaction_plan_from_messages(all_messages)
             .expect("expected compaction plan");
 
         let applied = conversation.apply_compaction(
@@ -1034,7 +1010,7 @@ mod tests {
             conversation
                 .messages
                 .last()
-                .is_some_and(HistoryMessage::is_assistant)
+                .is_some_and(HistoryMessage::is_user)
         );
         assert!(
             conversation
@@ -1057,12 +1033,12 @@ mod tests {
         let rebuilt = rebuild_compacted_agent_messages(&messages, "summary".to_string());
         assert_eq!(rebuilt.len(), 2);
         assert!(matches!(rebuilt[0], AgentMessage::System { .. }));
-        assert!(matches!(rebuilt[1], AgentMessage::Assistant { .. }));
+        assert!(matches!(rebuilt[1], AgentMessage::User { .. }));
         assert!(rebuilt.iter().all(|message| {
             !matches!(
                 message,
-                AgentMessage::User { .. }
-                    | AgentMessage::Tool { .. }
+                AgentMessage::Tool { .. }
+                    | AgentMessage::Assistant { .. }
                     | AgentMessage::AssistantToolCallProtocol { .. }
             )
         }));

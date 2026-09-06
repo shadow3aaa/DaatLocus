@@ -45,7 +45,7 @@ pub fn redact_secret_text(text: &str, secret: &str) -> String {
 // Provider credentials
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ProviderConfig {
     Openai {
@@ -94,7 +94,7 @@ impl ThinkingBudget {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ModelConfig {
     /// Key reference into Config.providers.
@@ -210,7 +210,7 @@ impl ModelConfig {
 // Judge configuration
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct JudgeConfig {
     pub enabled: bool,
@@ -228,6 +228,27 @@ impl Default for JudgeConfig {
             max_pairwise_candidates: 4,
             max_pairwise_cases: 4,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sleep configuration
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct SleepConfig {
+    /// Whether the sleep self-improvement mechanism may run.
+    ///
+    /// When disabled, background automatic sleep (idle and forced backlog
+    /// triggers) is skipped. Manual sleep runs stay available through the
+    /// dashboard `/sleep run` command as an explicit user action.
+    pub enabled: bool,
+}
+
+impl Default for SleepConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -253,6 +274,7 @@ pub struct Config {
     pub judge: JudgeConfig,
     pub sandbox: SandboxConfig,
     pub telegram: TelegramConfig,
+    pub sleep: SleepConfig,
 }
 
 impl Default for Config {
@@ -279,6 +301,7 @@ impl Default for Config {
             judge: JudgeConfig::default(),
             sandbox: SandboxConfig::default(),
             telegram: TelegramConfig::default(),
+            sleep: SleepConfig::default(),
         }
     }
 }
@@ -424,7 +447,7 @@ impl Default for DaemonConfig {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct SandboxConfig {
     pub enabled: bool,
@@ -440,7 +463,7 @@ impl Default for SandboxConfig {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct TelegramConfig {
     pub enabled: bool,

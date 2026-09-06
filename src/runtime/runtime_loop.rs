@@ -6,7 +6,7 @@ use crate::{
     activity_event::{TextActivityDescriptor, ToolCallActivityEvent, compact_preserved_body_lines},
     app::{AppId, AppToolExecutionContext},
     context::{Context, RuntimeTurnPhase},
-    context_budget::{TokenEstimateBaseline, is_context_budget_exceeded},
+    context_budget::is_context_budget_exceeded,
     dashboard::render::{
         AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, FORCE_SLEEP_ERROR_BACKLOG_THRESHOLD,
         render_dashboard_footer_context, sync_dashboard_state,
@@ -98,9 +98,9 @@ const RUNTIME_EVENT_CLAIM_BATCH_SIZE: usize = 1;
 const RUNTIME_OVERFLOW_FUSE_THRESHOLD: usize = 3;
 const RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD: usize = 3;
 const RUNTIME_HISTORY_MIN_MESSAGES: usize = 0;
-const RUNTIME_HISTORY_SUMMARY_MAX_TOKENS: usize = 800;
 const RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS: u64 = 60;
 
+#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::claimed_input::{
@@ -138,62 +138,14 @@ mod tests {
 
     struct UnusedModelProvider;
 
-    struct TextCompactionModelProvider {
-        summary: &'static str,
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
     struct OverflowRecoveryModelProvider {
         agent_requests: Arc<std::sync::Mutex<Vec<AgentTurnRequest>>>,
-        compaction_calls: Arc<std::sync::atomic::AtomicUsize>,
         succeed_on_agent_request: Option<usize>,
     }
 
     struct InterruptCheckpointModelProvider {
         calls: std::sync::atomic::AtomicUsize,
         second_request_started: Arc<tokio::sync::Notify>,
-    }
-
-    #[async_trait]
-    impl ModelProvider for TextCompactionModelProvider {
-        async fn complete_json(
-            &self,
-            _request: PromptRequest,
-            _options: ModelRequestOptions,
-        ) -> Result<serde_json::Value> {
-            Err(miette!("compaction must not use a structured tool request"))
-        }
-
-        async fn complete_agent_turn(
-            &self,
-            request: AgentTurnRequest,
-            _options: ModelRequestOptions,
-        ) -> Result<AgentTurnStreamResult> {
-            assert!(request.tools.is_empty());
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(AgentTurnStreamResult {
-                items: Vec::new(),
-                raw_stream_follow_up: false,
-                last_assistant_message: Some(self.summary.to_string()),
-                last_reasoning_content: None,
-            })
-        }
-
-        fn request_budget_limits(&self) -> crate::context_budget::RequestBudgetLimits {
-            crate::context_budget::RequestBudgetLimits {
-                context_window_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
-                auto_compact_threshold_tokens: crate::context_budget::DEFAULT_CONTEXT_WINDOW_TOKENS,
-                reserved_output_tokens: crate::context_budget::DEFAULT_MAX_COMPLETION_TOKENS,
-            }
-        }
-
-        fn token_usage_info(&self) -> crate::core::TokenUsageInfo {
-            crate::core::TokenUsageInfo::default()
-        }
-
-        fn model_name(&self) -> String {
-            "text-compaction-test".to_string()
-        }
     }
 
     #[async_trait]
@@ -213,16 +165,6 @@ mod tests {
             request: AgentTurnRequest,
             options: ModelRequestOptions,
         ) -> Result<AgentTurnStreamResult> {
-            if request.tools.is_empty() {
-                self.compaction_calls
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                return Ok(AgentTurnStreamResult {
-                    items: Vec::new(),
-                    raw_stream_follow_up: false,
-                    last_assistant_message: Some("overflow recovery summary".to_string()),
-                    last_reasoning_content: None,
-                });
-            }
 
             let request_count = {
                 let mut requests = self.agent_requests.lock().expect("agent requests lock");
@@ -379,6 +321,11 @@ mod tests {
                 model_provider: Box::new(UnusedModelProvider),
                 efficient_model_provider: std::sync::Arc::new(UnusedModelProvider),
                 config: Config::default(),
+                token_usage_store: crate::runtime::bootstrap::load_persistent_token_usage_store(
+                    None,
+                )
+                .await,
+                config_hot_reload_fingerprint: None,
                 memory: Memory::new().await,
                 plan: Plan::new().await,
                 events: crate::events::EventStore::new().await,
@@ -429,37 +376,52 @@ mod tests {
         }
     }
 
+    fn with_test_session_history(
+        context: &mut Context,
+        session_id: &str,
+    ) -> crate::dashboard::DashboardActivityHistoryStore {
+        context.session_id = Some(session_id.to_string());
+        let store = crate::dashboard::DashboardActivityHistoryStore::with_session(session_id)
+            .expect("test history store");
+        context.dashboard_history = Some(store.clone());
+        store
+    }
+
     #[tokio::test]
-    async fn pre_turn_compaction_uses_main_model_without_calling_efficient_model() {
+    async fn pre_turn_compaction_is_local_and_archives_history() {
         let mut isolated = IsolatedRuntimeContext::new().await;
         let context = &mut isolated.context;
-        let main_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        context.model_provider = Box::new(TextCompactionModelProvider {
-            summary: "## Current state\n\nmain model summary",
-            calls: main_calls.clone(),
-        });
-        context.efficient_model_provider = Arc::new(UnusedModelProvider);
-
-        let main_model = context.config.main_model.clone();
-        let model = context
-            .config
-            .models
-            .get_mut(&main_model)
-            .expect("default main model");
-        model.context_window_tokens = 1_000_000;
-        model.effective_context_window_percent = 100;
-        model.max_completion_tokens = 1;
-        let plan = crate::memory::RuntimeConversationCompactionPlan::for_test(
-            vec![HistoryMessage::user("user input")],
-            1_024,
-        );
+        let session_id = "test-session-archive";
+        let store = with_test_session_history(context, session_id);
+        let plan = crate::memory::RuntimeConversationCompactionPlan::for_test(vec![
+            HistoryMessage::user("user input"),
+            HistoryMessage::assistant("work completed"),
+        ]);
 
         let outcome = crate::runtime_context::execute_pre_turn_runtime_compaction(context, &plan)
             .await
-            .expect("main model compaction should succeed");
+            .expect("local compaction should succeed");
 
-        assert_eq!(main_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(outcome.summary.contains("main model summary"));
+        assert_eq!(
+            outcome.summary,
+            crate::runtime_context::HISTORY_ARCHIVE_PROMPT_MESSAGE
+        );
+        let archived = store
+            .query_history_archive(
+                crate::dashboard::HistoryArchiveQueryMode::Recent,
+                10,
+                None,
+                None,
+                "",
+            )
+            .expect("query archive");
+        assert_eq!(archived.len(), 2);
+        assert!(archived
+            .iter()
+            .any(|item| item.role == "user" && item.content.contains("user input")));
+        assert!(archived
+            .iter()
+            .any(|item| item.role == "assistant" && item.content.contains("work completed")));
         drop(isolated);
     }
 
@@ -467,24 +429,19 @@ mod tests {
     async fn overflow_recovery_retries_with_compacted_messages_in_the_same_step() {
         let mut isolated = IsolatedRuntimeContext::new().await;
         let context = &mut isolated.context;
+        let _store = with_test_session_history(context, "test-session-overflow-retry");
         let agent_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let compaction_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         context.model_provider = Box::new(OverflowRecoveryModelProvider {
             agent_requests: agent_requests.clone(),
-            compaction_calls: compaction_calls.clone(),
             succeed_on_agent_request: Some(2),
         });
 
         execute_agent_loop_step(context, None).await;
 
-        assert_eq!(
-            compaction_calls.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
         let requests = agent_requests.lock().expect("agent requests lock");
         assert_eq!(requests.len(), 2);
         assert!(requests[1].messages.iter().any(|message| {
-            matches!(message, AgentMessage::Assistant { content } if content.contains("overflow recovery summary"))
+            matches!(message, AgentMessage::User { content } if content.as_text().contains("read_history"))
         }));
         drop(requests);
         drop(isolated);
@@ -494,20 +451,15 @@ mod tests {
     async fn overflow_recovery_stops_after_three_compactions() {
         let mut isolated = IsolatedRuntimeContext::new().await;
         let context = &mut isolated.context;
+        let _store = with_test_session_history(context, "test-session-overflow-stop");
         let agent_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let compaction_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         context.model_provider = Box::new(OverflowRecoveryModelProvider {
             agent_requests: agent_requests.clone(),
-            compaction_calls: compaction_calls.clone(),
             succeed_on_agent_request: None,
         });
 
         execute_agent_loop_step(context, None).await;
 
-        assert_eq!(
-            compaction_calls.load(std::sync::atomic::Ordering::SeqCst),
-            MID_TURN_COMPACTION_MAX_RECOVERIES
-        );
         assert_eq!(
             agent_requests.lock().expect("agent requests lock").len(),
             MID_TURN_COMPACTION_MAX_RECOVERIES + 1
@@ -567,6 +519,45 @@ mod tests {
                 .expect("claim after interrupt")
                 .is_empty()
         );
+        drop(isolated);
+    }
+
+    #[tokio::test]
+    async fn interrupt_runtime_turn_clears_stale_live_activity_cells() {
+        let mut isolated = IsolatedRuntimeContext::new().await;
+        let context = &mut isolated.context;
+        let (dashboard_tx, _dashboard_rx) =
+            tokio::sync::watch::channel(crate::dashboard::DashboardState::default());
+        context.dashboard_tx = Some(dashboard_tx);
+        context.active_runtime_turn = true;
+        context.runtime_turn_started_at = Some(Instant::now());
+        context.runtime_turn_started_at_ms = Some(42);
+        context
+            .dashboard_tx
+            .as_ref()
+            .expect("dashboard tx")
+            .send_modify(|state| {
+                crate::dashboard::cells::apply_activity_event(
+                    state,
+                    crate::dashboard::cells::DashboardActivityEvent::ExecBegin {
+                        key: "exec-1".to_string(),
+                        title: "cargo test".to_string(),
+                        call_lines: vec!["cargo test".to_string()],
+                    },
+                );
+            });
+
+        let failed = interrupt_active_runtime_turn(context, "test interrupt");
+
+        assert_eq!(failed, 0);
+        let dashboard_tx = context.dashboard_tx.take().expect("dashboard tx");
+        let state = dashboard_tx.borrow();
+        let keys: Vec<&str> = state
+            .live_activity_events
+            .iter()
+            .map(|cell| cell.key.as_str())
+            .collect();
+        assert!(keys.is_empty());
         drop(isolated);
     }
 

@@ -13,7 +13,7 @@ use crate::{
     app::{AppId, AppManager, AppStateRender, AppToolExecutionContext},
     context::Context,
     context_budget::truncate_text_to_token_budget_with_notice,
-    dashboard::SessionActivityEvent,
+    dashboard::{DashboardActivityHistoryStore, SessionActivityEvent},
     live_progress::TelegramLiveStatus,
     reasoning::{
         episode::EpisodeActionRecord,
@@ -24,6 +24,7 @@ use crate::{
 };
 
 mod files;
+mod history;
 mod view_image;
 mod work;
 
@@ -642,6 +643,7 @@ fn build_worker_runtime_tools_for_apps(
     let mut tools = build_static_runtime_tools();
     tools.retain(|tool| tool.name() != "finish_and_send");
     tools.push(worker_finish_and_send_tool(output_schema));
+    tools.extend(history::register_tools());
 
     let reserved_names = tools
         .iter()
@@ -672,6 +674,7 @@ pub struct WorkerRuntimeToolCallContext<'a> {
     pub(crate) turn_epoch: u64,
     pub(crate) output_schema: &'a Value,
     pub(crate) worker_plan: &'a mut crate::plan::Plan,
+    pub(crate) dashboard_history: Option<&'a DashboardActivityHistoryStore>,
 }
 
 pub async fn execute_worker_runtime_tool_call_for_apps(
@@ -688,6 +691,7 @@ pub async fn execute_worker_runtime_tool_call_for_apps(
         turn_epoch,
         output_schema,
         worker_plan,
+        dashboard_history,
     } = context;
     let tools = build_worker_runtime_tools_for_apps(apps, output_schema.clone());
     let tool = find_runtime_tool(&tools, &call.name)?;
@@ -717,6 +721,7 @@ pub async fn execute_worker_runtime_tool_call_for_apps(
         worker_plan,
         image_state_dir,
         worker_model_supports_vision,
+        dashboard_history,
     )
     .await
     .map(|result| result.ensure_model_content_with_budget(tool_output_max_tokens.max(1)))
@@ -822,6 +827,7 @@ async fn execute_worker_runtime_tool(
     worker_plan: &mut crate::plan::Plan,
     image_state_dir: &std::path::Path,
     supports_vision: bool,
+    dashboard_history: Option<&DashboardActivityHistoryStore>,
 ) -> Result<ToolExecutionResult> {
     match tool.name() {
         "read_file" => {
@@ -855,6 +861,17 @@ async fn execute_worker_runtime_tool(
                 call.arguments.clone(),
                 None,
             ));
+        }
+        "read_history" => {
+            let store = dashboard_history.ok_or_else(|| {
+                miette!("read_history requires an active session history store")
+            })?;
+            return history::execute_worker_read_history(
+                call,
+                store,
+                app_context.tool_output_max_tokens.max(1),
+            )
+            .await;
         }
         _ => {}
     }
@@ -985,6 +1002,7 @@ fn build_app_runtime_tools(
 
 pub fn build_runtime_tools(context: &Context) -> Vec<Box<dyn RuntimeTool>> {
     let mut tools = build_static_runtime_tools();
+    tools.extend(history::register_tools());
     let mut reserved_names = tools
         .iter()
         .map(|tool| tool.name().to_string())
@@ -1374,6 +1392,7 @@ mod tests {
                 turn_epoch: 1,
                 output_schema: &output_schema,
                 worker_plan: &mut worker_plan,
+                dashboard_history: None,
             },
         )
         .await
@@ -1403,6 +1422,7 @@ mod tests {
                 turn_epoch: 2,
                 output_schema: &output_schema,
                 worker_plan: &mut worker_plan,
+                dashboard_history: None,
             },
         )
         .await
@@ -1474,6 +1494,11 @@ mod tests {
                 model_provider: Box::new(UnusedModelProvider),
                 efficient_model_provider: std::sync::Arc::new(UnusedModelProvider),
                 config,
+                token_usage_store: crate::runtime::bootstrap::load_persistent_token_usage_store(
+                    None,
+                )
+                .await,
+                config_hot_reload_fingerprint: None,
                 memory: Memory::new().await,
                 plan: Plan::new().await,
                 events: EventStore::new().await,

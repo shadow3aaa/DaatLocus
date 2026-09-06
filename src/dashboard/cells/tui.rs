@@ -514,7 +514,7 @@ fn render_activity_cell_lines_with_options(
         SessionActivityEvent::LiveBrowser(cell) => render_live_browser_cell_lines(cell, max_width),
         SessionActivityEvent::WebSearch(cell) => render_web_search_cell_lines(cell, max_width),
         SessionActivityEvent::CodingOpenProject(cell) => {
-            render_coding_open_project_cell_lines(cell, max_width)
+            render_coding_open_project_cell_lines(cell)
         }
         SessionActivityEvent::Explored(cell) => render_explored_cell_lines(cell, max_width),
         SessionActivityEvent::CodingEdit(cell) => render_coding_edit_cell_lines(cell, max_width),
@@ -1054,10 +1054,9 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
             };
             transcript_section(title, &lines.join("\n"))
         }
-        SessionActivityEvent::CodingOpenProject(cell) => transcript_section(
-            "OPENED PROJECT",
-            &primary_transcript_text(&cell.project_root, &cell.detail_lines),
-        ),
+        SessionActivityEvent::CodingOpenProject(cell) => {
+            transcript_section("OPENED PROJECT", &cell.project_root)
+        }
         SessionActivityEvent::Explored(cell) => {
             let lines = cell
                 .calls
@@ -1606,6 +1605,18 @@ fn prefix_wrapped_lines(
     out
 }
 
+fn pad_line_background_to_width(line: &mut Line<'static>, max_width: u16) {
+    let Some(background) = line.style.bg else {
+        return;
+    };
+    let used = spans_display_width(&line.spans);
+    let pad = usize::from(max_width).saturating_sub(used);
+    if pad > 0 {
+        line.spans
+            .push(Span::styled(" ".repeat(pad), Style::default().bg(background)));
+    }
+}
+
 fn prefixed_wrapped_line(
     content: Line<'static>,
     initial_prefix: Vec<Span<'static>>,
@@ -1641,6 +1652,7 @@ fn prefixed_wrapped_line(
                     subsequent_prefix.to_vec(),
                 ));
                 line.style = line_style;
+                pad_line_background_to_width(&mut line, max_width);
                 out.push(line);
                 current_prefix = subsequent_prefix.to_vec();
                 current_width = 0;
@@ -1660,6 +1672,7 @@ fn prefixed_wrapped_line(
     if !has_content || current_spans.len() > current_prefix.len() {
         let mut line = Line::from(current_spans);
         line.style = line_style;
+        pad_line_background_to_width(&mut line, max_width);
         out.push(line);
     }
 
@@ -1866,19 +1879,8 @@ fn render_generic_app_cell_lines(cell: &GenericAppActivityData) -> Vec<Line<'sta
 
 fn render_coding_open_project_cell_lines(
     cell: &CodingOpenProjectActivityData,
-    max_width: u16,
 ) -> Vec<Line<'static>> {
-    let title = format!("Opened Project: {}", cell.project_root);
-    let mut lines = vec![activity_header(title)];
-    let detail = cell
-        .detail_lines
-        .iter()
-        .take(6)
-        .cloned()
-        .map(Line::from)
-        .collect::<Vec<_>>();
-    lines.extend(prefixed_detail_lines(detail, max_width));
-    lines
+    vec![activity_header(format!("Opened Project At {}", cell.project_root))]
 }
 
 fn render_explored_cell_lines(cell: &ExploredActivityData, max_width: u16) -> Vec<Line<'static>> {
@@ -3485,6 +3487,98 @@ That's it.";
         assert!(rendered.iter().any(|line| line.contains("1 1   fn main()")));
         assert!(rendered.iter().any(|line| line.contains("2   -")));
         assert!(rendered.iter().any(|line| line.contains(" 2 +")));
+    }
+
+    #[test]
+    fn coding_open_project_cell_renders_only_path_title() {
+        let cell = CodingOpenProjectActivityData {
+            project_root: "C:/work/demo".to_string(),
+        };
+        let lines = render_coding_open_project_cell_lines(&cell);
+        assert_eq!(lines.len(), 1);
+        assert!(line_text(&lines[0]).contains("Opened Project At C:/work/demo"));
+        assert!(!line_text(&lines[0]).contains("fingerprint"));
+    }
+
+    #[test]
+    fn patch_diff_line_backgrounds_fill_full_render_width() {
+        let cell = PatchActivityData {
+            summary_line: "1 file changed".to_string(),
+            files: vec![PatchFileActivityDescriptor {
+                path: "src/app.rs".to_string(),
+                operation: PatchFileOperation::Update,
+                added_lines: 1,
+                removed_lines: 1,
+                diff_lines: vec![
+                    PatchDiffLineActivityDescriptor {
+                        kind: PatchDiffLineKind::Delete,
+                        old_lineno: Some(1),
+                        new_lineno: None,
+                        text: "old_line();".to_string(),
+                    },
+                    PatchDiffLineActivityDescriptor {
+                        kind: PatchDiffLineKind::Add,
+                        old_lineno: None,
+                        new_lineno: Some(1),
+                        text: "new_line();".to_string(),
+                    },
+                ],
+            }],
+        };
+
+        let lines = render_patch_cell_lines(&cell, 80);
+        let diff_lines: Vec<_> = lines.iter().filter(|line| line.style.bg.is_some()).collect();
+        assert_eq!(diff_lines.len(), 2);
+        for line in diff_lines {
+            assert_eq!(
+                spans_display_width(&line.spans),
+                80,
+                "diff background should fill the full render width: {:?}",
+                line_text(line)
+            );
+        }
+
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 12));
+        let mut cache = CachedActivityLines::new();
+        let mut user_hyperlink_areas = Vec::new();
+        let mut selectable_regions = Vec::new();
+        render_activity_feed_cached(
+            &mut buffer,
+            Rect::new(0, 0, 80, 12),
+            ActivityFeedRenderArgs {
+                cells: &[SessionActivityEvent::Patch(cell)],
+                live_cells: &[],
+                expanded_thinking: &HashSet::new(),
+                scroll_offset: 0,
+                cache: &mut cache,
+                user_hyperlink_areas: &mut user_hyperlink_areas,
+                selection: &SelectionRegistry::default(),
+                selectable_regions: &mut selectable_regions,
+            },
+        );
+
+        for (pattern, expected_bg) in [
+            ("old_line();", PATCH_DIFF_DELETE_BACKGROUND),
+            ("new_line();", PATCH_DIFF_ADD_BACKGROUND),
+        ] {
+            let y = (0..buffer.area.height)
+                .find(|y| buffer_row_text(&buffer, *y).contains(pattern))
+                .expect("diff row should be rendered into buffer");
+            let row_cells: Vec<_> = (1..buffer.area.width.saturating_sub(1))
+                .filter_map(|x| buffer.cell((x, y)))
+                .collect();
+            let first_bg = row_cells
+                .iter()
+                .position(|cell| cell.bg == expected_bg)
+                .expect("diff background should be present in row");
+            assert!(
+                row_cells[first_bg..]
+                    .iter()
+                    .all(|cell| cell.bg == expected_bg),
+                "diff background must fill the row width after the gutter: {}",
+                buffer_row_text(&buffer, y)
+            );
+        }
     }
 
     #[test]

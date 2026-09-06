@@ -77,8 +77,6 @@ pub enum WebSearchActivityAction {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodingOpenProjectActivityDescriptor {
     pub project_root: String,
-    #[serde(default)]
-    pub detail_lines: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -9,6 +9,7 @@ mod cli;
 mod coding_app;
 mod commands;
 mod config;
+mod config_hot_reload;
 mod config_setup;
 mod config_wizard;
 mod context;

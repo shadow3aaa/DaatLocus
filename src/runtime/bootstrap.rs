@@ -417,7 +417,7 @@ pub async fn build_eval_context_with_compiled(
         PersistentTokenUsageRole::Efficient,
         config.efficient_model_config().model_id.clone(),
         efficient_client,
-        token_usage_store,
+        token_usage_store.clone(),
     );
     let (daemon_control_tx, _daemon_control_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -426,6 +426,8 @@ pub async fn build_eval_context_with_compiled(
         model_provider: client,
         efficient_model_provider: std::sync::Arc::from(efficient_client),
         config,
+        token_usage_store: token_usage_store.clone(),
+        config_hot_reload_fingerprint: crate::config_hot_reload::current_config_fingerprint(),
         memory,
         plan,
         events,

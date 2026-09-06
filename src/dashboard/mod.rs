@@ -29,7 +29,8 @@ pub use cells::{
     ActivityFeedRenderArgs, CachedActivityLines, DashboardActivityEvent, LiveActivityEvent,
     ReducedMotion, SessionActivityEvent, WorkflowActivityData,
     activity_event_from_tool_call_activity_event, activity_events_from_history_items,
-    apply_activity_event, assistant_activity_cell, coalesce_activity_events,
+    apply_activity_event, assistant_activity_cell, clear_transient_live_activity_cells,
+    coalesce_activity_events,
     render_activity_feed_cached, render_activity_from_messages,
     terminal_activity_event_from_terminal_data, thinking_activity_cell, user_activity_cell,
     user_activity_cell_from_event,
@@ -42,6 +43,7 @@ pub use commands::{
 pub use history::{
     DashboardActivityHistoryCount, DashboardActivityHistoryItem, DashboardActivityHistoryPage,
     DashboardActivityHistoryStore, DashboardActivityHistoryWindow, DashboardInputHistory,
+    HISTORY_ARCHIVE_BATCH_KEEP_LIMIT, HistoryArchiveItem, HistoryArchiveQueryMode,
     WORKFLOW_WORKER_ACTIVITY_INITIAL_LIMIT, WorkflowWorkerActivityPage,
 };
 
@@ -149,6 +151,7 @@ pub struct DashboardStatusCommandSnapshot {
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DashboardSkillOptimizationSnapshot {
+    pub enabled: bool,
     pub running: bool,
     pub current_trigger: Option<String>,
     pub last_result: Option<String>,
@@ -160,6 +163,7 @@ pub struct DashboardSkillOptimizationSnapshot {
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DashboardRuntimeOptimizationSnapshot {
+    pub enabled: bool,
     pub running: bool,
     pub current_trigger: Option<String>,
     pub last_result: Option<String>,

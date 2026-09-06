@@ -103,6 +103,19 @@ pub fn sync_dashboard_runtime_status_live_cell(state: &mut DashboardState) {
     }
 }
 
+/// Remove transient live activity cells that were started by a runtime turn
+/// but never finalized because the turn was interrupted while a tool call was
+/// in flight. `ExecBegin`/`BrowserBegin` cells normally disappear when the
+/// tool call returns (`ExecEnd`/`BrowserEnd`), but an interrupted turn drops
+/// that finalization and leaves the dashboard reporting the cell as running
+/// until the daemon restarts. The runtime-status cell is preserved; the next
+/// dashboard sync re-pins or removes it based on the current turn state.
+pub fn clear_transient_live_activity_cells(state: &mut DashboardState) {
+    state
+        .live_activity_events
+        .retain(|cell| cell.key == RUNTIME_STATUS_LIVE_CELL_KEY);
+}
+
 /// Keep the "Working" runtime-status cell pinned to the end of the live cell
 /// list after other live cells are appended or updated. `sync_*` rebuilds the
 /// cell from state, but the live streaming path only mutates individual cells,
@@ -781,6 +794,29 @@ mod tests {
 
         let keys: Vec<&str> = live_cells.iter().map(|cell| cell.key.as_str()).collect();
         assert_eq!(keys, vec!["exec-1", RUNTIME_STATUS_LIVE_CELL_KEY]);
+    }
+
+    #[test]
+    fn clear_transient_live_activity_cells_keeps_only_runtime_status_cell() {
+        let mut state = DashboardState::default();
+        apply_activity_event(
+            &mut state,
+            DashboardActivityEvent::ExecBegin {
+                key: "exec-1".to_string(),
+                title: "cargo test".to_string(),
+                call_lines: vec!["cargo test".to_string()],
+            },
+        );
+        state.live_activity_events.push(runtime_status_live_event());
+
+        clear_transient_live_activity_cells(&mut state);
+
+        let keys: Vec<&str> = state
+            .live_activity_events
+            .iter()
+            .map(|cell| cell.key.as_str())
+            .collect();
+        assert_eq!(keys, vec![RUNTIME_STATUS_LIVE_CELL_KEY]);
     }
 
     #[test]

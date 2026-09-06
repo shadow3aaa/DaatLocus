@@ -60,6 +60,8 @@ pub struct Context {
     pub model_provider: Box<dyn ModelProvider + Send + Sync>,
     pub efficient_model_provider: std::sync::Arc<dyn ModelProvider + Send + Sync>,
     pub config: Config,
+    pub token_usage_store: std::sync::Arc<crate::runtime::bootstrap::PersistentTokenUsageStore>,
+    pub config_hot_reload_fingerprint: Option<crate::config_hot_reload::ConfigFileEntry>,
     pub memory: Memory,
     pub plan: Plan,
     pub events: EventStore,

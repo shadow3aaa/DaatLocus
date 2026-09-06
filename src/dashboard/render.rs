@@ -64,8 +64,10 @@ pub fn sync_dashboard_state(
             render_dashboard_footer_context(context, state.footer_estimated_input_tokens);
         state.current_plan_step = current_plan_step_for_dashboard(context);
         state.token_usage = token_usage_snapshot_for_dashboard(context);
-        state.runtime_optimization = runtime_optimization_snapshot_for_dashboard(sleep_status);
-        state.skill_optimization = skill_optimization_snapshot_for_dashboard(sleep_status);
+        state.runtime_optimization =
+            runtime_optimization_snapshot_for_dashboard(sleep_status, context.config.sleep.enabled);
+        state.skill_optimization =
+            skill_optimization_snapshot_for_dashboard(sleep_status, context.config.sleep.enabled);
         state.context_composition = context_composition_snapshot_for_dashboard(context);
     });
 }
@@ -169,8 +171,10 @@ pub fn context_composition_snapshot_for_dashboard(
 
 pub fn runtime_optimization_snapshot_for_dashboard(
     sleep_status: &SleepStatusSnapshot,
+    enabled: bool,
 ) -> DashboardRuntimeOptimizationSnapshot {
     DashboardRuntimeOptimizationSnapshot {
+        enabled,
         running: sleep_status.running,
         current_trigger: sleep_status.current_trigger.map(str::to_string),
         last_result: sleep_status.last_result.clone(),
@@ -190,8 +194,10 @@ pub fn runtime_optimization_snapshot_for_dashboard(
 
 pub fn skill_optimization_snapshot_for_dashboard(
     sleep_status: &SleepStatusSnapshot,
+    enabled: bool,
 ) -> DashboardSkillOptimizationSnapshot {
     DashboardSkillOptimizationSnapshot {
+        enabled,
         running: sleep_status.running,
         current_trigger: sleep_status.current_trigger.map(str::to_string),
         last_result: sleep_status.last_result.clone(),
@@ -320,7 +326,15 @@ pub fn render_sleep_status_output_for_dashboard(
     } else {
         "idle"
     };
-    let mut overview_lines = vec![format!("State: {state}")];
+    let auto_state = if context.config.sleep.enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let mut overview_lines = vec![
+        format!("State: {state}"),
+        format!("Automatic sleep: {auto_state}"),
+    ];
     if let Some(trigger) = sleep_status.current_trigger {
         overview_lines.push(format!("Trigger: {trigger}"));
     }
