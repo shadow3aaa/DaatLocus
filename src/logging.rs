@@ -49,6 +49,7 @@ pub async fn init_logging(session_id: Option<&str>) -> WorkerGuard {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::new("warn"))
             .with_ansi(false)
+            .with_timer(tracing_subscriber::fmt::time::ChronoLocal::rfc_3339())
             .with_writer(non_blocking)
             .try_init();
         return guard;
@@ -69,6 +70,7 @@ pub async fn init_logging(session_id: Option<&str>) -> WorkerGuard {
         .with_ansi(false)
         .with_target(true)
         .with_thread_ids(true)
+        .with_timer(tracing_subscriber::fmt::time::ChronoLocal::rfc_3339())
         .with_writer(non_blocking)
         .try_init()
     {
@@ -78,6 +80,7 @@ pub async fn init_logging(session_id: Option<&str>) -> WorkerGuard {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::new("daat_locus=info,warn"))
             .with_ansi(false)
+            .with_timer(tracing_subscriber::fmt::time::ChronoLocal::rfc_3339())
             .with_writer(nb_stderr)
             .try_init();
         return guard_stderr;
@@ -368,5 +371,41 @@ fn render_agent_turn_item_dump(item: &AgentTurnItem) -> Vec<String> {
             "arguments:".to_string(),
             to_string_pretty(&call.arguments).unwrap_or_else(|_| call.arguments.to_string()),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing_subscriber::fmt::format::Writer;
+    use tracing_subscriber::fmt::time::FormatTime;
+
+    #[test]
+    fn log_timer_emits_local_timezone_offset() {
+        let timer = tracing_subscriber::fmt::time::ChronoLocal::rfc_3339();
+        let mut out = String::new();
+        timer
+            .format_time(&mut Writer::new(&mut out))
+            .expect("timer should format into the writer");
+
+        let local_minus_utc = chrono::Local::now().offset().local_minus_utc();
+        if local_minus_utc == 0 {
+            // Machine timezone is UTC; RFC3339 may render `Z` or `+00:00`.
+            assert!(
+                out.ends_with('Z') || out.ends_with("+00:00"),
+                "unexpected UTC timestamp format: {out}"
+            );
+        } else {
+            // Machine timezone is not UTC: the timestamp must carry the local offset,
+            // never the UTC `Z` suffix.
+            assert!(
+                !out.ends_with('Z') && !out.ends_with("+00:00"),
+                "log timestamp uses UTC instead of local timezone: {out}"
+            );
+            let local_offset = chrono::Local::now().format("%:z").to_string();
+            assert!(
+                out.ends_with(&local_offset),
+                "log timestamp {out} does not end with local offset {local_offset}"
+            );
+        }
     }
 }
