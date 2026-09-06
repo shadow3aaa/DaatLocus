@@ -103,10 +103,10 @@ fn collect_skill_files(dir: &Path, entries: &mut Vec<CatalogFileEntry>) {
         };
         if metadata.is_dir() {
             collect_skill_files(&path, entries);
-        } else if file_name == SKILL_FILE_NAME {
-            if let Some(entry) = file_entry(&path) {
-                entries.push(entry);
-            }
+        } else if file_name == SKILL_FILE_NAME
+            && let Some(entry) = file_entry(&path)
+        {
+            entries.push(entry);
         }
     }
 }
@@ -117,10 +117,10 @@ fn collect_lua_files(dir: &Path, entries: &mut Vec<CatalogFileEntry>) {
     };
     for entry in read_dir.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) == Some("lua") {
-            if let Some(entry) = file_entry(&path) {
-                entries.push(entry);
-            }
+        if path.extension().and_then(|value| value.to_str()) == Some("lua")
+            && let Some(entry) = file_entry(&path)
+        {
+            entries.push(entry);
         }
     }
 }
@@ -150,8 +150,8 @@ mod tests {
         write(&skills.join("alpha").join("SKILL.md"), "# Alpha\n");
         let workflows = home.path().join("workflows");
         write(&workflows.join("goal.lua"), "return {}\n");
-        let first = compute_fingerprint_for_roots(&[skills.clone()], &workflows);
-        let second = compute_fingerprint_for_roots(&[skills.clone()], &workflows);
+        let first = compute_fingerprint_for_roots(std::slice::from_ref(&skills), &workflows);
+        let second = compute_fingerprint_for_roots(std::slice::from_ref(&skills), &workflows);
         assert_eq!(first, second);
         assert_eq!(first.len(), 2);
     }
@@ -162,9 +162,9 @@ mod tests {
         let skills = home.path().join("skills");
         write(&skills.join("alpha").join("SKILL.md"), "# Alpha\n");
         let workflows = home.path().join("workflows");
-        let before = compute_fingerprint_for_roots(&[skills.clone()], &workflows);
+        let before = compute_fingerprint_for_roots(std::slice::from_ref(&skills), &workflows);
         write(&skills.join("beta").join("SKILL.md"), "# Beta\n");
-        let after = compute_fingerprint_for_roots(&[skills.clone()], &workflows);
+        let after = compute_fingerprint_for_roots(std::slice::from_ref(&skills), &workflows);
         assert_ne!(before, after);
         assert_eq!(after.len(), 2);
     }
@@ -176,9 +176,9 @@ mod tests {
         let workflows = home.path().join("workflows");
         let path = workflows.join("goal.lua");
         write(&path, "return {}\n");
-        let before = compute_fingerprint_for_roots(&[skills.clone()], &workflows);
+        let before = compute_fingerprint_for_roots(std::slice::from_ref(&skills), &workflows);
         fs::remove_file(&path).expect("remove workflow");
-        let after = compute_fingerprint_for_roots(&[skills.clone()], &workflows);
+        let after = compute_fingerprint_for_roots(std::slice::from_ref(&skills), &workflows);
         assert_ne!(before, after);
         assert!(after.is_empty());
     }
@@ -190,9 +190,9 @@ mod tests {
         let workflows = home.path().join("workflows");
         let path = workflows.join("goal.lua");
         write(&path, "return {}\n");
-        let before = compute_fingerprint_for_roots(&[skills.clone()], &workflows);
+        let before = compute_fingerprint_for_roots(std::slice::from_ref(&skills), &workflows);
         write(&path, "return { extra = true }\n");
-        let after = compute_fingerprint_for_roots(&[skills.clone()], &workflows);
+        let after = compute_fingerprint_for_roots(std::slice::from_ref(&skills), &workflows);
         assert_ne!(before, after);
     }
 
@@ -203,7 +203,7 @@ mod tests {
         let workflows = home.path().join("workflows");
         write(&skills.join(".hidden").join("SKILL.md"), "# Hidden\n");
         write(&workflows.join("notes.txt"), "not a workflow\n");
-        let fingerprint = compute_fingerprint_for_roots(&[skills.clone()], &workflows);
+        let fingerprint = compute_fingerprint_for_roots(std::slice::from_ref(&skills), &workflows);
         assert!(fingerprint.is_empty());
     }
 
@@ -216,7 +216,7 @@ mod tests {
             "# Deep\n",
         );
         let workflows = home.path().join("workflows");
-        let fingerprint = compute_fingerprint_for_roots(&[skills.clone()], &workflows);
+        let fingerprint = compute_fingerprint_for_roots(std::slice::from_ref(&skills), &workflows);
         assert_eq!(fingerprint.len(), 1);
         assert!(fingerprint[0].path.ends_with("SKILL.md"));
     }

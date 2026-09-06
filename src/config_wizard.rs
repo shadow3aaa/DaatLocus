@@ -2875,9 +2875,9 @@ mod tests {
 
     #[test]
     fn model_capacity_prefers_special_provider_catalog_match() {
-        let capacity = resolve_model_capacity(&copilot_provider(), "gpt-4.1", None, None, None);
-        let expected = catalog_model_capacity_for_provider("github-copilot", "gpt-4.1")
-            .expect("compiled catalog should contain github-copilot/gpt-4.1");
+        let capacity = resolve_model_capacity(&copilot_provider(), "gpt-5.6-sol", None, None, None);
+        let expected = catalog_model_capacity_for_provider("github-copilot", "gpt-5.6-sol")
+            .expect("compiled catalog should contain github-copilot/gpt-5.6-sol");
 
         assert_eq!(capacity, expected);
     }
@@ -2886,14 +2886,14 @@ mod tests {
     fn model_capacity_prefers_url_matched_catalog_provider() {
         let capacity = resolve_model_capacity(
             &compatible_provider("https://api.githubcopilot.com/"),
-            "gpt-4.1",
+            "gpt-5.6-sol",
             None,
             None,
             None,
         );
 
-        let expected = catalog_model_capacity_for_provider("github-copilot", "gpt-4.1")
-            .expect("compiled catalog should contain github-copilot/gpt-4.1");
+        let expected = catalog_model_capacity_for_provider("github-copilot", "gpt-5.6-sol")
+            .expect("compiled catalog should contain github-copilot/gpt-5.6-sol");
         assert_eq!(capacity, expected);
     }
 
@@ -2901,14 +2901,14 @@ mod tests {
     fn openai_provider_custom_base_url_can_match_catalog_provider() {
         let capacity = resolve_model_capacity(
             &openai_provider_with_base_url("https://api.githubcopilot.com/"),
-            "gpt-4.1",
+            "gpt-5.6-sol",
             None,
             None,
             None,
         );
 
-        let expected = catalog_model_capacity_for_provider("github-copilot", "gpt-4.1")
-            .expect("compiled catalog should contain github-copilot/gpt-4.1");
+        let expected = catalog_model_capacity_for_provider("github-copilot", "gpt-5.6-sol")
+            .expect("compiled catalog should contain github-copilot/gpt-5.6-sol");
         assert_eq!(capacity, expected);
     }
 
