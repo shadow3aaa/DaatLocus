@@ -340,10 +340,17 @@ impl OpenAIClient {
         payload: &serde_json::Value,
         request_context: &[String],
         response_header_timeout: Duration,
+        session_headers: &reqwest::header::HeaderMap,
     ) -> Result<reqwest::Response> {
         const MAX_429_RETRIES: usize = 4;
         const MAX_5XX_RETRIES: usize = 3;
 
+        let mut request_headers = self.extra_headers.clone();
+        request_headers.extend(
+            session_headers
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
         let mut rate_limit_attempt = 0usize;
         let mut transient_attempt = 0usize;
         loop {
@@ -352,7 +359,7 @@ impl OpenAIClient {
                 .client
                 .post(url)
                 .bearer_auth(&self.api_key)
-                .headers(self.extra_headers.clone())
+                .headers(request_headers.clone())
                 .json(payload);
             let response = send_request_for_streaming_response(
                 request,
@@ -497,6 +504,8 @@ impl OpenAIClient {
         let output_schema = request.output_schema.clone();
         let budget = &options.budget;
         let request_context = summarize_prompt_request(&request, Some(budget));
+        let session_headers =
+            opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
         let mut adapter_state = self.adapter_state_guard();
         let body = loop {
             let payload =
@@ -508,6 +517,7 @@ impl OpenAIClient {
                     &payload,
                     &request_context,
                     self.stream_idle_timeout,
+                    &session_headers,
                 )
                 .await?;
             let status = response.status();
@@ -621,6 +631,8 @@ impl OpenAIClient {
         let budget = &options.budget;
         let request_context = summarize_agent_turn_request(&request, Some(budget));
         let request_has_tools = !request.tools.is_empty();
+        let session_headers =
+            opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
         let request_has_reasoning_content = request.messages.iter().any(|message| {
             matches!(
                 message,
@@ -641,6 +653,7 @@ impl OpenAIClient {
                     &payload,
                     &request_context,
                     self.request_timeout,
+                    &session_headers,
                 )
                 .await?;
             let status = response.status();
@@ -1182,6 +1195,56 @@ fn is_standard_openai_base_url(base_url: &str) -> bool {
     normalized.contains("api.openai.com")
 }
 
+const OPENCODE_CLIENT_ID: &str = "daat-locus";
+const OPENCODE_USER_AGENT: &str = concat!("daat-locus/", env!("CARGO_PKG_VERSION"));
+
+/// The OpenCode Zen/Go gateway (`https://opencode.ai/...`) rejects requests
+/// without a stable per-conversation `x-opencode-session` header.
+pub(crate) fn is_opencode_gateway_base_url(base_url: &str) -> bool {
+    match opencode_gateway_host(base_url) {
+        Some(host) => {
+            let host = host.to_ascii_lowercase();
+            host == "opencode.ai" || host.ends_with(".opencode.ai")
+        }
+        None => false,
+    }
+}
+
+fn opencode_gateway_host(base_url: &str) -> Option<&str> {
+    let rest = base_url.trim();
+    let rest = rest
+        .strip_prefix("https://")
+        .or_else(|| rest.strip_prefix("http://"))
+        .unwrap_or(rest);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    let host = host.split(':').next()?;
+    let host = host.trim();
+    (!host.is_empty()).then_some(host)
+}
+
+pub(crate) fn opencode_gateway_headers(
+    base_url: &str,
+    conversation_id: Option<&str>,
+) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if !is_opencode_gateway_base_url(base_url) {
+        return headers;
+    }
+    let Some(conversation_id) = conversation_id else {
+        return headers;
+    };
+    if let Ok(value) = reqwest::header::HeaderValue::from_str(conversation_id) {
+        headers.insert("x-opencode-session", value);
+    }
+    headers.insert("x-opencode-client", OPENCODE_CLIENT_ID.parse().unwrap());
+    headers.insert(
+        reqwest::header::USER_AGENT,
+        OPENCODE_USER_AGENT.parse().unwrap(),
+    );
+    headers
+}
+
 fn shared_request_rate_limiter(
     base_url: &str,
     model_id: &str,
@@ -1516,6 +1579,56 @@ mod tests {
         assert_eq!(
             versioned.url(),
             "https://api.deepseek.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn opencode_gateway_detection_matches_opencode_ai_host_only() {
+        assert!(is_opencode_gateway_base_url("https://opencode.ai/zen/v1"));
+        assert!(is_opencode_gateway_base_url("https://api.opencode.ai/v1"));
+        assert!(is_opencode_gateway_base_url("http://OPENCODE.AI/zen/v1"));
+        assert!(is_opencode_gateway_base_url(
+            "http://opencode.ai:8080/zen/v1"
+        ));
+        assert!(!is_opencode_gateway_base_url("https://api.openai.com/v1"));
+        assert!(!is_opencode_gateway_base_url("https://notopencode.ai/v1"));
+        assert!(!is_opencode_gateway_base_url(
+            "https://opencode.ai.evil.test/v1"
+        ));
+        assert!(!is_opencode_gateway_base_url(""));
+    }
+
+    #[test]
+    fn opencode_gateway_headers_carry_stable_session_identity() {
+        let headers = opencode_gateway_headers("https://opencode.ai/zen/v1", Some("session-1"));
+
+        assert_eq!(
+            headers.get("x-opencode-session").unwrap().to_str().unwrap(),
+            "session-1"
+        );
+        assert_eq!(
+            headers.get("x-opencode-client").unwrap().to_str().unwrap(),
+            "daat-locus"
+        );
+        assert!(
+            headers
+                .get(reqwest::header::USER_AGENT)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("daat-locus/")
+        );
+    }
+
+    #[test]
+    fn opencode_gateway_headers_skip_without_conversation_or_gateway() {
+        assert!(
+            opencode_gateway_headers("https://opencode.ai/zen/v1", None).is_empty(),
+            "missing conversation must not send partial gateway headers"
+        );
+        assert!(
+            opencode_gateway_headers("https://api.openai.com/v1", Some("session-1")).is_empty(),
+            "non-gateway providers must not receive opencode headers"
         );
     }
 

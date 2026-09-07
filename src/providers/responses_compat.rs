@@ -135,6 +135,7 @@ impl ResponsesCompatibleClient {
         &self,
         payload: &Value,
         request_context: &[String],
+        session_headers: &reqwest::header::HeaderMap,
     ) -> Result<reqwest::Response> {
         const MAX_429_RETRIES: usize = 4;
         const MAX_5XX_RETRIES: usize = 3;
@@ -148,6 +149,7 @@ impl ResponsesCompatibleClient {
                 .client
                 .post(&url)
                 .bearer_auth(&self.api_key)
+                .headers(session_headers.clone())
                 .json(payload);
             let response = send_request_for_streaming_response(
                 request,
@@ -439,6 +441,8 @@ impl ModelProvider for ResponsesCompatibleClient {
     ) -> Result<Value> {
         let budget = &options.budget;
         let request_context = super::io::summarize_prompt_request(&request, Some(budget));
+        let session_headers =
+            super::opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
         let (instructions, input) =
             history_messages_to_responses_parts(request.all_messages(), false);
         let mut payload = base_payload(self, &instructions, &input, &Vec::new());
@@ -451,7 +455,7 @@ impl ModelProvider for ResponsesCompatibleClient {
             }
         });
         let response = self
-            .post_responses_with_retry(&payload, &request_context)
+            .post_responses_with_retry(&payload, &request_context, &session_headers)
             .await?;
         let status = response.status();
         if !status.is_success() {
@@ -490,10 +494,12 @@ impl ModelProvider for ResponsesCompatibleClient {
     ) -> Result<AgentTurnStreamResult> {
         let budget = &options.budget;
         let request_context = super::io::summarize_agent_turn_request(&request, Some(budget));
+        let session_headers =
+            super::opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
         let strip_images = !self.supports_vision.load(Ordering::Relaxed);
         let payload = build_agent_payload(self, request.clone(), strip_images);
         let response = self
-            .post_responses_with_retry(&payload, &request_context)
+            .post_responses_with_retry(&payload, &request_context, &session_headers)
             .await?;
         let status = response.status();
         if !status.is_success() {
@@ -528,7 +534,7 @@ impl ModelProvider for ResponsesCompatibleClient {
                 );
                 let payload = build_agent_payload(self, request, true);
                 let response = self
-                    .post_responses_with_retry(&payload, &request_context)
+                    .post_responses_with_retry(&payload, &request_context, &session_headers)
                     .await?;
                 let status = response.status();
                 if status.is_success() {
