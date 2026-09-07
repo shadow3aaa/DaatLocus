@@ -1612,8 +1612,10 @@ fn pad_line_background_to_width(line: &mut Line<'static>, max_width: u16) {
     let used = spans_display_width(&line.spans);
     let pad = usize::from(max_width).saturating_sub(used);
     if pad > 0 {
-        line.spans
-            .push(Span::styled(" ".repeat(pad), Style::default().bg(background)));
+        line.spans.push(Span::styled(
+            " ".repeat(pad),
+            Style::default().bg(background),
+        ));
     }
 }
 
@@ -1880,7 +1882,10 @@ fn render_generic_app_cell_lines(cell: &GenericAppActivityData) -> Vec<Line<'sta
 fn render_coding_open_project_cell_lines(
     cell: &CodingOpenProjectActivityData,
 ) -> Vec<Line<'static>> {
-    vec![activity_header(format!("Opened Project At {}", cell.project_root))]
+    vec![activity_header(format!(
+        "Opened Project At {}",
+        cell.project_root
+    ))]
 }
 
 fn render_explored_cell_lines(cell: &ExploredActivityData, max_width: u16) -> Vec<Line<'static>> {
@@ -3527,7 +3532,10 @@ That's it.";
         };
 
         let lines = render_patch_cell_lines(&cell, 80);
-        let diff_lines: Vec<_> = lines.iter().filter(|line| line.style.bg.is_some()).collect();
+        let diff_lines: Vec<_> = lines
+            .iter()
+            .filter(|line| line.style.bg.is_some())
+            .collect();
         assert_eq!(diff_lines.len(), 2);
         for line in diff_lines {
             assert_eq!(

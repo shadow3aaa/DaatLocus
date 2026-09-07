@@ -30,8 +30,7 @@ pub const MID_TURN_COMPACTION_MAX_RECOVERIES: usize = 3;
 /// Message injected as the only history item after a clear-and-archive
 /// compaction. The model is expected to recover the task state by reading the
 /// archived history with the `read_history` tool before continuing work.
-pub const HISTORY_ARCHIVE_PROMPT_MESSAGE: &str =
-    "上下文已超出，更早的消息历史可使用 read_history 工具了解。请先调用它恢复任务状态，再继续当前工作。";
+pub const HISTORY_ARCHIVE_PROMPT_MESSAGE: &str = "上下文已超出，更早的消息历史可使用 read_history 工具了解。请先调用它恢复任务状态，再继续当前工作。";
 const RUNTIME_COMPACTION_EVENT_FILE_NAME: &str = "runtime_compaction_events.jsonl";
 static RUNTIME_COMPACTION_IO_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -153,7 +152,6 @@ const fn runtime_step_compaction_policy() -> RuntimeStepCompactionPolicy {
     }
 }
 
-
 fn history_message_token_cost(message: &HistoryMessage) -> usize {
     let role = message.role_name();
     approx_token_count(role) + approx_token_count(message.text_content().unwrap_or_default()) + 4
@@ -162,7 +160,6 @@ fn history_message_token_cost(message: &HistoryMessage) -> usize {
 fn history_messages_total_token_cost(messages: &[HistoryMessage]) -> usize {
     messages.iter().map(history_message_token_cost).sum()
 }
-
 
 struct RuntimeCompactionRequest<'a> {
     source_messages: &'a [HistoryMessage],
@@ -192,7 +189,8 @@ async fn execute_runtime_compaction(
         context.session_id.as_deref().unwrap_or("unknown-session"),
         Utc::now().timestamp_millis()
     );
-    let archived = archive_runtime_conversation_history(context, &batch_id, source_messages).await?;
+    let archived =
+        archive_runtime_conversation_history(context, &batch_id, source_messages).await?;
     if archived == 0 {
         return Err(miette!("runtime compaction archived no messages"));
     }
@@ -266,7 +264,9 @@ async fn build_mid_turn_compaction_outcome(
         .map(agent_message_to_history_message_for_archival)
         .collect::<Vec<_>>();
     if compacted_messages.is_empty() {
-        return Err(miette!("runtime compaction has no mid-turn messages to archive"));
+        return Err(miette!(
+            "runtime compaction has no mid-turn messages to archive"
+        ));
     }
     let reason = if compact_for_overflow {
         RuntimeCompactionReason::OverflowRecovery
@@ -309,4 +309,3 @@ async fn append_runtime_compaction_event(event: RuntimeCompactionTelemetryEvent)
 fn runtime_compaction_io_lock() -> &'static tokio::sync::Mutex<()> {
     RUNTIME_COMPACTION_IO_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
-

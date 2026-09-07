@@ -863,9 +863,8 @@ async fn execute_worker_runtime_tool(
             ));
         }
         "read_history" => {
-            let store = dashboard_history.ok_or_else(|| {
-                miette!("read_history requires an active session history store")
-            })?;
+            let store = dashboard_history
+                .ok_or_else(|| miette!("read_history requires an active session history store"))?;
             return history::execute_worker_read_history(
                 call,
                 store,

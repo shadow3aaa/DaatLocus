@@ -3176,10 +3176,11 @@ mod tests {
                 session_title: crate::runtime::session_title::SessionTitleState::default(),
                 token_estimate_baseline: TokenEstimateBaseline::default(),
             };
-            let dashboard_history = crate::dashboard::DashboardActivityHistoryStore::open_at_path_for_test(
-                home.path().join("dashboard_activity.sqlite3"),
-            )
-            .expect("test dashboard history store");
+            let dashboard_history =
+                crate::dashboard::DashboardActivityHistoryStore::open_at_path_for_test(
+                    home.path().join("dashboard_activity.sqlite3"),
+                )
+                .expect("test dashboard history store");
             context.dashboard_history = Some(dashboard_history);
             Self {
                 context,

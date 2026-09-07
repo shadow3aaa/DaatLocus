@@ -165,7 +165,6 @@ mod tests {
             request: AgentTurnRequest,
             options: ModelRequestOptions,
         ) -> Result<AgentTurnStreamResult> {
-
             let request_count = {
                 let mut requests = self.agent_requests.lock().expect("agent requests lock");
                 requests.push(request);
@@ -416,12 +415,16 @@ mod tests {
             )
             .expect("query archive");
         assert_eq!(archived.len(), 2);
-        assert!(archived
-            .iter()
-            .any(|item| item.role == "user" && item.content.contains("user input")));
-        assert!(archived
-            .iter()
-            .any(|item| item.role == "assistant" && item.content.contains("work completed")));
+        assert!(
+            archived
+                .iter()
+                .any(|item| item.role == "user" && item.content.contains("user input"))
+        );
+        assert!(
+            archived
+                .iter()
+                .any(|item| item.role == "assistant" && item.content.contains("work completed"))
+        );
         drop(isolated);
     }
 

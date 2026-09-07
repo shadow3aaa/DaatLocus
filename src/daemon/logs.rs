@@ -17,7 +17,7 @@ use tokio::{
 
 use crate::daat_locus_paths::daat_locus_paths;
 
-use super::{session, DAEMON_MAIN_LOG, SESSION_LOG, ServerState};
+use super::{DAEMON_MAIN_LOG, SESSION_LOG, ServerState, session};
 
 const DEFAULT_LOG_LINE_LIMIT: usize = 500;
 const MAX_LOG_LINE_LIMIT: usize = 2_000;

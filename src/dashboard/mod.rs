@@ -30,8 +30,7 @@ pub use cells::{
     ReducedMotion, SessionActivityEvent, WorkflowActivityData,
     activity_event_from_tool_call_activity_event, activity_events_from_history_items,
     apply_activity_event, assistant_activity_cell, clear_transient_live_activity_cells,
-    coalesce_activity_events,
-    render_activity_feed_cached, render_activity_from_messages,
+    coalesce_activity_events, render_activity_feed_cached, render_activity_from_messages,
     terminal_activity_event_from_terminal_data, thinking_activity_cell, user_activity_cell,
     user_activity_cell_from_event,
 };

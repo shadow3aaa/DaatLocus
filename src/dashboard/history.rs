@@ -3,16 +3,16 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use daat_locus_macros::model_schema;
-use miette::{Context as _, IntoDiagnostic, Result};
-use rusqlite::{Connection, OptionalExtension, params};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use crate::{
     daat_locus_paths::DaatLocusPaths,
     dashboard::SessionActivityEvent,
     reasoning::runtime::{AgentMessage, HistoryMessage},
 };
+use daat_locus_macros::model_schema;
+use miette::{Context as _, IntoDiagnostic, Result};
+use rusqlite::{Connection, OptionalExtension, params};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 const DASHBOARD_ACTIVITY_HISTORY_DB_FILE: &str = "dashboard_activity.sqlite3";
 const DASHBOARD_ACTIVITY_HISTORY_LIMIT_MAX: usize = 200;
@@ -468,7 +468,10 @@ impl DashboardActivityHistoryStore {
             .into_diagnostic()
             .wrap_err("prepare history archive query failed")?;
         let rows = statement
-            .query_map(rusqlite::params_from_iter(params.iter()), decode_history_archive_row)
+            .query_map(
+                rusqlite::params_from_iter(params.iter()),
+                decode_history_archive_row,
+            )
             .into_diagnostic()
             .wrap_err("query history archive failed")?;
         let mut items = rows
@@ -484,7 +487,11 @@ impl DashboardActivityHistoryStore {
         Ok(items)
     }
 
-    pub fn count_history_archive(&self, mode: HistoryArchiveQueryMode, query: &str) -> Result<usize> {
+    pub fn count_history_archive(
+        &self,
+        mode: HistoryArchiveQueryMode,
+        query: &str,
+    ) -> Result<usize> {
         let conn = self.open_connection()?;
         let sql = match mode {
             HistoryArchiveQueryMode::Recent | HistoryArchiveQueryMode::Range => {
@@ -492,11 +499,9 @@ impl DashboardActivityHistoryStore {
                  WHERE (?1 = '' OR content_text LIKE '%' || ?1 || '%')"
                     .to_string()
             }
-            HistoryArchiveQueryMode::Search => {
-                "SELECT COUNT(*) FROM history_archive
+            HistoryArchiveQueryMode::Search => "SELECT COUNT(*) FROM history_archive
                  WHERE content_text LIKE '%' || ?1 || '%'"
-                    .to_string()
-            }
+                .to_string(),
         };
         let count = conn
             .query_row(&sql, params![query], |row| row.get::<_, i64>(0))

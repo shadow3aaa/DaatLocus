@@ -28,7 +28,8 @@ use crate::{
         render_status_command_output_for_dashboard, render_system_prompt_output_for_dashboard,
         render_telegram_status_for_dashboard, runtime_activity_for_dashboard,
         runtime_optimization_snapshot_for_dashboard, skill_optimization_snapshot_for_dashboard,
-        status_command_snapshot_for_dashboard, sync_dashboard_state, token_usage_snapshot_for_dashboard,
+        status_command_snapshot_for_dashboard, sync_dashboard_state,
+        token_usage_snapshot_for_dashboard,
     },
     dashboard::{
         DashboardAction, DashboardActivityHistoryStore, DashboardControlCommand,

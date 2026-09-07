@@ -27,8 +27,8 @@ use crate::{
     daat_locus_paths::daat_locus_paths_sync,
     providers::build_model_provider,
     runtime::bootstrap::{
-        load_compiled_prompts_only, sandbox_policy_for_runtime,
-        wrap_model_provider_with_persistent_token_usage, PersistentTokenUsageRole,
+        PersistentTokenUsageRole, load_compiled_prompts_only, sandbox_policy_for_runtime,
+        wrap_model_provider_with_persistent_token_usage,
     },
 };
 
@@ -278,9 +278,11 @@ mod tests {
         changed
             .models
             .insert("m".to_string(), ModelConfig::default());
-        assert!(config_change_groups(&old, &changed)
-            .0
-            .contains(&"models/providers"));
+        assert!(
+            config_change_groups(&old, &changed)
+                .0
+                .contains(&"models/providers")
+        );
 
         let mut changed = sample_config();
         changed.providers.insert(
@@ -290,9 +292,11 @@ mod tests {
                 base_url: None,
             },
         );
-        assert!(config_change_groups(&old, &changed)
-            .0
-            .contains(&"models/providers"));
+        assert!(
+            config_change_groups(&old, &changed)
+                .0
+                .contains(&"models/providers")
+        );
     }
 
     #[test]

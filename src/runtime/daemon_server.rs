@@ -6,9 +6,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::{
     daemon::{
         DAEMON_HOST_DISPLAY, DaemonControlCommand, DaemonLifecycleHandle, DaemonLifecycleState,
-        DaemonLock, DaemonServerStartParams, SessionTokenStore, delete_session_by_id, session,
-        session_client_for_id, session_ipc, spawn_detached_daemon_process, start_server,
-        terminate_process_backed_sessions, probe_persisted_session_ipc_token,
+        DaemonLock, DaemonServerStartParams, SessionTokenStore, delete_session_by_id,
+        probe_persisted_session_ipc_token, session, session_client_for_id, session_ipc,
+        spawn_detached_daemon_process, start_server, terminate_process_backed_sessions,
     },
     daemon_tray::{DaemonTrayHandle, DaemonTrayStartup},
     dashboard::{
@@ -371,32 +371,33 @@ async fn run_daemon_serve_inner(
         }
     });
 
-    let mut telegram_transport = if config.telegram.enabled && config.telegram.has_real_credentials() {
-        let telegram = TelegramTransportState::new();
-        let telegram_handle = telegram.handle();
-        bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
-        let telegram_router = Arc::new(ManagerTelegramInputRouter {
-            sessions: telegram_sessions.clone(),
-            session_tokens: telegram_session_tokens.clone(),
-            telegram_defaults: telegram_defaults.clone(),
-        });
-        let telegram_auth_verifier = Arc::new(ManagerTelegramAuthVerifier {
-            auth_registry: daemon_token_registry.clone(),
-        });
-        Some(tokio::spawn(
-            TelegramTransport::new(
-                config.telegram.clone(),
-                telegram_handle,
-                telegram_acl.clone(),
-                telegram_auth_verifier,
-                telegram_router.clone(),
-                telegram_router,
-            )
-            .run(),
-        ))
-    } else {
-        None
-    };
+    let mut telegram_transport =
+        if config.telegram.enabled && config.telegram.has_real_credentials() {
+            let telegram = TelegramTransportState::new();
+            let telegram_handle = telegram.handle();
+            bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
+            let telegram_router = Arc::new(ManagerTelegramInputRouter {
+                sessions: telegram_sessions.clone(),
+                session_tokens: telegram_session_tokens.clone(),
+                telegram_defaults: telegram_defaults.clone(),
+            });
+            let telegram_auth_verifier = Arc::new(ManagerTelegramAuthVerifier {
+                auth_registry: daemon_token_registry.clone(),
+            });
+            Some(tokio::spawn(
+                TelegramTransport::new(
+                    config.telegram.clone(),
+                    telegram_handle,
+                    telegram_acl.clone(),
+                    telegram_auth_verifier,
+                    telegram_router.clone(),
+                    telegram_router,
+                )
+                .run(),
+            ))
+        } else {
+            None
+        };
     let mut telegram_outbox_delivery =
         if config.telegram.enabled && config.telegram.has_real_credentials() {
             Some(tokio::spawn(run_session_telegram_outbox_delivery(

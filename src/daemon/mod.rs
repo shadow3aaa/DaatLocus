@@ -2649,12 +2649,9 @@ async fn spawn_session_process(
         session_log_path,
     );
 
-    let client = session_ipc::SessionIpcClient::new(
-        session_id.clone(),
-        ipc_name,
-        ipc_token.clone(),
-    )
-    .with_timeout(Duration::from_secs(2));
+    let client =
+        session_ipc::SessionIpcClient::new(session_id.clone(), ipc_name, ipc_token.clone())
+            .with_timeout(Duration::from_secs(2));
     let startup_title = match wait_for_session_ready(&client).await {
         Ok(title) => title,
         Err(err) => {
@@ -2700,12 +2697,8 @@ async fn cleanup_failed_session_spawn(
         .ok()
         .flatten()
         .is_some_and(|token| token == attempted_token);
-    if persisted_still_ours
-        && let Err(err) = session::clear_session_ipc_token(session_id).await
-    {
-        tracing::warn!(
-            "failed to clear IPC token for session `{session_id}`: {err:?}"
-        );
+    if persisted_still_ours && let Err(err) = session::clear_session_ipc_token(session_id).await {
+        tracing::warn!("failed to clear IPC token for session `{session_id}`: {err:?}");
     }
 }
 
@@ -3197,9 +3190,7 @@ pub async fn session_client_for_id(
         if let Some(pid) = info.pid
             && process_exists(pid)
         {
-            tracing::info!(
-                "terminating stale session `{session_id}` pid {pid} before respawn"
-            );
+            tracing::info!("terminating stale session `{session_id}` pid {pid} before respawn");
             if let Err(err) = terminate_process_backed_session(
                 sessions.clone(),
                 session_tokens.clone(),
@@ -3208,9 +3199,7 @@ pub async fn session_client_for_id(
             )
             .await
             {
-                tracing::warn!(
-                    "failed to terminate stale session `{session_id}` process: {err:?}"
-                );
+                tracing::warn!("failed to terminate stale session `{session_id}` process: {err:?}");
             }
         }
         sessions.mark_dead(&session_id).await?;
@@ -3245,16 +3234,17 @@ pub async fn probe_persisted_session_ipc_token(
     let Some(ipc_name) = info.ipc_name.clone() else {
         return false;
     };
-    let probe = session_ipc::SessionIpcClient::new(info.session_id.clone(), ipc_name, token.clone())
-        .with_timeout(SESSION_IPC_SHUTDOWN_TIMEOUT);
+    let probe =
+        session_ipc::SessionIpcClient::new(info.session_id.clone(), ipc_name, token.clone())
+            .with_timeout(SESSION_IPC_SHUTDOWN_TIMEOUT);
     let accepted = matches!(
-        probe
-            .request(session_ipc::SessionIpcRequest::Status)
-            .await,
+        probe.request(session_ipc::SessionIpcRequest::Status).await,
         Ok(session_ipc::SessionIpcResponse::Status { .. })
     );
     if accepted {
-        session_tokens.write().insert(info.session_id.clone(), token);
+        session_tokens
+            .write()
+            .insert(info.session_id.clone(), token);
         tracing::info!(
             "session {} recovered via persisted IPC token",
             info.session_id

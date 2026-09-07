@@ -46,15 +46,17 @@ struct ReadHistoryArgs {
 }
 
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
-    vec![Box::new(StaticRuntimeTool::new_with_schema_and_availability(
-        "read_history",
-        "Read archived conversation history that was cleared by a runtime context compaction. Use it to recover the task state after the context was reset with the recovery prompt. recent returns the newest messages; range reads forward from start_seq; search finds messages whose text contains query. Each page returns next_seq for continued paging; tool outputs are omitted unless include_tool_output=true.",
-        model_schema_for::<ReadHistoryArgs>(),
-        |context: &Context| context.dashboard_history.is_some(),
-        summarize_read_history_tool,
-        render_read_history_call_ui,
-        execute_read_history_runtime_tool,
-    ))]
+    vec![Box::new(
+        StaticRuntimeTool::new_with_schema_and_availability(
+            "read_history",
+            "Read archived conversation history that was cleared by a runtime context compaction. Use it to recover the task state after the context was reset with the recovery prompt. recent returns the newest messages; range reads forward from start_seq; search finds messages whose text contains query. Each page returns next_seq for continued paging; tool outputs are omitted unless include_tool_output=true.",
+            model_schema_for::<ReadHistoryArgs>(),
+            |context: &Context| context.dashboard_history.is_some(),
+            summarize_read_history_tool,
+            render_read_history_call_ui,
+            execute_read_history_runtime_tool,
+        ),
+    )]
 }
 
 fn history_mode_str(mode: HistoryArchiveQueryMode) -> &'static str {
@@ -98,9 +100,10 @@ fn execute_read_history_runtime_tool<'a>(
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        let store = context.dashboard_history.as_ref().ok_or_else(|| {
-            miette!("read_history requires an active session history store")
-        })?;
+        let store = context
+            .dashboard_history
+            .as_ref()
+            .ok_or_else(|| miette!("read_history requires an active session history store"))?;
         let max_tokens = context
             .config
             .main_model_config()
@@ -117,9 +120,9 @@ pub fn execute_worker_read_history<'a>(
     store: &'a DashboardActivityHistoryStore,
     tool_output_max_tokens: usize,
 ) -> ToolFuture<'a> {
-    Box::pin(async move {
-        execute_read_history_with_store(call, store, tool_output_max_tokens).await
-    })
+    Box::pin(
+        async move { execute_read_history_with_store(call, store, tool_output_max_tokens).await },
+    )
 }
 
 async fn execute_read_history_with_store(
