@@ -2109,7 +2109,9 @@ async fn complete_workflow_worker_turn(
 ) -> Result<crate::reasoning::runtime::AgentTurnStreamResult> {
     ensure_workflow_not_interrupted(cancellation.as_ref())?;
     let provider = worker_model_provider(context, model);
-    let options = ModelRequestOptions::for_agent_turn(provider, &request, None)?;
+    // Workflow workers share the owning Session's conversation affinity.
+    let options =
+        ModelRequestOptions::for_agent_turn(provider, &request, context.session_id.clone())?;
     let result = complete_agent_turn_with_retry_using_policy_cancellable_with_observer(
         provider,
         request,
