@@ -1639,6 +1639,24 @@ async fn stream_handler(
         .into_response()
 }
 
+/// Ask must be routed before the generic slash-command branch: `/ask` also
+/// starts with `/` but carries user input instead of a dashboard command.
+enum ComposerInput<'a> {
+    Ask(&'a str),
+    DashboardCommand(&'a str),
+    UserText,
+}
+
+fn composer_input(input: &str) -> ComposerInput<'_> {
+    if let Some(ask_text) = ask_message_text(input) {
+        return ComposerInput::Ask(ask_text);
+    }
+    if let Some(command) = input.strip_prefix('/') {
+        return ComposerInput::DashboardCommand(command);
+    }
+    ComposerInput::UserText
+}
+
 fn session_submit_output(
     response: miette::Result<session_ipc::SessionIpcResponse>,
     queued_label: &str,
@@ -1708,80 +1726,86 @@ async fn command_handler(
                     .into_response();
             }
         };
-        if let Some(command) = trimmed.strip_prefix('/') {
-            if !attachments.is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(CommandResponse {
-                        output: "dashboard commands cannot include attachments".to_string(),
-                    }),
-                )
-                    .into_response();
-            }
-            let response = client
-                .request(session_ipc::SessionIpcRequest::DashboardCommand {
-                    command: command.trim().to_string(),
-                })
-                .await;
-            let output = match response {
-                Ok(session_ipc::SessionIpcResponse::DashboardCommandResult { output }) => output,
-                Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => message,
-                Ok(_) => "unexpected session IPC dashboard command response".to_string(),
-                Err(err) => format!("session dashboard command failed: {err:?}"),
-            };
-            return Json(CommandResponse { output }).into_response();
-        }
-        if let Some(ask_text) = ask_message_text(trimmed) {
-            if ask_text.is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(CommandResponse {
-                        output: "usage: /ask <message>".to_string(),
-                    }),
-                )
-                    .into_response();
-            }
-            let response = client
-                .request(session_ipc::SessionIpcRequest::SubmitUserInput {
-                    origin: request.origin,
-                    text: ask_text.to_string(),
-                    attachments: attachments
-                        .into_iter()
-                        .map(|attachment| session_ipc::InputAttachment {
-                            media_type: attachment.media_type,
-                            local_path: attachment.local_path,
-                            description: attachment.description,
-                        })
-                        .collect(),
-                    mode: crate::events::TerminalInputMode::Ask,
-                    wait_for_reply: false,
-                })
-                .await;
-            return Json(CommandResponse {
-                output: session_submit_output(response, "ask discussion"),
-            })
-            .into_response();
-        }
-        let response = client
-            .request(session_ipc::SessionIpcRequest::SubmitUserInput {
-                origin: request.origin,
-                text: request.command,
-                attachments: attachments
-                    .into_iter()
-                    .map(|attachment| session_ipc::InputAttachment {
-                        media_type: attachment.media_type,
-                        local_path: attachment.local_path,
-                        description: attachment.description,
+        return match composer_input(trimmed) {
+            ComposerInput::Ask(ask_text) => {
+                if ask_text.is_empty() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(CommandResponse {
+                            output: "usage: /ask <message>".to_string(),
+                        }),
+                    )
+                        .into_response();
+                }
+                let response = client
+                    .request(session_ipc::SessionIpcRequest::SubmitUserInput {
+                        origin: request.origin,
+                        text: ask_text.to_string(),
+                        attachments: attachments
+                            .into_iter()
+                            .map(|attachment| session_ipc::InputAttachment {
+                                media_type: attachment.media_type,
+                                local_path: attachment.local_path,
+                                description: attachment.description,
+                            })
+                            .collect(),
+                        mode: crate::events::TerminalInputMode::Ask,
+                        wait_for_reply: false,
                     })
-                    .collect(),
-                mode: crate::events::TerminalInputMode::Normal,
-                wait_for_reply: false,
-            })
-            .await;
-        return Json(CommandResponse {
-            output: session_submit_output(response, "session message"),
-        })
-        .into_response();
+                    .await;
+                Json(CommandResponse {
+                    output: session_submit_output(response, "ask discussion"),
+                })
+                .into_response()
+            }
+            ComposerInput::DashboardCommand(command) => {
+                if !attachments.is_empty() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(CommandResponse {
+                            output: "dashboard commands cannot include attachments".to_string(),
+                        }),
+                    )
+                        .into_response();
+                }
+                let response = client
+                    .request(session_ipc::SessionIpcRequest::DashboardCommand {
+                        command: command.trim().to_string(),
+                    })
+                    .await;
+                let output = match response {
+                    Ok(session_ipc::SessionIpcResponse::DashboardCommandResult { output }) => {
+                        output
+                    }
+                    Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => message,
+                    Ok(_) => "unexpected session IPC dashboard command response".to_string(),
+                    Err(err) => format!("session dashboard command failed: {err:?}"),
+                };
+                Json(CommandResponse { output }).into_response()
+            }
+            ComposerInput::UserText => {
+                let response = client
+                    .request(session_ipc::SessionIpcRequest::SubmitUserInput {
+                        origin: request.origin,
+                        text: request.command,
+                        attachments: attachments
+                            .into_iter()
+                            .map(|attachment| session_ipc::InputAttachment {
+                                media_type: attachment.media_type,
+                                local_path: attachment.local_path,
+                                description: attachment.description,
+                            })
+                            .collect(),
+                        mode: crate::events::TerminalInputMode::Normal,
+                        wait_for_reply: false,
+                    })
+                    .await;
+                Json(CommandResponse {
+                    output: session_submit_output(response, "session message"),
+                })
+                .into_response()
+            }
+        };
     }
     if !attachments.is_empty() {
         return (
@@ -4264,6 +4288,20 @@ mod tests {
 
         assert!(list_subdirs(temp.path(), false).is_empty());
     }
+    #[test]
+    fn composer_input_routes_ask_before_dashboard_commands() {
+        assert!(matches!(
+            composer_input("/ask discuss the design"),
+            ComposerInput::Ask("discuss the design")
+        ));
+        assert!(matches!(composer_input("/ask"), ComposerInput::Ask("")));
+        assert!(matches!(
+            composer_input("/status"),
+            ComposerInput::DashboardCommand("status")
+        ));
+        assert!(matches!(composer_input("hello"), ComposerInput::UserText));
+    }
+
     #[test]
     fn daemon_lifecycle_state_serializes_as_snake_case() {
         let encoded = serde_json::to_string(&DaemonLifecycleState::Initializing).unwrap();
