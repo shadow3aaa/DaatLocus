@@ -1095,7 +1095,7 @@ pub(crate) fn ask_mode_denies_tool(
     mode: crate::events::TerminalInputMode,
     tool_name: &str,
 ) -> bool {
-    mode.is_ask() && tool_name != "finish_and_send"
+    mode.is_ask() && !matches!(tool_name, "finish_and_send" | "read_history")
 }
 
 fn ask_mode_tool_result(call: &AgentToolCall) -> ToolExecutionResult {
@@ -1106,13 +1106,13 @@ fn ask_mode_tool_result(call: &AgentToolCall) -> ToolExecutionResult {
             "available": false,
             "ask_mode": true,
             "tool": call.name,
-            "allowed_next_action": "Answer directly and complete with `finish_and_send`.",
+            "allowed_next_action": "Use `read_history` to recover archived context, or answer directly and complete with `finish_and_send`.",
         }),
         None,
     )
     .with_model_content(format!(
         "Tool unavailable: `{display_tool_name}` is disabled because this is an ask discussion turn.\n\
-         Ask turns are discussion-only: do not call tools. Answer from the current context and complete with `finish_and_send`."
+         Ask turns only allow `read_history` and `finish_and_send`; all other tools are unavailable."
     ))
 }
 
@@ -1637,7 +1637,7 @@ mod tests {
     }
 
     #[test]
-    fn ask_mode_denies_tools_except_finish_and_send() {
+    fn ask_mode_denies_tools_except_history_and_finish() {
         use crate::events::TerminalInputMode;
 
         assert!(ask_mode_denies_tool(TerminalInputMode::Ask, "read_file"));
@@ -1645,9 +1645,14 @@ mod tests {
             TerminalInputMode::Ask,
             "coding__edit_code"
         ));
+        assert!(ask_mode_denies_tool(TerminalInputMode::Ask, "update_plan"));
         assert!(!ask_mode_denies_tool(
             TerminalInputMode::Ask,
             "finish_and_send"
+        ));
+        assert!(!ask_mode_denies_tool(
+            TerminalInputMode::Ask,
+            "read_history"
         ));
         assert!(!ask_mode_denies_tool(
             TerminalInputMode::Normal,

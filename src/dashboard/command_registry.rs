@@ -89,7 +89,7 @@ static DASHBOARD_COMMANDS: [DashboardCommandSpec; 10] = [
     },
     DashboardCommandSpec {
         primary_verb: "ask",
-        description: "start a discussion turn with tools disabled",
+        description: "start a discussion turn; only history reads and the final reply",
         aliases: NO_ALIASES,
         remote_command: None,
         remote_description: None,

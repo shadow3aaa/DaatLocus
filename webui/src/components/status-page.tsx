@@ -512,7 +512,7 @@ const WEB_SLASH_COMMANDS: WebSlashCommandDefinition[] = [
   },
   {
     name: "ask",
-    description: "start a discussion turn with tools disabled",
+    description: "start a discussion turn; only history reads and the final reply",
   },
 ];
 

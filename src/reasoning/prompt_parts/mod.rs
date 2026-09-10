@@ -201,7 +201,7 @@ fn render_afterclaim_events(events: &[EventView]) -> String {
                 ));
                 if payload.mode.is_ask() {
                     lines.push(
-                        "  mode=ask: discussion turn; tools are disabled. Answer from context and complete with `finish_and_send`."
+                        "  mode=ask: discussion turn; only `read_history` and `finish_and_send` are available."
                             .to_string(),
                     );
                 }
@@ -290,6 +290,7 @@ mod tests {
     fn afterclaim_events_mark_ask_mode_as_discussion() {
         let rendered = render_afterclaim_events(&[terminal_event(TerminalInputMode::Ask)]);
         assert!(rendered.contains("mode=ask"), "{rendered}");
+        assert!(rendered.contains("read_history"), "{rendered}");
         assert!(rendered.contains("finish_and_send"), "{rendered}");
     }
 
