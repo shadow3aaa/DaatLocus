@@ -438,6 +438,7 @@ pub async fn build_eval_context_with_compiled(
         active_skill_run: None,
         pending_skill_run_flushes: Vec::new(),
         current_work_origin: None,
+        current_turn_input_mode: crate::events::TerminalInputMode::Normal,
         apps,
         workspace_apps,
         telegram: telegram_handle,

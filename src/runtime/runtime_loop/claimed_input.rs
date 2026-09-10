@@ -17,6 +17,19 @@ pub(super) fn runtime_work_origin(inputs: &[ClaimedRuntimeInput]) -> Option<Stri
 
 pub(super) type ClaimedRuntimeInput = EventView;
 
+pub(super) fn claimed_input_mode(
+    inputs: &[ClaimedRuntimeInput],
+) -> crate::events::TerminalInputMode {
+    if inputs.iter().any(|input| match &input.payload {
+        EventPayload::TerminalIncoming(payload) => payload.mode.is_ask(),
+        EventPayload::TelegramIncoming(_) => false,
+    }) {
+        crate::events::TerminalInputMode::Ask
+    } else {
+        crate::events::TerminalInputMode::Normal
+    }
+}
+
 pub(super) fn claimed_runtime_input_fingerprint(inputs: &[ClaimedRuntimeInput]) -> Option<String> {
     if inputs.is_empty() {
         return None;

@@ -1,9 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::command_flow::{
-    adjusted_popup_scroll, command_blocks_submission, command_feedback_from_action_result,
-    command_panel_for_input, dashboard_action_for_input, dashboard_command_body,
-    is_clear_command_input, is_dashboard_command_input, matching_commands,
+    adjusted_popup_scroll, ask_message_text, command_blocks_submission,
+    command_feedback_from_action_result, command_panel_for_input, dashboard_action_for_input,
+    dashboard_command_body, is_clear_command_input, is_dashboard_command_input, matching_commands,
     selected_command_completion, unsupported_dashboard_command_feedback,
 };
 use super::command_input::{
@@ -480,6 +480,23 @@ fn handle_enter_key(
     let input = view.command_input.as_str().trim().to_string();
     let attachments =
         pending_attachments_for_input(view.command_input.as_str(), &view.pending_image_attachments);
+    if let Some(ask_text) = ask_message_text(&input) {
+        view.command_panel = None;
+        if ask_text.is_empty() {
+            view.command_feedback = Some(CommandFeedback {
+                title: "ASK".to_string(),
+                message: "usage: /ask <message>".to_string(),
+                detail: Some(
+                    "Ask turns answer from conversation context without calling tools.".to_string(),
+                ),
+                level: CommandFeedbackLevel::Error,
+            });
+            view.reset_command_popup();
+            return TuiInputOutcome::Continue;
+        }
+        view.reset_command_popup();
+        return TuiInputOutcome::SubmitText { input, attachments };
+    }
     if !input.is_empty() {
         if !attachments.is_empty() && is_dashboard_command_input(&input) {
             view.command_panel = None;
@@ -956,6 +973,68 @@ mod tests {
                 .map(|feedback| feedback.message.as_str()),
             Some("dashboard commands cannot include image attachments")
         );
+    }
+
+    #[test]
+    fn ask_command_submits_full_text_as_user_input() {
+        let mut view = TuiViewState::new();
+        view.command_input
+            .set_text("/ask discuss the design".to_string());
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut view,
+            &DashboardState::default(),
+        );
+
+        match outcome {
+            TuiInputOutcome::SubmitText { input, .. } => {
+                assert_eq!(input, "/ask discuss the design");
+            }
+            _ => panic!("ask command should submit as user input"),
+        }
+    }
+
+    #[test]
+    fn bare_ask_command_shows_usage_feedback() {
+        let mut view = TuiViewState::new();
+        view.command_input.set_text("/ask".to_string());
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut view,
+            &DashboardState::default(),
+        );
+
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert_eq!(
+            view.command_feedback
+                .as_ref()
+                .map(|feedback| feedback.message.as_str()),
+            Some("usage: /ask <message>")
+        );
+    }
+
+    #[test]
+    fn ask_command_can_submit_image_attachments() {
+        let mut view = TuiViewState::new();
+        handle_paste_event("C:/tmp/dashboard.png", &mut view);
+        view.command_input
+            .set_text(format!("/ask {}", view.command_input.as_str()));
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut view,
+            &DashboardState::default(),
+        );
+
+        match outcome {
+            TuiInputOutcome::SubmitText { input, attachments } => {
+                assert!(input.starts_with("/ask "), "{input}");
+                assert_eq!(attachments.len(), 1);
+            }
+            _ => panic!("ask command should submit with attachments"),
+        }
     }
 
     #[test]

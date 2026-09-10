@@ -170,6 +170,10 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
                     current_chat_note
                 )))
             }
+            "ask" => Ok(Some(
+                "ask mode is only available from the dashboard composer or `daat-locus send`."
+                    .to_string(),
+            )),
             _ => Ok(None),
         }
     }

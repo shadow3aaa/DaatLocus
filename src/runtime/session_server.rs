@@ -41,7 +41,7 @@ use crate::{
     },
     events::{
         EventPayload, EventStatus, EventStore, TelegramIncomingEvent, TerminalIncomingAttachment,
-        TerminalIncomingAttachmentKind, TerminalIncomingEvent,
+        TerminalIncomingAttachmentKind, TerminalIncomingEvent, TerminalInputMode,
     },
     logging::{RuntimeStatusLevel, set_runtime_status},
     memory::Memory,
@@ -218,6 +218,7 @@ pub async fn run_session_serve(
         active_skill_run: None,
         pending_skill_run_flushes: Vec::new(),
         current_work_origin: None,
+        current_turn_input_mode: TerminalInputMode::Normal,
         apps,
         workspace_apps,
         telegram: telegram_handle,
@@ -569,6 +570,7 @@ async fn handle_ipc_connection(
             origin,
             text,
             attachments,
+            mode,
             wait_for_reply,
         } => {
             let response = submit_user_input(
@@ -576,6 +578,7 @@ async fn handle_ipc_connection(
                 origin,
                 text,
                 attachments,
+                mode,
                 wait_for_reply,
                 request_id,
             )
@@ -1193,6 +1196,7 @@ async fn submit_user_input(
     origin: crate::daemon::session_ipc::UserInputOrigin,
     text: String,
     attachments: Vec<InputAttachment>,
+    mode: TerminalInputMode,
     wait_for_reply: bool,
     request_id: String,
 ) -> IpcResponseEnvelope {
@@ -1206,6 +1210,7 @@ async fn submit_user_input(
         origin,
         text,
         attachments,
+        mode,
     ) {
         Ok(event_id) => event_id,
         Err(err) => {
@@ -1285,6 +1290,7 @@ fn register_terminal_event(
     origin: crate::daemon::session_ipc::UserInputOrigin,
     incoming_text: String,
     attachments: Vec<InputAttachment>,
+    mode: TerminalInputMode,
 ) -> Result<uuid::Uuid> {
     let event_id = events.register_terminal_incoming(TerminalIncomingEvent {
         origin: origin.terminal_origin_label().to_string(),
@@ -1298,6 +1304,7 @@ fn register_terminal_event(
                 description: attachment.description,
             })
             .collect(),
+        mode,
     })?;
     pending_work.enqueue(PendingWork::Event { event_id })?;
     Ok(event_id)

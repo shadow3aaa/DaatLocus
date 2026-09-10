@@ -735,6 +735,7 @@ mod tests {
                     local_path: "/tmp/dashboard-image.png".to_string(),
                     description: Some("dashboard screenshot".to_string()),
                 }],
+                mode: crate::events::TerminalInputMode::Normal,
             }),
             last_error: None,
         }

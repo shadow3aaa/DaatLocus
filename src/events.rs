@@ -132,6 +132,25 @@ pub struct TerminalIncomingEvent {
     pub incoming_text: String,
     #[serde(default)]
     pub attachments: Vec<TerminalIncomingAttachment>,
+    #[serde(default)]
+    pub mode: TerminalInputMode,
+}
+
+/// How the runtime should treat a terminal-originated user input.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalInputMode {
+    /// Normal agent turn: tools are available.
+    #[default]
+    Normal,
+    /// Explicit discussion turn: tool calls are refused except completion.
+    Ask,
+}
+
+impl TerminalInputMode {
+    pub const fn is_ask(self) -> bool {
+        matches!(self, Self::Ask)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -607,6 +626,7 @@ mod tests {
                     origin: "dashboard".to_string(),
                     incoming_text: "local command".to_string(),
                     attachments: Vec::new(),
+                    mode: TerminalInputMode::Normal,
                 }),
                 last_error: Some("failed locally".to_string()),
             },
@@ -657,6 +677,28 @@ mod tests {
     }
 
     #[test]
+    fn terminal_event_mode_defaults_to_normal_and_round_trips_ask() {
+        let legacy: TerminalIncomingEvent = serde_json::from_value(serde_json::json!({
+            "origin": "dashboard",
+            "incoming_text": "hello",
+        }))
+        .expect("legacy terminal event");
+        assert_eq!(legacy.mode, TerminalInputMode::Normal);
+
+        let ask = TerminalIncomingEvent {
+            origin: "tui".to_string(),
+            incoming_text: "discuss".to_string(),
+            attachments: Vec::new(),
+            mode: TerminalInputMode::Ask,
+        };
+        let json = serde_json::to_value(&ask).expect("serialize ask event");
+        assert_eq!(json["mode"], "ask");
+        let restored: TerminalIncomingEvent =
+            serde_json::from_value(json).expect("decode ask event");
+        assert!(restored.mode.is_ask());
+    }
+
+    #[test]
     fn register_terminal_incoming_creates_terminal_event() {
         let store = test_store();
         let event_id = store
@@ -664,6 +706,7 @@ mod tests {
                 origin: "dashboard".to_string(),
                 incoming_text: "hello from terminal".to_string(),
                 attachments: Vec::new(),
+                mode: TerminalInputMode::Normal,
             })
             .expect("register terminal event");
         let event = store
@@ -696,6 +739,7 @@ mod tests {
                     origin: "dashboard".to_string(),
                     incoming_text: "finish this".to_string(),
                     attachments: Vec::new(),
+                    mode: TerminalInputMode::Normal,
                 }),
                 last_error: None,
             },
@@ -724,6 +768,7 @@ mod tests {
                 origin: "dashboard".to_string(),
                 incoming_text: "still needs work".to_string(),
                 attachments: Vec::new(),
+                mode: TerminalInputMode::Normal,
             })
             .expect("register terminal event");
         let claimed = store
@@ -751,6 +796,7 @@ mod tests {
                 origin: "dashboard".to_string(),
                 incoming_text: "cannot complete".to_string(),
                 attachments: Vec::new(),
+                mode: TerminalInputMode::Normal,
             })
             .expect("register terminal event");
 
@@ -778,6 +824,7 @@ mod tests {
                 origin: "dashboard".to_string(),
                 incoming_text: "local runtime question".to_string(),
                 attachments: Vec::new(),
+                mode: TerminalInputMode::Normal,
             })
             .expect("register terminal event");
         let _ = store
@@ -802,6 +849,7 @@ mod tests {
                 origin: "dashboard".to_string(),
                 incoming_text: "pending".to_string(),
                 attachments: Vec::new(),
+                mode: TerminalInputMode::Normal,
             })
             .expect("register pending");
         let claimed = store
@@ -809,6 +857,7 @@ mod tests {
                 origin: "dashboard".to_string(),
                 incoming_text: "claimed".to_string(),
                 attachments: Vec::new(),
+                mode: TerminalInputMode::Normal,
             })
             .expect("register claimed");
         store
@@ -820,6 +869,7 @@ mod tests {
                 origin: "dashboard".to_string(),
                 incoming_text: "awaiting".to_string(),
                 attachments: Vec::new(),
+                mode: TerminalInputMode::Normal,
             })
             .expect("register awaiting");
         store
@@ -834,6 +884,7 @@ mod tests {
                 origin: "dashboard".to_string(),
                 incoming_text: "resolved".to_string(),
                 attachments: Vec::new(),
+                mode: TerminalInputMode::Normal,
             })
             .expect("register resolved");
         store
@@ -844,6 +895,7 @@ mod tests {
                 origin: "dashboard".to_string(),
                 incoming_text: "dismissed".to_string(),
                 attachments: Vec::new(),
+                mode: TerminalInputMode::Normal,
             })
             .expect("register dismissed");
         store
@@ -854,6 +906,7 @@ mod tests {
                 origin: "dashboard".to_string(),
                 incoming_text: "failed".to_string(),
                 attachments: Vec::new(),
+                mode: TerminalInputMode::Normal,
             })
             .expect("register failed");
         store

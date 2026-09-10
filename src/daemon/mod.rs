@@ -56,7 +56,7 @@ use crate::{
         DashboardAction, DashboardActionResult, DashboardActivityHistoryPage,
         DashboardCommandAttachment, DashboardCommandRunner, DashboardControlCommand,
         DashboardHistoryLoader, DashboardIncomingAttachment, DashboardInputHistory,
-        DashboardSessionTitle, DashboardState, dashboard_action_is_manager_owned,
+        DashboardSessionTitle, DashboardState, ask_message_text, dashboard_action_is_manager_owned,
         dashboard_command_is_manager_owned, execute_control_command, execute_dashboard_action,
     },
     model_catalog::catalog_model_capacity,
@@ -1639,6 +1639,20 @@ async fn stream_handler(
         .into_response()
 }
 
+fn session_submit_output(
+    response: miette::Result<session_ipc::SessionIpcResponse>,
+    queued_label: &str,
+) -> String {
+    match response {
+        Ok(session_ipc::SessionIpcResponse::Submitted { event_id, .. }) => {
+            format!("queued {queued_label} as event {event_id}")
+        }
+        Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => message,
+        Ok(_) => "unexpected session IPC command response".to_string(),
+        Err(err) => format!("session command failed: {err:?}"),
+    }
+}
+
 async fn command_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1717,6 +1731,37 @@ async fn command_handler(
             };
             return Json(CommandResponse { output }).into_response();
         }
+        if let Some(ask_text) = ask_message_text(trimmed) {
+            if ask_text.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(CommandResponse {
+                        output: "usage: /ask <message>".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+            let response = client
+                .request(session_ipc::SessionIpcRequest::SubmitUserInput {
+                    origin: request.origin,
+                    text: ask_text.to_string(),
+                    attachments: attachments
+                        .into_iter()
+                        .map(|attachment| session_ipc::InputAttachment {
+                            media_type: attachment.media_type,
+                            local_path: attachment.local_path,
+                            description: attachment.description,
+                        })
+                        .collect(),
+                    mode: crate::events::TerminalInputMode::Ask,
+                    wait_for_reply: false,
+                })
+                .await;
+            return Json(CommandResponse {
+                output: session_submit_output(response, "ask discussion"),
+            })
+            .into_response();
+        }
         let response = client
             .request(session_ipc::SessionIpcRequest::SubmitUserInput {
                 origin: request.origin,
@@ -1729,18 +1774,14 @@ async fn command_handler(
                         description: attachment.description,
                     })
                     .collect(),
+                mode: crate::events::TerminalInputMode::Normal,
                 wait_for_reply: false,
             })
             .await;
-        let output = match response {
-            Ok(session_ipc::SessionIpcResponse::Submitted { event_id, .. }) => {
-                format!("queued session message as event {event_id}")
-            }
-            Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => message,
-            Ok(_) => "unexpected session IPC command response".to_string(),
-            Err(err) => format!("session command failed: {err:?}"),
-        };
-        return Json(CommandResponse { output }).into_response();
+        return Json(CommandResponse {
+            output: session_submit_output(response, "session message"),
+        })
+        .into_response();
     }
     if !attachments.is_empty() {
         return (
@@ -1752,6 +1793,15 @@ async fn command_handler(
             .into_response();
     }
     let trimmed = request.command.trim();
+    if ask_message_text(trimmed).is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(CommandResponse {
+                output: "session_id is required for /ask".to_string(),
+            }),
+        )
+            .into_response();
+    }
     let Some(command) = trimmed.strip_prefix('/') else {
         return (
             StatusCode::BAD_REQUEST,
@@ -1858,6 +1908,22 @@ async fn send_handler(
         )
             .into_response();
     }
+    let (message, mode) = match ask_message_text(message) {
+        Some(ask_text) if !ask_text.is_empty() => (ask_text, crate::events::TerminalInputMode::Ask),
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(SendResponse {
+                    event_id: String::new(),
+                    status: "failed".to_string(),
+                    reply_message: None,
+                    note: Some("usage: /ask <message>".to_string()),
+                }),
+            )
+                .into_response();
+        }
+        None => (message, crate::events::TerminalInputMode::Normal),
+    };
 
     if let Some(session_id) = request.session_id.as_deref() {
         let client = match session_client_for_request(&state, session_id).await {
@@ -1880,6 +1946,7 @@ async fn send_handler(
                 origin: session_ipc::UserInputOrigin::CliSend,
                 text: message.to_string(),
                 attachments: Vec::new(),
+                mode,
                 wait_for_reply: true,
             })
             .await

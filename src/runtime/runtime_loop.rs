@@ -83,7 +83,7 @@ pub use workflow_evidence::{AgentLoopStepExecution, AgentLoopStepOutput};
 
 use claimed_input::{
     ClaimedRuntimeInput, afterclaim_context_input_for_claimed_inputs, claim_pending_runtime_inputs,
-    claimed_events_are_terminal, claimed_events_require_explicit_completion,
+    claimed_events_are_terminal, claimed_events_require_explicit_completion, claimed_input_mode,
     claimed_runtime_input_fingerprint, finalize_claimed_runtime_events,
     handle_model_request_failure, handle_runtime_overflow, requeue_claimed_runtime_events,
     runtime_work_origin,
@@ -335,6 +335,7 @@ mod tests {
                 active_skill_run: None,
                 pending_skill_run_flushes: Vec::new(),
                 current_work_origin: None,
+                current_turn_input_mode: crate::events::TerminalInputMode::Normal,
                 apps,
                 workspace_apps: WorkspaceAppRegistry::default(),
                 telegram: telegram.handle(),
@@ -474,6 +475,7 @@ mod tests {
             origin: "test".to_string(),
             incoming_text: text.to_string(),
             attachments: Vec::new(),
+            mode: crate::events::TerminalInputMode::Normal,
         }
     }
 

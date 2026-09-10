@@ -510,6 +510,10 @@ const WEB_SLASH_COMMANDS: WebSlashCommandDefinition[] = [
     name: "workflows",
     description: "browse loaded Lua workflows and run typed inputs",
   },
+  {
+    name: "ask",
+    description: "start a discussion turn with tools disabled",
+  },
 ];
 
 type AgentChatSessionActivityRender =

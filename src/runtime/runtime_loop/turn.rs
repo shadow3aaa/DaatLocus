@@ -15,7 +15,7 @@ use super::{
     append_runtime_error_case, apply_activity_event, assistant_activity_cell,
     build_afterclaim_context_text, build_preturn_context_text, build_runtime_request_envelope,
     build_runtime_tool_specs, build_tool_call_activity_event, claim_pending_runtime_inputs,
-    claimed_events_are_terminal, claimed_events_require_explicit_completion,
+    claimed_events_are_terminal, claimed_events_require_explicit_completion, claimed_input_mode,
     claimed_runtime_input_fingerprint, compact_preserved_body_lines, execute_agent_tool_call,
     execute_pre_turn_runtime_compaction, finalize_claimed_runtime_events,
     handle_model_request_failure, handle_runtime_overflow, is_context_budget_exceeded, json,
@@ -303,6 +303,7 @@ pub async fn execute_agent_loop_step(
         .map(|input| input.event_id.to_string())
         .collect::<Vec<_>>();
     context.claimed_event_ids.clone_from(&claimed_event_ids);
+    context.current_turn_input_mode = claimed_input_mode(&claimed_inputs);
     append_claimed_input_activity_cells(context, tx, &claimed_inputs);
 
     let preflight_timeout = Duration::from_secs(RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS);

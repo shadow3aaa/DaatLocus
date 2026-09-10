@@ -199,6 +199,12 @@ fn render_afterclaim_events(events: &[EventView]) -> String {
                     attachment_summary,
                     compact_horizontal_whitespace(&payload.incoming_text)
                 ));
+                if payload.mode.is_ask() {
+                    lines.push(
+                        "  mode=ask: discussion turn; tools are disabled. Answer from context and complete with `finish_and_send`."
+                            .to_string(),
+                    );
+                }
             }
         }
         if let Some(error) = event.last_error.as_deref() {
@@ -257,4 +263,39 @@ pub fn compact_horizontal_whitespace(text: &str) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::{EventStatus, TerminalIncomingEvent, TerminalInputMode};
+
+    fn terminal_event(mode: TerminalInputMode) -> EventView {
+        EventView {
+            event_id: uuid::Uuid::nil(),
+            status: EventStatus::Claimed,
+            reply_message: None,
+            arrived_at_ms: 0,
+            payload: EventPayload::TerminalIncoming(TerminalIncomingEvent {
+                origin: "tui".to_string(),
+                incoming_text: "discuss this".to_string(),
+                attachments: Vec::new(),
+                mode,
+            }),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn afterclaim_events_mark_ask_mode_as_discussion() {
+        let rendered = render_afterclaim_events(&[terminal_event(TerminalInputMode::Ask)]);
+        assert!(rendered.contains("mode=ask"), "{rendered}");
+        assert!(rendered.contains("finish_and_send"), "{rendered}");
+    }
+
+    #[test]
+    fn afterclaim_events_leave_normal_mode_unmarked() {
+        let rendered = render_afterclaim_events(&[terminal_event(TerminalInputMode::Normal)]);
+        assert!(!rendered.contains("mode=ask"), "{rendered}");
+    }
 }

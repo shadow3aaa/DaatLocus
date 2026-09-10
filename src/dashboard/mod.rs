@@ -34,6 +34,7 @@ pub use cells::{
     terminal_activity_event_from_terminal_data, thinking_activity_cell, user_activity_cell,
     user_activity_cell_from_event,
 };
+pub(crate) use command_flow::ask_message_text;
 pub use command_flow::{dashboard_command_is_manager_owned, execute_control_command};
 pub use commands::{
     DashboardAction, DashboardActionResult, DashboardCommandAttachment, DashboardCommandRunner,

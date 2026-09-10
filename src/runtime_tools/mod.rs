@@ -1091,6 +1091,31 @@ fn unavailable_tool_result(
     .with_model_content(model_content)
 }
 
+pub(crate) fn ask_mode_denies_tool(
+    mode: crate::events::TerminalInputMode,
+    tool_name: &str,
+) -> bool {
+    mode.is_ask() && tool_name != "finish_and_send"
+}
+
+fn ask_mode_tool_result(call: &AgentToolCall) -> ToolExecutionResult {
+    let display_tool_name = AppId::render_exposed_tool_name(&call.name);
+    ToolExecutionResult::from_activity_event(
+        format!("{display_tool_name} disabled for ask"),
+        json!({
+            "available": false,
+            "ask_mode": true,
+            "tool": call.name,
+            "allowed_next_action": "Answer directly and complete with `finish_and_send`.",
+        }),
+        None,
+    )
+    .with_model_content(format!(
+        "Tool unavailable: `{display_tool_name}` is disabled because this is an ask discussion turn.\n\
+         Ask turns are discussion-only: do not call tools. Answer from the current context and complete with `finish_and_send`."
+    ))
+}
+
 pub fn summarize_action_from_tool_call(
     context: &Context,
     call: &AgentToolCall,
@@ -1236,6 +1261,9 @@ pub async fn execute_agent_tool_call(
 ) -> Result<ToolExecutionResult> {
     let tools = build_runtime_tools(context);
     let tool = find_runtime_tool(&tools, &call.name)?;
+    if ask_mode_denies_tool(context.current_turn_input_mode, &call.name) {
+        return Ok(ask_mode_tool_result(call));
+    }
     if let Some((reason, allowed_next_action)) = runtime_availability_denial(context, tool) {
         return Ok(unavailable_tool_result(call, reason, allowed_next_action));
     }
@@ -1508,6 +1536,7 @@ mod tests {
                 active_skill_run: None,
                 pending_skill_run_flushes: Vec::new(),
                 current_work_origin: None,
+                current_turn_input_mode: crate::events::TerminalInputMode::Normal,
                 apps,
                 workspace_apps: WorkspaceAppRegistry::default(),
                 telegram: telegram.handle(),
@@ -1605,6 +1634,45 @@ mod tests {
         let result = tool_result("finish_and_send", serde_json::json!({}), None);
 
         assert!(render_telegram_tool_result_status(&call, &result).is_none());
+    }
+
+    #[test]
+    fn ask_mode_denies_tools_except_finish_and_send() {
+        use crate::events::TerminalInputMode;
+
+        assert!(ask_mode_denies_tool(TerminalInputMode::Ask, "read_file"));
+        assert!(ask_mode_denies_tool(
+            TerminalInputMode::Ask,
+            "coding__edit_code"
+        ));
+        assert!(!ask_mode_denies_tool(
+            TerminalInputMode::Ask,
+            "finish_and_send"
+        ));
+        assert!(!ask_mode_denies_tool(
+            TerminalInputMode::Normal,
+            "read_file"
+        ));
+    }
+
+    #[tokio::test]
+    async fn ask_mode_tool_call_returns_discussion_denial() {
+        let mut isolated = IsolatedTestContext::new().await;
+        isolated.context.current_turn_input_mode = crate::events::TerminalInputMode::Ask;
+        let call = AgentToolCall {
+            id: "ask-read".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({ "path": "src/main.rs" }),
+        };
+
+        let result = execute_agent_tool_call(&mut isolated.context, &call)
+            .await
+            .expect("ask denial should be a normal tool result");
+
+        assert_eq!(result.payload["ask_mode"], true);
+        assert_eq!(result.payload["available"], false);
+        assert!(result.activity_event.is_none());
+        assert!(result.model_content().contains("finish_and_send"));
     }
 
     #[test]

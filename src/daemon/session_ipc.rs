@@ -20,7 +20,7 @@ use crate::{
         DashboardRuntimeStatusLevel, DashboardSessionTitle, DashboardSkillOptimizationSnapshot,
         DashboardState, DashboardTokenUsageSnapshot,
     },
-    events::{EventStatus, TelegramIncomingEvent},
+    events::{EventStatus, TelegramIncomingEvent, TerminalInputMode},
     telegram_transport::state::PendingOutboundMessage,
 };
 
@@ -60,6 +60,8 @@ pub enum SessionIpcRequest {
         text: String,
         #[serde(default)]
         attachments: Vec<InputAttachment>,
+        #[serde(default)]
+        mode: TerminalInputMode,
         wait_for_reply: bool,
     },
     DashboardCommand {
@@ -518,6 +520,7 @@ mod tests {
                 origin: UserInputOrigin::WebUi,
                 text: "hello".to_string(),
                 attachments: Vec::new(),
+                mode: TerminalInputMode::Normal,
                 wait_for_reply: false,
             },
         );
@@ -690,6 +693,7 @@ mod tests {
                 origin: UserInputOrigin::CliSend,
                 text: "hello".to_string(),
                 attachments: Vec::new(),
+                mode: TerminalInputMode::Normal,
                 wait_for_reply: true,
             });
         let ((), client_result) = tokio::join!(server_future, client_future);

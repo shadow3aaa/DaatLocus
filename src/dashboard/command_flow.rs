@@ -136,9 +136,27 @@ pub(super) fn dashboard_action_for_input(
                 quiet_success: false,
             }
         }
+        ["ask", ..] => {
+            return Err(CommandFeedback {
+                title: "ASK".to_string(),
+                message: "/ask needs a dashboard composer or `daat-locus send` input.".to_string(),
+                detail: Some("Type /ask followed by the discussion text there.".to_string()),
+                level: CommandFeedbackLevel::Error,
+            });
+        }
         _ => return Ok(None),
     };
     Ok(Some(invocation))
+}
+
+/// Returns the discussion text of an `/ask` command, or `None` when the input
+/// is not an ask command. An empty string means `/ask` was used without text.
+pub(crate) fn ask_message_text(input: &str) -> Option<&str> {
+    let rest = input.trim().strip_prefix("/ask")?;
+    if rest.starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
+        return None;
+    }
+    Some(rest.trim())
 }
 
 pub fn execute_control_command(
@@ -922,4 +940,22 @@ pub(super) fn dashboard_parts_run_action(parts: &[&str]) -> bool {
             | ["skills", "reload"]
             | ["skills", "enable" | "disable", _]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ask_message_text;
+
+    #[test]
+    fn ask_message_text_parses_only_ask_commands() {
+        assert_eq!(
+            ask_message_text("/ask explain the design"),
+            Some("explain the design")
+        );
+        assert_eq!(ask_message_text("  /ask   spaced   "), Some("spaced"));
+        assert_eq!(ask_message_text("/ask"), Some(""));
+        assert_eq!(ask_message_text("/ask\nmulti line"), Some("multi line"));
+        assert_eq!(ask_message_text("/asking a question"), None);
+        assert_eq!(ask_message_text("hello"), None);
+    }
 }

@@ -23,7 +23,7 @@ const NO_ALIASES: &[&str] = &[];
 const QUIT_ALIASES: &[&str] = &["q", "exit"];
 const APP_STATUS_ALIASES: &[&str] = &["app_status"];
 
-static DASHBOARD_COMMANDS: [DashboardCommandSpec; 9] = [
+static DASHBOARD_COMMANDS: [DashboardCommandSpec; 10] = [
     DashboardCommandSpec {
         primary_verb: "quit",
         description: "exit the dashboard",
@@ -85,6 +85,13 @@ static DASHBOARD_COMMANDS: [DashboardCommandSpec; 9] = [
         description: "browse loaded Lua workflows and their typed input schemas",
         aliases: NO_ALIASES,
         remote_command: Some("workflows"),
+        remote_description: None,
+    },
+    DashboardCommandSpec {
+        primary_verb: "ask",
+        description: "start a discussion turn with tools disabled",
+        aliases: NO_ALIASES,
+        remote_command: None,
         remote_description: None,
     },
 ];
