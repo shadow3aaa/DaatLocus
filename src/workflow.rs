@@ -1918,6 +1918,11 @@ async fn run_worker_turn(
                     protocol.tool_calls.clone(),
                 ),
             );
+            // OpenAI-compatible providers require every tool message for an
+            // assistant tool_calls message to come first. Tool-attached image
+            // messages must not interrupt that run, so they are deferred until
+            // all tool results of this batch are in the conversation.
+            let mut deferred_image_messages = Vec::new();
             for call in protocol.tool_calls {
                 ensure_workflow_not_interrupted(cancellation.as_ref())?;
                 let WorkflowWorkerActor {
@@ -1970,7 +1975,14 @@ async fn run_worker_turn(
                     runtime,
                     ..
                 } = &mut *actor;
-                append_worker_tool_result_message(conversation, call, result, runtime);
+                if let Some(message) =
+                    append_worker_tool_result_message(conversation, call, result, runtime)
+                {
+                    deferred_image_messages.push(message);
+                }
+            }
+            for message in deferred_image_messages {
+                actor.conversation.push_agent_message(message);
             }
         }
 
@@ -2027,7 +2039,7 @@ fn append_worker_tool_result_message(
     call: AgentToolCall,
     result: Result<ToolExecutionResult>,
     worker_runtime: &mut WorkerRuntimeState,
-) {
+) -> Option<AgentMessage> {
     match result {
         Ok(mut result) => {
             let model_content = if result.skip_source_elision {
@@ -2045,8 +2057,10 @@ fn append_worker_tool_result_message(
                 call.name.clone(),
                 model_content,
             ));
-            if !model_image_parts.is_empty() {
-                conversation.push_agent_message(AgentMessage::user_content(
+            if model_image_parts.is_empty() {
+                None
+            } else {
+                Some(AgentMessage::user_content(
                     crate::reasoning::runtime::AgentContent::multimodal(
                         format!(
                             "The `{}` tool attached image content for visual inspection.",
@@ -2054,14 +2068,17 @@ fn append_worker_tool_result_message(
                         ),
                         model_image_parts,
                     ),
-                ));
+                ))
             }
         }
-        Err(err) => conversation.push_agent_message(AgentMessage::tool(
-            call.id,
-            call.name,
-            json!({ "ok": false, "error": err.to_string() }).to_string(),
-        )),
+        Err(err) => {
+            conversation.push_agent_message(AgentMessage::tool(
+                call.id,
+                call.name,
+                json!({ "ok": false, "error": err.to_string() }).to_string(),
+            ));
+            None
+        }
     }
 }
 
@@ -4622,19 +4639,88 @@ workflow.define({{
                 description: Some("worker fixture".to_string()),
             });
 
-        append_worker_tool_result_message(&mut conversation, call, Ok(result), &mut worker_runtime);
+        let deferred = append_worker_tool_result_message(
+            &mut conversation,
+            call,
+            Ok(result),
+            &mut worker_runtime,
+        );
         let messages = conversation.agent_messages();
 
+        assert_eq!(
+            messages.len(),
+            1,
+            "the image message must be deferred until the tool batch is complete"
+        );
         assert!(matches!(
             &messages[0],
             AgentMessage::Tool { content, .. } if content == "attached image"
         ));
+
+        conversation.push_agent_message(deferred.expect("deferred image message"));
+        let messages = conversation.agent_messages();
         assert!(matches!(
             &messages[1],
             AgentMessage::User { content }
                 if matches!(content.parts(), [crate::reasoning::runtime::AgentContentPart::Image { media_type, .. }]
                     if media_type == "image/png")
         ));
+    }
+
+    #[test]
+    fn worker_image_message_does_not_interrupt_batched_tool_results() {
+        let mut conversation = RuntimeStepConversation::new(Vec::new());
+        let mut worker_runtime = WorkerRuntimeState::new();
+        let calls = vec![
+            AgentToolCall {
+                id: "worker-image".to_string(),
+                name: "view_image".to_string(),
+                arguments: json!({}),
+            },
+            AgentToolCall {
+                id: "worker-read".to_string(),
+                name: "read_file".to_string(),
+                arguments: json!({}),
+            },
+        ];
+        conversation.push_agent_message(AgentMessage::assistant_tool_call_protocol_with_reasoning(
+            None,
+            None,
+            calls.clone(),
+        ));
+
+        let mut deferred = Vec::new();
+        for call in calls {
+            let result = if call.name == "view_image" {
+                ToolExecutionResult::from_activity_event("image", json!({}), None)
+                    .with_model_image_part(crate::reasoning::runtime::AgentContentPart::Image {
+                        path: "worker-image.png".to_string(),
+                        media_type: "image/png".to_string(),
+                        description: None,
+                    })
+            } else {
+                ToolExecutionResult::from_activity_event("text", json!({}), None)
+            };
+            if let Some(message) = append_worker_tool_result_message(
+                &mut conversation,
+                call,
+                Ok(result),
+                &mut worker_runtime,
+            ) {
+                deferred.push(message);
+            }
+        }
+        for message in deferred {
+            conversation.push_agent_message(message);
+        }
+
+        let messages = conversation.agent_messages();
+        assert!(matches!(&messages[1], AgentMessage::Tool { .. }));
+        assert!(matches!(&messages[2], AgentMessage::Tool { .. }));
+        assert!(
+            matches!(&messages[3], AgentMessage::User { .. }),
+            "image message must come after all tool results"
+        );
     }
 
     async fn run_worker_with_inspector(

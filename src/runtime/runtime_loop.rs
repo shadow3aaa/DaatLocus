@@ -127,7 +127,7 @@ mod tests {
         plan::Plan,
         reasoning::{
             compiled::CompiledPromptStore,
-            runtime::{AgentTurnItem, PromptRequest},
+            runtime::{AgentToolCall, AgentTurnItem, PromptRequest},
         },
         runtime::bootstrap::DaatLocusHomeOverride,
         sandbox::RuntimeSandboxPolicy,
@@ -297,6 +297,86 @@ mod tests {
 
         fn model_name(&self) -> String {
             "unused-test-model-provider".to_string()
+        }
+    }
+
+    struct ToolImageOrderingProvider {
+        requests: Arc<std::sync::Mutex<Vec<AgentTurnRequest>>>,
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ToolImageOrderingProvider {
+        async fn complete_json(
+            &self,
+            _request: PromptRequest,
+            _options: ModelRequestOptions,
+        ) -> Result<serde_json::Value> {
+            Err(miette!(
+                "tool image ordering test does not use structured output"
+            ))
+        }
+
+        async fn complete_agent_turn(
+            &self,
+            request: AgentTurnRequest,
+            _options: ModelRequestOptions,
+        ) -> Result<AgentTurnStreamResult> {
+            let step = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.requests
+                .lock()
+                .expect("tool image ordering requests lock")
+                .push(request);
+            let calls = if step == 0 {
+                vec![
+                    AgentToolCall {
+                        id: "call-image".to_string(),
+                        name: "view_image".to_string(),
+                        arguments: json!({ "path": "fixture.png" }),
+                    },
+                    AgentToolCall {
+                        id: "call-read".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: json!({ "path": "fixture.txt" }),
+                    },
+                ]
+            } else {
+                vec![AgentToolCall {
+                    id: "call-finish".to_string(),
+                    name: "finish_and_send".to_string(),
+                    arguments: json!({
+                        "disposition": "resolved",
+                        "reply_message": "done",
+                    }),
+                }]
+            };
+            Ok(AgentTurnStreamResult {
+                items: calls
+                    .into_iter()
+                    .map(|call| AgentTurnItem::ToolCall { call })
+                    .collect(),
+                raw_stream_follow_up: true,
+                last_assistant_message: None,
+                last_reasoning_content: None,
+            })
+        }
+
+        fn request_budget_limits(&self) -> crate::context_budget::RequestBudgetLimits {
+            crate::context_budget::RequestBudgetLimits {
+                context_window_tokens: 1_000_000,
+                auto_compact_threshold_tokens: 900_000,
+                reserved_output_tokens: 50_000,
+            }
+        }
+
+        fn token_usage_info(&self) -> crate::core::TokenUsageInfo {
+            crate::core::TokenUsageInfo::default()
+        }
+
+        fn model_name(&self) -> String {
+            "tool-image-ordering-test".to_string()
         }
     }
 
@@ -924,6 +1004,85 @@ mod tests {
                 .is_none()
         );
         drop(isolated);
+    }
+
+    #[tokio::test]
+    async fn tool_attached_images_do_not_interrupt_tool_results() {
+        let mut isolated = IsolatedRuntimeContext::new().await;
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        isolated.context.model_provider = Box::new(ToolImageOrderingProvider {
+            requests: requests.clone(),
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        isolated
+            .context
+            .config
+            .models
+            .get_mut("default")
+            .expect("default model")
+            .supports_vision = Some(true);
+        std::fs::write(
+            isolated.context.execution_cwd.join("fixture.png"),
+            b"\x89PNG\r\n\x1a\nfixture",
+        )
+        .expect("png fixture");
+        std::fs::write(isolated.context.execution_cwd.join("fixture.txt"), "hello")
+            .expect("text fixture");
+
+        let event_id = isolated
+            .context
+            .events
+            .register_terminal_incoming(terminal_event("inspect the fixture"))
+            .expect("register event");
+        isolated
+            .context
+            .pending_work
+            .enqueue(PendingWork::Event { event_id })
+            .expect("enqueue event");
+
+        execute_agent_loop_step(&mut isolated.context, None).await;
+
+        let requests = requests.lock().expect("tool image ordering requests lock");
+        let request = requests
+            .iter()
+            .find(|request| {
+                request.messages.iter().any(|message| {
+                    matches!(
+                        message,
+                        AgentMessage::AssistantToolCallProtocol { calls, .. } if calls.len() == 2
+                    )
+                })
+            })
+            .expect("model request with the batched tool calls");
+        let assistant_index = request
+            .messages
+            .iter()
+            .position(|message| {
+                matches!(
+                    message,
+                    AgentMessage::AssistantToolCallProtocol { calls, .. } if calls.len() == 2
+                )
+            })
+            .expect("batched assistant tool call message");
+        assert!(matches!(
+            request.messages.get(assistant_index + 1),
+            Some(AgentMessage::Tool { .. })
+        ));
+        assert!(matches!(
+            request.messages.get(assistant_index + 2),
+            Some(AgentMessage::Tool { .. })
+        ));
+        let image_index = request
+            .messages
+            .iter()
+            .position(|message| {
+                matches!(message, AgentMessage::User { content } if !content.is_plain_text())
+            })
+            .expect("tool image user message");
+        assert!(
+            image_index > assistant_index + 2,
+            "tool image message must come after every tool result"
+        );
     }
 
     #[test]

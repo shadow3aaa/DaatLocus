@@ -800,6 +800,11 @@ pub async fn execute_agent_loop_step(
                 committed_cells.push(cell);
             }
             append_committed_activity_cells(context, tx, committed_cells);
+            // OpenAI-compatible providers require every tool message for an
+            // assistant tool_calls message to come first. Tool-attached image
+            // messages must not interrupt that run, so they are deferred until
+            // all tool results of this batch are in the conversation.
+            let mut deferred_image_messages = Vec::new();
             for (call_index, (call, call_activity_event)) in
                 calls.iter().zip(tool_call_previews.iter()).enumerate()
             {
@@ -964,7 +969,7 @@ pub async fn execute_agent_loop_step(
                     model_content,
                 ));
                 if !model_image_parts.is_empty() {
-                    runtime_step.push_agent_message(AgentMessage::user_content(
+                    deferred_image_messages.push(AgentMessage::user_content(
                         AgentContent::multimodal(
                             format!(
                                 "The `{}` tool attached image content for visual inspection.",
@@ -1016,6 +1021,9 @@ pub async fn execute_agent_loop_step(
                         actions: terminal_actions,
                     };
                 }
+            }
+            for message in deferred_image_messages {
+                runtime_step.push_agent_message(message);
             }
             continue 'agent_loop;
         }
