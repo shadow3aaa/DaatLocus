@@ -1120,6 +1120,7 @@ pub struct WorkerRuntimeState {
     visible_source_lines: std::collections::HashSet<
         crate::runtime::runtime_loop::coding_source_elision::CodingSourceLineKey,
     >,
+    file_anchors: crate::file_anchors::FileAnchorTable,
     image_state_dir: PathBuf,
     turn_epoch: u64,
 }
@@ -1146,6 +1147,7 @@ impl WorkerRuntimeState {
             completed_output: None,
             worker_plan: Plan::default(),
             visible_source_lines: std::collections::HashSet::new(),
+            file_anchors: crate::file_anchors::FileAnchorTable::default(),
             image_state_dir,
             turn_epoch: 0,
         }
@@ -2192,6 +2194,7 @@ async fn execute_worker_tool(
             turn_epoch,
             output_schema: &definition.output_schema,
             worker_plan: &mut worker_runtime.worker_plan,
+            file_anchors: &mut worker_runtime.file_anchors,
             dashboard_history: context.dashboard_history.as_ref(),
         },
     )
@@ -3165,6 +3168,7 @@ mod tests {
                 pending_skill_run_flushes: Vec::new(),
                 current_work_origin: None,
                 current_turn_input_mode: crate::events::TerminalInputMode::Normal,
+                file_anchors: crate::file_anchors::FileAnchorTable::default(),
                 apps: AppManager::new(Vec::new()).expect("app manager"),
                 workspace_apps: WorkspaceAppRegistry::default(),
                 telegram: telegram.handle(),

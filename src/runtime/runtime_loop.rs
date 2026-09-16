@@ -416,6 +416,7 @@ mod tests {
                 pending_skill_run_flushes: Vec::new(),
                 current_work_origin: None,
                 current_turn_input_mode: crate::events::TerminalInputMode::Normal,
+                file_anchors: crate::file_anchors::FileAnchorTable::default(),
                 apps,
                 workspace_apps: WorkspaceAppRegistry::default(),
                 telegram: telegram.handle(),

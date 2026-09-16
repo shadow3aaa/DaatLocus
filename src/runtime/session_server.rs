@@ -219,6 +219,7 @@ pub async fn run_session_serve(
         pending_skill_run_flushes: Vec::new(),
         current_work_origin: None,
         current_turn_input_mode: TerminalInputMode::Normal,
+        file_anchors: crate::file_anchors::FileAnchorTable::default(),
         apps,
         workspace_apps,
         telegram: telegram_handle,

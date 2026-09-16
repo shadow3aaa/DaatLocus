@@ -5,7 +5,6 @@
 //! separate helper process. The scope-engine crate is linked directly as a
 //! library dependency.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -31,32 +30,7 @@ pub struct ScopeEngineHandle {
     project_root: Option<PathBuf>,
     propagation_state: Mutex<PropagationState>,
     lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>>,
-    anchors: Mutex<AnchorTable>,
-}
-
-const MAX_TRACKED_ANCHORS: usize = 16_384;
-
-#[derive(Debug, Clone)]
-struct TrackedAnchor {
-    line: usize,
-    hash: String,
-    text: String,
-    last_used: u64,
-}
-
-#[derive(Debug, Default)]
-struct AnchorTable {
-    next_use: u64,
-    entries: HashMap<(PathBuf, String), TrackedAnchor>,
-}
-
-#[derive(Debug)]
-struct AnchorMutation {
-    path: PathBuf,
-    start_line: usize,
-    end_line: usize,
-    operation: api::EditOp,
-    replacement_lines: usize,
+    anchors: Mutex<crate::file_anchors::FileAnchorTable>,
 }
 
 impl ScopeEngineHandle {
@@ -65,7 +39,7 @@ impl ScopeEngineHandle {
             project_root: None,
             propagation_state: Mutex::new(PropagationState::new()),
             lsp_analyzer: Mutex::new(None),
-            anchors: Mutex::new(AnchorTable::default()),
+            anchors: Mutex::new(crate::file_anchors::FileAnchorTable::default()),
         }
     }
 
@@ -91,7 +65,6 @@ impl ScopeEngineHandle {
             self.anchors
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .entries
                 .clear();
         }
         self.project_root = Some(project_root);
@@ -163,174 +136,27 @@ impl ScopeEngineHandle {
         let Ok(mut table) = self.anchors.lock() else {
             return;
         };
-        for line in content.lines() {
-            let (path, anchor, text) = if let Some((first, rest)) = line.split_once('|')
-                && let Some((anchor, text)) = rest.split_once('|')
-            {
-                (first, anchor, text)
-            } else if let Some((anchor, text)) = line.split_once('|') {
-                (path, anchor, text)
-            } else {
-                continue;
-            };
-            let Some((line_number, hash)) = anchor.rsplit_once('#') else {
-                continue;
-            };
-            let Ok(line) = line_number.parse::<usize>() else {
-                continue;
-            };
-            if line == 0 || hash.is_empty() || hash.ends_with('~') {
-                continue;
-            }
-            table.next_use = table.next_use.wrapping_add(1);
-            let last_used = table.next_use;
-            table.entries.insert(
-                (PathBuf::from(path), anchor.to_string()),
-                TrackedAnchor {
-                    line,
-                    hash: hash.to_string(),
-                    text: text.to_string(),
-                    last_used,
-                },
-            );
-        }
-        while table.entries.len() > MAX_TRACKED_ANCHORS {
-            let Some(key) = table
-                .entries
-                .iter()
-                .min_by_key(|(_, anchor)| anchor.last_used)
-                .map(|(key, _)| key.clone())
-            else {
-                break;
-            };
-            table.entries.remove(&key);
-        }
+        table.observe_anchored_content(path, content);
     }
 
     fn resolve_tracked_anchors(
         &self,
         root: &Path,
         edits: &mut [api::StructuredEdit],
-    ) -> Result<Vec<AnchorMutation>> {
+    ) -> Result<Vec<crate::file_anchors::AnchorMutation>> {
         let mut table = self
             .anchors
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut mutations = Vec::new();
-        for edit in edits {
-            let path = PathBuf::from(&edit.path);
-            let Some(start) = edit.start.as_mut() else {
-                continue;
-            };
-            let Some(mut anchor) = table.entries.get(&(path.clone(), start.clone())).cloned()
-            else {
-                continue;
-            };
-            let current = std::fs::read_to_string(root.join(&path))
-                .map_err(|err| miette!("cannot refresh tracked anchor {}: {err}", edit.path))?;
-            let lines: Vec<&str> = current.lines().collect();
-            let current_line = if anchor.line > 0
-                && anchor.line <= lines.len()
-                && lines[anchor.line - 1] == anchor.text
-            {
-                Some(anchor.line)
-            } else {
-                let matches = lines
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, line)| **line == anchor.text)
-                    .map(|(index, _)| index + 1)
-                    .collect::<Vec<_>>();
-                (matches.len() == 1).then_some(matches[0])
-            };
-            let Some(current_line) = current_line else {
-                continue;
-            };
-            table.next_use = table.next_use.wrapping_add(1);
-            anchor.last_used = table.next_use;
-            table
-                .entries
-                .insert((path.clone(), start.clone()), anchor.clone());
-            let new_start = format!("{}#{}", current_line, anchor.hash);
-            *start = new_start;
-            if let Some(end) = edit.end.as_mut()
-                && let Some(end_anchor) = table.entries.get(&(path.clone(), end.clone())).cloned()
-            {
-                let end_line = if end_anchor.line > 0
-                    && end_anchor.line <= lines.len()
-                    && lines[end_anchor.line - 1] == end_anchor.text
-                {
-                    Some(end_anchor.line)
-                } else {
-                    let matches = lines
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, line)| **line == end_anchor.text)
-                        .map(|(index, _)| index + 1)
-                        .collect::<Vec<_>>();
-                    (matches.len() == 1).then_some(matches[0])
-                };
-                if let Some(end_line) = end_line {
-                    *end = format!("{}#{}", end_line, end_anchor.hash);
-                }
-            }
-            let start_line = current_line;
-            let end_line = edit
-                .end
-                .as_deref()
-                .and_then(|value| value.split_once('#'))
-                .and_then(|(line, _)| line.parse::<usize>().ok())
-                .unwrap_or(start_line);
-            mutations.push(AnchorMutation {
-                path,
-                start_line,
-                end_line,
-                operation: edit.op.clone().unwrap_or(api::EditOp::Replace),
-                replacement_lines: edit
-                    .content
-                    .clone()
-                    .map(api::EditContent::into_lines)
-                    .unwrap_or_default()
-                    .len(),
-            });
-        }
-        Ok(mutations)
+        table.resolve_tracked_anchors(root, edits)
     }
 
-    fn apply_anchor_mutations(&self, mutations: &[AnchorMutation]) {
+    fn apply_anchor_mutations(&self, mutations: &[crate::file_anchors::AnchorMutation]) {
         let mut table = self
             .anchors
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for mutation in mutations {
-            let delta = mutation.replacement_lines as isize
-                - match &mutation.operation {
-                    api::EditOp::Replace => (mutation.end_line - mutation.start_line + 1) as isize,
-                    api::EditOp::Append | api::EditOp::Prepend => 0,
-                };
-            for ((path, _), anchor) in &mut table.entries {
-                if *path != mutation.path {
-                    continue;
-                }
-                let insertion_line = match &mutation.operation {
-                    api::EditOp::Append => mutation.start_line,
-                    api::EditOp::Prepend => mutation.start_line,
-                    api::EditOp::Replace => mutation.start_line,
-                };
-                let affected = match &mutation.operation {
-                    api::EditOp::Replace => {
-                        anchor.line >= mutation.start_line && anchor.line <= mutation.end_line
-                    }
-                    api::EditOp::Append | api::EditOp::Prepend => false,
-                };
-                if affected {
-                    anchor.line = 0;
-                } else if anchor.line >= insertion_line {
-                    anchor.line = anchor.line.saturating_add_signed(delta);
-                }
-            }
-        }
-        table.entries.retain(|_, anchor| anchor.line != 0);
+        table.apply_anchor_mutations(mutations);
     }
 
     /// Return whether SCOPE owns semantic source operations for a path.

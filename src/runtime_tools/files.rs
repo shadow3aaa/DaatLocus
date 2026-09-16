@@ -124,7 +124,13 @@ fn execute_read_file_runtime_tool<'a>(
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        execute_read_file(&context.execution_cwd, &context.sandbox_policy, call).await
+        execute_read_file(
+            &context.execution_cwd,
+            &context.sandbox_policy,
+            call,
+            &mut context.file_anchors,
+        )
+        .await
     })
 }
 
@@ -132,14 +138,16 @@ pub async fn execute_worker_read_file(
     execution_cwd: &Path,
     sandbox_policy: &crate::sandbox::RuntimeSandboxPolicy,
     call: &AgentToolCall,
+    anchors: &mut crate::file_anchors::FileAnchorTable,
 ) -> Result<ToolExecutionResult> {
-    execute_read_file(execution_cwd, sandbox_policy, call).await
+    execute_read_file(execution_cwd, sandbox_policy, call, anchors).await
 }
 
 async fn execute_read_file(
     execution_cwd: &Path,
     sandbox_policy: &crate::sandbox::RuntimeSandboxPolicy,
     call: &AgentToolCall,
+    anchors: &mut crate::file_anchors::FileAnchorTable,
 ) -> Result<ToolExecutionResult> {
     let args: ReadFileArgs = parse_tool_args(call)?;
     let resolved = crate::sandbox::RuntimeSandboxPolicy::resolve_path(
@@ -176,6 +184,7 @@ async fn execute_read_file(
             .min(total_lines)
     };
     let model_content = prefix_file_lines_with_hash(&file_text, start_line, line_count);
+    anchors.observe_anchored_content(&args.path, &model_content);
     let display_path = display_tool_path(&args.path, &resolved);
     let actual_line_count = if total_lines == 0 {
         0
@@ -221,8 +230,9 @@ pub fn execute_worker_edit_file(
     execution_cwd: &Path,
     sandbox_policy: &crate::sandbox::RuntimeSandboxPolicy,
     call: &AgentToolCall,
+    anchors: &mut crate::file_anchors::FileAnchorTable,
 ) -> Result<ToolExecutionResult> {
-    let args: EditFileArgs = parse_tool_args(call)?;
+    let mut args: EditFileArgs = parse_tool_args(call)?;
     if args.edits.is_empty() {
         return Err(miette!("edit_file `edits` must not be empty"));
     }
@@ -236,8 +246,10 @@ pub fn execute_worker_edit_file(
         }
         sandbox_policy.ensure_path_writable(&resolved, "edit_file target")?;
     }
+    let mutations = anchors.resolve_tracked_anchors(execution_cwd, &mut args.edits)?;
     let result = scope_engine::patch::edit_file_apply(&args.edits, execution_cwd)
         .map_err(|err| miette!("edit_file failed: {err}"))?;
+    anchors.apply_anchor_mutations(&mutations);
     let added_lines = result
         .files
         .iter()
@@ -275,7 +287,7 @@ fn execute_edit_file_runtime_tool<'a>(
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        let args: EditFileArgs = parse_tool_args(call)?;
+        let mut args: EditFileArgs = parse_tool_args(call)?;
         if args.edits.is_empty() {
             return Err(miette!("edit_file `edits` must not be empty"));
         }
@@ -290,8 +302,12 @@ fn execute_edit_file_runtime_tool<'a>(
                 .sandbox_policy
                 .ensure_path_writable(&resolved, "edit_file target")?;
         }
+        let mutations = context
+            .file_anchors
+            .resolve_tracked_anchors(&context.execution_cwd, &mut args.edits)?;
         let result = scope_engine::patch::edit_file_apply(&args.edits, &context.execution_cwd)
             .map_err(|err| miette!("edit_file failed: {err}"))?;
+        context.file_anchors.apply_anchor_mutations(&mutations);
         let added_lines = result
             .files
             .iter()

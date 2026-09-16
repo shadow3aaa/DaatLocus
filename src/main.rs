@@ -21,6 +21,7 @@ mod daemon_tray;
 mod dashboard;
 mod dsml_repair;
 mod events;
+mod file_anchors;
 mod i18n;
 mod live_progress;
 mod logging;

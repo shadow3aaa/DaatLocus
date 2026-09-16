@@ -674,6 +674,7 @@ pub struct WorkerRuntimeToolCallContext<'a> {
     pub(crate) turn_epoch: u64,
     pub(crate) output_schema: &'a Value,
     pub(crate) worker_plan: &'a mut crate::plan::Plan,
+    pub(crate) file_anchors: &'a mut crate::file_anchors::FileAnchorTable,
     pub(crate) dashboard_history: Option<&'a DashboardActivityHistoryStore>,
 }
 
@@ -691,6 +692,7 @@ pub async fn execute_worker_runtime_tool_call_for_apps(
         turn_epoch,
         output_schema,
         worker_plan,
+        file_anchors,
         dashboard_history,
     } = context;
     let tools = build_worker_runtime_tools_for_apps(apps, output_schema.clone());
@@ -719,6 +721,7 @@ pub async fn execute_worker_runtime_tool_call_for_apps(
         &app_context,
         call,
         worker_plan,
+        file_anchors,
         image_state_dir,
         worker_model_supports_vision,
         dashboard_history,
@@ -825,6 +828,7 @@ async fn execute_worker_runtime_tool(
     app_context: &AppToolExecutionContext,
     call: &AgentToolCall,
     worker_plan: &mut crate::plan::Plan,
+    file_anchors: &mut crate::file_anchors::FileAnchorTable,
     image_state_dir: &std::path::Path,
     supports_vision: bool,
     dashboard_history: Option<&DashboardActivityHistoryStore>,
@@ -835,6 +839,7 @@ async fn execute_worker_runtime_tool(
                 app_context.execution_cwd.as_path(),
                 &app_context.sandbox_policy,
                 call,
+                file_anchors,
             )
             .await;
         }
@@ -843,6 +848,7 @@ async fn execute_worker_runtime_tool(
                 app_context.execution_cwd.as_path(),
                 &app_context.sandbox_policy,
                 call,
+                file_anchors,
             );
         }
         "update_plan" => return work::execute_worker_update_plan(worker_plan, call),
@@ -1407,6 +1413,7 @@ mod tests {
             }),
         };
         let image_state_dir = execution.path().join("images");
+        let mut file_anchors = crate::file_anchors::FileAnchorTable::default();
         let result = execute_worker_runtime_tool_call_for_apps(
             &mut apps,
             &read_call,
@@ -1419,6 +1426,7 @@ mod tests {
                 turn_epoch: 1,
                 output_schema: &output_schema,
                 worker_plan: &mut worker_plan,
+                file_anchors: &mut file_anchors,
                 dashboard_history: None,
             },
         )
@@ -1449,6 +1457,7 @@ mod tests {
                 turn_epoch: 2,
                 output_schema: &output_schema,
                 worker_plan: &mut worker_plan,
+                file_anchors: &mut file_anchors,
                 dashboard_history: None,
             },
         )
@@ -1456,6 +1465,94 @@ mod tests {
         .expect("worker update_plan");
         assert_eq!(worker_plan.steps().len(), 1);
         assert_eq!(worker_plan.steps()[0].step, "Inspect fixture");
+    }
+
+    #[tokio::test]
+    async fn worker_edit_file_relocates_observed_anchor_after_prior_shift() {
+        let home = tempfile::tempdir().expect("home");
+        let _home = DaatLocusHomeOverride::set(home.path().to_path_buf()).await;
+        let execution = tempfile::tempdir().expect("execution cwd");
+        std::fs::write(execution.path().join("notes.txt"), "alpha\nbeta\ngamma\n")
+            .expect("write fixture");
+        let mut apps = AppManager::new(vec![Box::new(BrowserApp::new()) as Box<dyn App>])
+            .expect("worker apps");
+        let mut worker_plan = Plan::default();
+        let mut file_anchors = crate::file_anchors::FileAnchorTable::default();
+        let output_schema = json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false,
+        });
+        let image_state_dir = execution.path().join("images");
+
+        let read_call = AgentToolCall {
+            id: "worker-read".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({ "path": "notes.txt" }),
+        };
+        execute_worker_runtime_tool_call_for_apps(
+            &mut apps,
+            &read_call,
+            WorkerRuntimeToolCallContext {
+                execution_cwd: execution.path(),
+                sandbox_policy: &RuntimeSandboxPolicy::disabled(),
+                tool_output_max_tokens: 1024,
+                supports_vision: Some(false),
+                image_state_dir: &image_state_dir,
+                turn_epoch: 1,
+                output_schema: &output_schema,
+                worker_plan: &mut worker_plan,
+                file_anchors: &mut file_anchors,
+                dashboard_history: None,
+            },
+        )
+        .await
+        .expect("worker read_file");
+
+        std::fs::write(
+            execution.path().join("notes.txt"),
+            "alpha\ninserted\nbeta\ngamma\n",
+        )
+        .expect("write shifted fixture");
+
+        let beta_hash = scope_engine::patch::line_hash("beta");
+        let edit_call = AgentToolCall {
+            id: "worker-edit".to_string(),
+            name: "edit_file".to_string(),
+            arguments: json!({
+                "edits": [{
+                    "path": "notes.txt",
+                    "op": "replace",
+                    "start": format!("2#{beta_hash}"),
+                    "end": format!("2#{beta_hash}"),
+                    "content": "BETA"
+                }]
+            }),
+        };
+        execute_worker_runtime_tool_call_for_apps(
+            &mut apps,
+            &edit_call,
+            WorkerRuntimeToolCallContext {
+                execution_cwd: execution.path(),
+                sandbox_policy: &RuntimeSandboxPolicy::disabled(),
+                tool_output_max_tokens: 1024,
+                supports_vision: Some(false),
+                image_state_dir: &image_state_dir,
+                turn_epoch: 2,
+                output_schema: &output_schema,
+                worker_plan: &mut worker_plan,
+                file_anchors: &mut file_anchors,
+                dashboard_history: None,
+            },
+        )
+        .await
+        .expect("worker stale anchor should relocate");
+
+        assert_eq!(
+            std::fs::read_to_string(execution.path().join("notes.txt")).expect("read fixture"),
+            "alpha\ninserted\nBETA\ngamma\n"
+        );
     }
 
     struct UnusedModelProvider;
@@ -1537,6 +1634,7 @@ mod tests {
                 pending_skill_run_flushes: Vec::new(),
                 current_work_origin: None,
                 current_turn_input_mode: crate::events::TerminalInputMode::Normal,
+                file_anchors: crate::file_anchors::FileAnchorTable::default(),
                 apps,
                 workspace_apps: WorkspaceAppRegistry::default(),
                 telegram: telegram.handle(),
@@ -1941,6 +2039,92 @@ mod tests {
         assert_eq!(ui_event.removed_lines, 1);
         assert_eq!(ui_event.propagation_count, 0);
         assert_eq!(ui_event.diff_files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn edit_file_relocates_observed_anchor_after_prior_shift() {
+        let mut isolated = IsolatedTestContext::new().await;
+        let root = isolated.context.execution_cwd.clone();
+        std::fs::write(root.join("notes.txt"), "alpha\nbeta\ngamma\n").expect("write fixture");
+
+        let read_call = AgentToolCall {
+            id: "call_read".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({ "path": "notes.txt" }),
+        };
+        execute_agent_tool_call(&mut isolated.context, &read_call)
+            .await
+            .expect("read file");
+
+        // A prior edit shifted the observed target one line down.
+        std::fs::write(root.join("notes.txt"), "alpha\ninserted\nbeta\ngamma\n")
+            .expect("write shifted fixture");
+
+        let beta_hash = scope_engine::patch::line_hash("beta");
+        let edit_call = AgentToolCall {
+            id: "call_edit".to_string(),
+            name: "edit_file".to_string(),
+            arguments: json!({
+                "edits": [{
+                    "path": "notes.txt",
+                    "op": "replace",
+                    "start": format!("2#{beta_hash}"),
+                    "end": format!("2#{beta_hash}"),
+                    "content": "BETA"
+                }]
+            }),
+        };
+
+        execute_agent_tool_call(&mut isolated.context, &edit_call)
+            .await
+            .expect("observed anchor should relocate after a shift");
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
+            "alpha\ninserted\nBETA\ngamma\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_does_not_relocate_ambiguous_observed_anchor() {
+        let mut isolated = IsolatedTestContext::new().await;
+        let root = isolated.context.execution_cwd.clone();
+        std::fs::write(root.join("notes.txt"), "beta\nalpha\n").expect("write fixture");
+
+        let read_call = AgentToolCall {
+            id: "call_read".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({ "path": "notes.txt" }),
+        };
+        execute_agent_tool_call(&mut isolated.context, &read_call)
+            .await
+            .expect("read file");
+
+        std::fs::write(root.join("notes.txt"), "alpha\nbeta\ngamma\nbeta\n")
+            .expect("write shifted fixture");
+
+        let beta_hash = scope_engine::patch::line_hash("beta");
+        let edit_call = AgentToolCall {
+            id: "call_edit".to_string(),
+            name: "edit_file".to_string(),
+            arguments: json!({
+                "edits": [{
+                    "path": "notes.txt",
+                    "op": "replace",
+                    "start": format!("1#{beta_hash}"),
+                    "end": format!("1#{beta_hash}"),
+                    "content": "BETA"
+                }]
+            }),
+        };
+
+        let err = execute_agent_tool_call(&mut isolated.context, &edit_call)
+            .await
+            .expect_err("ambiguous anchors must not be relocated");
+        assert!(err.to_string().contains("hash mismatch"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
+            "alpha\nbeta\ngamma\nbeta\n"
+        );
     }
 
     #[tokio::test]

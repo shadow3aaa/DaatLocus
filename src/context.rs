@@ -73,6 +73,7 @@ pub struct Context {
     pub pending_skill_run_flushes: Vec<PendingSkillRunFlush>,
     pub current_work_origin: Option<String>,
     pub current_turn_input_mode: crate::events::TerminalInputMode,
+    pub file_anchors: crate::file_anchors::FileAnchorTable,
     pub apps: AppManager,
     pub workspace_apps: WorkspaceAppRegistry,
     pub telegram: TelegramTransportStateHandle,
