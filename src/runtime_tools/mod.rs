@@ -1555,6 +1555,71 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn worker_edit_file_emits_coding_edit_activity() {
+        let home = tempfile::tempdir().expect("home");
+        let _home = DaatLocusHomeOverride::set(home.path().to_path_buf()).await;
+        let execution = tempfile::tempdir().expect("execution cwd");
+        std::fs::write(execution.path().join("notes.txt"), "old\n").expect("write fixture");
+        let mut apps = AppManager::new(vec![Box::new(BrowserApp::new()) as Box<dyn App>])
+            .expect("worker apps");
+        let mut worker_plan = Plan::default();
+        let mut file_anchors = crate::file_anchors::FileAnchorTable::default();
+        let output_schema = json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false,
+        });
+        let image_state_dir = execution.path().join("images");
+        let hash = scope_engine::patch::line_hash("old");
+        let call = AgentToolCall {
+            id: "worker-edit".to_string(),
+            name: "edit_file".to_string(),
+            arguments: json!({
+                "edits": [{
+                    "path": "notes.txt",
+                    "op": "replace",
+                    "start": format!("1#{hash}"),
+                    "end": format!("1#{hash}"),
+                    "content": "new",
+                }]
+            }),
+        };
+
+        let result = execute_worker_runtime_tool_call_for_apps(
+            &mut apps,
+            &call,
+            WorkerRuntimeToolCallContext {
+                execution_cwd: execution.path(),
+                sandbox_policy: &RuntimeSandboxPolicy::disabled(),
+                tool_output_max_tokens: 1024,
+                supports_vision: Some(false),
+                image_state_dir: &image_state_dir,
+                turn_epoch: 1,
+                output_schema: &output_schema,
+                worker_plan: &mut worker_plan,
+                file_anchors: &mut file_anchors,
+                dashboard_history: None,
+            },
+        )
+        .await
+        .expect("worker edit_file");
+
+        assert!(matches!(
+            &result.activity_event,
+            Some(SessionActivityEvent::CodingEdit(edit))
+                if edit.tool_name.as_deref() == Some("edit_file")
+                    && edit.title == "Edited File"
+                    && edit.file.as_deref() == Some("notes.txt")
+                    && edit.diff_files.len() == 1
+        ));
+        assert_eq!(
+            std::fs::read_to_string(execution.path().join("notes.txt")).expect("read fixture"),
+            "new\n"
+        );
+    }
+
     struct UnusedModelProvider;
 
     #[async_trait]

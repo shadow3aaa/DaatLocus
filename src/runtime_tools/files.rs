@@ -250,6 +250,15 @@ pub fn execute_worker_edit_file(
     let result = scope_engine::patch::edit_file_apply(&args.edits, execution_cwd)
         .map_err(|err| miette!("edit_file failed: {err}"))?;
     anchors.apply_anchor_mutations(&mutations);
+    Ok(edit_file_tool_result(call, &result))
+}
+
+/// Build the shared `edit_file` result, including the edit activity cell, so
+/// worker turns surface edits exactly like main-session turns do.
+fn edit_file_tool_result(
+    call: &AgentToolCall,
+    result: &scope_engine::api::AppliedStructuredEditSummary,
+) -> ToolExecutionResult {
     let added_lines = result
         .files
         .iter()
@@ -260,7 +269,13 @@ pub fn execute_worker_edit_file(
         .iter()
         .map(|file| file.removed_lines)
         .sum::<usize>();
-    Ok(ToolExecutionResult::from_activity_event(
+    let diff_files = applied_edit_ui_files(result);
+    let title = if result.files.len() == 1 {
+        "Edited File"
+    } else {
+        "Edited Files"
+    };
+    ToolExecutionResult::from_activity_event(
         format!("edited {} file(s)", result.files.len()),
         json!({
             "changed_files": result.files.len(),
@@ -278,8 +293,23 @@ pub fn execute_worker_edit_file(
                 })
             }).collect::<Vec<_>>(),
         }),
-        None,
-    ))
+        Some(SessionActivityEvent::CodingEdit(
+            CodingEditActivityDescriptor {
+                stable_id: edit_file_stable_id(call),
+                title: title.to_string(),
+                tool_name: Some("edit_file".to_string()),
+                tool_app: Some("Workspace".to_string()),
+                selector: "hash-anchored file edit".to_string(),
+                file: result.files.first().map(|file| file.path.clone()),
+                added_lines,
+                removed_lines,
+                propagation_count: 0,
+                impact_lines: Vec::new(),
+                diff_files,
+            }
+            .into(),
+        )),
+    )
 }
 
 fn execute_edit_file_runtime_tool<'a>(
@@ -308,57 +338,7 @@ fn execute_edit_file_runtime_tool<'a>(
         let result = scope_engine::patch::edit_file_apply(&args.edits, &context.execution_cwd)
             .map_err(|err| miette!("edit_file failed: {err}"))?;
         context.file_anchors.apply_anchor_mutations(&mutations);
-        let added_lines = result
-            .files
-            .iter()
-            .map(|file| file.added_lines)
-            .sum::<usize>();
-        let removed_lines = result
-            .files
-            .iter()
-            .map(|file| file.removed_lines)
-            .sum::<usize>();
-        let diff_files = applied_edit_ui_files(&result);
-        let title = if result.files.len() == 1 {
-            "Edited File"
-        } else {
-            "Edited Files"
-        };
-        Ok(ToolExecutionResult::from_activity_event(
-            format!("edited {} file(s)", result.files.len()),
-            json!({
-                "changed_files": result.files.len(),
-                "added_lines": added_lines,
-                "removed_lines": removed_lines,
-                "files": result.files.iter().map(|file| {
-                    json!({
-                        "path": file.path,
-                        "operation": match file.operation {
-                            scope_engine::api::AppliedStructuredEditOperation::Add => "add",
-                            scope_engine::api::AppliedStructuredEditOperation::Update => "update",
-                        },
-                        "added_lines": file.added_lines,
-                        "removed_lines": file.removed_lines,
-                    })
-                }).collect::<Vec<_>>(),
-            }),
-            Some(SessionActivityEvent::CodingEdit(
-                CodingEditActivityDescriptor {
-                    stable_id: edit_file_stable_id(call),
-                    title: title.to_string(),
-                    tool_name: Some("edit_file".to_string()),
-                    tool_app: Some("Workspace".to_string()),
-                    selector: "hash-anchored file edit".to_string(),
-                    file: result.files.first().map(|file| file.path.clone()),
-                    added_lines,
-                    removed_lines,
-                    propagation_count: 0,
-                    impact_lines: Vec::new(),
-                    diff_files,
-                }
-                .into(),
-            )),
-        ))
+        Ok(edit_file_tool_result(call, &result))
     })
 }
 
