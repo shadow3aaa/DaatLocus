@@ -1,32 +1,102 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{Context, EventPayload, EventView, Result};
 use crate::{
+    dashboard::{
+        DashboardActivityEvent, DashboardState, apply_activity_event, assistant_activity_cell,
+        thinking_activity_cell,
+    },
     live_progress::{LiveProgressEvent, TelegramLiveStatus},
     telegram_transport::state::TelegramTransportStateHandle,
 };
-use tokio::{sync::mpsc, task::JoinHandle, time::MissedTickBehavior};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
+    time::MissedTickBehavior,
+};
 
 const TELEGRAM_MESSAGE_LIMIT: usize = 4096;
 const MAX_LIVE_DRAFT_STATUSES: usize = 5;
 const MAX_RECENT_STATUSES_WITH_STICKY_WORKFLOW: usize = 4;
 const MARKDOWN_V2_ELLIPSIS: &str = "\\.\\.\\.";
+const TELEGRAM_DRAFT_FLUSH_INTERVAL: Duration = Duration::from_millis(900);
+const DASHBOARD_DRAFT_FLUSH_INTERVAL: Duration = Duration::from_millis(200);
+const DASHBOARD_THINKING_DRAFT_KEY: &str = "thinking-draft";
+const DASHBOARD_ASSISTANT_DRAFT_KEY: &str = "assistant-draft";
 
-pub(super) struct TelegramLiveDraftSession {
+pub(super) struct LiveProgressSession {
     join: JoinHandle<()>,
 }
 
-impl TelegramLiveDraftSession {
+impl LiveProgressSession {
     pub(super) async fn shutdown(self, context: &Context) {
         context.install_live_progress(None);
         let _ = tokio::time::timeout(Duration::from_secs(2), self.join).await;
     }
 }
 
-pub(super) fn maybe_start_telegram_live_draft_session(
+struct TelegramDraftTarget {
+    chat_id: i64,
+    draft_id: i64,
+    event_id: String,
+    previous_sent_text: Option<String>,
+}
+
+/// Start the per-turn live progress session.
+///
+/// Dashboard draft cells are produced for every turn. Telegram live drafts are
+/// produced only for private-chat Telegram events.
+pub(super) fn maybe_start_live_progress_session(
     context: &Context,
     claimed_event_views: &[EventView],
-) -> Option<TelegramLiveDraftSession> {
+) -> Option<LiveProgressSession> {
+    let telegram_target = telegram_draft_target(context, claimed_event_views);
+    let dashboard_tx = context.dashboard_tx.clone();
+    if telegram_target.is_none() && dashboard_tx.is_none() {
+        return None;
+    }
+    let (tx, mut rx) = mpsc::unbounded_channel::<LiveProgressEvent>();
+    context.install_live_progress(Some(tx));
+    let mut telegram = telegram_target.map(|target| TelegramDraftProcessor::start(context, target));
+    let join = tokio::spawn(async move {
+        let mut dashboard = DashboardLiveDraftState::default();
+        let mut dashboard_interval = tokio::time::interval(DASHBOARD_DRAFT_FLUSH_INTERVAL);
+        dashboard_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut telegram_interval = tokio::time::interval(TELEGRAM_DRAFT_FLUSH_INTERVAL);
+        telegram_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                maybe_event = rx.recv() => {
+                    match maybe_event {
+                        Some(event) => {
+                            dashboard.apply(&event, dashboard_tx.as_ref());
+                            if let Some(processor) = telegram.as_mut() {
+                                processor.apply(event);
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = dashboard_interval.tick() => dashboard.flush(dashboard_tx.as_ref()),
+                _ = telegram_interval.tick() => {
+                    if let Some(processor) = telegram.as_mut() {
+                        processor.flush();
+                    }
+                }
+            }
+        }
+        dashboard.end_cells(dashboard_tx.as_ref());
+        if let Some(processor) = telegram.as_mut() {
+            processor.flush();
+        }
+    });
+    Some(LiveProgressSession { join })
+}
+
+fn telegram_draft_target(
+    context: &Context,
+    claimed_event_views: &[EventView],
+) -> Option<TelegramDraftTarget> {
     if claimed_event_views.len() != 1 {
         return None;
     }
@@ -44,64 +114,186 @@ pub(super) fn maybe_start_telegram_live_draft_session(
     let event_id = event.event_id.to_string();
     let (draft_id, previous_sent_text) = context
         .get_or_create_telegram_live_draft(event_id.clone(), stable_live_draft_id(event.event_id));
-    let live_drafts = context.telegram_live_drafts.clone();
-    let telegram = context.telegram.clone();
-    let (tx, mut rx) = mpsc::unbounded_channel::<LiveProgressEvent>();
-    context.install_live_progress(Some(tx));
-    let join = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(900));
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut last_sent = previous_sent_text.unwrap_or_default();
-        let mut state = TelegramLiveDraftState::from_previous_sent(&last_sent);
-        let mut dirty = false;
-        let initial_draft_text = state.render_markdown_v2();
-        if should_send_initial_live_draft(&last_sent) {
-            if let Err(err) = enqueue_live_draft(&telegram, chat_id, draft_id, &initial_draft_text)
-            {
+    Some(TelegramDraftTarget {
+        chat_id,
+        draft_id,
+        event_id,
+        previous_sent_text,
+    })
+}
+
+struct TelegramDraftProcessor {
+    telegram: TelegramTransportStateHandle,
+    live_drafts: crate::context::TelegramLiveDraftRegistry,
+    event_id: String,
+    chat_id: i64,
+    draft_id: i64,
+    last_sent: String,
+    state: TelegramLiveDraftState,
+    dirty: bool,
+}
+
+impl TelegramDraftProcessor {
+    fn start(context: &Context, target: TelegramDraftTarget) -> Self {
+        let mut processor = Self {
+            telegram: context.telegram.clone(),
+            live_drafts: context.telegram_live_drafts.clone(),
+            event_id: target.event_id,
+            chat_id: target.chat_id,
+            draft_id: target.draft_id,
+            last_sent: target.previous_sent_text.clone().unwrap_or_default(),
+            state: TelegramLiveDraftState::from_previous_sent(
+                target.previous_sent_text.as_deref().unwrap_or_default(),
+            ),
+            dirty: false,
+        };
+        let initial_draft_text = processor.state.render_markdown_v2();
+        if should_send_initial_live_draft(&processor.last_sent) {
+            if let Err(err) = enqueue_live_draft(
+                &processor.telegram,
+                processor.chat_id,
+                processor.draft_id,
+                &initial_draft_text,
+            ) {
                 tracing::warn!("telegram initial live draft enqueue failed: {err:?}");
             } else {
-                record_live_draft_sent(&live_drafts, &event_id, &initial_draft_text);
-                last_sent = initial_draft_text;
+                record_live_draft_sent(
+                    &processor.live_drafts,
+                    &processor.event_id,
+                    &initial_draft_text,
+                );
+                processor.last_sent = initial_draft_text;
             }
         }
-        loop {
-            tokio::select! {
-                maybe_event = rx.recv() => {
-                    match maybe_event {
-                        Some(event) => {
-                            apply_live_progress_event(&mut state, &mut dirty, event);
-                        }
-                        None => break,
-                    }
-                }
-                _ = interval.tick() => {
-                    if dirty {
-                        let draft_text = state.render_markdown_v2();
-                        if draft_text != last_sent {
-                            if let Err(err) = enqueue_live_draft(&telegram, chat_id, draft_id, &draft_text) {
-                                tracing::warn!("telegram live draft enqueue failed: {err:?}");
-                            } else {
-                                record_live_draft_sent(&live_drafts, &event_id, &draft_text);
-                                last_sent = draft_text;
-                            }
-                        }
-                        dirty = false;
-                    }
-                }
-            }
+        processor
+    }
+
+    fn apply(&mut self, event: LiveProgressEvent) {
+        apply_live_progress_event(&mut self.state, &mut self.dirty, event);
+    }
+
+    fn flush(&mut self) {
+        if !self.dirty {
+            return;
         }
-        if dirty {
-            let draft_text = state.render_markdown_v2();
-            if draft_text != last_sent
-                && let Err(err) = enqueue_live_draft(&telegram, chat_id, draft_id, &draft_text)
+        let draft_text = self.state.render_markdown_v2();
+        if draft_text != self.last_sent {
+            if let Err(err) =
+                enqueue_live_draft(&self.telegram, self.chat_id, self.draft_id, &draft_text)
             {
-                tracing::warn!("telegram final live draft enqueue failed: {err:?}");
-            } else if draft_text != last_sent {
-                record_live_draft_sent(&live_drafts, &event_id, &draft_text);
+                tracing::warn!("telegram live draft enqueue failed: {err:?}");
+            } else {
+                record_live_draft_sent(&self.live_drafts, &self.event_id, &draft_text);
+                self.last_sent = draft_text;
             }
         }
-    });
-    Some(TelegramLiveDraftSession { join })
+        self.dirty = false;
+    }
+}
+
+#[derive(Default)]
+struct DashboardLiveDraftState {
+    thinking: String,
+    assistant: String,
+    has_drafts: bool,
+    dirty: bool,
+    last_flush_at: Option<Instant>,
+}
+
+impl DashboardLiveDraftState {
+    fn apply(&mut self, event: &LiveProgressEvent, tx: Option<&watch::Sender<DashboardState>>) {
+        match event {
+            LiveProgressEvent::GenerationStarted | LiveProgressEvent::DraftReset => self.reset(tx),
+            LiveProgressEvent::AssistantContent { content } => {
+                self.assistant.clone_from(content);
+                self.mark_dirty(tx);
+            }
+            LiveProgressEvent::ReasoningContent { content } => {
+                self.thinking.clone_from(content);
+                self.mark_dirty(tx);
+            }
+            LiveProgressEvent::TelegramStatus(_) => {}
+        }
+    }
+
+    fn mark_dirty(&mut self, tx: Option<&watch::Sender<DashboardState>>) {
+        self.dirty = true;
+        let due = self
+            .last_flush_at
+            .is_none_or(|at| at.elapsed() >= DASHBOARD_DRAFT_FLUSH_INTERVAL);
+        if due {
+            self.flush(tx);
+        }
+    }
+
+    fn flush(&mut self, tx: Option<&watch::Sender<DashboardState>>) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+        self.last_flush_at = Some(Instant::now());
+        let Some(tx) = tx else {
+            return;
+        };
+        let thinking = thinking_activity_cell(&self.thinking);
+        let assistant = assistant_activity_cell(&self.assistant);
+        if thinking.is_none() && assistant.is_none() {
+            return;
+        }
+        self.has_drafts = true;
+        tx.send_modify(|state| {
+            if let Some(event) = thinking {
+                apply_activity_event(
+                    state,
+                    DashboardActivityEvent::LiveCellUpsert {
+                        key: DASHBOARD_THINKING_DRAFT_KEY.to_string(),
+                        event: Box::new(event),
+                    },
+                );
+            }
+            if let Some(event) = assistant {
+                apply_activity_event(
+                    state,
+                    DashboardActivityEvent::LiveCellUpsert {
+                        key: DASHBOARD_ASSISTANT_DRAFT_KEY.to_string(),
+                        event: Box::new(event),
+                    },
+                );
+            }
+        });
+    }
+
+    fn reset(&mut self, tx: Option<&watch::Sender<DashboardState>>) {
+        self.thinking.clear();
+        self.assistant.clear();
+        self.dirty = false;
+        self.last_flush_at = None;
+        self.end_cells(tx);
+    }
+
+    fn end_cells(&mut self, tx: Option<&watch::Sender<DashboardState>>) {
+        if !self.has_drafts {
+            return;
+        }
+        self.has_drafts = false;
+        let Some(tx) = tx else {
+            return;
+        };
+        tx.send_modify(|state| {
+            apply_activity_event(
+                state,
+                DashboardActivityEvent::LiveCellEnd {
+                    key: DASHBOARD_THINKING_DRAFT_KEY.to_string(),
+                },
+            );
+            apply_activity_event(
+                state,
+                DashboardActivityEvent::LiveCellEnd {
+                    key: DASHBOARD_ASSISTANT_DRAFT_KEY.to_string(),
+                },
+            );
+        });
+    }
 }
 
 fn enqueue_live_draft(
@@ -177,6 +369,7 @@ impl TelegramLiveDraftState {
     fn apply(&mut self, event: LiveProgressEvent) -> bool {
         match event {
             LiveProgressEvent::GenerationStarted
+            | LiveProgressEvent::DraftReset
             | LiveProgressEvent::AssistantContent { .. }
             | LiveProgressEvent::ReasoningContent { .. } => false,
             LiveProgressEvent::TelegramStatus(status) => {
@@ -543,5 +736,103 @@ mod tests {
             escape_markdown_v2("_*[]()~`>#+-=|{}.!\\"),
             "\\_\\*\\[\\]\\(\\)\\~\\`\\>\\#\\+\\-\\=\\|\\{\\}\\.\\!\\\\"
         );
+    }
+
+    #[test]
+    fn dashboard_draft_upserts_assistant_and_thinking_cells() {
+        let (tx, rx) = tokio::sync::watch::channel(crate::dashboard::DashboardState::default());
+        let mut state = DashboardLiveDraftState::default();
+
+        state.apply(
+            &LiveProgressEvent::ReasoningContent {
+                content: "considering options".to_string(),
+            },
+            Some(&tx),
+        );
+        state.apply(
+            &LiveProgressEvent::AssistantContent {
+                content: "Here is the answer.".to_string(),
+            },
+            Some(&tx),
+        );
+        state.flush(Some(&tx));
+
+        let live = rx.borrow().live_activity_events.clone();
+        assert_eq!(live.len(), 2);
+        assert!(live.iter().any(|cell| {
+            cell.key == DASHBOARD_THINKING_DRAFT_KEY
+                && matches!(
+                    &cell.event,
+                    crate::dashboard::SessionActivityEvent::Thinking(thinking)
+                        if thinking.content == "considering options"
+                )
+        }));
+        assert!(live.iter().any(|cell| {
+            cell.key == DASHBOARD_ASSISTANT_DRAFT_KEY
+                && matches!(
+                    &cell.event,
+                    crate::dashboard::SessionActivityEvent::Assistant(assistant)
+                        if assistant.content == "Here is the answer."
+                )
+        }));
+    }
+
+    #[test]
+    fn dashboard_draft_reset_removes_cells_and_buffers() {
+        let (tx, rx) = tokio::sync::watch::channel(crate::dashboard::DashboardState::default());
+        let mut state = DashboardLiveDraftState::default();
+        state.apply(
+            &LiveProgressEvent::AssistantContent {
+                content: "draft".to_string(),
+            },
+            Some(&tx),
+        );
+        assert_eq!(rx.borrow().live_activity_events.len(), 1);
+
+        state.apply(&LiveProgressEvent::DraftReset, Some(&tx));
+        assert!(rx.borrow().live_activity_events.is_empty());
+
+        state.flush(Some(&tx));
+        assert!(
+            rx.borrow().live_activity_events.is_empty(),
+            "a late flush must not resurrect a committed draft"
+        );
+    }
+
+    #[test]
+    fn dashboard_draft_throttles_refreshes_until_flush() {
+        let (tx, rx) = tokio::sync::watch::channel(crate::dashboard::DashboardState::default());
+        let mut state = DashboardLiveDraftState::default();
+        state.apply(
+            &LiveProgressEvent::AssistantContent {
+                content: "first".to_string(),
+            },
+            Some(&tx),
+        );
+        state.apply(
+            &LiveProgressEvent::AssistantContent {
+                content: "first second".to_string(),
+            },
+            Some(&tx),
+        );
+
+        assert!(matches!(
+            rx.borrow().live_activity_events.first(),
+            Some(cell) if matches!(
+                &cell.event,
+                crate::dashboard::SessionActivityEvent::Assistant(assistant)
+                    if assistant.content == "first"
+            )
+        ));
+
+        state.flush(Some(&tx));
+        assert!(matches!(
+            rx.borrow().live_activity_events.first(),
+            Some(cell) if matches!(
+                &cell.event,
+                crate::dashboard::SessionActivityEvent::Assistant(assistant)
+                    if assistant.content == "first second"
+            )
+        ));
     }
 }

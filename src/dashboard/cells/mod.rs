@@ -175,6 +175,13 @@ pub enum DashboardActivityEvent {
     BrowserEnd {
         key: String,
     },
+    LiveCellUpsert {
+        key: String,
+        event: Box<SessionActivityEvent>,
+    },
+    LiveCellEnd {
+        key: String,
+    },
 }
 
 pub fn render_activity_from_messages(messages: Vec<HistoryMessage>) -> Vec<SessionActivityEvent> {
@@ -280,6 +287,13 @@ pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivity
             },
         ),
         DashboardActivityEvent::BrowserEnd { key } => {
+            state.live_activity_events.retain(|cell| cell.key != key);
+        }
+        DashboardActivityEvent::LiveCellUpsert { key, event } => upsert_live_activity_cell(
+            &mut state.live_activity_events,
+            LiveActivityEvent { key, event: *event },
+        ),
+        DashboardActivityEvent::LiveCellEnd { key } => {
             state.live_activity_events.retain(|cell| cell.key != key);
         }
     }
@@ -775,6 +789,41 @@ mod tests {
             .map(|cell| cell.key.as_str())
             .collect();
         assert_eq!(keys, vec!["exec-1", RUNTIME_STATUS_LIVE_CELL_KEY]);
+    }
+
+    #[test]
+    fn live_cell_events_upsert_and_end_by_key() {
+        let mut state = DashboardState::default();
+        apply_activity_event(
+            &mut state,
+            DashboardActivityEvent::LiveCellUpsert {
+                key: "thinking-draft".to_string(),
+                event: Box::new(SessionActivityEvent::Thinking(thinking_cell("first draft"))),
+            },
+        );
+        apply_activity_event(
+            &mut state,
+            DashboardActivityEvent::LiveCellUpsert {
+                key: "thinking-draft".to_string(),
+                event: Box::new(SessionActivityEvent::Thinking(thinking_cell(
+                    "second draft",
+                ))),
+            },
+        );
+
+        assert_eq!(state.live_activity_events.len(), 1);
+        assert!(matches!(
+            &state.live_activity_events[0].event,
+            SessionActivityEvent::Thinking(thinking) if thinking.content == "second draft"
+        ));
+
+        apply_activity_event(
+            &mut state,
+            DashboardActivityEvent::LiveCellEnd {
+                key: "thinking-draft".to_string(),
+            },
+        );
+        assert!(state.live_activity_events.is_empty());
     }
 
     #[test]

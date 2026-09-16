@@ -229,6 +229,10 @@ impl Context {
         });
     }
 
+    pub fn emit_live_draft_reset(&self) {
+        self.emit_live_progress(LiveProgressEvent::DraftReset);
+    }
+
     pub fn emit_live_telegram_status(&self, status: TelegramLiveStatus) {
         self.emit_live_progress(LiveProgressEvent::TelegramStatus(status));
     }

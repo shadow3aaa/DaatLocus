@@ -88,7 +88,7 @@ use claimed_input::{
     handle_model_request_failure, handle_runtime_overflow, requeue_claimed_runtime_events,
     runtime_work_origin,
 };
-use live_draft::{TelegramLiveDraftSession, maybe_start_telegram_live_draft_session};
+use live_draft::{LiveProgressSession, maybe_start_live_progress_session};
 use workflow_evidence::{
     maybe_record_skill_read, record_runtime_history_messages, record_skill_run_evidence,
 };
@@ -377,6 +377,84 @@ mod tests {
 
         fn model_name(&self) -> String {
             "tool-image-ordering-test".to_string()
+        }
+    }
+
+    struct StreamingProgressProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+        dashboard_rx: tokio::sync::watch::Receiver<crate::dashboard::DashboardState>,
+        observed_draft: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for StreamingProgressProvider {
+        async fn complete_json(
+            &self,
+            _request: PromptRequest,
+            _options: ModelRequestOptions,
+        ) -> Result<serde_json::Value> {
+            Err(miette!(
+                "streaming progress test does not use structured output"
+            ))
+        }
+
+        async fn complete_agent_turn(
+            &self,
+            _request: AgentTurnRequest,
+            options: ModelRequestOptions,
+        ) -> Result<AgentTurnStreamResult> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(progress) = options.progress.as_ref() {
+                progress.emit_reasoning_content("checking the fixture");
+                progress.emit_assistant_content("working on the request");
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                let has_drafts = self
+                    .dashboard_rx
+                    .borrow()
+                    .live_activity_events
+                    .iter()
+                    .any(|cell| cell.key == "assistant-draft" || cell.key == "thinking-draft");
+                if has_drafts {
+                    self.observed_draft
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            Ok(AgentTurnStreamResult {
+                items: vec![AgentTurnItem::ToolCall {
+                    call: AgentToolCall {
+                        id: "call-finish".to_string(),
+                        name: "finish_and_send".to_string(),
+                        arguments: json!({
+                            "disposition": "resolved",
+                            "reply_message": "done",
+                        }),
+                    },
+                }],
+                raw_stream_follow_up: true,
+                last_assistant_message: None,
+                last_reasoning_content: None,
+            })
+        }
+
+        fn request_budget_limits(&self) -> crate::context_budget::RequestBudgetLimits {
+            crate::context_budget::RequestBudgetLimits {
+                context_window_tokens: 1_000_000,
+                auto_compact_threshold_tokens: 900_000,
+                reserved_output_tokens: 50_000,
+            }
+        }
+
+        fn token_usage_info(&self) -> crate::core::TokenUsageInfo {
+            crate::core::TokenUsageInfo::default()
+        }
+
+        fn model_name(&self) -> String {
+            "streaming-progress-test".to_string()
         }
     }
 
@@ -1083,6 +1161,49 @@ mod tests {
         assert!(
             image_index > assistant_index + 2,
             "tool image message must come after every tool result"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_progress_populates_and_clears_live_drafts() {
+        let mut isolated = IsolatedRuntimeContext::new().await;
+        let (dashboard_tx, dashboard_rx) =
+            tokio::sync::watch::channel(crate::dashboard::DashboardState::default());
+        isolated.context.dashboard_tx = Some(dashboard_tx);
+        let observed_draft = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        isolated.context.model_provider = Box::new(StreamingProgressProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+            dashboard_rx,
+            observed_draft: observed_draft.clone(),
+        });
+
+        let event_id = isolated
+            .context
+            .events
+            .register_terminal_incoming(terminal_event("stream the answer"))
+            .expect("register event");
+        isolated
+            .context
+            .pending_work
+            .enqueue(PendingWork::Event { event_id })
+            .expect("enqueue event");
+
+        execute_agent_loop_step(&mut isolated.context, None).await;
+
+        assert!(
+            observed_draft.load(std::sync::atomic::Ordering::SeqCst),
+            "streamed progress should surface as live draft cells"
+        );
+        let final_state = isolated
+            .context
+            .dashboard_tx
+            .as_ref()
+            .expect("dashboard tx")
+            .borrow()
+            .clone();
+        assert!(
+            final_state.live_activity_events.is_empty(),
+            "live drafts must not survive the turn"
         );
     }
 

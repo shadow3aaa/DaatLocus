@@ -3,8 +3,15 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LiveProgressEvent {
     GenerationStarted,
-    AssistantContent { content: String },
-    ReasoningContent { content: String },
+    /// The runtime committed the current draft output (as activity cells or a
+    /// final reply), so consumers must drop any buffered draft text.
+    DraftReset,
+    AssistantContent {
+        content: String,
+    },
+    ReasoningContent {
+        content: String,
+    },
     TelegramStatus(TelegramLiveStatus),
 }
 

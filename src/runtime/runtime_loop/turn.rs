@@ -4,24 +4,24 @@ use super::{
     AgentLoopStepOutput, AgentMessage, AgentToolCall, AgentTurnRequest, AppId,
     AppToolExecutionContext, ClaimedRuntimeInput, Context, DashboardActivityEvent,
     DashboardActivityHistoryStore, DashboardActivityHistoryWindow, DashboardState, Duration,
-    EpisodeActionRecord, EventPayload, EventView, HistoryMessage,
+    EpisodeActionRecord, EventPayload, EventView, HistoryMessage, LiveProgressSession,
     MID_TURN_COMPACTION_MAX_RECOVERIES, PreTurnState, RUNTIME_EVENT_CLAIM_BATCH_SIZE,
     RUNTIME_HISTORY_MIN_MESSAGES, RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS, Result,
     RuntimeErrorActionContext, RuntimeErrorCase, RuntimeErrorCaseParts, RuntimeErrorKind,
     RuntimeErrorObservation, RuntimeErrorRuntimeContext, RuntimeErrorTaskContext,
-    RuntimeStatusLevel, RuntimeTurnPhase, SessionActivityEvent, TelegramLiveDraftSession,
-    TextActivityDescriptor, ToolCallActivityEvent, ToolExecutionResult,
-    activity_event_from_tool_call_activity_event, afterclaim_context_input_for_claimed_inputs,
-    append_runtime_error_case, apply_activity_event, assistant_activity_cell,
-    build_afterclaim_context_text, build_preturn_context_text, build_runtime_request_envelope,
-    build_runtime_tool_specs, build_tool_call_activity_event, claim_pending_runtime_inputs,
-    claimed_events_are_terminal, claimed_events_require_explicit_completion, claimed_input_mode,
+    RuntimeStatusLevel, RuntimeTurnPhase, SessionActivityEvent, TextActivityDescriptor,
+    ToolCallActivityEvent, ToolExecutionResult, activity_event_from_tool_call_activity_event,
+    afterclaim_context_input_for_claimed_inputs, append_runtime_error_case, apply_activity_event,
+    assistant_activity_cell, build_afterclaim_context_text, build_preturn_context_text,
+    build_runtime_request_envelope, build_runtime_tool_specs, build_tool_call_activity_event,
+    claim_pending_runtime_inputs, claimed_events_are_terminal,
+    claimed_events_require_explicit_completion, claimed_input_mode,
     claimed_runtime_input_fingerprint, compact_preserved_body_lines, execute_agent_tool_call,
     execute_pre_turn_runtime_compaction, finalize_claimed_runtime_events,
     handle_model_request_failure, handle_runtime_overflow, is_context_budget_exceeded, json,
-    maybe_compact_runtime_messages, maybe_record_skill_read,
-    maybe_start_telegram_live_draft_session, miette, record_runtime_history_messages,
-    record_skill_run_evidence, render_activity_from_messages, render_telegram_tool_result_status,
+    maybe_compact_runtime_messages, maybe_record_skill_read, maybe_start_live_progress_session,
+    miette, record_runtime_history_messages, record_skill_run_evidence,
+    render_activity_from_messages, render_telegram_tool_result_status,
     runtime_request_budget_limits, runtime_work_origin, set_runtime_status,
     set_runtime_status_only, summarize_action_from_tool_call, thinking_activity_cell,
     user_activity_cell_from_event,
@@ -72,7 +72,7 @@ pub(super) fn clear_runtime_overflow_failure_after_compaction(
 }
 
 struct RuntimeTurnAbort<'a> {
-    live_draft_session: Option<TelegramLiveDraftSession>,
+    live_progress_session: Option<LiveProgressSession>,
     claimed_event_ids: &'a [String],
     observation: String,
     description: String,
@@ -83,14 +83,14 @@ async fn abort_runtime_turn_before_model(
     abort: RuntimeTurnAbort<'_>,
 ) -> AgentLoopStepExecution {
     let RuntimeTurnAbort {
-        live_draft_session,
+        live_progress_session,
         claimed_event_ids,
         observation,
         description,
     } = abort;
 
     context.set_runtime_phase(None);
-    if let Some(session) = live_draft_session {
+    if let Some(session) = live_progress_session {
         session.shutdown(context).await;
     } else {
         context.install_live_progress(None);
@@ -309,7 +309,7 @@ pub async fn execute_agent_loop_step(
     let preflight_timeout = Duration::from_secs(RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS);
     let afterclaim_context_input = afterclaim_context_input_for_claimed_inputs(&claimed_inputs);
     let claimed_event_views = claimed_inputs.clone();
-    let live_draft_session = maybe_start_telegram_live_draft_session(context, &claimed_event_views);
+    let live_progress_session = maybe_start_live_progress_session(context, &claimed_event_views);
     enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightPreTurnContext);
     let should_prepare_coding_project = should_prepare_coding_project_for_claimed_input(
         context.afterclaim_context_fingerprint.as_deref(),
@@ -325,7 +325,7 @@ pub async fn execute_agent_loop_step(
         return abort_runtime_turn_before_model(
             context,
             RuntimeTurnAbort {
-                live_draft_session,
+                live_progress_session,
                 claimed_event_ids: &claimed_event_ids,
                 observation: format!("runtime preflight failed: auto coding project setup: {err}"),
                 description: "Failed to prepare the Coding app for the project session."
@@ -371,7 +371,7 @@ pub async fn execute_agent_loop_step(
         return abort_runtime_turn_before_model(
             context,
             RuntimeTurnAbort {
-                live_draft_session,
+                live_progress_session,
                 claimed_event_ids: &claimed_event_ids,
                 observation: format!("runtime preflight failed: {err}"),
                 description: "Failed to build preturn context.".to_string(),
@@ -479,7 +479,7 @@ pub async fn execute_agent_loop_step(
             return abort_runtime_turn_before_model(
                 context,
                 RuntimeTurnAbort {
-                    live_draft_session,
+                    live_progress_session,
                     claimed_event_ids: &claimed_event_ids,
                     observation: format!("runtime preflight failed: {err}"),
                     description: "Failed to archive and reset the runtime context.".to_string(),
@@ -800,6 +800,7 @@ pub async fn execute_agent_loop_step(
                 committed_cells.push(cell);
             }
             append_committed_activity_cells(context, tx, committed_cells);
+            context.emit_live_draft_reset();
             // OpenAI-compatible providers require every tool message for an
             // assistant tool_calls message to come first. Tool-attached image
             // messages must not interrupt that run, so they are deferred until
@@ -1120,6 +1121,7 @@ pub async fn execute_agent_loop_step(
                 checkpoint_runtime_step_history(context, &mut runtime_step);
             }
             runtime_step.push_agent_message(AgentMessage::user(expected_behavior));
+            context.emit_live_draft_reset();
             continue 'agent_loop;
         }
         let current_doing = assistant_text
@@ -1139,6 +1141,7 @@ pub async fn execute_agent_loop_step(
         if let Some(cell) = assistant_activity_cell(&assistant_text) {
             append_committed_activity_cells(context, tx, vec![cell]);
         }
+        context.emit_live_draft_reset();
         break 'agent_loop AgentLoopStepOutput {
             observation: if tool_results.is_empty() {
                 assistant_text.clone()
@@ -1156,7 +1159,7 @@ pub async fn execute_agent_loop_step(
     };
     runtime_step.set_current_doing(output.current_doing.clone());
     context.set_runtime_phase(None);
-    if let Some(session) = live_draft_session {
+    if let Some(session) = live_progress_session {
         session.shutdown(context).await;
     } else {
         context.install_live_progress(None);

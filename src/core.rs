@@ -281,6 +281,11 @@ impl ModelProgressSink {
             content: content.into(),
         });
     }
+
+    /// Drop buffered draft output because the runtime committed it.
+    pub fn emit_draft_reset(&self) {
+        let _ = self.sender.send(LiveProgressEvent::DraftReset);
+    }
 }
 
 /// Explicit metadata and runtime policy for one provider call.
@@ -543,6 +548,10 @@ where
 {
     const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+    // A retried attempt must not keep draft text streamed by the failed one.
+    if let Some(progress) = options.progress.as_ref() {
+        progress.emit_draft_reset();
+    }
     let request = tokio::time::timeout(
         request_timeout,
         provider.complete_agent_turn(request, options),
