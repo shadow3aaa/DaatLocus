@@ -1732,6 +1732,42 @@ fn worker_input_message(input: &Value) -> String {
     serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string())
 }
 
+/// Human-readable rendering of a worker input for the activity feed. The model
+/// still receives the typed JSON from `worker_input_message`; this text only
+/// feeds UI clients.
+fn worker_input_activity_text(input: &Value) -> String {
+    let Value::Object(fields) = input else {
+        return worker_input_scalar_text(input);
+    };
+    let mut lines = Vec::new();
+    for (key, value) in fields {
+        match value {
+            Value::Null => {}
+            Value::String(text) if text.trim().is_empty() => {}
+            Value::String(text) => lines.push(format!("{key}: {text}")),
+            Value::Array(values) if values.is_empty() => {}
+            Value::Array(values) => {
+                lines.push(format!("{key}:"));
+                for value in values {
+                    lines.push(format!("  - {}", worker_input_scalar_text(value)));
+                }
+            }
+            other => lines.push(format!("{key}: {}", worker_input_scalar_text(other))),
+        }
+    }
+    if lines.is_empty() {
+        return "{}".to_string();
+    }
+    lines.join("\n")
+}
+
+fn worker_input_scalar_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+    }
+}
+
 async fn worker_inspector_identity_from_actor(
     actor: &Arc<tokio::sync::Mutex<WorkflowWorkerActor>>,
 ) -> (WorkerDefinition, String) {
@@ -1831,7 +1867,7 @@ async fn run_worker_turn(
     actor
         .conversation
         .push_agent_message(AgentMessage::user(&input_message));
-    if let Some(event) = crate::dashboard::user_activity_cell(&input_message) {
+    if let Some(event) = crate::dashboard::user_activity_cell(&worker_input_activity_text(&input)) {
         inspector.append_worker_activity(worker_id, event);
     }
     let mut budget_recoveries = 0usize;
@@ -1891,6 +1927,11 @@ async fn run_worker_turn(
         let protocol = response.protocol();
         let follow_up_message =
             protocol.follow_up_message(true, WORKER_EXPLICIT_COMPLETION_MESSAGE);
+        if let Some(reasoning_content) = protocol.reasoning_content.as_deref()
+            && let Some(event) = crate::dashboard::thinking_activity_cell(reasoning_content)
+        {
+            inspector.append_worker_activity(worker_id, event);
+        }
         if protocol.tool_calls.is_empty() {
             let final_message = protocol.final_assistant_message.unwrap_or_default();
             if !final_message.trim().is_empty() {
@@ -2929,7 +2970,11 @@ mod tests {
     #[derive(Clone)]
     enum ScriptedWorkerResponse {
         Finish(Value),
-        Tool { name: String, arguments: Value },
+        Tool {
+            name: String,
+            arguments: Value,
+            reasoning: Option<String>,
+        },
         Error(String),
         ContextBudgetError,
     }
@@ -2943,6 +2988,19 @@ mod tests {
             Self::Tool {
                 name: name.into(),
                 arguments,
+                reasoning: None,
+            }
+        }
+
+        fn tool_with_reasoning(
+            name: impl Into<String>,
+            arguments: Value,
+            reasoning: impl Into<String>,
+        ) -> Self {
+            Self::Tool {
+                name: name.into(),
+                arguments,
+                reasoning: Some(reasoning.into()),
             }
         }
 
@@ -3083,11 +3141,15 @@ mod tests {
                 .expect("scripted responses lock")
                 .pop_front()
                 .ok_or_else(|| miette!("scripted {} worker ran out of responses", self.role))?;
-            let (name, arguments) = match response {
+            let (name, arguments, reasoning) = match response {
                 ScriptedWorkerResponse::Finish(arguments) => {
-                    ("finish_and_send".to_string(), arguments)
+                    ("finish_and_send".to_string(), arguments, None)
                 }
-                ScriptedWorkerResponse::Tool { name, arguments } => (name, arguments),
+                ScriptedWorkerResponse::Tool {
+                    name,
+                    arguments,
+                    reasoning,
+                } => (name, arguments, reasoning),
                 ScriptedWorkerResponse::Error(message) => return Err(miette!("{message}")),
                 ScriptedWorkerResponse::ContextBudgetError => {
                     let budget = crate::context_budget::estimate_agent_turn_request(
@@ -3116,7 +3178,7 @@ mod tests {
                 }],
                 raw_stream_follow_up: true,
                 last_assistant_message: None,
-                last_reasoning_content: None,
+                last_reasoning_content: reasoning,
             })
         }
 
@@ -4788,6 +4850,92 @@ workflow.define({{
         ));
     }
 
+    #[test]
+    fn worker_input_activity_text_renders_readable_fields() {
+        let text = worker_input_activity_text(&json!({
+            "goal": "check the fixture",
+            "worker_evidence": ["first", "second"],
+            "empty_list": [],
+            "empty_text": "  ",
+            "missing": null,
+        }));
+
+        assert_eq!(
+            text,
+            "goal: check the fixture\nworker_evidence:\n  - first\n  - second"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_worker_activity_renders_readable_input() {
+        let main = ScriptedWorkerProvider::new("main", vec![json!({})]);
+        let efficient = ScriptedWorkerProvider::new("efficient", Vec::new());
+        let isolated = IsolatedWorkflowContext::new(main, efficient).await;
+        let definition = WorkerDefinition {
+            role: "worker".to_string(),
+            model: WorkerModel::Main,
+            input_schema: goal_like_worker_schema(),
+            output_schema: worker_schema(),
+            instruction: "Return the required output.".to_string(),
+            extra_tools: Vec::new(),
+        };
+        let snapshot = run_worker_with_inspector(
+            &isolated,
+            definition,
+            json!({
+                "goal": "implement the fixture",
+                "attempt": 2,
+                "verifier_feedback": "",
+            }),
+        )
+        .await
+        .expect("worker should complete");
+        drop(isolated);
+
+        assert!(matches!(
+            snapshot.workers[0].activity.first(),
+            Some(crate::dashboard::SessionActivityEvent::User(input))
+                if input.content == "attempt: 2\ngoal: implement the fixture"
+        ));
+    }
+
+    #[tokio::test]
+    async fn workflow_worker_records_thinking_activity() {
+        let main = ScriptedWorkerProvider::with_responses(
+            "main",
+            vec![
+                ScriptedWorkerResponse::tool_with_reasoning(
+                    "read_file",
+                    json!({ "path": "notes.txt" }),
+                    "checking the fixture before editing",
+                ),
+                ScriptedWorkerResponse::finish(json!({})),
+            ],
+        );
+        let efficient = ScriptedWorkerProvider::new("efficient", Vec::new());
+        let isolated = IsolatedWorkflowContext::new(main, efficient).await;
+        std::fs::write(isolated.context.execution_cwd.join("notes.txt"), "alpha\n")
+            .expect("write fixture");
+        let definition = WorkerDefinition {
+            role: "worker".to_string(),
+            model: WorkerModel::Main,
+            input_schema: worker_schema(),
+            output_schema: worker_schema(),
+            instruction: "Inspect the fixture and finish.".to_string(),
+            extra_tools: Vec::new(),
+        };
+        let snapshot = run_worker_with_inspector(&isolated, definition, json!({}))
+            .await
+            .expect("worker should complete");
+        drop(isolated);
+
+        assert!(snapshot.workers[0].activity.iter().any(|event| matches!(
+            event,
+            crate::dashboard::SessionActivityEvent::Thinking(thinking)
+                if thinking.content.contains("checking the fixture before editing")
+        )));
+    }
+
     #[tokio::test]
     async fn workflow_worker_records_only_semantic_coding_open_project_activity() {
         let main = ScriptedWorkerProvider::with_responses(
@@ -4832,6 +4980,19 @@ workflow.define({{
         json!({
             "type": "object",
             "properties": {},
+            "required": [],
+            "additionalProperties": false,
+        })
+    }
+
+    fn goal_like_worker_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "goal": { "type": "string" },
+                "attempt": { "type": "integer" },
+                "verifier_feedback": { "type": "string" },
+            },
             "required": [],
             "additionalProperties": false,
         })
