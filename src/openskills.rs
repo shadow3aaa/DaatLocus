@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     env, fmt, fs, io,
     path::{Path, PathBuf},
 };
@@ -306,6 +306,10 @@ fn ensure_builtin_skills_on_disk() {
         );
         return;
     }
+    let current_skills = builtin_skill_bindings::BUILTIN_SKILL_SOURCES
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>();
     for (name, content) in builtin_skill_bindings::BUILTIN_SKILL_SOURCES {
         let skill_dir = target_dir.join(name);
         if let Err(err) = fs::create_dir_all(&skill_dir) {
@@ -322,6 +326,35 @@ fn ensure_builtin_skills_on_disk() {
             tracing::warn!(
                 "failed to write builtin skill {}: {err}",
                 skill_file.display()
+            );
+        }
+    }
+    remove_stale_skill_dirs(&target_dir, &current_skills);
+}
+
+/// Keep the builtin-owned home skills directory in sync with the compiled set:
+/// skill directories that no longer exist there are removed, which also covers
+/// renames. Workspace and project skills live in their own roots.
+fn remove_stale_skill_dirs(target_dir: &Path, current_skills: &[&str]) {
+    let current_skills = current_skills.iter().copied().collect::<BTreeSet<_>>();
+    let Ok(entries) = fs::read_dir(target_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || !path.join(SKILL_FILE_NAME).is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if current_skills.contains(name.as_str()) {
+            continue;
+        }
+        if let Err(err) = fs::remove_dir_all(&path) {
+            tracing::warn!(
+                "failed to remove stale builtin skill {}: {err}",
+                path.display()
             );
         }
     }
@@ -944,6 +977,31 @@ const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r"- Discovery: The list above is th
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_builtin_skills_are_removed_from_disk() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let stale = temp.path().join("commit-and-push");
+        fs::create_dir_all(&stale).expect("create stale skill dir");
+        fs::write(stale.join(SKILL_FILE_NAME), "# stale\n").expect("write stale skill");
+        let kept = temp.path().join("author-workflow");
+        fs::create_dir_all(&kept).expect("create kept skill dir");
+        fs::write(kept.join(SKILL_FILE_NAME), "# kept\n").expect("write kept skill");
+        let unrelated = temp.path().join("scratch");
+        fs::create_dir_all(&unrelated).expect("create unrelated dir");
+
+        remove_stale_skill_dirs(temp.path(), &["author-workflow"]);
+
+        assert!(!stale.exists(), "stale builtin skill dir should be removed");
+        assert!(
+            kept.exists(),
+            "current builtin skill dir should be preserved"
+        );
+        assert!(
+            unrelated.exists(),
+            "non-skill directories should be preserved"
+        );
+    }
 
     #[test]
     fn loads_skill_from_project_agents_skills() {

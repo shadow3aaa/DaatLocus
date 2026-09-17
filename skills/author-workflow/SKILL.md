@@ -1,16 +1,16 @@
 ---
-name: author-lua-workflow
-description: Author, validate, and safely test a Lua workflow that orchestrates isolated Daat Locus agent workers.
+name: author-workflow
+description: Author, validate, and safely test a workflow that orchestrates isolated Daat Locus agent workers.
 ---
 
-# Author Lua Workflow
+# Author Workflow
 
 ## When To Use
 
 Use this skill when the task calls for a reusable, executable orchestration of
 one or more isolated agent workers: a custom review pipeline, a research
 handoff, a typed multi-step procedure, or a side-effectful automation that
-needs Lua control flow.
+needs scripted control flow.
 
 Do not use a Workflow just because a task needs a browser, terminal, or coding
 tool:
@@ -21,7 +21,7 @@ tool:
   judge and resolve.
 - Use a **Skill** for reusable Markdown guidance; it never executes or owns a
   worker run.
-- Use a **Workflow** for a Lua program that creates isolated workers, chooses
+- Use a **Workflow** for a script that creates isolated workers, chooses
   branches/retries/coordination, and returns a typed result.
 
 ## File and Loading Contract
@@ -33,7 +33,7 @@ tool:
 2. Derive `workflow_id` from the lower-snake-case filename stem. Use lowercase
    letters, digits, and single underscores; begin with a letter, never end with
    an underscore, and never use `__`.
-3. Put all metadata in the Lua file. Do not add a manifest, sidecar schema,
+3. Put all metadata in the workflow file. Do not add a manifest, sidecar schema,
    profile catalog, predeclared job list, or task vocabulary.
 4. The runtime loads built-in workflow ids from the binary without writing them
    here. A file whose id matches a built-in workflow explicitly overrides that
@@ -51,7 +51,7 @@ manually route arbitrary payloads.
 
 ## Start With Portable Schemas
 
-Define reusable Lua tables for the workflow input/output and each worker or
+Define reusable tables for the workflow input/output and each worker or
 local-tool input/output. Every schema is checked at load time and every value
 is checked again at invocation time.
 
@@ -165,9 +165,9 @@ The local tool receives validated JSON-compatible input and must return an
 output matching its schema. Use it to make deterministic transforms and
 workflow-owned effects explicit rather than implicitly granting broad access.
 
-## Keep Control Flow in Lua
+## Keep Control Flow in the Script
 
-Call `workflow.define` exactly once. Its `run` function owns ordinary Lua
+Call `workflow.define` exactly once. Its `run` function owns ordinary
 conditions, loops, retries, branches, recursion, and worker coordination.
 
 ```lua
@@ -209,7 +209,7 @@ output schema. Do not use the worker output as an unvalidated final result.
 
 ## Handle Side Effects and Cancellation
 
-Lua workflow code may use host-provided `io.open`, `io.popen`, and `os.execute`.
+Workflow code may use host-provided `io.open`, `io.popen`, and `os.execute`.
 These calls remain constrained by `RuntimeSandboxPolicy`, workspace roots,
 writable-root policy, and process sandboxing; they are not a way to bypass host
 policy.
@@ -218,7 +218,7 @@ Treat file writes and shell commands as real side effects:
 
 1. Make them idempotent when practical.
 2. Persist a checkpoint explicitly if recovery matters.
-3. Check results and branch explicitly in Lua.
+3. Check results and branch explicitly.
 4. Never rely on automatic replay after interruption.
 
 An interrupted workflow is marked `interrupted`, not restarted from its first
@@ -232,7 +232,7 @@ agent can eventually resolve a claimed external event.
 2. Declare local tools, then workers with required non-empty roles, focused
    instructions, and only the workflow-local tools they need.
 3. Call `workflow.define` once and keep orchestration control flow inside its
-   Lua `run` function; label verify, revision, and retry handoffs with the
+   `run` function; label verify, revision, and retry handoffs with the
    optional transition argument.
 4. Reload with `/skills reload`; fix any `/workflows` load error before running.
 5. Submit a smallest valid payload through the `/workflows` form and inspect
