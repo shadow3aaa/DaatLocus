@@ -266,6 +266,7 @@ pub async fn run_session_serve(
             system_prompt_output: render_system_prompt_output_for_dashboard(&context),
             preturn_context_output: startup_preturn_context_output,
             app_status_outputs: render_app_status_outputs_for_dashboard(&context),
+            app_state_revisions: Vec::new(),
             skills: context.openskills.dashboard_summaries(),
             skill_errors: context.openskills.dashboard_errors(),
             workflows: dashboard_workflow_summaries(&context),

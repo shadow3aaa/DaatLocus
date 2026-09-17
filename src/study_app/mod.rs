@@ -337,6 +337,10 @@ impl App for StudyApp {
         APP_STUDY.app_docs()
     }
 
+    fn state_revision(&self) -> Option<i64> {
+        Some(self.store.revision())
+    }
+
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         vec![
             app_tool_with_schema(
@@ -419,8 +423,28 @@ impl App for StudyApp {
     async fn execute_tool(
         &mut self,
         call: &AgentToolCall,
-        _context: &AppToolExecutionContext,
+        context: &AppToolExecutionContext,
     ) -> Result<AppToolExecutionResult> {
+        let result = self.run_tool(call).await?;
+        self.publish_state_revision(context);
+        Ok(result)
+    }
+}
+
+impl StudyApp {
+    /// Push the current graph revision to the dashboard so clients can refetch
+    /// the network while a turn is still running.
+    fn publish_state_revision(&self, context: &AppToolExecutionContext) {
+        let Some(tx) = context.dashboard_tx.as_ref() else {
+            return;
+        };
+        let revision = self.store.revision();
+        tx.send_modify(|state| {
+            state.set_app_state_revision(AppId::study().as_str(), revision);
+        });
+    }
+
+    async fn run_tool(&self, call: &AgentToolCall) -> Result<AppToolExecutionResult> {
         match call.name.as_str() {
             "list_modules" => {
                 let _: StudyListModulesArgs = parse_args(call)?;

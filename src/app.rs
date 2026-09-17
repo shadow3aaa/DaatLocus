@@ -188,6 +188,12 @@ pub trait App: Send + Sync {
 
     fn docs(&self) -> AppDocs;
 
+    /// Monotonic revision of this app's structured state, when clients need to
+    /// detect app-owned data changes during a turn.
+    fn state_revision(&self) -> Option<i64> {
+        None
+    }
+
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         Vec::new()
     }
@@ -278,6 +284,17 @@ impl AppManager {
 
     pub fn docs(&self, id: &AppId) -> Option<AppDocs> {
         self.apps.get(id).map(|app| app.docs())
+    }
+
+    pub fn app_state_revisions(&self) -> Vec<(AppId, i64)> {
+        self.order
+            .iter()
+            .filter_map(|id| {
+                let app = self.apps.get(id)?;
+                let revision = app.state_revision()?;
+                Some((id.clone(), revision))
+            })
+            .collect()
     }
 
     pub fn app_ids(&self) -> Vec<AppId> {

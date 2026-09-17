@@ -138,6 +138,7 @@ pub struct StudyModuleSummary {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StudyGraphSnapshot {
     pub generated_at_ms: i64,
+    pub revision: i64,
     pub modules: Vec<StudyModuleSummary>,
     pub nodes: Vec<StudyNodeSummary>,
     pub edges: Vec<StudyEdge>,
@@ -256,6 +257,7 @@ impl StudyWriteOrigin {
 pub struct StudyStore {
     db_path: PathBuf,
     fts_enabled: bool,
+    revision: std::sync::Arc<std::sync::atomic::AtomicI64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -303,6 +305,7 @@ impl StudyStore {
         let store = Self {
             db_path,
             fts_enabled: false,
+            revision: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         };
         let connection = store.open_connection()?;
         let fts_enabled = migrate(&connection)?;
@@ -314,6 +317,17 @@ impl StudyStore {
 
     fn open_connection(&self) -> Result<Connection> {
         Connection::open(&self.db_path).into_diagnostic()
+    }
+
+    /// Monotonic revision of the graph data. It changes on every successful
+    /// mutation so clients can detect when to refetch.
+    pub fn revision(&self) -> i64 {
+        self.revision.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn bump_revision(&self) {
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn create_module(
@@ -350,6 +364,7 @@ impl StudyStore {
             .into_diagnostic()
             .map_err(|err| miette!("insert module failed: {err}"))?;
         let _ = origin;
+        self.bump_revision();
         Ok(module)
     }
 
@@ -456,6 +471,7 @@ impl StudyStore {
         let maintenance = load_maintenance(&connection, &modules, &nodes)?;
         Ok(StudyGraphSnapshot {
             generated_at_ms: now_ms(),
+            revision: self.revision(),
             modules,
             nodes,
             edges,
@@ -615,6 +631,7 @@ impl StudyStore {
             .into_iter()
             .filter(|candidate| candidate.id != node.id)
             .collect();
+        self.bump_revision();
         Ok(StudyCreateNodeResult { node, similar })
     }
 
@@ -684,6 +701,7 @@ impl StudyStore {
             )
             .into_diagnostic()
             .map_err(|err| miette!("update node failed: {err}"))?;
+        self.bump_revision();
         Ok(StudyNodeUpdateResult {
             node,
             content_changed,
@@ -739,6 +757,7 @@ impl StudyStore {
             .into_diagnostic()
             .map_err(|err| miette!("insert relation failed: {err}"))?;
         let edge_id = connection.last_insert_rowid();
+        self.bump_revision();
         Ok(StudyLinkResult {
             edge: StudyEdge {
                 id: edge_id,
@@ -776,6 +795,7 @@ impl StudyStore {
                 "no matching relation from `{from_node_id}` to `{to_node_id}` was found"
             ));
         }
+        self.bump_revision();
         Ok(StudyRemoveEdgeResult {
             removed_edges: removed,
         })
@@ -921,6 +941,7 @@ impl StudyStore {
 
         transaction.commit().into_diagnostic()?;
         let canonical = load_node(&connection, canonical_node_id)?;
+        self.bump_revision();
         Ok(StudyMergeResult {
             canonical_node_id: canonical_node_id.to_string(),
             merged_node_id: merged_node_id.to_string(),
@@ -992,6 +1013,7 @@ impl StudyStore {
         }
         transaction.commit().into_diagnostic()?;
         let stale_question_count = stale_question_count(&connection)?;
+        self.bump_revision();
         Ok(StudyQuestionWriteResult {
             added_questions: added,
             stale_question_count,
@@ -1028,6 +1050,7 @@ impl StudyStore {
                 params![attempt_id, question_id, node_id, outcome, note.trim(), now_ms()],
             )
             .into_diagnostic()?;
+        self.bump_revision();
         Ok(StudyAttemptResult {
             attempt_id,
             question_id: question_id.to_string(),
@@ -1064,6 +1087,7 @@ impl StudyStore {
             )
             .into_diagnostic()
             .map_err(|err| miette!("update progress failed: {err}"))?;
+        self.bump_revision();
         Ok(StudyProgressUpdate {
             node_id: node_id.to_string(),
             understanding,
@@ -1951,6 +1975,22 @@ mod tests {
                 .any(|group| group.len() > 1),
             "expected duplicate candidates: {report:?}"
         );
+    }
+
+    #[test]
+    fn mutations_bump_revision() {
+        let (_dir, store) = store();
+        let start = store.revision();
+        let module = create_module(&store, "Algebra");
+        let after_module = store.revision();
+        assert!(after_module > start);
+
+        let _node = create_node(&store, &module.id, "Group");
+        let after_node = store.revision();
+        assert!(after_node > after_module);
+
+        let snapshot = store.graph_snapshot().expect("snapshot");
+        assert_eq!(snapshot.revision, store.revision());
     }
 
     #[test]

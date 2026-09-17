@@ -330,6 +330,10 @@ pub struct DashboardState {
     pub system_prompt_output: String,
     pub preturn_context_output: String,
     pub app_status_outputs: Vec<(String, String)>,
+    /// Monotonic revision per app whose structured state changes during turns.
+    /// Clients use it to detect when to refetch app-owned data.
+    #[serde(default)]
+    pub app_state_revisions: Vec<(String, i64)>,
     #[serde(default)]
     pub skills: Vec<OpenSkillDashboardSummary>,
     #[serde(default)]
@@ -367,6 +371,21 @@ pub struct DashboardState {
     pub reduced_motion: ReducedMotion,
     pub footer_context: String,
     pub footer_estimated_input_tokens: Option<usize>,
+}
+
+impl DashboardState {
+    pub fn set_app_state_revision(&mut self, app_id: &str, revision: i64) {
+        if let Some(entry) = self
+            .app_state_revisions
+            .iter_mut()
+            .find(|(id, _)| id == app_id)
+        {
+            entry.1 = revision;
+        } else {
+            self.app_state_revisions
+                .push((app_id.to_string(), revision));
+        }
+    }
 }
 
 fn default_agent_name() -> String {

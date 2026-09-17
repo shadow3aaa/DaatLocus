@@ -107,6 +107,7 @@ export type StudyMaintenance = {
 
 export type StudyGraphSnapshot = {
   generated_at_ms: number;
+  revision: number;
   modules: StudyModuleSummary[];
   nodes: StudyNodeSummary[];
   edges: StudyEdge[];
@@ -616,6 +617,7 @@ export type DashboardSnapshot = {
   system_prompt_output: string;
   preturn_context_output: string;
   app_status_outputs: Array<[string, string]>;
+  app_state_revisions?: Array<[string, number]>;
   skills?: DashboardSkillSummary[];
   skill_errors?: DashboardSkillError[];
   workflows?: DashboardWorkflowSummary[];

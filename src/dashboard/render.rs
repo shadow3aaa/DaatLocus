@@ -41,6 +41,12 @@ pub fn sync_dashboard_state(
         state.inspect_telegram_output = render_telegram_status_for_dashboard(context);
         state.system_prompt_output = render_system_prompt_output_for_dashboard(context);
         state.app_status_outputs = render_app_status_outputs_for_dashboard(context);
+        state.app_state_revisions = context
+            .apps
+            .app_state_revisions()
+            .into_iter()
+            .map(|(app_id, revision)| (app_id.to_string(), revision))
+            .collect();
         state.skills = context.openskills.dashboard_summaries();
         state.skill_errors = context.openskills.dashboard_errors();
         state.workflows = dashboard_workflow_summaries(context);

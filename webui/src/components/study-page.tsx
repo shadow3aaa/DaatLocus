@@ -20,6 +20,7 @@ import {
 import { mockStudyNodeDetail } from "@/lib/study-mock";
 import { StudyCircle } from "@/components/study-circle";
 import { studyProgressColor } from "@/lib/study-circle-layout";
+import { useDashboardSnapshot } from "@/hooks/use-dashboard-snapshot";
 
 export type StudySidebarNode = {
   id: string;
@@ -89,12 +90,14 @@ export function StudyPage({
     controlledNodeId !== undefined ? controlledNodeId : internalNodeId;
   const [detail, setDetail] = useState<StudyNodeDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [graphVersion, setGraphVersion] = useState(0);
   const [activeTab, setActiveTab] = useState<"overview" | "chat">(
     initialTab ?? "overview",
   );
 
   const mockGraphRef = useRef(mockGraph);
   mockGraphRef.current = mockGraph;
+  const activeTurnRef = useRef(false);
 
   const loadGraph = useCallback(
     async (targetSessionId: string, signal?: AbortSignal) => {
@@ -105,8 +108,12 @@ export function StudyPage({
           sessionId: targetSessionId,
           signal,
         });
+        if (signal?.aborted) {
+          return;
+        }
         setGraph(nextGraph);
         setStatus("ready");
+        setGraphVersion((version) => version + 1);
       } catch (loadError) {
         if (signal?.aborted) {
           return;
@@ -119,6 +126,40 @@ export function StudyPage({
     },
     [],
   );
+
+  const { snapshot: studySnapshot } = useDashboardSnapshot(sessionId ?? "", {
+    disabled: isMock || !sessionId,
+  });
+  const activeTurn =
+    studySnapshot?.runtime_activity?.active_runtime_turn ?? false;
+  const studyRevision =
+    studySnapshot?.app_state_revisions?.find(([appId]) => appId === "study")?.[1] ??
+    null;
+  const loadedRevision = graph?.revision ?? null;
+
+  useEffect(() => {
+    if (isMock || !sessionId || studyRevision === null) {
+      return;
+    }
+    if (loadedRevision !== null && studyRevision === loadedRevision) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      void loadGraph(sessionId);
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [isMock, loadGraph, loadedRevision, sessionId, studyRevision]);
+
+  useEffect(() => {
+    if (isMock || !sessionId) {
+      return;
+    }
+    const wasActive = activeTurnRef.current;
+    activeTurnRef.current = activeTurn;
+    if (wasActive && !activeTurn) {
+      void loadGraph(sessionId);
+    }
+  }, [activeTurn, isMock, loadGraph, sessionId]);
 
   useEffect(() => {
     if (isMock) {
@@ -226,7 +267,7 @@ export function StudyPage({
     const controller = new AbortController();
     void loadDetail(selectedNodeId, controller.signal);
     return () => controller.abort();
-  }, [selectedNodeId, loadDetail]);
+  }, [selectedNodeId, loadDetail, graphVersion]);
 
   const handleSelectNode = useCallback(
     (nodeId: string | null) => {
@@ -241,6 +282,15 @@ export function StudyPage({
     },
     [onSelectNode],
   );
+
+  useEffect(() => {
+    if (!graph || !selectedNodeId) {
+      return;
+    }
+    if (!graph.nodes.some((node) => node.id === selectedNodeId)) {
+      handleSelectNode(null);
+    }
+  }, [graph, selectedNodeId, handleSelectNode]);
 
   const handleRefresh = useCallback(() => {
     if (isMock) {

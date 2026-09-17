@@ -328,6 +328,7 @@ function buildMockGraph(): StudyGraphSnapshot {
   const edges = buildMockEdges();
   return {
     generated_at_ms: MOCK_STUDY_NOW_MS,
+    revision: 1,
     modules: buildMockModules(nodes),
     nodes,
     edges,
@@ -396,6 +397,7 @@ export const MOCK_STUDY_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
       ].join("\n"),
     ],
   ],
+  app_state_revisions: [["study", 1]],
   skills: [],
   skill_errors: [],
   workflows: [],

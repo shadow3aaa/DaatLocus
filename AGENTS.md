@@ -1250,6 +1250,11 @@ CLI, or Telegram:
 - The Study tab has no session list. It renders the knowledge network plus an
   overview panel (description and relations only) and a chat that uses the
   study session dashboard stream.
+- Study graph mutations bump the study app's state revision, which the session
+  publishes in `DashboardState.app_state_revisions`. The Study tab refetches
+  the network when the revision changes (and again when the turn ends), so the
+  graph grows live while the agent works instead of only after a manual
+  refresh.
 - The network is rendered with the existing React Flow stack (`@xyflow/react`):
   a deterministic 3D force layout projects points through a fixed perspective
   camera, React Flow provides pan, zoom, hover, and selection, and the relation
