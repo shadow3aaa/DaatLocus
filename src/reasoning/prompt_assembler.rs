@@ -48,7 +48,11 @@ pub fn runtime_system_prompt_text(ctx: &Context) -> String {
             &resolve_prompt_persona_language(&persona, configured_locale),
             configured_locale,
         ),
-        skills_section: ctx.openskills.render_prompt_block().unwrap_or_default(),
+        skills_section: if ctx.study_mode() {
+            String::new()
+        } else {
+            ctx.openskills.render_prompt_block().unwrap_or_default()
+        },
         app_docs_section: render_app_docs_section(ctx),
         compiled_additions_section: render_compiled_additions_section(
             ctx.compiled_prompts.runtime_system_additions(),

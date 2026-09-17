@@ -125,9 +125,12 @@ impl AfterClaimContextPart for AfterClaimInputPart {
                 vec![(render_afterclaim_events(input))],
             )));
         }
-        let skill_injections = ctx
-            .openskills
-            .explicit_skill_injections_for_text(&claimed_work_query(input));
+        let skill_injections = if ctx.study_mode() {
+            Vec::new()
+        } else {
+            ctx.openskills
+                .explicit_skill_injections_for_text(&claimed_work_query(input))
+        };
         if !skill_injections.is_empty() {
             children.push(PromptNode::State(PromptStateDoc::new(
                 "explicit_skills",

@@ -207,6 +207,8 @@ pub struct Cli {
     ipc_token: Option<String>,
     #[arg(long, hide = true)]
     session_project_dir: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    session_study: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -457,6 +459,7 @@ pub async fn async_main(cli: Cli) -> Result<()> {
                     ipc_name: ipc_name.display().to_string(),
                     ipc_token,
                     project_dir: cli.session_project_dir.clone(),
+                    study_mode: cli.session_study,
                 },
             )
             .await?;
@@ -709,6 +712,7 @@ const fn session_scope_label(scope: &crate::daemon::session::SessionScope) -> &'
     match scope {
         crate::daemon::session::SessionScope::General => "general",
         crate::daemon::session::SessionScope::Project { .. } => "project",
+        crate::daemon::session::SessionScope::Study => "study",
     }
 }
 
@@ -718,7 +722,8 @@ fn session_title_for_table(session: &crate::daemon::session::SessionSummary) -> 
 
 fn session_project_for_table(session: &crate::daemon::session::SessionSummary) -> String {
     match &session.scope {
-        crate::daemon::session::SessionScope::General => "-".to_string(),
+        crate::daemon::session::SessionScope::General
+        | crate::daemon::session::SessionScope::Study => "-".to_string(),
         crate::daemon::session::SessionScope::Project { project_dir } => {
             project_dir.display().to_string()
         }
@@ -1027,6 +1032,7 @@ fn build_session_tree_rows(
                     .1
                     .push(index);
             }
+            crate::daemon::session::SessionScope::Study => {}
         }
     }
 
@@ -1147,6 +1153,7 @@ fn sort_selector_sessions(sessions: &mut [crate::daemon::session::SessionSummary
         let scope_order = match &session.scope {
             crate::daemon::session::SessionScope::General => 0,
             crate::daemon::session::SessionScope::Project { .. } => 1,
+            crate::daemon::session::SessionScope::Study => 2,
         };
         (
             scope_order,
@@ -1160,7 +1167,8 @@ fn sort_selector_sessions(sessions: &mut [crate::daemon::session::SessionSummary
 
 fn session_project_sort_key(session: &crate::daemon::session::SessionSummary) -> String {
     match &session.scope {
-        crate::daemon::session::SessionScope::General => String::new(),
+        crate::daemon::session::SessionScope::General
+        | crate::daemon::session::SessionScope::Study => String::new(),
         crate::daemon::session::SessionScope::Project { project_dir } => {
             project_dir.display().to_string()
         }
@@ -1657,7 +1665,7 @@ mod session_selector_tests {
 
     fn summary(id: &str, scope: SessionScope, title: &str) -> SessionSummary {
         let project_dir = match &scope {
-            SessionScope::General => None,
+            SessionScope::General | SessionScope::Study => None,
             SessionScope::Project { project_dir } => Some(project_dir.clone()),
         };
         SessionSummary {

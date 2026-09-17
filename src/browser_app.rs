@@ -1118,116 +1118,137 @@ impl App for BrowserApp {
         }
     }
 
-    fn tool_call_activity_event(&self, call: &AgentToolCall) -> Result<ToolCallActivityEvent> {
+    fn tool_call_activity_event(
+        &self,
+        call: &AgentToolCall,
+    ) -> Result<Option<ToolCallActivityEvent>> {
         match call.name.as_str() {
             "browser_open_page" => {
                 let args: BrowserOpenArgs = parse_browser_tool_args(call)?;
-                Ok(ToolCallActivityEvent::Browser(BrowserActivityDescriptor {
-                    action: BrowserActivityAction::OpenPage,
-                    title: "browser_open_page".to_string(),
-                    body_lines: vec![format!("url={}", summarize_state_text(&args.url))],
-                    url: Some(args.url),
-                    line_count: None,
-                    ref_count: None,
-                }))
+                Ok(Some(ToolCallActivityEvent::Browser(
+                    BrowserActivityDescriptor {
+                        action: BrowserActivityAction::OpenPage,
+                        title: "browser_open_page".to_string(),
+                        body_lines: vec![format!("url={}", summarize_state_text(&args.url))],
+                        url: Some(args.url),
+                        line_count: None,
+                        ref_count: None,
+                    },
+                )))
             }
             "browser_snapshot" => {
                 let args: BrowserSnapshotArgs = parse_browser_tool_args(call)?;
-                Ok(ToolCallActivityEvent::Browser(BrowserActivityDescriptor {
-                    action: BrowserActivityAction::Snapshot,
-                    title: "browser_snapshot".to_string(),
-                    body_lines: vec![format!("page={}", args.page_id)],
-                    url: None,
-                    line_count: None,
-                    ref_count: None,
-                }))
+                Ok(Some(ToolCallActivityEvent::Browser(
+                    BrowserActivityDescriptor {
+                        action: BrowserActivityAction::Snapshot,
+                        title: "browser_snapshot".to_string(),
+                        body_lines: vec![format!("page={}", args.page_id)],
+                        url: None,
+                        line_count: None,
+                        ref_count: None,
+                    },
+                )))
             }
             "browser_wait" => {
                 let args: BrowserWaitArgs = parse_browser_tool_args(call)?;
-                Ok(ToolCallActivityEvent::Browser(BrowserActivityDescriptor {
-                    action: BrowserActivityAction::Wait,
-                    title: "browser_wait".to_string(),
-                    body_lines: vec![
-                        format!("page={}", args.page_id),
-                        format!("state={}", args.state.as_deref().unwrap_or("load")),
-                    ],
-                    url: None,
-                    line_count: None,
-                    ref_count: None,
-                }))
+                Ok(Some(ToolCallActivityEvent::Browser(
+                    BrowserActivityDescriptor {
+                        action: BrowserActivityAction::Wait,
+                        title: "browser_wait".to_string(),
+                        body_lines: vec![
+                            format!("page={}", args.page_id),
+                            format!("state={}", args.state.as_deref().unwrap_or("load")),
+                        ],
+                        url: None,
+                        line_count: None,
+                        ref_count: None,
+                    },
+                )))
             }
             "browser_click" => {
                 let args: BrowserClickArgs = parse_browser_tool_args(call)?;
-                Ok(ToolCallActivityEvent::Browser(BrowserActivityDescriptor {
-                    action: BrowserActivityAction::Click,
-                    title: "browser_click".to_string(),
-                    body_lines: vec![
-                        format!("page={}", args.page_id),
-                        format!("ref={}", args.element_ref),
-                    ],
-                    url: None,
-                    line_count: None,
-                    ref_count: None,
-                }))
+                Ok(Some(ToolCallActivityEvent::Browser(
+                    BrowserActivityDescriptor {
+                        action: BrowserActivityAction::Click,
+                        title: "browser_click".to_string(),
+                        body_lines: vec![
+                            format!("page={}", args.page_id),
+                            format!("ref={}", args.element_ref),
+                        ],
+                        url: None,
+                        line_count: None,
+                        ref_count: None,
+                    },
+                )))
             }
             "browser_fill" => {
                 let args: BrowserFillArgs = parse_browser_tool_args(call)?;
-                Ok(ToolCallActivityEvent::Browser(BrowserActivityDescriptor {
-                    action: BrowserActivityAction::Fill,
-                    title: "browser_fill".to_string(),
-                    body_lines: vec![
-                        format!("page={}", args.page_id),
-                        format!("ref={}", args.element_ref),
-                        format!("value={}", summarize_state_text(&args.value)),
-                    ],
-                    url: None,
-                    line_count: None,
-                    ref_count: None,
-                }))
+                Ok(Some(ToolCallActivityEvent::Browser(
+                    BrowserActivityDescriptor {
+                        action: BrowserActivityAction::Fill,
+                        title: "browser_fill".to_string(),
+                        body_lines: vec![
+                            format!("page={}", args.page_id),
+                            format!("ref={}", args.element_ref),
+                            format!("value={}", summarize_state_text(&args.value)),
+                        ],
+                        url: None,
+                        line_count: None,
+                        ref_count: None,
+                    },
+                )))
             }
             "browser_back" => {
                 let args: BrowserBackArgs = parse_browser_tool_args(call)?;
-                Ok(ToolCallActivityEvent::Browser(BrowserActivityDescriptor {
-                    action: BrowserActivityAction::Back,
-                    title: "browser_back".to_string(),
-                    body_lines: vec![format!("page={}", args.page_id)],
-                    url: None,
-                    line_count: None,
-                    ref_count: None,
-                }))
+                Ok(Some(ToolCallActivityEvent::Browser(
+                    BrowserActivityDescriptor {
+                        action: BrowserActivityAction::Back,
+                        title: "browser_back".to_string(),
+                        body_lines: vec![format!("page={}", args.page_id)],
+                        url: None,
+                        line_count: None,
+                        ref_count: None,
+                    },
+                )))
             }
             "browser_forward" => {
                 let args: BrowserForwardArgs = parse_browser_tool_args(call)?;
-                Ok(ToolCallActivityEvent::Browser(BrowserActivityDescriptor {
-                    action: BrowserActivityAction::Forward,
-                    title: "browser_forward".to_string(),
-                    body_lines: vec![format!("page={}", args.page_id)],
-                    url: None,
-                    line_count: None,
-                    ref_count: None,
-                }))
+                Ok(Some(ToolCallActivityEvent::Browser(
+                    BrowserActivityDescriptor {
+                        action: BrowserActivityAction::Forward,
+                        title: "browser_forward".to_string(),
+                        body_lines: vec![format!("page={}", args.page_id)],
+                        url: None,
+                        line_count: None,
+                        ref_count: None,
+                    },
+                )))
             }
             "browser_reload" => {
                 let args: BrowserReloadArgs = parse_browser_tool_args(call)?;
-                Ok(ToolCallActivityEvent::Browser(BrowserActivityDescriptor {
-                    action: BrowserActivityAction::Reload,
-                    title: "browser_reload".to_string(),
-                    body_lines: vec![format!("page={}", args.page_id)],
-                    url: None,
-                    line_count: None,
-                    ref_count: None,
-                }))
+                Ok(Some(ToolCallActivityEvent::Browser(
+                    BrowserActivityDescriptor {
+                        action: BrowserActivityAction::Reload,
+                        title: "browser_reload".to_string(),
+                        body_lines: vec![format!("page={}", args.page_id)],
+                        url: None,
+                        line_count: None,
+                        ref_count: None,
+                    },
+                )))
             }
             "browser_close_page" => {
                 let args: BrowserClosePageArgs = parse_browser_tool_args(call)?;
-                Ok(ToolCallActivityEvent::Browser(BrowserActivityDescriptor {
-                    action: BrowserActivityAction::ClosePage,
-                    title: "browser_close_page".to_string(),
-                    body_lines: vec![format!("page={}", args.page_id)],
-                    url: None,
-                    line_count: None,
-                    ref_count: None,
-                }))
+                Ok(Some(ToolCallActivityEvent::Browser(
+                    BrowserActivityDescriptor {
+                        action: BrowserActivityAction::ClosePage,
+                        title: "browser_close_page".to_string(),
+                        body_lines: vec![format!("page={}", args.page_id)],
+                        url: None,
+                        line_count: None,
+                        ref_count: None,
+                    },
+                )))
             }
             _ => Err(miette!("unknown browser tool `{}`", call.name)),
         }

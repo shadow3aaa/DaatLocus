@@ -34,6 +34,10 @@ impl AppId {
         Self("coding".to_string())
     }
 
+    pub fn study() -> Self {
+        Self("study".to_string())
+    }
+
     pub fn is_valid_name(name: &str) -> bool {
         let Some(first) = name.chars().next() else {
             return false;
@@ -195,11 +199,14 @@ pub trait App: Send + Sync {
         })
     }
 
-    fn tool_call_activity_event(&self, call: &AgentToolCall) -> Result<ToolCallActivityEvent> {
-        Ok(ToolCallActivityEvent::App(TextActivityDescriptor {
+    fn tool_call_activity_event(
+        &self,
+        call: &AgentToolCall,
+    ) -> Result<Option<ToolCallActivityEvent>> {
+        Ok(Some(ToolCallActivityEvent::App(TextActivityDescriptor {
             title: call.name.clone(),
             body_lines: compact_app_activity_event_lines(&call.arguments),
-        }))
+        })))
     }
 
     fn before_runtime_tool_call(
@@ -322,7 +329,10 @@ impl AppManager {
         app.summarize_tool_call(&app_call)
     }
 
-    pub fn tool_call_activity_event(&self, call: &AgentToolCall) -> Result<ToolCallActivityEvent> {
+    pub fn tool_call_activity_event(
+        &self,
+        call: &AgentToolCall,
+    ) -> Result<Option<ToolCallActivityEvent>> {
         let (app_id, app_tool_name) = self.app_tool_name_from_exposed(&call.name)?;
         let app = self
             .apps

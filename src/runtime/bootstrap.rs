@@ -327,6 +327,12 @@ pub fn build_runtime_apps() -> Vec<Box<dyn crate::app::App>> {
     ]
 }
 
+pub fn build_study_apps(
+    store: crate::study_app::store::StudyStore,
+) -> Vec<Box<dyn crate::app::App>> {
+    vec![Box::new(crate::study_app::StudyApp::new(store))]
+}
+
 pub async fn build_eval_context_with_compiled(
     config: crate::config::Config,
     compiled_prompts: CompiledPromptStore,

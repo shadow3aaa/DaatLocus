@@ -75,6 +75,7 @@ pub struct SessionServeArgs {
     pub ipc_name: String,
     pub ipc_token: String,
     pub project_dir: Option<PathBuf>,
+    pub study_mode: bool,
 }
 
 pub async fn run_session_serve(
@@ -119,6 +120,12 @@ pub async fn run_session_serve(
     let telegram_handle = telegram.handle();
     bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
 
+    let study_store = if args.study_mode {
+        Some(crate::study_app::store::StudyStore::open_default().await?)
+    } else {
+        None
+    };
+
     let ipc_server = SessionIpcServer::bind(&args.ipc_name)?;
     let ipc_task = tokio::spawn(run_ipc_server(SessionIpcServerState {
         server: ipc_server,
@@ -136,6 +143,7 @@ pub async fn run_session_serve(
         workflow_cancellation: workflow_cancellation.clone(),
         runtime_wake_tx: runtime_wake_tx.clone(),
         daemon_control_tx: daemon_control_tx.clone(),
+        study_store: study_store.clone(),
     }));
 
     emit_startup_progress(format!(
@@ -184,7 +192,11 @@ pub async fn run_session_serve(
             )
         })?;
     let sandbox_policy = sandbox_policy_for_runtime(&config, Some(&execution_cwd)).await;
-    let apps = AppManager::new(build_runtime_apps())?;
+    let apps = if let Some(store) = study_store.clone() {
+        AppManager::new(crate::runtime::bootstrap::build_study_apps(store))?
+    } else {
+        AppManager::new(build_runtime_apps())?
+    };
     let openskills = load_openskills_for_runtime(&execution_cwd);
     let workflows = WorkflowCatalog::load();
     let mut context = Context {
@@ -459,6 +471,7 @@ struct SessionIpcServerState {
     workflow_cancellation: WorkflowCancellationRegistry,
     runtime_wake_tx: mpsc::UnboundedSender<()>,
     daemon_control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
+    study_store: Option<crate::study_app::store::StudyStore>,
 }
 
 async fn run_ipc_server(state: SessionIpcServerState) {
@@ -540,23 +553,34 @@ async fn handle_ipc_connection(
             mode,
             wait_for_reply,
         } => {
-            let response = submit_user_input(
-                &state,
-                origin,
-                text,
-                attachments,
-                mode,
-                wait_for_reply,
-                request_id,
-            )
-            .await;
-            refresh_pending_user_inputs(&state);
-            response
+            if state.study_store.is_some() && mode.is_ask() {
+                IpcResponseEnvelope::error(
+                    request_id,
+                    "study_mode_restricted",
+                    "ask turns are not available in study mode",
+                    false,
+                )
+            } else {
+                let response = submit_user_input(
+                    &state,
+                    origin,
+                    text,
+                    attachments,
+                    mode,
+                    wait_for_reply,
+                    request_id,
+                )
+                .await;
+                refresh_pending_user_inputs(&state);
+                response
+            }
         }
         SessionIpcRequest::DashboardCommand { command } => {
             let command = command.trim();
             let output = if dashboard_command_is_manager_owned(command) {
                 "telegram commands are handled by the manager daemon".to_string()
+            } else if state.study_store.is_some() && !study_mode_allows_dashboard_command(command) {
+                study_mode_command_rejection(command)
             } else {
                 let snapshot = state.dashboard_rx.borrow().clone();
                 execute_control_command(command, &snapshot, &state.dashboard_control_tx)
@@ -657,6 +681,80 @@ async fn handle_ipc_connection(
                 ),
             }
         }
+        SessionIpcRequest::StudyGraphSnapshot => {
+            match study_store_response(&state, |store| {
+                store
+                    .graph_snapshot()
+                    .map(|graph| SessionIpcResponse::StudyGraph {
+                        graph: Box::new(graph),
+                    })
+            }) {
+                Some(Ok(response)) => IpcResponseEnvelope::ok(request_id, response),
+                Some(Err(err)) => IpcResponseEnvelope::error(
+                    request_id,
+                    "study_graph_snapshot_failed",
+                    format!("{err:?}"),
+                    true,
+                ),
+                None => IpcResponseEnvelope::error(
+                    request_id,
+                    "study_mode_unavailable",
+                    "this session does not host the study graph",
+                    false,
+                ),
+            }
+        }
+        SessionIpcRequest::StudyNodeDetail { node_id } => {
+            match study_store_response(&state, |store| {
+                store
+                    .node_detail(&node_id)
+                    .map(|detail| SessionIpcResponse::StudyNodeDetail {
+                        detail: Box::new(detail),
+                    })
+            }) {
+                Some(Ok(response)) => IpcResponseEnvelope::ok(request_id, response),
+                Some(Err(err)) => IpcResponseEnvelope::error(
+                    request_id,
+                    "study_node_detail_failed",
+                    format!("{err:?}"),
+                    true,
+                ),
+                None => IpcResponseEnvelope::error(
+                    request_id,
+                    "study_mode_unavailable",
+                    "this session does not host the study graph",
+                    false,
+                ),
+            }
+        }
+        SessionIpcRequest::StudyProgressUpdate {
+            node_id,
+            understanding,
+            evidence,
+        } => match study_store_response(&state, |store| {
+            store
+                .update_progress(
+                    &node_id,
+                    understanding,
+                    evidence.as_deref().unwrap_or("user_declared"),
+                    crate::study_app::store::StudyWriteOrigin::User,
+                )
+                .map(|update| SessionIpcResponse::StudyProgressUpdated { update })
+        }) {
+            Some(Ok(response)) => IpcResponseEnvelope::ok(request_id, response),
+            Some(Err(err)) => IpcResponseEnvelope::error(
+                request_id,
+                "study_progress_update_failed",
+                format!("{err:?}"),
+                false,
+            ),
+            None => IpcResponseEnvelope::error(
+                request_id,
+                "study_mode_unavailable",
+                "this session does not host the study graph",
+                false,
+            ),
+        },
         SessionIpcRequest::DrainTelegramOutbox => IpcResponseEnvelope::ok(
             request_id,
             SessionIpcResponse::TelegramOutbox {
@@ -709,6 +807,53 @@ async fn handle_ipc_connection(
     })
 }
 
+fn study_store_response(
+    state: &SessionIpcServerState,
+    operation: impl FnOnce(&crate::study_app::store::StudyStore) -> miette::Result<SessionIpcResponse>,
+) -> Option<miette::Result<SessionIpcResponse>> {
+    state.study_store.as_ref().map(operation)
+}
+
+/// Study sessions expose only the generic session commands; work-mode
+/// dashboard commands (skills, workflows, app state, sleep, debug views) are
+/// not part of the study capability domain.
+fn study_mode_allows_dashboard_command(command: &str) -> bool {
+    matches!(
+        command
+            .trim()
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next(),
+        Some("status" | "clear")
+    )
+}
+
+fn study_mode_command_rejection(command: &str) -> String {
+    let verb = command
+        .trim()
+        .trim_start_matches('/')
+        .split_whitespace()
+        .next()
+        .unwrap_or_default();
+    format!(
+        "`/{verb}` is not available in study mode; study sessions support `/status` and `/clear`."
+    )
+}
+
+fn study_mode_allows_dashboard_action(action: &DashboardAction) -> bool {
+    matches!(
+        action,
+        DashboardAction::InterruptRuntime
+            | DashboardAction::ClearConversation
+            | DashboardAction::DismissPendingUserInput { .. }
+            | DashboardAction::ClearPendingUserInputs
+            | DashboardAction::UpdatePendingUserInput { .. }
+            | DashboardAction::MovePendingUserInput { .. }
+            | DashboardAction::MovePendingUserInputToPosition { .. }
+            | DashboardAction::PreemptPendingUserInput { .. }
+    )
+}
+
 fn validate_ipc_request(
     request: &crate::daemon::session_ipc::IpcRequestEnvelope,
     expected_session_id: &str,
@@ -754,6 +899,13 @@ fn execute_session_dashboard_action(
         return crate::dashboard::DashboardActionResult {
             success: false,
             message: "telegram actions are handled by the manager daemon".to_string(),
+            detail: None,
+        };
+    }
+    if state.study_store.is_some() && !study_mode_allows_dashboard_action(&action) {
+        return crate::dashboard::DashboardActionResult {
+            success: false,
+            message: "dashboard action is not available in study mode".to_string(),
             detail: None,
         };
     }
@@ -1480,6 +1632,50 @@ mod tests {
             }
             _ => panic!("expected IPC error response"),
         }
+    }
+
+    #[test]
+    fn study_mode_allows_only_generic_dashboard_commands() {
+        assert!(study_mode_allows_dashboard_command("/status"));
+        assert!(study_mode_allows_dashboard_command("status"));
+        assert!(study_mode_allows_dashboard_command("/clear"));
+        assert!(!study_mode_allows_dashboard_command("/workflows"));
+        assert!(!study_mode_allows_dashboard_command("/skills list"));
+        assert!(!study_mode_allows_dashboard_command("/app-status"));
+        assert!(!study_mode_allows_dashboard_command("/debug context"));
+        assert!(!study_mode_allows_dashboard_command("/sleep run"));
+        assert!(
+            study_mode_command_rejection("/skills list").contains("not available in study mode")
+        );
+        assert!(study_mode_command_rejection("/skills list").contains("/skills"));
+    }
+
+    #[test]
+    fn study_mode_allows_only_generic_dashboard_actions() {
+        assert!(study_mode_allows_dashboard_action(
+            &DashboardAction::InterruptRuntime
+        ));
+        assert!(study_mode_allows_dashboard_action(
+            &DashboardAction::ClearConversation
+        ));
+        assert!(study_mode_allows_dashboard_action(
+            &DashboardAction::ClearPendingUserInputs
+        ));
+        assert!(!study_mode_allows_dashboard_action(
+            &DashboardAction::RunSleep
+        ));
+        assert!(!study_mode_allows_dashboard_action(
+            &DashboardAction::ReloadSkills
+        ));
+        assert!(!study_mode_allows_dashboard_action(
+            &DashboardAction::RunWorkflow {
+                workflow_id: "goal".to_string(),
+                input: serde_json::json!({}),
+            }
+        ));
+        assert!(!study_mode_allows_dashboard_action(
+            &DashboardAction::SetSleepEnabled { enabled: true }
+        ));
     }
 
     #[test]

@@ -466,6 +466,7 @@ struct ServerState {
     connected_clients: Arc<std::sync::atomic::AtomicUsize>,
     sessions: session::SessionRegistry,
     session_tokens: SessionTokenStore,
+    study_ensure_lock: Arc<tokio::sync::Mutex<()>>,
     setup_auth_flows: Arc<parking_lot::Mutex<HashMap<String, PendingSetupProviderAuthFlow>>>,
 }
 
@@ -640,6 +641,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         connected_clients: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         sessions,
         session_tokens,
+        study_ensure_lock: Arc::new(tokio::sync::Mutex::new(())),
         setup_auth_flows: Arc::new(parking_lot::Mutex::new(HashMap::new())),
     };
 
@@ -699,6 +701,10 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/sessions", post(session_create_handler))
         .route("/sessions/{session_id}", delete(session_delete_handler))
         .route("/sessions/{session_id}/title", post(session_title_handler))
+        .route("/study/ensure", post(study_ensure_handler))
+        .route("/study/graph", get(study_graph_handler))
+        .route("/study/node", get(study_node_handler))
+        .route("/study/progress", post(study_progress_handler))
         .with_state(app_state);
 
     let router = router.fallback(get(embedded_webui_handler));
@@ -2307,6 +2313,7 @@ async fn session_list_handler(
             .sessions
             .list()
             .into_iter()
+            .filter(|info| !info.scope.is_study())
             .map(session::SessionSummary::from)
             .collect::<Vec<_>>(),
     )
@@ -2468,6 +2475,177 @@ pub async fn delete_session_by_id(
         }
     }
     Ok(removed)
+}
+
+async fn find_or_create_study_session(
+    sessions: &session::SessionRegistry,
+) -> Result<session::SessionInfo> {
+    if let Some(existing) = sessions
+        .list()
+        .into_iter()
+        .find(|info| info.scope.is_study())
+    {
+        return Ok(existing);
+    }
+    sessions
+        .create(session::SessionScope::Study, Some("Study".to_string()))
+        .await
+}
+
+fn study_error_response(status: StatusCode, message: String) -> axum::response::Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+async fn study_ensure_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(response) = config_not_ready_json_response().await {
+        return response;
+    }
+    let _ensure_guard = state.study_ensure_lock.lock().await;
+    let info = match find_or_create_study_session(&state.sessions).await {
+        Ok(info) => info,
+        Err(err) => {
+            return study_error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{err:?}"));
+        }
+    };
+    match session_client_for_id(
+        &state.sessions,
+        &state.session_tokens,
+        info.session_id.as_str(),
+    )
+    .await
+    {
+        Ok(_) => Json(session::SessionSummary::from(info)).into_response(),
+        Err(err) => study_error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{err:?}")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct StudySessionQuery {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StudyNodeQuery {
+    session_id: String,
+    node_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StudyProgressBody {
+    session_id: String,
+    node_id: String,
+    /// Understanding level as a percentage between 0 and 100.
+    understanding: i64,
+    evidence: Option<String>,
+}
+
+async fn study_ipc_request(
+    state: &ServerState,
+    session_id: &str,
+    body: session_ipc::SessionIpcRequest,
+) -> Result<session_ipc::SessionIpcResponse> {
+    let client = session_client_for_request(state, session_id).await?;
+    client.request(body).await
+}
+
+fn study_ipc_response_error(response: session_ipc::SessionIpcResponse) -> axum::response::Response {
+    match response {
+        session_ipc::SessionIpcResponse::Error { code, message, .. } => {
+            study_error_response(StatusCode::BAD_GATEWAY, format!("{code}: {message}"))
+        }
+        _ => study_error_response(
+            StatusCode::BAD_GATEWAY,
+            "session returned an unexpected response".to_string(),
+        ),
+    }
+}
+
+async fn study_graph_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Query(query): Query<StudySessionQuery>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(response) = config_not_ready_json_response().await {
+        return response;
+    }
+    match study_ipc_request(
+        &state,
+        &query.session_id,
+        session_ipc::SessionIpcRequest::StudyGraphSnapshot,
+    )
+    .await
+    {
+        Ok(session_ipc::SessionIpcResponse::StudyGraph { graph }) => Json(graph).into_response(),
+        Ok(other) => study_ipc_response_error(other),
+        Err(err) => study_error_response(StatusCode::BAD_GATEWAY, format!("{err:?}")),
+    }
+}
+
+async fn study_node_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Query(query): Query<StudyNodeQuery>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(response) = config_not_ready_json_response().await {
+        return response;
+    }
+    match study_ipc_request(
+        &state,
+        &query.session_id,
+        session_ipc::SessionIpcRequest::StudyNodeDetail {
+            node_id: query.node_id,
+        },
+    )
+    .await
+    {
+        Ok(session_ipc::SessionIpcResponse::StudyNodeDetail { detail }) => {
+            Json(detail).into_response()
+        }
+        Ok(other) => study_ipc_response_error(other),
+        Err(err) => study_error_response(StatusCode::BAD_GATEWAY, format!("{err:?}")),
+    }
+}
+
+async fn study_progress_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(body): Json<StudyProgressBody>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(response) = config_not_ready_json_response().await {
+        return response;
+    }
+    match study_ipc_request(
+        &state,
+        &body.session_id,
+        session_ipc::SessionIpcRequest::StudyProgressUpdate {
+            node_id: body.node_id,
+            understanding: body.understanding,
+            evidence: body.evidence,
+        },
+    )
+    .await
+    {
+        Ok(session_ipc::SessionIpcResponse::StudyProgressUpdated { update }) => {
+            Json(update).into_response()
+        }
+        Ok(other) => study_ipc_response_error(other),
+        Err(err) => study_error_response(StatusCode::BAD_GATEWAY, format!("{err:?}")),
+    }
 }
 
 async fn remove_session_directory(session_dir: &StdPath) -> Result<()> {
@@ -2710,6 +2888,9 @@ async fn spawn_session_process(
         .arg(&ipc_token);
     if let Some(project_dir) = info.project_dir.as_ref() {
         command.arg("--session-project-dir").arg(project_dir);
+    }
+    if info.scope.is_study() {
+        command.arg("--session-study");
     }
     command
         .arg("serve")

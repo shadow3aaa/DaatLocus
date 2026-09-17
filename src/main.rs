@@ -44,6 +44,7 @@ mod sandbox;
 mod schema_utils;
 mod skill_run_records;
 mod sleep_status;
+mod study_app;
 mod system_info;
 mod telegram_acl;
 mod telegram_transport;

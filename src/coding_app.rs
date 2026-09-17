@@ -841,11 +841,14 @@ impl App for CodingApp {
         })
     }
 
-    fn tool_call_activity_event(&self, call: &AgentToolCall) -> Result<ToolCallActivityEvent> {
-        Ok(ToolCallActivityEvent::app(
+    fn tool_call_activity_event(
+        &self,
+        call: &AgentToolCall,
+    ) -> Result<Option<ToolCallActivityEvent>> {
+        Ok(Some(ToolCallActivityEvent::app(
             call.name.clone(),
             compact_coding_argument_lines(&call.arguments),
-        ))
+        )))
     }
 
     fn before_runtime_tool_call(

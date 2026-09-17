@@ -8,7 +8,7 @@ pub mod generated {
 
 pub use generated::PERSONA_DEFAULT;
 pub use generated::{
-    APP_BROWSER, APP_CODING, APP_TERMINAL, HISTORY_COMPACTION_SUMMARY_PREFIX,
+    APP_BROWSER, APP_CODING, APP_STUDY, APP_TERMINAL, HISTORY_COMPACTION_SUMMARY_PREFIX,
     MID_TURN_SUMMARY_PREFIX, PROGRAM_RUNTIME_ERROR_CORRECTION_PLANNER_INSTRUCTIONS,
     PROGRAM_RUNTIME_ERROR_CORRECTION_PLANNER_SYSTEM,
     PROGRAM_SKILL_IMPROVEMENT_PLANNER_INSTRUCTIONS, PROGRAM_SKILL_IMPROVEMENT_PLANNER_SYSTEM,
@@ -17,7 +17,8 @@ pub use generated::{
 };
 #[cfg(test)]
 pub use generated::{
-    APP_BROWSER_SOURCE, APP_CODING_SOURCE, APP_TERMINAL_SOURCE, PERSONA_DEFAULT_SOURCE,
+    APP_BROWSER_SOURCE, APP_CODING_SOURCE, APP_STUDY_SOURCE, APP_TERMINAL_SOURCE,
+    PERSONA_DEFAULT_SOURCE,
 };
 
 pub fn prompt_bullet_lines(markdown: &str) -> Vec<String> {
@@ -93,10 +94,15 @@ mod tests {
 
     #[test]
     fn generated_app_prompt_structs_are_nonempty() {
-        for prompt in [APP_BROWSER, APP_CODING, APP_TERMINAL] {
+        for prompt in [APP_BROWSER, APP_CODING, APP_STUDY, APP_TERMINAL] {
             assert!(!prompt.docs.is_empty());
         }
-        for source in [APP_BROWSER_SOURCE, APP_CODING_SOURCE, APP_TERMINAL_SOURCE] {
+        for source in [
+            APP_BROWSER_SOURCE,
+            APP_CODING_SOURCE,
+            APP_STUDY_SOURCE,
+            APP_TERMINAL_SOURCE,
+        ] {
             assert!(!source.is_empty());
         }
     }

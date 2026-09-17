@@ -735,11 +735,14 @@ impl App for TerminalApp {
         }
     }
 
-    fn tool_call_activity_event(&self, call: &AgentToolCall) -> Result<ToolCallActivityEvent> {
+    fn tool_call_activity_event(
+        &self,
+        call: &AgentToolCall,
+    ) -> Result<Option<ToolCallActivityEvent>> {
         match call.name.as_str() {
             "terminal_exec" => {
                 let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
-                Ok(ToolCallActivityEvent::terminal(
+                Ok(Some(ToolCallActivityEvent::terminal(
                     TerminalActivityAction::Execute,
                     summarize_terminal_inline_text(&args.command),
                     vec![format!(
@@ -749,12 +752,12 @@ impl App for TerminalApp {
                         args.yield_time_ms
                             .map_or_else(|| "default".to_string(), |value| value.to_string())
                     )],
-                ))
+                )))
             }
             "terminal_write_stdin" => {
                 let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
                 let wait_mode = args.wait_mode.unwrap_or(TerminalWaitMode::AnyOutput);
-                Ok(ToolCallActivityEvent::terminal(
+                Ok(Some(ToolCallActivityEvent::terminal(
                     if args.text.is_empty() {
                         TerminalActivityAction::Poll
                     } else {
@@ -767,15 +770,15 @@ impl App for TerminalApp {
                         args.yield_time_ms
                             .map_or_else(|| "default".to_string(), |value| value.to_string())
                     )],
-                ))
+                )))
             }
             "terminal_terminate" => {
                 let args: TerminalTerminateArgs = parse_terminal_tool_args(call)?;
-                Ok(ToolCallActivityEvent::terminal(
+                Ok(Some(ToolCallActivityEvent::terminal(
                     TerminalActivityAction::Terminate,
                     format!("terminate {}", args.session_id),
                     Vec::new(),
-                ))
+                )))
             }
             _ => Err(miette!("unknown terminal tool `{}`", call.name)),
         }

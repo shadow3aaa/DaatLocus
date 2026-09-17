@@ -140,6 +140,16 @@ pub struct PendingSkillRunFlush {
 }
 
 impl Context {
+    /// Study Mode is defined by the installed capability domain: only study
+    /// sessions install the `study` app. Work sessions keep Browser, Terminal,
+    /// and Coding.
+    pub fn study_mode(&self) -> bool {
+        self.apps
+            .app_ids()
+            .iter()
+            .any(|app_id| app_id.as_str() == "study")
+    }
+
     pub fn runtime_system_prompt_text(&self) -> String {
         runtime_system_prompt_text(self)
     }

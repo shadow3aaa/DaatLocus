@@ -54,6 +54,13 @@ impl Default for SessionId {
 pub enum SessionScope {
     General,
     Project { project_dir: PathBuf },
+    Study,
+}
+
+impl SessionScope {
+    pub const fn is_study(&self) -> bool {
+        matches!(self, Self::Study)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,7 +120,7 @@ impl From<SessionInfo> for SessionSummary {
 impl SessionInfo {
     pub fn new(session_id: SessionId, scope: SessionScope, title: Option<String>) -> Self {
         let project_dir = match &scope {
-            SessionScope::General => None,
+            SessionScope::General | SessionScope::Study => None,
             SessionScope::Project { project_dir } => Some(project_dir.clone()),
         };
         Self {

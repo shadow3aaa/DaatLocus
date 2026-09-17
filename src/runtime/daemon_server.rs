@@ -48,8 +48,13 @@ impl TelegramAuthVerifier for ManagerTelegramAuthVerifier {
 impl TelegramInputRouter for ManagerTelegramInputRouter {
     async fn route_telegram_event(&self, event: TelegramIncomingEvent) -> Result<()> {
         let chat_id = event.chat_id.clone();
-        let session_id = match self.telegram_defaults.get(&chat_id) {
-            Some(session_id) if self.sessions.get(&session_id).is_some() => session_id,
+        let mapped_session = self.telegram_defaults.get(&chat_id).filter(|session_id| {
+            self.sessions
+                .get(session_id)
+                .is_some_and(|info| !info.scope.is_study())
+        });
+        let session_id = match mapped_session {
+            Some(session_id) => session_id,
             _ => {
                 let info = self
                     .sessions
@@ -120,6 +125,9 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
                     ));
                 };
                 match resolve_session_reference(&self.sessions, reference) {
+                    Ok(info) if info.scope.is_study() => Ok(Some(
+                        "the study session is not available to Telegram".to_string(),
+                    )),
                     Ok(info) => {
                         self.telegram_defaults
                             .set(chat_id.to_string(), info.session_id.clone())
@@ -140,6 +148,11 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
                     ));
                 };
                 let info = match resolve_session_reference(&self.sessions, reference) {
+                    Ok(info) if info.scope.is_study() => {
+                        return Ok(Some(
+                            "the study session is not available to Telegram".to_string(),
+                        ));
+                    }
                     Ok(info) => info,
                     Err(message) => return Ok(Some(message)),
                 };
@@ -210,11 +223,17 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
 
 impl ManagerTelegramInputRouter {
     fn telegram_session_list(&self, chat_id: &str) -> String {
-        let current = self
-            .telegram_defaults
-            .get(chat_id)
-            .filter(|session_id| self.sessions.get(session_id).is_some());
-        let mut sessions = self.sessions.list();
+        let current = self.telegram_defaults.get(chat_id).filter(|session_id| {
+            self.sessions
+                .get(session_id)
+                .is_some_and(|info| !info.scope.is_study())
+        });
+        let mut sessions = self
+            .sessions
+            .list()
+            .into_iter()
+            .filter(|info| !info.scope.is_study())
+            .collect::<Vec<_>>();
         sessions.sort_by_key(|info| info.started_at_ms);
         if sessions.is_empty() {
             return "no sessions\n/session_new [title] creates and attaches one".to_string();
@@ -306,6 +325,7 @@ fn session_scope_label(scope: &session::SessionScope) -> String {
         session::SessionScope::Project { project_dir } => {
             format!("project {}", project_dir.display())
         }
+        session::SessionScope::Study => "study".to_string(),
     }
 }
 

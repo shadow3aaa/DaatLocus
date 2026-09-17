@@ -771,15 +771,14 @@ pub async fn execute_agent_loop_step(
             let assistant_text = response_assistant_text;
             let tool_call_previews = calls
                 .iter()
-                .map(|call| {
-                    build_tool_call_activity_event(context, call).unwrap_or_else(|_| {
-                        ToolCallActivityEvent::error(
-                            call.name.clone(),
-                            vec![call.arguments.to_string()],
-                        )
-                    })
+                .map(|call| match build_tool_call_activity_event(context, call) {
+                    Ok(event) => event,
+                    Err(_) => Some(ToolCallActivityEvent::error(
+                        call.name.clone(),
+                        vec![call.arguments.to_string()],
+                    )),
                 })
-                .collect::<Vec<_>>();
+                .collect::<Vec<Option<ToolCallActivityEvent>>>();
             runtime_step.push_agent_message(
                 AgentMessage::assistant_tool_call_protocol_with_reasoning(
                     assistant_text.clone(),
@@ -818,8 +817,10 @@ pub async fn execute_agent_loop_step(
                     });
                 actions.push(action_record);
                 enter_runtime_phase(context, tx, RuntimeTurnPhase::ToolExecution);
-                if let Some(tx) = tx {
-                    match call_activity_event.clone() {
+                if let Some(tx) = tx
+                    && let Some(call_activity_event) = call_activity_event.clone()
+                {
+                    match call_activity_event {
                         ToolCallActivityEvent::Exec(event) => {
                             tx.send_modify(|state| {
                                 apply_activity_event(
@@ -980,10 +981,11 @@ pub async fn execute_agent_loop_step(
                         ),
                     ));
                 }
-                let tool_call_activity_events =
-                    activity_event_from_tool_call_activity_event(call_activity_event.clone())
-                        .into_iter()
-                        .collect();
+                let tool_call_activity_events = call_activity_event
+                    .clone()
+                    .and_then(activity_event_from_tool_call_activity_event)
+                    .into_iter()
+                    .collect();
                 runtime_step.push_history_message(HistoryMessage {
                     message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
                         None,

@@ -90,6 +90,17 @@ pub enum SessionIpcRequest {
         limit: usize,
     },
     DashboardHistoryCount,
+    StudyGraphSnapshot,
+    StudyNodeDetail {
+        node_id: String,
+    },
+    StudyProgressUpdate {
+        node_id: String,
+        /// Understanding level as a percentage between 0 and 100.
+        understanding: i64,
+        #[serde(default)]
+        evidence: Option<String>,
+    },
     DrainTelegramOutbox,
     RecordTelegramDelivery {
         event_id: String,
@@ -119,6 +130,9 @@ impl SessionIpcRequest {
             Self::WorkflowWorkerActivityPage { .. } => "workflow_worker_activity_page",
             Self::DashboardInputHistory { .. } => "dashboard_input_history",
             Self::DashboardHistoryCount => "dashboard_history_count",
+            Self::StudyGraphSnapshot => "study_graph_snapshot",
+            Self::StudyNodeDetail { .. } => "study_node_detail",
+            Self::StudyProgressUpdate { .. } => "study_progress_update",
             Self::DrainTelegramOutbox => "drain_telegram_outbox",
             Self::RecordTelegramDelivery { .. } => "record_telegram_delivery",
             Self::RequeueTelegramOutbound { .. } => "requeue_telegram_outbound",
@@ -218,6 +232,15 @@ pub enum SessionIpcResponse {
     },
     DashboardHistoryCount {
         count: DashboardActivityHistoryCount,
+    },
+    StudyGraph {
+        graph: Box<crate::study_app::store::StudyGraphSnapshot>,
+    },
+    StudyNodeDetail {
+        detail: Box<crate::study_app::store::StudyNodeDetail>,
+    },
+    StudyProgressUpdated {
+        update: crate::study_app::store::StudyProgressUpdate,
     },
     TelegramOutbox {
         messages: Vec<PendingOutboundMessage>,

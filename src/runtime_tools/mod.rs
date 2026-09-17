@@ -175,7 +175,10 @@ pub trait RuntimeTool: Send + Sync {
     }
 
     fn summarize_action(&self, call: &AgentToolCall) -> miette::Result<EpisodeActionRecord>;
-    fn call_activity_event(&self, call: &AgentToolCall) -> miette::Result<ToolCallActivityEvent>;
+    fn call_activity_event(
+        &self,
+        call: &AgentToolCall,
+    ) -> miette::Result<Option<ToolCallActivityEvent>>;
     async fn execute(
         &self,
         context: &mut Context,
@@ -261,8 +264,11 @@ impl RuntimeTool for StaticRuntimeTool {
         (self.summarize)(call)
     }
 
-    fn call_activity_event(&self, call: &AgentToolCall) -> miette::Result<ToolCallActivityEvent> {
-        (self.call_ui)(call)
+    fn call_activity_event(
+        &self,
+        call: &AgentToolCall,
+    ) -> miette::Result<Option<ToolCallActivityEvent>> {
+        Ok(Some((self.call_ui)(call)?))
     }
 
     async fn execute(
@@ -379,7 +385,13 @@ impl RuntimeTool for AppGetStateRuntimeTool {
         })
     }
 
-    fn call_activity_event(&self, call: &AgentToolCall) -> miette::Result<ToolCallActivityEvent> {
+    fn call_activity_event(
+        &self,
+        call: &AgentToolCall,
+    ) -> miette::Result<Option<ToolCallActivityEvent>> {
+        if self.owner_app_id.as_str() == "study" {
+            return Ok(None);
+        }
         let args: AppGetStateArgs = parse_tool_args(call)?;
         let lines = vec![format!(
             "detail={}",
@@ -388,10 +400,10 @@ impl RuntimeTool for AppGetStateRuntimeTool {
                 AppStateDetail::Full => "full",
             }
         )];
-        Ok(ToolCallActivityEvent::app(
+        Ok(Some(ToolCallActivityEvent::app(
             AppId::render_exposed_tool_name(&self.exposed_name),
             lines,
-        ))
+        )))
     }
 
     async fn execute(
@@ -407,16 +419,21 @@ impl RuntimeTool for AppGetStateRuntimeTool {
         let payload =
             app_state_payload(&self.owner_app_id, &state, args.detail.unwrap_or_default());
         let model_content = render_app_get_state_model_content(&self.owner_app_id, &state);
-        Ok(ToolExecutionResult::from_activity_event(
-            format!("read {} state", self.owner_app_id),
-            payload,
+        let activity_event = if self.owner_app_id.as_str() == "study" {
+            None
+        } else {
             Some(SessionActivityEvent::GenericApp(
                 TextActivityDescriptor {
                     title: AppId::render_exposed_tool_name(&self.exposed_name),
                     body_lines: state.lines,
                 }
                 .into(),
-            )),
+            ))
+        };
+        Ok(ToolExecutionResult::from_activity_event(
+            format!("read {} state", self.owner_app_id),
+            payload,
+            activity_event,
         )
         .with_model_content(model_content))
     }
@@ -449,7 +466,10 @@ impl RuntimeTool for AppRuntimeTool {
         unreachable!()
     }
 
-    fn call_activity_event(&self, _call: &AgentToolCall) -> miette::Result<ToolCallActivityEvent> {
+    fn call_activity_event(
+        &self,
+        _call: &AgentToolCall,
+    ) -> miette::Result<Option<ToolCallActivityEvent>> {
         context_free_error()?;
         unreachable!()
     }
@@ -528,14 +548,17 @@ impl RuntimeTool for WorkflowRuntimeTool {
         })
     }
 
-    fn call_activity_event(&self, call: &AgentToolCall) -> miette::Result<ToolCallActivityEvent> {
-        Ok(ToolCallActivityEvent::app(
+    fn call_activity_event(
+        &self,
+        call: &AgentToolCall,
+    ) -> miette::Result<Option<ToolCallActivityEvent>> {
+        Ok(Some(ToolCallActivityEvent::app(
             self.name.clone(),
             vec![format!(
                 "input={}",
                 summarize_inline_text(&call.arguments.to_string())
             )],
-        ))
+        )))
     }
 
     async fn execute(
@@ -1046,9 +1069,11 @@ fn find_runtime_tool<'a>(
 }
 
 pub fn build_runtime_tool_specs(context: &Context) -> Vec<AgentToolSpec> {
+    let study_mode = context.study_mode();
     build_runtime_tools(context)
         .into_iter()
         .filter(|tool| tool.is_available(context))
+        .filter(|tool| !study_mode || !study_mode_denies_tool(tool.name()))
         .map(|tool| tool.spec())
         .collect()
 }
@@ -1104,6 +1129,34 @@ pub(crate) fn ask_mode_denies_tool(
     mode.is_ask() && !matches!(tool_name, "finish_and_send" | "read_history")
 }
 
+/// Study sessions expose only the study tool domain plus the generic turn
+/// tools. Filesystem, browser, terminal, coding, and workflow tools stay in
+/// work sessions.
+pub(crate) fn study_mode_denies_tool(tool_name: &str) -> bool {
+    !(matches!(
+        tool_name,
+        "finish_and_send" | "update_plan" | "read_history"
+    ) || tool_name.starts_with("study__"))
+}
+
+fn study_mode_tool_result(call: &AgentToolCall) -> ToolExecutionResult {
+    let display_tool_name = AppId::render_exposed_tool_name(&call.name);
+    ToolExecutionResult::from_activity_event(
+        format!("{display_tool_name} unavailable in study mode"),
+        json!({
+            "available": false,
+            "study_mode": true,
+            "tool": call.name,
+            "allowed_next_action": "Use `study__*` tools, `update_plan`, `read_history`, or complete with `finish_and_send`.",
+        }),
+        None,
+    )
+    .with_model_content(format!(
+        "Tool unavailable: `{display_tool_name}` is disabled because this is a study mode session.\n\
+         Study sessions only allow `study__*` tools, `update_plan`, `read_history`, and `finish_and_send`."
+    ))
+}
+
 fn ask_mode_tool_result(call: &AgentToolCall) -> ToolExecutionResult {
     let display_tool_name = AppId::render_exposed_tool_name(&call.name);
     ToolExecutionResult::from_activity_event(
@@ -1136,7 +1189,7 @@ pub fn summarize_action_from_tool_call(
 pub fn build_tool_call_activity_event(
     context: &Context,
     call: &AgentToolCall,
-) -> Result<ToolCallActivityEvent> {
+) -> Result<Option<ToolCallActivityEvent>> {
     build_tool_call_activity_event_from_tools(&build_runtime_tools(context), call, &context.apps)
 }
 
@@ -1144,11 +1197,14 @@ fn build_tool_call_activity_event_from_tools(
     tools: &[Box<dyn RuntimeTool>],
     call: &AgentToolCall,
     apps: &AppManager,
-) -> Result<ToolCallActivityEvent> {
+) -> Result<Option<ToolCallActivityEvent>> {
     let tool = find_runtime_tool(tools, &call.name)?;
     let tool_call = tool_call_for_runtime_tool(tool, call);
-    tool.call_activity_event(&tool_call)
-        .map_or_else(|_| apps.tool_call_activity_event(call), Ok)
+    match tool.call_activity_event(&tool_call) {
+        Ok(Some(event)) => Ok(Some(event)),
+        Ok(None) => Ok(None),
+        Err(_) => apps.tool_call_activity_event(call),
+    }
 }
 
 fn tool_call_for_runtime_tool(tool: &dyn RuntimeTool, call: &AgentToolCall) -> AgentToolCall {
@@ -1269,6 +1325,9 @@ pub async fn execute_agent_tool_call(
     let tool = find_runtime_tool(&tools, &call.name)?;
     if ask_mode_denies_tool(context.current_turn_input_mode, &call.name) {
         return Ok(ask_mode_tool_result(call));
+    }
+    if context.study_mode() && study_mode_denies_tool(&call.name) {
+        return Ok(study_mode_tool_result(call));
     }
     if let Some((reason, allowed_next_action)) = runtime_availability_denial(context, tool) {
         return Ok(unavailable_tool_result(call, reason, allowed_next_action));
@@ -1819,6 +1878,21 @@ mod tests {
             TerminalInputMode::Normal,
             "read_file"
         ));
+    }
+
+    #[test]
+    fn study_mode_denies_work_tools_and_keeps_study_domain() {
+        assert!(study_mode_denies_tool("read_file"));
+        assert!(study_mode_denies_tool("edit_file"));
+        assert!(study_mode_denies_tool("terminal__terminal_exec"));
+        assert!(study_mode_denies_tool("coding__search_code"));
+        assert!(study_mode_denies_tool("browser__browser_open_page"));
+        assert!(study_mode_denies_tool("workflow__investigate"));
+        assert!(!study_mode_denies_tool("study__search_nodes"));
+        assert!(!study_mode_denies_tool("study__get_state"));
+        assert!(!study_mode_denies_tool("finish_and_send"));
+        assert!(!study_mode_denies_tool("update_plan"));
+        assert!(!study_mode_denies_tool("read_history"));
     }
 
     #[tokio::test]
