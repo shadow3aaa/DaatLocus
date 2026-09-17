@@ -1074,6 +1074,192 @@ become accidentally mixed because Manager and Session code share helper paths.
 - Keep project-scoped `code <project-dir>` as a multi-session selector.
 - Do not reintroduce any client direct-session connection path.
 
+## Study Mode
+
+Study Mode is a second agent mode that helps the user learn knowledge. It is not
+an `App`, not a work-session feature, and not a chat skin over the same
+workspace. It is a separate runtime surface with its own agent contract, its
+own capability domain, and its own client tab.
+
+### Study Goal
+
+Daat Locus maintains one unified, continuously growing knowledge graph. Knowledge
+is expressed as modules, nodes, and typed relations. The user learns by walking
+the graph or by extending it toward a learning goal, and the graph persists
+across time instead of being regenerated per conversation.
+
+The graph is visualized as a knowledge network in a 3D space. The layout is a
+projection of the stored graph, never the storage model:
+
+- nodes: knowledge points placed by a deterministic 3D force layout, projected
+  with a fixed perspective camera; closer points render larger
+- color: an emphasis gradient built from shadcn theme tokens, driven smoothly
+  by each node's understanding percentage (`--primary` near 100%, mixing
+  through `--muted-foreground`/`--border` toward 0%), so the graph follows
+  light/dark themes without custom colors
+- edges: one line per stored relation, colored with `color-mix` of its two
+  endpoint colors
+- labels: node titles appear only when the viewport is zoomed in far enough,
+  or on hover/selection; there are no axes, rings, or scale markers
+- focus: selecting a node animates the network into a flat focus projection
+  centered on that node, with other nodes ordered by neighbor barycenter
+  (Sugiyama-style sweeps) and spread evenly on relational hop rings so
+  relations radiate outward without crossing; the camera zooms into the
+  focused node's immediate neighborhood. Exiting (pane click, re-click, or the
+  panel close action) animates back to the 3D cloud
+- search: the sidebar search query rotates the network so the matched set is
+  recentered, highlights matching nodes and labels them, and dims everything
+  else in both the sidebar and the graph
+
+### Three Responsibilities
+
+The study agent owns exactly three responsibilities:
+
+1. **Organize (整理)**: maintain relations between knowledge nodes. The agent
+   judges identity, relation type, and prerequisite order; code performs
+   mechanical validation and mutation. The user may request organization work.
+2. **Understand (了解)**: maintain the per-node question bank and the user's
+   understanding level as a percentage. The agent generates questions, grades
+   attempts, and records progress. The user may ask for an assessment, or
+   directly declare an understanding percentage and have the agent record it.
+3. **Extrapolate (外推)**: add new knowledge nodes, either as a new core
+   (a new module or field) or extended from existing frontier nodes. The user
+   may give a learning goal; the agent grows the graph toward it.
+
+### Architecture
+
+```text
+Study App
+  capability domain: graph + question bank + progress storage
+  tools: study__* plus generated study__get_state
+  docs: prompts/apps/study.md carries the mode contract
+  render_state: graph counts, progress distribution, review queue, maintenance
+
+Study agent mode
+  independent persona contract, tool surface, and context assembly
+  singleton scope: SessionScope::Study, created on demand via POST /study/ensure
+  tool surface: study__* + finish_and_send + update_plan + read_history
+  work tools (read_file, edit_file, browser, terminal, coding, workflows) are
+  denied in this mode
+
+WebUI Study tab
+  the only client surface for study mode; TUI, CLI, and Telegram stay work-only
+```
+
+Rules:
+
+- The Study App is installed only in study sessions. Work sessions keep
+  Browser, Terminal, and Coding. Do not expose study tools to the work agent.
+- Study mode is single and unique: at most one study session exists in the
+  registry. `GET /sessions` must not list study sessions; clients resolve the
+  study session through `/study/ensure` only.
+- The study session is a normal session process with a normal event loop. User
+  messages in the Study tab go through the standard `POST /send` path and the
+  agent completes turns with `finish_and_send`.
+- The Study App follows the standard App contract (`render_state`, `docs`,
+  `tool_specs`, `execute_tool`). Do not add a parallel tool protocol.
+- Storage is the existing SQLite stack (rusqlite), at
+  `~/.daat-locus/study/graph.sqlite3` under `DAAT_LOCUS_HOME`.
+- Manager study endpoints are routing/proxy only:
+  `/study/ensure`, `/study/graph`, `/study/node`, `/study/progress`.
+
+### Study Data Model
+
+```text
+study_modules   id, title, description, created_at_ms, updated_at_ms
+study_nodes     id, module_id, title, summary, body, aliases, tags, sources,
+                content_version, created_at_ms, updated_at_ms
+study_edges     id, from_node_id, to_node_id, relation, note, created_at_ms
+study_progress  node_id, understanding, evidence, updated_by, updated_at_ms
+study_questions id, node_id, question, answer, difficulty,
+                node_content_version, created_at_ms
+study_attempts  id, question_id, node_id, outcome, note, created_at_ms
+```
+
+Enforced invariants:
+
+- `prerequisite` edges must stay acyclic; code rejects cycle-forming links.
+- Edge endpoints and node module references must exist.
+- Node identity is `id` plus aliases; merging duplicates is a code-executed
+  operation after the model judges that two nodes are the same concept.
+- New nodes require at least one source entry.
+- Updating node content bumps `content_version`; questions store the content
+  version they were generated from and become stale when it changes.
+- Understanding is one integer percentage per node in `0..=100`, with
+  `evidence` and `updated_by` (`user` or `agent`) recorded on every write;
+  `90` and above counts as mastered for aggregate stats.
+- The user can declare an understanding percentage directly; quiz evidence is
+  recorded but is not a hard gate.
+
+### Study Tools
+
+Model-facing tool names are `study__<action>`. The model decides semantics; code
+performs lookup, validation, and storage:
+
+```text
+study__list_modules      module overview with node counts and progress
+study__search_nodes      FTS plus alias search, optionally module-scoped
+study__read_node         node body plus neighbors grouped by relation
+study__create_node       create a node with sources, tags, aliases
+study__update_node       update content, aliases, tags, or sources
+study__link_nodes        create a typed relation edge
+study__unlink_nodes      remove a relation edge
+study__merge_nodes       merge a duplicate node into a canonical node
+study__find_similar      return duplicate candidates for a title or node
+study__add_questions     append questions for a node
+study__record_attempt    record an attempt outcome for a question
+study__update_progress   set a node's understanding percentage with evidence
+study__maintenance_report  orphans, duplicate candidates, dangling links
+```
+
+### Study Mode Completion
+
+Study turns are normal runtime turns. The agent answers the user in the
+Study tab only through `finish_and_send` with `event_id` and `reply_message`.
+Plain assistant text remains an internal record. Question generation, grading,
+graph edits, and progress updates must happen through study tools before the
+event completes.
+
+Study tool calls do not emit conversation activity rows. Graph and progress
+changes are visualized in the Study tab's network, sidebar list, and panels,
+so the chat shows only user input, thinking, plans, and the final reply.
+
+### Study Mode Surface Boundaries
+
+Work clients stay work-only. The study session is not reachable from the TUI,
+CLI, or Telegram:
+
+- `GET /sessions` excludes study sessions, so TUI/CLI selectors and
+  `send --session` prefix resolution cannot target them.
+- Telegram `/session_list` hides the study session, and `/session_attach` and
+  `/session_delete` refuse it. The Telegram default-session routing also
+  ignores stale study mappings.
+- The work slash-command surface does not apply to study. Study sessions
+  accept only `/status` and `/clear`; other dashboard commands and work-mode
+  dashboard actions (skills, workflows, app status, sleep, debug views) are
+  rejected with a study-mode message.
+- The Study tab chat disables slash-command completion and panels entirely.
+  User messages, including ones that start with `/`, flow through the normal
+  send path, and the session-side gate answers for anything reserved.
+
+### Study WebUI
+
+- The sidebar exposes an explicit mode switch between the work agent and study.
+  In study mode it shows a node search box plus a module-grouped node list in
+  the same row style as the session list.
+- The Study tab has no session list. It renders the knowledge network plus an
+  overview panel (description and relations only) and a chat that uses the
+  study session dashboard stream.
+- The network is rendered with the existing React Flow stack (`@xyflow/react`):
+  a deterministic 3D force layout projects points through a fixed perspective
+  camera, React Flow provides pan, zoom, hover, and selection, and the relation
+  lines are drawn by a custom SVG layer that follows the viewport and uses the
+  average color of both endpoints. Do not add a second graph-rendering
+  dependency for the same surface.
+- A `?mock=study` route renders the Study tab from fixed mock data so visual
+  verification does not require a live daemon. Mock query parameters: `node`,
+  `tab`, and `q`.
+
 ## Commit History
 
 Commit history is a long-term engineering interface, not a temporary chat log. When rewriting history or adding commits, follow these rules:
