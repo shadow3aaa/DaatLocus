@@ -28,6 +28,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { DirBrowserDialog } from "@/components/dir-browser-dialog";
+import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -50,9 +51,11 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import type { SessionInfo } from "@/lib/daemon-api";
+import type { StudyGraphSummaryProps } from "@/components/study-page";
+import { studyProgressColor } from "@/lib/study-circle-layout";
 import { cn } from "@/lib/utils";
 
-type AppPage = "agent" | "status" | "settings" | "logs";
+type AppPage = "agent" | "study" | "status" | "settings" | "logs";
 type ThemeMode = "light" | "dark";
 
 type AppSidebarProps = {
@@ -63,6 +66,11 @@ type AppSidebarProps = {
   isCreatingSession: boolean;
   deletingSessionId: string | null;
   themeMode: ThemeMode;
+  studySummary?: StudyGraphSummaryProps | null;
+  selectedStudyNodeId?: string | null;
+  onSelectStudyNode?: (nodeId: string) => void;
+  studyQuery?: string;
+  onStudyQueryChange?: (query: string) => void;
   onToggleThemeMode: () => void;
   onSelectSession: (sessionId: string) => void;
   onCreateSession: (projectDir?: string) => void;
@@ -139,6 +147,11 @@ function AppSidebarBody({
   isCreatingSession,
   deletingSessionId,
   themeMode,
+  studySummary,
+  selectedStudyNodeId,
+  onSelectStudyNode,
+  studyQuery,
+  onStudyQueryChange,
   onToggleThemeMode,
   onSelectSession,
   onCreateSession,
@@ -166,6 +179,11 @@ function AppSidebarBody({
     closeMobile();
   }
 
+  function switchMode(mode: "agent" | "study") {
+    window.location.hash = mode === "study" ? "#study" : "#agent";
+    closeMobile();
+  }
+
   async function confirmDeleteSession() {
     if (!deleteCandidate || isConfirmingDelete) {
       return;
@@ -184,6 +202,29 @@ function AppSidebarBody({
   return (
     <>
       <SidebarContent className="gap-1 px-2 py-2">
+        <div className="mb-1 grid grid-cols-2 gap-1 rounded-lg bg-muted p-1">
+          <Button
+            type="button"
+            size="sm"
+            variant={activePage === "agent" ? "secondary" : "ghost"}
+            aria-pressed={activePage === "agent"}
+            onClick={() => switchMode("agent")}
+            className="h-7"
+          >
+            {t("navigation.agent")}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={activePage === "study" ? "secondary" : "ghost"}
+            aria-pressed={activePage === "study"}
+            onClick={() => switchMode("study")}
+            className="h-7"
+          >
+            {t("navigation.study")}
+          </Button>
+        </div>
+
         {sessionError ? (
           <Alert variant="destructive" className="mb-2">
             <AlertDescription className="text-xs">
@@ -192,7 +233,20 @@ function AppSidebarBody({
           </Alert>
         ) : null}
 
-        <SidebarSessionSection
+        {activePage === "study" ? (
+          <StudySidebarSection
+            summary={studySummary ?? null}
+            selectedNodeId={selectedStudyNodeId ?? null}
+            onSelectNode={(nodeId) => {
+              onSelectStudyNode?.(nodeId);
+              closeMobile();
+            }}
+            query={studyQuery ?? ""}
+            onQueryChange={onStudyQueryChange ?? (() => undefined)}
+          />
+        ) : (
+          <>
+            <SidebarSessionSection
           label={t("sidebar.projects")}
           open={projectsOpen}
           highlighted={selectedProjectDir !== null}
@@ -253,8 +307,9 @@ function AppSidebarBody({
           }}
           onRequestDeleteSession={setDeleteCandidate}
         />
+          </>
+        )}
       </SidebarContent>
-
       <SidebarFooter>
         <SidebarSeparator className="mx-0" />
         <div className="flex flex-col gap-1">
@@ -314,6 +369,135 @@ function AppSidebarBody({
         onConfirm={confirmDeleteSession}
       />
     </>
+  );
+}
+
+function StudySidebarSection({
+  summary,
+  selectedNodeId,
+  onSelectNode,
+  query,
+  onQueryChange,
+}: {
+  summary: StudyGraphSummaryProps | null;
+  selectedNodeId: string | null;
+  onSelectNode: (nodeId: string) => void;
+  query: string;
+  onQueryChange: (query: string) => void;
+}) {
+  const { t } = useTranslation();
+  const normalizedQuery = query.trim().toLowerCase();
+  const modules = summary?.modules ?? [];
+  const nodes = summary?.nodes ?? [];
+
+  const visibleNodes = nodes.filter((node) => {
+    if (!normalizedQuery) {
+      return true;
+    }
+    return (
+      node.title.toLowerCase().includes(normalizedQuery) ||
+      node.aliases.some((alias) =>
+        alias.toLowerCase().includes(normalizedQuery),
+      )
+    );
+  });
+  const groups = modules
+    .map((module) => ({
+      module,
+      nodes: visibleNodes.filter((node) => node.moduleId === module.id),
+    }))
+    .filter((group) => group.nodes.length > 0);
+
+  return (
+    <>
+      <div className="px-1 pb-1">
+        <div className="relative">
+          <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-sidebar-foreground/40" />
+          <Input
+            value={query}
+            onChange={(event) => onQueryChange(event.target.value)}
+            placeholder={t("study.searchPlaceholder")}
+            aria-label={t("study.searchAria")}
+            className="h-8 rounded-md pl-8 text-sm"
+          />
+        </div>
+      </div>
+
+      {groups.map((group) => (
+        <StudyModuleGroup
+          key={group.module.id}
+          module={group.module}
+          nodes={group.nodes}
+          selectedNodeId={selectedNodeId}
+          onSelectNode={onSelectNode}
+        />
+      ))}
+
+      {groups.length === 0 ? (
+        <SidebarEmptyText>
+          {normalizedQuery
+            ? t("study.searchNoMatches")
+            : t("study.sidebarEmpty")}
+        </SidebarEmptyText>
+      ) : null}
+    </>
+  );
+}
+
+function StudyModuleGroup({
+  module,
+  nodes,
+  selectedNodeId,
+  onSelectNode,
+}: {
+  module: StudyGraphSummaryProps["modules"][number];
+  nodes: StudyGraphSummaryProps["nodes"];
+  selectedNodeId: string | null;
+  onSelectNode: (nodeId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(true);
+
+  return (
+    <SidebarSessionSection
+      label={module.title}
+      open={open}
+      onOpenChange={setOpen}
+      actions={
+        <span className="pr-2 text-xs text-sidebar-foreground/40">
+          {module.nodeCount}
+        </span>
+      }
+    >
+      <SidebarMenu className="gap-0.5 overflow-hidden">
+        {nodes.map((node) => (
+          <SidebarMenuItem key={node.id}>
+            <SidebarMenuButton
+              type="button"
+              isActive={node.id === selectedNodeId}
+              aria-selected={node.id === selectedNodeId}
+              title={node.title}
+              onClick={() => onSelectNode(node.id)}
+              className="h-8 justify-start gap-2 pl-2 text-left text-sidebar-foreground/85"
+            >
+              <span
+                className="size-2 shrink-0 rounded-full"
+                style={{
+                  backgroundColor: studyProgressColor(node.understanding),
+                }}
+                aria-hidden="true"
+              />
+              <span className="min-w-0 flex-1 truncate">{node.title}</span>
+              <span className="shrink-0 text-xs font-normal tabular-nums text-sidebar-foreground/45">
+                {t("study.understandingValue", {
+                  value: Math.round(node.understanding),
+                })}
+              </span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        ))}
+      </SidebarMenu>
+    </SidebarSessionSection>
   );
 }
 

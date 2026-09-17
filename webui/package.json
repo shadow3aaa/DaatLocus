@@ -8,6 +8,7 @@
     "dev": "vite",
     "dev:mock": "vite --open /?mock=setup",
     "dev:mock:settings": "vite --open /?mock=settings",
+    "dev:mock:study": "vite --open /?mock=study",
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
     "test": "bun test",

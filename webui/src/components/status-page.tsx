@@ -185,9 +185,13 @@ const AGENT_CHAT_QUICK_NAV_SCROLL_OFFSET_PX = 16;
 export function AgentPage({
   sessionId,
   mockSnapshot,
+  embedded = false,
+  allowSlashCommands = true,
 }: {
   sessionId: string;
   mockSnapshot?: DashboardSnapshot;
+  embedded?: boolean;
+  allowSlashCommands?: boolean;
 }) {
   const { t } = useTranslation();
   const { snapshot } = useDashboardSnapshot(sessionId, {
@@ -228,13 +232,17 @@ export function AgentPage({
       <section
         id="agent"
         aria-label={t("chat.agentPanelAria")}
-        className="relative flex h-screen min-h-screen w-full max-w-full flex-col overflow-hidden bg-background"
+        className={cn(
+          "relative flex w-full max-w-full flex-col overflow-hidden bg-background",
+          embedded ? "h-full min-h-0" : "h-screen min-h-screen",
+        )}
       >
         <AgentChatBubbles
           sessionId={sessionId}
           snapshot={snapshot}
           panelRef={chatPanelRef}
           composerHeight={chatComposerHeight}
+          embedded={embedded}
         />
         <AgentChatComposer
           sessionId={sessionId}
@@ -243,6 +251,8 @@ export function AgentPage({
           supportsVision={supportsVision}
           chatPanelRef={chatPanelRef}
           onHeightChange={setChatComposerHeight}
+          embedded={embedded}
+          allowSlashCommands={allowSlashCommands}
         />
       </section>
     </AgentChatMockDataContext.Provider>
@@ -726,6 +736,8 @@ function AgentChatComposer({
   supportsVision = true,
   chatPanelRef,
   onHeightChange,
+  embedded = false,
+  allowSlashCommands = true,
 }: {
   sessionId: string;
   snapshot: DashboardSnapshot | null;
@@ -733,6 +745,8 @@ function AgentChatComposer({
   supportsVision?: boolean;
   chatPanelRef: RefObject<HTMLDivElement | null>;
   onHeightChange: (height: number) => void;
+  embedded?: boolean;
+  allowSlashCommands?: boolean;
 }) {
   const { t } = useTranslation();
   const chatPlaceholder = t("chat.openChatWith", {
@@ -770,21 +784,26 @@ function AgentChatComposer({
   });
 
   const inputSuggestions = useMemo(
-    () => webInputSuggestions(message, snapshot),
-    [message, snapshot],
+    () => (allowSlashCommands ? webInputSuggestions(message, snapshot) : []),
+    [allowSlashCommands, message, snapshot],
   );
   const slashCommandFeedback = useMemo(
-    () => webSlashCommandFeedback(message, snapshot, imageAttachments.length),
-    [imageAttachments.length, message, snapshot],
+    () =>
+      allowSlashCommands
+        ? webSlashCommandFeedback(message, snapshot, imageAttachments.length)
+        : null,
+    [allowSlashCommands, imageAttachments.length, message, snapshot],
   );
   const selectedInputSuggestion =
     inputSuggestions[Math.min(slashCommandSelection, inputSuggestions.length - 1)];
   const slashCommandBlocksSubmit =
-    Boolean(slashCommandFeedback?.blocksSubmit) ||
-    (isWebSlashCommandInput(message) &&
-      !parseWebSlashCommand(message)?.trimmed);
+    allowSlashCommands &&
+    (Boolean(slashCommandFeedback?.blocksSubmit) ||
+      (isWebSlashCommandInput(message) &&
+        !parseWebSlashCommand(message)?.trimmed));
   const composerHasPayload = message.trim().length > 0 || imageAttachments.length > 0;
-  const composerQueuesUserInput = !isWebSlashCommandInput(message);
+  const composerQueuesUserInput =
+    !allowSlashCommands || !isWebSlashCommandInput(message);
   const queuedInputLimitBlocksSubmit =
     queuedInputLimitReached && composerHasPayload && composerQueuesUserInput;
   const isRuntimeInterruptible =
@@ -943,7 +962,8 @@ function AgentChatComposer({
 
   async function submitComposerInput(rawInput: string) {
     const trimmed = rawInput.trim();
-    const isSlashCommand = isWebSlashCommandInput(trimmed);
+    const isSlashCommand =
+      allowSlashCommands && isWebSlashCommandInput(trimmed);
     const slashBodyMissing =
       isSlashCommand && !parseWebSlashCommand(trimmed)?.trimmed;
     const slashFeedback = isSlashCommand
@@ -1182,7 +1202,10 @@ function AgentChatComposer({
     <div
       ref={composerContainerRef}
       className={cn(
-        "fixed inset-x-4 bottom-4 z-30 rounded-t-xl rounded-b-2xl border border-border/70 bg-background/92 shadow-xl shadow-background/30 backdrop-blur-xl transition-all duration-300 md:right-auto md:left-[calc(18rem+(100vw-18rem)/2)] md:w-[min(56rem,calc(100vw-18rem-2rem))] md:-translate-x-1/2",
+        "z-30 rounded-t-xl rounded-b-2xl border border-border/70 bg-background/92 shadow-xl shadow-background/30 backdrop-blur-xl transition-all duration-300",
+        embedded
+          ? "absolute inset-x-3 bottom-3 rounded-xl"
+          : "fixed inset-x-4 bottom-4 md:right-auto md:left-[calc(18rem+(100vw-18rem)/2)] md:w-[min(56rem,calc(100vw-18rem-2rem))] md:-translate-x-1/2",
         isDraggingImage && "border-primary/70 ring-4 ring-primary/15",
         "focus-within:border-primary/45 focus-within:ring-4 focus-within:ring-primary/10 hover:border-primary/30",
       )}
@@ -4375,11 +4398,13 @@ function AgentChatBubbles({
   snapshot,
   panelRef,
   composerHeight,
+  embedded = false,
 }: {
   sessionId: string;
   snapshot: DashboardSnapshot | null;
   panelRef: RefObject<HTMLDivElement | null>;
   composerHeight: number;
+  embedded?: boolean;
 }) {
   const { t } = useTranslation();
   const snapshotBubbles = useMemo(
@@ -5251,6 +5276,7 @@ function AgentChatBubbles({
         hasMoreBefore={hasMoreNavBefore && !navReachedMax}
         isLoadingHistory={isLoadingNavHistory}
         historyError={navHistoryError}
+        embedded={embedded}
         onNearTop={() => {
           void loadOlderNavHistory();
         }}
@@ -5272,7 +5298,10 @@ function AgentChatBubbles({
           }px)`,
         }}
         className={cn(
-          "fixed left-1/2 z-40 -translate-x-1/2 rounded-full border border-border/70 bg-background/90 shadow-lg shadow-background/30 backdrop-blur-xl transition-all duration-200 md:left-[calc(18rem+(100vw-18rem)/2)]",
+          "z-40 -translate-x-1/2 rounded-full border border-border/70 bg-background/90 shadow-lg shadow-background/30 backdrop-blur-xl transition-all duration-200",
+          embedded
+            ? "absolute left-1/2"
+            : "fixed left-1/2 md:left-[calc(18rem+(100vw-18rem)/2)]",
           showScrollToBottom
             ? "pointer-events-auto translate-y-0 opacity-100"
             : "pointer-events-none translate-y-2 opacity-0",
@@ -5301,6 +5330,7 @@ function AgentChatQuickNavigation({
   hasMoreBefore,
   isLoadingHistory,
   historyError,
+  embedded = false,
   onNearTop,
   onSelect,
 }: {
@@ -5310,6 +5340,7 @@ function AgentChatQuickNavigation({
   hasMoreBefore: boolean;
   isLoadingHistory: boolean;
   historyError: string | null;
+  embedded?: boolean;
   onNearTop: () => void;
   onSelect: (id: string) => void;
 }) {
@@ -5424,7 +5455,12 @@ function AgentChatQuickNavigation({
   return (
     <nav
       aria-label="User message quick navigation"
-      className="group pointer-events-none fixed top-1/2 right-0 z-50 h-[min(26rem,calc(100vh-1rem))] w-[min(17rem,calc(100vw-1rem))] -translate-y-1/2 md:pointer-events-auto md:right-4 md:flex md:w-auto md:items-center md:justify-end"
+      className={cn(
+        "group pointer-events-none z-50 h-[min(26rem,calc(100vh-1rem))] w-[min(17rem,calc(100vw-1rem))] -translate-y-1/2 md:pointer-events-auto md:flex md:w-auto md:items-center md:justify-end",
+        embedded
+          ? "absolute top-1/2 right-0"
+          : "fixed top-1/2 right-0 md:right-4",
+      )}
     >
       <button
         type="button"

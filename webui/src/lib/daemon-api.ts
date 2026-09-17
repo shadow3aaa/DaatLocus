@@ -18,7 +18,8 @@ export type DaemonStatus = {
 
 export type SessionScope =
   | { kind: "general" }
-  | { kind: "project"; project_dir: string };
+  | { kind: "project"; project_dir: string }
+  | { kind: "study" };
 
 export type SessionInfo = {
   session_id: string;
@@ -27,6 +28,143 @@ export type SessionInfo = {
   title: string | null;
   started_at_ms: number;
   last_seen_at_ms: number | null;
+};
+
+export type StudyProgress = {
+  /** Understanding level as a percentage between 0 and 100. */
+  understanding: number;
+  evidence: string;
+  updated_by: "code" | "user" | "agent";
+  updated_at_ms: number;
+};
+
+export type StudyModule = {
+  id: string;
+  title: string;
+  description: string;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+export type StudyModuleSummary = {
+  module: StudyModule;
+  node_count: number;
+  mastered_count: number;
+  in_progress_count: number;
+  unseen_count: number;
+  average_understanding: number;
+};
+
+export type StudyNodeSummary = {
+  id: string;
+  module_id: string;
+  title: string;
+  summary: string;
+  aliases: string[];
+  tags: string[];
+  content_version: number;
+  progress: StudyProgress;
+  question_count: number;
+  stale_question_count: number;
+};
+
+export type StudyRelation =
+  | "prerequisite"
+  | "part_of"
+  | "related"
+  | "contrast"
+  | "example_of"
+  | "applies_to";
+
+export type StudyEdge = {
+  id: number;
+  from: string;
+  to: string;
+  relation: StudyRelation;
+  note: string;
+};
+
+export type StudyStats = {
+  module_count: number;
+  node_count: number;
+  edge_count: number;
+  mastered_count: number;
+  in_progress_count: number;
+  unseen_count: number;
+  average_understanding: number;
+  question_count: number;
+  stale_question_count: number;
+  attempt_count: number;
+};
+
+export type StudyMaintenance = {
+  orphan_node_ids: string[];
+  empty_module_ids: string[];
+  duplicate_candidate_groups: string[][];
+  unlinked_node_ids: string[];
+  stale_question_count: number;
+};
+
+export type StudyGraphSnapshot = {
+  generated_at_ms: number;
+  modules: StudyModuleSummary[];
+  nodes: StudyNodeSummary[];
+  edges: StudyEdge[];
+  stats: StudyStats;
+  maintenance: StudyMaintenance;
+};
+
+export type StudySource = {
+  title: string;
+  url: string;
+};
+
+export type StudyQuestion = {
+  id: string;
+  node_id: string;
+  question: string;
+  answer: string;
+  difficulty: string;
+  node_content_version: number;
+  is_stale: boolean;
+  created_at_ms: number;
+  last_outcome: string | null;
+};
+
+export type StudyNode = {
+  id: string;
+  module_id: string;
+  title: string;
+  summary: string;
+  body: string;
+  aliases: string[];
+  tags: string[];
+  sources: StudySource[];
+  content_version: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+export type StudyNeighbor = {
+  node: StudyNodeSummary;
+  relation: StudyRelation;
+  direction: "in" | "out";
+  note: string;
+};
+
+export type StudyNodeDetail = {
+  node: StudyNode;
+  progress: StudyProgress;
+  questions: StudyQuestion[];
+  neighbors: StudyNeighbor[];
+};
+
+export type StudyProgressUpdate = {
+  node_id: string;
+  understanding: number;
+  evidence: string;
+  updated_by: "code" | "user" | "agent";
+  updated_at_ms: number;
 };
 
 export type DashboardSessionTitle = {
@@ -1551,6 +1689,132 @@ export async function createSession({
   });
 
   return parseJsonResponse<SessionInfo>(response, "Create session");
+}
+
+export async function ensureStudySession({
+  signal,
+  token = getStoredDaemonToken(),
+}: FetchOptions = {}): Promise<SessionInfo> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for study session.");
+  }
+
+  const response = await fetch("/study/ensure", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  return parseJsonResponse<SessionInfo>(response, "Ensure study session");
+}
+
+export async function fetchStudyGraph({
+  signal,
+  token = getStoredDaemonToken(),
+  sessionId,
+}: FetchOptions & { sessionId: string }): Promise<StudyGraphSnapshot> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for study graph.");
+  }
+
+  const url = new URL("/study/graph", window.location.href);
+  url.searchParams.set("session_id", sessionId);
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  return parseJsonResponse<StudyGraphSnapshot>(response, "Study graph");
+}
+
+export async function fetchStudyNode({
+  signal,
+  token = getStoredDaemonToken(),
+  sessionId,
+  nodeId,
+}: FetchOptions & {
+  sessionId: string;
+  nodeId: string;
+}): Promise<StudyNodeDetail> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for study node.");
+  }
+
+  const url = new URL("/study/node", window.location.href);
+  url.searchParams.set("session_id", sessionId);
+  url.searchParams.set("node_id", nodeId);
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  return parseJsonResponse<StudyNodeDetail>(response, "Study node");
+}
+
+export async function updateStudyProgress({
+  signal,
+  token = getStoredDaemonToken(),
+  sessionId,
+  nodeId,
+  understanding,
+  evidence,
+}: FetchOptions & {
+  sessionId: string;
+  nodeId: string;
+  understanding: number;
+  evidence?: string;
+}): Promise<StudyProgressUpdate> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for study progress.");
+  }
+
+  const body: {
+    session_id: string;
+    node_id: string;
+    understanding: number;
+    evidence?: string;
+  } = {
+    session_id: sessionId,
+    node_id: nodeId,
+    understanding: Math.round(understanding),
+  };
+  if (evidence) {
+    body.evidence = evidence;
+  }
+
+  const response = await fetch("/study/progress", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  return parseJsonResponse<StudyProgressUpdate>(response, "Study progress");
 }
 
 export type DirEntry = {

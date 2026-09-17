@@ -1,10 +1,19 @@
 import type { TFunction } from "i18next";
-import { useEffect, useLayoutEffect, useMemo, useState, lazy, Suspense } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  lazy,
+  Suspense,
+} from "react";
 import { useTranslation } from "react-i18next";
 
 import { AppSidebar } from "@/components/app-sidebar";
 import { LoginPage } from "@/components/login-page";
 import type { LogsPageMockData } from "@/components/logs-page";
+import type { StudyGraphSummaryProps } from "@/components/study-page";
 import { SetupPage } from "@/components/setup-page";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -39,15 +48,17 @@ import {
   type StatusSummary,
   type WorkflowRunSnapshot,
 } from "@/lib/daemon-api";
+import { MOCK_STUDY_DASHBOARD_SNAPSHOT, MOCK_STUDY_GRAPH } from "@/lib/study-mock";
 import { setWebUiLanguage } from "@/lib/i18n";
 // Lazy-loaded page components for smaller initial bundle
 const SettingsPage = lazy(() => import("@/components/settings-page").then(m => ({ default: m.SettingsPage })));
 const LogsPage = lazy(() => import("@/components/logs-page").then(m => ({ default: m.LogsPage })));
 const AgentPage = lazy(() => import("@/components/status-page").then(m => ({ default: m.AgentPage })));
 const StatusPage = lazy(() => import("@/components/status-dashboard-page").then(m => ({ default: m.StatusPage })));
+const StudyPage = lazy(() => import("@/components/study-page").then(m => ({ default: m.StudyPage })));
 
 
-type AppPage = "agent" | "status" | "settings" | "logs";
+type AppPage = "agent" | "study" | "status" | "settings" | "logs";
 type ThemeMode = "light" | "dark";
 
 const SELECTED_SESSION_STORAGE_KEY = "daat-locus.webui.selected-session-id";
@@ -103,6 +114,10 @@ export default function App() {
     return <MockLogsApp />;
   }
 
+  if (shouldRenderMockStudyPage()) {
+    return <MockStudyApp />;
+  }
+
   if (shouldRenderMockSettingsPage()) {
     return <MockSettingsApp />;
   }
@@ -116,6 +131,21 @@ export default function App() {
     Boolean(getStoredDaemonToken().trim()),
   );
   const [activePage, setActivePage] = useState(getCurrentPage);
+  const [studySummary, setStudySummary] =
+    useState<StudyGraphSummaryProps | null>(null);
+  const [selectedStudyNodeId, setSelectedStudyNodeId] = useState<string | null>(
+    null,
+  );
+  const [studyQuery, setStudyQuery] = useState("");
+  const handleStudyGraphLoaded = useCallback(
+    (summary: StudyGraphSummaryProps) => {
+      setStudySummary(summary);
+    },
+    [],
+  );
+  const handleSelectStudyNode = useCallback((nodeId: string | null) => {
+    setSelectedStudyNodeId(nodeId);
+  }, []);
   const [configReadiness, setConfigReadiness] =
     useState<ConfigReadinessReport | null>(null);
   const [configReadinessError, setConfigReadinessError] = useState<string | null>(
@@ -436,6 +466,11 @@ export default function App() {
             isCreatingSession={isCreatingSession}
             deletingSessionId={deletingSessionId}
             themeMode={themeMode}
+            studySummary={studySummary}
+            selectedStudyNodeId={selectedStudyNodeId}
+            onSelectStudyNode={handleSelectStudyNode}
+            studyQuery={studyQuery}
+            onStudyQueryChange={setStudyQuery}
             onToggleThemeMode={toggleThemeMode}
             onSelectSession={handleSelectSession}
             onCreateSession={handleCreateSession}
@@ -443,10 +478,20 @@ export default function App() {
           />
           <SidebarInset className="min-h-screen">
             <Suspense fallback={<div className="flex items-center justify-center p-8 min-h-screen"><Spinner /></div>}>
-              {renderAuthenticatedPage(activePage, selectedSessionId, {
-                hasLoadedSessions,
-                sessionError,
-              })}
+              {renderAuthenticatedPage(
+                activePage,
+                selectedSessionId,
+                {
+                  hasLoadedSessions,
+                  sessionError,
+                },
+                {
+                  onGraphLoaded: handleStudyGraphLoaded,
+                  selectedNodeId: selectedStudyNodeId,
+                  onSelectNode: handleSelectStudyNode,
+                  searchQuery: studyQuery,
+                },
+              )}
             </Suspense>
           </SidebarInset>
         </SidebarProvider>
@@ -508,6 +553,89 @@ function MockAgentApp() {
           <AgentPage
             sessionId={MOCK_SESSION.session_id}
             mockSnapshot={mockSnapshot}
+          />
+        </SidebarInset>
+      </SidebarProvider>
+    </main>
+  );
+}
+
+function MockStudyApp() {
+  const { t } = useTranslation();
+  const { themeMode, toggleThemeMode } = useThemeMode();
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(() =>
+    typeof window === "undefined"
+      ? null
+      : new URLSearchParams(window.location.search).get("node"),
+  );
+  const [studyQuery, setStudyQuery] = useState(() =>
+    typeof window === "undefined"
+      ? ""
+      : (new URLSearchParams(window.location.search).get("q") ?? ""),
+  );
+  const studySummary = useMemo<StudyGraphSummaryProps>(
+    () => ({
+      modules: MOCK_STUDY_GRAPH.modules.map((summary) => ({
+        id: summary.module.id,
+        title: summary.module.title,
+        nodeCount: summary.node_count,
+        masteredCount: summary.mastered_count,
+        inProgressCount: summary.in_progress_count,
+        averageUnderstanding: summary.average_understanding,
+      })),
+      nodes: MOCK_STUDY_GRAPH.nodes.map((node) => ({
+        id: node.id,
+        moduleId: node.module_id,
+        title: node.title,
+        aliases: node.aliases,
+        understanding: node.progress.understanding,
+      })),
+      stats: MOCK_STUDY_GRAPH.stats,
+    }),
+    [],
+  );
+
+  useEffect(() => {
+    document.title = pageDocumentTitle("study", null, true, t);
+  }, [t]);
+
+  return (
+    <main className="min-h-screen bg-background text-foreground">
+      <SidebarProvider>
+        <AppSidebar
+          activePage="study"
+          sessions={MOCK_SIDEBAR_SESSIONS}
+          selectedSessionId={MOCK_SESSION.session_id}
+          sessionError={null}
+          isCreatingSession={false}
+          deletingSessionId={null}
+          themeMode={themeMode}
+          studySummary={studySummary}
+          selectedStudyNodeId={selectedNodeId}
+          onSelectStudyNode={setSelectedNodeId}
+          studyQuery={studyQuery}
+          onStudyQueryChange={setStudyQuery}
+          onToggleThemeMode={toggleThemeMode}
+          onSelectSession={() => undefined}
+          onCreateSession={() => undefined}
+          onDeleteSession={async () => undefined}
+        />
+        <SidebarInset className="min-h-screen">
+          <StudyPage
+            mockGraph={MOCK_STUDY_GRAPH}
+            mockSessionId={MOCK_SESSION.session_id}
+            mockSnapshot={MOCK_STUDY_DASHBOARD_SNAPSHOT}
+            selectedNodeId={selectedNodeId}
+            onSelectNode={setSelectedNodeId}
+            searchQuery={studyQuery}
+            instantTransitions={
+              new URLSearchParams(window.location.search).get("anim") === "0"
+            }
+            initialTab={
+              new URLSearchParams(window.location.search).get("tab") === "chat"
+                ? "chat"
+                : "overview"
+            }
           />
         </SidebarInset>
       </SidebarProvider>
@@ -654,6 +782,12 @@ function renderAuthenticatedPage(
     hasLoadedSessions: boolean;
     sessionError: string | null;
   },
+  studyState: {
+    onGraphLoaded: (summary: StudyGraphSummaryProps) => void;
+    selectedNodeId: string | null;
+    onSelectNode: (nodeId: string | null) => void;
+    searchQuery: string;
+  },
 ) {
   switch (activePage) {
     case "status":
@@ -662,6 +796,15 @@ function renderAuthenticatedPage(
       return <SettingsPage />;
     case "logs":
       return <LogsPage />;
+    case "study":
+      return (
+        <StudyPage
+          onGraphLoaded={studyState.onGraphLoaded}
+          selectedNodeId={studyState.selectedNodeId}
+          onSelectNode={studyState.onSelectNode}
+          searchQuery={studyState.searchQuery}
+        />
+      );
     case "agent":
     default:
       return selectedSessionId ? (
@@ -821,6 +964,11 @@ function readStoredThemeMode(): ThemeMode {
     return "light";
   }
 
+  const queryTheme = new URLSearchParams(window.location.search).get("theme");
+  if (queryTheme === "dark" || queryTheme === "light") {
+    return queryTheme;
+  }
+
   try {
     const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
     if (storedTheme === "dark" || storedTheme === "light") {
@@ -880,6 +1028,8 @@ function pageLabel(page: AppPage, t: TFunction) {
       return t("navigation.settings");
     case "logs":
       return t("navigation.logs");
+    case "study":
+      return t("navigation.study");
     case "agent":
     default:
       return t("navigation.agent");
@@ -926,6 +1076,9 @@ function getCurrentPage(): AppPage {
   if (window.location.hash === "#settings") {
     return "settings";
   }
+  if (window.location.hash === "#study") {
+    return "study";
+  }
   return "agent";
 }
 
@@ -943,6 +1096,14 @@ function shouldRenderMockStatusPage() {
   }
 
   return new URLSearchParams(window.location.search).get("mock") === "status";
+}
+
+function shouldRenderMockStudyPage() {
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return false;
+  }
+
+  return new URLSearchParams(window.location.search).get("mock") === "study";
 }
 
 function shouldRenderMockLogsPage() {
