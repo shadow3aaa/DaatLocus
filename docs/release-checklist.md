@@ -12,8 +12,8 @@ Use this checklist before tagging a Daat Locus release.
 - Confirm `/health` remains minimal and unauthenticated.
 - Confirm daemon startup gates runtime commands until the lifecycle state is
   `ready`.
-- Confirm terminal and workspace app worker processes do not inherit protected
-  provider secret environment variables.
+- Confirm terminal worker processes do not inherit protected provider secret
+  environment variables.
 
 ## State And Migration
 
@@ -59,14 +59,6 @@ Use this checklist before tagging a Daat Locus release.
 
 - Load an existing config file from the previous release.
 - Run the setup wizard on a clean machine profile.
-- Load existing workspace app packages under `~/daat-locus-workspace/apps`.
-- Confirm workspace app hook compatibility:
-  - `config(ctx)`
-  - `init(ctx, state)`
-  - `render_state(ctx, state)`
-  - `list_tools(ctx, state)`
-  - `call_tool(ctx, state, name, args)`
-  - `poll_notices(ctx, state)`
 
 ## Quality Gates
 
@@ -80,7 +72,6 @@ Use this checklist before tagging a Daat Locus release.
   - daemon start and attach
   - Telegram ACL approval flow when Telegram is enabled
   - terminal command execution
-  - workspace app load, reload, timeout, and restart
 
 ## Release Notes
 
@@ -90,4 +81,3 @@ Use this checklist before tagging a Daat Locus release.
 - Document user-visible config changes.
 - Document state migration behavior.
 - Document any supply-chain pinning gaps.
-- Document backwards compatibility notes for workspace app behavior.

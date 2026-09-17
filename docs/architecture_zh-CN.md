@@ -183,21 +183,6 @@ Telegram 是 transport 和 event source。Manager 负责 poll/receive Telegram i
 
 模型从 runtime 获得结构化事实和 event id，判断 event，并用 `finish_and_send` 完成它。
 
-### Workspace Apps
-
-第三方 workspace Apps 是 source-first 资产，位于：
-
-```text
-~/daat-locus-workspace/apps/<app_id_snake_case>/
-  app.toml
-  runtime/app.lua
-  prompt/docs.md
-```
-
-Host 通过 `mlua` 从 `runtime/app.lua` 加载一个 Lua 5.4 module。当前 Lua surface 使用单一 module instance，hooks 包括 `config(ctx)`、`init(ctx, state)`、`render_state(ctx, state)`、`list_tools(ctx, state)`、`call_tool(ctx, state, name, args)` 和 `poll_notices(ctx, state)`。
-
-Workspace app prompt docs 描述 App 能力；可复用任务 SOP 位于 skill specs（SKILL.md 文件）。
-
 ## 工具与行动边界
 
 ### 显式标识符优先
@@ -228,7 +213,7 @@ Coding 使用一种可见 source-location vocabulary：`path + line#hash`。
 
 Runtime tools、App tools 和 structured model outputs 使用保守 JSON Schema dialect。Schema root 必须是 object；object properties 必须 required，并用 `additionalProperties: false` 关闭；optional values 表示为 nullable required fields；正确性来自生成并验证后的 provider-boundary schemas。
 
-Rust 侧通常使用 `#[model_schema]` 加 `model_schema_for::<T>()`。动态 workspace app schemas 会在加载时校验。
+Rust 侧通常使用 `#[model_schema]` 加 `model_schema_for::<T>()`。动态 workflow schemas 会在加载时校验。
 
 ## Multi-Session 架构
 
@@ -321,7 +306,7 @@ Sleep 是 evidence-driven improvement，有两条独立路径：
 
 受保护 runtime state 包括 configuration、daemon auth tokens、Telegram ACL/default-session mapping、session registry、events、pending work、runtime conversation and memory、plans、dashboard history、app-local state 和 sleep artifacts。
 
-可编辑 workspace assets 包括 project files、workspace app source packages 和 skill specs。Builtin skill specs 是编译进 binary 的 repository assets，在 runtime 中只读。
+可编辑 workspace assets 包括 project files 和 skill specs。Builtin skill specs 是编译进 binary 的 repository assets，在 runtime 中只读。
 
 这条边界把 runtime-owned state 与 project-file edits 分开，同时允许 agent-maintained workspace assets 在受控流程中演化。
 
@@ -334,10 +319,6 @@ Daat Locus 可以暴露类似聊天的界面；核心由 pending work、structur
 ### Domain-Owned Tools
 
 工具按 domain ownership 暴露。App tool names 显示 owner namespace；有状态 domain 通过 `get_state` 和显式标识符提供操作入口。
-
-### Source-First Workspace Apps
-
-Workspace Apps 是 source-first、本地、可审计的能力域。Skill specs 承载 self-optimizing task procedures。
 
 ### Evidence-Driven Improvement
 

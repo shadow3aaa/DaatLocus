@@ -259,25 +259,6 @@ messages to a Session, drains Session outboxes, and records delivery results.
 The model receives the structured facts and event id from runtime, judges the
 event, and completes it with `finish_and_send`.
 
-### Workspace Apps
-
-Third-party workspace Apps are source-first assets under:
-
-```text
-~/daat-locus-workspace/apps/<app_id_snake_case>/
-  app.toml
-  runtime/app.lua
-  prompt/docs.md
-```
-
-The host loads one Lua 5.4 module from `runtime/app.lua` through `mlua`. The
-current Lua surface uses one module instance with hooks such as `config(ctx)`,
-`init(ctx, state)`, `render_state(ctx, state)`, `list_tools(ctx, state)`,
-`call_tool(ctx, state, name, args)`, and `poll_notices(ctx, state)`.
-
-Workspace app prompt docs describe the App capability. Reusable task SOPs live in
-skill specs (SKILL.md files).
-
 ## Tool And Action Boundaries
 
 ### Prefer Explicit Identifiers
@@ -316,7 +297,7 @@ fields, and correctness comes from generated and validated schemas at the
 provider boundary.
 
 The normal Rust entry point is `#[model_schema]` plus `model_schema_for::<T>()`.
-Dynamic workspace app schemas are validated when loaded.
+Dynamic workflow schemas are validated when loaded.
 
 ## Multi-Session Architecture
 
@@ -448,9 +429,9 @@ ACL/default-session mapping, session registry, events, pending work, runtime
 conversation and memory, plans, dashboard history, app-local state, and sleep
 artifacts.
 
-Editable workspace assets include project files, workspace app source packages,
-and skill specs. Builtin skill specs are repository assets
-compiled into the binary and are read-only at runtime.
+Editable workspace assets include project files and skill specs. Builtin skill
+specs are repository assets compiled into the binary and are read-only at
+runtime.
 
 This boundary separates runtime-owned state from project-file edits while still
 allowing agent-maintained workspace assets to evolve through controlled
@@ -467,11 +448,6 @@ structured context, explicit tools, persisted state, and evidence.
 
 Tools are exposed by domain ownership. App tool names show their owner namespace,
 and stateful domains expose `get_state` with explicit identifiers.
-
-### Source-First Workspace Apps
-
-Workspace Apps are source-first, local, auditable capability domains. Skill
-specs carry self-optimizing task procedures.
 
 ### Evidence-Driven Improvement
 

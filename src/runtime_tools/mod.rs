@@ -1325,7 +1325,6 @@ mod tests {
         telegram_acl::TelegramAclHandle,
         telegram_transport::state::TelegramTransportState,
         terminal_app::TerminalApp,
-        workspace_app::WorkspaceAppRegistry,
     };
 
     #[test]
@@ -1701,7 +1700,6 @@ mod tests {
                 current_turn_input_mode: crate::events::TerminalInputMode::Normal,
                 file_anchors: crate::file_anchors::FileAnchorTable::default(),
                 apps,
-                workspace_apps: WorkspaceAppRegistry::default(),
                 telegram: telegram.handle(),
                 telegram_acl: TelegramAclHandle::load().await,
                 compiled_prompts: CompiledPromptStore::from_entries(Vec::new()),

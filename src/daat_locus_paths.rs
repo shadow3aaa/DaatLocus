@@ -202,6 +202,14 @@ fn resolve_daat_locus_home_root() -> PathBuf {
     )
 }
 
+/// Default runtime workspace used by general sessions when no project
+/// directory is supplied.
+pub fn resolve_runtime_workspace_dir() -> miette::Result<PathBuf> {
+    let home = env::home_dir()
+        .ok_or_else(|| miette::miette!("failed to determine home directory for workspace"))?;
+    Ok(home.join("daat-locus-workspace"))
+}
+
 fn ensure_layout_sync(paths: &DaatLocusPaths) {
     let _ = std::fs::create_dir_all(paths.config_dir());
     let _ = std::fs::create_dir_all(paths.codex_auth_dir());

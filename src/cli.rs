@@ -271,22 +271,6 @@ enum DaatLocusCommand {
     /// Print the JSON Schema for config.toml.
     #[command(name = "config-schema", hide = true)]
     ConfigSchema,
-    /// Internal workspace app worker process.
-    #[command(name = "workspace-app-worker", hide = true)]
-    WorkspaceAppWorker {
-        #[arg(long)]
-        app_id: String,
-        #[arg(long)]
-        app_dir: PathBuf,
-        #[arg(long)]
-        state_dir: PathBuf,
-        #[arg(long)]
-        entry: String,
-        #[arg(long)]
-        connect_addr: String,
-        #[arg(long)]
-        token: String,
-    },
 }
 
 #[cfg(feature = "tui-perf-cmd")]
@@ -355,26 +339,6 @@ pub async fn async_main(cli: Cli) -> Result<()> {
     let _log_guard = init_logging(cli.session_id.as_deref()).await;
 
     match cli.command.as_ref() {
-        Some(DaatLocusCommand::WorkspaceAppWorker {
-            app_id,
-            app_dir,
-            state_dir,
-            entry,
-            connect_addr,
-            token,
-        }) => {
-            crate::workspace_app::worker::run_workspace_app_worker(
-                crate::workspace_app::worker::WorkspaceAppWorkerArgs {
-                    app_id: app_id.clone(),
-                    app_dir: app_dir.clone(),
-                    state_dir: state_dir.clone(),
-                    entry: entry.clone(),
-                    connect_addr: connect_addr.clone(),
-                    token: token.clone(),
-                },
-            )?;
-            return Ok(());
-        }
         Some(DaatLocusCommand::Reset {
             target: ResetTarget::Compile,
         }) => {

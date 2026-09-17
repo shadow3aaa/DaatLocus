@@ -32,7 +32,7 @@ use crate::{
     reasoning::runtime::{
         AgentMessage, AgentToolCall, AgentToolInputSpec, AgentToolSpec, AgentTurnRequest,
     },
-    runtime::bootstrap::build_isolated_worker_apps,
+    runtime::bootstrap::build_runtime_apps,
     runtime_context::{MID_TURN_COMPACTION_MAX_RECOVERIES, maybe_compact_agent_messages},
     runtime_tools::{
         ToolExecutionResult, WorkerRuntimeToolCallContext,
@@ -1019,22 +1019,16 @@ struct WorkflowWorkerActorHandle(Arc<tokio::sync::Mutex<WorkflowWorkerActor>>);
 
 impl UserData for WorkflowWorkerActorHandle {}
 
-#[derive(Clone)]
-struct WorkerActorFactoryContext {
-    execution_cwd: PathBuf,
-    sandbox_policy: crate::sandbox::RuntimeSandboxPolicy,
-}
+#[derive(Clone, Copy, Default)]
+struct WorkerActorFactoryContext;
 
 impl WorkerActorFactoryContext {
-    fn from_context(context: &Context) -> Self {
-        Self {
-            execution_cwd: context.execution_cwd.clone(),
-            sandbox_policy: context.sandbox_policy.clone(),
-        }
+    const fn from_context(_: &Context) -> Self {
+        Self
     }
 
     fn build_apps(&self) -> Result<AppManager> {
-        build_worker_apps(&self.execution_cwd, &self.sandbox_policy)
+        build_worker_apps()
     }
 }
 
@@ -1423,13 +1417,8 @@ async fn run_workflow_script(
         .set("workflow", workflow.clone())
         .map_err(|err| lua_error(&err))?;
     let factory_context = WorkerActorFactoryContext::from_context(context);
-    install_execution_functions(
-        &lua,
-        &workflow,
-        factory_context.clone(),
-        local_tools.clone(),
-    )
-    .map_err(|err| lua_error(&err))?;
+    install_execution_functions(&lua, &workflow, factory_context, local_tools.clone())
+        .map_err(|err| lua_error(&err))?;
     let local_tool_slot = local_tools.clone();
     workflow
         .set(
@@ -1602,13 +1591,12 @@ fn install_execution_functions(
     factory_context: WorkerActorFactoryContext,
     local_tools: Arc<Mutex<BTreeMap<String, LocalToolDefinition>>>,
 ) -> mlua::Result<()> {
-    let worker_factory_context = factory_context.clone();
     workflow.set(
         "agent",
         lua.create_function(move |lua, table: Table| {
             let definition = worker_definition_from_lua(lua, &table)?;
             let actor = Arc::new(tokio::sync::Mutex::new(
-                WorkflowWorkerActor::new(&worker_factory_context, definition, &local_tools)
+                WorkflowWorkerActor::new(&factory_context, definition, &local_tools)
                     .map_err(mlua::Error::external)?,
             ));
             let factory = lua.create_table()?;
@@ -2125,14 +2113,8 @@ fn append_worker_tool_result_message(
     }
 }
 
-fn build_worker_apps(
-    execution_cwd: &Path,
-    sandbox_policy: &crate::sandbox::RuntimeSandboxPolicy,
-) -> Result<AppManager> {
-    let worker_id = uuid::Uuid::new_v4().to_string();
-    let (apps, _workspace_apps) =
-        build_isolated_worker_apps(execution_cwd, sandbox_policy, &worker_id);
-    AppManager::new(apps)
+fn build_worker_apps() -> Result<AppManager> {
+    AppManager::new(build_runtime_apps())
 }
 
 fn build_worker_tools(
@@ -2354,7 +2336,6 @@ mod tests {
         sandbox::RuntimeSandboxPolicy,
         telegram_acl::TelegramAclHandle,
         telegram_transport::state::TelegramTransportState,
-        workspace_app::WorkspaceAppRegistry,
     };
 
     fn workflow_inspector_actor_id(definition: &WorkerDefinition) -> String {
@@ -3232,7 +3213,6 @@ mod tests {
                 current_turn_input_mode: crate::events::TerminalInputMode::Normal,
                 file_anchors: crate::file_anchors::FileAnchorTable::default(),
                 apps: AppManager::new(Vec::new()).expect("app manager"),
-                workspace_apps: WorkspaceAppRegistry::default(),
                 telegram: telegram.handle(),
                 telegram_acl: TelegramAclHandle::load().await,
                 compiled_prompts: CompiledPromptStore::from_entries(Vec::new()),

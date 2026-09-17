@@ -72,16 +72,6 @@ const WORKER_DENY_WRITE_MASK: u32 = FILE_GENERIC_WRITE
     | FILE_DELETE_CHILD;
 const WORKER_DENY_READ_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 
-#[cfg(not(test))]
-pub enum WindowsSandboxChild {
-    Plain(std::process::Child),
-    Restricted(RestrictedWindowsChild),
-}
-
-#[cfg(not(test))]
-unsafe impl Send for WindowsSandboxChild {}
-#[cfg(not(test))]
-unsafe impl Sync for WindowsSandboxChild {}
 pub struct WindowsSandboxAsyncChild {
     child: RestrictedWindowsChild,
     stdin: Option<tokio::fs::File>,
@@ -138,37 +128,6 @@ struct ParentPipeHandles {
     stderr: Option<OwnedHandle>,
 }
 
-#[cfg(not(test))]
-impl WindowsSandboxChild {
-    pub fn id(&self) -> u32 {
-        match self {
-            Self::Plain(child) => child.id(),
-            Self::Restricted(child) => child.id(),
-        }
-    }
-
-    pub fn kill(&mut self) -> io::Result<()> {
-        match self {
-            Self::Plain(child) => child.kill(),
-            Self::Restricted(child) => child.kill(),
-        }
-    }
-
-    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        match self {
-            Self::Plain(child) => child.try_wait(),
-            Self::Restricted(child) => child.try_wait(),
-        }
-    }
-
-    pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        match self {
-            Self::Plain(child) => child.wait(),
-            Self::Restricted(child) => child.wait(),
-        }
-    }
-}
-
 impl WindowsSandboxAsyncChild {
     pub const fn id(&self) -> u32 {
         self.child.id()
@@ -194,38 +153,6 @@ impl WindowsSandboxAsyncChild {
         self.child.try_wait()
     }
 }
-#[cfg(not(test))]
-pub fn spawn_restricted(
-    policy: &RuntimeSandboxPolicy,
-    program: &PathBuf,
-    args: Vec<String>,
-    options: SandboxProcessOptions,
-) -> io::Result<WindowsSandboxChild> {
-    let cap_sid = random_capability_sid();
-    let cap_sid_ptr = LocalSid::from_string(&cap_sid)?;
-    let token = create_restricted_token(&cap_sid_ptr)?;
-    let mut acl_guards = Vec::new();
-    let process = match spawn_restricted_inner(RestrictedSpawnInput {
-        policy,
-        program,
-        args,
-        options,
-        psid_capability: cap_sid_ptr.as_ptr(),
-        psid_logon: token.logon_sid.as_ptr().cast::<c_void>().cast_mut(),
-        psid_everyone: token.everyone_sid.as_ptr().cast::<c_void>().cast_mut(),
-        token: token.handle.raw(),
-        acl_guards: &mut acl_guards,
-    }) {
-        Ok(process) => process,
-        Err(err) => {
-            restore_acl_guards(&acl_guards);
-            return Err(err);
-        }
-    };
-    drop(token);
-    Ok(WindowsSandboxChild::Restricted(process))
-}
-
 pub fn spawn_restricted_async(
     policy: &RuntimeSandboxPolicy,
     program: &PathBuf,
@@ -267,72 +194,6 @@ struct RestrictedSpawnInput<'a> {
     psid_everyone: PSID,
     token: HANDLE,
     acl_guards: &'a mut Vec<AclGuard>,
-}
-
-#[cfg(not(test))]
-fn spawn_restricted_inner(input: RestrictedSpawnInput<'_>) -> io::Result<RestrictedWindowsChild> {
-    apply_policy_acl_rules(
-        input.policy,
-        input.program,
-        input.psid_capability,
-        input.psid_logon,
-        input.psid_everyone,
-        input.acl_guards,
-    )?;
-    let current_dir = input
-        .options
-        .current_dir
-        .clone()
-        .unwrap_or(std::env::current_dir()?);
-    let argv = command_argv(input.program, input.args);
-    let mut command_line = to_wide(argv_to_command_line(&argv));
-    let program_wide = to_wide(input.program.as_os_str());
-    let current_dir_wide = to_wide(current_dir.as_os_str());
-    let env_block = environment_block(input.policy);
-    let stdio = StartupHandles::new(&input.options)?;
-    let startup_info = startup_info(&stdio);
-    let mut process_info = PROCESS_INFORMATION::default();
-
-    let created = unsafe {
-        CreateProcessAsUserW(
-            input.token,
-            program_wide.as_ptr(),
-            command_line.as_mut_ptr(),
-            ptr::null(),
-            ptr::null(),
-            1,
-            CREATE_UNICODE_ENVIRONMENT | 0x0800_0000,
-            env_block.as_ptr().cast::<c_void>(),
-            current_dir_wide.as_ptr(),
-            &raw const startup_info,
-            &raw mut process_info,
-        )
-    };
-    if created == 0 {
-        return Err(last_os_error("CreateProcessAsUserW failed"));
-    }
-
-    let job = match create_kill_on_close_job(process_info.hProcess) {
-        Ok(job) => job,
-        Err(err) => {
-            unsafe {
-                TerminateProcess(process_info.hProcess, 1);
-                CloseHandle(process_info.hThread);
-                CloseHandle(process_info.hProcess);
-            }
-            return Err(err);
-        }
-    };
-
-    Ok(RestrictedWindowsChild {
-        process: process_info.hProcess,
-        thread: process_info.hThread,
-        job,
-        process_id: unsafe { GetProcessId(process_info.hProcess) },
-        exit_status: None,
-        acl_guards: std::mem::take(input.acl_guards),
-        acl_cleaned: false,
-    })
 }
 
 fn spawn_restricted_async_inner(
@@ -1038,18 +899,6 @@ impl RestrictedWindowsChild {
         }
     }
 
-    #[cfg(not(test))]
-    fn wait(&mut self) -> io::Result<ExitStatus> {
-        if let Some(status) = self.exit_status {
-            return Ok(status);
-        }
-        match unsafe { WaitForSingleObject(self.process, u32::MAX) } {
-            WAIT_OBJECT_0 => self.finish_after_exit(),
-            WAIT_FAILED => Err(last_os_error("WaitForSingleObject failed")),
-            other => Err(io::Error::other(format!("unexpected wait result {other}"))),
-        }
-    }
-
     fn finish_after_exit(&mut self) -> io::Result<ExitStatus> {
         let mut code = 1;
         let ok = unsafe { GetExitCodeProcess(self.process, &raw mut code) };
@@ -1170,20 +1019,6 @@ impl Drop for OwnedHandle {
 }
 
 impl StartupHandles {
-    #[cfg(not(test))]
-    fn new(options: &SandboxProcessOptions) -> io::Result<Self> {
-        let mut owned = Vec::new();
-        let stdin = stdio_handle(options.stdin, STD_INPUT_HANDLE, true, &mut owned)?;
-        let stdout = stdio_handle(options.stdout, STD_OUTPUT_HANDLE, false, &mut owned)?;
-        let stderr = stdio_handle(options.stderr, STD_ERROR_HANDLE, false, &mut owned)?;
-        Ok(Self {
-            stdin,
-            stdout,
-            stderr,
-            _owned: owned,
-        })
-    }
-
     fn new_with_parent_pipes(
         options: &SandboxProcessOptions,
     ) -> io::Result<(Self, ParentPipeHandles)> {

@@ -1,8 +1,6 @@
 use miette::{Result, miette};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-#[cfg(not(test))]
-use std::process::Command as StdCommand;
 use std::{
     ffi::OsString,
     path::{Component, Path, PathBuf},
@@ -75,16 +73,6 @@ pub struct SandboxProcessOptions {
     pub stderr: SandboxStdio,
 }
 
-#[cfg(all(not(test), not(target_os = "windows")))]
-pub struct SandboxChild {
-    inner: std::process::Child,
-}
-
-#[cfg(all(not(test), target_os = "windows"))]
-pub struct SandboxChild {
-    inner: windows::WindowsSandboxChild,
-}
-
 pub struct SandboxAsyncChild {
     inner: SandboxAsyncChildInner,
 }
@@ -141,82 +129,6 @@ impl SandboxStdio {
             Self::Null => Stdio::null(),
             Self::Piped => Stdio::piped(),
         }
-    }
-}
-
-#[cfg(not(test))]
-impl SandboxChild {
-    pub fn spawn_strong(
-        policy: &RuntimeSandboxPolicy,
-        program: PathBuf,
-        args: Vec<String>,
-        options: SandboxProcessOptions,
-    ) -> std::io::Result<Self> {
-        #[cfg(target_os = "windows")]
-        {
-            if policy.strong_filesystem != StrongFilesystemSandboxMode::Off
-                && filesystem_policy_requires_backend(&policy.filesystem)
-            {
-                match windows::spawn_restricted(policy, &program, args.clone(), options.clone()) {
-                    Ok(inner) => return Ok(Self { inner }),
-                    Err(err)
-                        if policy.strong_filesystem == StrongFilesystemSandboxMode::Required =>
-                    {
-                        return Err(err);
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            "Windows strong filesystem sandbox requested in auto mode, but restricted spawn failed: {err}"
-                        );
-                    }
-                }
-            }
-            let mut command = StdCommand::new(program);
-            command.args(args);
-            apply_std_command_options(policy, &mut command, options);
-            command
-                .spawn()
-                .map(windows::WindowsSandboxChild::Plain)
-                .map(|inner| Self { inner })
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let spawn_spec = policy
-                .strong_command_spawn_spec(program, args)
-                .map_err(std::io::Error::other)?;
-            let mut command = StdCommand::new(spawn_spec.program);
-            command.args(spawn_spec.args);
-            apply_std_command_options(policy, &mut command, options);
-            let inner = command.spawn()?;
-            Ok(Self { inner })
-        }
-    }
-
-    pub fn id(&self) -> u32 {
-        self.inner.id()
-    }
-
-    pub fn kill(&mut self) -> std::io::Result<()> {
-        self.inner.kill()
-    }
-
-    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        self.inner.try_wait()
-    }
-
-    pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.inner.wait()
-    }
-}
-
-#[cfg(not(test))]
-impl std::fmt::Debug for SandboxChild {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SandboxChild")
-            .field("id", &self.id())
-            .finish_non_exhaustive()
     }
 }
 
@@ -450,23 +362,6 @@ impl AsyncRead for SandboxChildStderr {
     }
 }
 
-#[cfg(not(test))]
-pub fn apply_std_command_options(
-    policy: &RuntimeSandboxPolicy,
-    command: &mut std::process::Command,
-    options: SandboxProcessOptions,
-) {
-    strip_protected_env_from_std_command(policy, command);
-    if let Some(current_dir) = options.current_dir {
-        command.current_dir(current_dir);
-    }
-    crate::process_spawn::apply_no_window(command);
-    command
-        .stdin(options.stdin.to_stdio())
-        .stdout(options.stdout.to_stdio())
-        .stderr(options.stderr.to_stdio());
-}
-
 fn apply_tokio_command_options(
     policy: &RuntimeSandboxPolicy,
     command: &mut tokio::process::Command,
@@ -480,21 +375,6 @@ fn apply_tokio_command_options(
         .stdin(options.stdin.to_stdio())
         .stdout(options.stdout.to_stdio())
         .stderr(options.stderr.to_stdio());
-}
-
-#[cfg(not(test))]
-fn strip_protected_env_from_std_command(
-    policy: &RuntimeSandboxPolicy,
-    command: &mut std::process::Command,
-) {
-    for (name, _) in std::env::vars_os() {
-        if name
-            .to_str()
-            .is_some_and(|name| policy.is_env_var_protected(name))
-        {
-            command.env_remove(&name);
-        }
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -749,10 +629,6 @@ impl RuntimeSandboxPolicy {
         self.filesystem.protected_paths()
     }
 
-    pub fn protected_env_vars(&self) -> &[String] {
-        &self.protected_env_vars
-    }
-
     pub fn is_env_var_protected(&self, name: &str) -> bool {
         if self.is_disabled() {
             return false;
@@ -990,7 +866,7 @@ mod tests {
 
         assert!(policy.is_disabled());
         assert_eq!(policy.strong_filesystem, StrongFilesystemSandboxMode::Off);
-        assert!(policy.protected_env_vars().is_empty());
+        assert!(policy.protected_env_vars.is_empty());
         assert!(policy.protected_paths().is_empty());
         assert!(policy.is_path_readable(Path::new("/home/user/.daat-locus/config.toml")));
         assert!(policy.is_path_writable(Path::new("/repo/src/main.rs")));

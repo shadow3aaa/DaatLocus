@@ -104,13 +104,6 @@ impl PersistenceStore {
         read_json_optional(&self.memory_file(file_name), label).await
     }
 
-    pub fn read_json_file_sync<T>(path: &Path, label: &str) -> Option<T>
-    where
-        T: DeserializeOwned,
-    {
-        read_json_optional_sync(path, label)
-    }
-
     pub async fn write_postcard_memory<T>(&self, file_name: &str, value: &T) -> Result<()>
     where
         T: Serialize + ?Sized + Sync,
@@ -135,13 +128,6 @@ impl PersistenceStore {
         )
         .await
         .into_diagnostic()
-    }
-
-    pub fn write_json_file_sync<T>(path: &Path, value: &T) -> Result<()>
-    where
-        T: Serialize + ?Sized,
-    {
-        write_json_pretty_atomic_sync(path, value, PersistenceFileMode::Default)
     }
 
     pub async fn read_json_state_or_default<T>(&self, file_name: &str, label: &str) -> T
@@ -243,28 +229,6 @@ where
         Err(err) => {
             tracing::warn!("failed to decode {label} {}: {err}", path.display());
             quarantine_corrupt_file(path, label).await;
-            None
-        }
-    }
-}
-
-pub fn read_json_optional_sync<T>(path: &Path, label: &str) -> Option<T>
-where
-    T: DeserializeOwned,
-{
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
-        Err(err) => {
-            tracing::warn!("failed to read {label} {}: {err}", path.display());
-            return None;
-        }
-    };
-    match serde_json::from_slice::<T>(&bytes) {
-        Ok(value) => Some(value),
-        Err(err) => {
-            tracing::warn!("failed to decode {label} {}: {err}", path.display());
-            quarantine_corrupt_file_sync(path, label);
             None
         }
     }

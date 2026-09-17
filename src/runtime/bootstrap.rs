@@ -15,7 +15,7 @@ use crate::{
     context::Context,
     context_budget::TokenEstimateBaseline,
     core::{ModelProvider, ModelRequestOptions, TokenUsageInfo},
-    daat_locus_paths::{daat_locus_paths, daat_locus_paths_sync},
+    daat_locus_paths::daat_locus_paths,
     events::EventStore,
     memory::Memory,
     openskills::load_openskills_for_runtime,
@@ -35,10 +35,6 @@ use crate::{
     telegram_transport::state::TelegramTransportState,
     terminal_app::TerminalApp,
     workflow::{WorkflowCancellationRegistry, WorkflowCatalog},
-    workspace_app::paths::{resolve_runtime_workspace_dir, workspace_apps_dir},
-    workspace_app::{
-        WorkspaceAppRegistry, bootstrap_workspace_apps_with_state_root_and_strong_filesystem,
-    },
 };
 
 pub fn emit_startup_progress(message: impl AsRef<str>) {
@@ -323,70 +319,24 @@ fn daat_locus_source_root() -> Option<PathBuf> {
     source_root.exists().then_some(source_root)
 }
 
-pub fn build_runtime_apps(
-    execution_cwd: &Path,
-    sandbox_policy: &RuntimeSandboxPolicy,
-) -> (Vec<Box<dyn crate::app::App>>, WorkspaceAppRegistry) {
-    build_runtime_apps_with_workspace_app_state(
-        execution_cwd,
-        sandbox_policy,
-        &daat_locus_paths_sync().state_dir().join("apps"),
-    )
-}
-
-pub fn build_isolated_worker_apps(
-    execution_cwd: &Path,
-    sandbox_policy: &RuntimeSandboxPolicy,
-    worker_id: &str,
-) -> (Vec<Box<dyn crate::app::App>>, WorkspaceAppRegistry) {
-    let state_root = daat_locus_paths_sync()
-        .state_dir()
-        .join("workflow_workers")
-        .join(worker_id)
-        .join("apps");
-    build_runtime_apps_with_workspace_app_state(execution_cwd, sandbox_policy, &state_root)
-}
-
-fn build_runtime_apps_with_workspace_app_state(
-    execution_cwd: &Path,
-    sandbox_policy: &RuntimeSandboxPolicy,
-    workspace_app_state_root: &Path,
-) -> (Vec<Box<dyn crate::app::App>>, WorkspaceAppRegistry) {
-    let mut apps: Vec<Box<dyn crate::app::App>> = vec![
+pub fn build_runtime_apps() -> Vec<Box<dyn crate::app::App>> {
+    vec![
         Box::new(BrowserApp::new()),
         Box::new(TerminalApp::new()),
         Box::new(CodingApp::new()),
-    ];
-    let bootstrap = bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
-        execution_cwd,
-        workspace_app_state_root,
-        sandbox_policy.protected_env_vars(),
-        sandbox_policy.strong_filesystem,
-        sandbox_policy.is_disabled(),
-    );
-    for error in &bootstrap.errors {
-        tracing::warn!("{error}");
-    }
-    apps.extend(bootstrap.apps);
-    (apps, bootstrap.registry)
+    ]
 }
 
 pub async fn build_eval_context_with_compiled(
     config: crate::config::Config,
     compiled_prompts: CompiledPromptStore,
 ) -> Context {
-    let execution_cwd = resolve_runtime_workspace_dir()
+    let execution_cwd = crate::daat_locus_paths::resolve_runtime_workspace_dir()
         .unwrap_or_else(|err| panic!("failed to determine execution cwd: {err}"));
     std::fs::create_dir_all(&execution_cwd).unwrap_or_else(|err| {
         panic!(
             "failed to create runtime workspace {}: {err}",
             execution_cwd.display()
-        )
-    });
-    std::fs::create_dir_all(workspace_apps_dir(&execution_cwd)).unwrap_or_else(|err| {
-        panic!(
-            "failed to create workspace apps directory {}: {err}",
-            workspace_apps_dir(&execution_cwd).display()
         )
     });
     let sandbox_policy = sandbox_policy_for_runtime(&config, Some(&execution_cwd)).await;
@@ -400,8 +350,7 @@ pub async fn build_eval_context_with_compiled(
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
     bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
-    let (apps, workspace_apps) = build_runtime_apps(&execution_cwd, &sandbox_policy);
-    let apps = AppManager::new(apps).unwrap();
+    let apps = AppManager::new(build_runtime_apps()).unwrap();
     let token_usage_store = load_persistent_token_usage_store(None).await;
     let client = build_model_provider(&config.main_model, &config)
         .unwrap_or_else(|err| panic!("failed to construct main model provider: {err:?}"));
@@ -441,7 +390,6 @@ pub async fn build_eval_context_with_compiled(
         current_turn_input_mode: crate::events::TerminalInputMode::Normal,
         file_anchors: crate::file_anchors::FileAnchorTable::default(),
         apps,
-        workspace_apps,
         telegram: telegram_handle,
         telegram_acl,
         compiled_prompts,

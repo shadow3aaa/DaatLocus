@@ -71,7 +71,6 @@ mod scheduler;
 mod sleep_driver;
 mod turn;
 mod workflow_evidence;
-mod workspace_apps;
 
 pub use dashboard_control::handle_dashboard_control_command;
 pub use scheduler::{
@@ -92,7 +91,6 @@ use live_draft::{LiveProgressSession, maybe_start_live_progress_session};
 use workflow_evidence::{
     maybe_record_skill_read, record_runtime_history_messages, record_skill_run_evidence,
 };
-use workspace_apps::sync_workspace_apps_from_invalidation;
 
 const RUNTIME_EVENT_CLAIM_BATCH_SIZE: usize = 1;
 const RUNTIME_OVERFLOW_FUSE_THRESHOLD: usize = 3;
@@ -133,7 +131,6 @@ mod tests {
         sandbox::RuntimeSandboxPolicy,
         telegram_acl::TelegramAclHandle,
         telegram_transport::state::TelegramTransportState,
-        workspace_app::WorkspaceAppRegistry,
     };
 
     struct UnusedModelProvider;
@@ -496,7 +493,6 @@ mod tests {
                 current_turn_input_mode: crate::events::TerminalInputMode::Normal,
                 file_anchors: crate::file_anchors::FileAnchorTable::default(),
                 apps,
-                workspace_apps: WorkspaceAppRegistry::default(),
                 telegram: telegram.handle(),
                 telegram_acl: TelegramAclHandle::load().await,
                 compiled_prompts: CompiledPromptStore::from_entries(Vec::new()),

@@ -67,8 +67,6 @@ use crate::{
         PendingOutboundMessage, TelegramTransportState, TelegramTransportStateHandle,
     },
     workflow::{WorkflowCancellationRegistry, WorkflowCatalog},
-    workspace_app::paths::{resolve_runtime_workspace_dir, workspace_apps_dir},
-    workspace_app::{WorkspaceAppInvalidation, start_workspace_app_watcher},
 };
 
 #[derive(Debug, Clone)]
@@ -79,7 +77,6 @@ pub struct SessionServeArgs {
     pub project_dir: Option<PathBuf>,
 }
 
-// Workspace app notices are pull-based, so poll them only when a workspace app is loaded.
 pub async fn run_session_serve(
     config: crate::config::Config,
     args: SessionServeArgs,
@@ -116,8 +113,6 @@ pub async fn run_session_serve(
     let (sleep_result_tx, mut sleep_result_rx) = mpsc::unbounded_channel::<SleepTaskResult>();
     let (session_title_result_tx, mut session_title_result_rx) =
         mpsc::unbounded_channel::<crate::runtime::session_title::SessionTitleGenerationResult>();
-    let (workspace_app_invalidation_tx, mut workspace_app_invalidation_rx) =
-        mpsc::unbounded_channel::<WorkspaceAppInvalidation>();
     let (daemon_control_tx, mut daemon_control_rx) =
         mpsc::unbounded_channel::<DaemonControlCommand>();
     let telegram = TelegramTransportState::with_session(session_id.as_str());
@@ -178,7 +173,7 @@ pub async fn run_session_serve(
         }
         project_dir.clone()
     } else {
-        resolve_runtime_workspace_dir()?
+        crate::daat_locus_paths::resolve_runtime_workspace_dir()?
     };
     tokio::fs::create_dir_all(&execution_cwd)
         .await
@@ -188,17 +183,8 @@ pub async fn run_session_serve(
                 execution_cwd.display()
             )
         })?;
-    tokio::fs::create_dir_all(workspace_apps_dir(&execution_cwd))
-        .await
-        .map_err(|err| {
-            miette!(
-                "failed to create workspace apps directory {}: {err}",
-                workspace_apps_dir(&execution_cwd).display()
-            )
-        })?;
     let sandbox_policy = sandbox_policy_for_runtime(&config, Some(&execution_cwd)).await;
-    let (apps, workspace_apps) = build_runtime_apps(&execution_cwd, &sandbox_policy);
-    let apps = AppManager::new(apps)?;
+    let apps = AppManager::new(build_runtime_apps())?;
     let openskills = load_openskills_for_runtime(&execution_cwd);
     let workflows = WorkflowCatalog::load();
     let mut context = Context {
@@ -221,7 +207,6 @@ pub async fn run_session_serve(
         current_turn_input_mode: TerminalInputMode::Normal,
         file_anchors: crate::file_anchors::FileAnchorTable::default(),
         apps,
-        workspace_apps,
         telegram: telegram_handle,
         telegram_acl: telegram_acl.clone(),
         compiled_prompts,
@@ -309,17 +294,6 @@ pub async fn run_session_serve(
     });
     crate::runtime::session_title::sync_session_title_placeholder(&mut context, &tx);
 
-    let workspace_app_watcher = match start_workspace_app_watcher(
-        &workspace_apps_dir(&context.execution_cwd),
-        workspace_app_invalidation_tx,
-    ) {
-        Ok(watcher) => Some(watcher),
-        Err(err) => {
-            tracing::warn!("failed to start workspace app watcher: {err:?}");
-            None
-        }
-    };
-
     daemon_lifecycle.mark_ready();
 
     #[cfg(unix)]
@@ -333,9 +307,6 @@ pub async fn run_session_serve(
     let mut session_config_watch = tokio::time::interval(std::time::Duration::from_secs(3));
     session_config_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        if drain_workspace_app_invalidations(&mut context, &mut workspace_app_invalidation_rx) {
-            runtime_idle = false;
-        }
         if (SessionBoundaryRuntimeControlDrain {
             context: &mut context,
             tx: &tx,
@@ -387,10 +358,6 @@ pub async fn run_session_serve(
                 runtime_idle = false;
             }
             () = &mut runtime_idle_sleep, if runtime_idle && runtime_idle_sleep_enabled => {
-                runtime_idle = false;
-            }
-            Some(invalidation) = workspace_app_invalidation_rx.recv(), if runtime_idle => {
-                context.workspace_apps.record_invalidation(invalidation);
                 runtime_idle = false;
             }
             Some(result) = sleep_result_rx.recv(), if runtime_idle => {
@@ -465,7 +432,6 @@ pub async fn run_session_serve(
     }
 
     daemon_lifecycle.mark_stopping();
-    drop(workspace_app_watcher);
     context.dashboard_tx = None;
     context.shutdown().await;
     lock.release();
@@ -1150,18 +1116,6 @@ fn validate_pending_terminal_event(events: &EventStore, event_id: uuid::Uuid) ->
     }
     Ok(())
 }
-fn drain_workspace_app_invalidations(
-    context: &mut Context,
-    workspace_app_invalidation_rx: &mut mpsc::UnboundedReceiver<WorkspaceAppInvalidation>,
-) -> bool {
-    let mut drained = false;
-    while let Ok(invalidation) = workspace_app_invalidation_rx.try_recv() {
-        context.workspace_apps.record_invalidation(invalidation);
-        drained = true;
-    }
-    drained
-}
-
 fn next_runtime_idle_sleep_delay(context: &Context, sleep_running: bool) -> Option<Duration> {
     next_runtime_idle_sleep_delay_from_instants(
         context.idle_since,

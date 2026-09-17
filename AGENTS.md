@@ -31,7 +31,7 @@ Daat uses a conservative portable schema dialect. The
 entry point for Rust model-facing input and output types. The dialect is the
 source of truth, and the macro must implement it exactly. Runtime normalization
 must not be relied on for correctness. Provider boundaries should receive
-already-valid schemas. Dynamic schemas from workspace apps or other external
+already-valid schemas. Dynamic schemas from workflows or other external
 sources cannot be compile-time checked, so they must be validated at load time
 instead of silently rewritten.
 
@@ -1271,7 +1271,7 @@ workflow-local tools explicitly named in `extra_tools`. Workflow entry tools
 (`workflow__<id>`) and the main-agent event-completion `finish_and_send` are
 unavailable. The worker instead receives a same-named completion tool whose
 input is its declared output schema; it returns typed output to the workflow
-runner and never resolves or sends an event. Do not reuse the Workspace App
+runner and never resolves or sends an event. Do not reuse an App's
 `render_state`/`call_tool` protocol to implement workers. Build a worker-specific
 `AgentTurnRequest { messages, tools }` and route tool calls through a worker
 runtime boundary.
@@ -1904,136 +1904,6 @@ implementation. These fallback edits do not receive parse validation or
 propagation review; semantic analysis remains limited to SCOPE-owned source
 files.
 
-## Third-Party App Package
-
-Future third-party `App` extensions use a source-first design. Do not copy another product's plugin or connector structure.
-
-### Directory Placement
-
-- Third-party app source directories are fixed under the runtime workspace: `~/daat-locus-workspace/apps/<app_id_snake_case>/`.
-- The current runtime workspace is resolved by `resolve_runtime_workspace_dir()`, which defaults to `~/daat-locus-workspace`.
-- `app_id` is exactly the folder name `<app_id_snake_case>`.
-- `~/.daat-locus` is a protected runtime directory and must not store third-party app source code.
-- This design exists because `~/.daat-locus` is treated as a protected runtime path inside the sandbox, while the workspace is the default editable area.
-
-### Package Layout
-
-Minimal directory structure:
-
-```text
-~/daat-locus-workspace/apps/<app_id_snake_case>/
-  app.toml
-  runtime/
-    app.lua
-  prompt/
-    docs.md
-```
-
-Rules:
-
-- `runtime/app.lua` is the only Lua entry point.
-- `prompt/docs.md` is the app's only prompt document. It is plain markdown
-  without required frontmatter. It may include stable capability boundaries and
-  operation documentation for the app's tools.
-- Third-party app packages do not carry self-optimizable skill assets.
-
-### `app.toml`
-
-In v1, `app.toml` is intentionally minimal. It has one responsibility: specify the relative path to the Lua entry point.
-
-Rules:
-
-- It does not carry `id`.
-- It does not carry permissions.
-- It does not carry prompt docs or skill metadata.
-- By default, the entry point is `runtime/app.lua`.
-
-Minimal example:
-
-```toml
-entry = "runtime/app.lua"
-```
-
-Identity comes from the directory name. Configuration comes from `app.toml`.
-
-### Lua Runtime
-
-The third-party app runtime stack is fixed as:
-
-- Rust side uses `mlua`.
-- Lua dialect is standard `Lua 5.4`.
-- Do not use legacy `rlua`.
-- Do not use `JS/TS` as the v1 app runtime.
-- Do not use `Wasm` as the v1 app runtime.
-
-Rationale:
-
-- The agent needs to be able to directly write and modify apps.
-- Source-first Lua plus Markdown is a better v1 authoring format than ABI-first Wasm.
-- `mlua` has mature enough Lua 5.4 support in Rust for host embedding.
-
-### Unified Lua Interface
-
-Do not design an app as multiple independent Lua entry scripts.
-
-The correct model is:
-
-- One third-party `App` equals one unified Lua module instance.
-- The host loads only `runtime/app.lua`.
-- `render_state`, tool calls, and notice polling share the same app instance state.
-
-Do not introduce additional IPC to synchronize tool results and render state.
-
-This means the behavioral body of a third-party app is an object model, not a collection of scripts.
-
-### Skill Assets
-
-Skills are not attached to any app by default. They are the self-optimizable
-operational guidance layer.
-
-Rules:
-
-- Builtin skills live in repository root `skills/*/SKILL.md` and are compiled
-  into the program by `build.rs`.
-- Evolvable workspace skills live in `~/.agents/skills/<name>/SKILL.md`.
-- Each skill is a single Markdown file with the filename `SKILL.md` inside a
-  directory named for the skill id.
-- Skills do not require frontmatter; the skill id comes from the parent
-  directory name.
-- Skills are discovered by the `OpenSkillsCatalog` scanner at runtime.
-- Builtin skills are writable (placed in `~/.daat-locus/skills/` on startup),
-  but are overwritten if the compiled content changed.
-- `prompt/*.md` is for app descriptions; `skills/` is for self-optimizable
-  operational guidance. Do not mix them.
-
-### Reload Strategy
-
-Third-party apps should not be fully reparsed on every turn.
-
-Recommended strategy:
-
-- Perform one full scan of `~/daat-locus-workspace/apps` at startup.
-- Scan and watch the skill directory `~/.agents/skills` separately.
-- Use `notify` at runtime to watch supported directory changes.
-- Map file events to the affected `<app_id_snake_case>`.
-- Mark only that app as dirty and reload it incrementally.
-- When skill files change, mark only the affected skill as dirty and reload it incrementally.
-- If the watcher fails or directory state becomes untrusted, fall back to one full rescan.
-
-Do not make full parsing the normal path.
-
-### State and Cache
-
-v1 does not define a dedicated third-party app cache directory.
-
-Current conclusions:
-
-- Define only the source directory: `~/daat-locus-workspace/apps`.
-- Do not define `cache/apps`.
-- If the host later truly needs to persist app runtime state, use the protected runtime state system, for example `~/.daat-locus/state/apps/<app_id_snake_case>/`.
-
-Third-party apps and workspace skills are agent-editable assets, but they are not runtime state owned directly by the agent.
-
 ## Current Event Semantics
 
 ### Telegram
@@ -2276,10 +2146,10 @@ Rules:
 
 - Inject it before every model turn.
 - Operations that change the next context view, such as project instruction
-  reloads and workspace app dynamic tools, should continue the current turn by
-  returning structured tool output or inserting a structured context-refresh
-  message before the next model request. They should not end the turn unless
-  they also satisfy `Finished`, `Error`, `Compacted`, or `Interrupt`.
+  reloads, should continue the current turn by returning structured tool output
+  or inserting a structured context-refresh message before the next model
+  request. They should not end the turn unless they also satisfy `Finished`,
+  `Error`, `Compacted`, or `Interrupt`.
 - Treat runtime history compaction as a `Compacted` stop reason: compact, end
   the current turn, and build a fresh `PreTurn Context` for the next turn.
 - It should enter runtime history as structured context, rather than being appended as a transient final user message outside history.

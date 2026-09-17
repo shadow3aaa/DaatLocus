@@ -2246,7 +2246,7 @@ fn list_root_dirs(_include_files: bool) -> DirListResponse {
 }
 
 fn default_dir_listing(include_files: bool) -> DirListResponse {
-    match crate::workspace_app::paths::resolve_runtime_workspace_dir() {
+    match crate::daat_locus_paths::resolve_runtime_workspace_dir() {
         Ok(ws) if ws.is_dir() => {
             let parent = ws.parent().map(|p| p.display().to_string());
             let entries = list_subdirs(&ws, include_files);
@@ -4155,8 +4155,8 @@ pub fn daemonize_current_process_if_requested() {
         return;
     }
     // This marker is only for the top-level daemon child. If it survives in the
-    // daemon environment, later helper processes such as workspace app workers
-    // will daemonize themselves before running their actual subcommand.
+    // daemon environment, later helper processes will daemonize themselves
+    // before running their actual subcommand.
     unsafe {
         std::env::remove_var(DAEMONIZE_ENV);
     }

@@ -33,7 +33,6 @@ use crate::{
     telegram_acl::TelegramAclHandle,
     telegram_transport::state::TelegramTransportStateHandle,
     workflow::{WorkflowCancellationRegistry, WorkflowCatalog},
-    workspace_app::WorkspaceAppRegistry,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +74,6 @@ pub struct Context {
     pub current_turn_input_mode: crate::events::TerminalInputMode,
     pub file_anchors: crate::file_anchors::FileAnchorTable,
     pub apps: AppManager,
-    pub workspace_apps: WorkspaceAppRegistry,
     pub telegram: TelegramTransportStateHandle,
     pub telegram_acl: TelegramAclHandle,
     pub compiled_prompts: CompiledPromptStore,

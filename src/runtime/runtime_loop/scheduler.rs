@@ -4,7 +4,6 @@ use super::{
     RuntimeTurnPhase, SleepStatusSnapshot, SleepTaskResult, clear_runtime_status,
     execute_agent_loop_step, refresh_sleep_status_queues, requeue_claimed_runtime_events,
     set_runtime_status, set_runtime_status_only, sync_dashboard_state,
-    sync_workspace_apps_from_invalidation,
 };
 
 pub enum RuntimeLoopCycle {
@@ -28,7 +27,6 @@ pub async fn daat_locus_loop(
         set_runtime_status(Some(tx), RuntimeStatusLevel::Info, text);
         sync_dashboard_state(context, tx, sleep_status, None);
     }
-    sync_workspace_apps_from_invalidation(context).await;
 
     let forced_sleep_status =
         maybe_start_forced_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await;

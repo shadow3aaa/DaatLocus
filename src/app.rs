@@ -20,7 +20,6 @@ use crate::{
 pub struct AppId(String);
 
 impl AppId {
-    pub const DEFAULT_WORKSPACE_ENTRY: &str = "runtime/app.lua";
     pub const TOOL_NAME_SEPARATOR: &str = "__";
 
     pub fn browser() -> Self {
@@ -33,29 +32,6 @@ impl AppId {
 
     pub fn coding() -> Self {
         Self("coding".to_string())
-    }
-
-    pub fn from_workspace_folder(name: impl Into<String>) -> Result<Self> {
-        let name = name.into();
-        let trimmed = name.trim();
-        if trimmed.is_empty() {
-            return Err(miette!("workspace app folder name cannot be empty"));
-        }
-        if trimmed.contains(std::path::MAIN_SEPARATOR) || trimmed.contains('/') || trimmed == "." {
-            return Err(miette!("invalid workspace app folder name `{trimmed}`"));
-        }
-        if !Self::is_valid_name(trimmed) {
-            return Err(miette!(
-                "workspace app folder name `{trimmed}` must be snake_case: start with a lowercase ASCII letter and use only lowercase letters, numbers, and single `_` separators"
-            ));
-        }
-        if trimmed == Self::browser().as_str()
-            || trimmed == Self::terminal().as_str()
-            || trimmed == Self::coding().as_str()
-        {
-            return Err(miette!("workspace app id `{trimmed}` is reserved"));
-        }
-        Ok(Self(trimmed.to_string()))
     }
 
     pub fn is_valid_name(name: &str) -> bool {
@@ -262,12 +238,6 @@ pub struct AppManager {
     apps: HashMap<AppId, Box<dyn App>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppInstallDisposition {
-    Added,
-    Replaced,
-}
-
 impl AppManager {
     pub fn new(apps: Vec<Box<dyn App>>) -> Result<Self> {
         let mut order = Vec::with_capacity(apps.len());
@@ -391,28 +361,6 @@ impl AppManager {
         app.execute_tool(&app_call, context).await
     }
 
-    pub async fn install_or_replace(&mut self, app: Box<dyn App>) -> Result<AppInstallDisposition> {
-        let id = app.id();
-        let disposition = if let Some(mut previous) = self.apps.remove(&id) {
-            previous.shutdown().await?;
-            AppInstallDisposition::Replaced
-        } else {
-            self.order.push(id.clone());
-            AppInstallDisposition::Added
-        };
-        self.apps.insert(id, app);
-        Ok(disposition)
-    }
-
-    pub async fn remove(&mut self, id: &AppId) -> Result<bool> {
-        let Some(mut app) = self.apps.remove(id) else {
-            return Ok(false);
-        };
-        self.order.retain(|existing| existing != id);
-        app.shutdown().await?;
-        Ok(true)
-    }
-
     pub async fn wait_until_settled(&self, silence_duration: Duration, timeout: Duration) -> bool {
         for id in &self.order {
             let Some(app) = self.apps.get(id) else {
@@ -463,19 +411,6 @@ impl AppManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn workspace_app_id_rejects_separator_and_non_ascii_names() {
-        assert!(AppId::from_workspace_folder("notes").is_ok());
-        assert!(AppId::from_workspace_folder("my_app").is_ok());
-        assert!(AppId::from_workspace_folder("my app").is_err());
-        assert!(AppId::from_workspace_folder("应用").is_err());
-        assert!(AppId::from_workspace_folder("MyApp").is_err());
-        assert!(AppId::from_workspace_folder("my-app").is_err());
-        assert!(AppId::from_workspace_folder("my__app").is_err());
-        assert!(AppId::from_workspace_folder("my_app_").is_err());
-        assert!(AppId::from_workspace_folder("2app").is_err());
-    }
 
     #[test]
     fn app_tool_names_use_openai_safe_separator() {
