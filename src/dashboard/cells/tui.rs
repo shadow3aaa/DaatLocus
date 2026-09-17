@@ -1739,12 +1739,18 @@ fn render_assistant_cell_lines(cell: &AssistantActivityData, max_width: u16) -> 
 }
 
 fn thinking_collapsed_preview(content: &str) -> String {
-    let mut lines: Vec<&str> = content.lines().collect();
+    // Show the tail of the reasoning: while a thinking cell streams, its
+    // newest lines are the ones that keep changing, so a head preview would
+    // freeze on the first lines and hide every later update.
+    let lines: Vec<&str> = content.lines().collect();
     if lines.len() > 3 {
-        lines.truncate(2);
-        lines.push("...");
+        let mut preview = Vec::with_capacity(3);
+        preview.push("...");
+        preview.extend_from_slice(&lines[lines.len() - 2..]);
+        preview.join("\n")
+    } else {
+        lines.join("\n")
     }
-    lines.join("\n")
 }
 
 fn render_thinking_cell_lines(
@@ -3156,6 +3162,23 @@ That's it.";
                 .iter()
                 .any(|line| line.contains("Preview only"))
         );
+    }
+
+    #[test]
+    fn thinking_collapsed_preview_keeps_the_tail_lines() {
+        let cell = ThinkingActivityData {
+            content: "alpha\nbeta\ngamma\ndelta\nepsilon".to_string(),
+        };
+
+        let rendered = render_thinking_cell_lines(&cell, 80, false)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("delta"), "{rendered}");
+        assert!(rendered.contains("epsilon"), "{rendered}");
+        assert!(!rendered.contains("alpha"), "{rendered}");
     }
 
     #[test]

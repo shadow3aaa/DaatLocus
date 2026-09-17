@@ -7485,20 +7485,26 @@ function AgentChatThinkingCollapsibleCell({
         ) : null}
       </div>
       {contentText.trim() ? (
-        <div
-          className={cn(
-            "relative min-w-0 max-w-full text-muted-foreground",
-            !open && isTruncatable && "max-h-[4.5rem] overflow-hidden",
-          )}
-        >
-          <AgentChatMarkdownText
-            text={contentText}
-            limit={AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT}
-            tone="muted"
-            preserveSoftBreaks
-          />
+        <div className="relative min-w-0 max-w-full text-muted-foreground">
+          <div
+            className={cn(
+              "min-w-0 max-w-full",
+              !open &&
+                isTruncatable &&
+                "flex max-h-[4.5rem] flex-col justify-end overflow-hidden",
+            )}
+          >
+            <div className="min-w-0 max-w-full shrink-0">
+              <AgentChatMarkdownText
+                text={contentText}
+                limit={AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT}
+                tone="muted"
+                preserveSoftBreaks
+              />
+            </div>
+          </div>
           {!open && isTruncatable ? (
-            <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-background to-transparent pointer-events-none" />
+            <div className="absolute top-0 left-0 right-0 h-8 bg-gradient-to-b from-background to-transparent pointer-events-none" />
           ) : null}
         </div>
       ) : null}
