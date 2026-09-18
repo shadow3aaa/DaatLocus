@@ -409,8 +409,8 @@ function StudySidebarSection({
     .filter((group) => group.nodes.length > 0);
 
   return (
-    <>
-      <div className="px-1 pb-1">
+    <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto scrollbar-none">
+      <div className="sticky top-0 z-10 bg-sidebar px-1 pb-1">
         <div className="relative">
           <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-sidebar-foreground/40" />
           <Input
@@ -429,6 +429,7 @@ function StudySidebarSection({
           module={group.module}
           nodes={group.nodes}
           selectedNodeId={selectedNodeId}
+          searching={normalizedQuery.length > 0}
           onSelectNode={onSelectNode}
         />
       ))}
@@ -440,7 +441,7 @@ function StudySidebarSection({
             : t("study.sidebarEmpty")}
         </SidebarEmptyText>
       ) : null}
-    </>
+    </div>
   );
 }
 
@@ -448,21 +449,25 @@ function StudyModuleGroup({
   module,
   nodes,
   selectedNodeId,
+  searching,
   onSelectNode,
 }: {
   module: StudyGraphSummaryProps["modules"][number];
   nodes: StudyGraphSummaryProps["nodes"];
   selectedNodeId: string | null;
+  searching: boolean;
   onSelectNode: (nodeId: string) => void;
 }) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(true);
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const open = userOpen ?? searching;
 
   return (
     <SidebarSessionSection
       label={module.title}
       open={open}
-      onOpenChange={setOpen}
+      scrollable={false}
+      onOpenChange={setUserOpen}
       actions={
         <span className="pr-2 text-xs text-sidebar-foreground/40">
           {module.nodeCount}
@@ -505,6 +510,7 @@ function SidebarSessionSection({
   label,
   open,
   highlighted = false,
+  scrollable = true,
   actions,
   children,
   onOpenChange,
@@ -512,6 +518,7 @@ function SidebarSessionSection({
   label: string;
   open: boolean;
   highlighted?: boolean;
+  scrollable?: boolean;
   actions?: ReactNode;
   children: ReactNode;
   onOpenChange: (open: boolean) => void;
@@ -543,7 +550,14 @@ function SidebarSessionSection({
         ) : null}
       </div>
       {open ? (
-        <SidebarGroupContent className="min-h-0 flex-1 overflow-y-auto scrollbar-none pt-2">{children}</SidebarGroupContent>
+        <SidebarGroupContent
+          className={cn(
+            "pt-2",
+            scrollable && "min-h-0 flex-1 overflow-y-auto scrollbar-none",
+          )}
+        >
+          {children}
+        </SidebarGroupContent>
       ) : null}
     </SidebarGroup>
   );
