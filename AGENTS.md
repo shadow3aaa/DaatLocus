@@ -1267,6 +1267,10 @@ CLI, or Telegram:
   the network when the revision changes (and again when the turn ends), so the
   graph grows live while the agent works instead of only after a manual
   refresh.
+- Node writes publish a study focus hint in `DashboardState.app_focus`.
+  Creating, updating, or merging nodes moves the client view to that node
+  (flat focus projection plus overview panel). Read-only operations such as
+  search intentionally leave the client view untouched.
 - The network is rendered with the existing React Flow stack (`@xyflow/react`):
   a deterministic 3D force layout projects points through a fixed perspective
   camera, React Flow provides pan, zoom, hover, and selection, and the relation

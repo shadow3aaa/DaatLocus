@@ -428,7 +428,27 @@ impl App for StudyApp {
     ) -> Result<AppToolExecutionResult> {
         let result = self.run_tool(call).await?;
         self.publish_state_revision(context);
+        if let Some(focus_node_id) = study_focus_node_id(call, &result) {
+            self.publish_focus(context, &focus_node_id);
+        }
         Ok(result)
+    }
+}
+
+fn study_focus_node_id(call: &AgentToolCall, result: &AppToolExecutionResult) -> Option<String> {
+    match call.name.as_str() {
+        "create_node" | "update_node" => result
+            .payload
+            .get("node")
+            .and_then(|node| node.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        "merge_nodes" => result
+            .payload
+            .get("canonical_node_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        _ => None,
     }
 }
 
@@ -442,6 +462,17 @@ impl StudyApp {
         let revision = self.store.revision();
         tx.send_modify(|state| {
             state.set_app_state_revision(AppId::study().as_str(), revision);
+        });
+    }
+
+    /// Ask clients to move their view to the node the agent just wrote.
+    fn publish_focus(&self, context: &AppToolExecutionContext, node_id: &str) {
+        let Some(tx) = context.dashboard_tx.as_ref() else {
+            return;
+        };
+        let revision = self.store.revision();
+        tx.send_modify(|state| {
+            state.set_app_focus(AppId::study().as_str(), node_id, revision);
         });
     }
 
@@ -801,6 +832,52 @@ mod tests {
                 "applies_to"
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn node_writes_publish_a_focus_hint() {
+        let (_dir, mut app) = test_app();
+        let module = app
+            .store()
+            .create_module("Algebra", "", StudyWriteOrigin::Agent)
+            .expect("module");
+        let (tx, rx) = tokio::sync::watch::channel(crate::dashboard::DashboardState::default());
+        let context = AppToolExecutionContext {
+            dashboard_tx: Some(tx),
+            ..test_context()
+        };
+
+        let created = app
+            .execute_tool(
+                &call(
+                    "create_node",
+                    json!({
+                        "module_id": module.id,
+                        "title": "Group",
+                        "summary": "",
+                        "body": "",
+                        "aliases": [],
+                        "tags": [],
+                        "sources": [{ "title": "textbook", "url": "https://example.com" }]
+                    }),
+                ),
+                &context,
+            )
+            .await
+            .expect("create node");
+        let node_id = created.payload["node"]["id"]
+            .as_str()
+            .expect("node id")
+            .to_string();
+
+        let state = rx.borrow().clone();
+        let focus = state
+            .app_focus
+            .iter()
+            .find(|(app_id, _, _)| app_id == "study")
+            .expect("study focus hint");
+        assert_eq!(focus.1, node_id);
+        assert_eq!(focus.2, app.store().revision());
     }
 
     #[test]

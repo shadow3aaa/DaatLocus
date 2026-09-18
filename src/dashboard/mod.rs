@@ -334,6 +334,10 @@ pub struct DashboardState {
     /// Clients use it to detect when to refetch app-owned data.
     #[serde(default)]
     pub app_state_revisions: Vec<(String, i64)>,
+    /// Latest focus target per app: `(app_id, target_id, revision)`. Clients
+    /// move their view to the target when the revision changes.
+    #[serde(default)]
+    pub app_focus: Vec<(String, String, i64)>,
     #[serde(default)]
     pub skills: Vec<OpenSkillDashboardSummary>,
     #[serde(default)]
@@ -384,6 +388,16 @@ impl DashboardState {
         } else {
             self.app_state_revisions
                 .push((app_id.to_string(), revision));
+        }
+    }
+
+    pub fn set_app_focus(&mut self, app_id: &str, target_id: &str, revision: i64) {
+        if let Some(entry) = self.app_focus.iter_mut().find(|(id, _, _)| id == app_id) {
+            entry.1 = target_id.to_string();
+            entry.2 = revision;
+        } else {
+            self.app_focus
+                .push((app_id.to_string(), target_id.to_string(), revision));
         }
     }
 }
