@@ -126,6 +126,27 @@ pub async fn run_session_serve(
         None
     };
 
+    let coding_project_dir = args.project_dir;
+    let execution_cwd = if let Some(project_dir) = coding_project_dir.as_ref() {
+        if !project_dir.is_dir() {
+            return Err(miette!(
+                "session project directory does not exist: {}",
+                project_dir.display()
+            ));
+        }
+        project_dir.clone()
+    } else {
+        crate::daat_locus_paths::resolve_runtime_workspace_dir()?
+    };
+    tokio::fs::create_dir_all(&execution_cwd)
+        .await
+        .map_err(|err| {
+            miette!(
+                "failed to create session workspace {}: {err}",
+                execution_cwd.display()
+            )
+        })?;
+
     let ipc_server = SessionIpcServer::bind(&args.ipc_name)?;
     let ipc_task = tokio::spawn(run_ipc_server(SessionIpcServerState {
         server: ipc_server,
@@ -144,6 +165,7 @@ pub async fn run_session_serve(
         runtime_wake_tx: runtime_wake_tx.clone(),
         daemon_control_tx: daemon_control_tx.clone(),
         study_store: study_store.clone(),
+        execution_cwd: execution_cwd.clone(),
     }));
 
     emit_startup_progress(format!(
@@ -171,26 +193,6 @@ pub async fn run_session_serve(
         efficient_client,
         token_usage_store.clone(),
     );
-    let coding_project_dir = args.project_dir;
-    let execution_cwd = if let Some(project_dir) = coding_project_dir.as_ref() {
-        if !project_dir.is_dir() {
-            return Err(miette!(
-                "session project directory does not exist: {}",
-                project_dir.display()
-            ));
-        }
-        project_dir.clone()
-    } else {
-        crate::daat_locus_paths::resolve_runtime_workspace_dir()?
-    };
-    tokio::fs::create_dir_all(&execution_cwd)
-        .await
-        .map_err(|err| {
-            miette!(
-                "failed to create session workspace {}: {err}",
-                execution_cwd.display()
-            )
-        })?;
     let sandbox_policy = sandbox_policy_for_runtime(&config, Some(&execution_cwd)).await;
     let apps = if let Some(store) = study_store.clone() {
         AppManager::new(crate::runtime::bootstrap::build_study_apps(store))?
@@ -473,6 +475,7 @@ struct SessionIpcServerState {
     runtime_wake_tx: mpsc::UnboundedSender<()>,
     daemon_control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
     study_store: Option<crate::study_app::store::StudyStore>,
+    execution_cwd: PathBuf,
 }
 
 async fn run_ipc_server(state: SessionIpcServerState) {
@@ -1447,6 +1450,17 @@ async fn submit_user_input(
     if text.is_empty() {
         return IpcResponseEnvelope::error(request_id, "empty_input", "empty input", false);
     }
+    let attachments = match stage_file_attachments(&state.execution_cwd, attachments).await {
+        Ok(attachments) => attachments,
+        Err(err) => {
+            return IpcResponseEnvelope::error(
+                request_id,
+                "attachment_staging_failed",
+                format!("{err:?}"),
+                true,
+            );
+        }
+    };
     let event_id = match register_terminal_event(
         &state.events,
         &state.pending_work,
@@ -1541,7 +1555,12 @@ fn register_terminal_event(
         attachments: attachments
             .into_iter()
             .map(|attachment| TerminalIncomingAttachment {
-                kind: TerminalIncomingAttachmentKind::Image,
+                kind: match attachment.kind.as_deref() {
+                    Some(kind) if kind.eq_ignore_ascii_case("file") => {
+                        TerminalIncomingAttachmentKind::File
+                    }
+                    _ => TerminalIncomingAttachmentKind::Image,
+                },
                 media_type: attachment.media_type,
                 local_path: attachment.local_path,
                 description: attachment.description,
@@ -1551,6 +1570,87 @@ fn register_terminal_event(
     })?;
     pending_work.enqueue(PendingWork::Event { event_id })?;
     Ok(event_id)
+}
+
+/// Copy uploaded files into the session workspace so the agent can read them
+/// with the ordinary file tools; images stay where the provider reads them.
+async fn stage_file_attachments(
+    execution_cwd: &std::path::Path,
+    attachments: Vec<InputAttachment>,
+) -> Result<Vec<InputAttachment>> {
+    let mut staged = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let is_file = attachment
+            .kind
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("file"));
+        if !is_file {
+            staged.push(attachment);
+            continue;
+        }
+        let source = std::path::PathBuf::from(&attachment.local_path);
+        let bytes = tokio::fs::read(&source)
+            .await
+            .map_err(|err| miette!("failed to read attached file {}: {err}", source.display()))?;
+        let dir = execution_cwd.join("attachments");
+        tokio::fs::create_dir_all(&dir).await.map_err(|err| {
+            miette!(
+                "failed to create attachments directory {}: {err}",
+                dir.display()
+            )
+        })?;
+        let name = attachment_display_name(&source, attachment.description.as_deref());
+        let file_name = format!(
+            "{}-{}",
+            chrono::Utc::now().timestamp_millis(),
+            sanitize_attachment_name(&name)
+        );
+        let target = dir.join(file_name);
+        tokio::fs::write(&target, bytes)
+            .await
+            .map_err(|err| miette!("failed to stage attached file {}: {err}", target.display()))?;
+        staged.push(InputAttachment {
+            media_type: attachment.media_type,
+            local_path: target.display().to_string(),
+            description: attachment.description,
+            kind: attachment.kind,
+        });
+    }
+    Ok(staged)
+}
+
+fn attachment_display_name(source: &std::path::Path, description: Option<&str>) -> String {
+    if let Some(name) = description
+        .and_then(|description| description.strip_prefix("webui file "))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        return name.to_string();
+    }
+    source
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "attachment".to_string())
+}
+
+fn sanitize_attachment_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(80)
+        .collect();
+    let sanitized = sanitized.trim_matches('.').to_string();
+    if sanitized.is_empty() {
+        "attachment".to_string()
+    } else {
+        sanitized
+    }
 }
 
 async fn wait_for_send_reply(

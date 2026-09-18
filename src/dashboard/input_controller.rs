@@ -735,6 +735,7 @@ fn image_attachments_from_paste(text: &str) -> Option<Vec<DashboardCommandAttach
             name,
             path,
             media_type: media_type.to_string(),
+            kind: Some("image".to_string()),
         });
     }
     Some(attachments)

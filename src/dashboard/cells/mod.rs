@@ -464,6 +464,15 @@ fn user_agent_content_from_event(event: &EventView) -> Option<AgentContent> {
                             description: attachment.description.clone(),
                         }
                     }
+                    crate::events::TerminalIncomingAttachmentKind::File => AgentContentPart::Text {
+                        text: format!(
+                            "Attached file: {}",
+                            attachment
+                                .description
+                                .clone()
+                                .unwrap_or_else(|| attachment.local_path.clone())
+                        ),
+                    },
                 })
                 .collect::<Vec<_>>(),
         ),

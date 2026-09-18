@@ -148,41 +148,62 @@ fn preview_afterclaim_context_message(
 }
 
 fn afterclaim_agent_content(text: String, input: &AfterClaimContextInput) -> AgentContent {
-    let parts = input
-        .iter()
-        .flat_map(|event| match &event.payload {
-            EventPayload::TelegramIncoming(payload) => payload
-                .attachments
-                .iter()
-                .map(|attachment| match attachment.kind {
-                    crate::events::TelegramIncomingAttachmentKind::Image => {
-                        AgentContentPart::Image {
-                            path: attachment.local_path.clone(),
-                            media_type: attachment.media_type.clone(),
-                            description: attachment.description.clone(),
+    let mut parts = Vec::new();
+    let mut file_lines = Vec::new();
+    for event in input {
+        match &event.payload {
+            EventPayload::TelegramIncoming(payload) => {
+                for attachment in &payload.attachments {
+                    parts.push(AgentContentPart::Image {
+                        path: attachment.local_path.clone(),
+                        media_type: attachment.media_type.clone(),
+                        description: attachment.description.clone(),
+                    });
+                }
+            }
+            EventPayload::TerminalIncoming(payload) => {
+                for attachment in &payload.attachments {
+                    match attachment.kind {
+                        crate::events::TerminalIncomingAttachmentKind::Image => {
+                            parts.push(AgentContentPart::Image {
+                                path: attachment.local_path.clone(),
+                                media_type: attachment.media_type.clone(),
+                                description: attachment.description.clone(),
+                            });
+                        }
+                        crate::events::TerminalIncomingAttachmentKind::File => {
+                            file_lines.push(render_attached_file_line(
+                                &attachment.local_path,
+                                attachment.description.as_deref(),
+                            ));
                         }
                     }
-                })
-                .collect::<Vec<_>>(),
-            EventPayload::TerminalIncoming(payload) => payload
-                .attachments
-                .iter()
-                .map(|attachment| match attachment.kind {
-                    crate::events::TerminalIncomingAttachmentKind::Image => {
-                        AgentContentPart::Image {
-                            path: attachment.local_path.clone(),
-                            media_type: attachment.media_type.clone(),
-                            description: attachment.description.clone(),
-                        }
-                    }
-                })
-                .collect::<Vec<_>>(),
-        })
-        .collect::<Vec<_>>();
+                }
+            }
+        }
+    }
+    let text = if file_lines.is_empty() {
+        text
+    } else {
+        format!(
+            "{text}\n\nAttached files (read them from these paths before answering):\n{}",
+            file_lines.join("\n")
+        )
+    };
     if parts.is_empty() {
         AgentContent::text(text)
     } else {
         AgentContent::multimodal(text, parts)
+    }
+}
+
+fn render_attached_file_line(local_path: &str, description: Option<&str>) -> String {
+    match description
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+    {
+        Some(description) => format!("- `{local_path}` ({description})"),
+        None => format!("- `{local_path}`"),
     }
 }
 

@@ -1249,12 +1249,16 @@ CLI, or Telegram:
 - The sidebar exposes an explicit mode switch between the work agent and study.
   In study mode it shows a node search box plus a module-grouped node list in
   the same row style as the session list.
-- The study sidebar also exposes graph file actions: an Obsidian vault import
-  with a dry-run preview report and an export dialog that downloads an
-  Obsidian vault or JSON backup archive. Import and export are code-executed
-  adapters: notes become nodes, folders are ignored, wikilinks import as
-  `related`, understanding starts at 0, duplicates are matched by
-  title/alias, and re-import is idempotent.
+- The study chat composer's `+` menu also exposes graph file actions: an
+  Obsidian vault import with a dry-run preview report and an export dialog that
+  downloads an Obsidian vault or JSON backup archive. Work sessions use the
+  same menu to attach files. Import and export are code-executed adapters:
+  notes become nodes, folders are ignored, wikilinks import as `related`,
+  understanding starts at 0, duplicates are matched by title/alias, and
+  re-import is idempotent.
+- Attached files are staged into `<session workspace>/attachments/` before the
+  event is registered, so the claimed input carries readable paths; images
+  remain multimodal parts read directly by the model provider.
 - The Study tab has no session list. It renders the knowledge network plus an
   overview panel (description and relations only) and a chat that uses the
   study session dashboard stream.

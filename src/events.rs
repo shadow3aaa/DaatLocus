@@ -166,6 +166,7 @@ pub struct TerminalIncomingAttachment {
 #[serde(rename_all = "snake_case")]
 pub enum TerminalIncomingAttachmentKind {
     Image,
+    File,
 }
 
 fn default_telegram_chat_kind() -> String {

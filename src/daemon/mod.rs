@@ -98,6 +98,7 @@ const SESSION_LOG: &str = crate::logging::SESSION_LOG_FILE_NAME;
 pub const DAEMONIZE_ENV: &str = "DAAT_LOCUS_DAEMONIZE";
 const MAX_COMMAND_ATTACHMENTS: usize = 4;
 const MAX_COMMAND_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_COMMAND_FILE_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
 
 static EMBEDDED_WEBUI_DIST: Dir<'_> = include_dir!("$OUT_DIR/webui-dist");
 
@@ -283,6 +284,9 @@ pub struct CommandAttachmentRequest {
     pub name: String,
     pub media_type: String,
     pub data_url: String,
+    /// `image` (default) or `file`.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -891,7 +895,7 @@ async fn store_command_attachments(
 ) -> std::result::Result<Vec<DashboardIncomingAttachment>, String> {
     if attachments.len() > MAX_COMMAND_ATTACHMENTS {
         return Err(format!(
-            "too many image attachments: maximum is {MAX_COMMAND_ATTACHMENTS}"
+            "too many attachments: maximum is {MAX_COMMAND_ATTACHMENTS}"
         ));
     }
 
@@ -905,6 +909,14 @@ async fn store_command_attachments(
 async fn store_command_attachment(
     attachment: &CommandAttachmentRequest,
 ) -> std::result::Result<DashboardIncomingAttachment, String> {
+    let kind = match attachment.kind.as_deref().map(str::trim) {
+        Some(part) if part.eq_ignore_ascii_case("file") => "file",
+        _ => "image",
+    };
+    if kind == "file" {
+        return store_command_file_attachment(attachment).await;
+    }
+
     let media_type =
         normalize_dashboard_image_media_type(&attachment.media_type).ok_or_else(|| {
             "only PNG, JPEG, WebP, and GIF image attachments are supported".to_string()
@@ -945,10 +957,98 @@ async fn store_command_attachment(
         .map_err(|err| format!("failed to write dashboard attachment: {err}"))?;
 
     Ok(DashboardIncomingAttachment {
+        kind: "image".to_string(),
         media_type,
         local_path: path.display().to_string(),
         description: Some(format!("webui image {display_name}")),
     })
+}
+
+async fn store_command_file_attachment(
+    attachment: &CommandAttachmentRequest,
+) -> std::result::Result<DashboardIncomingAttachment, String> {
+    let bytes = decode_attachment_data_url(&attachment.data_url)?;
+    if bytes.len() > MAX_COMMAND_FILE_ATTACHMENT_BYTES {
+        return Err(format!(
+            "file attachment is too large: maximum is {} MiB",
+            MAX_COMMAND_FILE_ATTACHMENT_BYTES / 1024 / 1024
+        ));
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest_hex = hex::encode(hasher.finalize());
+    let original_name = attachment.name.trim();
+    let display_name = if original_name.is_empty() {
+        "webui-file".to_string()
+    } else {
+        original_name.to_string()
+    };
+    let extension = StdPath::new(&display_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| sanitize_attachment_extension(extension))
+        .filter(|extension| !extension.is_empty())
+        .unwrap_or_else(|| "bin".to_string());
+    let file_name = format!(
+        "dashboard-{}-{}.{}",
+        chrono::Utc::now().timestamp_millis(),
+        &digest_hex[..16],
+        extension
+    );
+    let dir = daat_locus_paths_sync()
+        .state_dir()
+        .join("dashboard_attachments");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|err| format!("failed to create dashboard attachment directory: {err}"))?;
+    let path = dir.join(file_name);
+    tokio::fs::write(&path, bytes)
+        .await
+        .map_err(|err| format!("failed to write dashboard attachment: {err}"))?;
+
+    let media_type = attachment.media_type.trim();
+    Ok(DashboardIncomingAttachment {
+        kind: "file".to_string(),
+        media_type: if media_type.is_empty() {
+            "application/octet-stream".to_string()
+        } else {
+            media_type.to_string()
+        },
+        local_path: path.display().to_string(),
+        description: Some(format!("webui file {display_name}")),
+    })
+}
+
+fn sanitize_attachment_extension(extension: &str) -> String {
+    extension
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(12)
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn decode_attachment_data_url(data_url: &str) -> std::result::Result<Vec<u8>, String> {
+    let trimmed = data_url.trim();
+    let payload = if let Some(rest) = trimmed.strip_prefix("data:") {
+        let (metadata, payload) = rest
+            .split_once(',')
+            .ok_or_else(|| "invalid attachment data URL".to_string())?;
+        if !metadata
+            .split(';')
+            .any(|part| part.eq_ignore_ascii_case("base64"))
+        {
+            return Err("attachment data URL must be base64 encoded".to_string());
+        }
+        payload
+    } else {
+        trimmed
+    };
+
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|err| format!("invalid base64 attachment: {err}"))
 }
 
 fn decode_image_data_url(
@@ -1787,6 +1887,7 @@ async fn command_handler(
                                 media_type: attachment.media_type,
                                 local_path: attachment.local_path,
                                 description: attachment.description,
+                                kind: Some(attachment.kind),
                             })
                             .collect(),
                         mode: crate::events::TerminalInputMode::Ask,
@@ -1834,6 +1935,7 @@ async fn command_handler(
                                 media_type: attachment.media_type,
                                 local_path: attachment.local_path,
                                 description: attachment.description,
+                                kind: Some(attachment.kind),
                             })
                             .collect(),
                         mode: crate::events::TerminalInputMode::Normal,
@@ -4298,6 +4400,7 @@ async fn command_attachment_requests(
             name: attachment.name,
             media_type: attachment.media_type.clone(),
             data_url: format!("data:{};base64,{encoded}", attachment.media_type),
+            kind: attachment.kind,
         });
     }
     Ok(requests)

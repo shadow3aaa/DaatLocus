@@ -423,6 +423,7 @@ pub trait DashboardHistoryLoader: Send + Sync {
 
 #[derive(Clone)]
 pub struct DashboardIncomingAttachment {
+    pub kind: String,
     pub media_type: String,
     pub local_path: String,
     pub description: Option<String>,
@@ -1596,6 +1597,7 @@ mod tests {
                 name: "dashboard.png".to_string(),
                 path: PathBuf::from("C:/tmp/dashboard.png"),
                 media_type: "image/png".to_string(),
+                kind: Some("image".to_string()),
             });
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");

@@ -187,6 +187,10 @@ pub struct InputAttachment {
     pub media_type: String,
     pub local_path: String,
     pub description: Option<String>,
+    /// `image` (default) or `file`; file attachments are staged into the
+    /// session workspace so the agent can read them.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

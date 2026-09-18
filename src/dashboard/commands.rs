@@ -109,6 +109,8 @@ pub struct DashboardCommandAttachment {
     pub name: String,
     pub path: PathBuf,
     pub media_type: String,
+    /// `image` (default) or `file`.
+    pub kind: Option<String>,
 }
 
 #[async_trait]
