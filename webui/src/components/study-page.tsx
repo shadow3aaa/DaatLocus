@@ -296,6 +296,38 @@ export function StudyPage({
     }
   }, [graph, selectedNodeId, handleSelectNode]);
 
+  const studyFocus =
+    studySnapshot?.app_focus?.find(([appId]) => appId === "study") ?? null;
+  const consumedFocusRevisionRef = useRef(0);
+  const pendingFocusNodeRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (isMock || !studyFocus) {
+      return;
+    }
+    const [, nodeId, revision] = studyFocus;
+    if (revision <= consumedFocusRevisionRef.current) {
+      return;
+    }
+    consumedFocusRevisionRef.current = revision;
+    pendingFocusNodeRef.current = nodeId;
+  }, [isMock, studyFocus]);
+
+  useEffect(() => {
+    const pending = pendingFocusNodeRef.current;
+    if (!pending || !graph) {
+      return;
+    }
+    if (graph.nodes.some((node) => node.id === pending)) {
+      pendingFocusNodeRef.current = null;
+      handleSelectNode(pending);
+      return;
+    }
+    if (graph.revision >= consumedFocusRevisionRef.current) {
+      pendingFocusNodeRef.current = null;
+    }
+  }, [graph, handleSelectNode]);
+
   const handleRefresh = useCallback(() => {
     if (isMock) {
       setStatus("ready");

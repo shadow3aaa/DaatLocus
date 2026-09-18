@@ -618,6 +618,7 @@ export type DashboardSnapshot = {
   preturn_context_output: string;
   app_status_outputs: Array<[string, string]>;
   app_state_revisions?: Array<[string, number]>;
+  app_focus?: Array<[string, string, number]>;
   skills?: DashboardSkillSummary[];
   skill_errors?: DashboardSkillError[];
   workflows?: DashboardWorkflowSummary[];
