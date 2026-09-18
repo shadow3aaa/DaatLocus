@@ -973,6 +973,7 @@ export type DashboardCommandAttachment = {
   name: string;
   media_type: string;
   data_url: string;
+  kind?: "image" | "file";
 };
 
 export class DaemonApiError extends Error {

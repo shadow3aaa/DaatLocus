@@ -54,8 +54,6 @@ type StudyPageProps = {
   onSelectNode?: (nodeId: string | null) => void;
   searchQuery?: string;
   instantTransitions?: boolean;
-  transferRequest?: "import" | "export" | null;
-  onTransferHandled?: () => void;
   onGraphLoaded?: (summary: StudyGraphSummaryProps) => void;
 };
 
@@ -71,8 +69,6 @@ export function StudyPage({
   onSelectNode,
   searchQuery = "",
   instantTransitions = false,
-  transferRequest = null,
-  onTransferHandled,
   onGraphLoaded,
 }: StudyPageProps) {
   const { t } = useTranslation();
@@ -98,6 +94,9 @@ export function StudyPage({
   const [graphVersion, setGraphVersion] = useState(0);
   const [activeTab, setActiveTab] = useState<"overview" | "chat">(
     initialTab ?? "overview",
+  );
+  const [transferMode, setTransferMode] = useState<"import" | "export" | null>(
+    null,
   );
 
   const mockGraphRef = useRef(mockGraph);
@@ -404,14 +403,16 @@ export function StudyPage({
             <StudyChatPanel
               sessionId={sessionId}
               mockSnapshot={mockSnapshot}
+              onImportGraph={() => setTransferMode("import")}
+              onExportGraph={() => setTransferMode("export")}
             />
           )}
         </div>
       </aside>
 
-      {transferRequest ? (
+      {transferMode ? (
         <StudyTransferDialog
-          mode={transferRequest}
+          mode={transferMode}
           sessionId={sessionId}
           modules={(graph?.modules ?? []).map((summary) => ({
             id: summary.module.id,
@@ -421,7 +422,7 @@ export function StudyPage({
             id: node.id,
             title: node.title,
           }))}
-          onClose={() => onTransferHandled?.()}
+          onClose={() => setTransferMode(null)}
           onImported={() => {
             if (sessionId) {
               void loadGraph(sessionId);
@@ -444,9 +445,13 @@ function StudyCenteredState({ children }: { children: ReactNode }) {
 function StudyChatPanel({
   sessionId,
   mockSnapshot,
+  onImportGraph,
+  onExportGraph,
 }: {
   sessionId: string | null;
   mockSnapshot?: DashboardSnapshot;
+  onImportGraph: () => void;
+  onExportGraph: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -467,6 +472,9 @@ function StudyChatPanel({
       mockSnapshot={mockSnapshot}
       embedded
       allowSlashCommands={false}
+      allowFileAttachments={false}
+      onImportGraph={onImportGraph}
+      onExportGraph={onExportGraph}
     />
   );
 }

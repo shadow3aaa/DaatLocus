@@ -56,7 +56,9 @@ import {
   InfoIcon,
   Maximize2Icon,
   MoreHorizontalIcon,
+  PaperclipIcon,
   PencilIcon,
+  PlusIcon,
   SendHorizontalIcon,
   Trash2Icon,
   XIcon,
@@ -173,6 +175,7 @@ const AGENT_CHAT_LEAVE_BOTTOM_THRESHOLD_PX = 16;
 const AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX = 160;
 const AGENT_CHAT_MAX_IMAGE_ATTACHMENTS = 4;
 const AGENT_CHAT_MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const AGENT_CHAT_MAX_FILE_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 const AGENT_CHAT_RUNTIME_SHIMMER_MS = 2_000;
 const AGENT_CHAT_RUNTIME_SHIMMER_STAGGER_MS = 120;
 const AGENT_CHAT_INLINE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
@@ -187,11 +190,17 @@ export function AgentPage({
   mockSnapshot,
   embedded = false,
   allowSlashCommands = true,
+  allowFileAttachments = true,
+  onImportGraph,
+  onExportGraph,
 }: {
   sessionId: string;
   mockSnapshot?: DashboardSnapshot;
   embedded?: boolean;
   allowSlashCommands?: boolean;
+  allowFileAttachments?: boolean;
+  onImportGraph?: () => void;
+  onExportGraph?: () => void;
 }) {
   const { t } = useTranslation();
   const { snapshot } = useDashboardSnapshot(sessionId, {
@@ -253,6 +262,9 @@ export function AgentPage({
           onHeightChange={setChatComposerHeight}
           embedded={embedded}
           allowSlashCommands={allowSlashCommands}
+          allowFileAttachments={allowFileAttachments}
+          onImportGraph={onImportGraph}
+          onExportGraph={onExportGraph}
         />
       </section>
     </AgentChatMockDataContext.Provider>
@@ -418,6 +430,11 @@ type AgentChatPendingImageAttachment = {
   id: string;
   file: File;
   previewUrl?: string;
+};
+
+type AgentChatPendingFileAttachment = {
+  id: string;
+  file: File;
 };
 
 type WebSlashCommandLevel = "info" | "warning" | "error";
@@ -738,6 +755,9 @@ function AgentChatComposer({
   onHeightChange,
   embedded = false,
   allowSlashCommands = true,
+  allowFileAttachments = true,
+  onImportGraph,
+  onExportGraph,
 }: {
   sessionId: string;
   snapshot: DashboardSnapshot | null;
@@ -747,6 +767,9 @@ function AgentChatComposer({
   onHeightChange: (height: number) => void;
   embedded?: boolean;
   allowSlashCommands?: boolean;
+  allowFileAttachments?: boolean;
+  onImportGraph?: () => void;
+  onExportGraph?: () => void;
 }) {
   const { t } = useTranslation();
   const chatPlaceholder = t("chat.openChatWith", {
@@ -756,12 +779,17 @@ function AgentChatComposer({
   const composerContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileAttachmentInputRef = useRef<HTMLInputElement>(null);
   const [message, setMessage] = useState("");
   const [imageAttachments, setImageAttachments] = useState<
     AgentChatPendingImageAttachment[]
   >([]);
+  const [fileAttachments, setFileAttachments] = useState<
+    AgentChatPendingFileAttachment[]
+  >([]);
   const imageAttachmentsRef = useRef<AgentChatPendingImageAttachment[]>([]);
   const nextImageAttachmentIdRef = useRef(0);
+  const nextFileAttachmentIdRef = useRef(0);
   const [isSending, setIsSending] = useState(false);
   const [isDraggingImage, setIsDraggingImage] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -801,7 +829,10 @@ function AgentChatComposer({
     (Boolean(slashCommandFeedback?.blocksSubmit) ||
       (isWebSlashCommandInput(message) &&
         !parseWebSlashCommand(message)?.trimmed));
-  const composerHasPayload = message.trim().length > 0 || imageAttachments.length > 0;
+  const composerHasPayload =
+    message.trim().length > 0 ||
+    imageAttachments.length > 0 ||
+    fileAttachments.length > 0;
   const composerQueuesUserInput =
     !allowSlashCommands || !isWebSlashCommandInput(message);
   const queuedInputLimitBlocksSubmit =
@@ -948,16 +979,75 @@ function AgentChatComposer({
     });
   }
 
-  async function commandAttachmentsFromPendingImages(): Promise<
+  function addFileAttachments(files: Iterable<File>) {
+    const nextFiles = Array.from(files);
+    if (nextFiles.length === 0) {
+      return;
+    }
+
+    setFileAttachments((current) => {
+      const totalAttachments = imageAttachments.length + current.length;
+      const remainingSlots = Math.max(
+        0,
+        AGENT_CHAT_MAX_IMAGE_ATTACHMENTS - totalAttachments,
+      );
+      const accepted = nextFiles.slice(0, remainingSlots);
+      const rejectedForCount = nextFiles.length - accepted.length;
+      const valid = accepted.filter(
+        (file) => file.size <= AGENT_CHAT_MAX_FILE_ATTACHMENT_BYTES,
+      );
+      const oversized = accepted.find(
+        (file) => file.size > AGENT_CHAT_MAX_FILE_ATTACHMENT_BYTES,
+      );
+
+      if (rejectedForCount > 0) {
+        setSendError(t("chat.attachmentLimit", { count: AGENT_CHAT_MAX_IMAGE_ATTACHMENTS }));
+      } else if (oversized) {
+        setSendError(
+          `${oversized.name} is too large. Each file must be ${formatFileSize(
+            AGENT_CHAT_MAX_FILE_ATTACHMENT_BYTES,
+          )} or smaller.`,
+        );
+      } else if (valid.length > 0) {
+        setSendError(null);
+      }
+
+      return [
+        ...current,
+        ...valid.map((file) => ({
+          id: `file-${nextFileAttachmentIdRef.current++}`,
+          file,
+        })),
+      ];
+    });
+  }
+
+  function removeFileAttachment(id: string) {
+    setFileAttachments((current) =>
+      current.filter((attachment) => attachment.id !== id),
+    );
+  }
+
+  async function commandAttachmentsFromPending(): Promise<
     DashboardCommandAttachment[]
   > {
-    return Promise.all(
+    const images = await Promise.all(
       imageAttachments.map(async (attachment) => ({
         name: attachment.file.name || "image",
         media_type: attachment.file.type || "application/octet-stream",
         data_url: await readFileAsDataUrl(attachment.file),
+        kind: "image" as const,
       })),
     );
+    const files = await Promise.all(
+      fileAttachments.map(async (attachment) => ({
+        name: attachment.file.name || "file",
+        media_type: attachment.file.type || "application/octet-stream",
+        data_url: await readFileAsDataUrl(attachment.file),
+        kind: "file" as const,
+      })),
+    );
+    return [...images, ...files];
   }
 
   async function submitComposerInput(rawInput: string) {
@@ -970,7 +1060,9 @@ function AgentChatComposer({
       ? webSlashCommandFeedback(trimmed, snapshot, imageAttachments.length)
       : null;
     if (
-      (!trimmed && imageAttachments.length === 0) ||
+      (!trimmed &&
+        imageAttachments.length === 0 &&
+        fileAttachments.length === 0) ||
       isSending ||
       slashBodyMissing ||
       Boolean(slashFeedback?.blocksSubmit)
@@ -1012,7 +1104,7 @@ function AgentChatComposer({
     try {
       const attachments = isSlashCommand
         ? []
-        : await commandAttachmentsFromPendingImages();
+        : await commandAttachmentsFromPending();
       const output = await runDashboardCommand(trimmed, {
         attachments,
         sessionId,
@@ -1024,6 +1116,7 @@ function AgentChatComposer({
         }
         return [];
       });
+      setFileAttachments([]);
 
       if (isSlashCommand) {
         setSlashCommandSelection(0);
@@ -1271,7 +1364,20 @@ function AgentChatComposer({
           }}
         />
       ) : null}
-      {imageAttachments.length > 0 ? (
+      {allowFileAttachments ? (
+        <Input
+          ref={fileAttachmentInputRef}
+          type="file"
+          multiple
+          className="sr-only"
+          aria-label={t("chat.attachFiles")}
+          onChange={(event) => {
+            addFileAttachments(event.target.files ?? []);
+            event.currentTarget.value = "";
+          }}
+        />
+      ) : null}
+      {imageAttachments.length > 0 || fileAttachments.length > 0 ? (
         <div className="flex gap-2 overflow-x-auto px-2 pb-2">
           {imageAttachments.map((attachment) => (
             <div
@@ -1307,6 +1413,38 @@ function AgentChatComposer({
                   name: attachment.file.name || t("chat.imageFallback"),
                 })}
                 onClick={() => removeImageAttachment(attachment.id)}
+                className="absolute right-1 top-1 rounded-full bg-background/90 text-muted-foreground opacity-90 shadow-sm hover:text-foreground group-hover:opacity-100"
+              >
+                <XIcon data-icon="inline-start" aria-hidden="true" />
+              </Button>
+            </div>
+          ))}
+          {fileAttachments.map((attachment) => (
+            <div
+              key={attachment.id}
+              className="group relative flex h-16 w-40 shrink-0 flex-col justify-between overflow-hidden rounded-xl border border-border/70 bg-muted px-2 py-1.5"
+              title={`${attachment.file.name} · ${formatFileSize(attachment.file.size)}`}
+            >
+              <span className="flex min-w-0 items-center gap-1.5 pt-0.5">
+                <PaperclipIcon
+                  className="size-3.5 shrink-0 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                <span className="min-w-0 truncate text-xs">
+                  {attachment.file.name || t("chat.fileFallback")}
+                </span>
+              </span>
+              <span className="truncate text-[10px] text-muted-foreground">
+                {formatFileSize(attachment.file.size)}
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label={t("chat.removeAttachment", {
+                  name: attachment.file.name || t("chat.fileFallback"),
+                })}
+                onClick={() => removeFileAttachment(attachment.id)}
                 className="absolute right-1 top-1 rounded-full bg-background/90 text-muted-foreground opacity-90 shadow-sm hover:text-foreground group-hover:opacity-100"
               >
                 <XIcon data-icon="inline-start" aria-hidden="true" />
@@ -1420,6 +1558,43 @@ function AgentChatComposer({
           align="inline-end"
           className="self-end gap-1 pb-1.5 pr-1.5 has-[>button]:mr-0"
         >
+          {allowFileAttachments || onImportGraph || onExportGraph ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={t("chat.moreActions")}
+                  title={t("chat.moreActions")}
+                  disabled={isSending}
+                  className="rounded-full text-muted-foreground hover:text-foreground"
+                >
+                  <PlusIcon data-icon="inline-start" aria-hidden="true" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {allowFileAttachments ? (
+                  <DropdownMenuItem
+                    onSelect={() => fileAttachmentInputRef.current?.click()}
+                  >
+                    <PaperclipIcon />
+                    {t("chat.attachFiles")}
+                  </DropdownMenuItem>
+                ) : null}
+                {onImportGraph ? (
+                  <DropdownMenuItem onSelect={onImportGraph}>
+                    {t("study.transfer.menuImport")}
+                  </DropdownMenuItem>
+                ) : null}
+                {onExportGraph ? (
+                  <DropdownMenuItem onSelect={onExportGraph}>
+                    {t("study.transfer.menuExport")}
+                  </DropdownMenuItem>
+                ) : null}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
           <Button
             type="button"
             variant="ghost"

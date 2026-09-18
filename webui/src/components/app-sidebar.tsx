@@ -2,19 +2,16 @@ import type { TFunction } from "i18next";
 import {
   ActivityIcon,
   ChevronDownIcon,
-  DownloadIcon,
   FolderIcon,
   FolderPlusIcon,
   MessageSquareIcon,
   MoonIcon,
-  MoreHorizontalIcon,
   PlusIcon,
   SearchIcon,
   ScrollTextIcon,
   SettingsIcon,
   SunIcon,
   Trash2Icon,
-  UploadIcon,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -74,8 +71,6 @@ type AppSidebarProps = {
   onSelectStudyNode?: (nodeId: string) => void;
   studyQuery?: string;
   onStudyQueryChange?: (query: string) => void;
-  onStudyImport?: () => void;
-  onStudyExport?: () => void;
   onToggleThemeMode: () => void;
   onSelectSession: (sessionId: string) => void;
   onCreateSession: (projectDir?: string) => void;
@@ -157,8 +152,6 @@ function AppSidebarBody({
   onSelectStudyNode,
   studyQuery,
   onStudyQueryChange,
-  onStudyImport,
-  onStudyExport,
   onToggleThemeMode,
   onSelectSession,
   onCreateSession,
@@ -250,8 +243,6 @@ function AppSidebarBody({
             }}
             query={studyQuery ?? ""}
             onQueryChange={onStudyQueryChange ?? (() => undefined)}
-            onImport={onStudyImport}
-            onExport={onStudyExport}
           />
         ) : (
           <>
@@ -387,16 +378,12 @@ function StudySidebarSection({
   onSelectNode,
   query,
   onQueryChange,
-  onImport,
-  onExport,
 }: {
   summary: StudyGraphSummaryProps | null;
   selectedNodeId: string | null;
   onSelectNode: (nodeId: string) => void;
   query: string;
   onQueryChange: (query: string) => void;
-  onImport?: () => void;
-  onExport?: () => void;
 }) {
   const { t } = useTranslation();
   const normalizedQuery = query.trim().toLowerCase();
@@ -424,46 +411,15 @@ function StudySidebarSection({
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto scrollbar-none">
       <div className="sticky top-0 z-10 bg-sidebar px-1 pb-1">
-        <div className="flex items-center gap-1">
-          <div className="relative min-w-0 flex-1">
-            <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-sidebar-foreground/40" />
-            <Input
-              value={query}
-              onChange={(event) => onQueryChange(event.target.value)}
-              placeholder={t("study.searchPlaceholder")}
-              aria-label={t("study.searchAria")}
-              className="h-8 rounded-md pl-8 text-sm"
-            />
-          </div>
-          {onImport || onExport ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon-sm"
-                  variant="ghost"
-                  aria-label={t("study.transfer.actions")}
-                  title={t("study.transfer.actions")}
-                >
-                  <MoreHorizontalIcon />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                {onImport ? (
-                  <DropdownMenuItem onSelect={onImport}>
-                    <UploadIcon />
-                    {t("study.transfer.menuImport")}
-                  </DropdownMenuItem>
-                ) : null}
-                {onExport ? (
-                  <DropdownMenuItem onSelect={onExport}>
-                    <DownloadIcon />
-                    {t("study.transfer.menuExport")}
-                  </DropdownMenuItem>
-                ) : null}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : null}
+        <div className="relative">
+          <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-sidebar-foreground/40" />
+          <Input
+            value={query}
+            onChange={(event) => onQueryChange(event.target.value)}
+            placeholder={t("study.searchPlaceholder")}
+            aria-label={t("study.searchAria")}
+            className="h-8 rounded-md pl-8 text-sm"
+          />
         </div>
       </div>
 

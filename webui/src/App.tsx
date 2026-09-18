@@ -137,9 +137,6 @@ export default function App() {
     null,
   );
   const [studyQuery, setStudyQuery] = useState("");
-  const [studyTransfer, setStudyTransfer] = useState<
-    "import" | "export" | null
-  >(null);
   const handleStudyGraphLoaded = useCallback(
     (summary: StudyGraphSummaryProps) => {
       setStudySummary(summary);
@@ -474,8 +471,6 @@ export default function App() {
             onSelectStudyNode={handleSelectStudyNode}
             studyQuery={studyQuery}
             onStudyQueryChange={setStudyQuery}
-            onStudyImport={() => setStudyTransfer("import")}
-            onStudyExport={() => setStudyTransfer("export")}
             onToggleThemeMode={toggleThemeMode}
             onSelectSession={handleSelectSession}
             onCreateSession={handleCreateSession}
@@ -495,8 +490,6 @@ export default function App() {
                   selectedNodeId: selectedStudyNodeId,
                   onSelectNode: handleSelectStudyNode,
                   searchQuery: studyQuery,
-                  transferRequest: studyTransfer,
-                  onTransferHandled: () => setStudyTransfer(null),
                 },
               )}
             </Suspense>
@@ -570,9 +563,6 @@ function MockAgentApp() {
 function MockStudyApp() {
   const { t } = useTranslation();
   const { themeMode, toggleThemeMode } = useThemeMode();
-  const [studyTransfer, setStudyTransfer] = useState<
-    "import" | "export" | null
-  >(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(() =>
     typeof window === "undefined"
       ? null
@@ -625,8 +615,6 @@ function MockStudyApp() {
           onSelectStudyNode={setSelectedNodeId}
           studyQuery={studyQuery}
           onStudyQueryChange={setStudyQuery}
-          onStudyImport={() => setStudyTransfer("import")}
-          onStudyExport={() => setStudyTransfer("export")}
           onToggleThemeMode={toggleThemeMode}
           onSelectSession={() => undefined}
           onCreateSession={() => undefined}
@@ -640,18 +628,6 @@ function MockStudyApp() {
             selectedNodeId={selectedNodeId}
             onSelectNode={setSelectedNodeId}
             searchQuery={studyQuery}
-            transferRequest={
-              studyTransfer ??
-              (new URLSearchParams(window.location.search).get("transfer") ===
-              "import"
-                ? "import"
-                : new URLSearchParams(window.location.search).get(
-                      "transfer",
-                    ) === "export"
-                  ? "export"
-                  : null)
-            }
-            onTransferHandled={() => setStudyTransfer(null)}
             instantTransitions={
               new URLSearchParams(window.location.search).get("anim") === "0"
             }
@@ -811,8 +787,6 @@ function renderAuthenticatedPage(
     selectedNodeId: string | null;
     onSelectNode: (nodeId: string | null) => void;
     searchQuery: string;
-    transferRequest: "import" | "export" | null;
-    onTransferHandled: () => void;
   },
 ) {
   switch (activePage) {
@@ -829,8 +803,6 @@ function renderAuthenticatedPage(
           selectedNodeId={studyState.selectedNodeId}
           onSelectNode={studyState.onSelectNode}
           searchQuery={studyState.searchQuery}
-          transferRequest={studyState.transferRequest}
-          onTransferHandled={studyState.onTransferHandled}
         />
       );
     case "agent":
