@@ -513,6 +513,11 @@ impl DaemonLock {
     }
 
     pub async fn acquire_with_suffix(suffix: &str) -> Result<Self> {
+        let path = Self::path_with_suffix(suffix).await?;
+        Self::acquire_at_path(path).await
+    }
+
+    pub async fn path_with_suffix(suffix: &str) -> Result<PathBuf> {
         let paths = daat_locus_paths().await;
         let mut path = paths.daemon_lock_file();
         if let Some(parent) = path.parent() {
@@ -528,7 +533,7 @@ impl DaemonLock {
                 parent.join(format!("{stem}-{suffix}.{ext}"))
             };
         }
-        Self::acquire_at_path(path).await
+        Ok(path)
     }
 
     async fn acquire_at_path(path: PathBuf) -> Result<Self> {
@@ -595,9 +600,34 @@ async fn stale_lock_can_be_removed(path: &PathBuf) -> Result<bool> {
     Ok(!process_exists(state.pid))
 }
 
-fn process_exists(pid: u32) -> bool {
+pub(crate) fn process_exists(pid: u32) -> bool {
     let system = System::new_all();
     system.process(Pid::from_u32(pid)).is_some()
+}
+
+/// Terminate a process that no longer belongs to any live session client.
+pub(crate) async fn force_terminate_process(pid: u32) -> bool {
+    if !process_exists(pid) {
+        return true;
+    }
+    let _ = signal_process(pid, Signal::Term);
+    if wait_for_process_exit(pid, SESSION_PROCESS_TERM_TIMEOUT).await {
+        return true;
+    }
+    let _ = signal_process(pid, Signal::Kill);
+    wait_for_process_exit(pid, SESSION_PROCESS_KILL_TIMEOUT).await
+}
+
+/// A live process that still holds this session's lock, typically an orphan
+/// from an earlier manager run or an unresponsive session whose pid was
+/// dropped from the registry.
+async fn live_session_lock_holder(session_id: &session::SessionId) -> Option<u32> {
+    let path = DaemonLock::path_with_suffix(&format!("session-{}", session_id.as_str()))
+        .await
+        .ok()?;
+    let bytes = tokio::fs::read(&path).await.ok()?;
+    let state: LockFileState = serde_json::from_slice(&bytes).ok()?;
+    (state.pid != std::process::id() && process_exists(state.pid)).then_some(state.pid)
 }
 
 pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServerHandle> {
@@ -3479,6 +3509,20 @@ pub async fn session_client_for_id(
         info.pid = None;
         info.ipc_name = None;
         info.ipc_token_hash = None;
+    }
+
+    // The registry may have lost track of an unresponsive session while its
+    // process still holds the session lock. Release the lock holder first, or
+    // every future spawn attempt would exit with "daemon already running".
+    if let Some(pid) = live_session_lock_holder(&session_id).await {
+        tracing::warn!(
+            "terminating orphaned session `{session_id}` pid {pid} holding the session lock before respawn"
+        );
+        if !force_terminate_process(pid).await {
+            tracing::warn!(
+                "orphaned session `{session_id}` pid {pid} did not exit after forced termination"
+            );
+        }
     }
 
     spawn_session_process(

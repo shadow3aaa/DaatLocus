@@ -606,6 +606,15 @@ async fn run_session_health_checks(
                         continue;
                     }
                     session_tokens.write().remove(&info.session_id);
+                    if let Some(pid) = info.pid
+                        && pid != std::process::id()
+                        && !crate::daemon::force_terminate_process(pid).await
+                    {
+                        tracing::warn!(
+                            "session {} pid {pid} did not exit after forced termination",
+                            info.session_id
+                        );
+                    }
                     let _ = sessions.mark_dead(&info.session_id).await;
                 }
             }
