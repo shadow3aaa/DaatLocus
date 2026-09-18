@@ -1819,6 +1819,210 @@ export async function updateStudyProgress({
   return parseJsonResponse<StudyProgressUpdate>(response, "Study progress");
 }
 
+export type ObsidianImportDuplicate = {
+  title: string;
+  rel_path: string;
+  existing_node_id: string;
+};
+
+export type ObsidianImportDanglingLink = {
+  from_title: string;
+  target: string;
+};
+
+export type ObsidianImportSkippedFile = {
+  rel_path: string;
+  reason: string;
+};
+
+export type ObsidianImportPreview = {
+  vault_dir: string;
+  proposed_module_title: string;
+  notes_found: number;
+  new_node_count: number;
+  duplicate_count: number;
+  dangling_link_count: number;
+  skipped_file_count: number;
+  truncated: boolean;
+  duplicates: ObsidianImportDuplicate[];
+  dangling_links: ObsidianImportDanglingLink[];
+  skipped_files: ObsidianImportSkippedFile[];
+};
+
+export type ObsidianImportResult = {
+  module_id: string;
+  module_title: string;
+  created_nodes: number;
+  merged_nodes: number;
+  created_edges: number;
+  skipped_duplicates: number;
+  skipped_links: number;
+};
+
+export type StudyExportArtifact = {
+  file_name: string;
+  path: string;
+  size_bytes: number;
+};
+
+export async function previewObsidianImport({
+  signal,
+  token = getStoredDaemonToken(),
+  sessionId,
+  vaultDir,
+  moduleId,
+}: FetchOptions & {
+  sessionId: string;
+  vaultDir: string;
+  moduleId?: string | null;
+}): Promise<ObsidianImportPreview> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for study import preview.");
+  }
+
+  const response = await fetch("/study/import/preview", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      session_id: sessionId,
+      vault_dir: vaultDir,
+      module_id: moduleId ?? null,
+    }),
+    signal,
+  });
+
+  return parseJsonResponse<ObsidianImportPreview>(response, "Study import preview");
+}
+
+export async function commitObsidianImport({
+  signal,
+  token = getStoredDaemonToken(),
+  sessionId,
+  vaultDir,
+  moduleId,
+  mergeDuplicates = true,
+}: FetchOptions & {
+  sessionId: string;
+  vaultDir: string;
+  moduleId?: string | null;
+  mergeDuplicates?: boolean;
+}): Promise<ObsidianImportResult> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for study import.");
+  }
+
+  const response = await fetch("/study/import/commit", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      session_id: sessionId,
+      vault_dir: vaultDir,
+      module_id: moduleId ?? null,
+      merge_duplicates: mergeDuplicates,
+    }),
+    signal,
+  });
+
+  return parseJsonResponse<ObsidianImportResult>(response, "Study import");
+}
+
+export async function exportStudyGraph({
+  signal,
+  token = getStoredDaemonToken(),
+  sessionId,
+  format,
+  moduleId,
+  includeQuestions = false,
+}: FetchOptions & {
+  sessionId: string;
+  format: "obsidian_vault" | "json";
+  moduleId?: string | null;
+  includeQuestions?: boolean;
+}): Promise<StudyExportArtifact> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for study export.");
+  }
+
+  const response = await fetch("/study/export", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      session_id: sessionId,
+      format,
+      module_id: moduleId ?? null,
+      include_questions: includeQuestions,
+    }),
+    signal,
+  });
+
+  return parseJsonResponse<StudyExportArtifact>(response, "Study export");
+}
+
+export async function downloadStudyExport({
+  token = getStoredDaemonToken(),
+  path,
+  fileName,
+}: {
+  token?: string;
+  path: string;
+  fileName?: string;
+}): Promise<void> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for study export download.");
+  }
+
+  const url = new URL("/study/export/download", window.location.href);
+  url.searchParams.set("path", path);
+  if (fileName) {
+    url.searchParams.set("file_name", fileName);
+  }
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${daemonToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    throw new DaemonApiError(
+      `Study export download returned ${response.status}: ${details}`,
+      response.status,
+    );
+  }
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = fileName ?? "study-export.zip";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
 export type DirEntry = {
   name: string;
   kind: string;

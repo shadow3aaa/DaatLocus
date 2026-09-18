@@ -19,6 +19,7 @@ import {
 } from "@/lib/daemon-api";
 import { mockStudyNodeDetail } from "@/lib/study-mock";
 import { StudyCircle } from "@/components/study-circle";
+import { StudyTransferDialog } from "@/components/study-transfer-dialog";
 import { studyProgressColor } from "@/lib/study-circle-layout";
 import { useDashboardSnapshot } from "@/hooks/use-dashboard-snapshot";
 
@@ -53,6 +54,8 @@ type StudyPageProps = {
   onSelectNode?: (nodeId: string | null) => void;
   searchQuery?: string;
   instantTransitions?: boolean;
+  transferRequest?: "import" | "export" | null;
+  onTransferHandled?: () => void;
   onGraphLoaded?: (summary: StudyGraphSummaryProps) => void;
 };
 
@@ -68,6 +71,8 @@ export function StudyPage({
   onSelectNode,
   searchQuery = "",
   instantTransitions = false,
+  transferRequest = null,
+  onTransferHandled,
   onGraphLoaded,
 }: StudyPageProps) {
   const { t } = useTranslation();
@@ -403,6 +408,27 @@ export function StudyPage({
           )}
         </div>
       </aside>
+
+      {transferRequest ? (
+        <StudyTransferDialog
+          mode={transferRequest}
+          sessionId={sessionId}
+          modules={(graph?.modules ?? []).map((summary) => ({
+            id: summary.module.id,
+            title: summary.module.title,
+          }))}
+          knownNodes={(graph?.nodes ?? []).map((node) => ({
+            id: node.id,
+            title: node.title,
+          }))}
+          onClose={() => onTransferHandled?.()}
+          onImported={() => {
+            if (sessionId) {
+              void loadGraph(sessionId);
+            }
+          }}
+        />
+      ) : null}
     </section>
   );
 }
