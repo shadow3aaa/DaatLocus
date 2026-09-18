@@ -756,6 +756,129 @@ async fn handle_ipc_connection(
                 false,
             ),
         },
+        SessionIpcRequest::StudyImportPreview {
+            vault_dir,
+            module_id: _,
+        } => {
+            match study_store_response(&state, |store| {
+                crate::study_app::transfer::preview_obsidian_import(
+                    store,
+                    std::path::Path::new(&vault_dir),
+                )
+                .map(|preview| SessionIpcResponse::StudyImportPreviewed {
+                    preview: Box::new(preview),
+                })
+            }) {
+                Some(Ok(response)) => IpcResponseEnvelope::ok(request_id, response),
+                Some(Err(err)) => IpcResponseEnvelope::error(
+                    request_id,
+                    "study_import_preview_failed",
+                    format!("{err:?}"),
+                    false,
+                ),
+                None => IpcResponseEnvelope::error(
+                    request_id,
+                    "study_mode_unavailable",
+                    "this session does not host the study graph",
+                    false,
+                ),
+            }
+        }
+        SessionIpcRequest::StudyImportCommit {
+            vault_dir,
+            module_id,
+            merge_duplicates,
+        } => {
+            let outcome = study_store_response(&state, |store| {
+                crate::study_app::transfer::import_obsidian_vault(
+                    store,
+                    std::path::Path::new(&vault_dir),
+                    module_id.as_deref(),
+                    merge_duplicates,
+                )
+                .map(|result| SessionIpcResponse::StudyImportCommitted {
+                    result: Box::new(result),
+                })
+            });
+            match outcome {
+                Some(Ok(response)) => {
+                    publish_study_revision(&state);
+                    IpcResponseEnvelope::ok(request_id, response)
+                }
+                Some(Err(err)) => IpcResponseEnvelope::error(
+                    request_id,
+                    "study_import_commit_failed",
+                    format!("{err:?}"),
+                    false,
+                ),
+                None => IpcResponseEnvelope::error(
+                    request_id,
+                    "study_mode_unavailable",
+                    "this session does not host the study graph",
+                    false,
+                ),
+            }
+        }
+        SessionIpcRequest::StudyExport {
+            format,
+            module_id,
+            include_questions,
+        } => {
+            let artifact_dir = crate::daat_locus_paths::daat_locus_paths()
+                .await
+                .artifact_dir("study-exports");
+            match study_store_response(&state, |store| {
+                let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                let (file_name, files) = match format.as_str() {
+                    "obsidian_vault" => (
+                        format!("study-vault-{timestamp}.zip"),
+                        crate::study_app::transfer::export_obsidian_vault(
+                            store,
+                            module_id.as_deref(),
+                        )?,
+                    ),
+                    "json" => {
+                        let json = crate::study_app::transfer::export_graph_json(
+                            store,
+                            module_id.as_deref(),
+                            include_questions,
+                        )?;
+                        (
+                            format!("study-graph-{timestamp}.zip"),
+                            vec![("study-graph.json".to_string(), json)],
+                        )
+                    }
+                    other => {
+                        return Err(miette!(
+                            "unsupported export format `{other}`; use `obsidian_vault` or `json`"
+                        ));
+                    }
+                };
+                let path = artifact_dir.join(&file_name);
+                let size_bytes = crate::study_app::transfer::write_export_zip(&files, &path)?;
+                Ok(SessionIpcResponse::StudyExported {
+                    artifact: crate::study_app::transfer::ExportArtifact {
+                        file_name,
+                        path: path.display().to_string(),
+                        size_bytes,
+                    },
+                })
+            }) {
+                Some(Ok(response)) => IpcResponseEnvelope::ok(request_id, response),
+                Some(Err(err)) => IpcResponseEnvelope::error(
+                    request_id,
+                    "study_export_failed",
+                    format!("{err:?}"),
+                    false,
+                ),
+                None => IpcResponseEnvelope::error(
+                    request_id,
+                    "study_mode_unavailable",
+                    "this session does not host the study graph",
+                    false,
+                ),
+            }
+        }
         SessionIpcRequest::DrainTelegramOutbox => IpcResponseEnvelope::ok(
             request_id,
             SessionIpcResponse::TelegramOutbox {
@@ -813,6 +936,18 @@ fn study_store_response(
     operation: impl FnOnce(&crate::study_app::store::StudyStore) -> miette::Result<SessionIpcResponse>,
 ) -> Option<miette::Result<SessionIpcResponse>> {
     state.study_store.as_ref().map(operation)
+}
+
+/// Push the current study graph revision after a code-executed mutation that
+/// bypasses the study agent tools, so clients refetch the network.
+fn publish_study_revision(state: &SessionIpcServerState) {
+    let Some(store) = state.study_store.as_ref() else {
+        return;
+    };
+    let revision = store.revision();
+    state.dashboard_tx.send_modify(|dashboard| {
+        dashboard.set_app_state_revision(crate::app::AppId::study().as_str(), revision);
+    });
 }
 
 /// Study sessions expose only the generic session commands; work-mode

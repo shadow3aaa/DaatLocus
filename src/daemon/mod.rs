@@ -735,6 +735,10 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/study/graph", get(study_graph_handler))
         .route("/study/node", get(study_node_handler))
         .route("/study/progress", post(study_progress_handler))
+        .route("/study/import/preview", post(study_import_preview_handler))
+        .route("/study/import/commit", post(study_import_commit_handler))
+        .route("/study/export", post(study_export_handler))
+        .route("/study/export/download", get(study_export_download_handler))
         .with_state(app_state);
 
     let router = router.fallback(get(embedded_webui_handler));
@@ -2676,6 +2680,188 @@ async fn study_progress_handler(
         Ok(other) => study_ipc_response_error(other),
         Err(err) => study_error_response(StatusCode::BAD_GATEWAY, format!("{err:?}")),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct StudyImportPreviewBody {
+    session_id: String,
+    vault_dir: String,
+    module_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StudyImportCommitBody {
+    session_id: String,
+    vault_dir: String,
+    module_id: Option<String>,
+    #[serde(default)]
+    merge_duplicates: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct StudyExportBody {
+    session_id: String,
+    format: String,
+    module_id: Option<String>,
+    #[serde(default)]
+    include_questions: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct StudyExportDownloadQuery {
+    session_id: Option<String>,
+    path: String,
+    file_name: Option<String>,
+}
+
+async fn study_import_preview_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(body): Json<StudyImportPreviewBody>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(response) = config_not_ready_json_response().await {
+        return response;
+    }
+    match study_ipc_request(
+        &state,
+        &body.session_id,
+        session_ipc::SessionIpcRequest::StudyImportPreview {
+            vault_dir: body.vault_dir,
+            module_id: body.module_id,
+        },
+    )
+    .await
+    {
+        Ok(session_ipc::SessionIpcResponse::StudyImportPreviewed { preview }) => {
+            Json(preview).into_response()
+        }
+        Ok(other) => study_ipc_response_error(other),
+        Err(err) => study_error_response(StatusCode::BAD_GATEWAY, format!("{err:?}")),
+    }
+}
+
+async fn study_import_commit_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(body): Json<StudyImportCommitBody>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(response) = config_not_ready_json_response().await {
+        return response;
+    }
+    match study_ipc_request(
+        &state,
+        &body.session_id,
+        session_ipc::SessionIpcRequest::StudyImportCommit {
+            vault_dir: body.vault_dir,
+            module_id: body.module_id,
+            merge_duplicates: body.merge_duplicates,
+        },
+    )
+    .await
+    {
+        Ok(session_ipc::SessionIpcResponse::StudyImportCommitted { result }) => {
+            Json(result).into_response()
+        }
+        Ok(other) => study_ipc_response_error(other),
+        Err(err) => study_error_response(StatusCode::BAD_GATEWAY, format!("{err:?}")),
+    }
+}
+
+async fn study_export_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(body): Json<StudyExportBody>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(response) = config_not_ready_json_response().await {
+        return response;
+    }
+    match study_ipc_request(
+        &state,
+        &body.session_id,
+        session_ipc::SessionIpcRequest::StudyExport {
+            format: body.format,
+            module_id: body.module_id,
+            include_questions: body.include_questions,
+        },
+    )
+    .await
+    {
+        Ok(session_ipc::SessionIpcResponse::StudyExported { artifact }) => {
+            Json(artifact).into_response()
+        }
+        Ok(other) => study_ipc_response_error(other),
+        Err(err) => study_error_response(StatusCode::BAD_GATEWAY, format!("{err:?}")),
+    }
+}
+
+async fn study_export_download_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Query(query): Query<StudyExportDownloadQuery>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let _ = query.session_id;
+    let root = crate::daat_locus_paths::daat_locus_paths()
+        .await
+        .root()
+        .to_path_buf();
+    let requested = std::path::PathBuf::from(&query.path);
+    let canonical_root = std::fs::canonicalize(&root).unwrap_or(root);
+    let canonical_path = match std::fs::canonicalize(&requested) {
+        Ok(path) => path,
+        Err(err) => {
+            return study_error_response(
+                StatusCode::NOT_FOUND,
+                format!("export artifact not readable: {err}"),
+            );
+        }
+    };
+    if !canonical_path.starts_with(&canonical_root)
+        || canonical_path
+            .extension()
+            .is_none_or(|extension| !extension.eq_ignore_ascii_case("zip"))
+    {
+        return study_error_response(
+            StatusCode::FORBIDDEN,
+            "export artifact path is outside the runtime data directory".to_string(),
+        );
+    }
+    let bytes = match tokio::fs::read(&canonical_path).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return study_error_response(
+                StatusCode::NOT_FOUND,
+                format!("export artifact not readable: {err}"),
+            );
+        }
+    };
+    let file_name = query.file_name.unwrap_or_else(|| {
+        canonical_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "study-export.zip".to_string())
+    });
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/zip"),
+    );
+    let disposition = format!("attachment; filename=\"{}\"", file_name.replace('"', ""));
+    if let Ok(value) = axum::http::HeaderValue::from_str(&disposition) {
+        response_headers.insert(axum::http::header::CONTENT_DISPOSITION, value);
+    }
+    (response_headers, bytes).into_response()
 }
 
 async fn remove_session_directory(session_dir: &StdPath) -> Result<()> {

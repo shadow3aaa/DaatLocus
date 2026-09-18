@@ -5,6 +5,7 @@
 //! state for dashboards, and carries the mode contract in its docs.
 
 pub mod store;
+pub mod transfer;
 
 use std::borrow::Cow;
 use std::fmt::Write as _;

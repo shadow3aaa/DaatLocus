@@ -101,6 +101,25 @@ pub enum SessionIpcRequest {
         #[serde(default)]
         evidence: Option<String>,
     },
+    StudyImportPreview {
+        vault_dir: String,
+        #[serde(default)]
+        module_id: Option<String>,
+    },
+    StudyImportCommit {
+        vault_dir: String,
+        #[serde(default)]
+        module_id: Option<String>,
+        #[serde(default)]
+        merge_duplicates: bool,
+    },
+    StudyExport {
+        format: String,
+        #[serde(default)]
+        module_id: Option<String>,
+        #[serde(default)]
+        include_questions: bool,
+    },
     DrainTelegramOutbox,
     RecordTelegramDelivery {
         event_id: String,
@@ -133,6 +152,9 @@ impl SessionIpcRequest {
             Self::StudyGraphSnapshot => "study_graph_snapshot",
             Self::StudyNodeDetail { .. } => "study_node_detail",
             Self::StudyProgressUpdate { .. } => "study_progress_update",
+            Self::StudyImportPreview { .. } => "study_import_preview",
+            Self::StudyImportCommit { .. } => "study_import_commit",
+            Self::StudyExport { .. } => "study_export",
             Self::DrainTelegramOutbox => "drain_telegram_outbox",
             Self::RecordTelegramDelivery { .. } => "record_telegram_delivery",
             Self::RequeueTelegramOutbound { .. } => "requeue_telegram_outbound",
@@ -241,6 +263,15 @@ pub enum SessionIpcResponse {
     },
     StudyProgressUpdated {
         update: crate::study_app::store::StudyProgressUpdate,
+    },
+    StudyImportPreviewed {
+        preview: Box<crate::study_app::transfer::ObsidianImportPreview>,
+    },
+    StudyImportCommitted {
+        result: Box<crate::study_app::transfer::ObsidianImportResult>,
+    },
+    StudyExported {
+        artifact: crate::study_app::transfer::ExportArtifact,
     },
     TelegramOutbox {
         messages: Vec<PendingOutboundMessage>,

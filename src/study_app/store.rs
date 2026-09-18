@@ -288,6 +288,36 @@ pub struct NewQuestionInput {
     pub difficulty: String,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct StudyImportNodeInput {
+    pub id: String,
+    pub title: String,
+    pub aliases: Vec<String>,
+    pub tags: Vec<String>,
+    pub body: String,
+    pub source_title: String,
+    pub source_url: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StudyImportMergeInput {
+    pub node_id: String,
+    pub body: String,
+    pub source_title: String,
+    pub source_url: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StudyImportOutcome {
+    pub module_id: String,
+    pub module_title: String,
+    pub created_nodes: usize,
+    pub merged_nodes: usize,
+    pub created_edges: usize,
+    pub skipped_duplicates: usize,
+    pub skipped_links: usize,
+}
+
 impl StudyStore {
     pub async fn open_default() -> Result<Self> {
         let root = crate::daat_locus_paths::daat_locus_paths()
@@ -1103,6 +1133,266 @@ impl StudyStore {
         let nodes = load_node_summaries(&connection)?;
         load_maintenance(&connection, &modules, &nodes)
     }
+
+    /// Normalized title/alias identity to node id, used by import adapters to
+    /// detect duplicates without loading full node bodies.
+    pub fn node_identity_index(&self) -> Result<BTreeMap<String, String>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection
+            .prepare("SELECT id, title, aliases FROM study_nodes")
+            .into_diagnostic()?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .into_diagnostic()?;
+        let mut index = BTreeMap::new();
+        for row in rows {
+            let (id, title, aliases) = row.into_diagnostic()?;
+            for identity in std::iter::once(title).chain(decode_string_list(&aliases)) {
+                let normalized = normalize_identity(&identity);
+                if !normalized.is_empty() {
+                    index.entry(normalized).or_insert_with(|| id.clone());
+                }
+            }
+        }
+        Ok(index)
+    }
+
+    pub fn all_nodes(&self, module_id: Option<&str>) -> Result<Vec<StudyNode>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, module_id, title, summary, body, aliases, tags, sources,
+                        content_version, created_at_ms, updated_at_ms
+                 FROM study_nodes
+                 WHERE (?1 IS NULL OR module_id = ?1)
+                 ORDER BY module_id ASC, created_at_ms ASC, id ASC",
+            )
+            .into_diagnostic()?;
+        let rows = statement
+            .query_map(params![module_id], |row| {
+                Ok(StudyNode {
+                    id: row.get(0)?,
+                    module_id: row.get(1)?,
+                    title: row.get(2)?,
+                    summary: row.get(3)?,
+                    body: row.get(4)?,
+                    aliases: decode_string_list(&row.get::<_, String>(5)?),
+                    tags: decode_string_list(&row.get::<_, String>(6)?),
+                    sources: decode_sources(&row.get::<_, String>(7)?),
+                    content_version: row.get(8)?,
+                    created_at_ms: row.get(9)?,
+                    updated_at_ms: row.get(10)?,
+                })
+            })
+            .into_diagnostic()?;
+        let mut nodes = Vec::new();
+        for row in rows {
+            nodes.push(row.into_diagnostic()?);
+        }
+        Ok(nodes)
+    }
+
+    pub fn all_questions(&self) -> Result<Vec<StudyQuestion>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT q.id, q.node_id, q.question, q.answer, q.difficulty,
+                        q.node_content_version, n.content_version, q.created_at_ms,
+                        (SELECT a.outcome FROM study_attempts a
+                          WHERE a.question_id = q.id ORDER BY a.created_at_ms DESC LIMIT 1)
+                 FROM study_questions q
+                 JOIN study_nodes n ON n.id = q.node_id
+                 ORDER BY q.node_id ASC, q.created_at_ms ASC, q.id ASC",
+            )
+            .into_diagnostic()?;
+        let rows = statement
+            .query_map([], |row| {
+                let question_version: i64 = row.get(5)?;
+                let node_version: i64 = row.get(6)?;
+                Ok(StudyQuestion {
+                    id: row.get(0)?,
+                    node_id: row.get(1)?,
+                    question: row.get(2)?,
+                    answer: row.get(3)?,
+                    difficulty: row.get(4)?,
+                    node_content_version: question_version,
+                    is_stale: question_version != node_version,
+                    created_at_ms: row.get(7)?,
+                    last_outcome: row.get(8)?,
+                })
+            })
+            .into_diagnostic()?;
+        let mut questions = Vec::new();
+        for row in rows {
+            questions.push(row.into_diagnostic()?);
+        }
+        Ok(questions)
+    }
+
+    /// Bulk import executed by the Obsidian adapter: one transaction, one
+    /// revision bump, untyped links imported as `related`.
+    pub fn apply_obsidian_import(
+        &self,
+        module_id: Option<&str>,
+        module_title: &str,
+        nodes: &[StudyImportNodeInput],
+        merges: &[StudyImportMergeInput],
+        edges: &[(String, String)],
+        merge_duplicates: bool,
+    ) -> Result<StudyImportOutcome> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction().into_diagnostic()?;
+
+        let module = match module_id {
+            Some(module_id) => {
+                let existing: Option<(String, String)> = transaction
+                    .query_row(
+                        "SELECT id, title FROM study_modules WHERE id = ?1",
+                        params![module_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .into_diagnostic()?;
+                match existing {
+                    Some((id, title)) => (id, title),
+                    None => {
+                        return Err(miette!(
+                            "module `{module_id}` does not exist; create it first or import into a new module"
+                        ));
+                    }
+                }
+            }
+            None => {
+                let now = now_ms();
+                let id = format!("module-{}", uuid::Uuid::new_v4());
+                let title = module_title.trim();
+                let title = if title.is_empty() {
+                    "Obsidian Import"
+                } else {
+                    title
+                };
+                transaction
+                    .execute(
+                        "INSERT INTO study_modules (id, title, description, created_at_ms, updated_at_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![id, title, "Imported from an Obsidian vault", now, now],
+                    )
+                    .into_diagnostic()?;
+                (id, title.to_string())
+            }
+        };
+
+        let now = now_ms();
+        let mut created_nodes = 0usize;
+        for node in nodes {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO study_nodes
+                     (id, module_id, title, summary, body, aliases, tags, sources, content_version, created_at_ms, updated_at_ms)
+                     VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, ?7, 1, ?8, ?8)",
+                    params![
+                        node.id,
+                        module.0,
+                        node.title,
+                        node.body,
+                        encode_string_list(&node.aliases),
+                        encode_string_list(&node.tags),
+                        encode_sources(&[StudySource {
+                            title: node.source_title.clone(),
+                            url: node.source_url.clone(),
+                        }]),
+                        now,
+                    ],
+                )
+                .into_diagnostic()?;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO study_progress (node_id, understanding, evidence, updated_by, updated_at_ms)
+                     VALUES (?1, 0, 'imported', 'code', ?2)",
+                    params![node.id, now],
+                )
+                .into_diagnostic()?;
+            created_nodes += 1;
+        }
+
+        let mut merged_nodes = 0usize;
+        let mut skipped_duplicates = 0usize;
+        for merge in merges {
+            if !merge_duplicates {
+                skipped_duplicates += 1;
+                continue;
+            }
+            let existing = load_node(&transaction, &merge.node_id)?;
+            let body = if merge.body.trim().is_empty() {
+                existing.body.clone()
+            } else if existing.body.trim().is_empty() {
+                merge.body.trim().to_string()
+            } else {
+                format!("{}\n\n---\n\n{}", existing.body.trim(), merge.body.trim())
+            };
+            let mut sources = existing.sources.clone();
+            if !sources
+                .iter()
+                .any(|source| source.title == merge.source_title)
+            {
+                sources.push(StudySource {
+                    title: merge.source_title.clone(),
+                    url: merge.source_url.clone(),
+                });
+            }
+            let content_changed = body != existing.body;
+            transaction
+                .execute(
+                    "UPDATE study_nodes
+                     SET body = ?2, sources = ?3, content_version = content_version + ?4, updated_at_ms = ?5
+                     WHERE id = ?1",
+                    params![
+                        merge.node_id,
+                        body,
+                        encode_sources(&sources),
+                        i64::from(content_changed),
+                        now,
+                    ],
+                )
+                .into_diagnostic()?;
+            merged_nodes += 1;
+        }
+
+        let mut created_edges = 0usize;
+        let mut skipped_links = 0usize;
+        for (from, to) in edges {
+            let inserted = transaction
+                .execute(
+                    "INSERT OR IGNORE INTO study_edges (from_node_id, to_node_id, relation, note, created_at_ms)
+                     VALUES (?1, ?2, 'related', 'imported', ?3)",
+                    params![from, to, now],
+                )
+                .into_diagnostic()?;
+            if inserted > 0 {
+                created_edges += 1;
+            } else {
+                skipped_links += 1;
+            }
+        }
+
+        transaction.commit().into_diagnostic()?;
+        self.bump_revision();
+        Ok(StudyImportOutcome {
+            module_id: module.0,
+            module_title: module.1,
+            created_nodes,
+            merged_nodes,
+            created_edges,
+            skipped_duplicates,
+            skipped_links,
+        })
+    }
 }
 
 fn migrate(connection: &Connection) -> Result<bool> {
@@ -1653,7 +1943,7 @@ fn normalize_string_list(values: &[String]) -> Vec<String> {
     normalized
 }
 
-fn normalize_identity(value: &str) -> String {
+pub(crate) fn normalize_identity(value: &str) -> String {
     value
         .trim()
         .to_lowercase()
