@@ -157,10 +157,7 @@ pub async fn maybe_reload_config(context: &mut Context) -> ConfigReloadOutcome {
     let (changed_groups, warnings) = config_change_groups(&context.config, &fresh);
     let reloaded = !changed_groups.is_empty() || !warnings.is_empty();
 
-    if changed_groups
-        .iter()
-        .any(|group| *group == "models/providers")
-    {
+    if changed_groups.contains(&"models/providers") {
         match rebuild_model_providers(context, &fresh).await {
             Ok(()) => {}
             Err(err) => {
@@ -181,7 +178,7 @@ pub async fn maybe_reload_config(context: &mut Context) -> ConfigReloadOutcome {
         }
     }
 
-    if changed_groups.iter().any(|group| *group == "sandbox") {
+    if changed_groups.contains(&"sandbox") {
         context.sandbox_policy =
             sandbox_policy_for_runtime(&fresh, Some(&context.execution_cwd)).await;
     }

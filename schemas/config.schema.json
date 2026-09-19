@@ -78,6 +78,12 @@
         "strong_filesystem": "off"
       }
     },
+    "sleep": {
+      "$ref": "#/$defs/SleepConfig",
+      "default": {
+        "enabled": true
+      }
+    },
     "telegram": {
       "$ref": "#/$defs/TelegramConfig",
       "default": {
@@ -361,6 +367,16 @@
         "strong_filesystem": {
           "$ref": "#/$defs/StrongFilesystemSandboxMode",
           "default": "off"
+        }
+      }
+    },
+    "SleepConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether the sleep self-improvement mechanism may run.\n\nWhen disabled, background automatic sleep (idle and forced backlog\ntriggers) is skipped. Manual sleep runs stay available through the\ndashboard `/sleep run` command as an explicit user action.",
+          "type": "boolean",
+          "default": true
         }
       }
     },

@@ -987,7 +987,7 @@ async fn store_command_file_attachment(
     let extension = StdPath::new(&display_name)
         .extension()
         .and_then(|extension| extension.to_str())
-        .map(|extension| sanitize_attachment_extension(extension))
+        .map(sanitize_attachment_extension)
         .filter(|extension| !extension.is_empty())
         .unwrap_or_else(|| "bin".to_string());
     let file_name = format!(
@@ -1119,8 +1119,8 @@ fn decode_dashboard_attachment_path(encoded_path: &str) -> Option<PathBuf> {
     }
 
     let mut bytes = Vec::with_capacity(encoded_path.len() / 2);
-    let mut chars = encoded_path.as_bytes().chunks_exact(2);
-    for pair in &mut chars {
+    let (pairs, _remainder) = encoded_path.as_bytes().as_chunks::<2>();
+    for pair in pairs {
         let pair = std::str::from_utf8(pair).ok()?;
         let byte = u8::from_str_radix(pair, 16).ok()?;
         bytes.push(byte);

@@ -367,7 +367,7 @@ pub async fn run_session_serve(
                 if let Some(text) = crate::config_hot_reload::config_reload_status_text(&outcome)
                 {
                     set_runtime_status(Some(&tx), RuntimeStatusLevel::Info, text);
-                    sync_dashboard_state(&mut context, &tx, &sleep_status, None);
+                    sync_dashboard_state(&context, &tx, &sleep_status, None);
                 }
             }
             Some(()) = runtime_wake_rx.recv(), if runtime_idle => {

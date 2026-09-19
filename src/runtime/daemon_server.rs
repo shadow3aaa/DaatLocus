@@ -893,6 +893,7 @@ fn apply_daemon_control_command(
 
 /// Rebuild the manager Telegram transport (and outbox delivery) from the
 /// current config on disk. Used by the config hot-reload watcher.
+#[allow(clippy::too_many_arguments)]
 async fn reload_telegram_transport(
     telegram_transport: &mut Option<tokio::task::JoinHandle<()>>,
     telegram_outbox_delivery: &mut Option<tokio::task::JoinHandle<()>>,
@@ -958,7 +959,7 @@ async fn reload_telegram_transport(
             session_tokens.clone(),
         )));
     }
-    emit_startup_progress("[manager] telegram transport hot-reloaded from config".to_string());
+    emit_startup_progress("[manager] telegram transport hot-reloaded from config");
 }
 
 #[cfg(test)]

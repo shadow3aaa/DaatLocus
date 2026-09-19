@@ -130,7 +130,7 @@ pub async fn handle_dashboard_control_command(
                 let state = if enabled { "enabled" } else { "disabled" };
                 set_runtime_status_only(
                     Some(tx),
-                    &format!("sleep self-improvement is already {state}"),
+                    format!("sleep self-improvement is already {state}"),
                 );
                 sync_dashboard_state(context, tx, sleep_status, None);
                 return;

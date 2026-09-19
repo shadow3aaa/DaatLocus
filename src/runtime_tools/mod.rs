@@ -845,6 +845,7 @@ fn unavailable_worker_tool_result(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_worker_runtime_tool(
     tool: &dyn RuntimeTool,
     apps: &mut AppManager,
