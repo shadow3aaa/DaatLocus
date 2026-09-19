@@ -301,6 +301,18 @@ export function StudyPage({
   const consumedFocusRevisionRef = useRef(0);
   const pendingFocusNodeRef = useRef<string | null>(null);
 
+  // Agent-initiated focus moves the graph view but keeps the user's panel tab.
+  const applyFocusNode = useCallback(
+    (nodeId: string) => {
+      if (onSelectNode) {
+        onSelectNode(nodeId);
+        return;
+      }
+      setInternalNodeId(nodeId);
+    },
+    [onSelectNode],
+  );
+
   useEffect(() => {
     if (isMock || !studyFocus) {
       return;
@@ -320,13 +332,13 @@ export function StudyPage({
     }
     if (graph.nodes.some((node) => node.id === pending)) {
       pendingFocusNodeRef.current = null;
-      handleSelectNode(pending);
+      applyFocusNode(pending);
       return;
     }
     if (graph.revision >= consumedFocusRevisionRef.current) {
       pendingFocusNodeRef.current = null;
     }
-  }, [graph, handleSelectNode]);
+  }, [graph, applyFocusNode]);
 
   const handleRefresh = useCallback(() => {
     if (isMock) {
