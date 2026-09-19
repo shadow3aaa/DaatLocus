@@ -5068,21 +5068,33 @@ mod tests {
     #[test]
     fn resolve_local_open_target_unwraps_file_urls_and_keeps_absolutes() {
         assert_eq!(
-            resolve_local_open_target("file:///C:/Users/me/a.md"),
-            "C:/Users/me/a.md"
-        );
-        assert_eq!(
             resolve_local_open_target("file:///home/user/a.md"),
             "/home/user/a.md"
-        );
-        assert_eq!(
-            resolve_local_open_target("C:\\Users\\me\\a.md"),
-            "C:\\Users\\me\\a.md"
         );
         assert_eq!(
             resolve_local_open_target("/home/user/a.md"),
             "/home/user/a.md"
         );
+
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                resolve_local_open_target("file:///C:/Users/me/a.md"),
+                "C:/Users/me/a.md"
+            );
+            assert_eq!(
+                resolve_local_open_target("C:\\Users\\me\\a.md"),
+                "C:\\Users\\me\\a.md"
+            );
+        }
+
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                resolve_local_open_target("file:///C:/Users/me/a.md"),
+                "/C:/Users/me/a.md"
+            );
+        }
 
         let cwd = std::env::current_dir().expect("current dir");
         let relative = resolve_local_open_target("./notes.md");
