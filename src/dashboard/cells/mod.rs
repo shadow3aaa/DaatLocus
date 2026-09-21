@@ -120,7 +120,7 @@ pub fn clear_transient_live_activity_cells(state: &mut DashboardState) {
 /// list after other live cells are appended or updated. `sync_*` rebuilds the
 /// cell from state, but the live streaming path only mutates individual cells,
 /// so it must re-pin the existing runtime-status cell without recomputing it.
-fn repin_runtime_status_live_cell(live_cells: &mut Vec<LiveActivityEvent>) {
+pub(crate) fn repin_runtime_status_live_cell(live_cells: &mut Vec<LiveActivityEvent>) {
     let Some(index) = live_cells
         .iter()
         .position(|cell| cell.key == RUNTIME_STATUS_LIVE_CELL_KEY)

@@ -25,6 +25,7 @@ pub mod tui_perf;
 mod view_state;
 
 pub use cells::sync_dashboard_runtime_status_live_cell;
+pub(crate) use cells::repin_runtime_status_live_cell;
 pub use cells::{
     ActivityFeedRenderArgs, CachedActivityLines, DashboardActivityEvent, LiveActivityEvent,
     ReducedMotion, SessionActivityEvent, WorkflowActivityData,

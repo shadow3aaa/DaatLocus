@@ -661,6 +661,7 @@ impl WorkflowInspectorPublisher {
                     .live_activity_events
                     .retain(|live| live.key != live_key);
             }
+            crate::dashboard::repin_runtime_status_live_cell(&mut state.live_activity_events);
         });
     }
 
@@ -2501,6 +2502,34 @@ mod tests {
         assert_eq!(
             inspector.snapshot().workers[0].status,
             WorkflowNodeStatus::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn running_workflow_live_cell_stays_above_pinned_runtime_status_cell() {
+        let (dashboard_tx, dashboard_rx) =
+            tokio::sync::watch::channel(crate::dashboard::DashboardState::default());
+        dashboard_tx.send_modify(|state| {
+            state.runtime_activity.active_runtime_turn = true;
+            crate::dashboard::sync_dashboard_runtime_status_live_cell(state);
+        });
+
+        let publisher = WorkflowInspectorPublisher::new(
+            "runtime-status-ordering".to_string(),
+            json!({}),
+            Some(dashboard_tx),
+        );
+        let run_id = publisher.snapshot().run_id;
+        let live_keys = dashboard_rx
+            .borrow()
+            .live_activity_events
+            .iter()
+            .map(|cell| cell.key.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            live_keys,
+            vec![format!("workflow:{run_id}"), "runtime-status".to_string()],
         );
     }
 
