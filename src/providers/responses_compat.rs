@@ -44,6 +44,9 @@ pub struct ResponsesCompatibleClient {
     request_rate_limiter: Option<Arc<Mutex<VecDeque<Instant>>>>,
     token_usage: std::sync::Mutex<TokenUsageInfo>,
     supports_vision: std::sync::atomic::AtomicBool,
+    /// Whether the provider accepts `reasoning.summary`. It is an optional
+    /// display enhancement, so runtime errors disable it and retry.
+    supports_reasoning_summary: std::sync::atomic::AtomicBool,
 }
 
 impl ResponsesCompatibleClient {
@@ -93,6 +96,7 @@ impl ResponsesCompatibleClient {
                 daily_token_usage: Vec::new(),
             }),
             supports_vision: std::sync::atomic::AtomicBool::new(supports_vision),
+            supports_reasoning_summary: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -255,6 +259,7 @@ impl ResponsesCompatibleClient {
         let mut delta_content = String::new();
         let mut output_messages = Vec::new();
         let mut reasoning_content = String::new();
+        let mut reasoning_item_content = String::new();
         let mut tool_calls = Vec::new();
         let mut completed = false;
         let mut last_assistant_progress_emit_at = Instant::now();
@@ -364,6 +369,9 @@ impl ResponsesCompatibleClient {
                             if let Some(message) = response_item_message_text(item) {
                                 output_messages.push(message);
                             }
+                            if let Some(reasoning) = response_item_reasoning_text(item) {
+                                reasoning_item_content.push_str(&reasoning);
+                            }
                             if let Some(call) = response_item_tool_call(item)? {
                                 tool_calls.push(call);
                             }
@@ -388,6 +396,10 @@ impl ResponsesCompatibleClient {
                     _ => {}
                 }
             }
+        }
+
+        if reasoning_content.trim().is_empty() {
+            reasoning_content = reasoning_item_content;
         }
 
         if emit_progress
@@ -445,7 +457,13 @@ impl ModelProvider for ResponsesCompatibleClient {
             super::opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
         let (instructions, input) =
             history_messages_to_responses_parts(request.all_messages(), false);
-        let mut payload = base_payload(self, &instructions, &input, &Vec::new());
+        let mut payload = base_payload(
+            self,
+            &instructions,
+            &input,
+            &Vec::new(),
+            responses_reasoning_payload(self, "prompt"),
+        );
         payload["text"] = json!({
             "format": {
                 "type": "json_schema",
@@ -496,13 +514,18 @@ impl ModelProvider for ResponsesCompatibleClient {
         let request_context = super::io::summarize_agent_turn_request(&request, Some(budget));
         let session_headers =
             super::opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
-        let strip_images = !self.supports_vision.load(Ordering::Relaxed);
-        let payload = build_agent_payload(self, request.clone(), strip_images);
-        let response = self
-            .post_responses_with_retry(&payload, &request_context, &session_headers)
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
+        let mut strip_images = !self.supports_vision.load(Ordering::Relaxed);
+        loop {
+            let payload = build_agent_payload(self, request.clone(), strip_images);
+            let response = self
+                .post_responses_with_retry(&payload, &request_context, &session_headers)
+                .await?;
+            let status = response.status();
+            if status.is_success() {
+                return self
+                    .parse_responses_stream(options.progress.as_ref(), response, true)
+                    .await;
+            }
             let url = self.url();
             let body = read_response_text_with_timeout(
                 response,
@@ -524,38 +547,27 @@ impl ModelProvider for ResponsesCompatibleClient {
                 )
                 .into());
             }
+            if super::io::should_retry_request_without_reasoning_summary(&body)
+                && self.supports_reasoning_summary.load(Ordering::Relaxed)
+            {
+                self.supports_reasoning_summary
+                    .store(false, Ordering::Relaxed);
+                warn!(
+                    "responses-compatible rejected reasoning.summary; retrying without reasoning summaries\n{}",
+                    request_context.join("\n")
+                );
+                continue;
+            }
             if super::io::looks_like_vision_unsupported_error(&body)
                 && self.supports_vision.load(Ordering::Relaxed)
             {
                 self.supports_vision.store(false, Ordering::Relaxed);
+                strip_images = true;
                 warn!(
                     "responses-compatible rejected image input; retrying without images\n{}",
                     request_context.join("\n")
                 );
-                let payload = build_agent_payload(self, request, true);
-                let response = self
-                    .post_responses_with_retry(&payload, &request_context, &session_headers)
-                    .await?;
-                let status = response.status();
-                if status.is_success() {
-                    return self
-                        .parse_responses_stream(options.progress.as_ref(), response, true)
-                        .await;
-                }
-                let url = self.url();
-                let body = read_response_text_with_timeout(
-                    response,
-                    self.request_timeout,
-                    "responses-compatible body read failed",
-                    &url,
-                    &request_context,
-                )
-                .await?;
-                return Err(miette!(
-                    "responses-compatible returned HTTP {}: {}",
-                    status,
-                    truncate_for_error(&body)
-                ));
+                continue;
             }
             return Err(miette!(
                 "responses-compatible returned HTTP {}: {}",
@@ -563,8 +575,6 @@ impl ModelProvider for ResponsesCompatibleClient {
                 truncate_for_error(&body)
             ));
         }
-        self.parse_responses_stream(options.progress.as_ref(), response, true)
-            .await
     }
 
     fn request_budget_limits(&self) -> RequestBudgetLimits {
@@ -593,6 +603,7 @@ fn base_payload(
     instructions: &str,
     input: &[Value],
     tools: &[Value],
+    reasoning: Option<Value>,
 ) -> Value {
     let mut payload = json!({
         "model": client.model,
@@ -603,13 +614,46 @@ fn base_payload(
         "parallel_tool_calls": true,
         "store": false,
         "stream": true,
+        "include": ["reasoning.encrypted_content"],
     });
-    if let Some(budget) = client.thinking_budget.as_deref()
-        && !budget.eq_ignore_ascii_case("none")
-    {
-        payload["reasoning"] = json!({ "effort": budget });
+    if let Some(reasoning) = reasoning {
+        payload["reasoning"] = reasoning;
     }
     payload
+}
+
+/// Builds the Responses `reasoning` payload for one request.
+///
+/// The Responses API only returns reasoning summaries when `summary` is
+/// requested, so agent turns ask for them unless thinking is disabled or the
+/// provider has already rejected the parameter. Prompt requests stay silent
+/// and only forward the configured effort.
+fn responses_reasoning_payload(
+    client: &ResponsesCompatibleClient,
+    request_kind: &str,
+) -> Option<Value> {
+    let summary = request_kind == "agent"
+        && client.supports_reasoning_summary.load(Ordering::Relaxed)
+        && !client
+            .thinking_budget
+            .as_deref()
+            .is_some_and(super::thinking::thinking_budget_is_none);
+    let effort = client
+        .thinking_budget
+        .as_deref()
+        .filter(|budget| !super::thinking::thinking_budget_is_none(budget));
+    if effort.is_none() && !summary {
+        return None;
+    }
+
+    let mut reasoning = serde_json::Map::new();
+    if let Some(effort) = effort {
+        reasoning.insert("effort".to_string(), json!(effort));
+    }
+    if summary {
+        reasoning.insert("summary".to_string(), json!("auto"));
+    }
+    Some(Value::Object(reasoning))
 }
 
 fn build_agent_payload(
@@ -623,7 +667,13 @@ fn build_agent_payload(
         .into_iter()
         .map(agent_tool_to_responses_tool)
         .collect::<Vec<_>>();
-    base_payload(client, &instructions, &input, &tools)
+    base_payload(
+        client,
+        &instructions,
+        &input,
+        &tools,
+        responses_reasoning_payload(client, "agent"),
+    )
 }
 
 fn history_messages_to_responses_parts(
@@ -814,6 +864,37 @@ fn response_item_message_text(item: &Value) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+fn response_item_reasoning_text(item: &Value) -> Option<String> {
+    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if let Some(summary) = item.get("summary").and_then(Value::as_array) {
+        for part in summary {
+            if let Some(text) = part.get("text").and_then(Value::as_str)
+                && !text.trim().is_empty()
+            {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    if let Some(content) = item.get("content").and_then(Value::as_array) {
+        for part in content {
+            let is_text = matches!(
+                part.get("type").and_then(Value::as_str),
+                Some("reasoning_text" | "text")
+            );
+            if is_text
+                && let Some(text) = part.get("text").and_then(Value::as_str)
+                && !text.trim().is_empty()
+            {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
 fn response_item_tool_call(item: &Value) -> Result<Option<AgentToolCall>> {
     match item.get("type").and_then(Value::as_str) {
         Some("function_call") => {
@@ -952,9 +1033,58 @@ mod tests {
             },
         );
 
-        let payload = base_payload(&client, "instructions", &[], &[]);
+        let payload = base_payload(&client, "instructions", &[], &[], None);
 
         assert!(payload.get("max_output_tokens").is_none(), "{payload:#}");
+    }
+
+    #[test]
+    fn responses_compat_agent_payload_requests_reasoning_summary_and_include() {
+        let client = ResponsesCompatibleClient::new(
+            "test-key",
+            "https://example.test/v1",
+            &ModelConfig {
+                model_id: "gpt-5.5".to_string(),
+                provider: "responses-compatible".to_string(),
+                ..ModelConfig::default()
+            },
+        );
+
+        let payload = build_agent_payload(
+            &client,
+            AgentTurnRequest {
+                messages: vec![AgentMessage::system("base"), AgentMessage::user("work")],
+                tools: Vec::new(),
+            },
+            false,
+        );
+
+        assert_eq!(payload["reasoning"]["summary"], "auto");
+        assert_eq!(payload["include"], json!(["reasoning.encrypted_content"]));
+    }
+
+    #[test]
+    fn responses_compat_prompt_payload_omits_reasoning_summary() {
+        let client = ResponsesCompatibleClient::new(
+            "test-key",
+            "https://example.test/v1",
+            &ModelConfig {
+                model_id: "gpt-5.5".to_string(),
+                provider: "responses-compatible".to_string(),
+                ..ModelConfig::default()
+            },
+        );
+
+        let payload = base_payload(
+            &client,
+            "instructions",
+            &[],
+            &[],
+            responses_reasoning_payload(&client, "prompt"),
+        );
+
+        assert!(payload.get("reasoning").is_none(), "{payload:#}");
+        assert_eq!(payload["include"], json!(["reasoning.encrypted_content"]));
     }
 
     #[test]

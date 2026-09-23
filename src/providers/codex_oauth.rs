@@ -43,7 +43,7 @@ const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_OAUTH_REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_OAUTH_REFRESH_URL_OVERRIDE_ENV: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
 const CODEX_RESPONSES_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-const CODEX_CLIENT_VERSION: &str = "0.145.0";
+const CODEX_CLIENT_VERSION: &str = "0.156.1";
 const CODEX_CLIENT_VERSION_OVERRIDE_ENV: &str = "CODEX_CLIENT_VERSION_OVERRIDE";
 const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const CODEX_SESSION_ID_HEADER: &str = "session-id";
@@ -305,7 +305,11 @@ impl CodexResponsesClient {
                 .bearer_auth(&self.api_key)
                 .headers(self.extra_headers.clone())
                 .header("version", &self.client_version)
-                .header("originator", CODEX_ORIGINATOR);
+                .header("originator", CODEX_ORIGINATOR)
+                .header(
+                    reqwest::header::USER_AGENT,
+                    codex_user_agent(&self.client_version),
+                );
             if let Some(identity) = request_identity {
                 request = request
                     .header(CODEX_SESSION_ID_HEADER, &identity.session_id)
@@ -546,6 +550,7 @@ impl CodexResponsesClient {
         let mut delta_content = String::new();
         let mut output_messages = Vec::new();
         let mut reasoning_content = String::new();
+        let mut reasoning_item_content = String::new();
         let mut tool_calls = Vec::new();
         let mut completed = false;
         let mut last_assistant_progress_emit_at = Instant::now();
@@ -655,6 +660,9 @@ impl CodexResponsesClient {
                             if let Some(message) = response_item_message_text(item) {
                                 output_messages.push(message);
                             }
+                            if let Some(reasoning) = response_item_reasoning_text(item) {
+                                reasoning_item_content.push_str(&reasoning);
+                            }
                             if let Some(call) = response_item_tool_call(item)? {
                                 tool_calls.push(call);
                             }
@@ -679,6 +687,10 @@ impl CodexResponsesClient {
                     _ => {}
                 }
             }
+        }
+
+        if reasoning_content.trim().is_empty() {
+            reasoning_content = reasoning_item_content;
         }
 
         if emit_progress
@@ -931,7 +943,7 @@ fn base_responses_payload(
         "parallel_tool_calls": true,
         "store": false,
         "stream": true,
-        "include": [],
+        "include": ["reasoning.encrypted_content"],
         "client_metadata": {
             "x-codex-installation-id": client.installation_id,
         },
@@ -1202,6 +1214,37 @@ fn response_item_message_text(item: &Value) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+fn response_item_reasoning_text(item: &Value) -> Option<String> {
+    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if let Some(summary) = item.get("summary").and_then(Value::as_array) {
+        for part in summary {
+            if let Some(text) = part.get("text").and_then(Value::as_str)
+                && !text.trim().is_empty()
+            {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    if let Some(content) = item.get("content").and_then(Value::as_array) {
+        for part in content {
+            let is_text = matches!(
+                part.get("type").and_then(Value::as_str),
+                Some("reasoning_text" | "text")
+            );
+            if is_text
+                && let Some(text) = part.get("text").and_then(Value::as_str)
+                && !text.trim().is_empty()
+            {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
 fn response_item_tool_call(item: &Value) -> Result<Option<AgentToolCall>> {
     match item.get("type").and_then(Value::as_str) {
         Some("function_call") => {
@@ -1324,6 +1367,18 @@ pub fn codex_oauth_client_version() -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| CODEX_CLIENT_VERSION.to_string())
+}
+
+/// Builds the Codex CLI compatible `User-Agent` header value.
+///
+/// The Codex backend identifies the client by this header, so the
+/// originator/version prefix must match the current Codex CLI shape.
+fn codex_user_agent(client_version: &str) -> String {
+    format!(
+        "{CODEX_ORIGINATOR}/{client_version} ({}; {})",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
 }
 
 pub fn codex_cli_auth_file() -> PathBuf {
@@ -1698,7 +1753,7 @@ mod tests {
 
     #[test]
     fn codex_oauth_client_version_defaults_to_latest_supported_cli() {
-        assert_eq!(codex_oauth_client_version(), "0.145.0");
+        assert_eq!(codex_oauth_client_version(), "0.156.1");
     }
 
     #[test]
@@ -1977,6 +2032,21 @@ mod tests {
 
         assert_eq!(payload["reasoning"]["summary"], "auto");
         assert!(payload["reasoning"].get("effort").is_none(), "{payload:#}");
+    }
+
+    #[test]
+    fn codex_agent_payload_requests_encrypted_reasoning_include() {
+        let payload = build_agent_responses_payload(
+            &test_client(),
+            AgentTurnRequest {
+                messages: vec![AgentMessage::system("base"), AgentMessage::user("work")],
+                tools: Vec::new(),
+            },
+            false,
+            None,
+        );
+
+        assert_eq!(payload["include"], json!(["reasoning.encrypted_content"]));
     }
 
     #[test]
@@ -2352,6 +2422,29 @@ mod tests {
             parsed.arguments,
             Value::String("--- a\n+++ b\n".to_string())
         );
+    }
+
+    #[test]
+    fn responses_item_parser_extracts_reasoning_summary_and_content() {
+        let reasoning = json!({
+            "type": "reasoning",
+            "id": "rsn-1",
+            "summary": [{"type": "summary_text", "text": "considered options"}],
+            "content": [{"type": "reasoning_text", "text": "raw thinking"}],
+        });
+        assert_eq!(
+            response_item_reasoning_text(&reasoning).as_deref(),
+            Some("considered options\nraw thinking")
+        );
+
+        let message = json!({
+            "type": "message",
+            "content": [{"type": "output_text", "text": "hi"}],
+        });
+        assert_eq!(response_item_reasoning_text(&message), None);
+
+        let empty = json!({"type": "reasoning", "summary": []});
+        assert_eq!(response_item_reasoning_text(&empty), None);
     }
 
     #[test]
