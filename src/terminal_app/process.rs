@@ -438,7 +438,10 @@ fn shell_command(command: &str) -> String {
             .map(|(name, value)| format!("$env:{name}={}", powershell_single_quoted(value)))
             .collect::<Vec<_>>()
             .join("; ");
-        format!("{prefix}; {command}")
+        format!(
+            "{}; {prefix}; {command}",
+            crate::process_spawn::POWERSHELL_UTF8_BOOTSTRAP
+        )
     } else {
         let prefix = terminal_env_defaults()
             .iter()
@@ -449,7 +452,7 @@ fn shell_command(command: &str) -> String {
     }
 }
 
-const fn terminal_env_defaults() -> [(&'static str, &'static str); 10] {
+const fn terminal_env_defaults() -> [(&'static str, &'static str); 11] {
     [
         ("NO_COLOR", "1"),
         ("TERM", "dumb"),
@@ -461,6 +464,7 @@ const fn terminal_env_defaults() -> [(&'static str, &'static str); 10] {
         ("GIT_PAGER", "cat"),
         ("GH_PAGER", "cat"),
         ("DAAT_LOCUS_CI", "1"),
+        ("PYTHONIOENCODING", "utf-8"),
     ]
 }
 
@@ -484,6 +488,30 @@ mod tests {
         assert!(command.contains("TERM"));
         assert!(command.contains("PAGER"));
         assert!(command.contains("pwd"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_command_keeps_output_utf8_without_a_utf8_console() {
+        use std::process::Stdio;
+
+        let command = shell_command("Write-Output '中文输出'");
+        let mut child = std::process::Command::new("powershell.exe");
+        child
+            .args(["-NoLogo", "-NoProfile", "-Command", &command])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        // Sessions started without a console fall back to the active code page, which is
+        // what happens for terminal sessions running without an attached console.
+        crate::process_spawn::apply_no_window(&mut child);
+
+        let output = child.output().expect("powershell should run");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            text.contains("中文输出"),
+            "shell output must stay utf-8 when the active code page is not utf-8: {text:?}"
+        );
     }
 
     #[test]

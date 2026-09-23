@@ -1434,6 +1434,34 @@ mod tests {
         assert_eq!(TerminalApp::initial_exec_yield_time_ms(Some(1)), 1);
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_shell_output_is_utf8_without_system_utf8_mode() {
+        let mut app = TerminalApp::new();
+        let sandbox_policy = test_sandbox_policy();
+
+        let created = app
+            .exec_command_with_progress(
+                TerminalExecCommandRequest {
+                    command: "Write-Output '中文输出'".to_string(),
+                    session_id: None,
+                    workdir: None,
+                    sandbox_policy: &sandbox_policy,
+                    yield_time_ms: None,
+                    max_chars: None,
+                },
+                |_session, _delta| {},
+            )
+            .await
+            .expect("unicode echo command should succeed");
+
+        assert!(
+            created.output.contains("中文输出"),
+            "windows shell output must stay valid utf-8 when the active code page is not utf-8: {:?}",
+            created.output
+        );
+    }
+
     #[tokio::test]
     async fn creates_new_sessions_and_lists_them() {
         let mut app = TerminalApp::new();

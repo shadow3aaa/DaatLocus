@@ -1,6 +1,18 @@
 #[cfg(windows)]
 pub const WINDOWS_CREATE_NO_WINDOW_FLAG: u32 = 0x0800_0000;
 
+/// Windows PowerShell encodes text written to a redirected stdout/stderr with the active code
+/// page unless the console is already UTF-8, which garbles non-ASCII output on systems where
+/// the UTF-8 system option is disabled (for example GBK with code page 936). Sessions always
+/// decode child output as UTF-8, so the shell has to emit UTF-8 before anything else runs.
+#[cfg(windows)]
+pub const POWERSHELL_UTF8_BOOTSTRAP: &str = "try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }; \
+try { [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }; \
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)";
+
+#[cfg(not(windows))]
+pub const POWERSHELL_UTF8_BOOTSTRAP: &str = "";
+
 pub fn apply_no_window(command: &mut std::process::Command) {
     apply_no_window_with_flags(command, 0);
 }

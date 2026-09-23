@@ -5419,7 +5419,10 @@ fn workflow_shell_invocation(command: &str) -> (&'static str, Vec<String>) {
                 "-NoLogo".to_string(),
                 "-NoProfile".to_string(),
                 "-Command".to_string(),
-                command.to_string(),
+                format!(
+                    "{}; {command}",
+                    crate::process_spawn::POWERSHELL_UTF8_BOOTSTRAP
+                ),
             ],
         )
     } else {
