@@ -878,6 +878,7 @@ pub(super) struct TuiViewState {
     pub(super) cached_activity_lines: CachedActivityLines,
     pub(super) expanded_thinking: HashSet<usize>,
     pub(super) visible_activity_cleared: bool,
+    pub(super) show_thinking: bool,
 }
 
 impl TuiViewState {
@@ -910,6 +911,7 @@ impl TuiViewState {
             cached_activity_lines: CachedActivityLines::new(),
             expanded_thinking: HashSet::new(),
             visible_activity_cleared: false,
+            show_thinking: true,
         }
     }
 
@@ -1218,6 +1220,14 @@ impl TuiViewState {
             state.live_activity_events.clone()
         };
         sync_runtime_status_live_cell(&mut live_cells, state);
+        if !self.show_thinking {
+            let committed_cells = committed_cells
+                .into_iter()
+                .filter(|cell| !matches!(cell, SessionActivityEvent::Thinking(_)))
+                .collect();
+            live_cells.retain(|cell| !matches!(cell.event, SessionActivityEvent::Thinking(_)));
+            return (committed_cells, live_cells);
+        }
         (committed_cells, live_cells)
     }
 
@@ -1289,6 +1299,14 @@ impl TuiViewState {
             && state.live_activity_events.is_empty()
         {
             self.visible_activity_cleared = false;
+        }
+    }
+
+    pub(super) fn set_show_thinking(&mut self, show: bool) {
+        if self.show_thinking != show {
+            self.show_thinking = show;
+            self.cached_activity_lines = CachedActivityLines::new();
+            self.transcript_overlay = None;
         }
     }
 

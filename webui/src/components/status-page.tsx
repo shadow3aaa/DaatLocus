@@ -193,6 +193,7 @@ export function AgentPage({
   allowFileAttachments = true,
   onImportGraph,
   onExportGraph,
+  showThinking = true,
 }: {
   sessionId: string;
   mockSnapshot?: DashboardSnapshot;
@@ -201,6 +202,7 @@ export function AgentPage({
   allowFileAttachments?: boolean;
   onImportGraph?: () => void;
   onExportGraph?: () => void;
+  showThinking?: boolean;
 }) {
   const { t } = useTranslation();
   const { snapshot } = useDashboardSnapshot(sessionId, {
@@ -252,6 +254,7 @@ export function AgentPage({
           panelRef={chatPanelRef}
           composerHeight={chatComposerHeight}
           embedded={embedded}
+          showThinking={showThinking}
         />
         <AgentChatComposer
           sessionId={sessionId}
@@ -652,6 +655,7 @@ type AgentChatSessionActivityViewProps = {
   isLatestReply?: boolean;
   isActiveRuntimeStatus?: boolean;
   onOpenWorkflowInspector?: (snapshot: WorkflowRunSnapshot) => void;
+  showThinking: boolean;
 };
 
 type AgentChatExpressionSlotKind = "reply" | "runtime";
@@ -4574,12 +4578,14 @@ function AgentChatBubbles({
   panelRef,
   composerHeight,
   embedded = false,
+  showThinking,
 }: {
   sessionId: string;
   snapshot: DashboardSnapshot | null;
   panelRef: RefObject<HTMLDivElement | null>;
   composerHeight: number;
   embedded?: boolean;
+  showThinking: boolean;
 }) {
   const { t } = useTranslation();
   const snapshotBubbles = useMemo(
@@ -4604,10 +4610,10 @@ function AgentChatBubbles({
   const navHistorySessionIdRef = useRef<string | null>(null);
   const navHistoryInitializedRef = useRef(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const bubbles = useMemo(
-    () => mergeAgentChatBubbles(historyBubbles, snapshotBubbles),
-    [historyBubbles, snapshotBubbles],
-  );
+  const bubbles = useMemo(() => {
+    const merged = mergeAgentChatBubbles(historyBubbles, snapshotBubbles);
+    return showThinking ? merged : merged.filter((bubble) => !agentChatBubbleHasSessionActivityEvent(bubble, "Thinking"));
+  }, [historyBubbles, showThinking, snapshotBubbles]);
   const workflowInspectorSnapshots = useMemo(() => {
     const snapshots = new Map<string, WorkflowRunSnapshot>();
     for (const bubble of bubbles) {
@@ -5399,6 +5405,7 @@ function AgentChatBubbles({
                       activeRuntimeStatusBubbleId={activeRuntimeStatusBubbleId}
                       isLatestReply={item.bubble.id === latestReplyBubbleId}
                       onOpenWorkflowInspector={openWorkflowInspector}
+                      showThinking={showThinking}
                     />
                   ) : (
                     <AgentChatFoldedActivityGroup
@@ -5409,6 +5416,7 @@ function AgentChatBubbles({
                       activeRuntimeStatusBubbleId={activeRuntimeStatusBubbleId}
                       latestReplyBubbleId={latestReplyBubbleId}
                       onOpenWorkflowInspector={openWorkflowInspector}
+                      showThinking={showThinking}
                       open={Boolean(openFoldedActivityGroups[item.id])}
                       onOpenChange={(nextOpen) =>
                         handleFoldedActivityGroupOpenChange(item.id, nextOpen)
@@ -5442,6 +5450,7 @@ function AgentChatBubbles({
               setWorkflowInspectorSnapshot(null);
             }
           }}
+          showThinking={showThinking}
         />
       ) : null}
       <AgentChatQuickNavigation
@@ -5734,6 +5743,7 @@ function AgentChatFoldedActivityGroup({
   activeRuntimeStatusBubbleId,
   latestReplyBubbleId,
   onOpenWorkflowInspector,
+  showThinking,
   open,
   onOpenChange,
   isFocused = true,
@@ -5748,6 +5758,7 @@ function AgentChatFoldedActivityGroup({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   isFocused?: boolean;
+  showThinking: boolean;
 }) {
   const { t } = useTranslation();
   const { toggle } = useCollapsibleState(false, open, onOpenChange);
@@ -5787,6 +5798,7 @@ function AgentChatFoldedActivityGroup({
                 isFocused={isFocused}
                 isLatestReply={bubble.id === latestReplyBubbleId}
                 onOpenWorkflowInspector={onOpenWorkflowInspector}
+                showThinking={showThinking}
                 compact
               />
             ))}
@@ -5804,6 +5816,7 @@ function AgentChatBubbleItem({
   isFocused = true,
   isLatestReply = false,
   onOpenWorkflowInspector,
+  showThinking,
   compact = false,
 }: {
   sessionId?: string;
@@ -5812,6 +5825,7 @@ function AgentChatBubbleItem({
   isFocused?: boolean;
   isLatestReply?: boolean;
   onOpenWorkflowInspector?: (snapshot: WorkflowRunSnapshot) => void;
+  showThinking: boolean;
   compact?: boolean;
 }) {
   const isConversationMessage = agentChatBubbleIsConversationMessage(bubble);
@@ -5857,6 +5871,7 @@ function AgentChatBubbleItem({
             isActiveRuntimeStatus={bubble.id === activeRuntimeStatusBubbleId}
             isLatestReply={isLatestReply}
             onOpenWorkflowInspector={onOpenWorkflowInspector}
+            showThinking={showThinking}
           />
         ) : (
           <div className="flex min-w-0 max-w-full flex-col gap-2 text-foreground/90">
@@ -6009,6 +6024,7 @@ function AgentChatSessionActivityView({
   isActiveRuntimeStatus = false,
   isLatestReply = false,
   onOpenWorkflowInspector,
+  showThinking,
 }: AgentChatSessionActivityViewProps) {
   if (render.kind === "text") {
     if (render.icon === "user") {
@@ -6040,12 +6056,12 @@ function AgentChatSessionActivityView({
   }
 
   if (render.kind === "thinking") {
-    return (
+    return showThinking ? (
       <AgentChatThinkingCollapsibleCell
         content={render.content}
         bodyLimit={render.bodyLimit}
       />
-    );
+    ) : null;
   }
 
   if (render.kind === "runtimeStatus") {
@@ -6339,11 +6355,13 @@ function WorkflowInspectorDialog({
   snapshot,
   open,
   onOpenChange,
+  showThinking,
 }: {
   sessionId: string;
   snapshot: WorkflowRunSnapshot;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  showThinking: boolean;
 }) {
   const [selectedActorId, setSelectedActorId] = useState<string | null>(null);
   const selectedActorWorkers = useMemo(
@@ -6412,6 +6430,7 @@ function WorkflowInspectorDialog({
             runId={snapshot.run_id}
             agent={selectedWorker}
             actorWorkers={selectedActorWorkers}
+            showThinking={showThinking}
           />
         ) : (
           <WorkflowInspectorGraph
@@ -6570,11 +6589,13 @@ function WorkflowInspectorAgentActivity({
   runId,
   agent,
   actorWorkers,
+  showThinking,
 }: {
   sessionId: string;
   runId: string;
   agent: WorkflowWorkerSnapshot;
   actorWorkers: WorkflowWorkerSnapshot[];
+  showThinking: boolean;
 }) {
   const isMockData = useContext(AgentChatMockDataContext);
   const visibleWorkers = useMemo(() => {
@@ -6767,7 +6788,7 @@ function WorkflowInspectorAgentActivity({
                     key={`${worker.worker_id}-${bubble.id}`}
                     bubble={bubble}
                     isFocused
-                    compact
+                    showThinking={showThinking}
                   />
                 ))}
               </Fragment>

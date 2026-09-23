@@ -524,6 +524,10 @@ const resources = {
           languageDescription:
             "This setting is saved to the shared Daat Locus locale configuration.",
           languagePlaceholder: "Select language",
+          showThinkingLabel: "Show thinking",
+          showThinkingDescription:
+            "Show the model's reasoning in the WebUI immediately. This preference is kept only in this browser session and is not saved to configuration.",
+          showThinkingAria: "Show model thinking",
         },
         telegram: {
           title: "Telegram",
@@ -1120,6 +1124,10 @@ const resources = {
           languageLabel: "WebUI 语言",
           languageDescription: "此设置会保存到共享的 Daat Locus 语言配置。",
           languagePlaceholder: "选择语言",
+          showThinkingLabel: "显示思考",
+          showThinkingDescription:
+            "立即在 WebUI 中显示模型的思考过程。此偏好仅保留在当前浏览器会话中，不会写入配置。",
+          showThinkingAria: "显示模型思考过程",
         },
         telegram: {
           title: "Telegram",

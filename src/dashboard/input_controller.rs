@@ -40,6 +40,9 @@ pub(super) enum TuiInputOutcome {
         event_id: uuid::Uuid,
         incoming_text: String,
     },
+    SetThinkingVisibility {
+        show: bool,
+    },
     SubmitText {
         input: String,
         attachments: Vec<DashboardCommandAttachment>,
@@ -497,6 +500,11 @@ fn handle_enter_key(
         view.reset_command_popup();
         return TuiInputOutcome::SubmitText { input, attachments };
     }
+    if matches!(input.as_str(), "/think show" | "/think hide") {
+        return TuiInputOutcome::SetThinkingVisibility {
+            show: input.ends_with("show"),
+        };
+    }
     if !input.is_empty() {
         if !attachments.is_empty() && is_dashboard_command_input(&input) {
             view.command_panel = None;
@@ -578,6 +586,18 @@ pub(super) async fn execute_input_outcome(
     match outcome {
         TuiInputOutcome::Exit => true,
         TuiInputOutcome::Continue | TuiInputOutcome::CopySelection { .. } => false,
+        TuiInputOutcome::SetThinkingVisibility { show } => {
+            view.set_show_thinking(show);
+            view.command_input.clear();
+            view.command_feedback = Some(CommandFeedback {
+                title: "THINKING".to_string(),
+                message: if show { "thinking is now visible" } else { "thinking is now hidden" }.to_string(),
+                detail: Some("This TUI-only preference is not written to configuration.".to_string()),
+                level: CommandFeedbackLevel::Info,
+            });
+            view.reset_command_popup();
+            false
+        }
         TuiInputOutcome::RunPanelAction {
             title,
             action,

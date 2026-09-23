@@ -8,7 +8,7 @@ use super::command_panels::{
 use super::command_registry::{
     app_status_command_accepts, clear_command_accepts, dashboard_command_is_known,
     dashboard_commands, debug_command_accepts, quit_command_accepts, restart_command_accepts,
-    skills_command_accepts, sleep_command_accepts, status_command_accepts,
+    skills_command_accepts, sleep_command_accepts, status_command_accepts, think_command_accepts,
     workflows_command_accepts,
 };
 use super::command_text::{
@@ -584,6 +584,14 @@ pub(super) fn command_live_feedback(
                 "Use /debug to choose a view.",
             ));
         }
+    } else if think_command_accepts(verb) {
+        if !matches!(parts.as_slice(), ["think", "show" | "hide"]) {
+            return Some(unknown_command_part_feedback(
+                "THINKING",
+                "Use /think show or /think hide.",
+                "This command is available only in the TUI and never writes configuration.",
+            ));
+        }
     } else if sleep_command_accepts(verb) {
         match parts.as_slice() {
             ["sleep", "run" | "status"] => {}
@@ -696,6 +704,18 @@ fn command_extra_argument_feedback(parts: &[&str]) -> Option<CommandFeedback> {
                 level: CommandFeedbackLevel::Error,
             })
         }
+        ["think"] => Some(CommandFeedback {
+            title: "THINKING".to_string(),
+            message: "think needs show or hide.".to_string(),
+            detail: Some("usage: /think <show|hide>".to_string()),
+            level: CommandFeedbackLevel::Warning,
+        }),
+        ["think", ..] => Some(CommandFeedback {
+            title: "THINKING".to_string(),
+            message: "think accepts only show or hide.".to_string(),
+            detail: Some("usage: /think <show|hide>".to_string()),
+            level: CommandFeedbackLevel::Error,
+        }),
         ["sleep", "run" | "status", ..] if parts.len() > 2 => Some(CommandFeedback {
             title: "SLEEP".to_string(),
             message: format!("sleep {} does not take extra arguments.", parts[1]),

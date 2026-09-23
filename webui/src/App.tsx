@@ -165,6 +165,7 @@ export default function App() {
   );
 
   const { themeMode, toggleThemeMode } = useThemeMode();
+  const [showThinking, setShowThinking] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -491,6 +492,8 @@ export default function App() {
                   onSelectNode: handleSelectStudyNode,
                   searchQuery: studyQuery,
                 },
+                showThinking,
+                setShowThinking,
               )}
             </Suspense>
           </SidebarInset>
@@ -788,12 +791,19 @@ function renderAuthenticatedPage(
     onSelectNode: (nodeId: string | null) => void;
     searchQuery: string;
   },
+  showThinking: boolean,
+  onShowThinkingChange: (show: boolean) => void,
 ) {
   switch (activePage) {
     case "status":
       return <StatusPage />;
     case "settings":
-      return <SettingsPage />;
+      return (
+        <SettingsPage
+          showThinking={showThinking}
+          onShowThinkingChange={onShowThinkingChange}
+        />
+      );
     case "logs":
       return <LogsPage />;
     case "study":
@@ -808,7 +818,11 @@ function renderAuthenticatedPage(
     case "agent":
     default:
       return selectedSessionId ? (
-        <AgentPage key={selectedSessionId} sessionId={selectedSessionId} />
+        <AgentPage
+          key={selectedSessionId}
+          sessionId={selectedSessionId}
+          showThinking={showThinking}
+        />
       ) : (
         <NoSessionPage {...sessionState} />
       );

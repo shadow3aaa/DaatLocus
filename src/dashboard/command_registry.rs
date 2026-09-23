@@ -23,7 +23,7 @@ const NO_ALIASES: &[&str] = &[];
 const QUIT_ALIASES: &[&str] = &["q", "exit"];
 const APP_STATUS_ALIASES: &[&str] = &["app_status"];
 
-static DASHBOARD_COMMANDS: [DashboardCommandSpec; 10] = [
+static DASHBOARD_COMMANDS: [DashboardCommandSpec; 11] = [
     DashboardCommandSpec {
         primary_verb: "quit",
         description: "exit the dashboard",
@@ -64,6 +64,13 @@ static DASHBOARD_COMMANDS: [DashboardCommandSpec; 10] = [
         description: "restart the daemon",
         aliases: NO_ALIASES,
         remote_command: Some("restart"),
+        remote_description: None,
+    },
+    DashboardCommandSpec {
+        primary_verb: "think",
+        description: "show or hide model thinking (TUI only)",
+        aliases: NO_ALIASES,
+        remote_command: None,
         remote_description: None,
     },
     DashboardCommandSpec {
@@ -133,6 +140,10 @@ pub(super) fn debug_command_accepts(verb: &str) -> bool {
 
 pub(super) fn app_status_command_accepts(verb: &str) -> bool {
     dashboard_command_accepts("app-status", verb)
+}
+
+pub(super) fn think_command_accepts(verb: &str) -> bool {
+    dashboard_command_accepts("think", verb)
 }
 
 pub(super) fn sleep_command_accepts(verb: &str) -> bool {

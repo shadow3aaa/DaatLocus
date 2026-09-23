@@ -55,6 +55,7 @@ const SETTINGS_AUTOSAVE_DELAY_MS = 800;
 
 type InterfaceSettingsValue = {
   locale: WebUiLocale;
+  showThinking: boolean;
 };
 
 type TelegramSettingsValue = {
@@ -72,11 +73,15 @@ type SettingsPageProps = {
     request: SetupConfigRequest,
     options?: { signal?: AbortSignal },
   ) => Promise<ConfigReadinessReport>;
+  showThinking?: boolean;
+  onShowThinkingChange?: (show: boolean) => void;
 };
 
 export function SettingsPage({
   mockSetupConfig,
   onSaveSetupConfig = saveSetupConfig,
+  showThinking: controlledShowThinking,
+  onShowThinkingChange,
 }: SettingsPageProps = {}) {
   const { t } = useTranslation();
   const [baseConfig, setBaseConfig] = useState<SetupConfigRequest | null>(
@@ -310,6 +315,8 @@ export function SettingsPage({
           <>
             <InterfaceSettingsEditor
               value={interfaceSettings}
+              showThinking={controlledShowThinking}
+              onShowThinkingChange={onShowThinkingChange}
               onChange={(nextValue) => {
                 setInterfaceSettings(nextValue);
                 void setWebUiLanguage(nextValue.locale);
@@ -364,6 +371,7 @@ export function SettingsPage({
 function createDefaultInterfaceSettingsValue(): InterfaceSettingsValue {
   return {
     locale: getCurrentWebUiLanguage(),
+    showThinking: true,
   };
 }
 
@@ -374,6 +382,7 @@ function setupConfigRequestToInterfaceSettingsValue(
     locale: request.locale
       ? normalizeWebUiLocale(request.locale)
       : getCurrentWebUiLanguage(),
+    showThinking: true,
   };
 }
 
@@ -387,9 +396,13 @@ function interfaceSettingsValueToSetupRequest(
 
 function InterfaceSettingsEditor({
   value,
+  showThinking,
+  onShowThinkingChange,
   onChange,
 }: {
   value: InterfaceSettingsValue;
+  showThinking?: boolean;
+  onShowThinkingChange?: (show: boolean) => void;
   onChange: (value: InterfaceSettingsValue) => void;
 }) {
   const { t } = useTranslation();
@@ -413,7 +426,7 @@ function InterfaceSettingsEditor({
           <Select
             value={value.locale}
             onValueChange={(locale) =>
-              onChange({ locale: locale as WebUiLocale })
+              onChange({ ...value, locale: locale as WebUiLocale })
             }
           >
             <SelectTrigger id="webui-settings-language" className="w-full">
@@ -434,6 +447,28 @@ function InterfaceSettingsEditor({
           <FieldDescription>
             {t("settings.interface.languageDescription")}
           </FieldDescription>
+        </Field>
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel htmlFor="webui-settings-show-thinking">
+              {t("settings.interface.showThinkingLabel")}
+            </FieldLabel>
+            <FieldDescription>
+              {t("settings.interface.showThinkingDescription")}
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="webui-settings-show-thinking"
+            checked={showThinking ?? value.showThinking}
+            onCheckedChange={(nextShowThinking) => {
+              if (onShowThinkingChange) {
+                onShowThinkingChange(nextShowThinking);
+              } else {
+                onChange({ ...value, showThinking: nextShowThinking });
+              }
+            }}
+            aria-label={t("settings.interface.showThinkingAria")}
+          />
         </Field>
       </FieldGroup>
     </section>
