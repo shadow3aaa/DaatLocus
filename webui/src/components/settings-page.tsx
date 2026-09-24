@@ -418,7 +418,7 @@ function InterfaceSettingsEditor({
         </p>
       </div>
 
-      <FieldGroup className="max-w-xl">
+      <FieldGroup className="max-w-none">
         <Field>
           <FieldLabel htmlFor="webui-settings-language">
             {t("settings.interface.languageLabel")}
