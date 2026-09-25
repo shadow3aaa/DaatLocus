@@ -966,7 +966,7 @@ pub async fn execute_agent_loop_step(
                         );
                     });
                 }
-                let model_content = if result.skip_source_elision {
+                let rendered_model_content = if result.skip_source_elision {
                     result.model_content()
                 } else {
                     super::coding_source_elision::elide_tool_model_content(
@@ -975,6 +975,19 @@ pub async fn execute_agent_loop_step(
                         &result.model_content(),
                     )
                 };
+                let model_content = crate::tool_output_spill::bound_tool_model_content(
+                    &rendered_model_content,
+                    context
+                        .config
+                        .main_model_config()
+                        .tool_output_max_tokens
+                        .max(1),
+                    Some(crate::tool_output_spill::SpillContext::new(
+                        context.session_id.as_deref().unwrap_or("session"),
+                        &call.name,
+                        &call.id,
+                    )),
+                );
                 let activity_event = result.activity_event.clone();
                 let history_content = result.history_content_with_budget(
                     &call.id,

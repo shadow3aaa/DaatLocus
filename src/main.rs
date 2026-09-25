@@ -50,6 +50,7 @@ mod telegram_acl;
 mod telegram_transport;
 mod terminal_app;
 mod terminal_logo;
+mod tool_output_spill;
 mod workflow;
 
 fn main() {

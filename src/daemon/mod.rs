@@ -747,6 +747,12 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
 
     let router = router.fallback(get(embedded_webui_handler));
 
+    // The Manager owns collection of the shared tool-output spill pool.
+    // Session processes only write spills; keeping the single collector here
+    // avoids a delete race between concurrent writers and lets the deadline
+    // live in file mtimes so it survives a Manager restart.
+    tokio::spawn(crate::tool_output_spill::run_gc_loop());
+
     let join = tokio::spawn(async move {
         let server = axum::serve(listener, router).with_graceful_shutdown(async move {
             let _ = shutdown_rx.await;

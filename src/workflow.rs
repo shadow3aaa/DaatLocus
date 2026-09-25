@@ -1117,6 +1117,7 @@ pub struct WorkerRuntimeState {
     >,
     file_anchors: crate::file_anchors::FileAnchorTable,
     image_state_dir: PathBuf,
+    worker_id: String,
     turn_epoch: u64,
 }
 
@@ -1136,7 +1137,7 @@ impl WorkerRuntimeState {
         let image_state_dir = crate::daat_locus_paths::daat_locus_paths_sync()
             .state_dir()
             .join("workflow_workers")
-            .join(worker_id)
+            .join(&worker_id)
             .join("viewed_images");
         Self {
             completed_output: None,
@@ -1144,6 +1145,7 @@ impl WorkerRuntimeState {
             visible_source_lines: std::collections::HashSet::new(),
             file_anchors: crate::file_anchors::FileAnchorTable::default(),
             image_state_dir,
+            worker_id,
             turn_epoch: 0,
         }
     }
@@ -1955,6 +1957,16 @@ async fn run_worker_turn(
             // messages must not interrupt that run, so they are deferred until
             // all tool results of this batch are in the conversation.
             let mut deferred_image_messages = Vec::new();
+            let worker_tool_output_max_tokens = match actor.definition.model {
+                WorkerModel::Main => context.config.main_model_config().tool_output_max_tokens,
+                WorkerModel::Efficient => {
+                    context
+                        .config
+                        .efficient_model_config()
+                        .tool_output_max_tokens
+                }
+            }
+            .max(1);
             for call in protocol.tool_calls {
                 ensure_workflow_not_interrupted(cancellation.as_ref())?;
                 let WorkflowWorkerActor {
@@ -2007,9 +2019,13 @@ async fn run_worker_turn(
                     runtime,
                     ..
                 } = &mut *actor;
-                if let Some(message) =
-                    append_worker_tool_result_message(conversation, call, result, runtime)
-                {
+                if let Some(message) = append_worker_tool_result_message(
+                    conversation,
+                    call,
+                    result,
+                    runtime,
+                    worker_tool_output_max_tokens,
+                ) {
                     deferred_image_messages.push(message);
                 }
             }
@@ -2071,10 +2087,11 @@ fn append_worker_tool_result_message(
     call: AgentToolCall,
     result: Result<ToolExecutionResult>,
     worker_runtime: &mut WorkerRuntimeState,
+    tool_output_max_tokens: usize,
 ) -> Option<AgentMessage> {
     match result {
         Ok(mut result) => {
-            let model_content = if result.skip_source_elision {
+            let rendered = if result.skip_source_elision {
                 result.model_content()
             } else {
                 crate::runtime::runtime_loop::coding_source_elision::elide_tool_model_content(
@@ -2083,6 +2100,15 @@ fn append_worker_tool_result_message(
                     &result.model_content(),
                 )
             };
+            let model_content = crate::tool_output_spill::bound_tool_model_content(
+                &rendered,
+                tool_output_max_tokens,
+                Some(crate::tool_output_spill::SpillContext::new(
+                    &worker_runtime.worker_id,
+                    &call.name,
+                    &call.id,
+                )),
+            );
             let model_image_parts = std::mem::take(&mut result.model_image_parts);
             conversation.push_agent_message(AgentMessage::tool(
                 call.id,
@@ -2104,11 +2130,16 @@ fn append_worker_tool_result_message(
             }
         }
         Err(err) => {
-            conversation.push_agent_message(AgentMessage::tool(
-                call.id,
-                call.name,
-                json!({ "ok": false, "error": err.to_string() }).to_string(),
-            ));
+            let model_content = crate::tool_output_spill::bound_tool_model_content(
+                &json!({ "ok": false, "error": err.to_string() }).to_string(),
+                tool_output_max_tokens,
+                Some(crate::tool_output_spill::SpillContext::new(
+                    &worker_runtime.worker_id,
+                    &call.name,
+                    &call.id,
+                )),
+            );
+            conversation.push_agent_message(AgentMessage::tool(call.id, call.name, model_content));
             None
         }
     }
@@ -4719,6 +4750,7 @@ workflow.define({{
             call,
             Ok(result),
             &mut worker_runtime,
+            2_000,
         );
         let messages = conversation.agent_messages();
 
@@ -4781,6 +4813,7 @@ workflow.define({{
                 call,
                 Ok(result),
                 &mut worker_runtime,
+                2_000,
             ) {
                 deferred.push(message);
             }

@@ -1363,6 +1363,37 @@ mod tests {
     use async_trait::async_trait;
     use tempfile::TempDir;
 
+    /// Persisted tool history must never carry a spill path.
+    ///
+    /// Age-based collection means a spill file is gone an hour after it was
+    /// written, while `HistoryMessage` survives far longer. If the persistent
+    /// rendering ever started reusing `model_content_override`, a stored tool
+    /// message would point at a deleted file and a later turn would chase a
+    /// dead path. This locks the two renderings apart.
+    #[test]
+    fn persistent_history_never_carries_a_spill_path() {
+        let result = ToolExecutionResult::from_activity_event(
+            "read big output",
+            json!({ "path": "src/lib.rs", "content": "payload" }),
+            None,
+        )
+        .with_model_content(
+            "truncated head\n[tool output truncated]\n\
+             Full output is at:\n/tmp/daat-locus/tool-output/1758801234567-sess-term.txt",
+        );
+
+        let history = result.history_content("call-1", "terminal__terminal_exec");
+
+        assert!(
+            !history.contains("tool-output"),
+            "persisted history must not reference the transient spill pool: {history}"
+        );
+        assert!(
+            history.contains("payload"),
+            "persisted history still renders the structured payload"
+        );
+    }
+
     use crate::{
         app::{App, AppManager},
         browser_app::BrowserApp,

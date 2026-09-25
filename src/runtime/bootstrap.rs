@@ -30,7 +30,7 @@ use crate::{
         },
         runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
     },
-    sandbox::{RuntimeSandboxPolicy, WritableRoot},
+    sandbox::{RuntimeSandboxPolicy, WritableRoot, normalize_path},
     telegram_acl::TelegramAclHandle,
     telegram_transport::state::TelegramTransportState,
     terminal_app::TerminalApp,
@@ -287,7 +287,32 @@ pub async fn sandbox_policy_for_runtime(
     if let Some(execution_cwd) = execution_cwd {
         allow_execution_workspace_writes(&mut policy, execution_cwd);
     }
+    deny_tool_output_spill_writes(&mut policy);
     policy
+}
+
+/// Keep the spill pool readable but not model-writable.
+///
+/// The model needs `read_file` on a spilled tool output to recover the part it
+/// could not see, but it must not be able to write there: a stray `edit_file`
+/// would silently corrupt a spill that a pending tool result still points at.
+/// Reads are left alone on purpose, so this only extends `deny_write_paths`.
+fn deny_tool_output_spill_writes(policy: &mut RuntimeSandboxPolicy) {
+    deny_writes_under(policy, &crate::tool_output_spill::pool_dir());
+}
+
+#[cfg(test)]
+pub(crate) fn deny_tool_output_spill_writes_for_test(
+    policy: &mut RuntimeSandboxPolicy,
+    dir: &Path,
+) {
+    deny_writes_under(policy, dir);
+}
+
+fn deny_writes_under(policy: &mut RuntimeSandboxPolicy, dir: &Path) {
+    policy.filesystem.deny_write_paths.push(normalize_path(dir));
+    policy.filesystem.deny_write_paths.sort();
+    policy.filesystem.deny_write_paths.dedup();
 }
 
 fn allow_execution_workspace_writes(policy: &mut RuntimeSandboxPolicy, execution_cwd: &Path) {
