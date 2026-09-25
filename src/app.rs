@@ -123,6 +123,10 @@ pub struct AppToolExecutionResult {
     pub payload: Value,
     pub model_content: Option<String>,
     pub activity_event: Option<SessionActivityEvent>,
+    /// Set by app tools whose output the model can obtain again from its
+    /// source, so an over-budget rendering points at the source instead of a
+    /// redundant temp copy.
+    pub overflow_continuation: Option<String>,
 }
 
 impl AppToolExecutionResult {
@@ -137,6 +141,7 @@ impl AppToolExecutionResult {
             payload,
             model_content,
             activity_event,
+            overflow_continuation: None,
         }
     }
 }

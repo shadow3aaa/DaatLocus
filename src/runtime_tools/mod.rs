@@ -68,6 +68,13 @@ pub struct ToolExecutionResult {
     pub model_image_parts: Vec<AgentContentPart>,
     pub activity_event: Option<SessionActivityEvent>,
     pub skip_source_elision: bool,
+    /// Set by tools whose output the model can obtain again from its source.
+    ///
+    /// When such a result is truncated, this becomes the marker instead of a
+    /// spill file. Pointing the model at the real file is strictly better than
+    /// a temp copy: the copy has no anchors it can edit against, and its line
+    /// numbering only matches the source when the read began at line one.
+    pub overflow_continuation: Option<String>,
 }
 
 impl ToolExecutionResult {
@@ -83,6 +90,7 @@ impl ToolExecutionResult {
             model_image_parts: Vec::new(),
             activity_event,
             skip_source_elision: false,
+            overflow_continuation: None,
         }
     }
 
@@ -99,6 +107,27 @@ impl ToolExecutionResult {
     pub const fn with_skip_source_elision(mut self, skip: bool) -> Self {
         self.skip_source_elision = skip;
         self
+    }
+
+    /// Tell the runtime how this result can be re-read if it is truncated.
+    pub fn with_overflow_continuation(mut self, instruction: Option<String>) -> Self {
+        self.overflow_continuation = instruction;
+        self
+    }
+
+    /// Where an over-budget rendering of this result should send the model.
+    pub fn overflow_target<'a>(
+        &'a self,
+        session_hint: &'a str,
+        tool_name: &'a str,
+        call_id: &'a str,
+    ) -> crate::tool_output_spill::OverflowTarget<'a> {
+        match self.overflow_continuation.clone() {
+            Some(instruction) => crate::tool_output_spill::OverflowTarget::Continue { instruction },
+            None => crate::tool_output_spill::OverflowTarget::Spill(
+                crate::tool_output_spill::SpillContext::new(session_hint, tool_name, call_id),
+            ),
+        }
     }
 
     pub fn model_content(&self) -> String {
@@ -503,6 +532,7 @@ impl RuntimeTool for AppRuntimeTool {
         if let Some(model_content) = result.model_content {
             output = output.with_model_content(model_content);
         }
+        output.overflow_continuation = result.overflow_continuation;
         Ok(output)
     }
 }

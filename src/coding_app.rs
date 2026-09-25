@@ -31,6 +31,7 @@ use crate::{
     reasoning::{episode::EpisodeActionRecord, prompts::APP_CODING, runtime::AgentToolCall},
     runtime::scope_engine::ScopeEngineHandle,
     schema_utils::{model_schema_for, structured_edit_args_schema},
+    tool_output_spill::OverflowTarget,
 };
 
 const MAX_RENDERED_LSP_SETUP_HINTS: usize = 5;
@@ -612,9 +613,15 @@ impl CodingApp {
             Some(existing) if !existing.trim().is_empty() => format!("{rendered}\n\n{existing}"),
             _ => rendered,
         };
-        result.model_content = Some(truncate_text_to_token_budget(
+        result.model_content = Some(crate::tool_output_spill::bound_tool_model_content(
             &model_text,
             context.tool_output_max_tokens,
+            Some(OverflowTarget::Continue {
+                instruction: format!(
+                    "Page the rest of this output, or read the instruction file itself, with read_file({{ \"path\": {path}, \"start_line\": <next line>, \"line_count\": 80 }}).",
+                    path = serde_json::to_string(path).unwrap_or_default(),
+                ),
+            }),
         ));
         if let Some(payload_object) = result.payload.as_object_mut() {
             payload_object.insert(
@@ -900,9 +907,14 @@ impl App for CodingApp {
                 let mut output = AppToolExecutionResult::from_activity_event(
                     format!("found {} matches", result.matches.len()),
                     serde_json::to_value(&result).unwrap(),
-                    Some(truncate_text_to_token_budget(
+                    Some(crate::tool_output_spill::bound_tool_model_content(
                         &model_content,
                         context.tool_output_max_tokens,
+                        Some(OverflowTarget::Continue {
+                            instruction:
+                                "Run search_code again with a narrower \"query\", a \"path\" or \"include\" filter, or a smaller \"limit\" to reach the rest of the matches."
+                                    .to_string(),
+                        }),
                     )),
                     Some(Self::explored_event(
                         "Search",
@@ -938,8 +950,29 @@ impl App for CodingApp {
                 };
                 let result = self.scope.read_code(&input)?;
                 self.last_action = Some(format!("read {summary_target}"));
-                let model_content =
-                    truncate_text_to_token_budget(&result.content, context.tool_output_max_tokens);
+                // `around` is a fixed window, so the way forward is always to
+                // ask for the enclosing symbol. `full` already returned that
+                // symbol, so the only way forward is to page the real file.
+                let continuation = match args.mode {
+                    CodingReadCodeMode::Around => format!(
+                        "Continue with coding__read_code({{ \"path\": {path}, \"anchor\": {anchor}, \"mode\": \"full\" }}) to get the whole enclosing symbol.",
+                        path = serde_json::to_string(&args.path).unwrap_or_default(),
+                        anchor = serde_json::to_string(&args.anchor).unwrap_or_default(),
+                    ),
+                    CodingReadCodeMode::Full => {
+                        format!(
+                            "The enclosing symbol is larger than one response; page it with read_file({{ \"path\": {path}, \"start_line\": <line after the last one shown>, \"line_count\": 80 }}).",
+                            path = serde_json::to_string(&args.path).unwrap_or_default()
+                        )
+                    }
+                };
+                let model_content = crate::tool_output_spill::bound_tool_model_content(
+                    &result.content,
+                    context.tool_output_max_tokens,
+                    Some(OverflowTarget::Continue {
+                        instruction: continuation,
+                    }),
+                );
                 let mut output = AppToolExecutionResult::from_activity_event(
                     format!("read code {summary_target}"),
                     serde_json::to_value(&result).unwrap(),

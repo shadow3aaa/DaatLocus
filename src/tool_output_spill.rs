@@ -85,28 +85,43 @@ pub fn ensure_pool_dir() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Where the model should go when a tool result does not fit the budget.
+#[derive(Clone, Debug)]
+pub enum OverflowTarget<'a> {
+    /// The full text cannot be re-derived from anywhere, so it is written to
+    /// the shared spill pool and the marker names the file.
+    Spill(SpillContext<'a>),
+    /// The caller can read the source again, so the marker says how to
+    /// continue instead.
+    ///
+    /// Copying content that already exists on disk into a temp file would only
+    /// hand the model a worse copy of what it just asked for: the copy has no
+    /// line anchors the model can edit against, and its line numbering does not
+    /// match the real file unless the read happened to start at line one.
+    Continue { instruction: String },
+}
+
 /// Applies the tool-output budget to already-rendered model content.
 ///
 /// This is unconditional, including for content a tool supplied as an explicit
 /// `model_content_override`. Call it where a tool result becomes an
 /// `AgentMessage::tool`, after source-line elision.
 ///
-/// When the content does not fit and a spill context is available, the full
-/// text is written to the pool and the returned marker points at it. Without a
-/// spill context, or when the write fails, this degrades to a plain prefix
-/// truncation.
+/// When the content does not fit, the target decides what the model is told.
+/// A tool that can be re-read supplies `Continue`; anything else spills to the
+/// pool. With no target at all this degrades to a plain prefix truncation.
 pub fn bound_tool_model_content(
     text: &str,
     max_tokens: usize,
-    spill: Option<SpillContext<'_>>,
+    target: Option<OverflowTarget<'_>>,
 ) -> String {
-    bound_tool_model_content_in(text, max_tokens, spill, None)
+    bound_tool_model_content_in(text, max_tokens, target, None)
 }
 
 fn bound_tool_model_content_in(
     text: &str,
     max_tokens: usize,
-    spill: Option<SpillContext<'_>>,
+    target: Option<OverflowTarget<'_>>,
     dir: Option<&Path>,
 ) -> String {
     let max_chars = max_tokens.max(1).saturating_mul(APPROX_BYTES_PER_TOKEN);
@@ -115,23 +130,39 @@ fn bound_tool_model_content_in(
         return text.to_string();
     }
 
-    match spill.and_then(|ctx| write_spill(text, &ctx, dir)) {
-        Some(written) => {
-            let marker = spill_marker(&written.path, total_chars, written.line_count);
-            // Reserve the marker's own length so the result stays inside the
-            // budget instead of overshooting it by the size of the notice.
-            let head_chars = max_chars.saturating_sub(marker.chars().count()).max(1);
-            let kept: String = text.chars().take(head_chars).collect();
+    match target {
+        None => plain_truncation(text, max_chars, total_chars),
+        Some(OverflowTarget::Continue { instruction }) => {
+            let marker = format!(
+                "[tool output truncated: showing part of {total_chars} chars]\n{instruction}"
+            );
+            let kept = keep_head(text, max_chars, &marker);
             format!("{kept}\n{marker}")
         }
-        None => {
-            let kept: String = text.chars().take(max_chars).collect();
-            format!(
-                "{kept}\n{PLAIN_TRUNCATION_NOTICE} ({} chars omitted)",
-                total_chars.saturating_sub(max_chars)
-            )
-        }
+        Some(OverflowTarget::Spill(ctx)) => match write_spill(text, &ctx, dir) {
+            Some(written) => {
+                let marker = spill_marker(&written.path, total_chars, written.line_count);
+                let kept = keep_head(text, max_chars, &marker);
+                format!("{kept}\n{marker}")
+            }
+            None => plain_truncation(text, max_chars, total_chars),
+        },
     }
+}
+
+/// Keep as much of the head as fits once the marker has been accounted for, so
+/// the result stays inside the budget instead of overshooting it.
+fn keep_head(text: &str, max_chars: usize, marker: &str) -> String {
+    let head_chars = max_chars.saturating_sub(marker.chars().count()).max(1);
+    text.chars().take(head_chars).collect()
+}
+
+fn plain_truncation(text: &str, max_chars: usize, total_chars: usize) -> String {
+    let kept: String = text.chars().take(max_chars).collect();
+    format!(
+        "{kept}\n{PLAIN_TRUNCATION_NOTICE} ({} chars omitted)",
+        total_chars.saturating_sub(max_chars)
+    )
 }
 
 struct WrittenSpill {
@@ -401,6 +432,55 @@ mod tests {
         assert_eq!(report, SweepReport::default());
     }
 
+    #[test]
+    fn continue_target_points_back_at_the_source_instead_of_copying_it() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let pool = temp.path().join("pool");
+        std::fs::create_dir_all(&pool).expect("create pool");
+
+        let body = "42#ab|some source line\n".repeat(4_000);
+        let bounded = bound_tool_model_content_in(
+            &body,
+            200,
+            Some(OverflowTarget::Continue {
+                instruction:
+                    "Continue with read_file({ \"path\": \"src/lib.rs\", \"start_line\": 2001, \"line_count\": 80 })."
+                        .to_string(),
+            }),
+            Some(&pool),
+        );
+
+        assert!(
+            bounded.contains("Continue with read_file"),
+            "marker must tell the model how to keep reading"
+        );
+        assert!(
+            !bounded.contains("tool-output"),
+            "a re-readable result must never be copied into the spill pool: {bounded}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&pool).expect("read pool").count(),
+            0,
+            "no spill file may be written for a redirectable result"
+        );
+    }
+
+    #[test]
+    fn continue_target_needs_no_lifetime_caveat() {
+        let bounded = bound_tool_model_content(
+            &"a".repeat(50_000),
+            100,
+            Some(OverflowTarget::Continue {
+                instruction: "Continue with read_file({ \"path\": \"a.rs\" }).".to_string(),
+            }),
+        );
+
+        assert!(
+            !bounded.contains("temporary"),
+            "the source is permanent, so the marker must not warn about expiry"
+        );
+    }
+
     fn write_stamped(dir: &Path, name: &str, stamp: SystemTime) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, b"payload").expect("write pool file");
@@ -421,11 +501,11 @@ mod tests {
         let bounded = bound_tool_model_content_in(
             &body,
             200,
-            Some(SpillContext::new(
+            Some(OverflowTarget::Spill(SpillContext::new(
                 "sess-1234",
                 "terminal__terminal_exec",
                 "call-abcdef",
-            )),
+            ))),
             Some(&pool),
         );
 

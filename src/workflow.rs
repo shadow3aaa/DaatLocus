@@ -2103,11 +2103,7 @@ fn append_worker_tool_result_message(
             let model_content = crate::tool_output_spill::bound_tool_model_content(
                 &rendered,
                 tool_output_max_tokens,
-                Some(crate::tool_output_spill::SpillContext::new(
-                    &worker_runtime.worker_id,
-                    &call.name,
-                    &call.id,
-                )),
+                Some(result.overflow_target(&worker_runtime.worker_id, &call.name, &call.id)),
             );
             let model_image_parts = std::mem::take(&mut result.model_image_parts);
             conversation.push_agent_message(AgentMessage::tool(
@@ -2133,10 +2129,12 @@ fn append_worker_tool_result_message(
             let model_content = crate::tool_output_spill::bound_tool_model_content(
                 &json!({ "ok": false, "error": err.to_string() }).to_string(),
                 tool_output_max_tokens,
-                Some(crate::tool_output_spill::SpillContext::new(
-                    &worker_runtime.worker_id,
-                    &call.name,
-                    &call.id,
+                Some(crate::tool_output_spill::OverflowTarget::Spill(
+                    crate::tool_output_spill::SpillContext::new(
+                        &worker_runtime.worker_id,
+                        &call.name,
+                        &call.id,
+                    ),
                 )),
             );
             conversation.push_agent_message(AgentMessage::tool(call.id, call.name, model_content));

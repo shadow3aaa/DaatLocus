@@ -982,7 +982,7 @@ pub async fn execute_agent_loop_step(
                         .main_model_config()
                         .tool_output_max_tokens
                         .max(1),
-                    Some(crate::tool_output_spill::SpillContext::new(
+                    Some(result.overflow_target(
                         context.session_id.as_deref().unwrap_or("session"),
                         &call.name,
                         &call.id,

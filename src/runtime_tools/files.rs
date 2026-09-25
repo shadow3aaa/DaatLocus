@@ -223,7 +223,20 @@ async fn execute_read_file(
         )),
     )
     .with_model_content(model_content)
-    .with_skip_source_elision(skip_elision))
+    .with_skip_source_elision(skip_elision)
+    .with_overflow_continuation(
+        // Only offer a continuation when the file actually has more lines left.
+        // A read that reached EOF has nothing to continue into, and a spill copy
+        // of a file the model can already page through would be a pointless
+        // round trip.
+        (end_line < total_lines).then(|| {
+            format!(
+                "Continue with read_file({{ \"path\": {display_path}, \"start_line\": {}, \"line_count\": {} }}).",
+                end_line + 1,
+                line_count
+            )
+        }),
+    ))
 }
 
 pub fn execute_worker_edit_file(
@@ -550,5 +563,76 @@ mod tests {
         assert!(lines.iter().all(|line| line.kind == PatchDiffLineKind::Add));
         assert_eq!(lines[0].text, "alpha");
         assert_eq!(lines[1].text, "beta");
+    }
+
+    /// A `read_file` result must point back at the file it came from, naming
+    /// the line after the range it actually returned. Handing the model a spill
+    /// copy instead would be a pointless round trip, and the copy's line
+    /// numbering would not line up with the real file.
+    #[tokio::test]
+    async fn read_file_redirects_to_the_next_unread_line() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let file = temp.path().join("sample.rs");
+        let body = (1..=500)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&file, &body).expect("write sample");
+        let policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
+
+        let call = crate::reasoning::runtime::AgentToolCall {
+            id: "call-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({
+                "path": file.display().to_string(),
+                "start_line": 1,
+                "line_count": 10,
+            }),
+        };
+        let mut anchors = crate::file_anchors::FileAnchorTable::default();
+        let result = execute_read_file(temp.path(), &policy, &call, &mut anchors)
+            .await
+            .expect("read_file");
+
+        let continuation = result
+            .overflow_continuation
+            .expect("a partial read must offer a continuation");
+        assert!(
+            continuation.contains(&file.display().to_string()),
+            "continuation must name the real file: {continuation}"
+        );
+        assert!(
+            continuation.contains("\"start_line\": 11"),
+            "continuation must resume after the last line returned, not at line one: {continuation}"
+        );
+    }
+
+    /// A read that reached end of file has nothing to continue into, so it must
+    /// fall through to normal spilling rather than advertise a dead range.
+    #[tokio::test]
+    async fn read_file_at_end_of_file_offers_no_continuation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let file = temp.path().join("sample.rs");
+        std::fs::write(&file, "alpha\nbeta\ngamma").expect("write sample");
+        let policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
+
+        let call = crate::reasoning::runtime::AgentToolCall {
+            id: "call-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({
+                "path": file.display().to_string(),
+                "start_line": 1,
+                "line_count": 500,
+            }),
+        };
+        let mut anchors = crate::file_anchors::FileAnchorTable::default();
+        let result = execute_read_file(temp.path(), &policy, &call, &mut anchors)
+            .await
+            .expect("read_file");
+
+        assert_eq!(
+            result.overflow_continuation, None,
+            "reaching end of file means there is nothing to continue into"
+        );
     }
 }
