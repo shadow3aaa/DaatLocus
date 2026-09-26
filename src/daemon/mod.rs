@@ -1375,23 +1375,56 @@ fn overlay_manager_owned_dashboard_state(
 async fn status_summary_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
-) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+) -> axum::response::Response {
+    let auth = match share::authorize_route(&state, &headers, "GET", "/status/summary").await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
 
-    let session_tasks = state.sessions.list().into_iter().map(|info| {
+    // Share visitors only see the sessions inside their frozen scope, and never
+    // the host-identifying daemon fields or the Telegram access requests.
+    let share_access = auth.share().cloned();
+    let infos: Vec<_> = match &share_access {
+        Some(access) => state
+            .sessions
+            .list()
+            .into_iter()
+            .filter(|info| access.session_allowed(info).is_ok())
+            .collect(),
+        None => state.sessions.list(),
+    };
+
+    let session_tasks = infos.into_iter().map(|info| {
         status_session_summary(state.sessions.clone(), state.session_tokens.clone(), info)
     });
     let sessions = futures_util::future::join_all(session_tasks).await;
 
+    let daemon = match &share_access {
+        Some(_) => redacted_status_response(&state),
+        None => status_response(&state),
+    };
+    let pending_access_requests = match &share_access {
+        Some(_) => Vec::new(),
+        None => state.telegram_acl.pending_requests(),
+    };
+
     Json(StatusSummaryResponse {
         loaded_at_ms: chrono::Utc::now().timestamp_millis(),
-        daemon: status_response(&state),
-        pending_access_requests: state.telegram_acl.pending_requests(),
+        daemon,
+        pending_access_requests,
         sessions,
     })
     .into_response()
+}
+
+/// Status block served to share visitors: keeps lifecycle/version but drops the
+/// fields that identify or locate the host process.
+fn redacted_status_response(state: &ServerState) -> StatusResponse {
+    let mut status = status_response(state);
+    status.pid = 0;
+    status.bind_host = String::new();
+    status.port = 0;
+    status
 }
 
 async fn status_session_summary(

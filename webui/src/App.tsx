@@ -268,7 +268,10 @@ export default function App() {
   }, [activePage, isAuthenticated, selectedSession, t]);
 
   useEffect(() => {
-    if (!isAuthenticated || configReadiness?.kind !== "complete") {
+    if (!isUnlocked) {
+      return;
+    }
+    if (isAuthenticated && configReadiness?.kind !== "complete") {
       return;
     }
 
@@ -282,7 +285,7 @@ export default function App() {
       controller.abort();
       window.clearInterval(interval);
     };
-  }, [configReadiness?.kind, isAuthenticated]);
+  }, [configReadiness?.kind, isAuthenticated, isUnlocked]);
 
   useEffect(() => {
     if (selectedSessionId) {

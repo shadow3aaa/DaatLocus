@@ -1002,15 +1002,23 @@ export async function fetchDaemonStatus({
   return parseJsonResponse<DaemonStatus>(response, "Daemon status");
 }
 
+/**
+ * Share visitors authenticate through the HttpOnly share cookie rather than a
+ * bearer token, so a missing token is only fatal outside share mode.
+ */
+function ensureDaemonAuth(token: string, purpose: string): void {
+  if (!token && !isShareMode()) {
+    throw new DaemonApiError(`Missing daemon token for ${purpose}.`);
+  }
+}
+
 export async function fetchStatusSummary({
   signal,
   token = getStoredDaemonToken(),
 }: FetchOptions = {}): Promise<StatusSummary> {
   const daemonToken = token.trim();
 
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for status summary.");
-  }
+  ensureDaemonAuth(daemonToken, "status summary");
 
   const response = await fetch("/status/summary", {
     method: "GET",
@@ -1031,9 +1039,7 @@ export async function fetchDashboardSnapshot({
 }: FetchOptions & { sessionId: string }): Promise<DashboardSnapshot> {
   const daemonToken = token.trim();
 
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for dashboard snapshot.");
-  }
+  ensureDaemonAuth(daemonToken, "dashboard snapshot");
 
   const url = new URL("/dashboard/snapshot", window.location.href);
   url.searchParams.set("session_id", sessionId);
@@ -1065,9 +1071,7 @@ export async function fetchDashboardActivityHistory({
 }): Promise<DashboardActivityHistoryPage> {
   const daemonToken = token.trim();
 
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for dashboard activity history.");
-  }
+  ensureDaemonAuth(daemonToken, "dashboard activity history");
 
   const url = new URL("/dashboard/activity-history", window.location.href);
   url.searchParams.set("limit", String(limit));
@@ -1117,9 +1121,7 @@ export async function fetchWorkflowWorkerActivity({
     );
   }
   const daemonToken = token.trim();
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for workflow worker activity.");
-  }
+  ensureDaemonAuth(daemonToken, "workflow worker activity");
 
   const url = new URL("/dashboard/workflow-worker-activity", window.location.href);
   url.searchParams.set("session_id", sessionId);
@@ -1156,9 +1158,7 @@ export async function fetchDashboardActivityHistoryCount({
 }): Promise<DashboardActivityHistoryCount> {
   const daemonToken = token.trim();
 
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for dashboard activity history count.");
-  }
+  ensureDaemonAuth(daemonToken, "dashboard activity history count");
 
   const url = new URL("/dashboard/activity-history/count", window.location.href);
   url.searchParams.set("session_id", sessionId);
@@ -1448,9 +1448,7 @@ export async function runDashboardCommand(
 ): Promise<string> {
   const daemonToken = token.trim();
 
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for dashboard command.");
-  }
+  ensureDaemonAuth(daemonToken, "dashboard command");
 
   const body: {
     command: string;
@@ -1496,9 +1494,7 @@ export async function runDashboardAction(
 ): Promise<DashboardActionResult> {
   const daemonToken = token.trim();
 
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for dashboard action.");
-  }
+  ensureDaemonAuth(daemonToken, "dashboard action");
 
   const body: {
     action: DashboardAction;
@@ -1658,9 +1654,7 @@ export async function fetchSessions({
 }: FetchOptions = {}): Promise<SessionInfo[]> {
   const daemonToken = token.trim();
 
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for sessions.");
-  }
+  ensureDaemonAuth(daemonToken, "sessions");
 
   const response = await fetch("/sessions", {
     method: "GET",

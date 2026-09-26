@@ -579,6 +579,7 @@ impl ShareAccess {
             ("GET", "/dashboard/input-history") => true,
             ("POST", "/commands/run") => true,
             ("POST", "/dashboard/action") => true,
+            ("GET", "/status/summary") => true,
             ("GET", path) if path.starts_with("/dashboard/attachments/") => true,
             _ => false,
         }
@@ -1031,6 +1032,7 @@ mod tests {
         assert!(access.allows("POST", "/commands/run"));
         assert!(access.allows("POST", "/share/exchange"));
         assert!(access.allows("GET", "/sessions"));
+        assert!(access.allows("GET", "/status/summary"));
     }
 
     #[test]
@@ -1043,7 +1045,6 @@ mod tests {
             ("GET", "/config/readiness"),
             ("GET", "/logs/sources"),
             ("GET", "/logs/read"),
-            ("GET", "/status/summary"),
             ("GET", "/status"),
             ("POST", "/sessions"),
             ("DELETE", "/sessions/abc"),
