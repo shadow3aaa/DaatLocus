@@ -1,58 +1,89 @@
 //! Temporary-session-share tunnel.
 //!
-//! `Tunnel::start` encapsulates the whole "connect to the Cloudflare edge →
-//! register a quick tunnel → get a `*.trycloudflare.com` hostname → forward
-//! public traffic to `127.0.0.1:<port>`" flow, transcribed from the open-source
-//! `cloudflared` CLI. There is deliberately no user-visible control surface: no
-//! subcommand, no dashboard action, no config file. The only entry point is
-//! [`Tunnel::start`], and the only teardown is [`TunnelHandle::shutdown`].
+//! `Tunnel::start` encapsulates the whole "register a Cloudflare quick tunnel
+//! -> get a `*.trycloudflare.com` hostname -> forward public traffic to
+//! `127.0.0.1:<port>`" flow. The edge protocol (QUIC + Cap'n Proto-RPC
+//! `RegisterConnection`, SRV/DoT edge discovery, the Cloudflare-internal trust
+//! roots, HTTP/1.1 + WebSocket proxying) is provided by the
+//! `cloudflare-quick-tunnel` crate; this module is the thin in-process wrapper
+//! that owns the lifecycle and maps failures onto the share API's error codes.
+//!
+//! There is deliberately no user-visible control surface: no subcommand, no
+//! dashboard action, no config file. The only entry point is [`Tunnel::start`]
+//! and the only teardown is [`TunnelHandle::shutdown`].
 //!
 //! The tunnel runs as a tokio task inside the Manager process and must never
 //! panic: every fallible step returns a [`TunnelError`].
 
 pub mod config;
-pub mod edge;
 pub mod error;
-pub mod listener;
-pub mod mux;
-pub mod register;
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::{sync::watch, task::JoinHandle};
+use cloudflare_quick_tunnel::api::{self, request_tunnel};
+use cloudflare_quick_tunnel::edge::{self, IpVersionFilter};
+use cloudflare_quick_tunnel::pool::Pool;
+use cloudflare_quick_tunnel::quic_dial::{build_endpoint, dial_any};
+use cloudflare_quick_tunnel::rpc::{
+    ConnectionOptions, ControlSession, TunnelAuth, register_connection,
+};
+use cloudflare_quick_tunnel::supervisor::{self, SupervisorExit, SupervisorMetrics};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 pub use config::TunnelConfig;
-use config::TunnelMode;
-use edge::EdgeAddress;
 pub use error::TunnelError;
 
-const USER_AGENT: &str = concat!("daat-locus/", env!("CARGO_PKG_VERSION"));
-const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
-const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
-const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Backoff floor between reconnect attempts.
+const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
+/// Backoff ceiling between reconnect attempts.
+const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
+/// Ceiling on how many discovered edges a single dial fans out to.
+const MAX_DIAL_EDGES: usize = 5;
+/// Bound on how long `shutdown` waits for the supervisor to stop.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
 
 /// Stateless entry point for the tunnel module.
 pub struct Tunnel;
 
-/// A running tunnel. Dropping the handle without calling [`Self::shutdown`]
-/// leaves the supervisor task running until its owning runtime shuts down.
-#[derive(Debug)]
+/// A running quick tunnel.
 pub struct TunnelHandle {
     hostname: String,
-    shutdown_tx: watch::Sender<bool>,
-    supervisor: JoinHandle<()>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
 }
 
 impl TunnelHandle {
-    /// The assigned `*.trycloudflare.com` hostname.
+    /// The assigned `*.trycloudflare.com` hostname (no scheme).
     pub fn hostname(&self) -> &str {
         &self.hostname
     }
 
     /// Tear the tunnel down and wait for the supervisor to stop.
-    pub async fn shutdown(self) {
-        let _ = self.shutdown_tx.send(true);
-        let _ = self.supervisor.await;
+    pub async fn shutdown(mut self) {
+        self.stop().await;
+    }
+
+    async fn stop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(task) = self.task.take() {
+            let _ = tokio::time::timeout(SHUTDOWN_GRACE, task).await;
+        }
+    }
+}
+
+impl Drop for TunnelHandle {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -61,269 +92,260 @@ impl Tunnel {
     ///
     /// Fails closed: if no hostname can be obtained, no share is created.
     pub async fn start(config: TunnelConfig) -> Result<TunnelHandle, TunnelError> {
-        // Only quick tunnels exist today; this exhaustive read keeps the mode
-        // field load-bearing and fails to compile when a new mode is added.
-        let TunnelMode::Quick = config.mode;
-
         if !config.enabled {
             return Err(TunnelError::TunnelDisabled(
                 "tunnelling is disabled for this build".to_string(),
             ));
         }
 
-        if config.edge.addresses.is_empty() {
-            return Err(TunnelError::NoColoAvailable(
-                "no edge addresses configured".to_string(),
-            ));
-        }
+        let tunnel = request_tunnel(api::DEFAULT_SERVICE_URL, api::DEFAULT_USER_AGENT)
+            .await
+            .map_err(map_error)?;
+        let tunnel_id = Uuid::parse_str(&tunnel.id).map_err(|err| {
+            TunnelError::Internal(format!("quick tunnel id is not a uuid: {err}"))
+        })?;
+        let hostname = normalize_hostname(&tunnel.hostname);
+        let auth = TunnelAuth {
+            account_tag: tunnel.account_tag.clone(),
+            tunnel_secret: tunnel.secret.clone(),
+        };
 
-        let client = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .timeout(Duration::from_secs(20))
-            .build()
-            .map_err(|err| TunnelError::Internal(format!("build http client failed: {err}")))?;
+        let endpoint = build_endpoint().map_err(map_error)?;
+        let (conn, control) = connect_and_register(&endpoint, &auth, tunnel_id, 0, false).await?;
 
-        let credentials = register::register_quick_tunnel(&client).await?;
+        let metrics = SupervisorMetrics::default();
+        let pool = Arc::new(Pool::new(config.target.port()));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-        let endpoint = Arc::new(make_endpoint(&config)?);
-        // Establish one connection eagerly so a broken edge surfaces as a
-        // typed failure instead of a silently dead share.
-        let (first, _address) = connect_any(&endpoint, &config).await?;
-        register_control_stream(&first, &credentials.tunnel_id).await?;
-
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let supervisor = tokio::spawn(run_supervisor(endpoint, config.clone(), shutdown_rx));
+        let task = tokio::spawn(run_reactor(
+            config.target.port(),
+            endpoint,
+            auth,
+            tunnel_id,
+            metrics,
+            pool,
+            conn,
+            control,
+            shutdown_rx,
+        ));
 
         Ok(TunnelHandle {
-            hostname: credentials.hostname,
-            shutdown_tx,
-            supervisor,
+            hostname,
+            shutdown_tx: Some(shutdown_tx),
+            task: Some(task),
         })
     }
 }
 
-/// Send the framed `registerTunnel` control message on a fresh bidirectional
-/// stream and wait for the edge's framed acknowledgement.
-///
-/// cloudflared associates a QUIC connection with the tunnel it is proxying for
-/// by registering over the connection's first stream; the framing keeps the
-/// control plane parse bounded.
-async fn register_control_stream(
-    connection: &quinn::Connection,
-    tunnel_id: &str,
-) -> Result<(), TunnelError> {
-    let (mut send, mut recv) = connection
-        .open_bi()
+async fn connect_and_register(
+    endpoint: &quinn::Endpoint,
+    auth: &TunnelAuth,
+    tunnel_id: Uuid,
+    conn_index: u8,
+    replace_existing: bool,
+) -> Result<(quinn::Connection, ControlSession), TunnelError> {
+    let mut edges = edge::discover(IpVersionFilter::Auto)
         .await
-        .map_err(|err| TunnelError::Internal(format!("open control stream: {err}")))?;
+        .map_err(map_error)?;
+    if edges.is_empty() {
+        return Err(TunnelError::NoColoAvailable(
+            "edge discovery returned no addresses".to_string(),
+        ));
+    }
+    edges.truncate(edges.len().min(MAX_DIAL_EDGES));
 
-    let payload = serde_json::json!({ "type": "registerTunnel", "tunnelId": tunnel_id });
-    let payload = serde_json::to_vec(&payload)
-        .map_err(|err| TunnelError::Internal(format!("encode control message: {err}")))?;
-    mux::send_frame(&mut send, &payload).await?;
+    let conn = dial_any(endpoint, &edges).await.map_err(map_error)?;
+    let mut options = ConnectionOptions::default_for_quick_tunnel(api::DEFAULT_USER_AGENT);
+    options.replace_existing = replace_existing;
 
-    let _ack = tokio::time::timeout(Duration::from_secs(10), mux::read_frame(&mut recv))
+    let (_details, control) = register_connection(&conn, auth, tunnel_id, conn_index, &options)
         .await
-        .map_err(|_| {
-            TunnelError::ConnectTimeout(
-                "edge did not acknowledge the tunnel registration".to_string(),
-            )
-        })??;
-    let _ = send.finish();
-    Ok(())
+        .map_err(map_error)?;
+    Ok((conn, control))
 }
 
-async fn run_supervisor(
-    endpoint: Arc<quinn::Endpoint>,
-    config: TunnelConfig,
-    mut shutdown_rx: watch::Receiver<bool>,
+#[allow(clippy::too_many_arguments)]
+async fn run_reactor(
+    local_port: u16,
+    endpoint: quinn::Endpoint,
+    auth: TunnelAuth,
+    tunnel_id: Uuid,
+    metrics: SupervisorMetrics,
+    pool: Arc<Pool>,
+    conn: quinn::Connection,
+    control: ControlSession,
+    mut shutdown_rx: oneshot::Receiver<()>,
 ) {
-    let mut workers = Vec::with_capacity(config.connection_count);
-    for _ in 0..config.connection_count {
-        workers.push(tokio::spawn(maintain_connection(
-            endpoint.clone(),
-            config.clone(),
-            shutdown_rx.clone(),
-        )));
-    }
-
-    let _ = shutdown_rx.changed().await;
-    for worker in workers {
-        worker.abort();
-    }
-    endpoint.close(0u32.into(), b"shutdown");
-}
-
-async fn maintain_connection(
-    endpoint: Arc<quinn::Endpoint>,
-    config: TunnelConfig,
-    mut shutdown_rx: watch::Receiver<bool>,
-) {
+    let mut conn = conn;
+    let mut control = Some(control);
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
+
     loop {
-        if *shutdown_rx.borrow() {
+        let (supervisor_shutdown_tx, supervisor_shutdown_rx) = oneshot::channel();
+        let exit = tokio::select! {
+            biased;
+            _ = &mut shutdown_rx => {
+                let _ = supervisor_shutdown_tx.send(());
+                SupervisorExit::Shutdown
+            }
+            exit = supervisor::run(
+                conn.clone(),
+                local_port,
+                metrics.clone(),
+                pool.clone(),
+                supervisor_shutdown_rx,
+            ) => exit,
+        };
+        conn.close(0u32.into(), b"rotate");
+        drop(control.take());
+
+        if matches!(exit, SupervisorExit::Shutdown) {
             return;
         }
 
-        match connect_any(&endpoint, &config).await {
-            Ok((connection, _address)) => {
-                backoff = INITIAL_RECONNECT_BACKOFF;
-                tokio::select! {
-                    _ = listener::serve_connection(connection.clone(), config.target) => {}
-                    _ = shutdown_rx.changed() => {
-                        connection.close(0u32.into(), b"shutdown");
-                        return;
-                    }
+        // The edge dropped us: reconnect with exponential backoff until a new
+        // registration succeeds or shutdown is requested.
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => return,
+                _ = tokio::time::sleep(backoff) => {}
+            }
+            match connect_and_register(&endpoint, &auth, tunnel_id, 0, true).await {
+                Ok((new_conn, new_control)) => {
+                    conn = new_conn;
+                    control = Some(new_control);
+                    backoff = INITIAL_RECONNECT_BACKOFF;
+                    break;
                 }
-                connection.close(0u32.into(), b"reconnect");
-            }
-            Err(error) => {
-                tracing::debug!("tunnel edge connection failed: {error}");
-                tokio::select! {
-                    _ = tokio::time::sleep(backoff) => {}
-                    _ = shutdown_rx.changed() => return,
-                }
-                backoff = (backoff * 2).min(config.reconnect_backoff_cap);
-            }
-        }
-    }
-}
-
-async fn connect_any(
-    endpoint: &quinn::Endpoint,
-    config: &TunnelConfig,
-) -> Result<(quinn::Connection, EdgeAddress), TunnelError> {
-    let mut last_error: Option<TunnelError> = None;
-
-    for address in &config.edge.addresses {
-        let resolved = match address.resolve() {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                last_error = Some(error);
-                continue;
-            }
-        };
-        let server_name = config
-            .edge
-            .server_name
-            .clone()
-            .unwrap_or_else(|| address.server_name().to_string());
-
-        for socket in resolved {
-            let connecting = match endpoint.connect(socket, &server_name) {
-                Ok(connecting) => connecting,
                 Err(error) => {
-                    last_error = Some(TunnelError::Internal(format!(
-                        "start QUIC connection to {socket}: {error}"
-                    )));
-                    continue;
-                }
-            };
-
-            match tokio::time::timeout(config.connect_timeout, connecting).await {
-                Ok(Ok(connection)) => return Ok((connection, address.clone())),
-                Ok(Err(error)) => {
-                    last_error = Some(map_connection_error(error));
-                }
-                Err(_) => {
-                    last_error = Some(TunnelError::ConnectTimeout(format!(
-                        "QUIC handshake to {socket} timed out"
-                    )));
+                    tracing::warn!("tunnel reconnect failed: {error}");
+                    backoff = (backoff * 2).min(MAX_RECONNECT_BACKOFF);
                 }
             }
         }
     }
-
-    Err(last_error
-        .unwrap_or_else(|| TunnelError::NoColoAvailable("no reachable edge address".to_string())))
 }
 
-fn map_connection_error(error: quinn::ConnectionError) -> TunnelError {
+/// Strip any scheme/trailing slash so callers always get a bare hostname.
+fn normalize_hostname(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Map the crate's error model onto the share API's stable codes.
+fn map_error(error: cloudflare_quick_tunnel::TunnelError) -> TunnelError {
+    use cloudflare_quick_tunnel::TunnelError as CrateError;
     match error {
-        quinn::ConnectionError::TimedOut => {
-            TunnelError::ConnectTimeout("QUIC handshake timed out".to_string())
+        CrateError::Api(err) => {
+            TunnelError::RegisterRejected(format!("quick tunnel request failed: {err}"))
         }
-        quinn::ConnectionError::TransportError(ref transport) => {
-            // `crypto_error` variants are surfaced by the transport as a TLS
-            // alert during the handshake.
-            TunnelError::TlsFailed(format!("edge transport error: {transport}"))
+        CrateError::ApiBusiness(errors) => {
+            TunnelError::RegisterRejected(format!("cloudflare rejected the tunnel: {errors:?}"))
         }
-        other => TunnelError::Internal(format!("QUIC connection failed: {other}")),
+        CrateError::ApiNonJson {
+            status,
+            body_snippet,
+        } => TunnelError::RegisterRejected(format!(
+            "cloudflare returned HTTP {status}: {body_snippet}"
+        )),
+        CrateError::Discovery(message) => TunnelError::DnsFailed(message),
+        CrateError::QuicDial { attempts, last } => {
+            let message = format!("after {attempts} attempt(s): {last}");
+            let lower = last.to_ascii_lowercase();
+            if lower.contains("certificate") || lower.contains("tls") {
+                TunnelError::TlsFailed(message)
+            } else {
+                TunnelError::ConnectTimeout(message)
+            }
+        }
+        CrateError::Register(message) => TunnelError::RegisterRejected(message),
+        CrateError::PermanentFailure(attempts) => {
+            TunnelError::ConnectTimeout(format!("supervisor gave up after {attempts} attempts"))
+        }
+        CrateError::Shutdown => TunnelError::Internal("tunnel was shut down".to_string()),
+        CrateError::Internal(message) => TunnelError::Internal(message),
     }
-}
-
-fn make_endpoint(config: &TunnelConfig) -> Result<quinn::Endpoint, TunnelError> {
-    let mut roots = quinn::rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    let provider = Arc::new(quinn::rustls::crypto::ring::default_provider());
-    let mut tls = quinn::rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&quinn::rustls::version::TLS13])
-        .map_err(|err| TunnelError::TlsFailed(format!("build tls client config: {err}")))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    if !config.edge.alpn.is_empty() {
-        tls.alpn_protocols = config.edge.alpn.clone();
-    }
-
-    let quic = quinn::crypto::rustls::QuicClientConfig::try_from(Arc::new(tls))
-        .map_err(|err| TunnelError::TlsFailed(format!("build QUIC client config: {err}")))?;
-    let mut client_config = quinn::ClientConfig::new(Arc::new(quic));
-
-    let idle_timeout = quinn::IdleTimeout::try_from(MAX_IDLE_TIMEOUT)
-        .map_err(|err| TunnelError::Internal(format!("idle timeout out of range: {err}")))?;
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(Some(idle_timeout));
-    transport.keep_alive_interval(Some(KEEP_ALIVE_INTERVAL));
-    client_config.transport_config(Arc::new(transport));
-
-    let bind: SocketAddr = "0.0.0.0:0"
-        .parse()
-        .map_err(|err| TunnelError::Internal(format!("parse bind address: {err}")))?;
-    let mut endpoint = quinn::Endpoint::client(bind)
-        .map_err(|err| TunnelError::Internal(format!("bind tunnel udp socket: {err}")))?;
-    endpoint.set_default_client_config(client_config);
-    Ok(endpoint)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, str::FromStr, time::Duration};
-
-    use super::{INITIAL_RECONNECT_BACKOFF, MAX_IDLE_TIMEOUT, TunnelConfig, config};
-    use crate::tunnel::error::TunnelErrorCode;
+    use super::normalize_hostname;
 
     #[test]
-    fn start_without_edge_addresses_fails_closed() {
-        let target = SocketAddr::from_str("127.0.0.1:53825").expect("addr");
-        let mut config = TunnelConfig::quick(target);
-        config.edge.addresses.clear();
+    fn normalize_hostname_strips_scheme_and_slash() {
+        assert_eq!(
+            normalize_hostname("https://a.trycloudflare.com"),
+            "a.trycloudflare.com"
+        );
+        assert_eq!(
+            normalize_hostname("http://a.trycloudflare.com/"),
+            "a.trycloudflare.com"
+        );
+        assert_eq!(
+            normalize_hostname(" a.trycloudflare.com "),
+            "a.trycloudflare.com"
+        );
+    }
 
-        let error = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
+    #[tokio::test]
+    #[ignore = "requires live Cloudflare edge access"]
+    async fn live_quick_tunnel_serves_local_http() {
+        use std::net::SocketAddr;
+        use std::str::FromStr;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A tiny local HTTP server that answers any request with `ok`.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local server");
+        let local = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let body = b"ok";
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(body).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let target = SocketAddr::from_str(&local.to_string()).expect("target addr");
+        let handle = super::Tunnel::start(super::TunnelConfig::quick(target))
+            .await
+            .expect("tunnel start");
+        let hostname = handle.hostname().to_string();
+        println!("LIVE_URL=https://{hostname}");
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
             .build()
-            .expect("runtime")
-            .block_on(super::Tunnel::start(config))
-            .expect_err("must fail without edge addresses");
-        assert_eq!(error.code(), TunnelErrorCode::NoColoAvailable);
-    }
-
-    #[test]
-    fn reconnect_backoff_doubles_up_to_the_cap() {
-        let cap = Duration::from_secs(4);
-        let mut backoff = INITIAL_RECONNECT_BACKOFF;
-        let mut observed = Vec::new();
-        for _ in 0..6 {
-            observed.push(backoff);
-            backoff = (backoff * 2).min(cap);
+            .expect("client");
+        let mut served = false;
+        for _ in 0..10 {
+            if let Ok(response) = client.get(format!("https://{hostname}/")).send().await {
+                if let Ok(text) = response.text().await {
+                    if text.contains("ok") {
+                        served = true;
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
-        assert_eq!(observed[0], INITIAL_RECONNECT_BACKOFF);
-        assert_eq!(*observed.last().expect("non-empty"), cap);
-    }
 
-    #[test]
-    fn idle_timeout_is_representable() {
-        assert!(quinn::IdleTimeout::try_from(MAX_IDLE_TIMEOUT).is_ok());
-        assert_eq!(config::DEFAULT_TUNNEL_CONNECTIONS, 4);
+        handle.shutdown().await;
+        server.abort();
+        assert!(served, "tunnel did not serve the local response");
     }
 }
