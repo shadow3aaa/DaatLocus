@@ -591,8 +591,15 @@ pub(super) async fn execute_input_outcome(
             view.command_input.clear();
             view.command_feedback = Some(CommandFeedback {
                 title: "THINKING".to_string(),
-                message: if show { "thinking is now visible" } else { "thinking is now hidden" }.to_string(),
-                detail: Some("This TUI-only preference is not written to configuration.".to_string()),
+                message: if show {
+                    "thinking is now visible"
+                } else {
+                    "thinking is now hidden"
+                }
+                .to_string(),
+                detail: Some(
+                    "This TUI-only preference is not written to configuration.".to_string(),
+                ),
                 level: CommandFeedbackLevel::Info,
             });
             view.reset_command_popup();
