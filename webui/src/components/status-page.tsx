@@ -67,6 +67,7 @@ import {
   AgentExpression,
   type AgentExpressionStatus,
 } from "@/components/agent-expression";
+import { ShareEntryButton } from "@/components/share-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -240,6 +241,7 @@ export function AgentPage({
 
   return (
     <AgentChatMockDataContext.Provider value={Boolean(mockSnapshot)}>
+      <ShareSessionContext.Provider value={sessionId}>
       <section
         id="agent"
         aria-label={t("chat.agentPanelAria")}
@@ -270,6 +272,7 @@ export function AgentPage({
           onExportGraph={onExportGraph}
         />
       </section>
+      </ShareSessionContext.Provider>
     </AgentChatMockDataContext.Provider>
   );
 }
@@ -702,6 +705,7 @@ const AGENT_CHAT_EXPRESSION_TRANSITION_MS = 520;
 const AgentChatExpressionTransitionContext =
   createContext<AgentChatExpressionTransitionContextValue | null>(null);
 const AgentChatMockDataContext = createContext(false);
+const ShareSessionContext = createContext<string | null>(null);
 
 function agentChatExpressionSlotKey(
   kind: AgentChatExpressionSlotKind,
@@ -8148,6 +8152,7 @@ function AgentChatReplyActivityLine({
   isLatestReply?: boolean;
 }) {
   const { t } = useTranslation();
+  const shareSessionId = useContext(ShareSessionContext);
   const [hasCopiedReply, setHasCopiedReply] = useState(false);
   const originalText = messageLines.join("\n");
   async function handleCopyReply() {
@@ -8194,6 +8199,13 @@ function AgentChatReplyActivityLine({
               <CopyIcon className="h-3 w-3" aria-hidden="true" />
             )}
           </button>
+          <ShareEntryButton
+            sessionId={shareSessionId}
+            label={t("share.thisSession")}
+            iconOnly
+            iconClassName="h-3 w-3"
+            className="text-[0.7rem] text-muted-foreground/60 hover:bg-muted/50 hover:text-muted-foreground"
+          />
         </div>
       </>
     );
@@ -8250,6 +8262,13 @@ function AgentChatReplyActivityLine({
               <CopyIcon className="h-3 w-3" aria-hidden="true" />
             )}
           </button>
+          <ShareEntryButton
+            sessionId={shareSessionId}
+            label={t("share.thisSession")}
+            iconOnly
+            iconClassName="h-3 w-3"
+            className="text-[0.7rem] text-muted-foreground/60 hover:bg-muted/50 hover:text-muted-foreground"
+          />
         </div>
       </div>
     </>

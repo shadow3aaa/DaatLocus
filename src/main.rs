@@ -51,6 +51,7 @@ mod telegram_transport;
 mod terminal_app;
 mod terminal_logo;
 mod tool_output_spill;
+mod tunnel;
 mod workflow;
 
 fn main() {

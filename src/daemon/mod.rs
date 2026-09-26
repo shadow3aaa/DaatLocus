@@ -68,6 +68,7 @@ mod auth;
 mod logs;
 pub mod session;
 pub mod session_ipc;
+mod share;
 
 pub type SessionTokenStore = Arc<parking_lot::RwLock<HashMap<session::SessionId, String>>>;
 
@@ -470,6 +471,7 @@ struct ServerState {
     connected_clients: Arc<std::sync::atomic::AtomicUsize>,
     sessions: session::SessionRegistry,
     session_tokens: SessionTokenStore,
+    shares: share::ShareRegistry,
     study_ensure_lock: Arc<tokio::sync::Mutex<()>>,
     setup_auth_flows: Arc<parking_lot::Mutex<HashMap<String, PendingSetupProviderAuthFlow>>>,
 }
@@ -675,6 +677,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         connected_clients: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         sessions,
         session_tokens,
+        shares: share::ShareRegistry::new(),
         study_ensure_lock: Arc::new(tokio::sync::Mutex::new(())),
         setup_auth_flows: Arc::new(parking_lot::Mutex::new(HashMap::new())),
     };
@@ -743,6 +746,11 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/study/import/commit", post(study_import_commit_handler))
         .route("/study/export", post(study_export_handler))
         .route("/study/export/download", get(study_export_download_handler))
+        .route("/shares", get(share::list_shares_handler))
+        .route("/shares", post(share::create_share_handler))
+        .route("/shares/{share_id}", get(share::share_status_handler))
+        .route("/shares/{share_id}", delete(share::delete_share_handler))
+        .route("/share/exchange", post(share::share_exchange_handler))
         .with_state(app_state);
 
     let router = router.fallback(get(embedded_webui_handler));
@@ -1489,15 +1497,53 @@ async fn apply_session_title_update(
     }
 }
 
+// The error is a fully-built HTTP response, whose size exceeds clippy's
+// `result_large_err` threshold; boxing it would only allocate on the error path.
+#[allow(clippy::result_large_err)]
+async fn authorize_route(
+    state: &ServerState,
+    headers: &HeaderMap,
+    method: &str,
+    path: &str,
+) -> Result<share::RouteAuth, Response> {
+    share::authorize_route(state, headers, method, path).await
+}
+
+/// When the request is authenticated with a share cookie, verify the addressed
+/// session is inside the share's frozen scope.
+#[allow(clippy::result_large_err)]
+fn authorize_share_session(
+    state: &ServerState,
+    auth: &share::RouteAuth,
+    session_id: &str,
+) -> Result<(), Response> {
+    let Some(access) = auth.share() else {
+        return Ok(());
+    };
+    let Ok(session_id) = session::SessionId::from_string(session_id) else {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    };
+    let Some(info) = state.sessions.get(&session_id) else {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    };
+    access
+        .session_allowed(&info)
+        .map_err(share::share_session_denied_response)
+}
+
 async fn snapshot_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
     Query(query): Query<DashboardSnapshotQuery>,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let auth = match authorize_route(&state, &headers, "GET", "/dashboard/snapshot").await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     if let Some(session_id) = query.session_id.as_deref() {
+        if let Err(response) = authorize_share_session(&state, &auth, session_id) {
+            return response;
+        }
         match session_client_for_request(&state, session_id).await {
             Ok(client) => match client
                 .request(session_ipc::SessionIpcRequest::DashboardSnapshot)
@@ -1536,11 +1582,15 @@ async fn activity_history_handler(
     headers: HeaderMap,
     Query(query): Query<DashboardActivityHistoryQuery>,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let auth = match authorize_route(&state, &headers, "GET", "/dashboard/activity-history").await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
 
     if let Some(session_id) = query.session_id.as_deref() {
+        if let Err(response) = authorize_share_session(&state, &auth, session_id) {
+            return response;
+        }
         match session_client_for_request(&state, session_id).await {
             Ok(client) => match client
                 .request(session_ipc::SessionIpcRequest::DashboardHistoryPage {
@@ -1579,9 +1629,17 @@ async fn workflow_worker_activity_handler(
     headers: HeaderMap,
     Query(query): Query<WorkflowWorkerActivityQuery>,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let auth = match authorize_route(
+        &state,
+        &headers,
+        "GET",
+        "/dashboard/workflow-worker-activity",
+    )
+    .await
+    {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     let Some(session_id) = query.session_id.as_deref() else {
         return (
             StatusCode::BAD_REQUEST,
@@ -1589,6 +1647,9 @@ async fn workflow_worker_activity_handler(
         )
             .into_response();
     };
+    if let Err(response) = authorize_share_session(&state, &auth, session_id) {
+        return response;
+    }
     let Some(run_id) = query.run_id.filter(|value| !value.trim().is_empty()) else {
         return (StatusCode::BAD_REQUEST, "run_id is required").into_response();
     };
@@ -1643,9 +1704,10 @@ async fn input_history_handler(
     headers: HeaderMap,
     Query(query): Query<DashboardInputHistoryQuery>,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let auth = match authorize_route(&state, &headers, "GET", "/dashboard/input-history").await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
 
     let Some(session_id) = query.session_id.as_deref() else {
         return (
@@ -1654,6 +1716,9 @@ async fn input_history_handler(
         )
             .into_response();
     };
+    if let Err(response) = authorize_share_session(&state, &auth, session_id) {
+        return response;
+    }
 
     match session_client_for_request(&state, session_id).await {
         Ok(client) => match client
@@ -1684,9 +1749,11 @@ async fn activity_history_count_handler(
     headers: HeaderMap,
     Query(query): Query<DashboardSnapshotQuery>,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let auth =
+        match authorize_route(&state, &headers, "GET", "/dashboard/activity-history/count").await {
+            Ok(auth) => auth,
+            Err(response) => return response,
+        };
 
     let Some(session_id) = query.session_id.as_deref() else {
         return (
@@ -1695,6 +1762,9 @@ async fn activity_history_count_handler(
         )
             .into_response();
     };
+    if let Err(response) = authorize_share_session(&state, &auth, session_id) {
+        return response;
+    }
 
     match session_client_for_request(&state, session_id).await {
         Ok(client) => match client
@@ -1753,21 +1823,40 @@ async fn stream_handler(
     headers: HeaderMap,
     Query(query): Query<DashboardStreamQuery>,
 ) -> impl IntoResponse {
-    let authorized = if let Some(token) = query
+    // Accept the long-lived daemon token via the `token` query parameter or
+    // the `Authorization` header, and fall back to the share cookie. The share
+    // cookie path lets the WebUI stop putting the token in the query string.
+    let mut auth = if let Some(token) = query
         .token
         .as_deref()
         .map(str::trim)
         .filter(|token| !token.is_empty())
     {
-        state.auth_registry.authorize_token(token).await
+        state
+            .auth_registry
+            .authorize_token(token)
+            .await
+            .then_some(share::RouteAuth::Token)
+    } else if state.auth_registry.authorize_headers(&headers).await {
+        Some(share::RouteAuth::Token)
     } else {
-        state.auth_registry.authorize_headers(&headers).await
+        None
     };
 
-    if !authorized {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if auth.is_none() {
+        match share::authorize_route(&state, &headers, "GET", "/dashboard/stream").await {
+            Ok(found) => auth = Some(found),
+            Err(response) => return response,
+        }
     }
+    let Some(auth) = auth else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
     if let Some(session_id) = query.session_id.as_deref() {
+        if let Err(response) = authorize_share_session(&state, &auth, session_id) {
+            return response;
+        }
         let sessions = state.sessions.clone();
         let telegram_acl = state.telegram_acl.clone();
         let session_id = session_id.to_string();
@@ -1822,9 +1911,10 @@ async fn command_handler(
     headers: HeaderMap,
     Json(request): Json<CommandRequest>,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let auth = match authorize_route(&state, &headers, "POST", "/commands/run").await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     if !state.lifecycle.get().allows_runtime_commands() {
         return runtime_not_ready_response(state.lifecycle.get());
     }
@@ -1842,6 +1932,9 @@ async fn command_handler(
         }
     };
     if let Some(session_id) = request.session_id.as_deref() {
+        if let Err(response) = authorize_share_session(&state, &auth, session_id) {
+            return response;
+        }
         let trimmed = request.command.trim();
         if let Some(command) = trimmed.strip_prefix('/')
             && dashboard_command_is_manager_owned(command)
@@ -1993,9 +2086,10 @@ async fn dashboard_action_handler(
     headers: HeaderMap,
     Json(request): Json<DashboardActionRequest>,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let auth = match authorize_route(&state, &headers, "POST", "/dashboard/action").await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     if !state.lifecycle.get().allows_runtime_commands() {
         return runtime_not_ready_response(state.lifecycle.get());
     }
@@ -2007,6 +2101,9 @@ async fn dashboard_action_handler(
         return Json(DashboardActionResponse { result }).into_response();
     }
     if let Some(session_id) = request.session_id.as_deref() {
+        if let Err(response) = authorize_share_session(&state, &auth, session_id) {
+            return response;
+        }
         let client = match session_client_for_request(&state, session_id).await {
             Ok(client) => client,
             Err(err) => {
@@ -2447,15 +2544,21 @@ async fn session_list_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    Json(
-        state
-            .sessions
-            .list()
+    let auth = match authorize_route(&state, &headers, "GET", "/sessions").await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    let sessions = state.sessions.list();
+    let visible = match &auth {
+        share::RouteAuth::Token => sessions,
+        share::RouteAuth::Share(access) => sessions
             .into_iter()
-            .filter(|info| !info.scope.is_study())
+            .filter(|info| access.session_allowed(info).is_ok())
+            .collect(),
+    };
+    Json(
+        visible
+            .into_iter()
             .map(session::SessionSummary::from)
             .collect::<Vec<_>>(),
     )

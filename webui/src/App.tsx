@@ -11,6 +11,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { AppSidebar } from "@/components/app-sidebar";
+import { ShareDialogHost, ShareFloatingButton } from "@/components/share-dialog";
 import { LoginPage } from "@/components/login-page";
 import type { LogsPageMockData } from "@/components/logs-page";
 import type { StudyGraphSummaryProps } from "@/components/study-page";
@@ -50,6 +51,7 @@ import {
 } from "@/lib/daemon-api";
 import { MOCK_STUDY_DASHBOARD_SNAPSHOT, MOCK_STUDY_GRAPH } from "@/lib/study-mock";
 import { setWebUiLanguage } from "@/lib/i18n";
+import { currentShareId, isShareMode } from "@/lib/share-mode";
 // Lazy-loaded page components for smaller initial bundle
 const SettingsPage = lazy(() => import("@/components/settings-page").then(m => ({ default: m.SettingsPage })));
 const LogsPage = lazy(() => import("@/components/logs-page").then(m => ({ default: m.LogsPage })));
@@ -127,6 +129,10 @@ export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(() =>
     Boolean(getStoredDaemonToken().trim()),
   );
+  // A visitor arriving through a share link carries no daemon token: the share
+  // cookie (HttpOnly) authenticates them instead.
+  const [shareModeActive, setShareModeActive] = useState(() => isShareMode());
+  const isUnlocked = isAuthenticated || shareModeActive;
   const [isCheckingStoredToken, setIsCheckingStoredToken] = useState(() =>
     Boolean(getStoredDaemonToken().trim()),
   );
@@ -430,8 +436,20 @@ export default function App() {
   }
 
   const shouldShowSetup =
-    shouldForceSetupPage() ||
-    (configReadiness !== null && configReadiness.kind !== "complete");
+    !shareModeActive &&
+    (shouldForceSetupPage() ||
+      (configReadiness !== null && configReadiness.kind !== "complete"));
+
+  // A visitor arriving with a `#s=<share_id>` link must exchange the PIN for a
+  // share cookie before the app shell is shown.
+  if (!shareModeActive && currentShareId()) {
+    return (
+      <ShareDialogHost
+        sessions={sessions}
+        onShareUnlocked={() => setShareModeActive(true)}
+      />
+    );
+  }
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -457,8 +475,9 @@ export default function App() {
         ) : (
           <LoginPage onAuthenticated={() => setIsAuthenticated(true)} />
         )
-      ) : isAuthenticated ? (
+      ) : isUnlocked ? (
         <SidebarProvider>
+          <ShareDialogHost sessions={sessions} />
           <AppSidebar
             activePage={activePage}
             sessions={sessions}
@@ -478,6 +497,7 @@ export default function App() {
             onDeleteSession={handleDeleteSession}
           />
           <SidebarInset className="min-h-screen">
+            <ShareFloatingButton />
             <Suspense fallback={<div className="flex items-center justify-center p-8 min-h-screen"><Spinner /></div>}>
               {renderAuthenticatedPage(
                 activePage,
@@ -539,6 +559,7 @@ function MockAgentApp() {
   return (
     <main className="min-h-screen bg-background text-foreground">
       <SidebarProvider>
+        <ShareDialogHost sessions={MOCK_SIDEBAR_SESSIONS} />
         <AppSidebar
           activePage="agent"
           sessions={MOCK_SIDEBAR_SESSIONS}
@@ -553,6 +574,7 @@ function MockAgentApp() {
           onDeleteSession={async () => undefined}
         />
         <SidebarInset className="min-h-screen">
+          <ShareFloatingButton />
           <AgentPage
             sessionId={MOCK_SESSION.session_id}
             mockSnapshot={mockSnapshot}
@@ -945,6 +967,7 @@ function SetupErrorPage({
 function preferredSession(sessions: SessionInfo[]) {
   return (
     sessions.find((session) => session.scope.kind === "general") ??
+    sessions.find((session) => session.scope.kind !== "study") ??
     sessions[0] ??
     null
   );

@@ -51,6 +51,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import type { SessionInfo } from "@/lib/daemon-api";
+import { filterNavigationForShareMode, isShareMode } from "@/lib/share-mode";
 import type { StudyGraphSummaryProps } from "@/components/study-page";
 import { studyProgressColor } from "@/lib/study-circle-layout";
 import { cn } from "@/lib/utils";
@@ -159,6 +160,12 @@ function AppSidebarBody({
 }: AppSidebarProps) {
   const { setOpenMobile } = useSidebar();
   const { t } = useTranslation();
+  // A share visitor only reaches the agent and status pages; everything else is
+  // hidden so the navigation does not offer routes the share would 403 on.
+  const shareMode = isShareMode();
+  const navigationEntries = shareMode
+    ? filterNavigationForShareMode(navigationItems)
+    : navigationItems;
   const sessionTree = buildSessionTree(sessions);
   const selectedProjectDir =
     sessions.find((session) => session.session_id === selectedSessionId)?.project_dir ??
@@ -202,27 +209,36 @@ function AppSidebarBody({
   return (
     <>
       <SidebarContent className="gap-1 px-2 py-2">
-        <div className="mb-1 grid grid-cols-2 gap-1 rounded-lg bg-muted p-1">
-          <Button
-            type="button"
-            size="sm"
-            variant={activePage === "agent" ? "secondary" : "ghost"}
-            aria-pressed={activePage === "agent"}
-            onClick={() => switchMode("agent")}
-            className="h-7"
+        <div className="mb-1 flex items-center gap-1">
+          <div
+            className={cn(
+              "grid flex-1 grid-cols-2 gap-1 rounded-lg bg-muted p-1",
+              shareMode && "grid-cols-1",
+            )}
           >
-            {t("navigation.agent")}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant={activePage === "study" ? "secondary" : "ghost"}
-            aria-pressed={activePage === "study"}
-            onClick={() => switchMode("study")}
-            className="h-7"
-          >
-            {t("navigation.study")}
-          </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={activePage === "agent" ? "secondary" : "ghost"}
+              aria-pressed={activePage === "agent"}
+              onClick={() => switchMode("agent")}
+              className="h-7"
+            >
+              {t("navigation.agent")}
+            </Button>
+            {!shareMode ? (
+              <Button
+                type="button"
+                size="sm"
+                variant={activePage === "study" ? "secondary" : "ghost"}
+                aria-pressed={activePage === "study"}
+                onClick={() => switchMode("study")}
+                className="h-7"
+              >
+                {t("navigation.study")}
+              </Button>
+            ) : null}
+          </div>
         </div>
 
         {sessionError ? (
@@ -313,7 +329,7 @@ function AppSidebarBody({
       <SidebarFooter>
         <SidebarSeparator className="mx-0" />
         <div className="flex flex-col gap-1">
-          {navigationItems.map((item) => {
+          {navigationEntries.map((item) => {
             const Icon = item.icon;
             const label = t(item.labelKey);
 

@@ -1,4 +1,5 @@
 import { getStoredDaemonToken, notifyDaemonAuthFailed } from "@/lib/daemon-auth";
+import { isShareMode } from "@/lib/share-mode";
 
 export type DaemonLifecycleState =
   | "initializing"
@@ -1595,8 +1596,11 @@ export function subscribeDashboardSnapshots({
   onClose,
 }: DashboardSnapshotSubscriptionOptions): DashboardSnapshotSubscription {
   const daemonToken = token.trim();
+  // A share visitor carries no daemon token: the share cookie is HttpOnly and
+  // sent automatically with the same-origin WebSocket handshake.
+  const shareMode = isShareMode();
 
-  if (!daemonToken) {
+  if (!daemonToken && !shareMode) {
     throw new DaemonApiError("Missing daemon token for dashboard stream.");
   }
 
@@ -1639,7 +1643,11 @@ export function subscribeDashboardSnapshots({
 function dashboardStreamUrl(token: string, sessionId: string) {
   const url = new URL("/dashboard/stream", window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("token", token);
+  // Only pass a token when there is one; share visitors rely on the cookie so
+  // the long-lived daemon token never lands in the request URL.
+  if (token) {
+    url.searchParams.set("token", token);
+  }
   url.searchParams.set("session_id", sessionId);
   return url.toString();
 }
@@ -2140,4 +2148,213 @@ async function parseJsonResponse<T>(
   }
 
   return response.json() as Promise<T>;
+}
+
+// ---------------------------------------------------------------------------
+// Temporary session share
+// ---------------------------------------------------------------------------
+
+/** Account scope requested when creating a share. */
+export type ShareScopeRequest =
+  | { kind: "sessions"; session_ids: string[] }
+  | { kind: "all_sessions" }
+  | { kind: "unrestricted" };
+
+export type ShareState = "preparing" | "ready" | "failed";
+
+export type ShareFailure = {
+  code: string;
+  message: string;
+};
+
+/** Read-only view of a share returned by `GET /shares` and `GET /shares/{id}`. */
+export type ShareSummary = {
+  share_id: string;
+  state: ShareState;
+  scope_kind: "sessions" | "unrestricted";
+  session_ids: string[];
+  created_at_ms: number;
+  expires_at_ms: number;
+  last_used_at_ms: number | null;
+  url: string | null;
+  /** Only present on the owner-facing detail endpoint. */
+  pin?: string;
+  error?: ShareFailure;
+};
+
+type ShareCreateResponse = {
+  share_id: string;
+  state: ShareState;
+};
+
+type ShareExchangeResponse = {
+  ok: boolean;
+};
+
+// Dev mock: the `?mock=...` pages have no daemon or tunnel, so fake the share
+// lifecycle locally. The real backend stays the source of truth elsewhere.
+const MOCK_SHARE_ID = "mock-share";
+const MOCK_SHARE_PREPARING_MS = 1200;
+let mockShareCreatedAtMs = 0;
+
+/** True on dev mock pages, where `/shares` has no backing daemon. */
+function isShareMockMode(): boolean {
+  return (
+    import.meta.env.DEV &&
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).has("mock")
+  );
+}
+
+/** A fake share that resolves from `preparing` to `ready` after a short delay. */
+function mockShareSummary(): ShareSummary {
+  const createdAt = mockShareCreatedAtMs || Date.now();
+  const ready = Date.now() - createdAt >= MOCK_SHARE_PREPARING_MS;
+  return {
+    share_id: MOCK_SHARE_ID,
+    state: ready ? "ready" : "preparing",
+    scope_kind: "unrestricted",
+    session_ids: [],
+    created_at_ms: createdAt,
+    expires_at_ms: createdAt + 2 * 60 * 60 * 1000,
+    last_used_at_ms: null,
+    url: ready ? "https://mock-share.trycloudflare.com/#s=mock-share" : null,
+    pin: ready ? "1234" : undefined,
+  };
+}
+
+/** Create a share; the tunnel is prepared asynchronously. */
+export async function createShare({
+  scope,
+  signal,
+  token = getStoredDaemonToken(),
+}: FetchOptions & { scope: ShareScopeRequest }): Promise<ShareCreateResponse> {
+  if (isShareMockMode()) {
+    mockShareCreatedAtMs = Date.now();
+    return { share_id: MOCK_SHARE_ID, state: "preparing" };
+  }
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for share creation.");
+  }
+
+  const response = await fetch("/shares", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ scope }),
+    signal,
+  });
+
+  return parseJsonResponse<ShareCreateResponse>(response, "Create share");
+}
+
+/** List active shares (never includes PINs). */
+export async function fetchShares({
+  signal,
+  token = getStoredDaemonToken(),
+}: FetchOptions = {}): Promise<ShareSummary[]> {
+  if (isShareMockMode()) {
+    return [];
+  }
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for share listing.");
+  }
+
+  const response = await fetch("/shares", {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  return parseJsonResponse<ShareSummary[]>(response, "List shares");
+}
+
+/** Poll a single share; includes the PIN so the owner can hand it over. */
+export async function fetchShare({
+  shareId,
+  signal,
+  token = getStoredDaemonToken(),
+}: FetchOptions & { shareId: string }): Promise<ShareSummary> {
+  if (isShareMockMode()) {
+    return mockShareSummary();
+  }
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for share status.");
+  }
+
+  const response = await fetch(`/shares/${encodeURIComponent(shareId)}`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  return parseJsonResponse<ShareSummary>(response, "Share status");
+}
+
+/** Revoke a share. */
+export async function deleteShare({
+  shareId,
+  signal,
+  token = getStoredDaemonToken(),
+}: FetchOptions & { shareId: string }): Promise<void> {
+  if (isShareMockMode()) {
+    mockShareCreatedAtMs = 0;
+    return;
+  }
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for share deletion.");
+  }
+
+  const response = await fetch(`/shares/${encodeURIComponent(shareId)}`, {
+    method: "DELETE",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  await parseJsonResponse<unknown>(response, "Delete share");
+}
+
+/**
+ * Exchange a 4-digit PIN for the share cookie. Tokenless: this is the only
+ * endpoint a share visitor may call without credentials.
+ */
+export async function exchangeSharePin({
+  shareId,
+  pin,
+  signal,
+}: FetchOptions & { shareId: string; pin: string }): Promise<ShareExchangeResponse> {
+  if (isShareMockMode()) {
+    return { ok: true };
+  }
+  const response = await fetch("/share/exchange", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ share_id: shareId, pin }),
+    signal,
+  });
+
+  return parseJsonResponse<ShareExchangeResponse>(response, "Share exchange");
 }
