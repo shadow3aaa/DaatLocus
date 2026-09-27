@@ -268,14 +268,16 @@ function AppSidebarBody({
           highlighted={selectedProjectDir !== null}
           onOpenChange={setProjectsOpen}
           actions={
-            <NewCodingSessionMenu
-              projectGroups={sessionTree.projectGroups}
-              disabled={isCreatingSession}
-              onCreateSession={(projectDir) => {
-                onCreateSession(projectDir);
-                closeMobile();
-              }}
-            />
+            shareMode ? undefined : (
+              <NewCodingSessionMenu
+                projectGroups={sessionTree.projectGroups}
+                disabled={isCreatingSession}
+                onCreateSession={(projectDir) => {
+                  onCreateSession(projectDir);
+                  closeMobile();
+                }}
+              />
+            )
           }
         >
           {sessionTree.projectGroups.length > 0 ? (
@@ -660,6 +662,7 @@ function ProjectSessionGroup({
   onRequestDeleteSession: (session: SessionInfo) => void;
 }) {
   const { t } = useTranslation();
+  const shareMode = isShareMode();
   const [open, setOpen] = useState(true);
   const newSessionLabel = t("sidebar.newSessionInProject", {
     project: group.label,
@@ -689,18 +692,20 @@ function ProjectSessionGroup({
           <FolderIcon className="size-4 shrink-0 text-sidebar-foreground/75" />
           <span className="min-w-0 flex-1 truncate">{group.label}</span>
         </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          aria-label={newSessionLabel}
-          title={newSessionLabel}
-          disabled={isCreatingSession}
-          onClick={onCreateSession}
-          className="mr-1"
-        >
-          <PlusIcon />
-        </Button>
+        {shareMode ? null : (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label={newSessionLabel}
+            title={newSessionLabel}
+            disabled={isCreatingSession}
+            onClick={onCreateSession}
+            className="mr-1"
+          >
+            <PlusIcon />
+          </Button>
+        )}
       </div>
 
       {open ? (
@@ -743,6 +748,7 @@ function ConversationSessionGroup({
   onRequestDeleteSession: (session: SessionInfo) => void;
 }) {
   const { t } = useTranslation();
+  const shareMode = isShareMode();
 
   return (
     <SidebarSessionSection
@@ -751,17 +757,19 @@ function ConversationSessionGroup({
       highlighted={highlighted}
       onOpenChange={onOpenChange}
       actions={
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label={t("sidebar.newConversation")}
-          title={t("sidebar.newConversation")}
-          disabled={isCreatingSession}
-          onClick={onCreateSession}
-        >
-          <PlusIcon />
-        </Button>
+        shareMode ? undefined : (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={t("sidebar.newConversation")}
+            title={t("sidebar.newConversation")}
+            disabled={isCreatingSession}
+            onClick={onCreateSession}
+          >
+            <PlusIcon />
+          </Button>
+        )
       }
     >
       {sessions.length > 0 ? (
@@ -829,6 +837,7 @@ function SessionRow({
   onRequestDeleteSession: (session: SessionInfo) => void;
 }) {
   const { t } = useTranslation();
+  const shareMode = isShareMode();
   const title = sessionTitle(session, t("common.untitledSession"));
   const isDeleting = deletingSessionId === session.session_id;
 
@@ -851,21 +860,23 @@ function SessionRow({
             {relativeSessionTime(session, t)}
           </span>
         </SidebarMenuButton>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          aria-label={t("sidebar.deleteSessionAria", { title })}
-          title={t("sidebar.deleteSessionTitle")}
-          disabled={deletingSessionId !== null}
-          onClick={() => onRequestDeleteSession(session)}
-          className={cn(
-            "absolute top-1 right-1",
-            isDeleting && "opacity-100",
-          )}
-        >
-          <Trash2Icon />
-        </Button>
+        {shareMode ? null : (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label={t("sidebar.deleteSessionAria", { title })}
+            title={t("sidebar.deleteSessionTitle")}
+            disabled={deletingSessionId !== null}
+            onClick={() => onRequestDeleteSession(session)}
+            className={cn(
+              "absolute top-1 right-1",
+              isDeleting && "opacity-100",
+            )}
+          >
+            <Trash2Icon />
+          </Button>
+        )}
       </div>
     </SidebarMenuItem>
   );
