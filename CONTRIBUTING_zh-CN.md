@@ -31,6 +31,12 @@ cargo deny --locked check bans sources licenses
 
 提交修改前，请在本地运行相关检查。对于高风险 runtime 变更，应增加聚焦测试，或写清楚人工验证结果。
 
+同样的检查也提供了本地 pre-commit hook：
+
+```bash
+scripts/install-git-hooks.sh
+```
+
 ## TUI 性能命令
 
 `tui-perf-cmd` 会启用一个隐藏的开发者命令，用于确定性地检查 dashboard 渲染性能。它是非默认 feature，不属于普通 CLI 功能面。
@@ -161,9 +167,7 @@ Runtime error correction 改的是全局工具和协议约束。Workflow improve
 - browser reference freshness；
 - filesystem sandbox；
 - Coding/SCOPE edit 与 propagation review 边界；
-- workspace app worker lifecycle 与 schema validation；
 - provider credentials 与 OAuth storage；
-- Hindsight retain / recall 集成；
 - sleep-time contract 与 workflow evolution。
 
 高风险修改应当尽量小、可审查，并在可行时加入针对性测试。

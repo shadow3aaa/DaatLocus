@@ -1660,14 +1660,9 @@ Do not use skill as:
 
 ### Memory
 
-### Memory
+`Memory` holds the runtime conversation: the current thread context and its compacted history records.
 
-`Memory` has two parts:
-
-- runtime conversation: the current thread context
-- hindsight queue: long-term memory items waiting to be retained or already retained
-
-Memory serves thread continuity and long-term experience accumulation. It does not serve mechanical state synchronization.
+Memory serves thread continuity. It does not serve mechanical state synchronization.
 
 ### Sleep / Self-Improvement
 

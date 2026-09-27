@@ -1,20 +1,9 @@
 /target
-/.githooks
-/.wix
-/assets/hindsight-sidecars/*.tar.zst
-/assets/hindsight-sidecars/*.tzst
-/assets/hindsight-sidecars/*.tar.gz
-/assets/hindsight-sidecars/*.tgz
-/assets/hindsight-sidecars/*.zip
-/assets/hindsight-sidecars/manifest.toml
 
 # WebUI local package manager state and build output
 /webui/dist/
 /webui/node_modules/
-scope-engine.zip
 .DS_Store
 
 # Local verification and browser test artifacts
-/target-actor-verify/
-/target-live-rebuild/
 /webui/.tmp*

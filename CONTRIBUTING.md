@@ -43,6 +43,12 @@ cargo deny --locked check bans sources licenses
 Run the relevant subset locally before submitting changes. For high-risk
 runtime changes, add focused tests or include a clear manual verification note.
 
+The same checks are available as a local pre-commit hook:
+
+```bash
+scripts/install-git-hooks.sh
+```
+
 ## TUI Performance Command
 
 `tui-perf-cmd` enables a hidden developer command for deterministic dashboard
@@ -203,9 +209,7 @@ Treat these areas as high risk:
 - browser reference freshness
 - filesystem sandboxing
 - Coding/SCOPE edit and propagation review boundaries
-- workspace app worker lifecycle and schema validation
 - provider credentials and OAuth storage
-- Hindsight retain and recall integration
 - sleep-time contract and workflow evolution
 
 High-risk changes should be small, reviewable, and covered by targeted tests
