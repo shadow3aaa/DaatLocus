@@ -1,11 +1,11 @@
 /**
  * Front-end share mode.
  *
- * A share is derived from the `#s=<share_id>` URL fragment — the only thing a
- * share link carries, since the 4-digit PIN never travels in the link — or from
- * a flag stored in `sessionStorage` after a successful PIN exchange. The share
- * session cookie itself is `HttpOnly`, so JavaScript cannot read it directly;
- * that is why the storage flag exists.
+ * A share link carries only `#s=<share_id>`; the 4-digit PIN never travels in
+ * the link. The share session cookie is `HttpOnly`, so JavaScript cannot read
+ * it directly — instead a flag is stored in `sessionStorage` after a successful
+ * PIN exchange. "Active" share mode means that flag is set (the cookie exists),
+ * *not* merely that the link is present.
  */
 
 export const SHARE_FRAGMENT_PARAM = "s";
@@ -41,13 +41,15 @@ export function parseShareIdFromHash(hash: string): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-/** Resolve share mode from the raw hash and the stored post-exchange flag. */
+/**
+ * Resolve share mode from the raw hash and the stored post-exchange flag.
+ *
+ * The `#s=` fragment only carries the share id; it does not mean the PIN was
+ * exchanged. `active` is therefore the post-exchange flag, so a link that has
+ * not been unlocked yet is inactive but still carries a `shareId`.
+ */
 export function readShareMode(hash: string, storedFlag: boolean): ShareMode {
-  const shareId = parseShareIdFromHash(hash);
-  if (shareId) {
-    return { active: true, shareId };
-  }
-  return { active: storedFlag, shareId: null };
+  return { active: storedFlag, shareId: parseShareIdFromHash(hash) };
 }
 
 /** Remove the `s` parameter from a hash, preserving any other parameters. */

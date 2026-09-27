@@ -25,12 +25,16 @@ describe("parseShareIdFromHash", () => {
 });
 
 describe("readShareMode", () => {
-  test("is active when the fragment carries a share id", () => {
-    expect(readShareMode("#s=abc", false)).toEqual({ active: true, shareId: "abc" });
+  test("a bare link is not active until the PIN is exchanged", () => {
+    expect(readShareMode("#s=abc", false)).toEqual({ active: false, shareId: "abc" });
   });
 
   test("is active after a stored exchange even without the fragment", () => {
     expect(readShareMode("#agent", true)).toEqual({ active: true, shareId: null });
+  });
+
+  test("stays active when the exchange flag and a fragment are both present", () => {
+    expect(readShareMode("#s=abc", true)).toEqual({ active: true, shareId: "abc" });
   });
 
   test("is inactive otherwise", () => {
