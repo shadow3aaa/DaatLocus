@@ -53,12 +53,12 @@ describe("stripShareFragment", () => {
 });
 
 describe("navigation filtering", () => {
-  test("share mode hides logs, study, and files", () => {
+  test("share mode hides logs and files", () => {
     expect(shareModeAllowsPage("agent")).toBe(true);
     expect(shareModeAllowsPage("status")).toBe(true);
     expect(shareModeAllowsPage("settings")).toBe(true);
+    expect(shareModeAllowsPage("study")).toBe(true);
     expect(shareModeAllowsPage("logs")).toBe(false);
-    expect(shareModeAllowsPage("study")).toBe(false);
   });
 
   test("filters navigation items by page", () => {
@@ -66,12 +66,14 @@ describe("navigation filtering", () => {
       { page: "agent", labelKey: "a" },
       { page: "status", labelKey: "b" },
       { page: "settings", labelKey: "c" },
-      { page: "logs", labelKey: "d" },
+      { page: "study", labelKey: "d" },
+      { page: "logs", labelKey: "e" },
     ];
     expect(filterNavigationForShareMode(items).map((item) => item.page)).toEqual([
       "agent",
       "status",
       "settings",
+      "study",
     ]);
   });
 });

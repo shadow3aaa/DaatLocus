@@ -213,7 +213,6 @@ function AppSidebarBody({
           <div
             className={cn(
               "grid flex-1 grid-cols-2 gap-1 rounded-lg bg-muted p-1",
-              shareMode && "grid-cols-1",
             )}
           >
             <Button
@@ -226,18 +225,16 @@ function AppSidebarBody({
             >
               {t("navigation.agent")}
             </Button>
-            {!shareMode ? (
-              <Button
-                type="button"
-                size="sm"
-                variant={activePage === "study" ? "secondary" : "ghost"}
-                aria-pressed={activePage === "study"}
-                onClick={() => switchMode("study")}
-                className="h-7"
-              >
-                {t("navigation.study")}
-              </Button>
-            ) : null}
+            <Button
+              type="button"
+              size="sm"
+              variant={activePage === "study" ? "secondary" : "ghost"}
+              aria-pressed={activePage === "study"}
+              onClick={() => switchMode("study")}
+              className="h-7"
+            >
+              {t("navigation.study")}
+            </Button>
           </div>
         </div>
 

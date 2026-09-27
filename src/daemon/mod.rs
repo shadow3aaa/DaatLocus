@@ -2778,9 +2778,10 @@ async fn study_ensure_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let auth = match share::authorize_route(&state, &headers, "POST", "/study/ensure").await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     if let Some(response) = config_not_ready_json_response().await {
         return response;
     }
@@ -2791,6 +2792,9 @@ async fn study_ensure_handler(
             return study_error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{err:?}"));
         }
     };
+    if let Err(response) = authorize_share_session(&state, &auth, info.session_id.as_str()) {
+        return response;
+    }
     match session_client_for_id(
         &state.sessions,
         &state.session_tokens,
@@ -2849,8 +2853,12 @@ async fn study_graph_handler(
     headers: HeaderMap,
     Query(query): Query<StudySessionQuery>,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let auth = match share::authorize_route(&state, &headers, "GET", "/study/graph").await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    if let Err(response) = authorize_share_session(&state, &auth, &query.session_id) {
+        return response;
     }
     if let Some(response) = config_not_ready_json_response().await {
         return response;
@@ -2873,8 +2881,12 @@ async fn study_node_handler(
     headers: HeaderMap,
     Query(query): Query<StudyNodeQuery>,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let auth = match share::authorize_route(&state, &headers, "GET", "/study/node").await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    if let Err(response) = authorize_share_session(&state, &auth, &query.session_id) {
+        return response;
     }
     if let Some(response) = config_not_ready_json_response().await {
         return response;
@@ -2901,8 +2913,12 @@ async fn study_progress_handler(
     headers: HeaderMap,
     Json(body): Json<StudyProgressBody>,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let auth = match share::authorize_route(&state, &headers, "POST", "/study/progress").await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    if let Err(response) = authorize_share_session(&state, &auth, &body.session_id) {
+        return response;
     }
     if let Some(response) = config_not_ready_json_response().await {
         return response;

@@ -1703,9 +1703,7 @@ export async function ensureStudySession({
 }: FetchOptions = {}): Promise<SessionInfo> {
   const daemonToken = token.trim();
 
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for study session.");
-  }
+  ensureDaemonAuth(daemonToken, "study session");
 
   const response = await fetch("/study/ensure", {
     method: "POST",
@@ -1726,9 +1724,7 @@ export async function fetchStudyGraph({
 }: FetchOptions & { sessionId: string }): Promise<StudyGraphSnapshot> {
   const daemonToken = token.trim();
 
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for study graph.");
-  }
+  ensureDaemonAuth(daemonToken, "study graph");
 
   const url = new URL("/study/graph", window.location.href);
   url.searchParams.set("session_id", sessionId);
@@ -1756,9 +1752,7 @@ export async function fetchStudyNode({
 }): Promise<StudyNodeDetail> {
   const daemonToken = token.trim();
 
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for study node.");
-  }
+  ensureDaemonAuth(daemonToken, "study node");
 
   const url = new URL("/study/node", window.location.href);
   url.searchParams.set("session_id", sessionId);
@@ -1791,9 +1785,7 @@ export async function updateStudyProgress({
 }): Promise<StudyProgressUpdate> {
   const daemonToken = token.trim();
 
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for study progress.");
-  }
+  ensureDaemonAuth(daemonToken, "study progress");
 
   const body: {
     session_id: string;

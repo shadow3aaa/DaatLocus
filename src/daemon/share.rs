@@ -580,6 +580,10 @@ impl ShareAccess {
             ("POST", "/commands/run") => true,
             ("POST", "/dashboard/action") => true,
             ("GET", "/status/summary") => true,
+            ("POST", "/study/ensure") => true,
+            ("GET", "/study/graph") => true,
+            ("GET", "/study/node") => true,
+            ("POST", "/study/progress") => true,
             ("GET", path) if path.starts_with("/dashboard/attachments/") => true,
             _ => false,
         }
@@ -1041,6 +1045,10 @@ mod tests {
         assert!(access.allows("POST", "/share/exchange"));
         assert!(access.allows("GET", "/sessions"));
         assert!(access.allows("GET", "/status/summary"));
+        assert!(access.allows("POST", "/study/ensure"));
+        assert!(access.allows("GET", "/study/graph"));
+        assert!(access.allows("GET", "/study/node"));
+        assert!(access.allows("POST", "/study/progress"));
     }
 
     #[test]
@@ -1061,8 +1069,6 @@ mod tests {
             ("POST", "/sessions"),
             ("DELETE", "/sessions/abc"),
             ("POST", "/sessions/abc/title"),
-            ("POST", "/study/ensure"),
-            ("GET", "/study/graph"),
             ("POST", "/send"),
             ("POST", "/daemon/shutdown"),
             ("POST", "/daemon/restart"),
