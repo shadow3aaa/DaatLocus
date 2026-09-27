@@ -79,13 +79,15 @@ export function ShareDialogHost({
           }}
         />
       ) : null}
-      <ShareDialog
-        open={open}
-        sessions={sessions}
-        initialSessionId={initialSessionId}
-        initialUnrestricted={initialUnrestricted}
-        onOpenChange={setOpen}
-      />
+      {isShareMode() ? null : (
+        <ShareDialog
+          open={open}
+          sessions={sessions}
+          initialSessionId={initialSessionId}
+          initialUnrestricted={initialUnrestricted}
+          onOpenChange={setOpen}
+        />
+      )}
     </>
   );
 }
@@ -598,6 +600,11 @@ export function ShareEntryButton({
   unrestricted?: boolean;
 }) {
   const { t } = useTranslation();
+
+  // A share visitor must never be able to hand out another share.
+  if (isShareMode()) {
+    return null;
+  }
   return (
     <button
       type="button"
