@@ -21,14 +21,14 @@ pub mod error;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cloudflare_quick_tunnel::api::{self, request_tunnel};
-use cloudflare_quick_tunnel::edge::{self, IpVersionFilter};
-use cloudflare_quick_tunnel::pool::Pool;
-use cloudflare_quick_tunnel::quic_dial::{build_endpoint, dial_any};
-use cloudflare_quick_tunnel::rpc::{
+use dl_cloudflare_quick_tunnel::api::{self, request_tunnel};
+use dl_cloudflare_quick_tunnel::edge::{self, IpVersionFilter};
+use dl_cloudflare_quick_tunnel::pool::Pool;
+use dl_cloudflare_quick_tunnel::quic_dial::{build_endpoint, dial_any};
+use dl_cloudflare_quick_tunnel::rpc::{
     ConnectionOptions, ControlSession, TunnelAuth, register_connection,
 };
-use cloudflare_quick_tunnel::supervisor::{self, SupervisorExit, SupervisorMetrics};
+use dl_cloudflare_quick_tunnel::supervisor::{self, SupervisorExit, SupervisorMetrics};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -237,8 +237,8 @@ fn normalize_hostname(raw: &str) -> String {
 }
 
 /// Map the crate's error model onto the share API's stable codes.
-fn map_error(error: cloudflare_quick_tunnel::TunnelError) -> TunnelError {
-    use cloudflare_quick_tunnel::TunnelError as CrateError;
+fn map_error(error: dl_cloudflare_quick_tunnel::TunnelError) -> TunnelError {
+    use dl_cloudflare_quick_tunnel::TunnelError as CrateError;
     match error {
         CrateError::Api(err) => {
             TunnelError::RegisterRejected(format!("quick tunnel request failed: {err}"))

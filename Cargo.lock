@@ -710,33 +710,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "cloudflare-quick-tunnel"
-version = "0.3.1"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "bytes",
- "capnp",
- "capnp-futures",
- "capnp-rpc",
- "futures",
- "hickory-resolver",
- "httparse",
- "quinn",
- "reqwest 0.12.28",
- "rustls 0.23.41",
- "rustls-native-certs 0.7.3",
- "rustls-pemfile 2.2.0",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1032,11 +1005,11 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
- "cloudflare-quick-tunnel",
  "crossterm",
  "daat-locus-macros",
  "daat-locus-md",
  "diffy",
+ "dl-cloudflare-quick-tunnel",
  "futures-util",
  "hex",
  "include_dir",
@@ -1297,6 +1270,33 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "dl-cloudflare-quick-tunnel"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "capnp",
+ "capnp-futures",
+ "capnp-rpc",
+ "futures",
+ "hickory-resolver",
+ "httparse",
+ "quinn",
+ "reqwest 0.12.28",
+ "rustls 0.23.41",
+ "rustls-native-certs 0.7.3",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
