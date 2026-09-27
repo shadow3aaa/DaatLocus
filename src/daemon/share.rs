@@ -649,8 +649,10 @@ pub(super) async fn create_share_handler(
     headers: HeaderMap,
     Json(request): Json<CreateShareRequest>,
 ) -> Response {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    match authorize_route(&state, &headers, "POST", "/shares").await {
+        Ok(RouteAuth::Token) => {}
+        Ok(RouteAuth::Share(_)) => return StatusCode::FORBIDDEN.into_response(),
+        Err(response) => return response,
     }
 
     let scope = match request.into_scope() {
@@ -698,8 +700,10 @@ pub(super) async fn list_shares_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> Response {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    match authorize_route(&state, &headers, "GET", "/shares").await {
+        Ok(RouteAuth::Token) => {}
+        Ok(RouteAuth::Share(_)) => return StatusCode::FORBIDDEN.into_response(),
+        Err(response) => return response,
     }
     Json(state.shares.list().await).into_response()
 }
@@ -709,8 +713,10 @@ pub(super) async fn share_status_handler(
     headers: HeaderMap,
     AxumPath(share_id): AxumPath<String>,
 ) -> Response {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    match authorize_route(&state, &headers, "GET", "/shares/{share_id}").await {
+        Ok(RouteAuth::Token) => {}
+        Ok(RouteAuth::Share(_)) => return StatusCode::FORBIDDEN.into_response(),
+        Err(response) => return response,
     }
     match state.shares.get(&share_id).await {
         Some(summary) => Json(summary).into_response(),
@@ -723,8 +729,10 @@ pub(super) async fn delete_share_handler(
     headers: HeaderMap,
     AxumPath(share_id): AxumPath<String>,
 ) -> Response {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    match authorize_route(&state, &headers, "DELETE", "/shares/{share_id}").await {
+        Ok(RouteAuth::Token) => {}
+        Ok(RouteAuth::Share(_)) => return StatusCode::FORBIDDEN.into_response(),
+        Err(response) => return response,
     }
     let removed = state.shares.delete(&share_id).await;
     Json(ShareDeleteResponse { removed }).into_response()
@@ -1046,6 +1054,10 @@ mod tests {
             ("GET", "/logs/sources"),
             ("GET", "/logs/read"),
             ("GET", "/status"),
+            ("POST", "/shares"),
+            ("GET", "/shares"),
+            ("GET", "/shares/abc"),
+            ("DELETE", "/shares/abc"),
             ("POST", "/sessions"),
             ("DELETE", "/sessions/abc"),
             ("POST", "/sessions/abc/title"),
