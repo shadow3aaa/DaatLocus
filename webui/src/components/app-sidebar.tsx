@@ -163,6 +163,12 @@ function AppSidebarBody({
   // A share visitor only reaches the agent and status pages; everything else is
   // hidden so the navigation does not offer routes the share would 403 on.
   const shareMode = isShareMode();
+  // A shared study session is opt-in: only offer the Agent/Study switch when the
+  // share actually includes it.
+  const shareIncludesStudy = sessions.some(
+    (session) => session.scope.kind === "study",
+  );
+  const showStudySwitch = !shareMode || shareIncludesStudy;
   const navigationEntries = shareMode
     ? filterNavigationForShareMode(navigationItems)
     : navigationItems;
@@ -212,7 +218,8 @@ function AppSidebarBody({
         <div className="mb-1 flex items-center gap-1">
           <div
             className={cn(
-              "grid flex-1 grid-cols-2 gap-1 rounded-lg bg-muted p-1",
+              "grid flex-1 gap-1 rounded-lg bg-muted p-1",
+              showStudySwitch ? "grid-cols-2" : "grid-cols-1",
             )}
           >
             <Button
@@ -225,16 +232,18 @@ function AppSidebarBody({
             >
               {t("navigation.agent")}
             </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant={activePage === "study" ? "secondary" : "ghost"}
-              aria-pressed={activePage === "study"}
-              onClick={() => switchMode("study")}
-              className="h-7"
-            >
-              {t("navigation.study")}
-            </Button>
+            {showStudySwitch ? (
+              <Button
+                type="button"
+                size="sm"
+                variant={activePage === "study" ? "secondary" : "ghost"}
+                aria-pressed={activePage === "study"}
+                onClick={() => switchMode("study")}
+                className="h-7"
+              >
+                {t("navigation.study")}
+              </Button>
+            ) : null}
           </div>
         </div>
 
