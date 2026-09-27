@@ -54,6 +54,7 @@ import { setWebUiLanguage } from "@/lib/i18n";
 import { currentShareId, isShareMode } from "@/lib/share-mode";
 // Lazy-loaded page components for smaller initial bundle
 const SettingsPage = lazy(() => import("@/components/settings-page").then(m => ({ default: m.SettingsPage })));
+const ShareSettingsPage = lazy(() => import("@/components/settings-page").then(m => ({ default: m.ShareSettingsPage })));
 const LogsPage = lazy(() => import("@/components/logs-page").then(m => ({ default: m.LogsPage })));
 const AgentPage = lazy(() => import("@/components/status-page").then(m => ({ default: m.AgentPage })));
 const StatusPage = lazy(() => import("@/components/status-dashboard-page").then(m => ({ default: m.StatusPage })));
@@ -823,7 +824,12 @@ function renderAuthenticatedPage(
     case "status":
       return <StatusPage />;
     case "settings":
-      return (
+      return isShareMode() ? (
+        <ShareSettingsPage
+          showThinking={showThinking}
+          onShowThinkingChange={onShowThinkingChange}
+        />
+      ) : (
         <SettingsPage
           showThinking={showThinking}
           onShowThinkingChange={onShowThinkingChange}

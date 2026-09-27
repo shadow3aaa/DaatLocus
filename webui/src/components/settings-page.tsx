@@ -475,6 +475,44 @@ function InterfaceSettingsEditor({
   );
 }
 
+/**
+ * Share-visitor settings: only the UI-local preferences a visitor may change
+ * (interface language and thinking visibility). Nothing here reads or writes
+ * the daemon configuration.
+ */
+export function ShareSettingsPage({
+  showThinking,
+  onShowThinkingChange,
+}: SettingsPageProps = {}) {
+  const { t } = useTranslation();
+  const [interfaceSettings, setInterfaceSettings] =
+    useState<InterfaceSettingsValue>(() => ({
+      locale: getCurrentWebUiLanguage(),
+      showThinking: showThinking ?? true,
+    }));
+
+  return (
+    <section
+      id="settings"
+      aria-label={t("settings.pageAria")}
+      className="min-h-screen w-full px-6"
+    >
+      <div aria-hidden="true" className="h-20 md:h-8" />
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-12">
+        <InterfaceSettingsEditor
+          value={interfaceSettings}
+          showThinking={showThinking ?? interfaceSettings.showThinking}
+          onShowThinkingChange={onShowThinkingChange}
+          onChange={(nextValue) => {
+            setInterfaceSettings(nextValue);
+            void setWebUiLanguage(nextValue.locale);
+          }}
+        />
+      </div>
+    </section>
+  );
+}
+
 function createDefaultTelegramSettingsValue(): TelegramSettingsValue {
   return {
     enabled: false,

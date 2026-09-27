@@ -24,7 +24,7 @@ export type ShareDialogRequest = {
 };
 
 /** Pages a share visitor may reach; everything else is hidden from navigation. */
-const SHARE_MODE_PAGES = ["agent", "status"] as const;
+const SHARE_MODE_PAGES = ["agent", "status", "settings"] as const;
 
 /** Extract the share id from a location hash such as `#s=abc` or `#agent&s=abc`. */
 export function parseShareIdFromHash(hash: string): string | null {
