@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { useTranslation } from "react-i18next";
 import { CheckIcon, CopyIcon, RefreshCwIcon, ShareIcon } from "lucide-react";
@@ -19,6 +19,7 @@ import { Spinner } from "@/components/ui/spinner";
 import {
   createShare,
   deleteShare,
+  ensureStudySession,
   exchangeSharePin,
   fetchShare,
   type SessionInfo,
@@ -188,7 +189,41 @@ function ShareDialog({
   const [error, setError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
 
-  const eligibleSessions = sessions;
+  const [ensuredStudySession, setEnsuredStudySession] =
+    useState<SessionInfo | null>(null);
+
+  // The fixed study session is only created lazily by the Study page. Ensure it
+  // exists when the owner opens this dialog so it can be selected and shared.
+  useEffect(() => {
+    if (!open || isShareMode()) {
+      return;
+    }
+    let cancelled = false;
+    void ensureStudySession()
+      .then((session) => {
+        if (!cancelled) {
+          setEnsuredStudySession(session);
+        }
+      })
+      .catch(() => {
+        // A study session is optional: keep the plain list if this fails.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const eligibleSessions = useMemo(() => {
+    if (
+      !ensuredStudySession ||
+      sessions.some(
+        (session) => session.session_id === ensuredStudySession.session_id,
+      )
+    ) {
+      return sessions;
+    }
+    return [...sessions, ensuredStudySession];
+  }, [sessions, ensuredStudySession]);
 
   useEffect(() => {
     if (!open) {
