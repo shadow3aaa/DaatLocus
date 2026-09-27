@@ -1,3 +1,6 @@
 [submodule "crates/daat-locus-md"]
 	path = crates/daat-locus-md
 	url = https://github.com/shadow3aaa/ratatui-markdown
+[submodule "crates/cloudflare-quick-tunnel"]
+	path = crates/cloudflare-quick-tunnel
+	url = https://github.com/shadow3aaa/cloudflare-quick-tunnel-rs

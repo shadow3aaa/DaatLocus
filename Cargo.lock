@@ -712,8 +712,6 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 [[package]]
 name = "cloudflare-quick-tunnel"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b68774cc799ab0d7c35a00f8f7a7c28536a27478c1a09955b3541f0b6cf3ea03"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
