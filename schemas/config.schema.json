@@ -313,6 +313,26 @@
             },
             "type": {
               "type": "string",
+              "const": "anthropic-compatible"
+            }
+          },
+          "required": [
+            "type",
+            "base_url",
+            "api_key"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "api_key": {
+              "type": "string"
+            },
+            "base_url": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
               "const": "openai-compatible"
             }
           },

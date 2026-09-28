@@ -82,12 +82,17 @@ Daat Locus daemon 绑定到 `0.0.0.0:<daemon.port>`，不再绑定回环地址�
 
 - `openai`：OpenAI API key provider。
 - `openai-compatible`：OpenAI-compatible HTTP API provider。
+- `anthropic-compatible`：Anthropic Messages API provider。
 - `github-copilot`：GitHub Copilot provider。
 - `openai-codex-oauth`：OpenAI Codex provider。
 
 OpenAI Codex 使用 ChatGPT Codex Responses backend，而不是公开 OpenAI API key 路径。默认登录方式是浏览器本地回调，device-code 登录保留为 fallback。轮换 OAuth 凭据保存在私有 auth JSON 文件里，`config.toml` 只保存 auth 文件路径。
 
-模型的 `thinking_budget` 是 provider 无关的可选枚举：`none`、`minimal`、`low`、`medium`、`high` 或 `max`。Daat Locus 会把它降级/映射到各 provider 支持的请求形态。对 OpenAI Codex，`max` 会作为 Codex 的 `xhigh` reasoning effort 发送。若 provider 拒绝 thinking 控制，运行时会不带该参数重试。
+对于 `openai-compatible` provider，模型的 `api_style` 决定端点所暴露的请求协议：`chat_completions`（默认）或 `responses`（`/responses` 端点）。
+
+`anthropic-compatible` provider 说 Anthropic Messages API（`/v1/messages`），使用 `x-api-key` 认证。适用于仅提供原生 Messages API 的 Claude 及 Claude Code 中转服务。其 base URL 既可以按 Daat 惯例已包含 `/v1`，也可以不带 `/v1`（此时 Daat 会自动补上）。
+
+模型的 `thinking_budget` 是 provider 无关的可选枚举：`none`、`minimal`、`low`、`medium`、`high` 或 `max`。Daat Locus 会把它降级/映射到各 provider 支持的请求形态。对 OpenAI Codex，`max` 会作为 Codex 的 `xhigh` reasoning effort 发送。若 provider 拒绝 thinking 控制，运行时会不带该参数重试。对 `anthropic-compatible`，会捕获扩展思考签名并在下一次请求中回传，使 thinking 在跨工具轮次中保持可用。
 
 
 ## Judge

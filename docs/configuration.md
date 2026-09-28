@@ -91,6 +91,7 @@ Supported provider types can be configured through the interactive `config` menu
 
 - `openai`: OpenAI API key provider.
 - `openai-compatible`: OpenAI-compatible HTTP API provider.
+- `anthropic-compatible`: Anthropic Messages API provider.
 - `github-copilot`: GitHub Copilot provider.
 - `openai-codex-oauth`: OpenAI Codex provider.
 
@@ -99,11 +100,20 @@ public OpenAI API key. Browser callback login is the default flow; device-code
 login remains available as a fallback. Rotating OAuth credentials are stored in
 a private auth JSON file, while `config.toml` keeps only the auth-file path.
 
-Model `thinking_budget` is a provider-agnostic optional enum: `none`,
-`minimal`, `low`, `medium`, `high`, or `max`. Daat Locus lowers it to each
-provider's supported request shape. For OpenAI Codex, `max` is sent as
-Codex's `xhigh` reasoning effort. Providers that reject thinking controls are
-retried without them.
+For `openai-compatible` providers, the per-model `api_style` selects the request
+protocol exposed by the endpoint: `chat_completions` (default) or `responses`
+(the `/responses` endpoint).
+
+The `anthropic-compatible` provider speaks the Anthropic Messages API
+(`/v1/messages`) and authenticates with `x-api-key`. Use it for Claude and
+Claude Code relays that only expose the native Messages API. Its base URL may
+either already include `/v1` (Daat's usual convention) or omit it, in which case
+Daat appends `/v1`.
+
+retried without them. For `anthropic-compatible`, the extended-thinking
+signature is captured and replayed on the next request so thinking keeps working
+across tool turns. Providers that reject thinking controls are retried without
+them.
 
 
 ## Judge

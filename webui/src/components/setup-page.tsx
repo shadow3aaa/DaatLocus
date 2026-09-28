@@ -171,6 +171,7 @@ const PROVIDER_KIND_ORDER: SetupProviderKind[] = [
   "openai_codex_oauth",
   "github_copilot",
   "openai_compatible",
+  "anthropic_compatible",
   "ollama",
   "ollama_cloud",
 ];
@@ -1119,11 +1120,14 @@ function ProviderDialog({
   const needsApiKey =
     draft.kind === "openai" ||
     draft.kind === "openai_compatible" ||
+    draft.kind === "anthropic_compatible" ||
     draft.kind === "ollama_cloud";
-  const needsBaseUrl = draft.kind === "openai_compatible";
+  const needsBaseUrl =
+    draft.kind === "openai_compatible" || draft.kind === "anthropic_compatible";
   const showBaseUrl =
     draft.kind === "openai" ||
     draft.kind === "openai_compatible" ||
+    draft.kind === "anthropic_compatible" ||
     draft.kind === "openai_codex_oauth" ||
     draft.kind === "ollama";
   const showKeepAlive = draft.kind === "ollama" || draft.kind === "ollama_cloud";
@@ -2352,6 +2356,7 @@ function providerRequestToDraft(provider: SetupProviderRequest): SetupProviderDr
   };
 }
 
+
 function modelRequestToDraft(model: SetupModelRequest): SetupModelDraft {
   return {
     id: createLocalId("model"),
@@ -2371,7 +2376,8 @@ function modelRequestToDraft(model: SetupModelRequest): SetupModelDraft {
           ? "true"
           : "false",
     thinkingBudget: model.thinking_budget ?? "",
-    apiStyle: model.api_style === "responses" ? "responses" : "chat_completions",
+    apiStyle:
+      model.api_style === "responses" ? "responses" : "chat_completions",
     source: model,
   };
 }
@@ -2587,6 +2593,8 @@ function defaultProviderName(kind: SetupProviderKind) {
       return "copilot";
     case "openai_compatible":
       return "openai-compatible";
+    case "anthropic_compatible":
+      return "anthropic";
     case "ollama":
       return "ollama";
     case "ollama_cloud":
@@ -2607,6 +2615,9 @@ function defaultProviderApiKey(
   if (kind === "ollama_cloud") {
     return "$OLLAMA_API_KEY";
   }
+  if (kind === "anthropic_compatible") {
+    return "$ANTHROPIC_API_KEY";
+  }
   return "";
 }
 
@@ -2621,6 +2632,9 @@ function defaultProviderBaseUrl(kind: SetupProviderKind) {
   if (kind === "openai_compatible") {
     return "https://api.openai.com/v1";
   }
+  if (kind === "anthropic_compatible") {
+    return "https://api.anthropic.com";
+  }
   if (kind === "ollama") {
     return "http://127.0.0.1:11434";
   }
@@ -2633,6 +2647,9 @@ function providerBaseUrlPlaceholder(kind: SetupProviderKind, t: TFunction) {
   }
   if (kind === "openai_compatible") {
     return "https://api.example.com/v1";
+  }
+  if (kind === "anthropic_compatible") {
+    return "https://api.anthropic.com";
   }
   return t("setup.modelAccess.providerDialog.baseUrlPlaceholderDefault");
 }

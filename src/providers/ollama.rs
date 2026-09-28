@@ -861,6 +861,7 @@ impl OllamaClient {
                 raw_stream_follow_up: true,
                 last_assistant_message: assistant_message,
                 last_reasoning_content: non_empty_string(cleaned_thinking),
+                last_reasoning_signature: None,
             });
         }
 
@@ -878,6 +879,7 @@ impl OllamaClient {
             raw_stream_follow_up: false,
             last_assistant_message,
             last_reasoning_content: non_empty_string(cleaned_thinking),
+            last_reasoning_signature: None,
         })
     }
 }
@@ -1059,6 +1061,7 @@ fn agent_message_to_ollama_content(
             content,
             reasoning_content,
             calls,
+            ..
         } => {
             let text = content.as_deref().unwrap_or("");
             let calls_json = calls

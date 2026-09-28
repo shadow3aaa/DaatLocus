@@ -705,6 +705,7 @@ mod tests {
             raw_stream_follow_up: false,
             last_assistant_message: None,
             last_reasoning_content: None,
+            last_reasoning_signature: None,
         }
     }
 

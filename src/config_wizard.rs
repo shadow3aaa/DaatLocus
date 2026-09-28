@@ -1618,6 +1618,7 @@ enum ProviderKind {
     OpenAICodexOauth,
     GithubCopilot,
     OpenAICompatible,
+    AnthropicCompatible,
     Ollama,
     OllamaCloud,
 }
@@ -1629,6 +1630,7 @@ impl ProviderKind {
             "OpenAI Codex".to_string(),
             "GitHub Copilot".to_string(),
             crate::tr!(locale, "config.provider_openai_compatible"),
+            crate::tr!(locale, "config.provider_anthropic_compatible"),
             crate::tr!(locale, "config.provider_ollama_local"),
             crate::tr!(locale, "config.provider_ollama_cloud"),
         ]
@@ -1640,7 +1642,8 @@ impl ProviderKind {
             1 => Self::OpenAICodexOauth,
             2 => Self::GithubCopilot,
             3 => Self::OpenAICompatible,
-            4 => Self::Ollama,
+            4 => Self::AnthropicCompatible,
+            5 => Self::Ollama,
             _ => Self::OllamaCloud,
         }
     }
@@ -1660,6 +1663,7 @@ async fn prompt_provider(
         ProviderKind::OpenAICodexOauth => "codex-oauth",
         ProviderKind::GithubCopilot => "copilot",
         ProviderKind::OpenAI | ProviderKind::OpenAICompatible => "openai",
+        ProviderKind::AnthropicCompatible => "anthropic",
         ProviderKind::Ollama => "ollama",
         ProviderKind::OllamaCloud => "ollama-cloud",
     };
@@ -1775,6 +1779,17 @@ async fn prompt_provider(
             )?;
             let api_key = ui.text(&crate::tr!(locale, "config.local_api_key"), None)?;
             ProviderConfig::OpenaiCompatible {
+                base_url: normalize_provider_base_url(&base_url),
+                api_key,
+            }
+        }
+        ProviderKind::AnthropicCompatible => {
+            let base_url = ui.text(
+                &crate::tr!(locale, "config.anthropic_base_url"),
+                Some("https://api.anthropic.com"),
+            )?;
+            let api_key = ui.password(&crate::tr!(locale, "config.anthropic_api_key"))?;
+            ProviderConfig::AnthropicCompatible {
                 base_url: normalize_provider_base_url(&base_url),
                 api_key,
             }
@@ -2394,6 +2409,15 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
                 let masked = mask_secret(api_key);
                 (
                     "openai-compatible",
+                    vec![("base_url", base_url.clone()), ("api_key", masked)],
+                )
+            }
+            ProviderConfig::AnthropicCompatible {
+                base_url, api_key, ..
+            } => {
+                let masked = mask_secret(api_key);
+                (
+                    "anthropic-compatible",
                     vec![("base_url", base_url.clone()), ("api_key", masked)],
                 )
             }

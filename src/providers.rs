@@ -39,6 +39,7 @@ pub use codex_oauth::{
 mod ollama;
 pub use ollama::OllamaClient;
 
+mod anthropic_compat;
 pub mod responses_compat;
 
 mod io;
@@ -970,6 +971,7 @@ impl OpenAIClient {
                 raw_stream_follow_up: true,
                 last_assistant_message: assistant_message,
                 last_reasoning_content: non_empty_string(cleaned_reasoning),
+                last_reasoning_signature: None,
             });
         }
 
@@ -1005,6 +1007,7 @@ impl OpenAIClient {
                 raw_stream_follow_up: true,
                 last_assistant_message: assistant_message,
                 last_reasoning_content: non_empty_string(cleaned_reasoning),
+                last_reasoning_signature: None,
             });
         }
 
@@ -1022,6 +1025,7 @@ impl OpenAIClient {
             raw_stream_follow_up: false,
             last_assistant_message,
             last_reasoning_content: non_empty_string(cleaned_reasoning),
+            last_reasoning_signature: None,
         })
     }
 
@@ -1354,6 +1358,14 @@ pub fn build_model_provider(
             Ok(Box::new(OpenAIClient::from_parts(
                 &api_key,
                 base,
+                model_config,
+            )))
+        }
+        ProviderConfig::AnthropicCompatible { base_url, api_key } => {
+            let api_key = resolve_env_reference(api_key);
+            Ok(Box::new(anthropic_compat::AnthropicCompatibleClient::new(
+                &api_key,
+                base_url,
                 model_config,
             )))
         }

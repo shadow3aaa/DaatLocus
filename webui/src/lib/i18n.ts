@@ -296,6 +296,10 @@ const resources = {
               label: "OpenAI compatible",
               description: "Use an API key with a custom base URL.",
             },
+            anthropic_compatible: {
+              label: "Anthropic compatible",
+              description: "Use an Anthropic Messages API key with a base URL.",
+            },
             ollama: {
               label: "Ollama local",
               description: "Use a local Ollama endpoint.",
@@ -946,6 +950,10 @@ const resources = {
             openai_compatible: {
               label: "OpenAI 兼容",
               description: "使用 API 密钥和自定义 base URL。",
+            },
+            anthropic_compatible: {
+              label: "Anthropic 兼容",
+              description: "使用 Anthropic Messages API 密钥与 base URL。",
             },
             ollama: {
               label: "Ollama 本地",

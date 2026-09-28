@@ -128,6 +128,9 @@ fn catalog_provider_id_for_model(provider: &ProviderConfig, model_id: &str) -> O
         ProviderConfig::OpenaiCompatible { base_url, .. } => {
             catalog_provider_id_for_base_url_and_model(base_url, model_id)
         }
+        // Anthropic-compatible relays are keyed by model slug; fall back to the
+        // provider-agnostic catalog lookup in `resolve_model_capacity`.
+        ProviderConfig::AnthropicCompatible { .. } => None,
         ProviderConfig::Ollama { .. } => None,
     }
 }
@@ -199,6 +202,10 @@ pub async fn discover_model_ids(
         } => {
             let api_key = resolve_env_reference(api_key);
             fetch_openai_models(base_url, &api_key).await
+        }
+        ProviderConfig::AnthropicCompatible { base_url, api_key } => {
+            let api_key = resolve_env_reference(api_key);
+            fetch_anthropic_models(base_url, &api_key).await
         }
         ProviderConfig::Ollama { host, .. } => {
             let host = host.as_deref().map_or_else(
@@ -327,6 +334,42 @@ async fn fetch_openai_models_path(url: &str, api_key: &str) -> Result<Vec<Discov
         .json()
         .await
         .map_err(|err| miette!("fetch_openai_models: response parse failed: {err}"))?;
+    Ok(parse_models_response(Some(json)))
+}
+
+/// Discover Anthropic-compatible model IDs via `GET /v1/models`, which
+/// authenticates with `x-api-key` rather than a bearer token.
+async fn fetch_anthropic_models(base_url: &str, api_key: &str) -> Result<Vec<DiscoveredModel>> {
+    let base = normalize_provider_base_url(base_url);
+    let url = if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| miette!("fetch_anthropic_models: failed to build http client: {err}"))?;
+    let resp = client
+        .get(&url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await
+        .map_err(|err| miette!("fetch_anthropic_models: request to {url} failed: {err}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let body = redact_secret_text(&body, api_key);
+        return Err(miette!(
+            "fetch_anthropic_models: request to {url} returned HTTP {status}: {body}"
+        ));
+    }
+    let json = resp
+        .json()
+        .await
+        .map_err(|err| miette!("fetch_anthropic_models: response parse failed: {err}"))?;
     Ok(parse_models_response(Some(json)))
 }
 

@@ -775,6 +775,7 @@ pub async fn execute_agent_loop_step(
         let response_tool_calls = response_protocol.tool_calls;
         let response_assistant_text = response_protocol.assistant_text;
         let response_reasoning_content = response_protocol.reasoning_content;
+        let response_reasoning_signature = response_protocol.reasoning_signature;
         let response_assistant_content = response_protocol.final_assistant_message;
         if let Some(reasoning_content) = response_reasoning_content.as_deref() {
             context.emit_live_reasoning_progress(reasoning_content);
@@ -801,9 +802,10 @@ pub async fn execute_agent_loop_step(
                 })
                 .collect::<Vec<Option<ToolCallActivityEvent>>>();
             runtime_step.push_agent_message(
-                AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                AgentMessage::assistant_tool_call_protocol_with_signed_reasoning(
                     assistant_text.clone(),
                     response_reasoning_content.clone(),
+                    response_reasoning_signature.clone(),
                     calls.clone(),
                 ),
             );
@@ -1021,10 +1023,13 @@ pub async fn execute_agent_loop_step(
                     .into_iter()
                     .collect();
                 runtime_step.push_history_message(HistoryMessage {
-                    message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                    message: AgentMessage::assistant_tool_call_protocol_with_signed_reasoning(
                         None,
                         (call_index == 0)
                             .then(|| response_reasoning_content.clone())
+                            .flatten(),
+                        (call_index == 0)
+                            .then(|| response_reasoning_signature.clone())
                             .flatten(),
                         vec![call.clone()],
                     ),

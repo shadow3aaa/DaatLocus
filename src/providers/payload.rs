@@ -138,6 +138,7 @@ pub(super) fn agent_message_to_openai_message(
             content,
             reasoning_content,
             calls,
+            ..
         } => {
             let mut message = json!({
                 "role": "assistant",
@@ -209,6 +210,7 @@ pub(super) fn agent_turn_request_to_openai_messages(
             AgentMessage::AssistantToolCallProtocol {
                 content,
                 reasoning_content,
+                reasoning_signature,
                 calls,
             } => {
                 if flatten_orphan_tool_messages {
@@ -218,6 +220,7 @@ pub(super) fn agent_turn_request_to_openai_messages(
                     AgentMessage::AssistantToolCallProtocol {
                         content,
                         reasoning_content,
+                        reasoning_signature,
                         calls,
                     },
                     include_reasoning_content,

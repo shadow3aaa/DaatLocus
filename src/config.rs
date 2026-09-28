@@ -62,6 +62,10 @@ pub enum ProviderConfig {
         #[serde(default)]
         auth_file: String,
     },
+    AnthropicCompatible {
+        base_url: String,
+        api_key: String,
+    },
     OpenaiCompatible {
         base_url: String,
         api_key: String,
@@ -329,6 +333,7 @@ impl Config {
         for provider in self.providers.values() {
             match provider {
                 ProviderConfig::Openai { api_key, .. }
+                | ProviderConfig::AnthropicCompatible { api_key, .. }
                 | ProviderConfig::OpenaiCompatible { api_key, .. } => {
                     push_secret_env_ref(&mut vars, api_key);
                 }

@@ -664,11 +664,13 @@ fn trim_history_message_content(mut message: HistoryMessage) -> HistoryMessage {
         AgentMessage::Assistant { .. } => AgentMessage::assistant(trimmed),
         AgentMessage::AssistantToolCallProtocol {
             reasoning_content,
+            reasoning_signature,
             calls,
             ..
-        } => AgentMessage::assistant_tool_call_protocol_with_reasoning(
+        } => AgentMessage::assistant_tool_call_protocol_with_signed_reasoning(
             Some(trimmed),
             reasoning_content,
+            reasoning_signature,
             calls,
         ),
         AgentMessage::Tool {

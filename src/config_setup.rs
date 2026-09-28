@@ -173,6 +173,7 @@ pub struct SetupModelRequest {
 #[serde(rename_all = "snake_case")]
 pub enum SetupProviderKind {
     Openai,
+    AnthropicCompatible,
     OpenaiCompatible,
     OpenaiCodexOauth,
     GithubCopilot,
@@ -463,6 +464,7 @@ pub async fn run_setup_provider_auth(
             "GitHub Copilot device login must be started before it can be completed"
         )),
         SetupProviderKind::Openai
+        | SetupProviderKind::AnthropicCompatible
         | SetupProviderKind::OpenaiCompatible
         | SetupProviderKind::OllamaCloud => {
             if request
@@ -608,6 +610,18 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
             base_url, api_key, ..
         } => SetupProviderRequest {
             kind: SetupProviderKind::OpenaiCompatible,
+            name: name.to_string(),
+            api_key: Some(api_key.clone()),
+            base_url: Some(base_url.clone()),
+            keep_alive: None,
+            codex_auth_method: None,
+            codex_auth_file: None,
+            github_auth_method: None,
+        },
+        ProviderConfig::AnthropicCompatible {
+            base_url, api_key, ..
+        } => SetupProviderRequest {
+            kind: SetupProviderKind::AnthropicCompatible,
             name: name.to_string(),
             api_key: Some(api_key.clone()),
             base_url: Some(base_url.clone()),
@@ -890,6 +904,10 @@ fn provider_from_setup_legacy(
             base_url: required_string(base_url, "base_url")?,
             api_key,
         }),
+        SetupProviderKind::AnthropicCompatible => Ok(ProviderConfig::AnthropicCompatible {
+            base_url: required_string(base_url, "base_url")?,
+            api_key,
+        }),
         SetupProviderKind::OpenaiCodexOauth => Err(miette!(
             "legacy Codex OAuth setup requires an imported Daat auth file"
         )),
@@ -918,6 +936,10 @@ fn provider_from_setup_provider(provider: &SetupProviderRequest) -> Result<Provi
             base_url: optional_normalized_url(base_url),
         }),
         SetupProviderKind::OpenaiCompatible => Ok(ProviderConfig::OpenaiCompatible {
+            base_url: required_string(base_url, "provider.base_url")?,
+            api_key: required_string(&api_key, "provider.api_key")?,
+        }),
+        SetupProviderKind::AnthropicCompatible => Ok(ProviderConfig::AnthropicCompatible {
             base_url: required_string(base_url, "provider.base_url")?,
             api_key: required_string(&api_key, "provider.api_key")?,
         }),
@@ -1789,6 +1811,14 @@ fn provider_error(name: &str, provider: &ProviderConfig) -> Option<String> {
             }
         }
         ProviderConfig::OpenaiCompatible {
+            base_url, api_key, ..
+        } => {
+            if base_url.trim().is_empty() {
+                return Some(format!("provider '{name}' has an empty base_url"));
+            }
+            credential_error(name, "api_key", api_key, Some("your-api-key"))
+        }
+        ProviderConfig::AnthropicCompatible {
             base_url, api_key, ..
         } => {
             if base_url.trim().is_empty() {

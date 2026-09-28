@@ -216,6 +216,10 @@ pub enum AgentMessage {
         content: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
+        /// Opaque provider-side signature required to replay `reasoning_content`
+        /// in later turns, such as the Anthropic extended-thinking signature.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_signature: Option<String>,
         calls: Vec<AgentToolCall>,
     },
     Tool {
@@ -246,6 +250,8 @@ pub struct AgentTurnStreamResult {
     pub last_assistant_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reasoning_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reasoning_signature: Option<String>,
 }
 
 impl AgentTurnStreamResult {
@@ -272,6 +278,7 @@ impl AgentTurnStreamResult {
             assistant_text,
             final_assistant_message,
             reasoning_content: self.last_reasoning_content,
+            reasoning_signature: self.last_reasoning_signature,
             raw_stream_follow_up: self.raw_stream_follow_up,
         }
     }
@@ -282,6 +289,7 @@ pub struct AgentTurnResponse {
     pub assistant_text: Option<String>,
     pub final_assistant_message: Option<String>,
     pub reasoning_content: Option<String>,
+    pub reasoning_signature: Option<String>,
     pub raw_stream_follow_up: bool,
 }
 
@@ -467,6 +475,9 @@ impl AgentMessage {
         }
     }
 
+    /// Convenience constructor without a reasoning signature. Production turns
+    /// always use [`Self::assistant_tool_call_protocol_with_signed_reasoning`].
+    #[cfg(test)]
     pub const fn assistant_tool_call_protocol_with_reasoning(
         content: Option<String>,
         reasoning_content: Option<String>,
@@ -475,6 +486,24 @@ impl AgentMessage {
         Self::AssistantToolCallProtocol {
             content,
             reasoning_content,
+            reasoning_signature: None,
+            calls,
+        }
+    }
+
+    /// Like [`Self::assistant_tool_call_protocol_with_reasoning`], but also
+    /// keeps the provider-side reasoning signature so the reasoning block can be
+    /// replayed on the next request.
+    pub const fn assistant_tool_call_protocol_with_signed_reasoning(
+        content: Option<String>,
+        reasoning_content: Option<String>,
+        reasoning_signature: Option<String>,
+        calls: Vec<AgentToolCall>,
+    ) -> Self {
+        Self::AssistantToolCallProtocol {
+            content,
+            reasoning_content,
+            reasoning_signature,
             calls,
         }
     }
@@ -895,6 +924,7 @@ mod tests {
             raw_stream_follow_up: false,
             last_assistant_message: Some("final".to_string()),
             last_reasoning_content: None,
+            last_reasoning_signature: None,
         }
         .protocol();
 
@@ -921,6 +951,7 @@ mod tests {
             raw_stream_follow_up: true,
             last_assistant_message: Some(" ".to_string()),
             last_reasoning_content: None,
+            last_reasoning_signature: None,
         }
         .protocol();
 

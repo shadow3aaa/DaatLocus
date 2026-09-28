@@ -338,6 +338,7 @@ fn render_agent_message_dump(message: &AgentMessage) -> Vec<String> {
             content,
             reasoning_content,
             calls,
+            ..
         } => render_assistant_tool_call_protocol_dump(
             content.as_deref(),
             reasoning_content.as_deref(),

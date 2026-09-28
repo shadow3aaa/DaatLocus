@@ -402,6 +402,7 @@ pub fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {
             content,
             reasoning_content,
             calls,
+            ..
         } => {
             let content_tokens = content
                 .as_deref()

@@ -179,6 +179,7 @@ fn agent_message_char_count(message: &AgentMessage) -> usize {
             content,
             reasoning_content,
             calls,
+            ..
         } => assistant_tool_call_protocol_char_count(
             content.as_deref(),
             reasoning_content.as_deref(),
@@ -259,6 +260,7 @@ pub(super) fn parse_agent_turn_stream_result_from_json(
             raw_stream_follow_up: true,
             last_assistant_message: assistant_message,
             last_reasoning_content: reasoning_content,
+            last_reasoning_signature: None,
         });
     }
 
@@ -276,6 +278,7 @@ pub(super) fn parse_agent_turn_stream_result_from_json(
         raw_stream_follow_up: false,
         last_assistant_message,
         last_reasoning_content: reasoning_content,
+        last_reasoning_signature: None,
     })
 }
 

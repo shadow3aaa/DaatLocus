@@ -731,6 +731,7 @@ impl CodexResponsesClient {
             raw_stream_follow_up: !tool_calls.is_empty(),
             last_assistant_message: assistant_message,
             last_reasoning_content: non_empty_string(reasoning_content),
+            last_reasoning_signature: None,
         })
     }
 

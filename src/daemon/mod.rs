@@ -3666,6 +3666,15 @@ fn settings_provider_summary(name: &str, provider: &ProviderConfig) -> SettingsP
             credential: credential_summary(api_key, Some("your-api-key")),
             auth_file: None,
         },
+        ProviderConfig::AnthropicCompatible {
+            base_url, api_key, ..
+        } => SettingsProviderSummary {
+            name: name.to_string(),
+            provider_type: "anthropic-compatible",
+            base_url: Some(base_url.clone()),
+            credential: credential_summary(api_key, Some("your-api-key")),
+            auth_file: None,
+        },
         ProviderConfig::Ollama { host, api_key, .. } => {
             let is_cloud = api_key.is_some();
             SettingsProviderSummary {

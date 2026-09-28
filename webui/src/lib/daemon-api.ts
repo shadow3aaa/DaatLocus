@@ -821,6 +821,7 @@ type ConfigReadinessResponse = {
 export type SetupProviderKind =
   | "openai"
   | "openai_compatible"
+  | "anthropic_compatible"
   | "openai_codex_oauth"
   | "github_copilot"
   | "ollama"

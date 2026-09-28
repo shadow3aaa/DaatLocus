@@ -42,6 +42,7 @@ setup:
 config:
   provider_kind: "Provider 类型"
   provider_openai_compatible: "OpenAI-compatible"
+  provider_anthropic_compatible: "Anthropic-compatible"
   provider_ollama_local: "Ollama（本地）"
   provider_ollama_cloud: "Ollama Cloud（ollama.com）"
   provider_name: "Provider 名称（在 config.toml 中的 key）"
@@ -50,6 +51,8 @@ config:
   base_url_openai: "Base URL（API 根路径，例如 https://api.openai.com/v1）"
   base_url_local: "Base URL（API 根路径，例如 https://api.openai.com/v1）"
   local_api_key: "API key"
+  anthropic_base_url: "Base URL（API 根路径，例如 https://api.anthropic.com）"
+  anthropic_api_key: "Anthropic API key（sk-ant-...）"
   ollama_host: "Ollama 主机地址（例如 http://127.0.0.1:11434）"
   ollama_cloud_api_key: "Ollama API key（从 ollama.com/settings/api-keys 获取）"
   ollama_keep_alive_enable: "设置 keep_alive 时长？（保持模型加载在内存中）"
