@@ -391,12 +391,18 @@ impl ModelProvider for AnthropicCompatibleClient {
         let session_headers =
             super::opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
         let tool_name = request.tool_name.clone();
-        let payload = build_prompt_payload(self, &request);
-        let response = self
-            .post_messages_with_retry(&payload, &request_context, &session_headers)
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
+        // Some models (e.g. Claude Opus 5.5) reject a forced tool_choice; fall back
+        // to `auto` and read the structured object from the text answer.
+        let mut force_tool = true;
+        let response = loop {
+            let payload = build_prompt_payload(self, &request, force_tool);
+            let response = self
+                .post_messages_with_retry(&payload, &request_context, &session_headers)
+                .await?;
+            let status = response.status();
+            if status.is_success() {
+                break response;
+            }
             let url = self.url();
             let body = read_response_text_with_timeout(
                 response,
@@ -406,6 +412,14 @@ impl ModelProvider for AnthropicCompatibleClient {
                 &request_context,
             )
             .await?;
+            if force_tool && looks_like_forced_tool_choice_error(&body) {
+                force_tool = false;
+                warn!(
+                    "anthropic-compatible rejected forced tool_choice; retrying with tool_choice=auto\n{}",
+                    request_context.join("\n")
+                );
+                continue;
+            }
             if looks_like_anthropic_context_error(&body) {
                 return Err(ContextBudgetExceededError::for_request(
                     "prompt request",
@@ -423,7 +437,7 @@ impl ModelProvider for AnthropicCompatibleClient {
                 status,
                 truncate_for_error(&body)
             ));
-        }
+        };
         let result = self
             .parse_messages_stream(options.progress.as_ref(), response, false)
             .await?;
@@ -602,14 +616,16 @@ fn build_agent_payload(
         payload["tool_choice"] = json!({ "type": "auto" });
     }
 
-    let thinking_enabled = apply_thinking(client, &mut payload);
-    if !thinking_enabled {
-        payload["temperature"] = json!(client.temperature);
-    }
+    apply_thinking(client, &mut payload);
+    apply_temperature(client, &mut payload);
     payload
 }
 
-fn build_prompt_payload(client: &AnthropicCompatibleClient, request: &PromptRequest) -> Value {
+fn build_prompt_payload(
+    client: &AnthropicCompatibleClient,
+    request: &PromptRequest,
+    force_tool: bool,
+) -> Value {
     let (system, messages) = agent_messages_to_anthropic(
         collect_prompt_messages(request),
         !client.supports_vision.load(Ordering::Relaxed),
@@ -628,13 +644,17 @@ fn build_prompt_payload(client: &AnthropicCompatibleClient, request: &PromptRequ
             "description": request.tool_description,
             "input_schema": request.output_schema,
         }],
-        "tool_choice": { "type": "tool", "name": request.tool_name },
+        "tool_choice": if force_tool {
+            json!({ "type": "tool", "name": request.tool_name })
+        } else {
+            json!({ "type": "auto" })
+        },
         "stream": true,
     });
     if let Some(system) = system {
         payload["system"] = json!(system);
     }
-    payload["temperature"] = json!(client.temperature);
+    apply_temperature(client, &mut payload);
     payload
 }
 
@@ -644,6 +664,25 @@ fn collect_prompt_messages(request: &PromptRequest) -> Vec<AgentMessage> {
         .into_iter()
         .map(|history| history.message)
         .collect()
+}
+
+/// Add a non-default `temperature` only when thinking is not configured: models
+/// with always-on adaptive thinking (Claude Opus 5.x) reject non-default
+/// sampling parameters, and omitting temperature is always safe.
+fn apply_temperature(client: &AnthropicCompatibleClient, payload: &mut Value) {
+    if !thinking_configured(client) {
+        payload["temperature"] = json!(client.temperature);
+    }
+}
+
+/// A 400 that means the provider rejects a forced `tool_choice`.
+fn looks_like_forced_tool_choice_error(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("tool_choice")
+        && (lower.contains("does not support")
+            || lower.contains("unsupported")
+            || lower.contains("not supported")
+            || lower.contains("invalid"))
 }
 
 /// Whether extended thinking is configured at all (any non-`none` budget).
@@ -669,17 +708,27 @@ fn thinking_enabled_for_request(client: &AnthropicCompatibleClient) -> bool {
         && client.thinking_mode.load(Ordering::Relaxed) != THINKING_MODE_DISABLED
 }
 
-/// Adaptive-thinking effort derived from the provider-agnostic budget. Numeric
-/// budgets fall through to the explicit `enabled` + `budget_tokens` shape.
+/// Adaptive-thinking effort derived from the provider-agnostic budget.
+/// `claude-opus-5-5` supports the five levels `low`, `medium`, `high`, `xhigh`
+/// and `max` (default `medium`); numeric budgets map to the nearest level.
 fn adaptive_effort(budget: &str) -> Option<&'static str> {
     let normalized = budget.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "minimal" | "low" => Some("low"),
-        "medium" => Some("medium"),
-        "high" => Some("high"),
-        "xhigh" | "max" | "ultra" => Some("max"),
-        _ => None,
+        "minimal" | "low" => return Some("low"),
+        "medium" => return Some("medium"),
+        "high" => return Some("high"),
+        "xhigh" => return Some("xhigh"),
+        "max" | "ultra" => return Some("max"),
+        _ => {}
     }
+    let tokens = normalized.parse::<u64>().ok()?;
+    Some(match tokens {
+        0..4096 => "low",
+        4096..16384 => "medium",
+        16384..32768 => "high",
+        32768..65536 => "xhigh",
+        _ => "max",
+    })
 }
 
 /// Explicit token budget for models that only accept `enabled` thinking.
@@ -878,15 +927,16 @@ fn agent_messages_to_anthropic(
                 // Replay the signed thinking block first: Anthropic requires the
                 // assistant turn that produced a tool_use to carry its thinking
                 // block verbatim, otherwise a thinking continuation is rejected.
+                // With `thinking.display = "omitted"` (the default for Opus 5.x)
+                // the thinking text is empty, so the signature alone is enough.
                 if include_reasoning_blocks
-                    && let (Some(thinking), Some(signature)) =
-                        (reasoning_content.as_deref(), reasoning_signature.as_deref())
-                    && !thinking.trim().is_empty()
-                    && !signature.trim().is_empty()
+                    && let Some(signature) = reasoning_signature
+                        .as_deref()
+                        .filter(|signature| !signature.trim().is_empty())
                 {
                     blocks.push(json!({
                         "type": "thinking",
-                        "thinking": thinking,
+                        "thinking": reasoning_content.as_deref().unwrap_or(""),
                         "signature": signature,
                     }));
                 }
@@ -1569,7 +1619,8 @@ mod tests {
             false,
         );
         assert!(continuation.get("thinking").is_none());
-        assert!(continuation.get("temperature").is_some());
+        // Thinking is configured, so non-default sampling params stay omitted.
+        assert!(continuation.get("temperature").is_none());
     }
 
     #[test]
@@ -1618,7 +1669,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_thinking_budget_uses_explicit_token_shape() {
+    fn numeric_thinking_budget_maps_to_adaptive_effort() {
         let client = AnthropicCompatibleClient::new(
             "test-key",
             "https://example.test/v1",
@@ -1631,6 +1682,38 @@ mod tests {
                 ..ModelConfig::default()
             },
         );
+        let payload = build_agent_payload(
+            &client,
+            AgentTurnRequest {
+                messages: vec![AgentMessage::user("hi")],
+                tools: Vec::new(),
+            },
+            false,
+        );
+        assert_eq!(payload["thinking"]["type"], "adaptive");
+        assert_eq!(payload["output_config"]["effort"], "medium");
+        assert!(payload.get("temperature").is_none());
+    }
+
+    #[test]
+    fn budget_mode_uses_explicit_token_shape() {
+        let client = AnthropicCompatibleClient::new(
+            "test-key",
+            "https://example.test/v1",
+            &ModelConfig {
+                model_id: "claude-sonnet-4-5".to_string(),
+                provider: "anthropic".to_string(),
+                thinking_budget: Some(ThinkingBudget::new("4096")),
+                context_window_tokens: 1_000_000,
+                max_completion_tokens: 128_000,
+                ..ModelConfig::default()
+            },
+        );
+        // A provider that rejected adaptive thinking falls back to the older
+        // explicit `enabled` + `budget_tokens` shape.
+        client
+            .thinking_mode
+            .store(THINKING_MODE_BUDGET, Ordering::Relaxed);
         let payload = build_agent_payload(
             &client,
             AgentTurnRequest {
@@ -1655,7 +1738,7 @@ mod tests {
             ),
             Some(THINKING_MODE_ADAPTIVE)
         );
-        // Adaptive required but unavailable (numeric budget): give up.
+        // Adaptive required but the client cannot request it: give up.
         assert_eq!(
             next_thinking_mode_on_error("requires adaptive thinking", THINKING_MODE_AUTO, false),
             Some(THINKING_MODE_DISABLED)
@@ -1687,9 +1770,37 @@ mod tests {
         assert_eq!(adaptive_effort("low"), Some("low"));
         assert_eq!(adaptive_effort("medium"), Some("medium"));
         assert_eq!(adaptive_effort("high"), Some("high"));
-        assert_eq!(adaptive_effort("xhigh"), Some("max"));
+        assert_eq!(adaptive_effort("xhigh"), Some("xhigh"));
         assert_eq!(adaptive_effort("max"), Some("max"));
-        assert_eq!(adaptive_effort("4096"), None);
+        assert_eq!(adaptive_effort("4096"), Some("medium"));
+        assert_eq!(adaptive_effort("1024"), Some("low"));
+        assert_eq!(adaptive_effort("200000"), Some("max"));
+    }
+
+    #[test]
+    fn signed_thinking_block_is_replayed_without_visible_text() {
+        let (_, messages) = agent_messages_to_anthropic(
+            vec![
+                AgentMessage::user("hi"),
+                AgentMessage::assistant_tool_call_protocol_with_signed_reasoning(
+                    None,
+                    None,
+                    Some("sig-only".to_string()),
+                    vec![AgentToolCall {
+                        id: "t1".to_string(),
+                        name: "read".to_string(),
+                        arguments: json!({}),
+                    }],
+                ),
+                AgentMessage::tool("t1", "read", "contents"),
+            ],
+            false,
+            true,
+        );
+        let blocks = messages[1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "");
+        assert_eq!(blocks[0]["signature"], "sig-only");
     }
 
     #[test]

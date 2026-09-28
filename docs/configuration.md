@@ -111,10 +111,13 @@ either already include `/v1` (Daat's usual convention) or omit it, in which case
 Daat appends `/v1`.
 
 retried without them. For `anthropic-compatible`, thinking prefers the newer
-adaptive shape (`thinking.type = "adaptive"` with `output_config.effort`) and
-falls back to an explicit `budget_tokens` (then to no thinking) when a provider
-rejects it; the extended-thinking signature is captured and replayed on the next
-request so thinking keeps working across tool turns.
+adaptive shape (`thinking.type = "adaptive"` with `output_config.effort` mapped
+from `thinking_budget`, including the `low`/`medium`/`high`/`xhigh`/`max` levels)
+and falls back to an explicit `budget_tokens` (then to no thinking) when a
+provider rejects it. Signed thinking blocks are captured and replayed verbatim
+(even with empty text) on the next request, so thinking keeps working across tool
+turns; non-default sampling parameters are omitted while thinking is configured,
+and a forced `tool_choice` is retried as `auto` for models that reject it.
 
 
 ## Judge
