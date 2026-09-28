@@ -110,10 +110,11 @@ Claude Code relays that only expose the native Messages API. Its base URL may
 either already include `/v1` (Daat's usual convention) or omit it, in which case
 Daat appends `/v1`.
 
-retried without them. For `anthropic-compatible`, the extended-thinking
-signature is captured and replayed on the next request so thinking keeps working
-across tool turns. Providers that reject thinking controls are retried without
-them.
+retried without them. For `anthropic-compatible`, thinking prefers the newer
+adaptive shape (`thinking.type = "adaptive"` with `output_config.effort`) and
+falls back to an explicit `budget_tokens` (then to no thinking) when a provider
+rejects it; the extended-thinking signature is captured and replayed on the next
+request so thinking keeps working across tool turns.
 
 
 ## Judge

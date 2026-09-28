@@ -7,13 +7,13 @@
 //! Messages requests and parses the Anthropic streaming events back into an
 //! [`AgentTurnStreamResult`].
 //!
-//! It is selected with `api_style = "anthropic"` on an `openai-compatible`
-//! provider, mirroring how `api_style = "responses"` selects
-//! [`super::responses_compat`].
+//! It is the dedicated `anthropic-compatible` provider backend
+//! (`ProviderConfig::AnthropicCompatible`), not an `openai-compatible`
+//! `api_style`.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -48,6 +48,16 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Anthropic requires `max_tokens > budget_tokens` and `budget_tokens >= 1024`.
 const MIN_THINKING_BUDGET_TOKENS: u64 = 1024;
 
+/// How to ask for extended thinking. Newer models (e.g. Claude Opus 5.x)
+/// require adaptive thinking with an `output_config.effort`, while older models
+/// only accept an explicit token budget; the client starts in `AUTO` and falls
+/// back to the other shape (then disables thinking) on a 400.
+const THINKING_MODE_AUTO: u8 = 0;
+const THINKING_MODE_ADAPTIVE: u8 = 1;
+const THINKING_MODE_BUDGET: u8 = 2;
+const THINKING_MODE_DISABLED: u8 = 3;
+const MAX_THINKING_RETRIES: u8 = 2;
+
 pub struct AnthropicCompatibleClient {
     client: reqwest::Client,
     api_key: String,
@@ -66,9 +76,10 @@ pub struct AnthropicCompatibleClient {
     request_rate_limiter: Option<Arc<Mutex<VecDeque<Instant>>>>,
     token_usage: std::sync::Mutex<TokenUsageInfo>,
     supports_vision: AtomicBool,
-    /// Extended thinking is an opt-in enhancement. Providers that reject the
-    /// `thinking` parameter disable it and retry instead of failing the turn.
-    supports_thinking: AtomicBool,
+    /// Extended thinking request shape. `AUTO` prefers adaptive thinking and
+    /// falls back to an explicit token budget (or off) when a provider rejects
+    /// the chosen shape, so thinking keeps working without failing the turn.
+    thinking_mode: AtomicU8,
 }
 
 impl AnthropicCompatibleClient {
@@ -121,7 +132,7 @@ impl AnthropicCompatibleClient {
                 daily_token_usage: Vec::new(),
             }),
             supports_vision: AtomicBool::new(supports_vision),
-            supports_thinking: AtomicBool::new(true),
+            thinking_mode: AtomicU8::new(THINKING_MODE_AUTO),
         }
     }
 
@@ -442,6 +453,7 @@ impl ModelProvider for AnthropicCompatibleClient {
         let session_headers =
             super::opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
         let mut strip_images = !self.supports_vision.load(Ordering::Relaxed);
+        let mut thinking_retries = 0u8;
         loop {
             let payload = build_agent_payload(self, request.clone(), strip_images);
             let response = self
@@ -474,12 +486,22 @@ impl ModelProvider for AnthropicCompatibleClient {
                 )
                 .into());
             }
-            if looks_like_thinking_unsupported_error(&body)
-                && self.supports_thinking.load(Ordering::Relaxed)
+            let current_thinking_mode = self.thinking_mode.load(Ordering::Relaxed);
+            let adaptive_available = self
+                .thinking_budget
+                .as_deref()
+                .is_some_and(|budget| adaptive_effort(budget).is_some());
+            if thinking_retries < MAX_THINKING_RETRIES
+                && let Some(next_mode) =
+                    next_thinking_mode_on_error(&body, current_thinking_mode, adaptive_available)
+                && next_mode != current_thinking_mode
             {
-                self.supports_thinking.store(false, Ordering::Relaxed);
+                self.thinking_mode.store(next_mode, Ordering::Relaxed);
+                thinking_retries += 1;
                 warn!(
-                    "anthropic-compatible rejected extended thinking; retrying without it\n{}",
+                    "anthropic-compatible rejected thinking_mode={} ; retrying with thinking_mode={}\n{}",
+                    current_thinking_mode,
+                    next_mode,
                     request_context.join("\n")
                 );
                 continue;
@@ -548,16 +570,6 @@ fn looks_like_anthropic_context_error(body: &str) -> bool {
         || lower.contains("input length and `max_tokens` exceed")
 }
 
-fn looks_like_thinking_unsupported_error(body: &str) -> bool {
-    let lower = body.to_ascii_lowercase();
-    lower.contains("thinking")
-        && (lower.contains("unsupported")
-            || lower.contains("not supported")
-            || lower.contains("unknown")
-            || lower.contains("invalid")
-            || lower.contains("extra inputs"))
-}
-
 // ---------------------------------------------------------------------------
 // Request payload construction
 // ---------------------------------------------------------------------------
@@ -567,8 +579,7 @@ fn build_agent_payload(
     request: AgentTurnRequest,
     strip_images: bool,
 ) -> Value {
-    let include_reasoning_blocks =
-        thinking_requested(client) && client.supports_thinking.load(Ordering::Relaxed);
+    let include_reasoning_blocks = thinking_enabled_for_request(client);
     let (system, messages) =
         agent_messages_to_anthropic(request.messages, strip_images, include_reasoning_blocks);
     let mut payload = json!({
@@ -591,8 +602,7 @@ fn build_agent_payload(
         payload["tool_choice"] = json!({ "type": "auto" });
     }
 
-    let thinking_enabled =
-        client.supports_thinking.load(Ordering::Relaxed) && apply_thinking(client, &mut payload);
+    let thinking_enabled = apply_thinking(client, &mut payload);
     if !thinking_enabled {
         payload["temperature"] = json!(client.temperature);
     }
@@ -636,14 +646,66 @@ fn collect_prompt_messages(request: &PromptRequest) -> Vec<AgentMessage> {
         .collect()
 }
 
-/// Apply the configured extended-thinking budget when the trailing turn allows
-/// it. Returns `true` when thinking was enabled (in which case sampling
-/// parameters must be omitted).
+/// Whether extended thinking is configured at all (any non-`none` budget).
+fn thinking_configured(client: &AnthropicCompatibleClient) -> bool {
+    client
+        .thinking_budget
+        .as_deref()
+        .is_some_and(|budget| !is_thinking_disabled(budget))
+}
+
+fn is_thinking_disabled(budget: &str) -> bool {
+    matches!(
+        budget.trim().to_ascii_lowercase().as_str(),
+        "none" | "off" | "disabled" | "false" | ""
+    )
+}
+
+/// Whether reasoning blocks should be replayed and thinking requested. Once a
+/// provider has rejected every thinking shape, this turns off so later turns
+/// skip thinking entirely.
+fn thinking_enabled_for_request(client: &AnthropicCompatibleClient) -> bool {
+    thinking_configured(client)
+        && client.thinking_mode.load(Ordering::Relaxed) != THINKING_MODE_DISABLED
+}
+
+/// Adaptive-thinking effort derived from the provider-agnostic budget. Numeric
+/// budgets fall through to the explicit `enabled` + `budget_tokens` shape.
+fn adaptive_effort(budget: &str) -> Option<&'static str> {
+    let normalized = budget.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "minimal" | "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" | "max" | "ultra" => Some("max"),
+        _ => None,
+    }
+}
+
+/// Explicit token budget for models that only accept `enabled` thinking.
+fn explicit_thinking_budget(budget: &str) -> Option<u64> {
+    let normalized = budget.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "minimal" | "low" => return Some(2048),
+        "medium" => return Some(8192),
+        "high" => return Some(16384),
+        "xhigh" | "max" | "ultra" => return Some(24576),
+        _ => {}
+    }
+    normalized
+        .parse::<u64>()
+        .ok()
+        .filter(|tokens| *tokens >= MIN_THINKING_BUDGET_TOKENS)
+}
+
+/// Apply the configured extended thinking when the trailing turn allows it.
+/// Returns `true` when thinking was enabled (in which case sampling parameters
+/// must be omitted).
 fn apply_thinking(client: &AnthropicCompatibleClient, payload: &mut Value) -> bool {
-    let Some(budget) = client.thinking_budget.as_deref() else {
+    if !thinking_enabled_for_request(client) {
         return false;
-    };
-    let Some(budget_tokens) = anthropic_thinking_budget(budget) else {
+    }
+    let Some(budget) = client.thinking_budget.as_deref() else {
         return false;
     };
     let Some(messages) = payload.get("messages").and_then(Value::as_array) else {
@@ -655,6 +717,20 @@ fn apply_thinking(client: &AnthropicCompatibleClient, payload: &mut Value) -> bo
     if !trailing_turn_supports_thinking(messages) {
         return false;
     }
+    let prefer_adaptive = match client.thinking_mode.load(Ordering::Relaxed) {
+        THINKING_MODE_ADAPTIVE => true,
+        THINKING_MODE_BUDGET => false,
+        // AUTO: prefer adaptive whenever the budget maps to an effort.
+        _ => adaptive_effort(budget).is_some(),
+    };
+    if prefer_adaptive && let Some(effort) = adaptive_effort(budget) {
+        payload["thinking"] = json!({ "type": "adaptive" });
+        payload["output_config"] = json!({ "effort": effort });
+        return true;
+    }
+    let Some(budget_tokens) = explicit_thinking_budget(budget) else {
+        return false;
+    };
     let max_tokens = payload
         .get("max_tokens")
         .and_then(Value::as_u64)
@@ -667,29 +743,29 @@ fn apply_thinking(client: &AnthropicCompatibleClient, payload: &mut Value) -> bo
     true
 }
 
-fn anthropic_thinking_budget(budget: &str) -> Option<u64> {
-    let normalized = budget.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "minimal" | "low" => return Some(2048),
-        "medium" => return Some(8192),
-        "high" => return Some(16384),
-        "xhigh" | "max" | "ultra" => return Some(24576),
-        "none" | "off" | "disabled" | "false" | "" => return None,
-        _ => {}
+/// Next thinking shape to try after a 400 that mentions thinking, or `None`
+/// when the error is unrelated to thinking.
+fn next_thinking_mode_on_error(body: &str, current: u8, adaptive_available: bool) -> Option<u8> {
+    let lower = body.to_ascii_lowercase();
+    if !lower.contains("thinking") {
+        return None;
     }
-    normalized
-        .parse::<u64>()
-        .ok()
-        .filter(|tokens| *tokens >= MIN_THINKING_BUDGET_TOKENS)
-}
-
-/// Whether extended thinking should be requested for this client at all.
-fn thinking_requested(client: &AnthropicCompatibleClient) -> bool {
-    client
-        .thinking_budget
-        .as_deref()
-        .and_then(anthropic_thinking_budget)
-        .is_some()
+    // "requires adaptive thinking" (or "must"/"only") means the provider
+    // demands adaptive; any other mention of adaptive means it was rejected.
+    let requires_adaptive = lower.contains("adaptive")
+        && (lower.contains("require") || lower.contains("must") || lower.contains("only"));
+    let next = if requires_adaptive {
+        if adaptive_available && current != THINKING_MODE_ADAPTIVE {
+            THINKING_MODE_ADAPTIVE
+        } else {
+            THINKING_MODE_DISABLED
+        }
+    } else if current != THINKING_MODE_BUDGET {
+        THINKING_MODE_BUDGET
+    } else {
+        THINKING_MODE_DISABLED
+    };
+    Some(next)
 }
 
 /// Anthropic only accepts a thinking continuation when the assistant turn that
@@ -1468,7 +1544,8 @@ mod tests {
             },
             false,
         );
-        assert_eq!(fresh["thinking"]["type"], "enabled");
+        assert_eq!(fresh["thinking"]["type"], "adaptive");
+        assert_eq!(fresh["output_config"]["effort"], "high");
         assert!(fresh.get("temperature").is_none());
 
         let continuation = build_agent_payload(
@@ -1536,8 +1613,83 @@ mod tests {
         assert_eq!(assistant_blocks[0]["thinking"], "planning");
         assert_eq!(assistant_blocks[0]["signature"], "sig-abc");
         assert_eq!(assistant_blocks[1]["type"], "tool_use");
-        assert_eq!(payload["thinking"]["type"], "enabled");
+        assert_eq!(payload["thinking"]["type"], "adaptive");
         assert!(payload.get("temperature").is_none());
+    }
+
+    #[test]
+    fn numeric_thinking_budget_uses_explicit_token_shape() {
+        let client = AnthropicCompatibleClient::new(
+            "test-key",
+            "https://example.test/v1",
+            &ModelConfig {
+                model_id: "claude-sonnet-4-5".to_string(),
+                provider: "anthropic".to_string(),
+                thinking_budget: Some(ThinkingBudget::new("4096")),
+                context_window_tokens: 1_000_000,
+                max_completion_tokens: 128_000,
+                ..ModelConfig::default()
+            },
+        );
+        let payload = build_agent_payload(
+            &client,
+            AgentTurnRequest {
+                messages: vec![AgentMessage::user("hi")],
+                tools: Vec::new(),
+            },
+            false,
+        );
+        assert_eq!(payload["thinking"]["type"], "enabled");
+        assert_eq!(payload["thinking"]["budget_tokens"], 4096);
+        assert!(payload.get("output_config").is_none());
+    }
+
+    #[test]
+    fn thinking_error_fallback_selects_the_other_shape_then_disables() {
+        // Provider demands adaptive thinking: switch from AUTO/BUDGET to adaptive.
+        assert_eq!(
+            next_thinking_mode_on_error(
+                r#"{"error":{"message":"claude-opus-5-5 requires adaptive thinking; omit thinking or use thinking.type=adaptive and output_config.effort"}}"#,
+                THINKING_MODE_AUTO,
+                true,
+            ),
+            Some(THINKING_MODE_ADAPTIVE)
+        );
+        // Adaptive required but unavailable (numeric budget): give up.
+        assert_eq!(
+            next_thinking_mode_on_error("requires adaptive thinking", THINKING_MODE_AUTO, false),
+            Some(THINKING_MODE_DISABLED)
+        );
+        // Adaptive rejected: fall back to the explicit token-budget shape.
+        assert_eq!(
+            next_thinking_mode_on_error(
+                r#"{"error":{"message":"thinking.type adaptive is not supported"}}"#,
+                THINKING_MODE_ADAPTIVE,
+                true,
+            ),
+            Some(THINKING_MODE_BUDGET)
+        );
+        // The budget shape was rejected as well: disable thinking.
+        assert_eq!(
+            next_thinking_mode_on_error("unknown parameter: thinking", THINKING_MODE_BUDGET, true),
+            Some(THINKING_MODE_DISABLED)
+        );
+        // Unrelated errors leave thinking untouched.
+        assert_eq!(
+            next_thinking_mode_on_error("model not found", THINKING_MODE_AUTO, true),
+            None
+        );
+    }
+
+    #[test]
+    fn adaptive_effort_maps_provider_agnostic_budgets() {
+        assert_eq!(adaptive_effort("minimal"), Some("low"));
+        assert_eq!(adaptive_effort("low"), Some("low"));
+        assert_eq!(adaptive_effort("medium"), Some("medium"));
+        assert_eq!(adaptive_effort("high"), Some("high"));
+        assert_eq!(adaptive_effort("xhigh"), Some("max"));
+        assert_eq!(adaptive_effort("max"), Some("max"));
+        assert_eq!(adaptive_effort("4096"), None);
     }
 
     #[test]
