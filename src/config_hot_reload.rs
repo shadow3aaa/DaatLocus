@@ -212,7 +212,7 @@ async fn rebuild_model_providers(context: &mut Context, config: &Config) -> miet
         efficient,
         context.token_usage_store.clone(),
     );
-    context.model_provider = main;
+    context.model_provider = std::sync::Arc::from(main);
     context.efficient_model_provider = std::sync::Arc::from(efficient);
     Ok(())
 }

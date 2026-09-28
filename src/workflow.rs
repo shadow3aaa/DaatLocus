@@ -33,7 +33,9 @@ use crate::{
         AgentMessage, AgentToolCall, AgentToolInputSpec, AgentToolSpec, AgentTurnRequest,
     },
     runtime::bootstrap::build_runtime_apps,
-    runtime_context::{MID_TURN_COMPACTION_MAX_RECOVERIES, maybe_compact_agent_messages},
+    runtime_context::{
+        MID_TURN_COMPACTION_MAX_RECOVERIES, maybe_compact_agent_messages_in_archive,
+    },
     runtime_tools::{
         ToolExecutionResult, WorkerRuntimeToolCallContext,
         build_worker_runtime_tool_specs_for_apps, execute_worker_runtime_tool_call_for_apps,
@@ -45,6 +47,9 @@ use crate::{
 mod builtin_workflow_bindings {
     include!(concat!(env!("OUT_DIR"), "/builtin_workflows.rs"));
 }
+
+mod runs;
+pub use runs::WorkflowRunRegistry;
 
 const WORKFLOW_TOOL_PREFIX: &str = "workflow__";
 const DEFAULT_WORKFLOW_TOOL_DESCRIPTION: &str = "Run this typed Lua workflow. It orchestrates isolated workers and returns the workflow's declared output.";
@@ -65,31 +70,34 @@ const WORKFLOW_LUA_INTERRUPT_INSTRUCTION_INTERVAL: u32 = 1_000;
 
 #[derive(Clone, Default)]
 pub struct WorkflowCancellationRegistry {
-    active: Arc<parking_lot::Mutex<Option<WorkflowCancellation>>>,
+    active: Arc<parking_lot::Mutex<BTreeMap<String, WorkflowCancellation>>>,
 }
 
 impl WorkflowCancellationRegistry {
-    pub fn begin(&self) -> WorkflowCancellation {
+    pub fn begin(&self, run_id: &str) -> WorkflowCancellation {
         let cancellation = WorkflowCancellation::new();
-        *self.active.lock() = Some(cancellation.clone());
+        self.active
+            .lock()
+            .insert(run_id.to_string(), cancellation.clone());
         cancellation
     }
 
+    /// A runtime interrupt interrupts every run, not an arbitrary last registration.
     pub fn interrupt_active(&self) -> bool {
-        let active = self.active.lock().clone();
-        active.is_some_and(|cancellation| {
+        let active = self.active.lock();
+        for cancellation in active.values() {
             cancellation.interrupt();
-            true
-        })
+        }
+        !active.is_empty()
     }
 
-    pub fn clear(&self, cancellation: &WorkflowCancellation) {
+    pub fn clear(&self, run_id: &str, cancellation: &WorkflowCancellation) {
         let mut active = self.active.lock();
         if active
-            .as_ref()
+            .get(run_id)
             .is_some_and(|current| current.is_same(cancellation))
         {
-            *active = None;
+            active.remove(run_id);
         }
     }
 }
@@ -97,17 +105,25 @@ impl WorkflowCancellationRegistry {
 #[derive(Clone, Debug)]
 pub struct WorkflowCancellation {
     interrupted: Arc<AtomicBool>,
+    signal: tokio::sync::watch::Sender<bool>,
 }
 
 impl WorkflowCancellation {
     pub fn new() -> Self {
         Self {
             interrupted: Arc::new(AtomicBool::new(false)),
+            signal: tokio::sync::watch::channel(false).0,
         }
     }
 
     pub fn interrupt(&self) {
         self.interrupted.store(true, Ordering::SeqCst);
+        self.signal.send_replace(true);
+    }
+
+    async fn cancelled(&self) {
+        let mut receiver = self.signal.subscribe();
+        let _ = receiver.wait_for(|interrupted| *interrupted).await;
     }
 
     fn is_interrupted(&self) -> bool {
@@ -589,6 +605,12 @@ impl WorkflowInspectorPublisher {
         publisher
     }
 
+    /// Share the live snapshot cell so a run registry can report status without
+    /// re-cloning the snapshot on every poll.
+    fn shared_snapshot(&self) -> Arc<parking_lot::Mutex<WorkflowRunSnapshot>> {
+        Arc::clone(&self.snapshot)
+    }
+
     fn snapshot(&self) -> WorkflowRunSnapshot {
         self.snapshot.lock().clone()
     }
@@ -873,6 +895,24 @@ impl WorkflowInspectorPublisher {
     ) -> WorkflowRunSnapshot {
         {
             let mut snapshot = self.snapshot.lock();
+            for worker in &mut snapshot.workers {
+                if matches!(
+                    worker.status,
+                    WorkflowNodeStatus::Pending | WorkflowNodeStatus::Running
+                ) {
+                    worker.status = status;
+                    worker.completed_at_ms = Some(current_time_ms());
+                }
+            }
+            for group in &mut snapshot.await_groups {
+                if matches!(
+                    group.status,
+                    WorkflowNodeStatus::Pending | WorkflowNodeStatus::Running
+                ) {
+                    group.status = status;
+                    group.completed_at_ms = Some(current_time_ms());
+                }
+            }
             snapshot.status = status;
             snapshot.completed_at_ms = Some(current_time_ms());
             snapshot.output = output;
@@ -958,7 +998,9 @@ fn workflow_snapshot_message(snapshot: &WorkflowRunSnapshot) -> String {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct WorkflowInvocationResult {
+    pub run_id: String,
     pub workflow_id: String,
     pub status: WorkflowInvocationStatus,
     pub output: Option<Value>,
@@ -1020,12 +1062,44 @@ struct WorkflowWorkerActorHandle(Arc<tokio::sync::Mutex<WorkflowWorkerActor>>);
 
 impl UserData for WorkflowWorkerActorHandle {}
 
-#[derive(Clone, Copy, Default)]
-struct WorkerActorFactoryContext;
+/// Per-run factory for workflow worker actors. It also owns every actor it
+/// created so the run can shut their apps down when it finishes.
+#[derive(Clone, Default)]
+struct WorkerActorFactoryContext {
+    actors: Arc<Mutex<Vec<Arc<tokio::sync::Mutex<WorkflowWorkerActor>>>>>,
+}
 
 impl WorkerActorFactoryContext {
-    const fn from_context(_: &Context) -> Self {
-        Self
+    #[cfg(test)]
+    fn from_context<T>(_: &T) -> Self {
+        Self::default()
+    }
+
+    fn register_actor(&self, actor: Arc<tokio::sync::Mutex<WorkflowWorkerActor>>) {
+        self.actors
+            .lock()
+            .expect("workflow actor registry lock poisoned")
+            .push(actor);
+    }
+
+    /// Shut down the apps owned by every actor created in this run. Called once
+    /// per run so concurrent runs never leak Browser/Terminal processes.
+    async fn shutdown(&self) {
+        let actors = std::mem::take(
+            &mut *self
+                .actors
+                .lock()
+                .expect("workflow actor registry lock poisoned"),
+        );
+        for actor in actors {
+            let apps = std::mem::replace(
+                &mut actor.lock().await.apps,
+                AppManager::new(Vec::new()).expect("empty app manager"),
+            );
+            if let Err(error) = apps.shutdown().await {
+                tracing::warn!("workflow app shutdown failed: {error}");
+            }
+        }
     }
 
     fn build_apps(&self) -> Result<AppManager> {
@@ -1123,7 +1197,7 @@ pub struct WorkerRuntimeState {
 
 struct WorkerToolCallContext<'a> {
     apps: &'a mut AppManager,
-    context: &'a Context,
+    context: &'a WorkflowExecutionContext,
     definition: &'a WorkerDefinition,
     worker_runtime: &'a mut WorkerRuntimeState,
     tools: &'a [WorkerTool],
@@ -1164,49 +1238,78 @@ struct WorkerTool {
     output_schema: Value,
 }
 
+/// Immutable worker resources captured at launch. Session history, main Apps,
+/// claimed events, mutable main conversation and PendingWork are deliberately absent.
+struct WorkflowExecutionContext {
+    session_id: Option<String>,
+    model_provider: Arc<dyn crate::core::ModelProvider + Send + Sync>,
+    efficient_model_provider: Arc<dyn crate::core::ModelProvider + Send + Sync>,
+    config: crate::config::Config,
+    execution_cwd: PathBuf,
+    sandbox_policy: crate::sandbox::RuntimeSandboxPolicy,
+    token_estimate_baseline: crate::context_budget::TokenEstimateBaseline,
+    dashboard_history: Option<crate::dashboard::DashboardActivityHistoryStore>,
+    factory: WorkerActorFactoryContext,
+}
+impl From<&Context> for WorkflowExecutionContext {
+    fn from(context: &Context) -> Self {
+        Self {
+            session_id: context.session_id.clone(),
+            model_provider: context.model_provider.clone(),
+            efficient_model_provider: context.efficient_model_provider.clone(),
+            config: context.config.clone(),
+            execution_cwd: context.execution_cwd.clone(),
+            sandbox_policy: context.sandbox_policy.clone(),
+            token_estimate_baseline: context.token_estimate_baseline.clone(),
+            dashboard_history: context.dashboard_history.clone(),
+            factory: WorkerActorFactoryContext::default(),
+        }
+    }
+}
+
+/// Launch one workflow run in the background and return its running handle.
+pub fn start(
+    context: &Context,
+    invocation: WorkflowInvocation,
+) -> Result<WorkflowInvocationResult> {
+    context.workflow_runs.start(context, invocation)
+}
+
+/// Blocking convenience entry used by tests and simple callers: start the run,
+/// then await it. Interactive callers should use `start` plus
+/// `WorkflowRunRegistry::wait` so they can do other work first.
+#[cfg(test)]
 pub async fn invoke(
     context: &Context,
     invocation: WorkflowInvocation,
 ) -> Result<WorkflowInvocationResult> {
-    let cancellation = context.workflow_cancellation.begin();
-    let result = invoke_with_cancellation(context, invocation, Some(&cancellation)).await;
-    context.workflow_cancellation.clear(&cancellation);
-    result
+    let started = start(context, invocation)?;
+    context.workflow_runs.wait(&started.run_id).await
 }
 
-pub async fn invoke_with_cancellation(
-    context: &Context,
-    invocation: WorkflowInvocation,
-    cancellation: Option<&WorkflowCancellation>,
-) -> Result<WorkflowInvocationResult> {
-    let definition = context
-        .workflows
-        .get(&invocation.workflow_id)
-        .cloned()
-        .ok_or_else(|| miette!("unknown workflow `{}`", invocation.workflow_id))?;
-    validate_value_against_schema(
-        &invocation.input,
-        &definition.input_schema,
-        "workflow input",
-    )?;
-    let source = definition.source.clone();
-    let inspector = WorkflowInspectorPublisher::new_with_history(
-        definition.id.clone(),
-        invocation.input.clone(),
-        context.dashboard_tx.clone(),
-        context.dashboard_history.clone(),
-    );
-
-    match run_workflow_script(
-        &source,
+async fn execute_run(
+    context: &WorkflowExecutionContext,
+    definition: &WorkflowDefinition,
+    input: Value,
+    cancellation: &WorkflowCancellation,
+    inspector: &WorkflowInspectorPublisher,
+) -> WorkflowInvocationResult {
+    let execution = run_workflow_script(
+        &definition.source,
         &definition,
-        invocation.input,
+        input,
         context,
-        cancellation,
+        Some(cancellation),
         &inspector,
-    )
-    .await
-    {
+    );
+    use futures_util::FutureExt as _;
+    let result = tokio::select! {
+        result = std::panic::AssertUnwindSafe(execution).catch_unwind() =>
+            result.unwrap_or_else(|_| Err(miette!("workflow task panicked"))),
+        () = cancellation.cancelled() => Err(miette!(WorkflowInterrupted)),
+    };
+    context.factory.shutdown().await;
+    match result {
         Ok(output) => {
             if let Err(err) =
                 validate_value_against_schema(&output, &definition.output_schema, "workflow output")
@@ -1214,23 +1317,25 @@ pub async fn invoke_with_cancellation(
                 let message = err.to_string();
                 let snapshot =
                     inspector.finish_run(WorkflowNodeStatus::Failed, None, Some(message.clone()));
-                return Ok(WorkflowInvocationResult {
-                    workflow_id: definition.id,
+                return WorkflowInvocationResult {
+                    run_id: inspector.snapshot().run_id,
+                    workflow_id: definition.id.clone(),
                     status: WorkflowInvocationStatus::Failed,
                     output: None,
                     message,
                     snapshot,
-                });
+                };
             }
             let snapshot =
                 inspector.finish_run(WorkflowNodeStatus::Completed, Some(output.clone()), None);
-            Ok(WorkflowInvocationResult {
-                workflow_id: definition.id,
+            WorkflowInvocationResult {
+                run_id: inspector.snapshot().run_id,
+                workflow_id: definition.id.clone(),
                 status: WorkflowInvocationStatus::Completed,
                 output: Some(output),
                 message: "workflow completed".to_string(),
                 snapshot,
-            })
+            }
         }
         Err(err) if is_workflow_interrupted_error(&err) => {
             let snapshot = inspector.finish_run(
@@ -1238,25 +1343,27 @@ pub async fn invoke_with_cancellation(
                 None,
                 Some(WORKFLOW_INTERRUPTED_ERROR.to_string()),
             );
-            Ok(WorkflowInvocationResult {
-                workflow_id: definition.id,
+            WorkflowInvocationResult {
+                run_id: inspector.snapshot().run_id,
+                workflow_id: definition.id.clone(),
                 status: WorkflowInvocationStatus::Interrupted,
                 output: None,
                 message: WORKFLOW_INTERRUPTED_ERROR.to_string(),
                 snapshot,
-            })
+            }
         }
         Err(err) => {
             let message = err.to_string();
             let snapshot =
                 inspector.finish_run(WorkflowNodeStatus::Failed, None, Some(message.clone()));
-            Ok(WorkflowInvocationResult {
-                workflow_id: definition.id,
+            WorkflowInvocationResult {
+                run_id: inspector.snapshot().run_id,
+                workflow_id: definition.id.clone(),
                 status: WorkflowInvocationStatus::Failed,
                 output: None,
                 message,
                 snapshot,
-            })
+            }
         }
     }
 }
@@ -1375,7 +1482,7 @@ async fn run_workflow_script(
     source: &str,
     definition: &WorkflowDefinition,
     input: Value,
-    context: &Context,
+    context: &WorkflowExecutionContext,
     cancellation: Option<&WorkflowCancellation>,
     inspector: &WorkflowInspectorPublisher,
 ) -> Result<Value> {
@@ -1419,9 +1526,14 @@ async fn run_workflow_script(
     lua.globals()
         .set("workflow", workflow.clone())
         .map_err(|err| lua_error(&err))?;
-    let factory_context = WorkerActorFactoryContext::from_context(context);
-    install_execution_functions(&lua, &workflow, factory_context, local_tools.clone())
-        .map_err(|err| lua_error(&err))?;
+    let factory_context = context.factory.clone();
+    install_execution_functions(
+        &lua,
+        &workflow,
+        factory_context.clone(),
+        local_tools.clone(),
+    )
+    .map_err(|err| lua_error(&err))?;
     let local_tool_slot = local_tools.clone();
     workflow
         .set(
@@ -1602,6 +1714,7 @@ fn install_execution_functions(
                 WorkflowWorkerActor::new(&factory_context, definition, &local_tools)
                     .map_err(mlua::Error::external)?,
             ));
+            factory_context.register_actor(Arc::clone(&actor));
             let factory = lua.create_table()?;
             factory.set(
                 "actor",
@@ -1778,7 +1891,7 @@ fn duration_millis(duration: Duration) -> u64 {
 }
 
 async fn run_worker_with_timing(
-    context: &Context,
+    context: &WorkflowExecutionContext,
     actor: Arc<tokio::sync::Mutex<WorkflowWorkerActor>>,
     input: Value,
     local_tools: &Arc<Mutex<BTreeMap<String, LocalToolDefinition>>>,
@@ -1816,7 +1929,7 @@ async fn run_worker_with_timing(
 }
 
 async fn run_worker(
-    context: &Context,
+    context: &WorkflowExecutionContext,
     actor: Arc<tokio::sync::Mutex<WorkflowWorkerActor>>,
     input: Value,
     local_tools: &Arc<Mutex<BTreeMap<String, LocalToolDefinition>>>,
@@ -1844,7 +1957,7 @@ async fn run_worker(
 }
 
 async fn run_worker_turn(
-    context: &Context,
+    context: &WorkflowExecutionContext,
     actor: &Arc<tokio::sync::Mutex<WorkflowWorkerActor>>,
     input: Value,
     local_tools: &Arc<Mutex<BTreeMap<String, LocalToolDefinition>>>,
@@ -1872,8 +1985,9 @@ async fn run_worker_turn(
             &actor.tools,
             worker_model_supports_vision(context, &model),
         );
-        if maybe_compact_agent_messages(
-            context,
+        if maybe_compact_agent_messages_in_archive(
+            context.session_id.as_deref(),
+            context.dashboard_history.as_ref(),
             worker_model_provider(context, &model),
             &mut actor.conversation,
             &tools,
@@ -1898,8 +2012,9 @@ async fn run_worker_turn(
                     if is_context_budget_exceeded(&error)
                         && budget_recoveries < MID_TURN_COMPACTION_MAX_RECOVERIES =>
                 {
-                    if maybe_compact_agent_messages(
-                        context,
+                    if maybe_compact_agent_messages_in_archive(
+                        context.session_id.as_deref(),
+                        context.dashboard_history.as_ref(),
                         worker_model_provider(context, &model),
                         &mut actor.conversation,
                         &tools,
@@ -1946,9 +2061,10 @@ async fn run_worker_turn(
                 inspector.append_worker_activity(worker_id, event);
             }
             actor.conversation.push_agent_message(
-                AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                AgentMessage::assistant_tool_call_protocol_with_signed_reasoning(
                     assistant_text,
                     protocol.reasoning_content.clone(),
+                    protocol.reasoning_signature.clone(),
                     protocol.tool_calls.clone(),
                 ),
             );
@@ -2061,7 +2177,7 @@ fn worker_tool_specs(
     tools
 }
 
-fn worker_model_supports_vision(context: &Context, model: &WorkerModel) -> bool {
+fn worker_model_supports_vision(context: &WorkflowExecutionContext, model: &WorkerModel) -> bool {
     let model = match model {
         WorkerModel::Main => context.config.main_model_config(),
         WorkerModel::Efficient => context.config.efficient_model_config(),
@@ -2073,7 +2189,7 @@ fn worker_model_supports_vision(context: &Context, model: &WorkerModel) -> bool 
 }
 
 fn worker_model_provider<'a>(
-    context: &'a Context,
+    context: &'a WorkflowExecutionContext,
     model: &WorkerModel,
 ) -> &'a (dyn crate::core::ModelProvider + Send + Sync) {
     match model {
@@ -2174,7 +2290,7 @@ fn build_worker_tools(
 }
 
 async fn complete_workflow_worker_turn(
-    context: &Context,
+    context: &WorkflowExecutionContext,
     model: &WorkerModel,
     request: AgentTurnRequest,
     cancellation: Option<WorkflowCancellationRef<'_>>,
@@ -2514,8 +2630,9 @@ mod tests {
             )
             .expect("create workflow worker actor"),
         ));
+        let execution = isolated.execution();
         let result = run_worker_with_timing(
-            &isolated.context,
+            &execution,
             actor,
             json!({}),
             &local_tools,
@@ -3150,6 +3267,7 @@ mod tests {
                     raw_stream_follow_up: false,
                     last_assistant_message: Some(summary),
                     last_reasoning_content: None,
+                    last_reasoning_signature: None,
                 });
             }
 
@@ -3218,6 +3336,7 @@ mod tests {
                 raw_stream_follow_up: true,
                 last_assistant_message: None,
                 last_reasoning_content: reasoning,
+                last_reasoning_signature: None,
             })
         }
 
@@ -3250,7 +3369,7 @@ mod tests {
             let (daemon_control_tx, _daemon_control_rx) = tokio::sync::mpsc::unbounded_channel();
             let mut context = Context {
                 session_id: None,
-                model_provider: Box::new(main),
+                model_provider: std::sync::Arc::new(main),
                 efficient_model_provider: Arc::new(efficient),
                 config: Config::default(),
                 token_usage_store: crate::runtime::bootstrap::load_persistent_token_usage_store(
@@ -3265,6 +3384,7 @@ mod tests {
                 openskills: OpenSkillsCatalog::default(),
                 workflows: WorkflowCatalog::load(),
                 workflow_cancellation: WorkflowCancellationRegistry::default(),
+                workflow_runs: crate::workflow::WorkflowRunRegistry::default(),
                 active_skill_run: None,
                 pending_skill_run_flushes: Vec::new(),
                 current_work_origin: None,
@@ -3312,6 +3432,12 @@ mod tests {
                 _home: home,
                 _execution: execution,
             }
+        }
+
+        /// Immutable worker execution snapshot derived from the current context,
+        /// matching how the runtime launches workflow runs.
+        fn execution(&self) -> WorkflowExecutionContext {
+            WorkflowExecutionContext::from(&self.context)
         }
     }
 
@@ -3379,6 +3505,7 @@ mod tests {
                 raw_stream_follow_up: true,
                 last_assistant_message: None,
                 last_reasoning_content: None,
+                last_reasoning_signature: None,
             })
         }
 
@@ -3439,11 +3566,12 @@ workflow.define({
         let inspector =
             WorkflowInspectorPublisher::new(definition.id.clone(), json!({ "id": "job" }), None);
 
+        let execution = isolated.execution();
         let result = run_workflow_script(
             source,
             &definition,
             json!({ "id": "job" }),
-            &isolated.context,
+            &execution,
             None,
             &inspector,
         )
@@ -3465,7 +3593,7 @@ workflow.define({
         let main = ScriptedWorkerProvider::new("main", Vec::new());
         let efficient = ScriptedWorkerProvider::new("efficient", Vec::new());
         let mut isolated = IsolatedWorkflowContext::new(main, efficient).await;
-        isolated.context.model_provider = Box::new(AwaitAllTestProvider {
+        isolated.context.model_provider = std::sync::Arc::new(AwaitAllTestProvider {
             started_tx,
             release: Arc::clone(&release),
             fail_id: None,
@@ -3519,11 +3647,12 @@ workflow.define({
         let definition = load_workflow_definition(&workflow_path).expect("load await_all workflow");
         let inspector =
             WorkflowInspectorPublisher::new(definition.id.clone(), json!({ "id": "job" }), None);
+        let execution = isolated.execution();
         let invocation = run_workflow_script(
             source,
             &definition,
             json!({ "id": "job" }),
-            &isolated.context,
+            &execution,
             None,
             &inspector,
         );
@@ -3574,7 +3703,7 @@ workflow.define({
         let main = ScriptedWorkerProvider::new("main", Vec::new());
         let efficient = ScriptedWorkerProvider::new("efficient", Vec::new());
         let mut isolated = IsolatedWorkflowContext::new(main, efficient).await;
-        isolated.context.model_provider = Box::new(AwaitAllTestProvider {
+        isolated.context.model_provider = std::sync::Arc::new(AwaitAllTestProvider {
             started_tx,
             release,
             fail_id: Some("job-first".to_string()),
@@ -3622,11 +3751,12 @@ workflow.define({
             load_workflow_definition(&workflow_path).expect("load await_all failure workflow");
         let inspector =
             WorkflowInspectorPublisher::new(definition.id.clone(), json!({ "id": "job" }), None);
+        let execution = isolated.execution();
         let invocation = run_workflow_script(
             source,
             &definition,
             json!({ "id": "job" }),
-            &isolated.context,
+            &execution,
             None,
             &inspector,
         );
@@ -3677,7 +3807,7 @@ workflow.define({
         let main = ScriptedWorkerProvider::new("main", Vec::new());
         let efficient = ScriptedWorkerProvider::new("efficient", Vec::new());
         let mut isolated = IsolatedWorkflowContext::new(main, efficient).await;
-        isolated.context.model_provider = Box::new(AwaitAllTestProvider {
+        isolated.context.model_provider = std::sync::Arc::new(AwaitAllTestProvider {
             started_tx,
             release,
             fail_id: None,
@@ -3726,11 +3856,12 @@ workflow.define({
         let inspector =
             WorkflowInspectorPublisher::new(definition.id.clone(), json!({ "id": "job" }), None);
         let cancellation = WorkflowCancellation::new();
+        let execution = isolated.execution();
         let invocation = run_workflow_script(
             source,
             &definition,
             json!({ "id": "job" }),
-            &isolated.context,
+            &execution,
             Some(&cancellation),
             &inspector,
         );
@@ -4435,11 +4566,12 @@ workflow.define({{
             json!({ "value": "input" }),
             None,
         );
+        let execution = isolated.execution();
         let output = run_workflow_script(
             &source,
             &definition,
             json!({ "value": "input" }),
-            &isolated.context,
+            &execution,
             None,
             &inspector,
         )
@@ -4488,17 +4620,18 @@ workflow.define({{
             ],
         );
         let next_probe = next_main.clone();
-        isolated.context.model_provider = Box::new(next_main);
+        isolated.context.model_provider = std::sync::Arc::new(next_main);
         let next_inspector = WorkflowInspectorPublisher::new(
             definition.id.clone(),
             json!({ "value": "input" }),
             None,
         );
+        let next_execution = isolated.execution();
         run_workflow_script(
             &source,
             &definition,
             json!({ "value": "input" }),
-            &isolated.context,
+            &next_execution,
             None,
             &next_inspector,
         )
@@ -4602,8 +4735,9 @@ workflow.define({{
             );
         }
 
+        let execution = isolated.execution();
         let second = run_worker(
-            &isolated.context,
+            &execution,
             actor.clone(),
             json!({ "value": "second" }),
             &local_tools,
@@ -4686,8 +4820,9 @@ workflow.define({{
         let inspector =
             WorkflowInspectorPublisher::new("worker-overflow-test".to_string(), json!({}), None);
 
+        let execution = isolated.execution();
         let result = run_worker(
-            &isolated.context,
+            &execution,
             actor,
             json!({ "value": "done" }),
             &local_tools,
@@ -4851,8 +4986,9 @@ workflow.define({{
             definition,
             &local_tools,
         )?));
+        let execution = isolated.execution();
         let result = run_worker_with_timing(
-            &isolated.context,
+            &execution,
             actor,
             input,
             &local_tools,
@@ -5143,6 +5279,275 @@ workflow.define({
 
         assert!(definition.extra_tools.is_empty());
     }
+
+    /// Worker provider that signals when its turn starts and then waits until the
+    /// test releases a level-triggered watch channel. This lets a test observe
+    /// several workflow runs progressing at the same time.
+    #[derive(Clone)]
+    struct GatedWorkerProvider {
+        started_tx: tokio::sync::mpsc::UnboundedSender<String>,
+        release: tokio::sync::watch::Receiver<bool>,
+    }
+
+    impl GatedWorkerProvider {
+        fn worker_input(request: &AgentTurnRequest) -> Result<Value> {
+            request
+                .messages
+                .iter()
+                .find_map(|message| match message {
+                    AgentMessage::User { content } => {
+                        serde_json::from_str::<Value>(content.as_text()).ok()
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| miette!("gated test worker input missing"))
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for GatedWorkerProvider {
+        async fn complete_json(
+            &self,
+            _request: PromptRequest,
+            _options: ModelRequestOptions,
+        ) -> Result<Value> {
+            Err(miette!("gated test provider does not compact"))
+        }
+
+        async fn complete_agent_turn(
+            &self,
+            request: AgentTurnRequest,
+            _options: ModelRequestOptions,
+        ) -> Result<AgentTurnStreamResult> {
+            let input = Self::worker_input(&request)?;
+            let id = input["id"]
+                .as_str()
+                .ok_or_else(|| miette!("gated test worker id missing"))?
+                .to_string();
+            self.started_tx
+                .send(id.clone())
+                .map_err(|_| miette!("gated test start receiver dropped"))?;
+            let mut release = self.release.clone();
+            if !*release.borrow() {
+                let _ = release.wait_for(|released| *released).await;
+            }
+            Ok(AgentTurnStreamResult {
+                items: vec![AgentTurnItem::ToolCall {
+                    call: AgentToolCall {
+                        id: format!("finish-{id}"),
+                        name: "finish_and_send".to_string(),
+                        arguments: json!({ "id": id }),
+                    },
+                }],
+                raw_stream_follow_up: true,
+                last_assistant_message: None,
+                last_reasoning_content: None,
+                last_reasoning_signature: None,
+            })
+        }
+
+        fn request_budget_limits(&self) -> RequestBudgetLimits {
+            RequestBudgetLimits {
+                context_window_tokens: 128_000,
+                auto_compact_threshold_tokens: 128_000,
+                reserved_output_tokens: 4_000,
+            }
+        }
+
+        fn token_usage_info(&self) -> TokenUsageInfo {
+            TokenUsageInfo::default()
+        }
+
+        fn model_name(&self) -> String {
+            "gated-test-worker".to_string()
+        }
+    }
+
+    async fn install_gated_run_workflow(
+        isolated: &mut IsolatedWorkflowContext,
+    ) -> WorkflowDefinition {
+        let source = r#"
+local Schema = {
+  type = "object",
+  properties = { id = { type = "string" } },
+  required = { "id" },
+  additionalProperties = false,
+}
+local worker = workflow.agent({
+  role = "run",
+  model = "main",
+  input = Schema,
+  output = Schema,
+  instruction = "Return the id.",
+  extra_tools = {},
+})
+workflow.define({
+  input = Schema,
+  output = Schema,
+  run = function(input, ctx)
+    local out = workflow.await(worker:run({ id = input.id }))
+    return out
+  end,
+})
+"#;
+        let workflow_path = isolated._execution.path().join("run_concurrency.lua");
+        fs::write(&workflow_path, source).expect("write run concurrency workflow");
+        let definition =
+            load_workflow_definition(&workflow_path).expect("load run concurrency workflow");
+        isolated
+            .context
+            .workflows
+            .definitions
+            .insert(definition.id.clone(), definition.clone());
+        definition
+    }
+
+    #[tokio::test]
+    async fn workflow_runs_execute_concurrently_and_wait_returns_each_result() {
+        let main = ScriptedWorkerProvider::new("main", Vec::new());
+        let efficient = ScriptedWorkerProvider::new("efficient", Vec::new());
+        let mut isolated = IsolatedWorkflowContext::new(main, efficient).await;
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        isolated.context.model_provider = Arc::new(GatedWorkerProvider {
+            started_tx,
+            release: release_rx,
+        });
+        let definition = install_gated_run_workflow(&mut isolated).await;
+
+        let first = start(
+            &isolated.context,
+            WorkflowInvocation {
+                workflow_id: definition.id.clone(),
+                input: json!({ "id": "first" }),
+            },
+        )
+        .expect("start first run");
+        let second = start(
+            &isolated.context,
+            WorkflowInvocation {
+                workflow_id: definition.id.clone(),
+                input: json!({ "id": "second" }),
+            },
+        )
+        .expect("start second run");
+        assert_eq!(first.status, WorkflowInvocationStatus::Running);
+        assert_ne!(first.run_id, second.run_id);
+        assert!(
+            isolated.context.workflow_runs.list().len() >= 2,
+            "both concurrent runs should be tracked"
+        );
+
+        let mut started = Vec::new();
+        for _ in 0..2 {
+            let id = tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+                .await
+                .expect("both workers should start while the other run is still blocked")
+                .expect("worker start signal");
+            started.push(id);
+        }
+        started.sort();
+        assert_eq!(started, vec!["first".to_string(), "second".to_string()]);
+
+        release_tx.send(true).expect("release gated workers");
+
+        let first_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            isolated.context.workflow_runs.wait(&first.run_id),
+        )
+        .await
+        .expect("first run should finish")
+        .expect("first run result");
+        let second_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            isolated.context.workflow_runs.wait(&second.run_id),
+        )
+        .await
+        .expect("second run should finish")
+        .expect("second run result");
+        assert_eq!(first_result.status, WorkflowInvocationStatus::Completed);
+        assert_eq!(second_result.status, WorkflowInvocationStatus::Completed);
+        assert_eq!(first_result.output, Some(json!({ "id": "first" })));
+        assert_eq!(second_result.output, Some(json!({ "id": "second" })));
+
+        let retained = isolated
+            .context
+            .workflow_runs
+            .wait(&first.run_id)
+            .await
+            .expect("finished run keeps its result");
+        assert_eq!(retained.status, WorkflowInvocationStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn workflow_run_cancel_interrupts_only_the_target_run() {
+        let main = ScriptedWorkerProvider::new("main", Vec::new());
+        let efficient = ScriptedWorkerProvider::new("efficient", Vec::new());
+        let mut isolated = IsolatedWorkflowContext::new(main, efficient).await;
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        isolated.context.model_provider = Arc::new(GatedWorkerProvider {
+            started_tx,
+            release: release_rx,
+        });
+        let definition = install_gated_run_workflow(&mut isolated).await;
+
+        let first = start(
+            &isolated.context,
+            WorkflowInvocation {
+                workflow_id: definition.id.clone(),
+                input: json!({ "id": "first" }),
+            },
+        )
+        .expect("start first run");
+        let second = start(
+            &isolated.context,
+            WorkflowInvocation {
+                workflow_id: definition.id.clone(),
+                input: json!({ "id": "second" }),
+            },
+        )
+        .expect("start second run");
+        for _ in 0..2 {
+            tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+                .await
+                .expect("both workers should start")
+                .expect("worker start signal");
+        }
+
+        assert!(
+            isolated
+                .context
+                .workflow_runs
+                .cancel(&first.run_id)
+                .expect("cancel first run")
+        );
+        let first_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            isolated.context.workflow_runs.wait(&first.run_id),
+        )
+        .await
+        .expect("cancelled run should finish")
+        .expect("cancelled run result");
+        assert_eq!(first_result.status, WorkflowInvocationStatus::Interrupted);
+
+        let second_status = isolated
+            .context
+            .workflow_runs
+            .status(&second.run_id)
+            .expect("second run status");
+        assert_eq!(second_status.status, WorkflowInvocationStatus::Running);
+
+        release_tx.send(true).expect("release remaining worker");
+        let second_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            isolated.context.workflow_runs.wait(&second.run_id),
+        )
+        .await
+        .expect("second run should finish")
+        .expect("second run result");
+        assert_eq!(second_result.status, WorkflowInvocationStatus::Completed);
+    }
 }
 
 fn local_tool_definition_from_lua(lua: &Lua, table: &Table) -> mlua::Result<LocalToolDefinition> {
@@ -5201,7 +5606,10 @@ fn new_lua() -> mlua::Result<Lua> {
     Lua::new_with(libraries, LuaOptions::default())
 }
 
-fn install_sandboxed_lua_environment(lua: &Lua, context: &Context) -> mlua::Result<()> {
+fn install_sandboxed_lua_environment(
+    lua: &Lua,
+    context: &WorkflowExecutionContext,
+) -> mlua::Result<()> {
     let execution_cwd = context.execution_cwd.clone();
     let sandbox_policy = context.sandbox_policy.clone();
     let io_table = lua.create_table()?;

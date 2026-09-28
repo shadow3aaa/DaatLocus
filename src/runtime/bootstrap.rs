@@ -403,7 +403,7 @@ pub async fn build_eval_context_with_compiled(
 
     Context {
         session_id: None,
-        model_provider: client,
+        model_provider: std::sync::Arc::from(client),
         efficient_model_provider: std::sync::Arc::from(efficient_client),
         config,
         token_usage_store: token_usage_store.clone(),
@@ -415,6 +415,7 @@ pub async fn build_eval_context_with_compiled(
         openskills,
         workflows,
         workflow_cancellation: WorkflowCancellationRegistry::default(),
+        workflow_runs: crate::workflow::WorkflowRunRegistry::default(),
         active_skill_run: None,
         pending_skill_run_flushes: Vec::new(),
         current_work_origin: None,

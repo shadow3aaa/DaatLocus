@@ -78,7 +78,8 @@ pub async fn execute_pre_turn_runtime_compaction(
     plan: &RuntimeConversationCompactionPlan,
 ) -> Result<RuntimeCompactionOutcome> {
     execute_runtime_compaction(
-        context,
+        context.session_id.as_deref(),
+        context.dashboard_history.as_ref(),
         RuntimeCompactionRequest {
             source_messages: plan.source_messages(),
             retained_user_message_count: 0,
@@ -115,6 +116,27 @@ pub async fn maybe_compact_agent_messages(
     baseline: &crate::context_budget::TokenEstimateBaseline,
     compact_for_overflow: bool,
 ) -> Result<bool> {
+    maybe_compact_agent_messages_in_archive(
+        context.session_id.as_deref(),
+        context.dashboard_history.as_ref(),
+        provider,
+        conversation,
+        tools,
+        baseline,
+        compact_for_overflow,
+    )
+    .await
+}
+
+pub async fn maybe_compact_agent_messages_in_archive(
+    session_id: Option<&str>,
+    archive: Option<&crate::dashboard::DashboardActivityHistoryStore>,
+    provider: &(dyn crate::core::ModelProvider + Send + Sync),
+    conversation: &mut RuntimeStepConversation,
+    tools: &[AgentToolSpec],
+    baseline: &crate::context_budget::TokenEstimateBaseline,
+    compact_for_overflow: bool,
+) -> Result<bool> {
     let compaction_result = conversation
         .maybe_compact(
             tools,
@@ -124,7 +146,8 @@ pub async fn maybe_compact_agent_messages(
             runtime_step_compaction_policy(),
             |messages, max_tokens| async move {
                 match build_mid_turn_compaction_outcome(
-                    context,
+                    session_id,
+                    archive,
                     &messages,
                     max_tokens,
                     compact_for_overflow,
@@ -170,7 +193,8 @@ struct RuntimeCompactionRequest<'a> {
 }
 
 async fn execute_runtime_compaction(
-    context: &Context,
+    session_id: Option<&str>,
+    archive: Option<&crate::dashboard::DashboardActivityHistoryStore>,
     request: RuntimeCompactionRequest<'_>,
 ) -> Result<RuntimeCompactionOutcome> {
     let RuntimeCompactionRequest {
@@ -186,11 +210,11 @@ async fn execute_runtime_compaction(
     let before_tokens = history_messages_total_token_cost(source_messages);
     let batch_id = format!(
         "{}-{}",
-        context.session_id.as_deref().unwrap_or("unknown-session"),
+        session_id.unwrap_or("unknown-session"),
         Utc::now().timestamp_millis()
     );
     let archived =
-        archive_runtime_conversation_history(context, &batch_id, source_messages).await?;
+        archive_runtime_conversation_history(archive, &batch_id, source_messages).await?;
     if archived == 0 {
         return Err(miette!("runtime compaction archived no messages"));
     }
@@ -230,11 +254,11 @@ async fn execute_runtime_compaction(
 }
 
 async fn archive_runtime_conversation_history(
-    context: &Context,
+    archive: Option<&crate::dashboard::DashboardActivityHistoryStore>,
     batch_id: &str,
     messages: &[HistoryMessage],
 ) -> Result<usize> {
-    let store = context.dashboard_history.as_ref().ok_or_else(|| {
+    let store = archive.ok_or_else(|| {
         miette!("runtime compaction archive requires an active session history store")
     })?;
     let archived = store.archive_history_messages(batch_id, messages)?;
@@ -254,7 +278,8 @@ fn agent_message_to_history_message_for_archival(message: &AgentMessage) -> Hist
 }
 
 async fn build_mid_turn_compaction_outcome(
-    context: &Context,
+    session_id: Option<&str>,
+    archive: Option<&crate::dashboard::DashboardActivityHistoryStore>,
     messages: &[AgentMessage],
     _max_tokens: usize,
     compact_for_overflow: bool,
@@ -274,7 +299,8 @@ async fn build_mid_turn_compaction_outcome(
         RuntimeCompactionReason::BudgetThreshold
     };
     execute_runtime_compaction(
-        context,
+        session_id,
+        archive,
         RuntimeCompactionRequest {
             source_messages: &compacted_messages,
             retained_user_message_count: 0,

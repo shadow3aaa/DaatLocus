@@ -203,7 +203,7 @@ pub async fn run_session_serve(
     let workflows = WorkflowCatalog::load();
     let mut context = Context {
         session_id: Some(session_id.as_str().to_string()),
-        model_provider: client,
+        model_provider: std::sync::Arc::from(client),
         efficient_model_provider: std::sync::Arc::from(efficient_client),
         config,
         token_usage_store: token_usage_store.clone(),
@@ -215,6 +215,7 @@ pub async fn run_session_serve(
         openskills,
         workflows,
         workflow_cancellation: workflow_cancellation.clone(),
+        workflow_runs: crate::workflow::WorkflowRunRegistry::default(),
         active_skill_run: None,
         pending_skill_run_flushes: Vec::new(),
         current_work_origin: None,

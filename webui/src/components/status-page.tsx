@@ -4635,6 +4635,15 @@ function AgentChatBubbles({
     ? workflowInspectorSnapshots.get(workflowInspectorSnapshot.run_id) ?? workflowInspectorSnapshot
     : null;
   const visibleWorkflowSnapshot = primaryWorkflowSnapshot;
+  const visibleWorkflowRuns = useMemo(
+    () =>
+      Array.from(workflowInspectorSnapshots.values()).sort(
+        (left, right) =>
+          Number(right.status === "running") - Number(left.status === "running") ||
+          right.started_at_ms - left.started_at_ms,
+      ),
+    [workflowInspectorSnapshots],
+  );
   const openWorkflowInspector = useCallback((workflowSnapshot: WorkflowRunSnapshot) => {
     setWorkflowInspectorSnapshot(workflowSnapshot);
   }, []);
@@ -5448,6 +5457,8 @@ function AgentChatBubbles({
         <WorkflowInspectorDialog
           sessionId={sessionId}
           snapshot={visibleWorkflowSnapshot}
+          runs={visibleWorkflowRuns}
+          onSelectRun={openWorkflowInspector}
           open
           onOpenChange={(nextOpen) => {
             if (!nextOpen) {
@@ -6357,12 +6368,16 @@ const WORKFLOW_INSPECTOR_NODE_TYPES: NodeTypes = {
 function WorkflowInspectorDialog({
   sessionId,
   snapshot,
+  runs,
+  onSelectRun,
   open,
   onOpenChange,
   showThinking,
 }: {
   sessionId: string;
   snapshot: WorkflowRunSnapshot;
+  runs: WorkflowRunSnapshot[];
+  onSelectRun: (snapshot: WorkflowRunSnapshot) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   showThinking: boolean;
@@ -6427,6 +6442,31 @@ function WorkflowInspectorDialog({
               </DialogDescription>
             </div>
           </div>
+          {runs.length > 1 ? (
+            <div className="mt-3 flex min-w-0 flex-wrap items-center gap-1.5">
+              <span className="mr-1 text-xs text-muted-foreground">
+                {runs.length} runs
+              </span>
+              {runs.map((run) => (
+                <Button
+                  key={run.run_id}
+                  type="button"
+                  size="xs"
+                  variant={run.run_id === snapshot.run_id ? "secondary" : "outline"}
+                  title={`${run.workflow_id} · ${run.run_id}`}
+                  onClick={() => onSelectRun(run)}
+                >
+                  <span
+                    className={cn("size-2 rounded-full", workflowStatusDotClass(run.status))}
+                  />
+                  <span className="max-w-[10rem] truncate font-mono">{run.workflow_id}</span>
+                  <span className="text-muted-foreground">
+                    {workflowStatusLabel(run.status)}
+                  </span>
+                </Button>
+              ))}
+            </div>
+          ) : null}
         </DialogHeader>
         {selectedWorker ? (
           <WorkflowInspectorAgentActivity

@@ -1439,24 +1439,28 @@ fn compact_runtime_error_text(text: &str, max_chars: usize) -> String {
     value
 }
 
+/// Commit a finished workflow run to the transcript. It only needs the history
+/// store and dashboard sender, so background completion watchers can call it
+/// without holding the runtime `Context`.
 pub fn append_workflow_activity_event(
-    context: &Context,
-    tx: &tokio::sync::watch::Sender<DashboardState>,
+    dashboard_history: Option<&DashboardActivityHistoryStore>,
+    tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
     result: &crate::workflow::WorkflowInvocationResult,
 ) {
-    append_committed_activity_cells(
-        context,
-        Some(tx),
-        vec![crate::dashboard::SessionActivityEvent::Workflow(
-            crate::dashboard::WorkflowActivityData {
-                workflow_id: result.workflow_id.clone(),
-                status: result.status.clone(),
-                output: result.output.clone(),
-                message: result.message.clone(),
-                snapshot: Some(result.snapshot.clone()),
-            },
-        )],
-    );
+    let cells = vec![crate::dashboard::SessionActivityEvent::Workflow(
+        crate::dashboard::WorkflowActivityData {
+            workflow_id: result.workflow_id.clone(),
+            status: result.status.clone(),
+            output: result.output.clone(),
+            message: result.message.clone(),
+            snapshot: Some(result.snapshot.clone()),
+        },
+    )];
+    let stable_ids = cells
+        .iter()
+        .map(stable_dashboard_activity_id_for_cell)
+        .collect::<Option<Vec<_>>>();
+    append_committed_activity_cells_with_history(dashboard_history, tx, cells, stable_ids);
 }
 
 fn append_committed_activity_cells(
@@ -1468,10 +1472,15 @@ fn append_committed_activity_cells(
         .iter()
         .map(stable_dashboard_activity_id_for_cell)
         .collect::<Option<Vec<_>>>();
-    append_committed_activity_cells_with_ids(context, tx, cells, stable_ids);
+    append_committed_activity_cells_with_history(
+        context.dashboard_history.as_ref(),
+        tx,
+        cells,
+        stable_ids,
+    );
 }
-fn append_committed_activity_cells_with_ids(
-    context: &Context,
+fn append_committed_activity_cells_with_history(
+    dashboard_history: Option<&DashboardActivityHistoryStore>,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
     cells: Vec<crate::dashboard::SessionActivityEvent>,
     stable_ids: Option<Vec<String>>,
@@ -1483,7 +1492,7 @@ fn append_committed_activity_cells_with_ids(
         || dashboard_activity_items_from_cells(&cells),
         |ids| dashboard_activity_items_from_cells_with_ids(&cells, ids),
     );
-    let persisted_window = context.dashboard_history.as_ref().and_then(|history| {
+    let persisted_window = dashboard_history.and_then(|history| {
         persist_dashboard_activity_items(history, &history_items).map_or_else(
             |err| {
                 tracing::warn!("persist dashboard activity history failed: {err:?}");
@@ -1541,7 +1550,12 @@ fn append_claimed_input_activity_cells(
             stable_ids.push(dashboard_user_activity_item_id(input));
         }
     }
-    append_committed_activity_cells_with_ids(context, tx, cells, Some(stable_ids));
+    append_committed_activity_cells_with_history(
+        context.dashboard_history.as_ref(),
+        tx,
+        cells,
+        Some(stable_ids),
+    );
 }
 
 fn dashboard_user_activity_item_id(event: &EventView) -> String {

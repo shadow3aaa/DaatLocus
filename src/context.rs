@@ -56,7 +56,7 @@ impl RuntimeTurnPhase {
 
 pub struct Context {
     pub session_id: Option<String>,
-    pub model_provider: Box<dyn ModelProvider + Send + Sync>,
+    pub model_provider: Arc<dyn ModelProvider + Send + Sync>,
     pub efficient_model_provider: std::sync::Arc<dyn ModelProvider + Send + Sync>,
     pub config: Config,
     pub token_usage_store: std::sync::Arc<crate::runtime::bootstrap::PersistentTokenUsageStore>,
@@ -68,6 +68,7 @@ pub struct Context {
     pub openskills: OpenSkillsCatalog,
     pub workflows: WorkflowCatalog,
     pub workflow_cancellation: WorkflowCancellationRegistry,
+    pub workflow_runs: crate::workflow::WorkflowRunRegistry,
     pub active_skill_run: Option<ActiveSkillRunSession>,
     pub pending_skill_run_flushes: Vec<PendingSkillRunFlush>,
     pub current_work_origin: Option<String>,
@@ -283,6 +284,7 @@ impl Context {
     }
 
     pub async fn shutdown(self) {
+        self.workflow_runs.shutdown().await;
         self.memory.shutdown().await;
         self.plan.shutdown().await;
         self.events.shutdown();

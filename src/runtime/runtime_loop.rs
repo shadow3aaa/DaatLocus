@@ -476,7 +476,7 @@ mod tests {
             let apps = AppManager::new(Vec::<Box<dyn App>>::new()).expect("app manager");
             let context = Context {
                 session_id: None,
-                model_provider: Box::new(UnusedModelProvider),
+                model_provider: std::sync::Arc::new(UnusedModelProvider),
                 efficient_model_provider: std::sync::Arc::new(UnusedModelProvider),
                 config: Config::default(),
                 token_usage_store: crate::runtime::bootstrap::load_persistent_token_usage_store(
@@ -491,6 +491,7 @@ mod tests {
                 openskills: OpenSkillsCatalog::default(),
                 workflows: crate::workflow::WorkflowCatalog::load(),
                 workflow_cancellation: crate::workflow::WorkflowCancellationRegistry::default(),
+                workflow_runs: crate::workflow::WorkflowRunRegistry::default(),
                 active_skill_run: None,
                 pending_skill_run_flushes: Vec::new(),
                 current_work_origin: None,
@@ -594,7 +595,7 @@ mod tests {
         let context = &mut isolated.context;
         let _store = with_test_session_history(context, "test-session-overflow-retry");
         let agent_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-        context.model_provider = Box::new(OverflowRecoveryModelProvider {
+        context.model_provider = std::sync::Arc::new(OverflowRecoveryModelProvider {
             agent_requests: agent_requests.clone(),
             succeed_on_agent_request: Some(2),
         });
@@ -616,7 +617,7 @@ mod tests {
         let context = &mut isolated.context;
         let _store = with_test_session_history(context, "test-session-overflow-stop");
         let agent_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-        context.model_provider = Box::new(OverflowRecoveryModelProvider {
+        context.model_provider = std::sync::Arc::new(OverflowRecoveryModelProvider {
             agent_requests: agent_requests.clone(),
             succeed_on_agent_request: None,
         });
@@ -730,7 +731,7 @@ mod tests {
         let mut isolated = IsolatedRuntimeContext::new().await;
         let context = &mut isolated.context;
         let second_request_started = Arc::new(tokio::sync::Notify::new());
-        context.model_provider = Box::new(InterruptCheckpointModelProvider {
+        context.model_provider = std::sync::Arc::new(InterruptCheckpointModelProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
             second_request_started: second_request_started.clone(),
         });
@@ -1089,7 +1090,7 @@ mod tests {
     async fn tool_attached_images_do_not_interrupt_tool_results() {
         let mut isolated = IsolatedRuntimeContext::new().await;
         let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-        isolated.context.model_provider = Box::new(ToolImageOrderingProvider {
+        isolated.context.model_provider = std::sync::Arc::new(ToolImageOrderingProvider {
             requests: requests.clone(),
             call_count: std::sync::atomic::AtomicUsize::new(0),
         });
@@ -1171,7 +1172,7 @@ mod tests {
             tokio::sync::watch::channel(crate::dashboard::DashboardState::default());
         isolated.context.dashboard_tx = Some(dashboard_tx);
         let observed_draft = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        isolated.context.model_provider = Box::new(StreamingProgressProvider {
+        isolated.context.model_provider = std::sync::Arc::new(StreamingProgressProvider {
             call_count: std::sync::atomic::AtomicUsize::new(0),
             dashboard_rx,
             observed_draft: observed_draft.clone(),

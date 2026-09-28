@@ -20,7 +20,7 @@ use crate::{
         runtime::{AgentContentPart, AgentToolCall, AgentToolInputSpec, AgentToolSpec},
     },
     schema_utils::{model_schema, model_schema_for, validate_model_facing_schema},
-    workflow::{WorkflowInvocation, invoke as invoke_workflow},
+    workflow::WorkflowInvocation,
 };
 
 mod files;
@@ -596,22 +596,22 @@ impl RuntimeTool for WorkflowRuntimeTool {
         context: &mut Context,
         call: &AgentToolCall,
     ) -> miette::Result<ToolExecutionResult> {
-        let result = invoke_workflow(
+        let result = crate::workflow::start(
             context,
             WorkflowInvocation {
                 workflow_id: self.workflow_id.clone(),
                 input: call.arguments.clone(),
             },
-        )
-        .await?;
+        )?;
         let payload = json!({
             "workflow_id": result.workflow_id,
+            "run_id": result.run_id,
             "status": result.status,
             "output": result.output,
             "message": result.message,
         });
         Ok(ToolExecutionResult::from_activity_event(
-            format!("workflow {}", self.workflow_id),
+            format!("workflow {} started", self.workflow_id),
             payload,
             Some(workflow_activity_event(&result)),
         ))
@@ -628,6 +628,183 @@ fn workflow_activity_event(
         message: result.message.clone(),
         snapshot: Some(result.snapshot.clone()),
     })
+}
+
+fn build_workflow_management_runtime_tools() -> Vec<Box<dyn RuntimeTool>> {
+    vec![
+        Box::new(StaticRuntimeTool::new_with_schema(
+            "workflow__await",
+            "Wait for a workflow run that was started earlier to finish, then return its declared output. Use this when you started one or more runs and are ready to consume their results, instead of blocking at start time.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "The run_id returned when the workflow run was started."
+                    }
+                },
+                "required": ["run_id"],
+                "additionalProperties": false,
+            }),
+            summarize_workflow_management_tool,
+            render_workflow_management_tool,
+            execute_workflow_await_tool,
+        )),
+        Box::new(StaticRuntimeTool::new_with_schema(
+            "workflow__status",
+            "Inspect a single workflow run without blocking. Returns the current status, message, and output of the run with the given run_id. Use `workflow__runs` to list every run.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "The run_id to inspect."
+                    }
+                },
+                "required": ["run_id"],
+                "additionalProperties": false,
+            }),
+            summarize_workflow_management_tool,
+            render_workflow_management_tool,
+            execute_workflow_status_tool,
+        )),
+        Box::new(StaticRuntimeTool::new_with_schema(
+            "workflow__runs",
+            "List every workflow run started in this session with its current status, running runs first. Use it to review concurrent runs before awaiting or cancelling them.",
+            json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false,
+            }),
+            summarize_workflow_management_tool,
+            render_workflow_management_tool,
+            execute_workflow_runs_tool,
+        )),
+        Box::new(StaticRuntimeTool::new_with_schema(
+            "workflow__cancel",
+            "Request interruption of one workflow run by its run_id. Use it to stop a run that is no longer needed, then await it to observe the interrupted result.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "The run_id of the run to interrupt."
+                    }
+                },
+                "required": ["run_id"],
+                "additionalProperties": false,
+            }),
+            summarize_workflow_management_tool,
+            render_workflow_management_tool,
+            execute_workflow_cancel_tool,
+        )),
+    ]
+}
+
+fn summarize_workflow_management_tool(call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
+    Ok(EpisodeActionRecord {
+        kind: call.name.clone(),
+        summary: summarize_inline_text(&call.arguments.to_string()),
+    })
+}
+
+fn render_workflow_management_tool(call: &AgentToolCall) -> miette::Result<ToolCallActivityEvent> {
+    Ok(ToolCallActivityEvent::app(
+        call.name.clone(),
+        vec![summarize_inline_text(&call.arguments.to_string())],
+    ))
+}
+
+fn workflow_run_id_arg(call: &AgentToolCall) -> miette::Result<String> {
+    call.arguments
+        .get("run_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| miette!("tool `{}` requires a string `run_id` argument", call.name))
+}
+
+fn execute_workflow_await_tool<'a>(
+    context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let run_id = workflow_run_id_arg(call)?;
+        let result = context.workflow_runs.wait(&run_id).await?;
+        let summary = format!(
+            "workflow run {run_id} {}",
+            workflow_run_status_label(&result.status)
+        );
+        Ok(ToolExecutionResult::from_activity_event(
+            summary,
+            workflow_run_payload(&result),
+            Some(workflow_activity_event(&result)),
+        ))
+    })
+}
+
+fn execute_workflow_status_tool<'a>(
+    context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let run_id = workflow_run_id_arg(call)?;
+        let status = context.workflow_runs.status(&run_id)?;
+        Ok(ToolExecutionResult::from_activity_event(
+            format!("workflow run {run_id} status"),
+            json!({ "run_id": run_id, "status": status }),
+            None,
+        ))
+    })
+}
+
+fn execute_workflow_runs_tool<'a>(
+    context: &'a mut Context,
+    _call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let runs = context.workflow_runs.list();
+        Ok(ToolExecutionResult::from_activity_event(
+            format!("{} workflow run(s)", runs.len()),
+            json!({ "runs": runs }),
+            None,
+        ))
+    })
+}
+
+fn execute_workflow_cancel_tool<'a>(
+    context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let run_id = workflow_run_id_arg(call)?;
+        let interrupted = context.workflow_runs.cancel(&run_id)?;
+        Ok(ToolExecutionResult::from_activity_event(
+            format!("workflow run {run_id} cancel"),
+            json!({ "run_id": run_id, "interrupted": interrupted }),
+            None,
+        ))
+    })
+}
+
+fn workflow_run_payload(result: &crate::workflow::WorkflowInvocationResult) -> Value {
+    json!({
+        "workflow_id": result.workflow_id,
+        "run_id": result.run_id,
+        "status": result.status,
+        "output": result.output,
+        "message": result.message,
+    })
+}
+
+fn workflow_run_status_label(status: &crate::workflow::WorkflowInvocationStatus) -> &'static str {
+    use crate::workflow::WorkflowInvocationStatus;
+    match status {
+        WorkflowInvocationStatus::Running => "running",
+        WorkflowInvocationStatus::Completed => "completed",
+        WorkflowInvocationStatus::Failed => "failed",
+        WorkflowInvocationStatus::Interrupted => "interrupted",
+    }
 }
 
 fn build_workflow_runtime_tools(
@@ -1069,6 +1246,13 @@ pub fn build_runtime_tools(context: &Context) -> Vec<Box<dyn RuntimeTool>> {
     let app_tools = build_app_runtime_tools(context, &reserved_names);
     reserved_names.extend(app_tools.iter().map(|tool| tool.name().to_string()));
     tools.extend(app_tools);
+    let workflow_management_tools = build_workflow_management_runtime_tools();
+    reserved_names.extend(
+        workflow_management_tools
+            .iter()
+            .map(|tool| tool.name().to_string()),
+    );
+    tools.extend(workflow_management_tools);
     tools.extend(build_workflow_runtime_tools(context, &reserved_names));
     tools
 }
@@ -1800,7 +1984,7 @@ mod tests {
             let apps = AppManager::new(apps).expect("app manager");
             let context = Context {
                 session_id: None,
-                model_provider: Box::new(UnusedModelProvider),
+                model_provider: std::sync::Arc::new(UnusedModelProvider),
                 efficient_model_provider: std::sync::Arc::new(UnusedModelProvider),
                 config,
                 token_usage_store: crate::runtime::bootstrap::load_persistent_token_usage_store(
@@ -1815,6 +1999,7 @@ mod tests {
                 openskills: OpenSkillsCatalog::default(),
                 workflows: crate::workflow::WorkflowCatalog::load(),
                 workflow_cancellation: crate::workflow::WorkflowCancellationRegistry::default(),
+                workflow_runs: crate::workflow::WorkflowRunRegistry::default(),
                 active_skill_run: None,
                 pending_skill_run_flushes: Vec::new(),
                 current_work_origin: None,

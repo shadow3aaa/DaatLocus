@@ -6,7 +6,7 @@ use super::{
 };
 use crate::daemon::DaemonControlCommand;
 use crate::openskills::{reload_openskills_for_runtime, set_openskill_auto_use};
-use crate::workflow::{WorkflowInvocation, invoke as invoke_workflow};
+use crate::workflow::WorkflowInvocation;
 
 pub async fn handle_dashboard_control_command(
     context: &mut Context,
@@ -71,30 +71,46 @@ pub async fn handle_dashboard_control_command(
             set_runtime_status(
                 Some(tx),
                 RuntimeStatusLevel::Info,
-                format!("running workflow `{workflow_id}`"),
+                format!("starting workflow `{workflow_id}`"),
             );
             sync_dashboard_state(context, tx, sleep_status, None);
-            let result = invoke_workflow(context, WorkflowInvocation { workflow_id, input }).await;
-            match result {
-                Ok(result) => {
-                    let level = match result.status {
-                        crate::workflow::WorkflowInvocationStatus::Completed
-                        | crate::workflow::WorkflowInvocationStatus::Running => {
-                            RuntimeStatusLevel::Info
-                        }
-                        crate::workflow::WorkflowInvocationStatus::Failed
-                        | crate::workflow::WorkflowInvocationStatus::Interrupted => {
-                            RuntimeStatusLevel::Error
-                        }
-                    };
-                    crate::runtime::runtime_loop::append_workflow_activity_event(
-                        context, tx, &result,
-                    );
+            // Start the run in the background so the runtime loop and other
+            // concurrent runs are never blocked on workflow completion.
+            match crate::workflow::start(context, WorkflowInvocation { workflow_id, input }) {
+                Ok(started) => {
+                    let run_id = started.run_id.clone();
                     set_runtime_status(
                         Some(tx),
-                        level,
-                        format!("workflow `{}`: {}", result.workflow_id, result.message),
+                        RuntimeStatusLevel::Info,
+                        format!("workflow `{}` started (run {run_id})", started.workflow_id),
                     );
+                    let registry = context.workflow_runs.clone();
+                    let dashboard_history = context.dashboard_history.clone();
+                    let dashboard_tx = tx.clone();
+                    tokio::spawn(async move {
+                        if let Ok(result) = registry.wait(&run_id).await {
+                            let level = match result.status {
+                                crate::workflow::WorkflowInvocationStatus::Completed
+                                | crate::workflow::WorkflowInvocationStatus::Running => {
+                                    RuntimeStatusLevel::Info
+                                }
+                                crate::workflow::WorkflowInvocationStatus::Failed
+                                | crate::workflow::WorkflowInvocationStatus::Interrupted => {
+                                    RuntimeStatusLevel::Error
+                                }
+                            };
+                            crate::runtime::runtime_loop::append_workflow_activity_event(
+                                dashboard_history.as_ref(),
+                                Some(&dashboard_tx),
+                                &result,
+                            );
+                            set_runtime_status(
+                                Some(&dashboard_tx),
+                                level,
+                                format!("workflow `{}`: {}", result.workflow_id, result.message),
+                            );
+                        }
+                    });
                 }
                 Err(err) => set_runtime_status(
                     Some(tx),
