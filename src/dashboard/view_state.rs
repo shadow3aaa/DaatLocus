@@ -367,9 +367,139 @@ impl TranscriptOverlayState {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WorkflowGroupPage {
+    Graph,
+    Run,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WorkflowInspectorPage {
     Outline,
     Activity,
+}
+
+pub(super) struct WorkflowGroupViewState {
+    pub(super) selected: usize,
+    pub(super) page: WorkflowGroupPage,
+    pub(super) inspector: Option<WorkflowInspectorState>,
+}
+
+impl WorkflowGroupViewState {
+    fn new(group: &crate::workflow::WorkflowGroupSnapshot) -> Self {
+        Self {
+            selected: group.nodes.len().saturating_sub(1),
+            page: WorkflowGroupPage::Graph,
+            inspector: None,
+        }
+    }
+
+    pub(super) fn selected_node<'a>(
+        &self,
+        group: &'a crate::workflow::WorkflowGroupSnapshot,
+    ) -> Option<&'a crate::workflow::WorkflowGroupNodeSnapshot> {
+        group
+            .nodes
+            .get(self.selected.min(group.nodes.len().saturating_sub(1)))
+    }
+
+    fn select_node(&mut self, offset: isize, node_count: usize) {
+        if node_count == 0 {
+            self.selected = 0;
+            return;
+        }
+        let current = self.selected.min(node_count - 1);
+        self.selected = if offset.is_negative() {
+            current.saturating_sub(offset.unsigned_abs())
+        } else {
+            current
+                .saturating_add(offset as usize)
+                .min(node_count - 1)
+        };
+    }
+
+    fn open_selected(&mut self, group: &crate::workflow::WorkflowGroupSnapshot) {
+        let snapshot = self
+            .selected_node(group)
+            .and_then(|node| node.snapshot.clone());
+        self.page = WorkflowGroupPage::Run;
+        self.inspector = snapshot.map(WorkflowInspectorState::new);
+    }
+
+    fn sync_group(&mut self, group: &crate::workflow::WorkflowGroupSnapshot) {
+        if group.nodes.is_empty() {
+            self.selected = 0;
+            self.page = WorkflowGroupPage::Graph;
+            self.inspector = None;
+            return;
+        }
+        self.selected = self.selected.min(group.nodes.len() - 1);
+        if self.page != WorkflowGroupPage::Run {
+            return;
+        }
+        let Some(node) = group.nodes.get(self.selected) else {
+            self.page = WorkflowGroupPage::Graph;
+            self.inspector = None;
+            return;
+        };
+        match (&mut self.inspector, node.snapshot.as_ref()) {
+            (Some(inspector), Some(snapshot)) if inspector.snapshot.run_id == snapshot.run_id => {
+                inspector.sync_snapshot(snapshot);
+            }
+            (_, Some(snapshot)) => {
+                self.inspector = Some(WorkflowInspectorState::new(snapshot.clone()));
+            }
+            (_, None) => {
+                self.inspector = None;
+            }
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent, group: &crate::workflow::WorkflowGroupSnapshot) -> bool {
+        if self.page == WorkflowGroupPage::Run {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                if self.inspector.as_ref().is_some_and(|inspector| {
+                    inspector.page == WorkflowInspectorPage::Activity
+                }) {
+                    if let Some(inspector) = self.inspector.as_mut() {
+                        inspector.page = WorkflowInspectorPage::Outline;
+                        inspector.activity_scroll.reset_to_bottom();
+                    }
+                } else {
+                    self.page = WorkflowGroupPage::Graph;
+                    self.inspector = None;
+                }
+                return true;
+            }
+            return self
+                .inspector
+                .as_mut()
+                .is_some_and(|inspector| inspector.handle_key(key));
+        }
+
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.select_node(-1, group.nodes.len());
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.select_node(1, group.nodes.len());
+                true
+            }
+            KeyCode::Enter => {
+                self.open_selected(group);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_scroll_rows(&mut self, rows: i16) -> bool {
+        self.page == WorkflowGroupPage::Run
+            && self.inspector.as_mut().is_some_and(|inspector| {
+                inspector.page == WorkflowInspectorPage::Activity
+                    && inspector.activity_scroll.handle_scroll_rows(rows)
+            })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -857,7 +987,8 @@ pub(super) struct TuiViewState {
     pub(super) command_popup_scroll: usize,
     pub(super) command_panel: Option<CommandPanel>,
     pub(super) transcript_overlay: Option<TranscriptOverlayState>,
-    pub(super) workflow_inspector: Option<WorkflowInspectorState>,
+    pub(super) workflow_group: Option<WorkflowGroupViewState>,
+    pub(super) workflow_group_chord: Option<std::time::Instant>,
     pub(super) command_feedback: Option<CommandFeedback>,
     pub(super) ctrl_c_reminder: Option<CtrlCReminder>,
     pub(super) editing_pending_user_input: Option<PendingUserInputEditState>,
@@ -891,7 +1022,8 @@ impl TuiViewState {
             command_popup_scroll: 0,
             command_panel: None,
             transcript_overlay: None,
-            workflow_inspector: None,
+            workflow_group: None,
+            workflow_group_chord: None,
             command_feedback: None,
             ctrl_c_reminder: None,
             editing_pending_user_input: None,
@@ -954,21 +1086,12 @@ impl TuiViewState {
                 .is_some_and(|overlay| overlay.handle_key(key)),
         }
     }
-    pub(super) fn open_latest_workflow_inspector(&mut self, state: &DashboardState) -> bool {
-        let snapshot = state.active_workflow_runs.last().cloned().or_else(|| {
-            state
-                .activity_events
-                .iter()
-                .rev()
-                .find_map(|event| match event {
-                    SessionActivityEvent::Workflow(workflow) => workflow.snapshot.clone(),
-                    _ => None,
-                })
-        });
-        let Some(snapshot) = snapshot else {
+    pub(super) fn open_workflow_group(&mut self, state: &DashboardState) -> bool {
+        if state.workflow_group.nodes.is_empty() {
             return false;
-        };
-        self.workflow_inspector = Some(WorkflowInspectorState::new(snapshot));
+        }
+        self.workflow_group = Some(WorkflowGroupViewState::new(&state.workflow_group));
+        self.workflow_group_chord = None;
         self.transcript_overlay = None;
         self.command_panel = None;
         self.command_feedback = None;
@@ -977,58 +1100,45 @@ impl TuiViewState {
         true
     }
 
-    pub(super) fn sync_workflow_inspector(&mut self, state: &DashboardState) {
-        let Some(inspector) = self.workflow_inspector.as_mut() else {
+    pub(super) fn sync_workflow_group(&mut self, state: &DashboardState) {
+        let Some(group) = self.workflow_group.as_mut() else {
             return;
         };
-        if let Some(snapshot) = state
-            .active_workflow_runs
-            .iter()
-            .find(|run| run.run_id == inspector.snapshot.run_id)
-            .or_else(|| {
-                state
-                    .activity_events
-                    .iter()
-                    .rev()
-                    .find_map(|event| match event {
-                        SessionActivityEvent::Workflow(workflow) => workflow
-                            .snapshot
-                            .as_ref()
-                            .filter(|snapshot| snapshot.run_id == inspector.snapshot.run_id),
-                        _ => None,
-                    })
-            })
-        {
-            inspector.sync_snapshot(snapshot);
+        if state.workflow_group.nodes.is_empty() {
+            self.workflow_group = None;
+            return;
         }
+        group.sync_group(&state.workflow_group);
     }
 
-    pub(super) fn handle_workflow_inspector_key(&mut self, key: KeyEvent) -> bool {
-        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
-            if self
-                .workflow_inspector
-                .as_ref()
-                .is_some_and(|inspector| inspector.page == WorkflowInspectorPage::Activity)
-            {
-                if let Some(inspector) = self.workflow_inspector.as_mut() {
-                    inspector.page = WorkflowInspectorPage::Outline;
-                    inspector.activity_scroll.reset_to_bottom();
-                }
-            } else {
-                self.workflow_inspector = None;
-            }
+    pub(super) fn handle_workflow_group_key(
+        &mut self,
+        key: KeyEvent,
+        state: &DashboardState,
+    ) -> bool {
+        if self.workflow_group.as_ref().is_some_and(|group| {
+            group.page == WorkflowGroupPage::Graph
+                && matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
+        }) {
+            self.workflow_group = None;
+            self.workflow_group_chord = None;
             return true;
         }
-        self.workflow_inspector
+        self.workflow_group
             .as_mut()
-            .is_some_and(|inspector| inspector.handle_key(key))
+            .is_some_and(|group| group.handle_key(key, &state.workflow_group))
     }
 
-    pub(super) fn handle_workflow_inspector_scroll_rows(&mut self, rows: i16) -> bool {
-        self.workflow_inspector.as_mut().is_some_and(|inspector| {
-            inspector.page == WorkflowInspectorPage::Activity
-                && inspector.activity_scroll.handle_scroll_rows(rows)
-        })
+    pub(super) fn handle_workflow_group_scroll_rows(&mut self, rows: i16) -> bool {
+        self.workflow_group
+            .as_mut()
+            .is_some_and(|group| group.handle_scroll_rows(rows))
+    }
+
+    pub(super) fn workflow_inspector_mut(&mut self) -> Option<&mut WorkflowInspectorState> {
+        self.workflow_group
+            .as_mut()
+            .and_then(|group| group.inspector.as_mut())
     }
 
     pub(super) fn handle_transcript_overlay_scroll_rows(&mut self, rows: i16) -> bool {
@@ -2018,26 +2128,43 @@ mod tests {
             workers: Vec::new(),
         };
         let state = DashboardState {
-            active_workflow_runs: vec![snapshot],
+            workflow_group: crate::workflow::WorkflowGroupSnapshot {
+                nodes: vec![crate::workflow::WorkflowGroupNodeSnapshot {
+                    run_id: snapshot.run_id.clone(),
+                    workflow_id: snapshot.workflow_id.clone(),
+                    status: snapshot.status,
+                    started_at_ms: snapshot.started_at_ms,
+                    completed_at_ms: snapshot.completed_at_ms,
+                    input: snapshot.input.clone(),
+                    output: snapshot.output.clone(),
+                    error: snapshot.error.clone(),
+                    message: String::new(),
+                    snapshot: Some(snapshot),
+                }],
+                edges: Vec::new(),
+            },
             ..DashboardState::default()
         };
         let mut view = TuiViewState::new();
-        assert!(view.open_latest_workflow_inspector(&state));
-        assert!(!view.handle_workflow_inspector_scroll_rows(-1));
-        assert!(view.handle_workflow_inspector_key(KeyEvent::new(
-            KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE
-        )));
-        view.workflow_inspector
-            .as_mut()
+
+        assert!(view.open_workflow_group(&state));
+        assert!(!view.handle_workflow_group_scroll_rows(-1));
+        assert!(view.handle_workflow_group_key(
+            KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
+            &state,
+        ));
+        assert!(view.handle_workflow_group_key(
+            KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
+            &state,
+        ));
+        view.workflow_inspector_mut()
             .expect("workflow inspector")
             .activity_scroll
             .set_render_metrics(100, 20);
 
-        assert!(view.handle_workflow_inspector_scroll_rows(-1));
+        assert!(view.handle_workflow_group_scroll_rows(-1));
         assert!(
-            view.workflow_inspector
-                .as_ref()
+            view.workflow_inspector_mut()
                 .is_some_and(|inspector| !inspector.activity_scroll.follow_bottom)
         );
     }

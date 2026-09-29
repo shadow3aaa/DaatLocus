@@ -497,6 +497,40 @@ export type WorkflowRunSnapshot = {
   workers: WorkflowWorkerSnapshot[];
 };
 
+export type WorkflowGroupNodeStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted";
+
+export type WorkflowGroupNodeSnapshot = {
+  run_id: string;
+  workflow_id: string;
+  status: WorkflowGroupNodeStatus;
+  started_at_ms: number;
+  completed_at_ms?: number | null;
+  input: unknown;
+  output?: unknown | null;
+  error?: string | null;
+  message: string;
+  /** Present only after the run has started. Pending runs omit it. */
+  snapshot?: WorkflowRunSnapshot | null;
+};
+
+export type WorkflowGroupEdgeSnapshot = {
+  /** The dependency run. */
+  source_run_id: string;
+  /** The run waiting on `source_run_id`. */
+  target_run_id: string;
+};
+
+/** Active session workflow group. Edges are wait constraints, not data flow. */
+export type WorkflowGroupSnapshot = {
+  nodes: WorkflowGroupNodeSnapshot[];
+  edges: WorkflowGroupEdgeSnapshot[];
+};
+
 export type SessionActivityWorkflow = {
   workflow_id: string;
   status: "Running" | "Completed" | "Failed" | "Interrupted" | (string & {});
@@ -632,6 +666,8 @@ export type DashboardSnapshot = {
     event: SessionActivityEvent;
   }>;
   active_workflow_runs?: WorkflowRunSnapshot[];
+  /** Active workflow runs and the waits between them. Older snapshots omit it. */
+  workflow_group?: WorkflowGroupSnapshot | null;
   activity_history?: DashboardActivityHistoryWindow;
   last_cycle_elapsed_ms: number | null;
   runtime_status: string | null;

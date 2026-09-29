@@ -47,6 +47,7 @@ import {
   type SetupConfigRequest,
   type SetupConfigResponse,
   type StatusSummary,
+  type WorkflowGroupSnapshot,
   type WorkflowRunSnapshot,
 } from "@/lib/daemon-api";
 import { MOCK_STUDY_DASHBOARD_SNAPSHOT, MOCK_STUDY_GRAPH } from "@/lib/study-mock";
@@ -1567,6 +1568,7 @@ const MOCK_WORKFLOW_RUN: WorkflowRunSnapshot = {
   ],
 };
 
+const MOCK_WORKFLOW_PENDING_RUN_ID = "mock-pending-workflow-run";
 const MOCK_WORKFLOW_ACTOR_SPLIT_RUN_ID = "mock-actor-split-workflow-run";
 
 const MOCK_WORKFLOW_ACTOR_SPLIT_RUN: WorkflowRunSnapshot = {
@@ -1728,6 +1730,52 @@ const MOCK_WORKFLOW_ACTOR_SPLIT_RUN: WorkflowRunSnapshot = {
       activity_count: 0,
       activity_revision: 0,
       activity: [],
+    },
+  ],
+};
+
+const MOCK_WORKFLOW_GROUP: WorkflowGroupSnapshot = {
+  nodes: [
+    {
+      run_id: MOCK_WORKFLOW_RUN.run_id,
+      workflow_id: MOCK_WORKFLOW_RUN.workflow_id,
+      status: "running",
+      started_at_ms: MOCK_WORKFLOW_RUN.started_at_ms,
+      completed_at_ms: null,
+      input: MOCK_WORKFLOW_RUN.input,
+      output: null,
+      error: null,
+      message: "running 4 workers across 4 await groups",
+      snapshot: MOCK_WORKFLOW_RUN,
+    },
+    {
+      run_id: MOCK_WORKFLOW_PENDING_RUN_ID,
+      workflow_id: "report",
+      status: "pending",
+      started_at_ms: MOCK_WORKFLOW_STARTED_AT + 1_000,
+      completed_at_ms: null,
+      input: { goal: "Summarize the workflow visualization changes." },
+      output: null,
+      error: null,
+      message: "waiting for goal",
+    },
+    {
+      run_id: MOCK_WORKFLOW_ACTOR_SPLIT_RUN.run_id,
+      workflow_id: MOCK_WORKFLOW_ACTOR_SPLIT_RUN.workflow_id,
+      status: "completed",
+      started_at_ms: MOCK_WORKFLOW_ACTOR_SPLIT_RUN.started_at_ms,
+      completed_at_ms: MOCK_WORKFLOW_ACTOR_SPLIT_RUN.completed_at_ms,
+      input: MOCK_WORKFLOW_ACTOR_SPLIT_RUN.input,
+      output: MOCK_WORKFLOW_ACTOR_SPLIT_RUN.output,
+      error: null,
+      message: "verified same-role actors remain separate",
+      snapshot: MOCK_WORKFLOW_ACTOR_SPLIT_RUN,
+    },
+  ],
+  edges: [
+    {
+      source_run_id: MOCK_WORKFLOW_RUN.run_id,
+      target_run_id: MOCK_WORKFLOW_PENDING_RUN_ID,
     },
   ],
 };
@@ -1907,18 +1955,6 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
   ],
   live_activity_events: [
     {
-      key: "mock-live-exec",
-      event: {
-        LiveExec: {
-          title: "cargo check",
-          call_lines: ["cargo check"],
-          meta: null,
-          output_lines: ["Checking daat-locus v0.1.1"],
-          started_at_ms: MOCK_ACTIVITY_STARTED_AT + 12_000,
-        },
-      },
-    },
-    {
       key: `workflow:${MOCK_WORKFLOW_RUN.run_id}`,
       event: {
         Workflow: {
@@ -1930,8 +1966,21 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
         },
       },
     },
+    {
+      key: "mock-live-exec",
+      event: {
+        LiveExec: {
+          title: "cargo check",
+          call_lines: ["cargo check"],
+          meta: null,
+          output_lines: ["Checking daat-locus v0.1.1"],
+          started_at_ms: MOCK_ACTIVITY_STARTED_AT + 12_000,
+        },
+      },
+    },
   ],
   active_workflow_runs: [MOCK_WORKFLOW_RUN],
+  workflow_group: MOCK_WORKFLOW_GROUP,
   last_cycle_elapsed_ms: 2300,
   runtime_status: "Working",
   runtime_status_level: "info",

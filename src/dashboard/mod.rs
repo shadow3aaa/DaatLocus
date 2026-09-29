@@ -44,8 +44,8 @@ pub use commands::{
 pub use history::{
     DashboardActivityHistoryCount, DashboardActivityHistoryItem, DashboardActivityHistoryPage,
     DashboardActivityHistoryStore, DashboardActivityHistoryWindow, DashboardInputHistory,
-    HISTORY_ARCHIVE_BATCH_KEEP_LIMIT, HistoryArchiveItem, HistoryArchiveQueryMode,
-    WORKFLOW_WORKER_ACTIVITY_INITIAL_LIMIT, WorkflowWorkerActivityPage,
+    HistoryQueryItem, HistoryQueryMode, WORKFLOW_WORKER_ACTIVITY_INITIAL_LIMIT,
+    WorkflowWorkerActivityPage,
 };
 
 #[cfg(test)]
@@ -111,7 +111,8 @@ use terminal_hyperlinks::{
 use transcript_overlay::render_transcript_overlay;
 use tui_animation::dashboard_state_needs_animation;
 use view_state::{
-    TuiViewState, WorkflowInspectorActorTransition, WorkflowInspectorPage, WorkflowInspectorState,
+    TuiViewState, WorkflowGroupPage, WorkflowGroupViewState, WorkflowInspectorActorTransition,
+    WorkflowInspectorPage, WorkflowInspectorState,
 };
 
 const TUI_ANIMATION_INTERVAL: Duration = Duration::from_millis(32);
@@ -354,6 +355,11 @@ pub struct DashboardState {
     pub live_activity_events: Vec<LiveActivityEvent>,
     #[serde(default)]
     pub active_workflow_runs: Vec<crate::workflow::WorkflowRunSnapshot>,
+    /// Session workflow group. Empty until the main agent starts a grouped run.
+    /// A component stays here while any member is pending or running, then the
+    /// whole component disappears together.
+    #[serde(default)]
+    pub workflow_group: crate::workflow::WorkflowGroupSnapshot,
     #[serde(default)]
     pub activity_history: DashboardActivityHistoryWindow,
     pub last_cycle_elapsed_ms: Option<u64>,
@@ -527,14 +533,21 @@ pub async fn run_tui_dashboard(
                                 if should_exit {
                                     break;
                                 }
+                                if let Some(deadline) =
+                                    input_controller::workflow_group_chord_deadline(&view)
+                                {
+                                    chord_sleep
+                                        .as_mut()
+                                        .reset(tokio::time::Instant::from_std(deadline));
+                                }
                                 continue;
                     }
                     tui_event::TuiEvent::MouseWheel { rows } => {
                         if view.selection_dragging() {
                             continue;
                         }
-                        if view.workflow_inspector.is_some() {
-                            if view.handle_workflow_inspector_scroll_rows(rows) {
+                        if view.workflow_group.is_some() {
+                            if view.handle_workflow_group_scroll_rows(rows) {
                                 frame_requester.schedule_frame();
                             }
                         } else if view.transcript_overlay.is_some() {
@@ -568,6 +581,17 @@ pub async fn run_tui_dashboard(
                 }
                 continue;
             }
+            _ = &mut chord_sleep, if input_controller::workflow_group_chord_deadline(&view).is_some() => {
+                if input_controller::poll_workflow_group_chord(&mut view) {
+                    frame_requester.schedule_frame();
+                }
+                if let Some(deadline) = input_controller::workflow_group_chord_deadline(&view) {
+                    chord_sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::from_std(deadline));
+                }
+                continue;
+            }
             result = draw_rx.recv() => {
                 if result.is_err() {
                     continue;
@@ -579,8 +603,8 @@ pub async fn run_tui_dashboard(
         view.sync_visible_clear_from_state(&state);
         view.seed_command_history_from_state(&state);
         view.sync_transcript_overlay(&state);
-        view.sync_workflow_inspector(&state);
-        if let Some(inspector) = view.workflow_inspector.as_mut() {
+        view.sync_workflow_group(&state);
+        if let Some(inspector) = view.workflow_inspector_mut() {
             let activity_pane_visible = terminal
                 .size()
                 .map(|area| area.width >= 100)
@@ -734,6 +758,161 @@ fn workflow_status_style(status: crate::workflow::WorkflowNodeStatus) -> Style {
     }
 }
 
+fn short_run_id(run_id: &str) -> String {
+    let trimmed = run_id.trim();
+    let mut chars = trimmed.chars();
+    let short = chars.by_ref().take(7).collect::<String>();
+    if chars.next().is_none() {
+        short
+    } else {
+        format!("{short}\u{2026}")
+    }
+}
+
+fn render_workflow_group(
+    frame: &mut Frame,
+    area: Rect,
+    group: &mut WorkflowGroupViewState,
+    snapshot: &crate::workflow::WorkflowGroupSnapshot,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    match group.page {
+        WorkflowGroupPage::Graph => render_workflow_group_graph(frame, area, group, snapshot),
+        WorkflowGroupPage::Run => {
+            if let Some(inspector) = group.inspector.as_mut() {
+                render_workflow_inspector(frame, area, inspector);
+            } else {
+                render_workflow_group_not_started(frame, area, group, snapshot);
+            }
+        }
+    }
+}
+
+fn render_workflow_group_graph(
+    frame: &mut Frame,
+    area: Rect,
+    group: &WorkflowGroupViewState,
+    snapshot: &crate::workflow::WorkflowGroupSnapshot,
+) {
+    frame.render_widget(Clear, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "WORKFLOW GROUP",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "  {} run{}",
+                    snapshot.nodes.len(),
+                    if snapshot.nodes.len() == 1 { "" } else { "s" }
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])),
+        rows[0],
+    );
+
+    let selected = group
+        .selected
+        .min(snapshot.nodes.len().saturating_sub(1));
+    let mut lines = Vec::new();
+    if snapshot.nodes.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No workflow runs in this group.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (index, node) in snapshot.nodes.iter().enumerate() {
+        let marker = if index == selected { ">" } else { " " };
+        let message = format!("  {}", workflow_status_label(node.status));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{marker} "),
+                if index == selected {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                },
+            ),
+            Span::styled(
+                format!("{:<11}", workflow_status_label(node.status)),
+                workflow_status_style(node.status),
+            ),
+            Span::styled(
+                format!(" {} ", node.workflow_id),
+                if index == selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ),
+            Span::styled(short_run_id(&node.run_id), Style::default().fg(Color::DarkGray)),
+            Span::styled(message, Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+    if !snapshot.edges.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Waits",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for edge in &snapshot.edges {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {} -> {}",
+                    short_run_id(&edge.source_run_id),
+                    short_run_id(&edge.target_run_id)
+                ),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[1]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Esc/q close   Up/Down run   Enter actor outline",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        rows[2],
+    );
+}
+
+fn render_workflow_group_not_started(
+    frame: &mut Frame,
+    area: Rect,
+    group: &WorkflowGroupViewState,
+    snapshot: &crate::workflow::WorkflowGroupSnapshot,
+) {
+    frame.render_widget(Clear, area);
+    let node = group.selected_node(snapshot);
+    let title = node.map_or_else(
+        || "run".to_string(),
+        |node| format!("{} {}", node.workflow_id, short_run_id(&node.run_id)),
+    );
+    let block = ratatui::widgets::Block::bordered().title(format!(" {title} "));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new("\u{5c1a}\u{672a}\u{542f}\u{52a8}").style(Style::default().fg(Color::DarkGray)),
+        inner,
+    );
+}
+
 fn render_workflow_inspector(
     frame: &mut Frame,
     area: Rect,
@@ -791,11 +970,11 @@ fn render_workflow_inspector(
     }
 
     let footer = if area.width >= 100 {
-        "Esc/q close   Up/Down actor   PgUp/PgDn activity   Tab/←/→ switch pane"
+        "Esc/q back   Up/Down actor   PgUp/PgDn activity   Tab/\u{2190}/\u{2192} switch pane"
     } else if inspector.page == WorkflowInspectorPage::Outline {
-        "Esc/q close   Up/Down actor   Enter/Tab/→ activity"
+        "Esc/q back   Up/Down actor   Enter/Tab/\u{2192} activity"
     } else {
-        "Esc/q back   PgUp/PgDn scroll   Tab/← outline"
+        "Esc/q back   PgUp/PgDn scroll   Tab/\u{2190} outline"
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -1043,6 +1222,8 @@ fn render_workflow_inspector_activity(
                 user_hyperlink_areas: &mut hyperlink_areas,
                 selection: &selection,
                 selectable_regions: &mut selectable_regions,
+                artifact_previews: None,
+                workflow_group: None,
             },
         ),
         inner.height.saturating_sub(1),
@@ -1062,7 +1243,7 @@ fn render_tui_dashboard_frame<B: Backend>(
 ) -> Result<TuiFrameRender, B::Error> {
     let frame_start = Instant::now();
     let prep_start = Instant::now();
-    let overlay_open = view.transcript_overlay.is_some() || view.workflow_inspector.is_some();
+    let overlay_open = view.transcript_overlay.is_some() || view.workflow_group.is_some();
     let panel_open =
         view.command_panel.is_some() || view.editing_pending_user_input.is_some() || overlay_open;
     let live_command_feedback = if panel_open {
@@ -1133,8 +1314,11 @@ fn render_tui_dashboard_frame<B: Backend>(
         terminal.draw(|f| {
             view.last_cursor_pos = None;
             let activity_start = Instant::now();
-            if let Some(inspector) = view.workflow_inspector.as_mut() {
-                render_workflow_inspector(f, f.area(), inspector);
+            if view.workflow_group.is_some() {
+                let group_snapshot = state.workflow_group.clone();
+                if let Some(group) = view.workflow_group.as_mut() {
+                    render_workflow_group(f, f.area(), group, &group_snapshot);
+                }
                 hyperlink_clears = collect_removed_terminal_hyperlink_clears(
                     f.buffer_mut(),
                     &view.previous_hyperlink_overlays,
@@ -1203,6 +1387,8 @@ fn render_tui_dashboard_frame<B: Backend>(
                 user_hyperlink_areas: &mut user_hyperlink_areas,
                 selection: &selection,
                 selectable_regions: &mut selectable_regions,
+                artifact_previews: Some(&mut artifact_previews),
+                workflow_group: Some(&state.workflow_group),
             },
         );
         view.activity_scroll
@@ -1314,6 +1500,27 @@ mod tests {
             .join("\n")
     }
 
+fn workflow_group_state(snapshot: crate::workflow::WorkflowRunSnapshot) -> DashboardState {
+    DashboardState {
+        workflow_group: crate::workflow::WorkflowGroupSnapshot {
+            nodes: vec![crate::workflow::WorkflowGroupNodeSnapshot {
+                run_id: snapshot.run_id.clone(),
+                workflow_id: snapshot.workflow_id.clone(),
+                status: snapshot.status,
+                started_at_ms: snapshot.started_at_ms,
+                completed_at_ms: snapshot.completed_at_ms,
+                input: snapshot.input.clone(),
+                output: snapshot.output.clone(),
+                error: snapshot.error.clone(),
+                message: String::new(),
+                snapshot: Some(snapshot),
+            }],
+            edges: Vec::new(),
+        },
+        ..DashboardState::default()
+    }
+}
+
     #[test]
     fn workflow_inspector_wide_view_reuses_canonical_activity_renderer() {
         let snapshot = crate::workflow::WorkflowRunSnapshot {
@@ -1402,12 +1609,17 @@ mod tests {
                 },
             ],
         };
-        let state = DashboardState {
-            active_workflow_runs: vec![snapshot],
-            ..DashboardState::default()
-        };
+        let state = workflow_group_state(snapshot);
         let mut view = TuiViewState::new();
-        assert!(view.open_latest_workflow_inspector(&state));
+
+        assert!(view.open_workflow_group(&state));
+        assert!(view.handle_workflow_group_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        ));
         let backend = TestBackend::new(140, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
 
@@ -1461,36 +1673,242 @@ mod tests {
                 activity: vec![],
             }],
         };
+        let state = workflow_group_state(snapshot);
+        let mut view = TuiViewState::new();
+
+        assert!(view.open_workflow_group(&state));
+        assert!(view.handle_workflow_group_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        ));
+        assert!(view.handle_workflow_group_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        ));
+        assert_eq!(
+            view.workflow_inspector_mut().map(|inspector| inspector.page),
+            Some(WorkflowInspectorPage::Activity)
+        );
+        assert!(view.handle_workflow_group_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        ));
+        assert_eq!(
+            view.workflow_inspector_mut().map(|inspector| inspector.page),
+            Some(WorkflowInspectorPage::Outline)
+        );
+    }
+
+    #[test]
+    fn workflow_group_renders_runs_and_wait_edges_without_merging() {
+        let started = crate::workflow::WorkflowRunSnapshot {
+            run_id: "abcdef123456".to_string(),
+            workflow_id: "research".to_string(),
+            status: crate::workflow::WorkflowNodeStatus::Running,
+            started_at_ms: 2,
+            completed_at_ms: None,
+            input: serde_json::json!({}),
+            output: None,
+            error: None,
+            await_groups: Vec::new(),
+            transitions: Vec::new(),
+            workers: vec![crate::workflow::WorkflowWorkerSnapshot {
+                worker_id: "worker-1".to_string(),
+                actor_id: "researcher-actor".to_string(),
+                await_group_id: "await-1".to_string(),
+                role: "researcher".to_string(),
+                model: "main".to_string(),
+                status: crate::workflow::WorkflowNodeStatus::Running,
+                started_at_ms: 3,
+                completed_at_ms: None,
+                agent_run_time_ms: 4,
+                input: serde_json::json!({}),
+                output: None,
+                error: None,
+                activity_count: 0,
+                activity_revision: 0,
+                activity: Vec::new(),
+            }],
+        };
         let state = DashboardState {
-            active_workflow_runs: vec![snapshot],
+            workflow_group: crate::workflow::WorkflowGroupSnapshot {
+                nodes: vec![
+                    crate::workflow::WorkflowGroupNodeSnapshot {
+                        run_id: "pending-run-1".to_string(),
+                        workflow_id: "search".to_string(),
+                        status: crate::workflow::WorkflowNodeStatus::Pending,
+                        started_at_ms: 1,
+                        completed_at_ms: None,
+                        input: serde_json::json!({}),
+                        output: None,
+                        error: None,
+                        message: "waiting".to_string(),
+                        snapshot: None,
+                    },
+                    crate::workflow::WorkflowGroupNodeSnapshot {
+                        run_id: started.run_id.clone(),
+                        workflow_id: started.workflow_id.clone(),
+                        status: started.status,
+                        started_at_ms: started.started_at_ms,
+                        completed_at_ms: started.completed_at_ms,
+                        input: started.input.clone(),
+                        output: started.output.clone(),
+                        error: started.error.clone(),
+                        message: "running 1 worker".to_string(),
+                        snapshot: Some(started),
+                    },
+                ],
+                edges: vec![crate::workflow::WorkflowGroupEdgeSnapshot {
+                    source_run_id: "pending-run-1".to_string(),
+                    target_run_id: "abcdef123456".to_string(),
+                }],
+            },
             ..DashboardState::default()
         };
         let mut view = TuiViewState::new();
-        assert!(view.open_latest_workflow_inspector(&state));
-        assert!(
-            view.handle_workflow_inspector_key(crossterm::event::KeyEvent::new(
+        assert!(view.open_workflow_group(&state));
+        assert!(view.handle_workflow_group_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Up,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        ));
+
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        render_tui_dashboard_frame(&mut terminal, &mut view, &state).expect("render group");
+        let output = trimmed_buffer_text(terminal.backend().buffer());
+        assert!(output.contains("pending"), "{output}");
+        assert!(output.contains("search"), "{output}");
+        assert!(output.contains("pending\u{2026}"), "{output}");
+        assert!(output.contains("running"), "{output}");
+        assert!(output.contains("research"), "{output}");
+        assert!(output.contains("abcdef1\u{2026}"), "{output}");
+        assert!(!output.contains("running 1 worker"), "{output}");
+        assert!(output.contains("pending\u{2026} -> abcdef1\u{2026}"), "{output}");
+        assert!(!output.contains("researcher"), "{output}");
+
+        assert!(view.handle_workflow_group_key(
+            crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::NONE,
-            ))
-        );
-        assert_eq!(
-            view.workflow_inspector
-                .as_ref()
-                .map(|inspector| inspector.page),
-            Some(WorkflowInspectorPage::Activity)
-        );
-        assert!(
-            view.handle_workflow_inspector_key(crossterm::event::KeyEvent::new(
+            ),
+            &state,
+        ));
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        render_tui_dashboard_frame(&mut terminal, &mut view, &state)
+            .expect("render not started");
+        let output = trimmed_buffer_text(terminal.backend().buffer());
+        assert!(output.contains("\u{5c1a} \u{672a} \u{542f} \u{52a8}"), "{output}");
+
+        assert!(view.handle_workflow_group_key(
+            crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Esc,
                 crossterm::event::KeyModifiers::NONE,
-            ))
-        );
+            ),
+            &state,
+        ));
+        assert!(view.handle_workflow_group_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Down,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        ));
+        assert!(view.handle_workflow_group_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        ));
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        render_tui_dashboard_frame(&mut terminal, &mut view, &state)
+            .expect("render actor outline");
+        let output = trimmed_buffer_text(terminal.backend().buffer());
+        assert!(output.contains("researcher \u{00b7} main \u{00b7} 1 attempt"));
+        assert!(!output.contains("worker-1"));
+    }
+
+    #[test]
+    fn workflow_group_enter_opens_selected_run_and_escape_returns() {
+        let state = workflow_group_state(crate::workflow::WorkflowRunSnapshot {
+            run_id: "run-1".to_string(),
+            workflow_id: "research".to_string(),
+            status: crate::workflow::WorkflowNodeStatus::Running,
+            started_at_ms: 1,
+            completed_at_ms: None,
+            input: serde_json::json!({}),
+            output: None,
+            error: None,
+            await_groups: Vec::new(),
+            transitions: Vec::new(),
+            workers: vec![crate::workflow::WorkflowWorkerSnapshot {
+                worker_id: "worker-1".to_string(),
+                actor_id: "researcher-actor-1".to_string(),
+                await_group_id: "await-1".to_string(),
+                role: "researcher".to_string(),
+                model: "main".to_string(),
+                status: crate::workflow::WorkflowNodeStatus::Running,
+                started_at_ms: 2,
+                completed_at_ms: None,
+                agent_run_time_ms: 10,
+                input: serde_json::json!({}),
+                output: None,
+                error: None,
+                activity_count: 0,
+                activity_revision: 0,
+                activity: Vec::new(),
+            }],
+        });
+        let mut view = TuiViewState::new();
+        assert!(view.open_workflow_group(&state));
+
+        assert!(view.handle_workflow_group_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        ));
         assert_eq!(
-            view.workflow_inspector
-                .as_ref()
-                .map(|inspector| inspector.page),
-            Some(WorkflowInspectorPage::Outline)
+            view.workflow_group.as_ref().map(|group| group.page),
+            Some(WorkflowGroupPage::Run)
         );
+        assert!(view.workflow_inspector_mut().is_some());
+
+        assert!(view.handle_workflow_group_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        ));
+        assert_eq!(
+            view.workflow_group.as_ref().map(|group| group.page),
+            Some(WorkflowGroupPage::Graph)
+        );
+
+        assert!(view.handle_workflow_group_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('q'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        ));
+        assert!(view.workflow_group.is_none());
     }
 
     #[test]

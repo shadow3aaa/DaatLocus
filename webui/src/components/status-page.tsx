@@ -118,7 +118,6 @@ import {
   fetchSetupConfig,
   fetchWorkflowWorkerActivity,
   fetchSettingsSummary,
-  getDashboardAttachmentUrl,
   openLocalPath,
   runDashboardAction,
   runDashboardCommand,
@@ -135,6 +134,10 @@ import {
   type SessionActivityEvent,
   type SetupConfigRequest,
   type WorkflowAwaitGroupSnapshot,
+  type WorkflowGroupEdgeSnapshot,
+  type WorkflowGroupNodeSnapshot,
+  type WorkflowGroupNodeStatus,
+  type WorkflowGroupSnapshot,
   type WorkflowNodeStatus,
   type WorkflowRunSnapshot,
   type WorkflowTransitionKind,
@@ -257,6 +260,7 @@ export function AgentPage({
           composerHeight={chatComposerHeight}
           embedded={embedded}
           showThinking={showThinking}
+          initiallyOpenWorkflowGroup={Boolean(mockSnapshot)}
         />
         <AgentChatComposer
           sessionId={sessionId}
@@ -652,12 +656,14 @@ type AgentChatExploredCall = {
 };
 
 type AgentChatSessionActivityViewProps = {
-  sessionId?: string;
   bubbleId: string;
   render: AgentChatSessionActivityRender;
   isLatestReply?: boolean;
   isActiveRuntimeStatus?: boolean;
-  onOpenWorkflowInspector?: (snapshot: WorkflowRunSnapshot) => void;
+  isLatestArtifactVersion?: boolean;
+  hasOlderArtifactVersion?: boolean;
+  workflowGroup?: WorkflowGroupSnapshot | null;
+  onOpenWorkflowGroup?: () => void;
   showThinking: boolean;
 };
 
@@ -4583,6 +4589,7 @@ function AgentChatBubbles({
   composerHeight,
   embedded = false,
   showThinking,
+  initiallyOpenWorkflowGroup = false,
 }: {
   sessionId: string;
   snapshot: DashboardSnapshot | null;
@@ -4590,6 +4597,7 @@ function AgentChatBubbles({
   composerHeight: number;
   embedded?: boolean;
   showThinking: boolean;
+  initiallyOpenWorkflowGroup?: boolean;
 }) {
   const { t } = useTranslation();
   const snapshotBubbles = useMemo(
@@ -4606,8 +4614,7 @@ function AgentChatBubbles({
   const [hasMoreNavBefore, setHasMoreNavBefore] = useState(false);
   const [isLoadingNavHistory, setIsLoadingNavHistory] = useState(false);
   const [navHistoryError, setNavHistoryError] = useState<string | null>(null);
-  const [workflowInspectorSnapshot, setWorkflowInspectorSnapshot] =
-    useState<WorkflowRunSnapshot | null>(null);
+  const [workflowGroupOpen, setWorkflowGroupOpen] = useState(initiallyOpenWorkflowGroup);
   const navHistoryAbortRef = useRef<AbortController | null>(null);
   const historySessionIdRef = useRef<string | null>(null);
   const loadedOlderHistoryRef = useRef(false);
@@ -4616,49 +4623,59 @@ function AgentChatBubbles({
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const bubbles = useMemo(() => {
     const merged = mergeAgentChatBubbles(historyBubbles, snapshotBubbles);
-    return showThinking ? merged : merged.filter((bubble) => !agentChatBubbleHasSessionActivityEvent(bubble, "Thinking"));
-  }, [historyBubbles, showThinking, snapshotBubbles]);
-  const workflowInspectorSnapshots = useMemo(() => {
-    const snapshots = new Map<string, WorkflowRunSnapshot>();
-    for (const bubble of bubbles) {
-      const workflowSnapshot = workflowSnapshotFromActivityBubble(bubble);
-      if (workflowSnapshot) {
-        snapshots.set(workflowSnapshot.run_id, workflowSnapshot);
+    const visible = showThinking
+      ? merged
+      : merged.filter((bubble) => !agentChatBubbleHasSessionActivityEvent(bubble, "Thinking"));
+    let latestWorkflowIndex = -1;
+    for (let index = visible.length - 1; index >= 0; index -= 1) {
+      const bubble = visible[index];
+      if (bubble && agentChatBubbleHasSessionActivityEvent(bubble, "Workflow")) {
+        latestWorkflowIndex = index;
+        break;
       }
     }
-    for (const workflowSnapshot of snapshot?.active_workflow_runs ?? []) {
-      snapshots.set(workflowSnapshot.run_id, workflowSnapshot);
+    if (latestWorkflowIndex < 0) {
+      return visible;
     }
-    return snapshots;
-  }, [bubbles, snapshot?.active_workflow_runs]);
-  const primaryWorkflowSnapshot = workflowInspectorSnapshot
-    ? workflowInspectorSnapshots.get(workflowInspectorSnapshot.run_id) ?? workflowInspectorSnapshot
-    : null;
-  const visibleWorkflowSnapshot = primaryWorkflowSnapshot;
-  const visibleWorkflowRuns = useMemo(
-    () =>
-      Array.from(workflowInspectorSnapshots.values()).sort(
-        (left, right) =>
-          Number(right.status === "running") - Number(left.status === "running") ||
-          right.started_at_ms - left.started_at_ms,
-      ),
-    [workflowInspectorSnapshots],
+    return visible.filter(
+      (bubble, index) =>
+        index === latestWorkflowIndex ||
+        !agentChatBubbleHasSessionActivityEvent(bubble, "Workflow"),
+    );
+  }, [historyBubbles, showThinking, snapshotBubbles]);
+  const activeWorkflowBubbleId = useMemo(() => {
+    for (let index = bubbles.length - 1; index >= 0; index -= 1) {
+      const bubble = bubbles[index];
+      if (bubble && agentChatBubbleHasSessionActivityEvent(bubble, "Workflow")) {
+        return bubble.id;
+      }
+    }
+    return null;
+  }, [bubbles]);
+  const latestArtifactVersionById = useMemo(() => {
+    const latest = new Map<string, number>();
+    for (const bubble of bubbles) {
+      const artifact = artifactDataFromActivityEvent(bubble.activityEvent);
+      if (!artifact) {
+        continue;
+      }
+      const current = latest.get(artifact.artifactId) ?? 0;
+      if (artifact.version >= current) {
+        latest.set(artifact.artifactId, artifact.version);
+      }
+    }
+    return latest;
+  }, [bubbles]);
+  const workflowGroup = useMemo(
+    () => asWorkflowGroupSnapshot(snapshot?.workflow_group),
+    [snapshot?.workflow_group],
   );
-  const openWorkflowInspector = useCallback((workflowSnapshot: WorkflowRunSnapshot) => {
-    setWorkflowInspectorSnapshot(workflowSnapshot);
+  const openWorkflowGroup = useCallback(() => {
+    setWorkflowGroupOpen(true);
   }, []);
 
   useEffect(() => {
-    setWorkflowInspectorSnapshot((current) => {
-      if (!current) {
-        return null;
-      }
-      return workflowInspectorSnapshots.get(current.run_id) ?? current;
-    });
-  }, [workflowInspectorSnapshots]);
-
-  useEffect(() => {
-    setWorkflowInspectorSnapshot(null);
+    setWorkflowGroupOpen(false);
   }, [sessionId]);
   const activityScroll = useActivityFollowBottom<HTMLDivElement>(
     panelRef,
@@ -4725,9 +4742,10 @@ function AgentChatBubbles({
   const displayItems = useMemo(
     () =>
       foldCompletedAgentChatActivity(bubbles, {
-        isOutputBoundary: agentChatBubbleIsOutputBoundary,
+        isOutputBoundary: (bubble) =>
+          bubble.id === activeWorkflowBubbleId || agentChatBubbleIsOutputBoundary(bubble),
       }),
-    [bubbles],
+    [activeWorkflowBubbleId, bubbles],
   );
   const [openFoldedActivityGroups, setOpenFoldedActivityGroups] = useState<
     Record<string, boolean>
@@ -5413,22 +5431,23 @@ function AgentChatBubbles({
                 >
                   {item.kind === "bubble" ? (
                     <AgentChatBubbleItem
-                      sessionId={sessionId}
                       bubble={item.bubble}
                       activeRuntimeStatusBubbleId={activeRuntimeStatusBubbleId}
                       isLatestReply={item.bubble.id === latestReplyBubbleId}
-                      onOpenWorkflowInspector={openWorkflowInspector}
+                      onOpenWorkflowGroup={workflowGroup ? openWorkflowGroup : undefined}
+                      workflowGroup={
+                        item.bubble.id === activeWorkflowBubbleId ? workflowGroup : null
+                      }
                       showThinking={showThinking}
                     />
                   ) : (
                     <AgentChatFoldedActivityGroup
                       id={item.id}
-                      sessionId={sessionId}
                       bubbles={item.bubbles}
                       outputBubble={item.outputBubble}
                       activeRuntimeStatusBubbleId={activeRuntimeStatusBubbleId}
                       latestReplyBubbleId={latestReplyBubbleId}
-                      onOpenWorkflowInspector={openWorkflowInspector}
+                      onOpenWorkflowGroup={workflowGroup ? openWorkflowGroup : undefined}
                       showThinking={showThinking}
                       open={Boolean(openFoldedActivityGroups[item.id])}
                       onOpenChange={(nextOpen) =>
@@ -5453,18 +5472,12 @@ function AgentChatBubbles({
           )}
         </div>
       </div>
-      {visibleWorkflowSnapshot ? (
+      {workflowGroupOpen && workflowGroup ? (
         <WorkflowInspectorDialog
           sessionId={sessionId}
-          snapshot={visibleWorkflowSnapshot}
-          runs={visibleWorkflowRuns}
-          onSelectRun={openWorkflowInspector}
+          group={workflowGroup}
           open
-          onOpenChange={(nextOpen) => {
-            if (!nextOpen) {
-              setWorkflowInspectorSnapshot(null);
-            }
-          }}
+          onOpenChange={setWorkflowGroupOpen}
           showThinking={showThinking}
         />
       ) : null}
@@ -5752,24 +5765,22 @@ function AgentChatQuickNavigation({
 
 function AgentChatFoldedActivityGroup({
   id,
-  sessionId,
   bubbles,
   outputBubble,
   activeRuntimeStatusBubbleId,
   latestReplyBubbleId,
-  onOpenWorkflowInspector,
+  onOpenWorkflowGroup,
   showThinking,
   open,
   onOpenChange,
   isFocused = true,
 }: {
   id: string;
-  sessionId?: string;
   bubbles: AgentChatBubble[];
   outputBubble: AgentChatBubble;
   activeRuntimeStatusBubbleId?: string | null;
   latestReplyBubbleId?: string | null;
-  onOpenWorkflowInspector?: (snapshot: WorkflowRunSnapshot) => void;
+  onOpenWorkflowGroup?: () => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   isFocused?: boolean;
@@ -5807,12 +5818,11 @@ function AgentChatFoldedActivityGroup({
             {bubbles.map((bubble) => (
               <AgentChatBubbleItem
                 key={`${id}-${bubble.id}`}
-                sessionId={sessionId}
                 bubble={bubble}
                 activeRuntimeStatusBubbleId={activeRuntimeStatusBubbleId}
                 isFocused={isFocused}
                 isLatestReply={bubble.id === latestReplyBubbleId}
-                onOpenWorkflowInspector={onOpenWorkflowInspector}
+                onOpenWorkflowGroup={onOpenWorkflowGroup}
                 showThinking={showThinking}
                 compact
               />
@@ -5825,26 +5835,38 @@ function AgentChatFoldedActivityGroup({
 }
 
 function AgentChatBubbleItem({
-  sessionId,
   bubble,
   activeRuntimeStatusBubbleId,
   isFocused = true,
   isLatestReply = false,
-  onOpenWorkflowInspector,
+  onOpenWorkflowGroup,
+  workflowGroup,
   showThinking,
   compact = false,
 }: {
-  sessionId?: string;
   bubble: AgentChatBubble;
   activeRuntimeStatusBubbleId?: string | null;
   isFocused?: boolean;
   isLatestReply?: boolean;
-  onOpenWorkflowInspector?: (snapshot: WorkflowRunSnapshot) => void;
+  onOpenWorkflowGroup?: () => void;
+  workflowGroup?: WorkflowGroupSnapshot | null;
   showThinking: boolean;
   compact?: boolean;
 }) {
   const isConversationMessage = agentChatBubbleIsConversationMessage(bubble);
   const SessionActivityRender = agentChatSessionActivityRenderForBubble(bubble);
+  const latestArtifactVersions = useContext(AgentChatArtifactLatestVersionContext);
+  const artifactVersionInfo = (() => {
+    if (SessionActivityRender?.kind !== "artifact" || !latestArtifactVersions) {
+      return { isLatest: false, hasOlderVersion: false };
+    }
+    const { artifactId, version } = SessionActivityRender.artifact;
+    const latest = latestArtifactVersions.get(artifactId);
+    return {
+      isLatest: latest === version,
+      hasOlderVersion: latest !== undefined && (latest > version || version > 1),
+    };
+  })();
   const useCanonicalSessionActivity = Boolean(SessionActivityRender);
   const primaryBlocks = useCanonicalSessionActivity
     ? []
@@ -5880,12 +5902,14 @@ function AgentChatBubbleItem({
         ) : null}
         {SessionActivityRender ? (
           <AgentChatSessionActivityView
-            sessionId={sessionId}
             bubbleId={bubble.id}
             render={SessionActivityRender}
             isActiveRuntimeStatus={bubble.id === activeRuntimeStatusBubbleId}
+            isLatestArtifactVersion={artifactVersionInfo.isLatest}
+            hasOlderArtifactVersion={artifactVersionInfo.hasOlderVersion}
             isLatestReply={isLatestReply}
-            onOpenWorkflowInspector={onOpenWorkflowInspector}
+            onOpenWorkflowGroup={onOpenWorkflowGroup}
+            workflowGroup={workflowGroup}
             showThinking={showThinking}
           />
         ) : (
@@ -6033,12 +6057,14 @@ function AgentChatActivityHeader({
 }
 
 function AgentChatSessionActivityView({
-  sessionId,
   bubbleId,
   render,
   isActiveRuntimeStatus = false,
+  isLatestArtifactVersion = false,
+  hasOlderArtifactVersion = false,
   isLatestReply = false,
-  onOpenWorkflowInspector,
+  workflowGroup,
+  onOpenWorkflowGroup,
   showThinking,
 }: AgentChatSessionActivityViewProps) {
   if (render.kind === "text") {
@@ -6098,9 +6124,18 @@ function AgentChatSessionActivityView({
   if (render.kind === "workflow") {
     return (
       <AgentChatWorkflowActivityCell
-        sessionId={sessionId}
-        render={render}
-        onOpenInspector={onOpenWorkflowInspector}
+        group={workflowGroup ?? null}
+        onOpenGroup={onOpenWorkflowGroup}
+      />
+    );
+  }
+
+  if (render.kind === "artifact") {
+    return (
+      <ArtifactCard
+        artifact={render.artifact}
+        isLatest={isLatestArtifactVersion}
+        hasOlderVersion={hasOlderArtifactVersion}
       />
     );
   }
@@ -6198,98 +6233,80 @@ function AgentChatSessionActivityView({
 }
 
 function AgentChatWorkflowActivityCell({
-  sessionId,
-  render,
-  onOpenInspector,
+  group,
+  onOpenGroup,
 }: {
-  sessionId?: string;
-  render: Extract<AgentChatSessionActivityRender, { kind: "workflow" }>;
-  onOpenInspector?: (snapshot: WorkflowRunSnapshot) => void;
+  group: WorkflowGroupSnapshot | null;
+  onOpenGroup?: () => void;
 }) {
-  const workflowSnapshot = render.snapshot;
-  const hasInspector = Boolean(workflowSnapshot && sessionId && onOpenInspector);
+  const graph = useMemo(() => (group ? workflowGroupGraph(group) : []), [group]);
+  const hasGraph = graph.length > 0;
+
+  if (!hasGraph) {
+    return null;
+  }
 
   return (
-    <>
-      {workflowSnapshot ? (
-        <WorkflowInlinePreview
-          snapshot={workflowSnapshot}
-          onOpenPreview={
-            hasInspector
-              ? () => {
-                  onOpenInspector?.(workflowSnapshot);
-                }
-              : undefined
-          }
-        />
-      ) : (
-        <div className="flex min-w-0 max-w-full flex-col gap-1 text-sm leading-6 text-foreground/90 [overflow-wrap:anywhere]">
-          <WorkflowActivityHeading
-            status={render.status}
-            workflowId={render.workflowId}
-          />
-          {render.message ? (
-            <p className="min-w-0 break-words pl-8 pr-2 text-xs leading-5 text-muted-foreground sm:pl-10 sm:pr-3">
-              {render.message}
-            </p>
-          ) : null}
-        </div>
-      )}
-    </>
+    <WorkflowGroupInlinePreview
+      components={graph}
+      onOpenPreview={onOpenGroup}
+    />
   );
 }
 
-function workflowSnapshotFromActivityBubble(
-  bubble: AgentChatBubble,
-): WorkflowRunSnapshot | null {
-  const workflow = agentChatSessionActivityPayload(bubble.activityEvent, "Workflow");
-  return workflow ? asWorkflowRunSnapshot(workflow.snapshot) : null;
-}
-
-function WorkflowInlinePreview({
-  snapshot,
+function WorkflowGroupInlinePreview({
+  components,
   onOpenPreview,
 }: {
-  snapshot: WorkflowRunSnapshot;
+  components: WorkflowGroupGraphComponent[];
   onOpenPreview?: () => void;
 }) {
-  const graph = useMemo(() => workflowInspectorGraph(snapshot), [snapshot]);
+  const { t } = useTranslation();
+  const runCount = components.reduce((count, component) => count + component.nodes.length, 0);
+  const running = components.some((component) =>
+    component.nodes.some((node) => node.data.status === "running" || node.data.status === "pending"),
+  );
 
   return (
     <div className="flex min-w-0 max-w-full flex-col gap-1 text-sm leading-6 text-foreground/90 [overflow-wrap:anywhere]">
       <WorkflowActivityHeading
-        status={snapshot.status}
-        workflowId={snapshot.workflow_id}
+        status={running ? "running" : "completed"}
+        title={t("chat.workflowGroup")}
+        detail={t("chat.workflowRuns", { count: runCount })}
         onOpenPreview={onOpenPreview}
       />
-      {snapshot.workers.length === 0 ? (
-        <p className="min-w-0 break-words pl-8 pr-2 text-xs leading-5 text-muted-foreground sm:pl-10 sm:pr-3">
-          Waiting for the first agent.
-        </p>
-      ) : (
-        <div className="min-w-0 pl-8 pr-2 sm:pl-10 sm:pr-3">
-          <div className="h-64 min-w-0 bg-muted/15">
+      <div className="flex min-w-0 flex-col gap-2 pl-8 pr-2 sm:pl-10 sm:pr-3">
+        {components.map((component) => (
+          <div
+            key={component.id}
+            className="min-w-0 overflow-hidden rounded-xl border bg-muted/15"
+            style={{ height: workflowGroupComponentHeight(component.nodes.length, false) }}
+          >
             <WorkflowInspectorGraphCanvas
-              nodes={graph.nodes}
-              edges={graph.edges}
+              nodes={component.nodes}
+              edges={component.edges}
               interactive={false}
             />
           </div>
-        </div>
-      )}
+        ))}
+      </div>
     </div>
   );
 }
 
+
 function WorkflowActivityHeading({
   status,
-  workflowId,
+  title,
+  detail,
   onOpenPreview,
 }: {
   status: WorkflowNodeStatus | string;
-  workflowId: string;
+  title: string;
+  detail: string;
   onOpenPreview?: () => void;
 }) {
+  const { t } = useTranslation();
   const normalizedStatus = status.toLowerCase();
   const isError = normalizedStatus === "failed" || normalizedStatus === "interrupted";
 
@@ -6310,9 +6327,10 @@ function WorkflowActivityHeading({
       <div className="flex min-w-0 items-center gap-x-2">
         <p className="min-w-0 break-words font-semibold text-foreground">
           <span className={workflowStatusTextClass(status)}>
-            {workflowActivityVerb(status)} Workflow
+            {workflowActivityVerb(status)}
           </span>{" "}
-          <span className="font-mono text-foreground/90">{workflowId}</span>
+          <span className="text-foreground/90">{title}</span>
+          <span className="ml-2 font-normal text-muted-foreground">{detail}</span>
         </p>
         {onOpenPreview ? (
           <Button
@@ -6320,8 +6338,8 @@ function WorkflowActivityHeading({
             variant="ghost"
             size="icon-sm"
             className="ml-auto shrink-0"
-            aria-label="Open workflow preview"
-            title="Open workflow preview"
+            aria-label={t("chat.openWorkflowPreview")}
+            title={t("chat.openWorkflowPreview")}
             onClick={onOpenPreview}
           >
             <Maximize2Icon aria-hidden="true" />
@@ -6342,6 +6360,16 @@ type WorkflowInspectorNodeData = {
   attemptCount: number;
 };
 
+type WorkflowGroupGraphNodeData = {
+  /** Full run id. Selection must use this, never the display-only short id. */
+  runId: string;
+  shortRunId: string;
+  workflowId: string;
+  label: string;
+  message: string;
+  status: WorkflowGroupNodeStatus;
+};
+
 type WorkflowInspectorActor = {
   actorId: string;
   role: string;
@@ -6359,133 +6387,235 @@ type WorkflowInspectorActorTransition = {
   count: number;
 };
 
-type WorkflowInspectorGraphNode = FlowNode<WorkflowInspectorNodeData>;
+type WorkflowInspectorGraphNode = FlowNode<WorkflowInspectorNodeData, "workflowInspector">;
+type WorkflowGroupGraphNode = FlowNode<WorkflowGroupGraphNodeData, "workflowGroupRun">;
+type WorkflowGraphNode = WorkflowInspectorGraphNode | WorkflowGroupGraphNode;
 
 const WORKFLOW_INSPECTOR_NODE_TYPES: NodeTypes = {
   workflowInspector: WorkflowInspectorGraphNodeView,
+  workflowGroupRun: WorkflowGroupGraphNodeView,
 };
 
 function WorkflowInspectorDialog({
   sessionId,
-  snapshot,
-  runs,
-  onSelectRun,
+  group,
   open,
   onOpenChange,
   showThinking,
 }: {
   sessionId: string;
-  snapshot: WorkflowRunSnapshot;
-  runs: WorkflowRunSnapshot[];
-  onSelectRun: (snapshot: WorkflowRunSnapshot) => void;
+  group: WorkflowGroupSnapshot;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   showThinking: boolean;
 }) {
+  const { t } = useTranslation();
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedActorId, setSelectedActorId] = useState<string | null>(null);
+  const selectedNode = selectedRunId
+    ? group.nodes.find((node) => node.run_id === selectedRunId) ?? null
+    : null;
+  const selectedSnapshot = selectedNode?.snapshot ?? null;
   const selectedActorWorkers = useMemo(
-    () => selectedActorId
-      ? workflowInspectorWorkersForActor(snapshot.workers, selectedActorId)
-      : [],
-    [selectedActorId, snapshot.workers],
+    () =>
+      selectedSnapshot && selectedActorId
+        ? workflowInspectorWorkersForActor(selectedSnapshot.workers, selectedActorId)
+        : [],
+    [selectedActorId, selectedSnapshot],
   );
   const selectedWorker = selectedActorWorkers.at(-1) ?? null;
-  const graph = useMemo(() => workflowInspectorGraph(snapshot), [snapshot]);
+  const actorGraph = useMemo(
+    () => (selectedSnapshot ? workflowInspectorGraph(selectedSnapshot) : null),
+    [selectedSnapshot],
+  );
+  const groupGraph = useMemo(() => workflowGroupGraph(group), [group]);
+  const handleSelectRun = useCallback((runId: string) => {
+    setSelectedActorId(null);
+    setSelectedRunId(runId);
+  }, []);
   const handleSelectActor = useCallback((actorId: string) => {
     setSelectedActorId(actorId);
   }, []);
 
   useEffect(() => {
     if (!open) {
+      setSelectedRunId(null);
       setSelectedActorId(null);
     }
   }, [open]);
 
   useEffect(() => {
-    if (selectedActorId && !snapshot.workers.some(
-      (worker) => workflowWorkerActorId(worker) === selectedActorId,
-    )) {
+    if (selectedRunId && !group.nodes.some((node) => node.run_id === selectedRunId)) {
+      setSelectedRunId(null);
       setSelectedActorId(null);
     }
-  }, [selectedActorId, snapshot.workers]);
+  }, [group.nodes, selectedRunId]);
+
+  useEffect(() => {
+    if (
+      selectedActorId &&
+      !selectedSnapshot?.workers.some(
+        (worker) => workflowWorkerActorId(worker) === selectedActorId,
+      )
+    ) {
+      setSelectedActorId(null);
+    }
+  }, [selectedActorId, selectedSnapshot]);
+
+  const layerTitle = selectedWorker
+    ? t("chat.agentActivity")
+    : selectedNode
+      ? t("chat.workflowPreview")
+      : t("chat.workflowGroup");
+  const layerDescription = selectedWorker
+    ? `${selectedWorker.role} · ${selectedWorker.model} · ${selectedActorWorkers.length} ${
+        selectedActorWorkers.length === 1 ? t("chat.attempt") : t("chat.attempts")
+      }`
+    : selectedNode
+      ? `${selectedNode.workflow_id} · ${shortWorkflowRunId(selectedNode.run_id)}`
+      : t("chat.workflowGroupDescription", { count: group.nodes.length });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[min(94vh,60rem)] w-[min(96vw,88rem)] max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-w-none">
         <DialogHeader className="border-b px-5 py-4 pr-12">
           <div className="flex min-w-0 items-center gap-3">
-            {selectedActorId ? (
+            {selectedNode ? (
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                aria-label="Back to workflow preview"
-                title="Back to workflow preview"
-                onClick={() => setSelectedActorId(null)}
+                aria-label={t("chat.backToWorkflowGroup")}
+                title={t("chat.backToWorkflowGroup")}
+                onClick={() => {
+                  setSelectedActorId(null);
+                  setSelectedRunId(null);
+                }}
               >
                 <ArrowLeftIcon data-icon="inline-start" aria-hidden="true" />
               </Button>
             ) : null}
             <div className="min-w-0">
               <DialogTitle className="flex min-w-0 flex-wrap items-center gap-2">
-                <span>{selectedActorId ? "Agent activity" : "Workflow preview"}</span>
-                <Badge variant="outline" className={workflowStatusTextClass(snapshot.status)}>
-                  {workflowStatusLabel(snapshot.status)}
-                </Badge>
+                <span>{layerTitle}</span>
+                {selectedNode ? (
+                  <Badge variant="outline" className={workflowStatusTextClass(selectedNode.status)}>
+                    {workflowStatusLabel(selectedNode.status)}
+                  </Badge>
+                ) : null}
               </DialogTitle>
               <DialogDescription className="truncate font-mono text-xs">
-                {selectedWorker
-                  ? `${selectedWorker.role} · ${selectedWorker.model} · ${selectedActorWorkers.length} ${
-                      selectedActorWorkers.length === 1 ? "attempt" : "attempts"
-                    }`
-                  : `${snapshot.workflow_id} · ${snapshot.run_id}`}
+                {layerDescription}
               </DialogDescription>
             </div>
           </div>
-          {runs.length > 1 ? (
-            <div className="mt-3 flex min-w-0 flex-wrap items-center gap-1.5">
-              <span className="mr-1 text-xs text-muted-foreground">
-                {runs.length} runs
-              </span>
-              {runs.map((run) => (
-                <Button
-                  key={run.run_id}
-                  type="button"
-                  size="xs"
-                  variant={run.run_id === snapshot.run_id ? "secondary" : "outline"}
-                  title={`${run.workflow_id} · ${run.run_id}`}
-                  onClick={() => onSelectRun(run)}
-                >
-                  <span
-                    className={cn("size-2 rounded-full", workflowStatusDotClass(run.status))}
-                  />
-                  <span className="max-w-[10rem] truncate font-mono">{run.workflow_id}</span>
-                  <span className="text-muted-foreground">
-                    {workflowStatusLabel(run.status)}
-                  </span>
-                </Button>
-              ))}
-            </div>
-          ) : null}
         </DialogHeader>
-        {selectedWorker ? (
+        {selectedWorker && selectedSnapshot ? (
           <WorkflowInspectorAgentActivity
             sessionId={sessionId}
-            runId={snapshot.run_id}
+            runId={selectedSnapshot.run_id}
             agent={selectedWorker}
             actorWorkers={selectedActorWorkers}
             showThinking={showThinking}
           />
+        ) : selectedNode ? (
+          selectedSnapshot && actorGraph ? (
+            <WorkflowInspectorGraph
+              snapshot={selectedSnapshot}
+              nodes={actorGraph.nodes}
+              edges={actorGraph.edges}
+              onSelectActor={handleSelectActor}
+            />
+          ) : (
+            <WorkflowGroupPendingRun />
+          )
         ) : (
-          <WorkflowInspectorGraph
-            snapshot={snapshot}
-            nodes={graph.nodes}
-            edges={graph.edges}
-            onSelectActor={handleSelectActor}
+          <WorkflowGroupGraph
+            components={groupGraph}
+            onSelectRun={handleSelectRun}
           />
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+function WorkflowGroupGraph({
+  components,
+  onSelectRun,
+}: {
+  components: WorkflowGroupGraphComponent[];
+  onSelectRun: (runId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const runCount = components.reduce((count, component) => count + component.nodes.length, 0);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-5 py-3 text-xs text-muted-foreground">
+        <span>{t("chat.workflowRuns", { count: runCount })}</span>
+        <span className="ml-auto">{t("chat.selectWorkflowRun")}</span>
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto bg-muted/15 p-4">
+        {components.map((component) => (
+          <div
+            key={component.id}
+            className="min-h-64 overflow-hidden rounded-xl border bg-background"
+            style={{ height: workflowGroupComponentHeight(component.nodes.length) }}
+          >
+            <WorkflowInspectorGraphCanvas
+              nodes={component.nodes}
+              edges={component.edges}
+              interactive
+              onSelectRun={onSelectRun}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowGroupPendingRun() {
+  const { t } = useTranslation();
+
+  return (
+    <Empty className="rounded-none border-0">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <CommandIcon aria-hidden="true" />
+        </EmptyMedia>
+        <EmptyTitle>{t("chat.workflowNotStarted")}</EmptyTitle>
+        <EmptyDescription>{t("chat.workflowNotStartedDescription")}</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+function WorkflowGroupGraphNodeView({ data }: NodeProps<WorkflowGroupGraphNode>) {
+  return (
+    <div
+      className={cn(
+        "w-56 rounded-xl border bg-background px-4 py-3 text-left shadow-sm",
+        data.status === "running" && "border-primary/40 shadow-primary/10",
+        (data.status === "failed" || data.status === "interrupted") && "border-destructive/45",
+      )}
+    >
+      <Handle id="top-target" type="target" position={Position.Top} className="opacity-0" />
+      <div className="flex items-center gap-2">
+        <span className={cn("size-2 shrink-0 rounded-full", workflowStatusDotClass(data.status))} />
+        <span className="min-w-0 truncate font-mono text-sm font-medium text-foreground">
+          {data.label}
+        </span>
+        {data.status === "running" ? <Spinner className="ml-auto size-3" /> : null}
+      </div>
+      <p className="mt-1 truncate font-mono text-[0.68rem] text-muted-foreground">
+        {data.shortRunId}
+      </p>
+      <p className="mt-2 line-clamp-2 text-[0.68rem] leading-4 text-muted-foreground/80">
+        {data.message}
+      </p>
+      <Handle id="bottom-source" type="source" position={Position.Bottom} className="opacity-0" />
+    </div>
   );
 }
 
@@ -6546,11 +6676,13 @@ function WorkflowInspectorGraphCanvas({
   edges,
   interactive,
   onSelectActor,
+  onSelectRun,
 }: {
-  nodes: WorkflowInspectorGraphNode[];
+  nodes: WorkflowGraphNode[];
   edges: Edge[];
   interactive: boolean;
   onSelectActor?: (actorId: string) => void;
+  onSelectRun?: (runId: string) => void;
 }) {
   return (
     <ReactFlow
@@ -6576,9 +6708,13 @@ function WorkflowInspectorGraphCanvas({
       zoomOnDoubleClick={interactive}
       preventScrolling={!interactive}
       onNodeClick={
-        interactive && onSelectActor
+        interactive
           ? (_, node) => {
-              onSelectActor(node.data.actorId);
+              if (node.type === "workflowGroupRun" && onSelectRun) {
+                onSelectRun(node.data.runId);
+              } else if (node.type === "workflowInspector" && onSelectActor) {
+                onSelectActor(node.data.actorId);
+              }
             }
           : undefined
       }
@@ -6921,6 +7057,224 @@ function mergeWorkflowWorkerActivityPages(
     has_more_after: newer.has_more_after,
     activity_count: Math.max(older.activity_count, newer.activity_count),
     revision: Math.max(older.revision, newer.revision),
+  };
+}
+type WorkflowGroupGraphComponent = {
+  id: string;
+  nodes: WorkflowGroupGraphNode[];
+  edges: Edge[];
+};
+
+const WORKFLOW_GROUP_NODE_STATUSES = new Set<WorkflowGroupNodeStatus>([
+  "pending",
+  "running",
+  "completed",
+  "failed",
+  "interrupted",
+]);
+
+function workflowGroupGraph(group: WorkflowGroupSnapshot): WorkflowGroupGraphComponent[] {
+  // Keep every legal group node, including pending runs with no snapshot or message.
+  const nodes = [...group.nodes].sort(
+    (left, right) =>
+      left.started_at_ms - right.started_at_ms || left.run_id.localeCompare(right.run_id),
+  );
+  const nodeIds = new Set(nodes.map((node) => node.run_id));
+  const edges = group.edges.filter(
+    (edge) =>
+      edge.source_run_id !== edge.target_run_id &&
+      nodeIds.has(edge.source_run_id) &&
+      nodeIds.has(edge.target_run_id),
+  );
+  const components = workflowGroupComponents(nodes, edges);
+
+  return components.map((component, index) => {
+    const componentIds = new Set(component.map((node) => node.run_id));
+    const componentEdges = edges.filter(
+      (edge) => componentIds.has(edge.source_run_id) && componentIds.has(edge.target_run_id),
+    );
+    return layoutWorkflowGroupComponent(component, componentEdges, index);
+  });
+}
+
+function workflowGroupComponents(
+  nodes: WorkflowGroupNodeSnapshot[],
+  edges: WorkflowGroupEdgeSnapshot[],
+) {
+  const adjacent = new Map<string, string[]>(nodes.map((node) => [node.run_id, []]));
+  for (const edge of edges) {
+    adjacent.get(edge.source_run_id)?.push(edge.target_run_id);
+    adjacent.get(edge.target_run_id)?.push(edge.source_run_id);
+  }
+  const unseen = new Set(nodes.map((node) => node.run_id));
+  const nodesById = new Map(nodes.map((node) => [node.run_id, node]));
+  const components: WorkflowGroupNodeSnapshot[][] = [];
+
+  for (const node of nodes) {
+    if (!unseen.has(node.run_id)) {
+      continue;
+    }
+    const component: WorkflowGroupNodeSnapshot[] = [];
+    const queue = [node.run_id];
+    unseen.delete(node.run_id);
+    while (queue.length > 0) {
+      const runId = queue.shift();
+      const current = runId ? nodesById.get(runId) : undefined;
+      if (!runId || !current) {
+        continue;
+      }
+      component.push(current);
+      for (const peer of adjacent.get(runId) ?? []) {
+        if (unseen.delete(peer)) {
+          queue.push(peer);
+        }
+      }
+    }
+    components.push(component);
+  }
+
+  return components;
+}
+
+function layoutWorkflowGroupComponent(
+  component: WorkflowGroupNodeSnapshot[],
+  edges: WorkflowGroupEdgeSnapshot[],
+  index: number,
+): WorkflowGroupGraphComponent {
+  const graph = new graphlib.Graph().setDefaultEdgeLabel(() => ({}));
+  graph.setGraph({ rankdir: "TB", nodesep: 48, ranksep: 72, marginx: 24, marginy: 24 });
+  const nodes: WorkflowGroupGraphNode[] = component.map((node) => ({
+    id: node.run_id,
+    type: "workflowGroupRun",
+    position: { x: 0, y: 0 },
+    data: {
+      runId: node.run_id,
+      shortRunId: shortWorkflowRunId(node.run_id),
+      workflowId: node.workflow_id,
+      label: node.workflow_id,
+      message: workflowStatusLabel(node.status),
+      status: node.status,
+    },
+  }));
+  const flowEdges = edges.map((edge, edgeIndex) =>
+    workflowInspectorEdge(
+      edge.source_run_id,
+      edge.target_run_id,
+      `wait:${edge.source_run_id}:${edge.target_run_id}:${edgeIndex}`,
+      "wait",
+    ),
+  );
+
+  for (const edge of flowEdges) {
+    if (edge.source !== edge.target) {
+      graph.setEdge(edge.source, edge.target);
+    }
+  }
+  for (const node of nodes) {
+    graph.setNode(node.id, { width: 224, height: 92 });
+  }
+  if (nodes.length > 0) {
+    layoutDagreGraph(graph);
+  }
+
+  return {
+    id: component.map((node) => node.run_id).join(":") || `workflow-group-${index}`,
+    nodes: nodes.map((node) => {
+      const position = graph.node(node.id) as
+        | { x: number; y: number; width: number; height: number }
+        | undefined;
+      if (!position) {
+        return node;
+      }
+      return {
+        ...node,
+        position: {
+          x: position.x - position.width / 2,
+          y: position.y - position.height / 2,
+        },
+      };
+    }),
+    edges: flowEdges,
+  };
+}
+
+function workflowGroupComponentHeight(nodeCount: number, interactive = true) {
+  const rows = Math.max(1, nodeCount);
+  return Math.min(interactive ? 640 : 420, 180 + rows * 120);
+}
+
+function shortWorkflowRunId(runId: string) {
+  const compact = runId.replace(/-/g, "");
+  return compact.length <= 8 ? runId : compact.slice(0, 8);
+}
+
+
+function asWorkflowGroupSnapshot(value: unknown): WorkflowGroupSnapshot | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  const nodes = arrayValue(record.nodes)
+    .map(asWorkflowGroupNodeSnapshot)
+    .filter((node): node is WorkflowGroupNodeSnapshot => Boolean(node));
+  const nodeIds = new Set(nodes.map((node) => node.run_id));
+  const edges = arrayValue(record.edges)
+    .map(asRecord)
+    .filter((edge): edge is Record<string, unknown> => Boolean(edge))
+    .map((edge): WorkflowGroupEdgeSnapshot | null => {
+      const sourceRunId = nullableStringValue(edge.source_run_id);
+      const targetRunId = nullableStringValue(edge.target_run_id);
+      if (
+        !sourceRunId ||
+        !targetRunId ||
+        sourceRunId === targetRunId ||
+        !nodeIds.has(sourceRunId) ||
+        !nodeIds.has(targetRunId)
+      ) {
+        return null;
+      }
+      return {
+        source_run_id: sourceRunId,
+        target_run_id: targetRunId,
+      };
+    })
+    .filter((edge): edge is WorkflowGroupEdgeSnapshot => Boolean(edge));
+
+  if (nodes.length === 0) {
+    return null;
+  }
+  return { nodes, edges };
+}
+
+function asWorkflowGroupNodeSnapshot(value: unknown): WorkflowGroupNodeSnapshot | null {
+  const node = asRecord(value);
+  if (!node) {
+    return null;
+  }
+  const runId = nullableStringValue(node.run_id);
+  const workflowId = nullableStringValue(node.workflow_id);
+  const status = nullableStringValue(node.status);
+  const startedAtMs = nullableNumberValue(node.started_at_ms);
+  if (
+    !runId ||
+    !workflowId ||
+    !status ||
+    !WORKFLOW_GROUP_NODE_STATUSES.has(status as WorkflowGroupNodeStatus) ||
+    startedAtMs === null
+  ) {
+    return null;
+  }
+  return {
+    run_id: runId,
+    workflow_id: workflowId,
+    status: status as WorkflowGroupNodeStatus,
+    started_at_ms: startedAtMs,
+    completed_at_ms: nullableNumberValue(node.completed_at_ms),
+    input: "input" in node ? node.input : null,
+    output: node.output,
+    error: nullableStringValue(node.error),
+    message: nullableStringValue(node.message) ?? "",
+    snapshot: asWorkflowRunSnapshot(node.snapshot),
   };
 }
 
@@ -8535,6 +8889,41 @@ function AgentChatLink({
     </a>
   );
 }
+function AgentChatMarkdownImage({
+  src,
+  alt,
+}: {
+  src?: unknown;
+  alt?: unknown;
+}) {
+  if (isAllowedMarkdownImageSource(src)) {
+    return (
+      <img
+        src={src}
+        alt={typeof alt === "string" ? alt : ""}
+        loading="lazy"
+        className="max-h-[22rem] w-full rounded-lg border border-border/60 bg-muted/20 object-contain"
+      />
+    );
+  }
+
+  // Agent-authored markdown image sources are untrusted: anything that is not a
+  // self-authorizing daemon URL or an allowed data image is downgraded to a
+  // plain link so it never triggers an outbound fetch from the user's browser.
+  const href = typeof src === "string" ? src.trim() : "";
+  const label = typeof alt === "string" && alt.trim() ? alt : href || "image";
+  return href ? (
+    <AgentChatLink
+      href={href}
+      className="break-all text-primary underline-offset-4 hover:underline"
+    >
+      {label}
+    </AgentChatLink>
+  ) : (
+    <span className="break-all text-muted-foreground">{label}</span>
+  );
+}
+
 
 const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
   text,
@@ -8704,6 +9093,9 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
             </strong>
           ),
           em: ({ children }: any) => <em className="italic">{children}</em>,
+          img: ({ src, alt }: any) => (
+            <AgentChatMarkdownImage src={src} alt={alt} />
+          ),
         }}
       >
         {limitedText}
@@ -8762,6 +9154,9 @@ function AgentChatMarkdownInline({ text }: { text: string }) {
           <strong className="font-semibold text-foreground">{children}</strong>
         ),
         em: ({ children }: any) => <em className="italic">{children}</em>,
+        img: ({ src, alt }: any) => (
+          <AgentChatMarkdownImage src={src} alt={alt} />
+        ),
       }}
     >
       {text}
@@ -8801,33 +9196,6 @@ function AgentChatListItems({
         </li>
       ) : null}
     </ul>
-  );
-}
-
-function AgentChatImageAttachment({
-  label,
-  uri,
-  mimeType,
-}: {
-  label: string;
-  uri: string;
-  mimeType: string;
-}) {
-  const imageUrl = getDashboardAttachmentUrl(uri);
-  const title = [label, mimeType].filter(Boolean).join(" · ");
-
-  return (
-    <figure className="min-w-0 max-w-[min(28rem,100%)] overflow-hidden rounded-lg border border-border/60 bg-muted/20">
-      <a href={imageUrl} target="_blank" rel="noreferrer" className="block">
-        <img
-          src={imageUrl}
-          alt={label}
-          title={title || label}
-          loading="lazy"
-          className="max-h-[22rem] w-full object-contain"
-        />
-      </a>
-    </figure>
   );
 }
 

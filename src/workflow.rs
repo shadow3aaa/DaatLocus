@@ -48,7 +48,11 @@ mod builtin_workflow_bindings {
     include!(concat!(env!("OUT_DIR"), "/builtin_workflows.rs"));
 }
 
+mod group;
 mod runs;
+pub use group::{WorkflowGroupNodeSnapshot, WorkflowGroupSnapshot};
+#[cfg(test)]
+pub use group::WorkflowGroupEdgeSnapshot;
 pub use runs::WorkflowRunRegistry;
 
 const WORKFLOW_TOOL_PREFIX: &str = "workflow__";
@@ -423,6 +427,7 @@ fn is_legacy_builtin_workflow_source(id: &str, source: &str) -> bool {
 pub struct WorkflowInvocation {
     pub workflow_id: String,
     pub input: Value,
+    pub waits_for: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -557,7 +562,7 @@ impl WorkflowRunSnapshot {
         Self {
             run_id: uuid::Uuid::new_v4().to_string(),
             workflow_id,
-            status: WorkflowNodeStatus::Running,
+            status: WorkflowNodeStatus::Pending,
             started_at_ms: current_time_ms(),
             completed_at_ms: None,
             input,
@@ -584,14 +589,17 @@ impl WorkflowInspectorPublisher {
         input: Value,
         dashboard_tx: Option<tokio::sync::watch::Sender<crate::dashboard::DashboardState>>,
     ) -> Self {
-        Self::new_with_history(workflow_id, input, dashboard_tx, None)
+        Self::new_with_history_publishing(workflow_id, input, dashboard_tx, None, true)
     }
 
-    fn new_with_history(
+    /// `publish` is false while a grouped run is still pending. Publishing then
+    /// would put a not-yet-running snapshot into `active_workflow_runs`.
+    fn new_with_history_publishing(
         workflow_id: String,
         input: Value,
         dashboard_tx: Option<tokio::sync::watch::Sender<crate::dashboard::DashboardState>>,
         activity_history: Option<crate::dashboard::DashboardActivityHistoryStore>,
+        publish: bool,
     ) -> Self {
         let publisher = Self {
             snapshot: Arc::new(parking_lot::Mutex::new(WorkflowRunSnapshot::new(
@@ -601,7 +609,9 @@ impl WorkflowInspectorPublisher {
             dashboard_tx,
             activity_history,
         };
-        publisher.publish();
+        if publish {
+            publisher.publish();
+        }
         publisher
     }
 
@@ -683,6 +693,18 @@ impl WorkflowInspectorPublisher {
                     .live_activity_events
                     .retain(|live| live.key != live_key);
             }
+            if let Some(node) = state
+                .workflow_group
+                .nodes
+                .iter_mut()
+                .find(|node| node.run_id == snapshot.run_id)
+            {
+                node.status = snapshot.status;
+                node.completed_at_ms = snapshot.completed_at_ms;
+                node.output = snapshot.output.clone();
+                node.error = snapshot.error.clone();
+                node.snapshot = Some(snapshot.clone());
+            }
             crate::dashboard::repin_runtime_status_live_cell(&mut state.live_activity_events);
         });
     }
@@ -746,7 +768,11 @@ impl WorkflowInspectorPublisher {
                 "register workflow worker activity stream failed: {err:?}"
             );
         }
-        self.snapshot.lock().workers.push(WorkflowWorkerSnapshot {
+        let mut snapshot = self.snapshot.lock();
+        if snapshot.status == WorkflowNodeStatus::Pending {
+            snapshot.status = WorkflowNodeStatus::Running;
+        }
+        snapshot.workers.push(WorkflowWorkerSnapshot {
             worker_id,
             actor_id,
             await_group_id: group_id.to_string(),
@@ -978,7 +1004,8 @@ fn aggregate_node_status(statuses: &[WorkflowNodeStatus]) -> WorkflowNodeStatus 
 
 fn workflow_snapshot_message(snapshot: &WorkflowRunSnapshot) -> String {
     match snapshot.status {
-        WorkflowNodeStatus::Running | WorkflowNodeStatus::Pending => format!(
+        WorkflowNodeStatus::Pending => "pending".to_string(),
+        WorkflowNodeStatus::Running => format!(
             "running {} worker{} across {} await group{}",
             snapshot.workers.len(),
             if snapshot.workers.len() == 1 { "" } else { "s" },
@@ -1267,7 +1294,67 @@ impl From<&Context> for WorkflowExecutionContext {
     }
 }
 
-/// Launch one workflow run in the background and return its running handle.
+pub fn split_workflow_waits_for(mut arguments: Value) -> Result<(Value, Vec<String>)> {
+    let waits_for = match arguments.get_mut("waits_for").map(Value::take) {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .into_iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| miette!("workflow `waits_for` entries must be strings"))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => return Err(miette!("workflow `waits_for` must be an array of run ids")),
+    };
+    if let Some(object) = arguments.as_object_mut() {
+        object.remove("waits_for");
+    }
+    Ok((arguments, waits_for))
+}
+
+pub(crate) fn publish_workflow_group(
+    dashboard_tx: Option<&tokio::sync::watch::Sender<crate::dashboard::DashboardState>>,
+    group: &group::WorkflowGroupSnapshot,
+) {
+    let Some(tx) = dashboard_tx else {
+        return;
+    };
+    let group = group.clone();
+    tx.send_modify(|state| {
+        state.workflow_group = group;
+    });
+}
+pub(crate) fn workflow_tool_input_schema(input_schema: &Value) -> Value {
+    let mut schema = input_schema.clone();
+    let Some(object) = schema.as_object_mut() else {
+        return schema;
+    };
+    if let Some(properties) = object
+        .entry("properties")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        properties.insert(
+            "waits_for".to_string(),
+            json!({
+                "type": ["array", "null"],
+                "items": { "type": "string" },
+                "description": "Run ids this run must wait for before starting. Null starts immediately."
+            }),
+        );
+    }
+    if let Some(required) = object
+        .entry("required")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        && !required.iter().any(|item| item.as_str() == Some("waits_for"))
+    {
+        required.push(json!("waits_for"));
+    }
+    schema
+}
+
 pub fn start(
     context: &Context,
     invocation: WorkflowInvocation,
@@ -3933,6 +4020,7 @@ workflow.define({
             WorkflowInvocation {
                 workflow_id: "goal".to_string(),
                 input: json!({ "goal": "complete the requested implementation" }),
+                waits_for: Vec::new(),
             },
         )
         .await
@@ -4030,6 +4118,7 @@ workflow.define({
             WorkflowInvocation {
                 workflow_id: "goal".to_string(),
                 input: json!({ "goal": "complete the requested implementation" }),
+                waits_for: Vec::new(),
             },
         )
         .await
@@ -4083,6 +4172,7 @@ workflow.define({
             WorkflowInvocation {
                 workflow_id: "goal".to_string(),
                 input: json!({ "goal": "complete the requested implementation" }),
+                waits_for: Vec::new(),
             },
         )
         .await
@@ -4152,6 +4242,7 @@ workflow.define({
             WorkflowInvocation {
                 workflow_id: "goal".to_string(),
                 input: json!({ "goal": "complete all required work" }),
+                waits_for: Vec::new(),
             },
         )
         .await
@@ -4257,6 +4348,7 @@ workflow.define({
             WorkflowInvocation {
                 workflow_id: "search".to_string(),
                 input: json!({ "goal": "find two independent sources" }),
+                waits_for: Vec::new(),
             },
         )
         .await
@@ -4384,6 +4476,7 @@ workflow.define({
                 input: json!({
                     "goals": ["inspect alpha", "inspect beta"]
                 }),
+                waits_for: Vec::new(),
             },
         )
         .await
@@ -5417,6 +5510,7 @@ workflow.define({
             WorkflowInvocation {
                 workflow_id: definition.id.clone(),
                 input: json!({ "id": "first" }),
+                waits_for: Vec::new(),
             },
         )
         .expect("start first run");
@@ -5425,6 +5519,7 @@ workflow.define({
             WorkflowInvocation {
                 workflow_id: definition.id.clone(),
                 input: json!({ "id": "second" }),
+                waits_for: Vec::new(),
             },
         )
         .expect("start second run");
@@ -5494,6 +5589,7 @@ workflow.define({
             WorkflowInvocation {
                 workflow_id: definition.id.clone(),
                 input: json!({ "id": "first" }),
+                waits_for: Vec::new(),
             },
         )
         .expect("start first run");
@@ -5502,6 +5598,7 @@ workflow.define({
             WorkflowInvocation {
                 workflow_id: definition.id.clone(),
                 input: json!({ "id": "second" }),
+                waits_for: Vec::new(),
             },
         )
         .expect("start second run");

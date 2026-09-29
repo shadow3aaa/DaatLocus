@@ -76,7 +76,14 @@ pub async fn handle_dashboard_control_command(
             sync_dashboard_state(context, tx, sleep_status, None);
             // Start the run in the background so the runtime loop and other
             // concurrent runs are never blocked on workflow completion.
-            match crate::workflow::start(context, WorkflowInvocation { workflow_id, input }) {
+            match crate::workflow::start(
+                context,
+                WorkflowInvocation {
+                    workflow_id,
+                    input,
+                    waits_for: Vec::new(),
+                },
+            ) {
                 Ok(started) => {
                     let run_id = started.run_id.clone();
                     set_runtime_status(

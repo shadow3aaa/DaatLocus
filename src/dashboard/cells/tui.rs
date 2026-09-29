@@ -69,6 +69,8 @@ struct CacheEntry {
     width: u16,
     options: ActivityDataRenderOptions,
     cell: SessionActivityEvent,
+    /// Workflow group identity used by the single group entry. Other cells ignore it.
+    workflow_group_key: u64,
     lines: Vec<Line<'static>>,
     height: u16,
 }
@@ -131,10 +133,15 @@ impl CachedActivityLines {
         width: u16,
         cell: &SessionActivityEvent,
         options: ActivityDataRenderOptions,
+        workflow_group_key: u64,
     ) -> Option<CachedCellLines> {
         let cached = self.entries.get(index).and_then(|e| {
             e.as_ref().and_then(|entry| {
-                if entry.width == width && entry.options == options && entry.cell == *cell {
+                if entry.width == width
+                    && entry.options == options
+                    && entry.cell == *cell
+                    && entry.workflow_group_key == workflow_group_key
+                {
                     Some(CachedCellLines {
                         lines: entry.lines.clone(),
                         height: entry.height,
@@ -162,6 +169,7 @@ impl CachedActivityLines {
         width: u16,
         options: ActivityDataRenderOptions,
         cell: SessionActivityEvent,
+        workflow_group_key: u64,
         lines: Vec<Line<'static>>,
     ) -> CachedCellLines {
         if index >= self.entries.len() {
@@ -172,6 +180,7 @@ impl CachedActivityLines {
             width,
             options,
             cell,
+            workflow_group_key,
             lines: lines.clone(),
             height,
         });
@@ -261,6 +270,8 @@ pub fn render_activity_feed_cached(
         user_hyperlink_areas,
         selection,
         selectable_regions,
+        mut artifact_previews,
+        workflow_group,
     } = args;
     user_hyperlink_areas.clear();
     let inner = Rect {
@@ -292,18 +303,66 @@ pub fn render_activity_feed_cached(
     };
 
     // Committed cells: use cache to skip markdown re-render.
+    // Every workflow event shares one group entry. Later events stay in history
+    // but do not render another cell, so `w g` cannot point at a single run.
+    let mut saw_workflow_entry = false;
     for (i, cell) in cells.iter().enumerate() {
+        if matches!(cell, SessionActivityEvent::Workflow(_)) {
+            if saw_workflow_entry {
+                continue;
+            }
+            saw_workflow_entry = true;
+        }
         let options = ActivityDataRenderOptions {
             thinking_expanded: matches!(cell, SessionActivityEvent::Thinking(_))
                 && expanded_thinking.contains(&i),
         };
-        let cached = cache.get(i, inner.width, cell, options).unwrap_or_else(|| {
-            let lines = render_activity_cell_lines_with_options(cell, inner.width, options);
-            cache.set(i, inner.width, options, cell.clone(), lines)
-        });
+        let workflow_group_key = if matches!(cell, SessionActivityEvent::Workflow(_)) {
+            workflow_group_cache_key(workflow_group)
+        } else {
+            0
+        };
+        let cached = if let Some(cached) =
+            cache.get(i, inner.width, cell, options, workflow_group_key)
+        {
+            cached
+        } else {
+            let lines = render_activity_cell_lines_with_options(
+                cell,
+                inner.width,
+                options,
+                artifact_previews.as_deref_mut(),
+                if matches!(cell, SessionActivityEvent::Workflow(_)) {
+                    workflow_group
+                } else {
+                    None
+                },
+            );
+            cache.set(
+                i,
+                inner.width,
+                options,
+                cell.clone(),
+                workflow_group_key,
+                lines,
+            )
+        };
         let cached_height = cached.height;
-        if matches!(cell, SessionActivityEvent::User(_)) {
-            user_cell_rows.push((column_rows, cached_height));
+        record_preview_placement(
+            &mut preview_placements,
+            artifact_previews.as_deref_mut(),
+            cell,
+            inner.width,
+            column_rows,
+            cached_height,
+        );
+        // User prompts and artifact cards can both contain URLs; include their
+        // rows so the OSC 8 overlay pass can linkify them.
+        if matches!(
+            cell,
+            SessionActivityEvent::User(_) | SessionActivityEvent::Artifact(_)
+        ) {
+            hyperlink_cell_rows.push((column_rows, cached_height));
         }
         selectable_cell_rows.push(SelectableActivityDataRows {
             id: committed_activity_selectable_id(cell),
@@ -322,13 +381,52 @@ pub fn render_activity_feed_cached(
 
     // Live cells are always re-rendered (they change every frame).
     for (i, lc) in live_cells.iter().enumerate() {
+        if matches!(lc.event, SessionActivityEvent::Workflow(_)) {
+            if saw_workflow_entry {
+                continue;
+            }
+            saw_workflow_entry = true;
+        }
         let idx = cells.len() + i;
         let options = ActivityDataRenderOptions::default();
-        let lines = render_activity_cell_lines_with_options(&lc.event, inner.width, options);
-        let cached = cache.set(idx, inner.width, options, lc.event.clone(), lines);
+        let workflow_group_key = if matches!(lc.event, SessionActivityEvent::Workflow(_)) {
+            workflow_group_cache_key(workflow_group)
+        } else {
+            0
+        };
+        let lines = render_activity_cell_lines_with_options(
+            &lc.event,
+            inner.width,
+            options,
+            artifact_previews.as_deref_mut(),
+            if matches!(lc.event, SessionActivityEvent::Workflow(_)) {
+                workflow_group
+            } else {
+                None
+            },
+        );
+        let cached = cache.set(
+            idx,
+            inner.width,
+            options,
+            lc.event.clone(),
+            workflow_group_key,
+            lines,
+        );
         let cached_height = cached.height;
-        if matches!(&lc.event, SessionActivityEvent::User(_)) {
-            user_cell_rows.push((column_rows, cached_height));
+        record_preview_placement(
+            &mut preview_placements,
+            artifact_previews.as_deref_mut(),
+            &lc.event,
+            inner.width,
+            column_rows,
+            cached_height,
+        );
+        if matches!(
+            &lc.event,
+            SessionActivityEvent::User(_) | SessionActivityEvent::Artifact(_)
+        ) {
+            hyperlink_cell_rows.push((column_rows, cached_height));
         }
         selectable_cell_rows.push(SelectableActivityDataRows {
             id: SelectableId::new(format!("activity-live:{}", lc.key)),
@@ -361,12 +459,12 @@ pub fn render_activity_feed_cached(
     // sticky-header artefacts.
     let max_scroll = total_height.saturating_sub(inner.height.saturating_sub(1));
 
-    push_visible_user_hyperlink_areas(
+    push_visible_hyperlink_areas(
         user_hyperlink_areas,
         inner,
         effective_scroll,
         total_height.min(inner.height),
-        &user_cell_rows,
+        &hyperlink_cell_rows,
     );
     let visible_selectable_regions = visible_activity_selectable_regions(
         inner,
@@ -447,19 +545,19 @@ fn committed_activity_selectable_id(cell: &SessionActivityEvent) -> SelectableId
     SelectableId::new(id)
 }
 
-fn push_visible_user_hyperlink_areas(
+fn push_visible_hyperlink_areas(
     out: &mut Vec<Rect>,
     area: Rect,
     scroll: u16,
     viewport_height: u16,
-    user_rows: &[(u16, u16)],
+    cell_rows: &[(u16, u16)],
 ) {
     if area.width == 0 || viewport_height == 0 {
         return;
     }
     let viewport_top = scroll;
     let viewport_bottom = scroll.saturating_add(viewport_height);
-    for &(start, height) in user_rows {
+    for &(start, height) in cell_rows {
         let end = start.saturating_add(height);
         if end <= viewport_top || start >= viewport_bottom {
             continue;
@@ -537,7 +635,12 @@ fn render_activity_cell_lines_with_options(
         SessionActivityEvent::RuntimeStatus(cell) => {
             render_runtime_status_cell_lines(cell, max_width)
         }
-        SessionActivityEvent::Workflow(cell) => render_workflow_cell_lines(cell, max_width),
+        SessionActivityEvent::Workflow(cell) => {
+            render_workflow_cell_lines(cell, workflow_group, max_width)
+        }
+        SessionActivityEvent::Artifact(cell) => {
+            render_artifact_cell_lines(cell, max_width, preview)
+        }
     }
 }
 
@@ -612,7 +715,16 @@ fn activity_cell_transcript_lines(cell: &SessionActivityEvent, width: u16) -> Ve
     }
 }
 
-#[cfg(test)]
+/// Render one activity cell to plain transcript text. Used by `read_history`, which
+/// pages over the same activity history the WebUI/TUI transcript is built from.
+pub(in crate::dashboard) fn activity_cell_transcript_text(cell: &SessionActivityEvent) -> String {
+    activity_cell_transcript_lines(cell, u16::MAX)
+        .iter()
+        .map(rendered_line_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn rendered_line_text(line: &Line<'_>) -> String {
     line.spans
         .iter()
@@ -756,7 +868,7 @@ fn transcript_plan_lines(cell: &PlanActivityData, width: u16) -> Vec<Line<'stati
     lines
 }
 
-fn workflow_transcript_lines(cell: &super::WorkflowActivityData, width: u16) -> Vec<Line<'static>> {
+fn workflow_transcript_lines(cell: &WorkflowActivityData, width: u16) -> Vec<Line<'static>> {
     let mut lines = vec![transcript_header("WORKFLOW")];
     let mut body = vec![Line::from(format!(
         "{}: {:?}",
@@ -2106,50 +2218,61 @@ fn coding_edit_title(cell: &CodingEditActivityData) -> String {
     )
 }
 
+
+fn workflow_group_cache_key(
+    group: Option<&crate::workflow::WorkflowGroupSnapshot>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let Some(group) = group else {
+        return 0;
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    group.nodes.len().hash(&mut hasher);
+    group.edges.len().hash(&mut hasher);
+    for node in &group.nodes {
+        node.run_id.hash(&mut hasher);
+        node.workflow_id.hash(&mut hasher);
+        format!("{:?}", node.status).hash(&mut hasher);
+        node.message.hash(&mut hasher);
+        node.snapshot.is_some().hash(&mut hasher);
+    }
+    for edge in &group.edges {
+        edge.source_run_id.hash(&mut hasher);
+        edge.target_run_id.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 fn render_workflow_cell_lines(
-    cell: &super::WorkflowActivityData,
+    cell: &WorkflowActivityData,
+    group: Option<&crate::workflow::WorkflowGroupSnapshot>,
     max_width: u16,
 ) -> Vec<Line<'static>> {
-    let status = format!("{:?}", cell.status).to_ascii_lowercase();
-    let mut lines = vec![Line::from(vec![
-        Span::styled("Workflow", bold_style()),
+    let _ = (cell, max_width);
+    let run_count = group.map(|group| group.nodes.len()).unwrap_or(0);
+    let running = group.is_some_and(|group| {
+        group.nodes.iter().any(|node| {
+            matches!(
+                node.status,
+                crate::workflow::WorkflowNodeStatus::Running
+                    | crate::workflow::WorkflowNodeStatus::Pending
+            )
+        })
+    });
+    let status = if run_count == 0 {
+        "not started"
+    } else if running {
+        "running"
+    } else {
+        "completed"
+    };
+    let runs = if run_count == 1 { "run" } else { "runs" };
+    vec![Line::from(vec![
+        Span::styled("Workflow group", bold_style()),
         Span::raw(" "),
-        Span::styled(cell.workflow_id.clone(), Style::default().fg(Color::Cyan)),
-        Span::raw(" — "),
-        Span::styled(status, dim_style()),
-        Span::styled("  [w inspect]", dim_style()),
-    ])];
-    if let Some(snapshot) = cell.snapshot.as_ref() {
-        let actors = snapshot
-            .workers
-            .iter()
-            .map(workflow_snapshot_actor_id)
-            .collect::<std::collections::HashSet<_>>();
-        let summary = format!(
-            "{} actor{} · {} run{} · {}",
-            actors.len(),
-            if actors.len() == 1 { "" } else { "s" },
-            snapshot.workers.len(),
-            if snapshot.workers.len() == 1 { "" } else { "s" },
-            snapshot.run_id,
-        );
-        lines.extend(prefixed_detail_lines(vec![Line::from(summary)], max_width));
-    }
-    if !cell.message.trim().is_empty() {
-        lines.extend(prefixed_detail_lines(
-            vec![Line::from(cell.message.clone())],
-            max_width,
-        ));
-    }
-    if cell.snapshot.is_none()
-        && let Some(output) = cell.output.as_ref()
-    {
-        lines.extend(prefixed_detail_lines(
-            vec![Line::from(output.to_string())],
-            max_width,
-        ));
-    }
-    lines
+        Span::styled(format!("{run_count} {runs} \u{00b7} {status}"), dim_style()),
+        Span::styled("  [w g]", dim_style()),
+    ])]
 }
 
 fn render_runtime_status_cell_lines(
@@ -3585,10 +3708,13 @@ That's it.";
                 user_hyperlink_areas: &mut user_hyperlink_areas,
                 selection: &SelectionRegistry::default(),
                 selectable_regions: &mut selectable_regions,
+                artifact_previews: None,
+                workflow_group: None,
             },
         );
 
         for (pattern, expected_bg) in [
+            ("old_line();", PATCH_DIFF_DELETE_BACKGROUND),
             ("old_line();", PATCH_DIFF_DELETE_BACKGROUND),
             ("new_line();", PATCH_DIFF_ADD_BACKGROUND),
         ] {
@@ -3803,10 +3929,13 @@ That's it.";
                 user_hyperlink_areas: &mut user_hyperlink_areas,
                 selection: &SelectionRegistry::default(),
                 selectable_regions: &mut selectable_regions,
+                artifact_previews: None,
+                workflow_group: None,
             },
         );
 
         for (pattern, expected_bg) in [
+            ("old();", PATCH_DIFF_DELETE_BACKGROUND),
             ("old();", PATCH_DIFF_DELETE_BACKGROUND),
             ("new();", PATCH_DIFF_ADD_BACKGROUND),
         ] {
@@ -3853,6 +3982,8 @@ That's it.";
                 user_hyperlink_areas: &mut user_hyperlink_areas,
                 selection: &SelectionRegistry::default(),
                 selectable_regions: &mut selectable_regions,
+                artifact_previews: None,
+                workflow_group: None,
             },
         );
 
@@ -3888,6 +4019,8 @@ That's it.";
                 user_hyperlink_areas: &mut Vec::new(),
                 selection: &SelectionRegistry::default(),
                 selectable_regions: &mut top_regions,
+                artifact_previews: None,
+                workflow_group: None,
             },
         );
 
@@ -3904,6 +4037,8 @@ That's it.";
                 user_hyperlink_areas: &mut Vec::new(),
                 selection: &SelectionRegistry::default(),
                 selectable_regions: &mut scrolled_regions,
+                artifact_previews: None,
+                workflow_group: None,
             },
         );
 
@@ -3928,6 +4063,8 @@ That's it.";
                 user_hyperlink_areas: &mut Vec::new(),
                 selection: &SelectionRegistry::default(),
                 selectable_regions: &mut regions,
+                artifact_previews: None,
+                workflow_group: None,
             },
         );
         let mut registry = SelectionRegistry::default();
@@ -3950,6 +4087,8 @@ That's it.";
                 user_hyperlink_areas: &mut Vec::new(),
                 selection: &registry,
                 selectable_regions: &mut next_regions,
+                artifact_previews: None,
+                workflow_group: None,
             },
         );
 
@@ -4373,5 +4512,102 @@ That's it.";
                 .count(),
             1
         );
+    }
+
+    fn workflow_activity(workflow_id: &str) -> SessionActivityEvent {
+        SessionActivityEvent::Workflow(crate::dashboard::WorkflowActivityData {
+            workflow_id: workflow_id.to_string(),
+            status: crate::workflow::WorkflowInvocationStatus::Running,
+            output: None,
+            message: format!("{workflow_id} is running"),
+            snapshot: None,
+        })
+    }
+
+    #[test]
+    fn multiple_workflow_events_render_one_workflow_group_entry() {
+        let group = crate::workflow::WorkflowGroupSnapshot {
+            nodes: vec![
+                crate::workflow::WorkflowGroupNodeSnapshot {
+                    run_id: "run-a".to_string(),
+                    workflow_id: "alpha".to_string(),
+                    status: crate::workflow::WorkflowNodeStatus::Completed,
+                    started_at_ms: 1,
+                    completed_at_ms: Some(2),
+                    input: serde_json::json!({}),
+                    output: None,
+                    error: None,
+                    message: String::new(),
+                    snapshot: None,
+                },
+                crate::workflow::WorkflowGroupNodeSnapshot {
+                    run_id: "run-b".to_string(),
+                    workflow_id: "beta".to_string(),
+                    status: crate::workflow::WorkflowNodeStatus::Running,
+                    started_at_ms: 3,
+                    completed_at_ms: None,
+                    input: serde_json::json!({}),
+                    output: None,
+                    error: None,
+                    message: String::new(),
+                    snapshot: None,
+                },
+            ],
+            edges: Vec::new(),
+        };
+        let cells = vec![
+            workflow_activity("alpha"),
+            workflow_activity("beta"),
+            SessionActivityEvent::User(UserActivityData {
+                content: "after workflows".to_string(),
+                image_attachments: Vec::new(),
+            }),
+        ];
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buf = Buffer::empty(area);
+        let mut cache = CachedActivityLines::new();
+        let mut hyperlink_areas = Vec::new();
+        let mut selectable_regions = Vec::new();
+
+        render_activity_feed_cached(
+            &mut buf,
+            area,
+            ActivityFeedRenderArgs {
+                cells: &cells,
+                live_cells: &[],
+                expanded_thinking: &HashSet::new(),
+                scroll_offset: 0,
+                cache: &mut cache,
+                user_hyperlink_areas: &mut hyperlink_areas,
+                selection: &SelectionRegistry::default(),
+                selectable_regions: &mut selectable_regions,
+                artifact_previews: None,
+                workflow_group: Some(&group),
+            },
+        );
+
+        let rendered = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol()))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        let text = rendered.join("\n");
+
+        assert_eq!(
+            text.matches("Workflow group").count(),
+            1,
+            "multiple workflow events must share one entry: {text}"
+        );
+        assert!(text.contains("[w g]"), "{text}");
+        assert!(text.contains("2 runs"), "{text}");
+        assert!(!text.contains("alpha"), "{text}");
+        assert!(!text.contains("beta"), "{text}");
+        assert!(!text.contains("[w inspect]"), "{text}");
+        assert!(text.contains("after workflows"), "{text}");
     }
 }

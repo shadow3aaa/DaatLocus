@@ -18,7 +18,94 @@ use super::view_state::{CtrlCReminder, TuiViewState};
 use std::path::{Path, PathBuf};
 
 use super::{DashboardAction, DashboardCommandAttachment, DashboardCommandRunner, DashboardState};
+use std::time::{Duration, Instant};
 
+/// How long an unmodified `w` waits for the following `g` before it is ordinary input.
+const WORKFLOW_GROUP_CHORD_TIMEOUT: Duration = Duration::from_millis(800);
+
+fn handle_workflow_group_chord(
+    key: KeyEvent,
+    view: &mut TuiViewState,
+    state: &DashboardState,
+    now: Instant,
+) -> bool {
+    let Some(started_at) = view.workflow_group_chord else {
+        return false;
+    };
+    let expired = now.saturating_duration_since(started_at) > WORKFLOW_GROUP_CHORD_TIMEOUT;
+    view.workflow_group_chord = None;
+    if expired {
+        insert_replayed_chars(view, "w");
+        return false;
+    }
+    if is_unmodified_char(key, 'g') {
+        view.open_workflow_group(state);
+        return true;
+    }
+    if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+        return true;
+    }
+    if let KeyCode::Char(ch) = key.code
+        && key.modifiers.is_empty()
+    {
+        insert_replayed_chars(view, &format!("w{ch}"));
+        return true;
+    }
+    insert_replayed_chars(view, "w");
+    false
+}
+
+fn begin_workflow_group_chord(view: &mut TuiViewState, now: Instant) {
+    view.workflow_group_chord = Some(now);
+}
+
+fn workflow_group_chord_expired(view: &mut TuiViewState, now: Instant) -> bool {
+    let Some(started_at) = view.workflow_group_chord else {
+        return false;
+    };
+    if now.saturating_duration_since(started_at) <= WORKFLOW_GROUP_CHORD_TIMEOUT {
+        return false;
+    }
+    view.workflow_group_chord = None;
+    true
+}
+
+pub(super) fn poll_workflow_group_chord(view: &mut TuiViewState) -> bool {
+    poll_workflow_group_chord_at(view, Instant::now())
+}
+
+fn poll_workflow_group_chord_at(view: &mut TuiViewState, now: Instant) -> bool {
+    if !workflow_group_chord_expired(view, now) {
+        return false;
+    }
+    insert_replayed_chars(view, "w");
+    true
+}
+
+pub(super) fn workflow_group_chord_deadline(view: &TuiViewState) -> Option<Instant> {
+    view.workflow_group_chord
+        .map(|started_at| started_at + WORKFLOW_GROUP_CHORD_TIMEOUT)
+}
+
+const fn is_unmodified_char(key: KeyEvent, expected: char) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Char(ch) if key.modifiers.is_empty() && ch.eq_ignore_ascii_case(&expected)
+    )
+}
+
+fn insert_replayed_chars(view: &mut TuiViewState, replay: &str) {
+    if replay.is_empty() {
+        return;
+    }
+    for ch in replay.chars() {
+        view.command_input.insert_char(ch);
+    }
+    view.command_feedback = None;
+    view.clear_ctrl_c_reminder();
+    view.reset_command_history_navigation();
+    view.reset_command_popup();
+}
 pub(super) enum TuiInputOutcome {
     Continue,
     Exit,
@@ -68,8 +155,8 @@ pub(super) fn handle_key_event(
         return TuiInputOutcome::Continue;
     }
 
-    if view.workflow_inspector.is_some() {
-        view.handle_workflow_inspector_key(key);
+    if view.workflow_group.is_some() {
+        view.handle_workflow_group_key(key, state);
         return TuiInputOutcome::Continue;
     }
 
@@ -82,8 +169,18 @@ pub(super) fn handle_key_event(
         view.open_transcript_overlay(state);
         return TuiInputOutcome::Continue;
     }
-    if is_workflow_inspector_key(key) {
-        view.open_latest_workflow_inspector(state);
+    if is_ctrl_o(key) {
+        return handle_open_artifact_key(view, state);
+    }
+    if view.workflow_group_chord.is_some() {
+        if handle_workflow_group_chord(key, view, state, Instant::now()) {
+            return TuiInputOutcome::Continue;
+        }
+    } else if workflow_group_chord_expired(view, Instant::now()) {
+        insert_replayed_chars(view, "w");
+    }
+    if is_unmodified_char(key, 'w') && view.command_input.is_empty() {
+        begin_workflow_group_chord(view, Instant::now());
         return TuiInputOutcome::Continue;
     }
     if view.editing_pending_user_input.is_some() {
@@ -1602,5 +1699,117 @@ mod tests {
         assert!(!should_exit);
         assert!(view.editing_pending_user_input.is_none());
         assert!(view.command_input.is_empty());
+    }
+
+    fn workflow_group_dashboard_state() -> DashboardState {
+        DashboardState {
+            workflow_group: crate::workflow::WorkflowGroupSnapshot {
+                nodes: vec![crate::workflow::WorkflowGroupNodeSnapshot {
+                    run_id: "run-1".to_string(),
+                    workflow_id: "research".to_string(),
+                    status: crate::workflow::WorkflowNodeStatus::Running,
+                    started_at_ms: 1,
+                    completed_at_ms: None,
+                    input: serde_json::json!({}),
+                    output: None,
+                    error: None,
+                    message: String::new(),
+                    snapshot: None,
+                }],
+                edges: Vec::new(),
+            },
+            ..DashboardState::default()
+        }
+    }
+
+    fn plain_char(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn plain_w_does_not_open_workflow_group() {
+        let state = workflow_group_dashboard_state();
+        let mut view = TuiViewState::new();
+
+        let outcome = handle_key_event(plain_char('w'), &mut view, &state);
+
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert!(view.workflow_group.is_none());
+        assert!(view.command_input.is_empty());
+        assert!(view.workflow_group_chord.is_some());
+    }
+
+    #[test]
+    fn w_then_g_opens_workflow_group_from_dashboard_state() {
+        let state = workflow_group_dashboard_state();
+        let mut view = TuiViewState::new();
+
+        let _ = handle_key_event(plain_char('w'), &mut view, &state);
+        let outcome = handle_key_event(plain_char('g'), &mut view, &state);
+
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert!(view.workflow_group.is_some());
+        assert!(view.command_input.is_empty());
+        assert!(view.workflow_group_chord.is_none());
+    }
+
+    #[test]
+    fn w_then_other_character_is_ordinary_input() {
+        let state = workflow_group_dashboard_state();
+        let mut view = TuiViewState::new();
+
+        let _ = handle_key_event(plain_char('w'), &mut view, &state);
+        let outcome = handle_key_event(plain_char('x'), &mut view, &state);
+
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert!(view.workflow_group.is_none());
+        assert_eq!(view.command_input.as_str(), "wx");
+    }
+
+    #[test]
+    fn w_then_esc_cancels_chord_without_inserting_w() {
+        let state = workflow_group_dashboard_state();
+        let mut view = TuiViewState::new();
+
+        let _ = handle_key_event(plain_char('w'), &mut view, &state);
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut view,
+            &state,
+        );
+
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert!(view.workflow_group.is_none());
+        assert!(view.command_input.is_empty());
+        assert!(view.workflow_group_chord.is_none());
+    }
+
+    #[test]
+    fn workflow_group_chord_timeout_keeps_w_as_input() {
+        let state = workflow_group_dashboard_state();
+        let mut view = TuiViewState::new();
+        let started = Instant::now() - WORKFLOW_GROUP_CHORD_TIMEOUT - Duration::from_millis(1);
+        begin_workflow_group_chord(&mut view, started);
+
+        let consumed = handle_workflow_group_chord(plain_char('x'), &mut view, &state, Instant::now());
+
+        assert!(!consumed);
+        assert_eq!(view.command_input.as_str(), "w");
+        assert!(view.workflow_group.is_none());
+
+        let follow_up = handle_key_event(plain_char('x'), &mut view, &state);
+        assert!(matches!(follow_up, TuiInputOutcome::Continue));
+        assert_eq!(view.command_input.as_str(), "wx");
+    }
+
+    #[test]
+    fn workflow_group_chord_timeout_inserts_w_without_another_key() {
+        let mut view = TuiViewState::new();
+        let started = Instant::now() - WORKFLOW_GROUP_CHORD_TIMEOUT - Duration::from_millis(1);
+        begin_workflow_group_chord(&mut view, started);
+
+        assert!(poll_workflow_group_chord_at(&mut view, Instant::now()));
+        assert_eq!(view.command_input.as_str(), "w");
+        assert!(view.workflow_group_chord.is_none());
     }
 }

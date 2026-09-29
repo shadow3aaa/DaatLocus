@@ -276,6 +276,7 @@ pub async fn run_session_serve(
             workflows: dashboard_workflow_summaries(&context),
             workflow_errors: dashboard_workflow_errors(&context),
             active_workflow_runs: Vec::new(),
+            workflow_group: crate::workflow::WorkflowGroupSnapshot::default(),
             pending_access_requests: context.telegram_acl.pending_requests(),
             pending_user_inputs: pending_user_inputs_from_sources(
                 &context.events,

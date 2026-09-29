@@ -601,11 +601,13 @@ impl RuntimeTool for WorkflowRuntimeTool {
         context: &mut Context,
         call: &AgentToolCall,
     ) -> miette::Result<ToolExecutionResult> {
+        let (input, waits_for) = crate::workflow::split_workflow_waits_for(call.arguments.clone())?;
         let result = crate::workflow::start(
             context,
             WorkflowInvocation {
                 workflow_id: self.workflow_id.clone(),
-                input: call.arguments.clone(),
+                input,
+                waits_for,
             },
         )?;
         let payload = json!({
@@ -2583,6 +2585,53 @@ mod tests {
             .expect("investigate workflow tool");
         assert!(investigate.description.contains("read-only"));
         assert!(investigate.description.contains("workflow__goal"));
+
+        let AgentToolInputSpec::JsonSchema { schema } = &goal.input_spec else {
+            panic!("workflow tool schema should be json schema");
+        };
+        assert_eq!(
+            schema.pointer("/properties/waits_for/type"),
+            Some(&json!(["array", "null"]))
+        );
+        let required = schema.pointer("/required").and_then(Value::as_array);
+        assert!(required.is_some_and(|required| {
+            required
+                .iter()
+                .any(|item| item.as_str() == Some("waits_for"))
+        }));
+        let (_, empty) = crate::workflow::split_workflow_waits_for(json!({
+            "goal": "ship it",
+            "waits_for": null
+        }))
+        .expect("null waits_for");
+        assert!(empty.is_empty());
+        let (input, waits_for) = crate::workflow::split_workflow_waits_for(json!({
+            "goal": "ship it",
+            "waits_for": ["run-a"]
+        }))
+        .expect("split waits_for");
+        assert_eq!(waits_for, vec!["run-a".to_string()]);
+        assert!(input.get("waits_for").is_none());
+        crate::schema_utils::validate_value_against_schema(
+            &input,
+            &json!({
+                "type": "object",
+                "properties": { "goal": { "type": "string" } },
+                "required": ["goal"],
+                "additionalProperties": false
+            }),
+            "workflow input",
+        )
+        .expect("stripped input validates against the workflow schema");
+        crate::schema_utils::validate_value_against_schema(
+            &json!({
+                "goal": "ship it",
+                "waits_for": ["run-a"]
+            }),
+            schema,
+            "workflow tool input",
+        )
+        .expect("model-visible schema accepts optional waits_for");
     }
 
     #[tokio::test]
