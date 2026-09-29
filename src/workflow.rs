@@ -34,7 +34,7 @@ use crate::{
     },
     runtime::bootstrap::build_runtime_apps,
     runtime_context::{
-        MID_TURN_COMPACTION_MAX_RECOVERIES, maybe_compact_agent_messages_in_archive,
+        MID_TURN_RESET_MAX_RECOVERIES, maybe_reset_agent_history,
     },
     runtime_tools::{
         ToolExecutionResult, WorkerRuntimeToolCallContext,
@@ -1985,9 +1985,7 @@ async fn run_worker_turn(
             &actor.tools,
             worker_model_supports_vision(context, &model),
         );
-        if maybe_compact_agent_messages_in_archive(
-            context.session_id.as_deref(),
-            context.dashboard_history.as_ref(),
+        if maybe_reset_agent_history(
             worker_model_provider(context, &model),
             &mut actor.conversation,
             &tools,
@@ -2010,11 +2008,9 @@ async fn run_worker_turn(
                 Ok(response) => response,
                 Err(error)
                     if is_context_budget_exceeded(&error)
-                        && budget_recoveries < MID_TURN_COMPACTION_MAX_RECOVERIES =>
+                        && budget_recoveries < MID_TURN_RESET_MAX_RECOVERIES =>
                 {
-                    if maybe_compact_agent_messages_in_archive(
-                        context.session_id.as_deref(),
-                        context.dashboard_history.as_ref(),
+                    if maybe_reset_agent_history(
                         worker_model_provider(context, &model),
                         &mut actor.conversation,
                         &tools,

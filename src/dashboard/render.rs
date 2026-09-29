@@ -497,7 +497,7 @@ pub fn runtime_activity_for_dashboard(
         let status = match context.active_runtime_phase {
             Some(
                 crate::context::RuntimeTurnPhase::PreflightPreTurnContext
-                | crate::context::RuntimeTurnPhase::PreflightCompaction
+                | crate::context::RuntimeTurnPhase::PreflightHistoryReset
                 | crate::context::RuntimeTurnPhase::ModelRequest,
             ) => DashboardRuntimeActivityStatus::Thinking,
             Some(crate::context::RuntimeTurnPhase::ToolExecution) => {

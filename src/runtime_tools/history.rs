@@ -9,7 +9,7 @@ use crate::{
     context::Context,
     context_budget::APPROX_BYTES_PER_TOKEN,
     dashboard::SessionActivityEvent,
-    dashboard::{DashboardActivityHistoryStore, HistoryArchiveItem, HistoryArchiveQueryMode},
+    dashboard::{DashboardActivityHistoryStore, HistoryQueryItem, HistoryQueryMode},
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
     runtime_tools::{
         RuntimeTool, StaticRuntimeTool, ToolExecutionResult, ToolFuture, parse_tool_args,
@@ -25,9 +25,9 @@ const HISTORY_QUERY_LIMIT_MAX: usize = 200;
 #[serde(deny_unknown_fields)]
 struct ReadHistoryArgs {
     /// recent = newest-first page; range = forward page from start_seq;
-    /// search = keyword (substring, case-insensitive) match in archived messages.
+    /// search = keyword (substring, case-insensitive) match in the session history.
     #[serde(default)]
-    mode: Option<HistoryArchiveQueryMode>,
+    mode: Option<HistoryQueryMode>,
     /// Maximum number of messages to return (1..=200, default 40).
     #[serde(default)]
     limit: Option<usize>,
@@ -40,16 +40,13 @@ struct ReadHistoryArgs {
     /// Substring filter for range/recent; required for search.
     #[serde(default)]
     query: Option<String>,
-    /// Set true to include full tool outputs instead of an omission placeholder.
-    #[serde(default)]
-    include_tool_output: Option<bool>,
 }
 
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     vec![Box::new(
         StaticRuntimeTool::new_with_schema_and_availability(
             "read_history",
-            "Read archived conversation history that was cleared by a runtime context compaction. Use it to recover the task state after the context was reset with the recovery prompt. recent returns the newest messages; range reads forward from start_seq; search finds messages whose text contains query. Each page returns next_seq for continued paging; tool outputs are omitted unless include_tool_output=true.",
+            "Page over this session's conversation history. Use it to recover the task state after a context overflow reset the runtime history with the recovery prompt. recent returns the newest entries; range reads forward from start_seq; search finds entries whose text contains query. Each page returns next_seq for continued paging.",
             model_schema_for::<ReadHistoryArgs>(),
             |context: &Context| context.dashboard_history.is_some(),
             summarize_read_history_tool,
@@ -59,17 +56,17 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     )]
 }
 
-fn history_mode_str(mode: HistoryArchiveQueryMode) -> &'static str {
+fn history_mode_str(mode: HistoryQueryMode) -> &'static str {
     match mode {
-        HistoryArchiveQueryMode::Recent => "recent",
-        HistoryArchiveQueryMode::Range => "range",
-        HistoryArchiveQueryMode::Search => "search",
+        HistoryQueryMode::Recent => "recent",
+        HistoryQueryMode::Range => "range",
+        HistoryQueryMode::Search => "search",
     }
 }
 
 fn summarize_read_history_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
     let args: ReadHistoryArgs = parse_tool_args(call)?;
-    let mode = args.mode.unwrap_or(HistoryArchiveQueryMode::Recent);
+    let mode = args.mode.unwrap_or(HistoryQueryMode::Recent);
     Ok(EpisodeActionRecord {
         kind: "read_history".to_string(),
         summary: format!(
@@ -83,7 +80,7 @@ fn summarize_read_history_tool(call: &AgentToolCall) -> Result<EpisodeActionReco
 
 fn render_read_history_call_ui(call: &AgentToolCall) -> Result<ToolCallActivityEvent> {
     let args: ReadHistoryArgs = parse_tool_args(call)?;
-    let mode = args.mode.unwrap_or(HistoryArchiveQueryMode::Recent);
+    let mode = args.mode.unwrap_or(HistoryQueryMode::Recent);
     Ok(ToolCallActivityEvent::app(
         "Read History",
         vec![format!(
@@ -131,57 +128,35 @@ async fn execute_read_history_with_store(
     tool_output_max_tokens: usize,
 ) -> Result<ToolExecutionResult> {
     let args: ReadHistoryArgs = parse_tool_args(call)?;
-    let mode = args.mode.unwrap_or(HistoryArchiveQueryMode::Recent);
+    let mode = args.mode.unwrap_or(HistoryQueryMode::Recent);
     let limit = args
         .limit
         .unwrap_or(DEFAULT_HISTORY_QUERY_LIMIT)
         .clamp(1, HISTORY_QUERY_LIMIT_MAX);
     let query = args.query.unwrap_or_default();
-    let include_tool_output = args.include_tool_output.unwrap_or(false);
-    let items =
-        store.query_history_archive(mode, limit, args.before_seq, args.start_seq, &query)?;
-    let total = store.count_history_archive(mode, &query)?;
+    let items = store.query_history(mode, limit, args.before_seq, args.start_seq, &query)?;
+    let total = store.count_history(&query)?;
     let max_tokens = tool_output_max_tokens.max(1);
     let max_chars = max_tokens.saturating_mul(APPROX_BYTES_PER_TOKEN).max(1);
 
     let mut content = String::new();
-    let mut rendered: Vec<HistoryArchiveItem> = Vec::new();
+    let mut rendered: Vec<HistoryQueryItem> = Vec::new();
     let mut truncated = false;
     let mut next_seq = None;
     for item in &items {
-        let text = if item.role == "tool" && !include_tool_output {
-            match &item.tool_name {
-                Some(name) => format!(
-                    "<tool `{name}` output omitted; call read_history with include_tool_output=true to read it>"
-                ),
-                None => {
-                    "<tool output omitted; call read_history with include_tool_output=true to read it>"
-                        .to_string()
-                }
-            }
-        } else {
-            item.content.clone()
-        };
-        let line = format!("seq={} [{}] {}\n", item.seq, item.role, text);
+        let line = format!("seq={} [{}] {}\n", item.seq, item.role, item.content);
         if content.chars().count().saturating_add(line.chars().count()) > max_chars {
             truncated = true;
             next_seq = Some(item.seq);
             break;
         }
         content.push_str(&line);
-        rendered.push(HistoryArchiveItem {
-            seq: item.seq,
-            role: item.role.clone(),
-            tool_name: item.tool_name.clone(),
-            content: text,
-        });
+        rendered.push(item.clone());
     }
     if !truncated {
         next_seq = items.last().map(|item| match mode {
-            HistoryArchiveQueryMode::Recent | HistoryArchiveQueryMode::Search => {
-                item.seq.saturating_sub(1)
-            }
-            HistoryArchiveQueryMode::Range => item.seq.saturating_add(1),
+            HistoryQueryMode::Recent | HistoryQueryMode::Search => item.seq.saturating_sub(1),
+            HistoryQueryMode::Range => item.seq.saturating_add(1),
         });
     }
     let mode_str = history_mode_str(mode);

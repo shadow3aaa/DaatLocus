@@ -16,7 +16,6 @@ use crate::{
         DashboardContextCompositionPrefixUnit, DashboardContextCompositionSegment,
         DashboardContextCompositionSnapshot,
     },
-    reasoning::prompts::{MID_TURN_SUMMARY_PREFIX, RUNTIME_HISTORY_SUMMARY_PREFIX},
     reasoning::runtime::AgentToolSpec,
     runtime::bootstrap::save_token_estimate_baseline,
 };
@@ -279,10 +278,6 @@ fn context_composition_message_name(message: &AgentMessage) -> String {
                 "preturn_context".to_string()
             } else if text.contains("<claimed_input>") {
                 "claimed_input".to_string()
-            } else if text.contains(RUNTIME_HISTORY_SUMMARY_PREFIX)
-                || text.contains(MID_TURN_SUMMARY_PREFIX)
-            {
-                "summarized_history".to_string()
             } else {
                 "conversation_history".to_string()
             }
@@ -296,9 +291,7 @@ fn context_composition_label_for_name(name: &str) -> &str {
         "afterclaim_context" => "Afterclaim context",
         "preturn_context" => "Preturn context",
         "claimed_input" => "Claimed input",
-        "summarized_history" => "Summarized history",
         "conversation_history" => "Conversation history",
-        "assistant_messages" => "Assistant messages",
         "tool_inputs" => "Tool inputs",
         "tool_messages" => "Tool outputs",
         "tools_schema" => "Tools schema",

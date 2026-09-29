@@ -5,7 +5,7 @@ use super::{
     AppToolExecutionContext, ClaimedRuntimeInput, Context, DashboardActivityEvent,
     DashboardActivityHistoryStore, DashboardActivityHistoryWindow, DashboardState, Duration,
     EpisodeActionRecord, EventPayload, EventView, HistoryMessage, LiveProgressSession,
-    MID_TURN_COMPACTION_MAX_RECOVERIES, PreTurnState, RUNTIME_EVENT_CLAIM_BATCH_SIZE,
+    MID_TURN_RESET_MAX_RECOVERIES, PreTurnState, RUNTIME_EVENT_CLAIM_BATCH_SIZE,
     RUNTIME_HISTORY_MIN_MESSAGES, RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS, Result,
     RuntimeErrorActionContext, RuntimeErrorCase, RuntimeErrorCaseParts, RuntimeErrorKind,
     RuntimeErrorObservation, RuntimeErrorRuntimeContext, RuntimeErrorTaskContext,
@@ -17,16 +17,16 @@ use super::{
     claim_pending_runtime_inputs, claimed_events_are_terminal,
     claimed_events_require_explicit_completion, claimed_input_mode,
     claimed_runtime_input_fingerprint, compact_preserved_body_lines, execute_agent_tool_call,
-    execute_pre_turn_runtime_compaction, finalize_claimed_runtime_events,
+    execute_pre_turn_history_reset, finalize_claimed_runtime_events,
     handle_model_request_failure, handle_runtime_overflow, is_context_budget_exceeded, json,
-    maybe_compact_runtime_messages, maybe_record_skill_read, maybe_start_live_progress_session,
+    maybe_reset_runtime_history, maybe_record_skill_read, maybe_start_live_progress_session,
     miette, record_runtime_history_messages, record_skill_run_evidence,
     render_activity_from_messages, render_telegram_tool_result_status,
     runtime_request_budget_limits, runtime_work_origin, set_runtime_status,
     set_runtime_status_only, summarize_action_from_tool_call, thinking_activity_cell,
     user_activity_cell_from_event,
 };
-use crate::memory::{PlanCompactionInput, RuntimeStepConversation};
+use crate::memory::RuntimeStepConversation;
 use crate::reasoning::prompt_parts::compact_horizontal_whitespace;
 use std::path::{Path, PathBuf};
 use tracing::warn;
@@ -219,7 +219,7 @@ fn is_complete_afterclaim_context_text(text: &str) -> bool {
     text.starts_with("<afterclaim_context") && text.contains("</afterclaim_context>")
 }
 
-fn runtime_context_compacted_output(reason: impl Into<String>) -> AgentLoopStepOutput {
+fn runtime_context_reset_output(reason: impl Into<String>) -> AgentLoopStepOutput {
     let reason = reason.into();
     AgentLoopStepOutput {
         observation: reason.clone(),
@@ -436,93 +436,63 @@ pub async fn execute_agent_loop_step(
     if !preturn_context_text.trim().is_empty() {
         initial_injected_context_messages.push(HistoryMessage::user(preturn_context_text.clone()));
     }
-    let pre_turn_compacted = if let Some(plan) = context
-        .memory
-        .plan_runtime_conversation_compaction_for_request(PlanCompactionInput {
-            envelope: &request_envelope,
-            injected_messages: &initial_injected_context_messages,
-            tools: &initial_tools,
-            limits: request_budget_limits,
-            baseline: &context.token_estimate_baseline,
-            min_messages: RUNTIME_HISTORY_MIN_MESSAGES,
-        }) {
-        enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightCompaction);
-        let compaction_started_at = std::time::Instant::now();
-        tracing::debug!(
-            "runtime preflight stage started: {}",
-            RuntimeTurnPhase::PreflightCompaction.label()
-        );
-        // Clear-and-archive compaction is a local sqlite operation: archive the
-        // full conversation history, reset the runtime messages to the recovery
-        // prompt, and let the model restore task state via `read_history`.
-        // The turn is aborted only if the archive itself fails.
-        let mut failure = None;
+    let pre_turn_reset = if let Some(plan) =
+        context
+            .memory
+            .plan_runtime_history_reset_for_request(crate::memory::PlanHistoryResetInput {
+                envelope: &request_envelope,
+                injected_messages: &initial_injected_context_messages,
+                tools: &initial_tools,
+                limits: request_budget_limits,
+                baseline: &context.token_estimate_baseline,
+                min_messages: RUNTIME_HISTORY_MIN_MESSAGES,
+            })
+    {
+        enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightHistoryReset);
+        let reset_started_at = std::time::Instant::now();
         let outcome = match tokio::time::timeout(
             Duration::from_secs(RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS),
-            execute_pre_turn_runtime_compaction(context, &plan),
+            execute_pre_turn_history_reset(&plan),
         )
         .await
         {
-            Ok(Ok(value)) => Some(value),
+            Ok(Ok(value)) => value,
             Ok(Err(err)) => {
-                failure = Some(format!("runtime compaction failed: {err}"));
-                None
+                return abort_runtime_turn_before_model(
+                    context,
+                    RuntimeTurnAbort {
+                        live_progress_session,
+                        claimed_event_ids: &claimed_event_ids,
+                        observation: format!("runtime preflight failed: {err}"),
+                        description: "Failed to reset the runtime context.".to_string(),
+                    },
+                )
+                .await;
             }
             Err(_) => {
-                failure = Some(format!(
-                    "runtime compaction timed out after {RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS}s"
-                ));
-                None
+                return abort_runtime_turn_before_model(
+                    context,
+                    RuntimeTurnAbort {
+                        live_progress_session,
+                        claimed_event_ids: &claimed_event_ids,
+                        observation: format!(
+                            "runtime history reset timed out after {RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS}s"
+                        ),
+                        description: "Failed to reset the runtime context.".to_string(),
+                    },
+                )
+                .await;
             }
         };
-        if let Some(failure) = &failure {
-            tracing::warn!(error = %failure, "runtime preflight compaction failed");
-        }
-        let Some(outcome) = outcome else {
-            let err = miette!(
-                "runtime preflight stage `{}` failed after main-model compaction retries: {}",
-                RuntimeTurnPhase::PreflightCompaction.label(),
-                failure.unwrap_or_else(|| "unknown compaction failure".to_string())
-            );
-            set_runtime_status(
-                tx,
-                RuntimeStatusLevel::Error,
-                format!(
-                    "runtime turn preflight failed: {}",
-                    RuntimeTurnPhase::PreflightCompaction.label()
-                ),
-            );
-            tracing::error!(
-                elapsed_ms = compaction_started_at.elapsed().as_millis(),
-                error = %err,
-                "runtime preflight compaction failed without local fallback"
-            );
-            return abort_runtime_turn_before_model(
-                context,
-                RuntimeTurnAbort {
-                    live_progress_session,
-                    claimed_event_ids: &claimed_event_ids,
-                    observation: format!("runtime preflight failed: {err}"),
-                    description: "Failed to archive and reset the runtime context.".to_string(),
-                },
-            )
-            .await;
-        };
         tracing::debug!(
-            elapsed_ms = compaction_started_at.elapsed().as_millis(),
+            elapsed_ms = reset_started_at.elapsed().as_millis(),
             "runtime preflight stage completed: {}",
-            RuntimeTurnPhase::PreflightCompaction.label()
+            RuntimeTurnPhase::PreflightHistoryReset.label()
         );
-        let applied = context
+        context
             .memory
-            .apply_runtime_conversation_compaction(plan, outcome)
+            .apply_runtime_history_reset(plan, outcome)
             .await;
-        if applied {
-            clear_runtime_overflow_failure_after_compaction(
-                context,
-                claimed_input_fingerprint.as_deref(),
-            );
-        }
         context.delivered_root_instruction_fingerprint = None;
         context.visible_source_lines.clear();
         true
@@ -539,7 +509,7 @@ pub async fn execute_agent_loop_step(
         context,
         &afterclaim_context_input,
         claimed_input_fingerprint.as_deref(),
-        pre_turn_compacted && !history_has_complete_afterclaim_context(&conversation_slice),
+        pre_turn_reset && !history_has_complete_afterclaim_context(&conversation_slice),
     ) {
         injected_context_messages.push(message);
     }
@@ -566,7 +536,7 @@ pub async fn execute_agent_loop_step(
 
     let output = 'agent_loop: loop {
         let tools = build_runtime_tool_specs(context);
-        match maybe_compact_runtime_messages(context, &mut runtime_step, &tools, false).await {
+        match maybe_reset_runtime_history(context, &mut runtime_step, &tools, false).await {
             Ok(true) => {
                 clear_runtime_overflow_failure_after_compaction(
                     context,
@@ -575,7 +545,7 @@ pub async fn execute_agent_loop_step(
                 set_runtime_status_only(tx, "Compacting runtime context");
                 context.delivered_root_instruction_fingerprint = None;
                 context.visible_source_lines.clear();
-                break 'agent_loop runtime_context_compacted_output(
+                break 'agent_loop runtime_context_reset_output(
                     "runtime context compacted before model request; starting a new turn",
                 );
             }
@@ -611,8 +581,8 @@ pub async fn execute_agent_loop_step(
             }
             Err(err) => {
                 let is_overflow = is_context_budget_exceeded(&err);
-                if is_overflow && budget_recoveries < MID_TURN_COMPACTION_MAX_RECOVERIES {
-                    match maybe_compact_runtime_messages(context, &mut runtime_step, &tools, true)
+                if is_overflow && budget_recoveries < MID_TURN_RESET_MAX_RECOVERIES {
+                    match maybe_reset_runtime_history(context, &mut runtime_step, &tools, true)
                         .await
                     {
                         Ok(true) => {
@@ -625,7 +595,7 @@ pub async fn execute_agent_loop_step(
                                 tx,
                                 RuntimeStatusLevel::Warn,
                                 format!(
-                                    "Recovering from context overflow ({budget_recoveries}/{MID_TURN_COMPACTION_MAX_RECOVERIES})"
+                                    "Recovering from context overflow ({budget_recoveries}/{MID_TURN_RESET_MAX_RECOVERIES})"
                                 ),
                             );
                             // Retry in this step so the compacted in-memory conversation is
@@ -1713,8 +1683,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_compaction_boundary_output_is_detected() {
-        let output = runtime_context_compacted_output("compacted");
+    fn runtime_reset_boundary_output_is_detected() {
+        let output = runtime_context_reset_output("reset");
         assert!(output_is_runtime_context_compaction_boundary(&output));
     }
 

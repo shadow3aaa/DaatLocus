@@ -38,7 +38,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeTurnPhase {
     PreflightPreTurnContext,
-    PreflightCompaction,
+    PreflightHistoryReset,
     ModelRequest,
     ToolExecution,
 }
@@ -47,7 +47,7 @@ impl RuntimeTurnPhase {
     pub const fn label(self) -> &'static str {
         match self {
             Self::PreflightPreTurnContext => "preflight: preturn context",
-            Self::PreflightCompaction => "preflight: compaction",
+            Self::PreflightHistoryReset => "preflight: history reset",
             Self::ModelRequest => "model request",
             Self::ToolExecution => "tool execution",
         }

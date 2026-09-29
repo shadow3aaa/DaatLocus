@@ -135,7 +135,7 @@ fn skill_tool_action_count(output: &AgentLoopStepOutput) -> usize {
         .filter(|action| {
             !matches!(
                 action.kind.as_str(),
-                "assistant_message" | "empty_tool_calls" | "runtime_context_compacted"
+                "assistant_message" | "empty_tool_calls" | "runtime_context_reset"
             )
         })
         .count()

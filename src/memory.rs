@@ -9,10 +9,7 @@ use crate::{
     },
     dashboard::SessionActivityEvent,
     persistence::PersistenceStore,
-    reasoning::{
-        prompts::HISTORY_COMPACTION_SUMMARY_PREFIX,
-        runtime::{AgentMessage, AgentToolSpec, HistoryMessage},
-    },
+    reasoning::runtime::{AgentMessage, AgentToolSpec, HistoryMessage},
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -20,7 +17,7 @@ use serde::{Deserialize, Serialize};
 const RUNTIME_CONVERSATION_FILE_NAME: &str = "runtime_conversation.json";
 const RUNTIME_CONVERSATION_LEGACY_FILE_NAME: &str = "runtime_conversation";
 const RUNTIME_HISTORY_TOOL_MESSAGE_MAX_TOKENS: usize = 600;
-const RUNTIME_COMPACTION_RECORD_LIMIT: usize = 32;
+const RUNTIME_HISTORY_RESET_RECORD_LIMIT: usize = 32;
 
 pub struct Memory {
     runtime_conversation: RuntimeConversation,
@@ -29,7 +26,7 @@ pub struct Memory {
 pub struct RuntimeTurnDraft {
     current_doing: String,
     messages: Vec<HistoryMessage>,
-    compaction_records: Vec<RuntimeCompactionRecord>,
+    history_reset_records: Vec<RuntimeHistoryResetRecord>,
 }
 
 pub struct RuntimeRequestEnvelope {
@@ -42,53 +39,54 @@ pub struct RuntimeStepConversation {
     turn_draft: RuntimeTurnDraft,
 }
 
-pub struct RuntimeConversationCompactionPlan {
+pub struct RuntimeHistoryResetPlan {
     source_messages: Vec<HistoryMessage>,
 }
 
 #[derive(Clone, Debug)]
-pub struct RuntimeCompactionOutcome {
-    pub summary: String,
-    pub record: RuntimeCompactionRecord,
+pub struct RuntimeHistoryResetOutcome {
+    pub recovery_prompt: String,
+    pub record: RuntimeHistoryResetRecord,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimeCompactionPhase {
+pub enum RuntimeHistoryResetPhase {
     PreTurn,
     MidTurn,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimeCompactionReason {
+pub enum RuntimeHistoryResetReason {
     BudgetThreshold,
     OverflowRecovery,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimeCompactionReinjectionStrategy {
+pub enum RuntimeHistoryResetReinjectionStrategy {
     RebuildRuntimeEnvelope,
     PreserveSystemOnly,
     PreserveSystemAndRecentUsers,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RuntimeCompactionRecord {
+pub struct RuntimeHistoryResetRecord {
     pub timestamp_ms: i64,
-    pub phase: RuntimeCompactionPhase,
-    pub reason: RuntimeCompactionReason,
-    pub reinjection_strategy: RuntimeCompactionReinjectionStrategy,
+    pub phase: RuntimeHistoryResetPhase,
+    pub reason: RuntimeHistoryResetReason,
+    pub reinjection_strategy: RuntimeHistoryResetReinjectionStrategy,
     pub source_item_count: usize,
     pub source_message_count: usize,
     pub trimmed_item_count: usize,
     pub retained_user_message_count: usize,
-    pub summary: String,
+    #[serde(alias = "summary")]
+    pub recovery_prompt: String,
 }
 
 #[derive(Clone, Copy)]
-pub struct PlanCompactionInput<'a> {
+pub struct PlanHistoryResetInput<'a> {
     pub envelope: &'a RuntimeRequestEnvelope,
     pub injected_messages: &'a [HistoryMessage],
     pub tools: &'a [AgentToolSpec],
@@ -98,8 +96,7 @@ pub struct PlanCompactionInput<'a> {
 }
 
 #[derive(Clone, Copy)]
-pub struct RuntimeStepCompactionPolicy {
-    pub summary_max_tokens: usize,
+pub struct RuntimeStepResetPolicy {
     pub max_recoveries: usize,
 }
 
@@ -123,17 +120,17 @@ impl Memory {
         &mut self,
         current_doing: String,
         messages: Vec<HistoryMessage>,
-        compaction_records: Vec<RuntimeCompactionRecord>,
+        history_reset_records: Vec<RuntimeHistoryResetRecord>,
     ) {
         self.runtime_conversation_mut()
-            .append_turn(current_doing, messages, compaction_records);
+            .append_turn(current_doing, messages, history_reset_records);
         self.sync_to_disk().await;
     }
 
     pub fn checkpoint_runtime_turn(&mut self, draft: RuntimeTurnDraft) {
-        let (current_doing, messages, compaction_records) = draft.into_parts();
+        let (current_doing, messages, history_reset_records) = draft.into_parts();
         self.runtime_conversation_mut()
-            .append_turn(current_doing, messages, compaction_records);
+            .append_turn(current_doing, messages, history_reset_records);
     }
 
     pub async fn sync_runtime_conversation(&self) {
@@ -168,24 +165,25 @@ impl Memory {
     }
 
     pub async fn commit_runtime_turn(&mut self, draft: RuntimeTurnDraft) {
-        let (current_doing, messages, compaction_records) = draft.into_parts();
-        self.record_agent_turn(current_doing, messages, compaction_records)
+        let (current_doing, messages, history_reset_records) = draft.into_parts();
+        self.record_agent_turn(current_doing, messages, history_reset_records)
             .await;
     }
 
-    pub fn plan_runtime_conversation_compaction_for_request(
+    pub fn plan_runtime_history_reset_for_request(
         &self,
-        input: PlanCompactionInput<'_>,
-    ) -> Option<RuntimeConversationCompactionPlan> {
-        self.runtime_conversation.plan_compaction_for_request(input)
+        input: PlanHistoryResetInput<'_>,
+    ) -> Option<RuntimeHistoryResetPlan> {
+        self.runtime_conversation
+            .plan_history_reset_for_request(input)
     }
 
-    pub async fn apply_runtime_conversation_compaction(
+    pub async fn apply_runtime_history_reset(
         &mut self,
-        plan: RuntimeConversationCompactionPlan,
-        outcome: RuntimeCompactionOutcome,
+        plan: RuntimeHistoryResetPlan,
+        outcome: RuntimeHistoryResetOutcome,
     ) -> bool {
-        let changed = self.runtime_conversation.apply_compaction(plan, outcome);
+        let changed = self.runtime_conversation.apply_history_reset(plan, outcome);
         if changed {
             self.runtime_conversation.sync_to_disk().await;
         }
@@ -233,8 +231,8 @@ pub struct RuntimeConversation {
     session_id: Option<String>,
     last_focus: Option<String>,
     messages: Vec<HistoryMessage>,
-    #[serde(default)]
-    compaction_records: VecDeque<RuntimeCompactionRecord>,
+    #[serde(default, alias = "compaction_records")]
+    history_reset_records: VecDeque<RuntimeHistoryResetRecord>,
 }
 
 impl RuntimeTurnDraft {
@@ -242,7 +240,7 @@ impl RuntimeTurnDraft {
         Self {
             current_doing,
             messages: Vec::new(),
-            compaction_records: Vec::new(),
+            history_reset_records: Vec::new(),
         }
     }
 
@@ -257,19 +255,23 @@ impl RuntimeTurnDraft {
         self.messages.push(message);
     }
 
-    pub fn record_compaction(&mut self, record: RuntimeCompactionRecord) {
-        self.compaction_records.push(record);
+    pub fn record_history_reset(&mut self, record: RuntimeHistoryResetRecord) {
+        self.history_reset_records.push(record);
     }
 
-    fn into_parts(self) -> (String, Vec<HistoryMessage>, Vec<RuntimeCompactionRecord>) {
-        (self.current_doing, self.messages, self.compaction_records)
+    fn into_parts(self) -> (String, Vec<HistoryMessage>, Vec<RuntimeHistoryResetRecord>) {
+        (
+            self.current_doing,
+            self.messages,
+            self.history_reset_records,
+        )
     }
 
     fn take_checkpoint(&mut self) -> Self {
         Self {
             current_doing: self.current_doing.clone(),
             messages: std::mem::take(&mut self.messages),
-            compaction_records: std::mem::take(&mut self.compaction_records),
+            history_reset_records: std::mem::take(&mut self.history_reset_records),
         }
     }
 }
@@ -389,66 +391,62 @@ impl RuntimeStepConversation {
         self.turn_draft.take_checkpoint()
     }
 
-    pub async fn maybe_compact<F, Fut>(
+    pub async fn maybe_reset<F, Fut>(
         &mut self,
         tools: &[AgentToolSpec],
         limits: RequestBudgetLimits,
         baseline: &TokenEstimateBaseline,
-        compact_for_overflow: bool,
-        policy: RuntimeStepCompactionPolicy,
-        mut build_summary: F,
+        reset_for_overflow: bool,
+        policy: RuntimeStepResetPolicy,
+        mut build_reset_outcome: F,
     ) -> Result<bool, String>
     where
-        F: FnMut(Vec<AgentMessage>, usize) -> Fut,
-        Fut: Future<Output = Result<RuntimeCompactionOutcome, String>>,
+        F: FnMut(Vec<AgentMessage>) -> Fut,
+        Fut: Future<Output = Result<RuntimeHistoryResetOutcome, String>>,
     {
-        if compact_for_overflow {
-            self.compact_once(policy, &mut build_summary).await?;
+        if reset_for_overflow {
+            self.reset_once(&mut build_reset_outcome).await?;
             return Ok(true);
         }
 
-        let mut compacted_any = false;
+        let mut reset_any = false;
         for _ in 0..policy.max_recoveries {
             let breakdown = estimate_agent_turn_request(self.agent_messages(), tools, limits)
                 .with_conservative_calibrated_input_tokens(baseline);
             if !breakdown.above_auto_compact_threshold() {
                 break;
             }
-            self.compact_once(policy, &mut build_summary).await?;
-            compacted_any = true;
+            self.reset_once(&mut build_reset_outcome).await?;
+            reset_any = true;
         }
-        Ok(compacted_any)
+        Ok(reset_any)
     }
 
-    async fn compact_once<F, Fut>(
-        &mut self,
-        policy: RuntimeStepCompactionPolicy,
-        build_summary: &mut F,
-    ) -> Result<(), String>
+    async fn reset_once<F, Fut>(&mut self, build_reset_outcome: &mut F) -> Result<(), String>
     where
-        F: FnMut(Vec<AgentMessage>, usize) -> Fut,
-        Fut: Future<Output = Result<RuntimeCompactionOutcome, String>>,
+        F: FnMut(Vec<AgentMessage>) -> Fut,
+        Fut: Future<Output = Result<RuntimeHistoryResetOutcome, String>>,
     {
         let source_messages = self.agent_messages.clone();
         if source_messages.is_empty() {
-            return Err("runtime compaction has no messages to summarize".to_string());
+            return Err("runtime history reset has no messages to clear".to_string());
         }
         let has_non_system = source_messages
             .iter()
             .any(|message| !matches!(message, AgentMessage::System { .. }));
         if !has_non_system {
-            return Err("runtime compaction has no non-system messages to summarize".to_string());
+            return Err("runtime history reset has no non-system messages to clear".to_string());
         }
 
-        let outcome = build_summary(source_messages.clone(), policy.summary_max_tokens).await?;
+        let outcome = build_reset_outcome(source_messages.clone()).await?;
         self.agent_messages =
-            rebuild_compacted_agent_messages(&source_messages, outcome.summary.clone());
-        self.turn_draft.record_compaction(outcome.record);
+            rebuild_reset_agent_messages(&source_messages, outcome.recovery_prompt.clone());
+        self.turn_draft.record_history_reset(outcome.record);
         Ok(())
     }
 }
 
-impl RuntimeConversationCompactionPlan {
+impl RuntimeHistoryResetPlan {
     pub fn source_messages(&self) -> &[HistoryMessage] {
         &self.source_messages
     }
@@ -458,16 +456,16 @@ impl RuntimeConversationCompactionPlan {
     }
 }
 
-fn rebuild_compacted_agent_messages(
+fn rebuild_reset_agent_messages(
     source_messages: &[AgentMessage],
-    summary: String,
+    recovery_prompt: String,
 ) -> Vec<AgentMessage> {
     let mut rebuilt = source_messages
         .iter()
         .filter(|message| matches!(message, AgentMessage::System { .. }))
         .cloned()
         .collect::<Vec<_>>();
-    rebuilt.push(AgentMessage::user(summary));
+    rebuilt.push(AgentMessage::user(recovery_prompt));
     rebuilt
 }
 
@@ -520,7 +518,7 @@ impl RuntimeConversation {
             session_id,
             last_focus: bootstrap_focus,
             messages: bootstrap_messages,
-            compaction_records: VecDeque::new(),
+            history_reset_records: VecDeque::new(),
         }
     }
 
@@ -533,15 +531,15 @@ impl RuntimeConversation {
         &mut self,
         current_doing: String,
         messages: Vec<HistoryMessage>,
-        compaction_records: Vec<RuntimeCompactionRecord>,
+        history_reset_records: Vec<RuntimeHistoryResetRecord>,
     ) {
         if !current_doing.trim().is_empty() {
             self.last_focus = Some(current_doing);
         }
         self.messages.extend(messages);
         self.messages = normalize_runtime_prompt_messages(std::mem::take(&mut self.messages));
-        for record in compaction_records {
-            self.push_compaction_record(record);
+        for record in history_reset_records {
+            self.push_history_reset_record(record);
         }
     }
 
@@ -552,7 +550,7 @@ impl RuntimeConversation {
     pub fn clear(&mut self) {
         self.last_focus = None;
         self.messages.clear();
-        self.compaction_records.clear();
+        self.history_reset_records.clear();
     }
 
     pub fn take_for_memory(&mut self) -> Option<(String, Vec<HistoryMessage>)> {
@@ -581,10 +579,10 @@ impl RuntimeConversation {
         self.messages()
     }
 
-    fn plan_compaction_for_request(
+    fn plan_history_reset_for_request(
         &self,
-        input: PlanCompactionInput<'_>,
-    ) -> Option<RuntimeConversationCompactionPlan> {
+        input: PlanHistoryResetInput<'_>,
+    ) -> Option<RuntimeHistoryResetPlan> {
         let _ = input.min_messages;
         let all_messages = self.messages();
         let mut request_messages = all_messages.clone();
@@ -597,35 +595,36 @@ impl RuntimeConversation {
         if !breakdown.above_auto_compact_threshold() {
             return None;
         }
-        Self::compaction_plan_from_messages(all_messages)
+        Self::history_reset_plan_from_messages(all_messages)
     }
 
-    fn compaction_plan_from_messages(
+    fn history_reset_plan_from_messages(
         source_messages: Vec<HistoryMessage>,
-    ) -> Option<RuntimeConversationCompactionPlan> {
+    ) -> Option<RuntimeHistoryResetPlan> {
         if source_messages.is_empty() {
             return None;
         }
-        Some(RuntimeConversationCompactionPlan { source_messages })
+        Some(RuntimeHistoryResetPlan { source_messages })
     }
 
-    fn apply_compaction(
+    fn apply_history_reset(
         &mut self,
-        _plan: RuntimeConversationCompactionPlan,
-        outcome: RuntimeCompactionOutcome,
+        _plan: RuntimeHistoryResetPlan,
+        outcome: RuntimeHistoryResetOutcome,
     ) -> bool {
         self.messages.clear();
-        self.messages.push(HistoryMessage::user(outcome.summary));
+        self.messages
+            .push(HistoryMessage::user(outcome.recovery_prompt));
         self.messages = normalize_runtime_prompt_messages(std::mem::take(&mut self.messages));
-        self.push_compaction_record(outcome.record);
+        self.push_history_reset_record(outcome.record);
         true
     }
 
-    fn push_compaction_record(&mut self, mut record: RuntimeCompactionRecord) {
+    fn push_history_reset_record(&mut self, mut record: RuntimeHistoryResetRecord) {
         record.timestamp_ms = Utc::now().timestamp_millis();
-        self.compaction_records.push_back(record);
-        while self.compaction_records.len() > RUNTIME_COMPACTION_RECORD_LIMIT {
-            self.compaction_records.pop_front();
+        self.history_reset_records.push_back(record);
+        while self.history_reset_records.len() > RUNTIME_HISTORY_RESET_RECORD_LIMIT {
+            self.history_reset_records.pop_front();
         }
     }
 
@@ -687,15 +686,10 @@ fn normalize_runtime_prompt_messages(messages: Vec<HistoryMessage>) -> Vec<Histo
             continue;
         };
 
-        if let Some(previous) = normalized.last_mut() {
-            if previous.message == message.message {
-                continue;
-            }
-
-            if is_runtime_summary_message(previous) && is_runtime_summary_message(&message) {
-                *previous = message;
-                continue;
-            }
+        if let Some(previous) = normalized.last_mut()
+            && previous.message == message.message
+        {
+            continue;
         }
 
         normalized.push(message);
@@ -839,24 +833,16 @@ fn activity_event_title(event: &SessionActivityEvent) -> String {
     summarize_activity_event(event)
 }
 
-fn is_runtime_summary_message(message: &HistoryMessage) -> bool {
-    message.is_assistant()
-        && message
-            .text_content()
-            .unwrap_or_default()
-            .starts_with(HISTORY_COMPACTION_SUMMARY_PREFIX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn request_level_pre_turn_compaction_accounts_for_injected_context() {
+    fn request_level_pre_turn_history_reset_accounts_for_injected_context() {
         let conversation = RuntimeConversation {
             last_focus: Some("test".to_string()),
             messages: vec![HistoryMessage::assistant("runtime history".repeat(12))],
-            compaction_records: VecDeque::new(),
+            history_reset_records: VecDeque::new(),
             session_id: None,
         };
         let envelope = RuntimeRequestEnvelope::from_system_messages(vec!["system".repeat(8)]);
@@ -872,7 +858,7 @@ mod tests {
 
         assert!(
             conversation
-                .plan_compaction_for_request(PlanCompactionInput {
+                .plan_history_reset_for_request(PlanHistoryResetInput {
                     envelope: &envelope,
                     injected_messages: &injected_messages,
                     tools: &tools,
@@ -885,11 +871,11 @@ mod tests {
     }
 
     #[test]
-    fn low_observed_baseline_does_not_hide_pre_turn_compaction() {
+    fn low_observed_baseline_does_not_hide_pre_turn_history_reset() {
         let conversation = RuntimeConversation {
             last_focus: Some("test".to_string()),
             messages: vec![HistoryMessage::assistant("runtime history ".repeat(1_000))],
-            compaction_records: VecDeque::new(),
+            history_reset_records: VecDeque::new(),
             session_id: None,
         };
         let envelope = RuntimeRequestEnvelope::from_system_messages(vec!["system".to_string()]);
@@ -906,7 +892,7 @@ mod tests {
 
         assert!(
             conversation
-                .plan_compaction_for_request(PlanCompactionInput {
+                .plan_history_reset_for_request(PlanHistoryResetInput {
                     envelope: &envelope,
                     injected_messages: &[],
                     tools: &tools,
@@ -919,7 +905,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn low_observed_baseline_does_not_hide_overflow_compaction() {
+    async fn low_observed_baseline_does_not_hide_overflow_history_reset() {
         let mut runtime_step = RuntimeStepConversation::new(vec![
             AgentMessage::system("system"),
             AgentMessage::user("x".repeat(10_000)),
@@ -934,42 +920,39 @@ mod tests {
             observed_input_tokens: Some(1),
         };
 
-        let compacted = runtime_step
-            .maybe_compact(
+        let reset = runtime_step
+            .maybe_reset(
                 &[],
                 limits,
                 &baseline,
                 true,
-                RuntimeStepCompactionPolicy {
-                    summary_max_tokens: 80,
-                    max_recoveries: 1,
-                },
-                |_messages, _max_tokens| async {
-                    Ok(RuntimeCompactionOutcome {
-                        summary: "summary".to_string(),
-                        record: RuntimeCompactionRecord {
+                RuntimeStepResetPolicy { max_recoveries: 1 },
+                |_messages| async {
+                    Ok(RuntimeHistoryResetOutcome {
+                        recovery_prompt: "recovery prompt".to_string(),
+                        record: RuntimeHistoryResetRecord {
                             timestamp_ms: 0,
-                            phase: RuntimeCompactionPhase::MidTurn,
-                            reason: RuntimeCompactionReason::OverflowRecovery,
+                            phase: RuntimeHistoryResetPhase::MidTurn,
+                            reason: RuntimeHistoryResetReason::OverflowRecovery,
                             reinjection_strategy:
-                                RuntimeCompactionReinjectionStrategy::PreserveSystemOnly,
+                                RuntimeHistoryResetReinjectionStrategy::PreserveSystemOnly,
                             source_item_count: 1,
                             source_message_count: 2,
                             trimmed_item_count: 0,
                             retained_user_message_count: 0,
-                            summary: "summary".to_string(),
+                            recovery_prompt: "recovery prompt".to_string(),
                         },
                     })
                 },
             )
             .await
-            .expect("overflow compaction should succeed");
+            .expect("overflow history reset should succeed");
 
-        assert!(compacted);
+        assert!(reset);
     }
 
     #[test]
-    fn runtime_conversation_compaction_rebuilds_history_as_summary_only() {
+    fn runtime_conversation_history_reset_rebuilds_history_as_prompt_only() {
         let mut conversation = RuntimeConversation {
             last_focus: Some("test".to_string()),
             messages: vec![
@@ -980,29 +963,29 @@ mod tests {
                 HistoryMessage::assistant("assistant two"),
                 HistoryMessage::tool("call-2", "tool-two", "tool output two", None),
             ],
-            compaction_records: VecDeque::new(),
+            history_reset_records: VecDeque::new(),
             session_id: None,
         };
 
         let all_messages = conversation.messages();
-        let plan = RuntimeConversation::compaction_plan_from_messages(all_messages)
-            .expect("expected compaction plan");
+        let plan = RuntimeConversation::history_reset_plan_from_messages(all_messages)
+            .expect("expected history reset plan");
 
-        let applied = conversation.apply_compaction(
+        let applied = conversation.apply_history_reset(
             plan,
-            RuntimeCompactionOutcome {
-                summary: "summary".to_string(),
-                record: RuntimeCompactionRecord {
+            RuntimeHistoryResetOutcome {
+                recovery_prompt: "recovery prompt".to_string(),
+                record: RuntimeHistoryResetRecord {
                     timestamp_ms: 0,
-                    phase: RuntimeCompactionPhase::PreTurn,
-                    reason: RuntimeCompactionReason::BudgetThreshold,
+                    phase: RuntimeHistoryResetPhase::PreTurn,
+                    reason: RuntimeHistoryResetReason::BudgetThreshold,
                     reinjection_strategy:
-                        RuntimeCompactionReinjectionStrategy::RebuildRuntimeEnvelope,
+                        RuntimeHistoryResetReinjectionStrategy::RebuildRuntimeEnvelope,
                     source_item_count: 2,
                     source_message_count: 6,
                     trimmed_item_count: 0,
                     retained_user_message_count: 0,
-                    summary: "summary".to_string(),
+                    recovery_prompt: "recovery prompt".to_string(),
                 },
             },
         );
@@ -1023,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_compacted_agent_messages_drops_runtime_user_context_and_tool_history() {
+    fn rebuild_reset_agent_messages_drops_runtime_user_context_and_tool_history() {
         let messages = vec![
             AgentMessage::system("system"),
             AgentMessage::user("claimed input"),
@@ -1032,7 +1015,7 @@ mod tests {
             AgentMessage::tool("call-1", "shell", "tool output"),
         ];
 
-        let rebuilt = rebuild_compacted_agent_messages(&messages, "summary".to_string());
+        let rebuilt = rebuild_reset_agent_messages(&messages, "recovery prompt".to_string());
         assert_eq!(rebuilt.len(), 2);
         assert!(matches!(rebuilt[0], AgentMessage::System { .. }));
         assert!(matches!(rebuilt[1], AgentMessage::User { .. }));
@@ -1122,7 +1105,7 @@ mod tests {
                 activity_event: None,
                 tool_call_activity_events: Vec::new(),
             }],
-            compaction_records: VecDeque::new(),
+            history_reset_records: VecDeque::new(),
             session_id: None,
         };
         let bytes = serde_json::to_vec_pretty(&conversation).expect("serialize conversation");

@@ -42,10 +42,9 @@ use crate::{
         sleep::run_sleep,
     },
     runtime_context::{
-        MID_TURN_COMPACTION_MAX_RECOVERIES, build_afterclaim_context_text,
-        build_preturn_context_text, build_runtime_request_envelope,
-        execute_pre_turn_runtime_compaction, maybe_compact_runtime_messages,
-        runtime_request_budget_limits,
+        MID_TURN_RESET_MAX_RECOVERIES, build_afterclaim_context_text, build_preturn_context_text,
+        build_runtime_request_envelope, execute_pre_turn_history_reset,
+        maybe_reset_runtime_history, runtime_request_budget_limits,
     },
     runtime_tools::{
         ToolExecutionResult, build_runtime_tool_specs, build_tool_call_activity_event,
@@ -106,7 +105,8 @@ mod tests {
         runtime_overflow_failure_note, summarize_claimed_event_statuses,
     };
     use super::turn::{
-        clear_runtime_failures_after_model_success, clear_runtime_overflow_failure_after_compaction,
+        clear_runtime_failures_after_model_success,
+        clear_runtime_overflow_failure_after_history_reset,
     };
     use super::*;
     use std::{collections::HashMap, sync::Arc, time::Instant};
@@ -153,7 +153,7 @@ mod tests {
             _options: ModelRequestOptions,
         ) -> Result<serde_json::Value> {
             Err(miette!(
-                "overflow recovery must use a text compaction request"
+                "overflow recovery must use a text history reset request"
             ))
         }
 
@@ -548,49 +548,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_turn_compaction_is_local_and_archives_history() {
+    async fn pre_turn_history_reset_is_local_and_injects_recovery_prompt() {
         let mut isolated = IsolatedRuntimeContext::new().await;
         let context = &mut isolated.context;
-        let session_id = "test-session-archive";
-        let store = with_test_session_history(context, session_id);
-        let plan = crate::memory::RuntimeConversationCompactionPlan::for_test(vec![
+        let store = with_test_session_history(context, "test-session-history-reset");
+        let plan = crate::memory::RuntimeHistoryResetPlan::for_test(vec![
             HistoryMessage::user("user input"),
             HistoryMessage::assistant("work completed"),
         ]);
 
-        let outcome = crate::runtime_context::execute_pre_turn_runtime_compaction(context, &plan)
+        let outcome = crate::runtime_context::execute_pre_turn_history_reset(&plan)
             .await
-            .expect("local compaction should succeed");
+            .expect("local history reset should succeed");
 
         assert_eq!(
-            outcome.summary,
-            crate::runtime_context::HISTORY_ARCHIVE_PROMPT_MESSAGE
+            outcome.recovery_prompt,
+            crate::runtime_context::RUNTIME_HISTORY_RESET_PROMPT_MESSAGE
         );
-        let archived = store
-            .query_history_archive(
-                crate::dashboard::HistoryArchiveQueryMode::Recent,
+        assert!(outcome.record.recovery_prompt.contains("read_history"));
+        let history = store
+            .query_history(
+                crate::dashboard::HistoryQueryMode::Recent,
                 10,
                 None,
                 None,
                 "",
             )
-            .expect("query archive");
-        assert_eq!(archived.len(), 2);
-        assert!(
-            archived
-                .iter()
-                .any(|item| item.role == "user" && item.content.contains("user input"))
-        );
-        assert!(
-            archived
-                .iter()
-                .any(|item| item.role == "assistant" && item.content.contains("work completed"))
-        );
+            .expect("query history");
+        assert!(history.is_empty());
         drop(isolated);
     }
 
     #[tokio::test]
-    async fn overflow_recovery_retries_with_compacted_messages_in_the_same_step() {
+    async fn overflow_recovery_retries_with_reset_messages_in_the_same_step() {
         let mut isolated = IsolatedRuntimeContext::new().await;
         let context = &mut isolated.context;
         let _store = with_test_session_history(context, "test-session-overflow-retry");
@@ -612,7 +602,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overflow_recovery_stops_after_three_compactions() {
+    async fn overflow_recovery_stops_after_three_history_resets() {
         let mut isolated = IsolatedRuntimeContext::new().await;
         let context = &mut isolated.context;
         let _store = with_test_session_history(context, "test-session-overflow-stop");
@@ -626,7 +616,7 @@ mod tests {
 
         assert_eq!(
             agent_requests.lock().expect("agent requests lock").len(),
-            MID_TURN_COMPACTION_MAX_RECOVERIES + 1
+            MID_TURN_RESET_MAX_RECOVERIES + 1
         );
         drop(isolated);
     }
@@ -1012,14 +1002,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_compaction_only_clears_overflow_failure_counter() {
+    async fn successful_history_reset_only_clears_overflow_failure_counter() {
         let isolated = IsolatedRuntimeContext::new().await;
         let context = &isolated.context;
         let fingerprint = "events=[test]";
         context.record_runtime_overflow_failure(fingerprint);
         context.record_model_request_failure(fingerprint);
 
-        clear_runtime_overflow_failure_after_compaction(context, Some(fingerprint));
+        clear_runtime_overflow_failure_after_history_reset(context, Some(fingerprint));
 
         assert_eq!(context.record_runtime_overflow_failure(fingerprint), 1);
         assert_eq!(context.record_model_request_failure(fingerprint), 2);

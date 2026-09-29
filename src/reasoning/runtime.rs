@@ -373,13 +373,6 @@ impl HistoryMessage {
         matches!(self.message, AgentMessage::User { .. })
     }
 
-    pub const fn is_assistant(&self) -> bool {
-        matches!(
-            self.message,
-            AgentMessage::Assistant { .. } | AgentMessage::AssistantToolCallProtocol { .. }
-        )
-    }
-
     pub const fn is_system(&self) -> bool {
         matches!(self.message, AgentMessage::System { .. })
     }
