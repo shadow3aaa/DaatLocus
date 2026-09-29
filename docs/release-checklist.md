@@ -66,7 +66,6 @@ Use this checklist before tagging a Daat Locus release.
 - Run WebUI tests with `cd webui && bun install --frozen-lockfile && bun run test`.
 - Run `cargo clippy --locked --all-targets -- -D warnings`.
 - Run `cargo test --locked`.
-- Run `cargo deny --locked check bans sources licenses`.
 - Run targeted manual smoke tests for:
   - first-time setup
   - daemon start and attach

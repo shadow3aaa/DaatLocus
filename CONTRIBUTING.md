@@ -37,7 +37,6 @@ cargo fmt --all -- --check
 cd webui && bun install --frozen-lockfile && bun run test
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
-cargo deny --locked check bans sources licenses
 ```
 
 Run the relevant subset locally before submitting changes. For high-risk

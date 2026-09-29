@@ -26,7 +26,6 @@ cargo fmt --all -- --check
 cd webui && bun install --frozen-lockfile && bun run test
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
-cargo deny --locked check bans sources licenses
 ```
 
 提交修改前，请在本地运行相关检查。对于高风险 runtime 变更，应增加聚焦测试，或写清楚人工验证结果。

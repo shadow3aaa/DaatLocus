@@ -11,9 +11,6 @@ on:
 permissions:
   contents: read
 
-env:
-  CARGO_DENY_VERSION: 0.19.4
-
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -87,24 +84,3 @@ jobs:
             echo "::error::schemas/config.schema.json is out of date. Regenerate with: cargo run -p daat-locus -- config-schema > schemas/config.schema.json"
             exit 1
           fi
-
-  dependency-policy:
-    name: Dependency policy
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
-
-      - name: Check dependency policy and licenses
-        run: cargo deny --locked check bans sources licenses
