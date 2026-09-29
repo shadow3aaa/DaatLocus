@@ -1296,11 +1296,11 @@ async fn execute_run(
 ) -> WorkflowInvocationResult {
     let execution = run_workflow_script(
         &definition.source,
-        &definition,
+        definition,
         input,
         context,
         Some(cancellation),
-        &inspector,
+        inspector,
     );
     use futures_util::FutureExt as _;
     let result = tokio::select! {

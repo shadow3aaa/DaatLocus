@@ -1187,7 +1187,7 @@ fn drop_tool_result_blocks(message: &mut Value) {
 }
 
 fn drop_empty_messages(messages: &mut Vec<Value>) {
-    messages.retain(|message| message_has_content(message));
+    messages.retain(message_has_content);
 }
 
 fn message_has_content(message: &Value) -> bool {

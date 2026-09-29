@@ -333,13 +333,12 @@ mod tests {
             .expect("client");
         let mut served = false;
         for _ in 0..10 {
-            if let Ok(response) = client.get(format!("https://{hostname}/")).send().await {
-                if let Ok(text) = response.text().await {
-                    if text.contains("ok") {
-                        served = true;
-                        break;
-                    }
-                }
+            if let Ok(response) = client.get(format!("https://{hostname}/")).send().await
+                && let Ok(text) = response.text().await
+                && text.contains("ok")
+            {
+                served = true;
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
