@@ -28,10 +28,14 @@ const DEFAULT_READ_LINE_COUNT: usize = 80;
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadFileArgs {
+    // Models frequently reach for the widely used `file_path`/`offset`/`limit`
+    // names when a tool is called `read_file`, regardless of the declared
+    // schema, so accept those as aliases instead of rejecting the whole call.
+    #[serde(alias = "file_path")]
     path: String,
-    #[serde(default)]
+    #[serde(default, alias = "offset")]
     start_line: Option<usize>,
-    #[serde(default)]
+    #[serde(default, alias = "limit")]
     line_count: Option<usize>,
     #[serde(default)]
     force_no_elide: Option<bool>,
@@ -563,6 +567,19 @@ mod tests {
         assert!(lines.iter().all(|line| line.kind == PatchDiffLineKind::Add));
         assert_eq!(lines[0].text, "alpha");
         assert_eq!(lines[1].text, "beta");
+    }
+
+    #[test]
+    fn read_file_args_accept_common_alias_names() {
+        let call = crate::reasoning::runtime::AgentToolCall {
+            id: "call-alias".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({ "file_path": "src/lib.rs", "offset": 10, "limit": 5 }),
+        };
+        let args: ReadFileArgs = parse_tool_args(&call).expect("aliases are accepted");
+        assert_eq!(args.path, "src/lib.rs");
+        assert_eq!(args.start_line, Some(10));
+        assert_eq!(args.line_count, Some(5));
     }
 
     /// A `read_file` result must point back at the file it came from, naming
