@@ -1351,62 +1351,160 @@ pub fn build_model_provider(
             )
         })?;
 
-    match provider_config {
+    let provider: Box<dyn ModelProvider + Send + Sync> = match provider_config {
         ProviderConfig::Openai { api_key, base_url } => {
             let base = base_url.as_deref().unwrap_or("https://api.openai.com/v1");
             let api_key = resolve_env_reference(api_key);
-            Ok(Box::new(OpenAIClient::from_parts(
-                &api_key,
-                base,
-                model_config,
-            )))
+            Box::new(OpenAIClient::from_parts(&api_key, base, model_config))
         }
         ProviderConfig::AnthropicCompatible { base_url, api_key } => {
             let api_key = resolve_env_reference(api_key);
-            Ok(Box::new(anthropic_compat::AnthropicCompatibleClient::new(
+            Box::new(anthropic_compat::AnthropicCompatibleClient::new(
                 &api_key,
                 base_url,
                 model_config,
-            )))
+            ))
         }
         ProviderConfig::OpenaiCompatible { base_url, api_key } => {
             let api_key = resolve_env_reference(api_key);
             if model_config.api_style.as_deref() == Some("responses") {
-                Ok(Box::new(responses_compat::ResponsesCompatibleClient::new(
+                Box::new(responses_compat::ResponsesCompatibleClient::new(
                     &api_key,
                     base_url,
                     model_config,
-                )))
+                ))
             } else {
-                Ok(Box::new(OpenAIClient::from_parts(
-                    &api_key,
-                    base_url,
-                    model_config,
-                )))
+                Box::new(OpenAIClient::from_parts(&api_key, base_url, model_config))
             }
         }
         ProviderConfig::GithubCopilot { github_token } => {
             let resolved = resolve_env_reference(github_token);
-            Ok(Box::new(CopilotClient::new(&resolved, model_config)))
+            Box::new(CopilotClient::new(&resolved, model_config))
         }
         ProviderConfig::OpenaiCodexOauth {
             base_url,
             auth_file,
-        } => Ok(Box::new(CodexOAuthClient::new(
+        } => Box::new(CodexOAuthClient::new(
             auth_file.into(),
             base_url.as_deref(),
             model_config,
-        ))),
+        )),
         ProviderConfig::Ollama {
             host,
             api_key,
             keep_alive,
-        } => Ok(Box::new(OllamaClient::from_parts(
+        } => Box::new(OllamaClient::from_parts(
             host.as_deref(),
             model_config,
             api_key.as_deref(),
             keep_alive.as_deref(),
-        ))),
+        )),
+    };
+    Ok(
+        match model_facing_tool_name_prefix(&model_config.model_id) {
+            Some(prefix) => Box::new(PrefixedToolNameProvider {
+                inner: provider,
+                prefix,
+            }),
+            None => provider,
+        },
+    )
+}
+
+/// Prefix applied to the tool names Daat shows a model.
+///
+/// Some models were trained against another agent's built-in tool surface —
+/// Claude Code's `Read` tool takes `file_path`/`offset`/`limit`, for example —
+/// and carry a memorized signature for those names. When Daat declares a tool
+/// called `read_file`, such a model ignores the declared schema and emits the
+/// memorized fields instead, which our strict argument parsing then rejects and
+/// the turn loops on failures. Namespacing the tool names removes the collision.
+const MODEL_FACING_TOOL_NAME_PREFIX: &str = "dl_";
+
+/// Whether model-facing tool names should be namespaced for this model id.
+fn model_facing_tool_name_prefix(model_id: &str) -> Option<&'static str> {
+    model_id
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("claude")
+        .then_some(MODEL_FACING_TOOL_NAME_PREFIX)
+}
+
+/// Provider decorator that namespaces tool names for models whose own prior
+/// collides with ours. The prefix never leaves the provider boundary, so the
+/// rest of the runtime keeps using the canonical tool names.
+struct PrefixedToolNameProvider {
+    inner: Box<dyn ModelProvider + Send + Sync>,
+    prefix: &'static str,
+}
+
+impl PrefixedToolNameProvider {
+    fn model_facing(&self, name: &str) -> String {
+        format!("{}{name}", self.prefix)
+    }
+
+    fn canonical(&self, name: &str) -> String {
+        name.strip_prefix(self.prefix).unwrap_or(name).to_owned()
+    }
+}
+
+#[async_trait]
+impl ModelProvider for PrefixedToolNameProvider {
+    async fn complete_json(
+        &self,
+        request: PromptRequest,
+        options: ModelRequestOptions,
+    ) -> Result<serde_json::Value> {
+        // The structured-output tool name is Daat-internal and does not collide
+        // with an agent tool surface, so it stays untouched.
+        self.inner.complete_json(request, options).await
+    }
+
+    async fn complete_agent_turn(
+        &self,
+        mut request: AgentTurnRequest,
+        options: ModelRequestOptions,
+    ) -> Result<AgentTurnStreamResult> {
+        for tool in &mut request.tools {
+            let name = self.model_facing(&tool.name);
+            tool.name = name;
+        }
+        for message in &mut request.messages {
+            match message {
+                AgentMessage::AssistantToolCallProtocol { calls, .. } => {
+                    for call in calls {
+                        let name = self.model_facing(&call.name);
+                        call.name = name;
+                    }
+                }
+                AgentMessage::Tool { name, .. } => {
+                    let namespaced = self.model_facing(name);
+                    *name = namespaced;
+                }
+                _ => {}
+            }
+        }
+
+        let mut result = self.inner.complete_agent_turn(request, options).await?;
+        for item in &mut result.items {
+            if let AgentTurnItem::ToolCall { call } = item {
+                let name = self.canonical(&call.name);
+                call.name = name;
+            }
+        }
+        Ok(result)
+    }
+
+    fn request_budget_limits(&self) -> RequestBudgetLimits {
+        self.inner.request_budget_limits()
+    }
+
+    fn token_usage_info(&self) -> TokenUsageInfo {
+        self.inner.token_usage_info()
+    }
+
+    fn model_name(&self) -> String {
+        self.inner.model_name()
     }
 }
 
@@ -1472,6 +1570,140 @@ mod tests {
 
     fn thinking_budget(value: &str) -> ThinkingBudget {
         serde_json::from_value(json!(value)).expect("thinking budget deserializes")
+    }
+
+    #[derive(Clone, Default)]
+    struct StubProvider {
+        seen_tools: Arc<Mutex<Vec<String>>>,
+        seen_message_calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for StubProvider {
+        async fn complete_json(
+            &self,
+            _request: PromptRequest,
+            _options: ModelRequestOptions,
+        ) -> Result<serde_json::Value> {
+            Ok(json!({}))
+        }
+
+        async fn complete_agent_turn(
+            &self,
+            request: AgentTurnRequest,
+            _options: ModelRequestOptions,
+        ) -> Result<AgentTurnStreamResult> {
+            *self.seen_tools.lock().unwrap() =
+                request.tools.iter().map(|tool| tool.name.clone()).collect();
+            for message in &request.messages {
+                if let AgentMessage::AssistantToolCallProtocol { calls, .. } = message {
+                    for call in calls {
+                        self.seen_message_calls
+                            .lock()
+                            .unwrap()
+                            .push(call.name.clone());
+                    }
+                }
+            }
+            let name = request
+                .tools
+                .first()
+                .map(|tool| tool.name.clone())
+                .unwrap_or_default();
+            Ok(AgentTurnStreamResult {
+                items: vec![AgentTurnItem::ToolCall {
+                    call: AgentToolCall {
+                        id: "call-1".to_string(),
+                        name,
+                        arguments: json!({}),
+                    },
+                }],
+                raw_stream_follow_up: false,
+                last_assistant_message: None,
+                last_reasoning_content: None,
+                last_reasoning_signature: None,
+            })
+        }
+
+        fn request_budget_limits(&self) -> RequestBudgetLimits {
+            RequestBudgetLimits {
+                context_window_tokens: 1000,
+                auto_compact_threshold_tokens: 900,
+                reserved_output_tokens: 100,
+            }
+        }
+
+        fn token_usage_info(&self) -> TokenUsageInfo {
+            TokenUsageInfo::default()
+        }
+
+        fn model_name(&self) -> String {
+            "stub".to_string()
+        }
+    }
+
+    #[test]
+    fn colliding_model_ids_get_a_tool_name_prefix() {
+        assert_eq!(
+            model_facing_tool_name_prefix("claude-opus-5-5"),
+            Some(MODEL_FACING_TOOL_NAME_PREFIX)
+        );
+        assert_eq!(
+            model_facing_tool_name_prefix("Claude-Sonnet-4-5"),
+            Some(MODEL_FACING_TOOL_NAME_PREFIX)
+        );
+        assert_eq!(model_facing_tool_name_prefix("deepseek-v4.1-flash"), None);
+    }
+
+    #[tokio::test]
+    async fn prefixed_provider_namespaces_tools_and_restores_call_names() {
+        let stub = StubProvider::default();
+        let provider = PrefixedToolNameProvider {
+            inner: Box::new(stub.clone()),
+            prefix: MODEL_FACING_TOOL_NAME_PREFIX,
+        };
+        let request = AgentTurnRequest {
+            messages: vec![
+                AgentMessage::user("hi"),
+                AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                    None,
+                    None,
+                    vec![AgentToolCall {
+                        id: "call-1".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: json!({}),
+                    }],
+                ),
+                AgentMessage::tool("call-1", "read_file", "contents"),
+            ],
+            tools: vec![AgentToolSpec {
+                name: "read_file".to_string(),
+                description: "read a file".to_string(),
+                input_spec: AgentToolInputSpec::JsonSchema {
+                    schema: json!({"type": "object"}),
+                },
+            }],
+        };
+        let options =
+            ModelRequestOptions::for_agent_turn(&provider, &request, None).expect("budget options");
+
+        let result = provider
+            .complete_agent_turn(request, options)
+            .await
+            .expect("agent turn");
+
+        assert_eq!(
+            *stub.seen_tools.lock().unwrap(),
+            vec!["dl_read_file".to_string()]
+        );
+        assert_eq!(
+            *stub.seen_message_calls.lock().unwrap(),
+            vec!["dl_read_file".to_string()]
+        );
+        match &result.items[0] {
+            AgentTurnItem::ToolCall { call } => assert_eq!(call.name, "read_file"),
+            _ => panic!("expected a tool call item"),
+        }
     }
 
     #[test]
