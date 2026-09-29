@@ -760,18 +760,21 @@ fn apply_thinking(client: &AnthropicCompatibleClient, payload: &mut Value) -> bo
     let Some(messages) = payload.get("messages").and_then(Value::as_array) else {
         return false;
     };
-    // The trailing turn can only continue thinking when its preceding assistant
-    // turn still replays a signed thinking block (see
-    // [`trailing_turn_supports_thinking`]).
-    if !trailing_turn_supports_thinking(messages) {
-        return false;
-    }
     let prefer_adaptive = match client.thinking_mode.load(Ordering::Relaxed) {
         THINKING_MODE_ADAPTIVE => true,
         THINKING_MODE_BUDGET => false,
         // AUTO: prefer adaptive whenever the budget maps to an effort.
         _ => adaptive_effort(budget).is_some(),
     };
+    // Adaptive thinking lets the model skip thinking on any step, and the API
+    // accepts adaptive thinking after an assistant tool_use turn that carried no
+    // thinking block. Only the legacy `enabled` shape needs the preceding
+    // assistant turn to replay a signed thinking block (see
+    // [`trailing_turn_supports_thinking`]); gating adaptive on it would switch
+    // thinking off for the rest of a tool loop after the first skipped step.
+    if !prefer_adaptive && !trailing_turn_supports_thinking(messages) {
+        return false;
+    }
     if prefer_adaptive && let Some(effort) = adaptive_effort(budget) {
         payload["thinking"] = json!({ "type": "adaptive" });
         payload["output_config"] = json!({ "effort": effort });
@@ -803,13 +806,14 @@ fn next_thinking_mode_on_error(body: &str, current: u8, adaptive_available: bool
     // demands adaptive; any other mention of adaptive means it was rejected.
     let requires_adaptive = lower.contains("adaptive")
         && (lower.contains("require") || lower.contains("must") || lower.contains("only"));
-    let next = if requires_adaptive {
-        if adaptive_available && current != THINKING_MODE_ADAPTIVE {
-            THINKING_MODE_ADAPTIVE
-        } else {
-            THINKING_MODE_DISABLED
-        }
-    } else if current != THINKING_MODE_BUDGET {
+    if requires_adaptive {
+        // The provider only accepts adaptive thinking. When that is already what
+        // we send there is no other shape to try, and downgrading would only
+        // disable thinking for the rest of the process, so surface the error.
+        return (adaptive_available && current != THINKING_MODE_ADAPTIVE)
+            .then_some(THINKING_MODE_ADAPTIVE);
+    }
+    let next = if current != THINKING_MODE_BUDGET {
         THINKING_MODE_BUDGET
     } else {
         THINKING_MODE_DISABLED
@@ -1574,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_is_enabled_only_for_fresh_user_prompts() {
+    fn adaptive_thinking_survives_unsigned_tool_continuation() {
         let client = AnthropicCompatibleClient::new(
             "test-key",
             "https://example.test/v1",
@@ -1585,6 +1589,22 @@ mod tests {
                 ..ModelConfig::default()
             },
         );
+        let unsigned_continuation = || AgentTurnRequest {
+            messages: vec![
+                AgentMessage::user("hi"),
+                AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                    None,
+                    None,
+                    vec![AgentToolCall {
+                        id: "t1".to_string(),
+                        name: "read".to_string(),
+                        arguments: json!({}),
+                    }],
+                ),
+                AgentMessage::tool("t1", "read", "contents"),
+            ],
+            tools: vec![read_tool()],
+        };
 
         let fresh = build_agent_payload(
             &client,
@@ -1598,29 +1618,18 @@ mod tests {
         assert_eq!(fresh["output_config"]["effort"], "high");
         assert!(fresh.get("temperature").is_none());
 
-        let continuation = build_agent_payload(
-            &client,
-            AgentTurnRequest {
-                messages: vec![
-                    AgentMessage::user("hi"),
-                    AgentMessage::assistant_tool_call_protocol_with_reasoning(
-                        None,
-                        None,
-                        vec![AgentToolCall {
-                            id: "t1".to_string(),
-                            name: "read".to_string(),
-                            arguments: json!({}),
-                        }],
-                    ),
-                    AgentMessage::tool("t1", "read", "contents"),
-                ],
-                tools: vec![read_tool()],
-            },
-            false,
-        );
-        assert!(continuation.get("thinking").is_none());
-        // Thinking is configured, so non-default sampling params stay omitted.
-        assert!(continuation.get("temperature").is_none());
+        // Adaptive thinking may skip a step; the next step must still ask for it.
+        let continuation = build_agent_payload(&client, unsigned_continuation(), false);
+        assert_eq!(continuation["thinking"]["type"], "adaptive");
+        assert_eq!(continuation["output_config"]["effort"], "high");
+
+        // The legacy budget shape still requires a signed thinking block.
+        client
+            .thinking_mode
+            .store(THINKING_MODE_BUDGET, Ordering::Relaxed);
+        let budget_continuation = build_agent_payload(&client, unsigned_continuation(), false);
+        assert!(budget_continuation.get("thinking").is_none());
+        assert!(budget_continuation.get("temperature").is_none());
     }
 
     #[test]
@@ -1738,10 +1747,16 @@ mod tests {
             ),
             Some(THINKING_MODE_ADAPTIVE)
         );
-        // Adaptive required but the client cannot request it: give up.
+        // The provider requires adaptive thinking but the client cannot request
+        // it: surface the error instead of silently disabling thinking.
         assert_eq!(
             next_thinking_mode_on_error("requires adaptive thinking", THINKING_MODE_AUTO, false),
-            Some(THINKING_MODE_DISABLED)
+            None
+        );
+        // Adaptive is required and already being sent: retrying cannot help.
+        assert_eq!(
+            next_thinking_mode_on_error("requires adaptive thinking", THINKING_MODE_ADAPTIVE, true),
+            None
         );
         // Adaptive rejected: fall back to the explicit token-budget shape.
         assert_eq!(
