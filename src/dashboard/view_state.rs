@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use crossterm::event::{KeyCode, KeyEvent};
 use unicode_width::UnicodeWidthChar;
 
+use super::cells::artifact_preview::ArtifactPreviewState;
 use super::command_panels::{CommandFeedback, CommandPanel};
 use super::selection::{SelectableRegion, SelectionRegistry};
 use super::tui_event::TuiMouseSelectionKind;
@@ -1007,6 +1008,7 @@ pub(super) struct TuiViewState {
     pub(super) history_load_rx:
         Option<tokio::sync::oneshot::Receiver<Result<DashboardActivityHistoryPage, String>>>,
     pub(super) cached_activity_lines: CachedActivityLines,
+    pub(super) artifact_previews: ArtifactPreviewState,
     pub(super) expanded_thinking: HashSet<usize>,
     pub(super) visible_activity_cleared: bool,
     pub(super) show_thinking: bool,
@@ -1041,6 +1043,7 @@ impl TuiViewState {
             load_cooldown: 0,
             history_load_rx: None,
             cached_activity_lines: CachedActivityLines::new(),
+            artifact_previews: ArtifactPreviewState::default(),
             expanded_thinking: HashSet::new(),
             visible_activity_cleared: false,
             show_thinking: true,

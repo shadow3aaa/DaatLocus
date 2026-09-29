@@ -67,6 +67,7 @@ import {
   AgentExpression,
   type AgentExpressionStatus,
 } from "@/components/agent-expression";
+import { AgentChatImageAttachment, ArtifactCard } from "@/components/artifact-card";
 import { ShareEntryButton } from "@/components/share-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -150,6 +151,12 @@ import {
   type AgentChatFoldDisplayItem,
 } from "@/lib/agent-chat-folding";
 import { normalizeThinkingMarkdown } from "@/lib/agent-chat-markdown";
+import {
+  artifactDataFromActivityEvent,
+  isAbsoluteHttpUrl,
+  isAllowedMarkdownImageSource,
+  type SessionActivityArtifactData,
+} from "@/lib/artifact";
 import {
   highlightCodeWithShiki,
   type ShikiColorScheme,
@@ -641,6 +648,11 @@ type AgentChatSessionActivityRender =
       output?: unknown | null;
       message: string;
       snapshot?: WorkflowRunSnapshot | null;
+    }
+  | {
+      kind: "artifact";
+      icon: AgentChatActivityMarkerKind;
+      artifact: SessionActivityArtifactData;
     };
 
 type AgentChatExploredCallAction = "read" | "list" | "search" | "run" | "unknown";
@@ -711,6 +723,10 @@ const AGENT_CHAT_EXPRESSION_TRANSITION_MS = 520;
 const AgentChatExpressionTransitionContext =
   createContext<AgentChatExpressionTransitionContextValue | null>(null);
 const AgentChatMockDataContext = createContext(false);
+const AgentChatArtifactLatestVersionContext = createContext<ReadonlyMap<
+  string,
+  number
+> | null>(null);
 const ShareSessionContext = createContext<string | null>(null);
 
 function agentChatExpressionSlotKey(
@@ -5387,6 +5403,9 @@ function AgentChatBubbles({
     <AgentChatExpressionTransitionContext.Provider
       value={agentExpressionTransitionContextValue}
     >
+      <AgentChatArtifactLatestVersionContext.Provider
+        value={latestArtifactVersionById}
+      >
       <>
         <div
         ref={panelRef}
@@ -5531,6 +5550,7 @@ function AgentChatBubbles({
           )
         : null}
     </>
+      </AgentChatArtifactLatestVersionContext.Provider>
   </AgentChatExpressionTransitionContext.Provider>
   );
 }
@@ -8757,6 +8777,12 @@ function AgentChatBlock({
     const label = stringValue(record.label, "Artifact");
     const uri = stringValue(record.uri, "");
     const mimeType = stringValue(record.mime_type, "");
+    if (type === "artifact" && uri) {
+      const artifact = artifactDataFromBlock(record, label, uri, mimeType);
+      if (artifact) {
+        return <ArtifactCard artifact={artifact} />;
+      }
+    }
     if (uri && (type === "image" || mimeType.startsWith("image/"))) {
       return (
         <AgentChatImageAttachment label={label} uri={uri} mimeType={mimeType} />
@@ -8780,6 +8806,61 @@ function AgentChatBlock({
     </p>
   );
 }
+function artifactKindFromBlock(
+  kind: unknown,
+  mimeType: string,
+  uri: string,
+): string {
+  const explicit = typeof kind === "string" ? kind.trim().toLowerCase() : "";
+  if (
+    explicit === "image" ||
+    explicit === "svg" ||
+    explicit === "html" ||
+    explicit === "url"
+  ) {
+    return explicit;
+  }
+
+  const mime = mimeType.toLowerCase();
+  if (mime.includes("svg")) {
+    return "svg";
+  }
+  if (mime.startsWith("image/")) {
+    return "image";
+  }
+  if (mime.includes("html")) {
+    return "html";
+  }
+  if (isAbsoluteHttpUrl(uri)) {
+    return "url";
+  }
+  return explicit || "artifact";
+}
+
+function artifactDataFromBlock(
+  record: Record<string, unknown>,
+  label: string,
+  uri: string,
+  mimeType: string,
+): SessionActivityArtifactData | null {
+  const artifactId = stringValue(record.artifact_id, "") || uri || label;
+  if (!artifactId) {
+    return null;
+  }
+
+  return {
+    artifactId,
+    version: numberValue(record.version, 1),
+    kind: artifactKindFromBlock(record.kind, mimeType, uri),
+    title: label,
+    uri,
+    mimeType,
+    localPath: nullableStringValue(record.local_path),
+    byteLen: nullableNumberValue(record.byte_len),
+    description: nullableStringValue(record.description),
+  };
+}
+
 
 function FragmentPair({ left, right }: { left: string; right: string }) {
   return (
@@ -9714,6 +9795,15 @@ function agentChatActivityMetaFromEvent(event: SessionActivityEvent): {
       title: stringValue(runtimeStatus.label, "Working"),
     };
   }
+  const artifact = artifactDataFromActivityEvent(event);
+  if (artifact) {
+    return {
+      kind: "tool",
+      actor: "tool",
+      title: artifact.title || "Artifact",
+    };
+  }
+
 
   const title =
     stringValue(agentChatSessionActivityPayload(event, "GenericApp")?.title, "") ||
@@ -10432,6 +10522,15 @@ function agentChatSessionActivityRenderForBubble(
       output: workflow.output,
       message: stringValue(workflow.message, "workflow completed"),
       snapshot: asWorkflowRunSnapshot(workflow.snapshot),
+    };
+  }
+
+  const artifact = artifactDataFromActivityEvent(activityEvent);
+  if (artifact) {
+    return {
+      kind: "artifact",
+      icon: "activity",
+      artifact,
     };
   }
 

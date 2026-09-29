@@ -26,7 +26,7 @@ use axum::{
     body::Body,
     http::{
         Uri,
-        header::{CACHE_CONTROL, CONTENT_TYPE},
+        header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE},
     },
     response::Response,
 };
@@ -703,6 +703,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
             "/dashboard/attachments/{encoded_path}",
             get(dashboard_attachment_handler),
         )
+        .route("/artifacts/{file_name}", get(artifact_handler))
         .route("/settings/summary", get(settings_summary_handler))
         .route("/config/readiness", get(config_readiness_handler))
         .route(
@@ -897,9 +898,169 @@ async fn dashboard_attachment_handler(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    Response::builder()
-        .header(CONTENT_TYPE, webui_content_type(&path.to_string_lossy()))
-        .header(CACHE_CONTROL, "no-store")
+    let mut builder = Response::builder();
+    for (name, value) in dashboard_attachment_headers(&path) {
+        builder = builder.header(name, value);
+    }
+    builder
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+const ARTIFACT_CSP_SVG: &str =
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox";
+const ARTIFACT_CSP_HTML: &str = "sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self' data: blob: 'unsafe-inline' 'unsafe-eval' https:; frame-ancestors 'self'";
+const ARTIFACT_CSP_IMAGE: &str = "default-src 'none'";
+const ATTACHMENT_CSP: &str = "default-src 'none'; sandbox";
+
+fn artifact_content_type(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "jpeg" | "jpg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "html" | "htm" => "text/html; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+fn artifact_content_security_policy(ext: &str) -> &'static str {
+    match ext {
+        "svg" => ARTIFACT_CSP_SVG,
+        "html" | "htm" => ARTIFACT_CSP_HTML,
+        _ => ARTIFACT_CSP_IMAGE,
+    }
+}
+
+fn artifact_response_headers(file_name: &str) -> Vec<(&'static str, String)> {
+    let ext = file_name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    vec![
+        (
+            CONTENT_TYPE.as_str(),
+            artifact_content_type(&ext).to_string(),
+        ),
+        ("X-Content-Type-Options", "nosniff".to_string()),
+        (
+            CACHE_CONTROL.as_str(),
+            "private, max-age=31536000, immutable".to_string(),
+        ),
+        ("Cross-Origin-Resource-Policy", "same-site".to_string()),
+        (
+            "Content-Security-Policy",
+            artifact_content_security_policy(&ext).to_string(),
+        ),
+    ]
+}
+
+fn is_inline_attachment_media_type(ext: &str) -> bool {
+    matches!(ext, "png" | "jpeg" | "jpg" | "gif" | "webp")
+}
+
+fn safe_attachment_filename(path: &StdPath) -> String {
+    let base = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("attachment");
+    let filtered: String = base
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' ') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = filtered.trim_matches(|ch| ch == '.' || ch == ' ');
+    if trimmed.is_empty() {
+        "attachment".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Response headers for the authenticated dashboard attachment route.
+///
+/// User/Telegram-supplied content is never trusted: everything gets `nosniff`
+/// and a locked-down CSP, only raster images are served inline, and every other
+/// type is forced to download as an attachment.
+fn dashboard_attachment_headers(path: &StdPath) -> Vec<(&'static str, String)> {
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut headers = vec![
+        (
+            CONTENT_TYPE.as_str(),
+            webui_content_type(&path.to_string_lossy()).to_string(),
+        ),
+        ("X-Content-Type-Options", "nosniff".to_string()),
+        ("Content-Security-Policy", ATTACHMENT_CSP.to_string()),
+        (CACHE_CONTROL.as_str(), "no-store".to_string()),
+    ];
+    if !is_inline_attachment_media_type(&ext) {
+        headers.push((
+            CONTENT_DISPOSITION.as_str(),
+            format!(
+                "attachment; filename=\"{}\"",
+                safe_attachment_filename(path)
+            ),
+        ));
+    }
+    headers
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtifactQuery {
+    sig: Option<String>,
+}
+
+/// Serve a presented, content-addressed artifact.
+///
+/// This route intentionally requires neither the daemon token nor the share
+/// cookie: a valid capability `sig` is the only credential, and it grants access
+/// to exactly one immutable file.
+async fn artifact_handler(
+    Query(query): Query<ArtifactQuery>,
+    Path(file_name): Path<String>,
+) -> Response {
+    let Some(sig) = query.sig.as_deref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !crate::runtime_tools::present_artifact::is_valid_artifact_file_name(&file_name) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let secret = crate::runtime_tools::present_artifact::artifact_signing_secret();
+    if !crate::runtime_tools::present_artifact::verify_artifact_signature(&secret, &file_name, sig)
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let base = daat_locus_paths_sync()
+        .artifact_dir(crate::runtime_tools::present_artifact::ARTIFACT_PRESENTED_DIR_NAME);
+    let Ok(base_canonical) = tokio::fs::canonicalize(&base).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let candidate = base.join(&file_name);
+    let file_path = match tokio::fs::canonicalize(&candidate).await {
+        Ok(path) if path.starts_with(&base_canonical) => path,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let Ok(bytes) = tokio::fs::read(&file_path).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let mut builder = Response::builder();
+    for (name, value) in artifact_response_headers(&file_name) {
+        builder = builder.header(name, value);
+    }
+    builder
         .body(Body::from(bytes))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
@@ -5266,5 +5427,91 @@ mod tests {
         let cwd = std::env::current_dir().expect("current dir");
         let relative = resolve_local_open_target("./notes.md");
         assert_eq!(PathBuf::from(relative), cwd.join("./notes.md"));
+    }
+
+    #[test]
+    fn artifact_response_headers_are_hardened_per_kind() {
+        let hex = "0".repeat(64);
+        let png = artifact_response_headers(&format!("{hex}.png"));
+        let value = |name: &str| {
+            png.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(value("X-Content-Type-Options"), Some("nosniff"));
+        assert_eq!(value("Cross-Origin-Resource-Policy"), Some("same-site"));
+        assert_eq!(
+            value("cache-control"),
+            Some("private, max-age=31536000, immutable")
+        );
+        assert_eq!(value("Content-Security-Policy"), Some("default-src 'none'"));
+        assert_eq!(value("content-type"), Some("image/png"));
+
+        let svg = artifact_response_headers(&format!("{hex}.svg"));
+        let svg_csp = svg
+            .iter()
+            .find(|(key, _)| *key == "Content-Security-Policy")
+            .expect("svg csp");
+        assert!(svg_csp.1.contains("sandbox"));
+        assert!(svg_csp.1.contains("style-src 'unsafe-inline'"));
+        assert!(!svg_csp.1.contains("allow-same-origin"));
+
+        let html = artifact_response_headers(&format!("{hex}.html"));
+        let html_csp = html
+            .iter()
+            .find(|(key, _)| *key == "Content-Security-Policy")
+            .expect("html csp");
+        assert!(html_csp.1.contains("allow-scripts"));
+        assert!(html_csp.1.contains("frame-ancestors 'self'"));
+        assert!(!html_csp.1.contains("allow-same-origin"));
+        assert_eq!(artifact_content_type("html"), "text/html; charset=utf-8");
+    }
+
+    #[test]
+    fn artifact_route_file_name_validation_rejects_traversal() {
+        assert!(
+            !crate::runtime_tools::present_artifact::is_valid_artifact_file_name("../etc/passwd")
+        );
+        assert!(
+            !crate::runtime_tools::present_artifact::is_valid_artifact_file_name("manifest.json")
+        );
+        assert!(
+            crate::runtime_tools::present_artifact::is_valid_artifact_file_name(&format!(
+                "{}.png",
+                "0".repeat(64)
+            ))
+        );
+    }
+
+    #[test]
+    fn attachment_headers_force_download_for_non_images() {
+        let image = dashboard_attachment_headers(StdPath::new("/tmp/pic.png"));
+        assert!(
+            image
+                .iter()
+                .any(|(key, value)| *key == "X-Content-Type-Options" && value == "nosniff")
+        );
+        assert!(image.iter().any(|(key, value)| {
+            *key == "Content-Security-Policy" && value == "default-src 'none'; sandbox"
+        }));
+        assert!(!image.iter().any(|(key, _)| *key == "content-disposition"));
+
+        let page = dashboard_attachment_headers(StdPath::new("/tmp/page.html"));
+        let disposition = page
+            .iter()
+            .find(|(key, _)| *key == "content-disposition")
+            .expect("html disposition");
+        assert_eq!(disposition.1, "attachment; filename=\"page.html\"");
+        assert!(
+            page.iter()
+                .any(|(key, value)| *key == "X-Content-Type-Options" && value == "nosniff")
+        );
+
+        let sneaky = dashboard_attachment_headers(StdPath::new("/tmp/we ird<script>.svg"));
+        let disposition = sneaky
+            .iter()
+            .find(|(key, _)| *key == "content-disposition")
+            .expect("sanitized disposition");
+        assert_eq!(disposition.1, "attachment; filename=\"we ird_script_.svg\"");
     }
 }

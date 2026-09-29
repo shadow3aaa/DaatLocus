@@ -7,6 +7,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
+use super::artifact_preview::{ArtifactPreviewRequest, ArtifactPreviewState};
 use super::markdown::render_markdown_with_width;
 use super::{
     LiveActivityEvent, SessionActivityEvent,
@@ -25,12 +26,14 @@ use super::{
     },
     messages::{PatchActivityData, ReplyActivityData, TelegramActivityData},
     plan::{PlanActivityData, PlanStepDisplayStatus},
+    WorkflowActivityData,
 };
 use crate::activity_event::{
     ExploredCallActivityAction, PatchDiffLineActivityDescriptor, PatchDiffLineKind,
     PatchFileActivityDescriptor, PlanActivityKind, TerminalActivityAction, TerminalActivityOrigin,
     WebSearchActivityAction,
 };
+use crate::dashboard::artifact_links;
 use crate::dashboard::renderable::{FlexRenderable, Renderable, ViewportCulledColumn};
 use crate::dashboard::selection::{
     SelectableId, SelectableRegion, SelectionRegistry, line_plain_text,
@@ -254,6 +257,11 @@ pub struct ActivityFeedRenderArgs<'a> {
     pub user_hyperlink_areas: &'a mut Vec<Rect>,
     pub selection: &'a SelectionRegistry,
     pub selectable_regions: &'a mut Vec<SelectableRegion>,
+    /// Inline artifact preview state; `None` disables image previews.
+    pub artifact_previews: Option<&'a mut ArtifactPreviewState>,
+    /// Current session workflow group. Workflow activity events render as one
+    /// entry that opens this graph, not a cell per run.
+    pub workflow_group: Option<&'a crate::workflow::WorkflowGroupSnapshot>,
 }
 
 pub fn render_activity_feed_cached(
@@ -291,10 +299,14 @@ pub fn render_activity_feed_cached(
     }
 
     cache.ensure_capacity(total_cells);
+    if let Some(previews) = artifact_previews.as_deref_mut() {
+        previews.retain_width(inner.width);
+    }
+    let mut preview_placements: Vec<(ArtifactPreviewRequest, u16)> = Vec::new();
 
     let mut column = ViewportCulledColumn::new();
     let mut column_rows = 0u16;
-    let mut user_cell_rows = Vec::new();
+    let mut hyperlink_cell_rows = Vec::new();
     let mut selectable_cell_rows = Vec::new();
 
     let spacer_line = CachedCellLines {
@@ -476,6 +488,13 @@ pub fn render_activity_feed_cached(
     let mut flex = FlexRenderable::new();
     flex.push(1, column);
     flex.render(inner, buf);
+    render_artifact_previews(
+        artifact_previews,
+        &preview_placements,
+        inner,
+        effective_scroll,
+        buf,
+    );
     for region in &visible_selectable_regions {
         if let Some(range) = selection.region_selection(&region.id) {
             region.highlight(&range, buf);
@@ -484,6 +503,60 @@ pub fn render_activity_feed_cached(
     selectable_regions.extend(visible_selectable_regions);
 
     max_scroll
+}
+
+/// Reserve a preview slot for `cell`, recording the absolute logical row where
+/// the graphics area begins (the card's trailing placeholder lines).
+fn record_preview_placement(
+    placements: &mut Vec<(ArtifactPreviewRequest, u16)>,
+    previews: Option<&mut ArtifactPreviewState>,
+    cell: &SessionActivityEvent,
+    width: u16,
+    cell_top: u16,
+    cached_height: u16,
+) {
+    let SessionActivityEvent::Artifact(artifact) = cell else {
+        return;
+    };
+    let Some(previews) = previews else {
+        return;
+    };
+    let Some(request) = previews.plan(artifact, width) else {
+        return;
+    };
+    let text_rows = cached_height.saturating_sub(request.rows);
+    placements.push((request, cell_top.saturating_add(text_rows)));
+}
+
+/// Draw cached artifact previews into the rows reserved by their placeholder
+/// lines.  Partially-scrolled previews are skipped so a protocol never gets
+/// squashed into a partial rectangle.
+fn render_artifact_previews(
+    previews: Option<&mut ArtifactPreviewState>,
+    placements: &[(ArtifactPreviewRequest, u16)],
+    viewport: Rect,
+    scroll: u16,
+    buf: &mut Buffer,
+) {
+    let Some(previews) = previews else {
+        return;
+    };
+    if placements.is_empty() {
+        return;
+    }
+    let viewport_bottom = scroll.saturating_add(viewport.height);
+    for (request, block_top) in placements {
+        let block_bottom = block_top.saturating_add(request.rows);
+        if *block_top < scroll || block_bottom > viewport_bottom {
+            continue;
+        }
+        let y = viewport.y.saturating_add(block_top.saturating_sub(scroll));
+        let rect = Rect::new(viewport.x, y, viewport.width, request.rows);
+        if rect.bottom() > viewport.bottom() {
+            continue;
+        }
+        previews.render(request, rect, buf);
+    }
 }
 
 struct SelectableActivityDataRows {
@@ -597,13 +670,21 @@ impl Renderable for SessionActivityEvent {
 }
 
 fn render_activity_cell_lines(cell: &SessionActivityEvent, max_width: u16) -> Vec<Line<'static>> {
-    render_activity_cell_lines_with_options(cell, max_width, ActivityDataRenderOptions::default())
+    render_activity_cell_lines_with_options(
+        cell,
+        max_width,
+        ActivityDataRenderOptions::default(),
+        None,
+        None,
+    )
 }
 
 fn render_activity_cell_lines_with_options(
     cell: &SessionActivityEvent,
     max_width: u16,
     options: ActivityDataRenderOptions,
+    preview: Option<&mut ArtifactPreviewState>,
+    workflow_group: Option<&crate::workflow::WorkflowGroupSnapshot>,
 ) -> Vec<Line<'static>> {
     match cell {
         SessionActivityEvent::Assistant(cell) => render_assistant_cell_lines(cell, max_width),
@@ -1280,10 +1361,26 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
         SessionActivityEvent::Workflow(cell) => {
             transcript_section("WORKFLOW", &workflow_activity_text(cell))
         }
+        SessionActivityEvent::Artifact(cell) => {
+            transcript_section("ARTIFACT", &artifact_transcript_text(cell))
+        }
     }
 }
 
-fn workflow_activity_text(cell: &super::WorkflowActivityData) -> String {
+fn artifact_transcript_text(cell: &super::ArtifactActivityData) -> String {
+    let mut text = format!(
+        "{} · {}\nversion: {}",
+        cell.title.trim(),
+        artifact_kind_label(cell.kind),
+        cell.version
+    );
+    if !cell.uri.trim().is_empty() {
+        text.push_str(&format!("\nuri: {}", cell.uri.trim()));
+    }
+    text
+}
+
+fn workflow_activity_text(cell: &WorkflowActivityData) -> String {
     let mut lines = vec![format!("{}: {:?}", cell.workflow_id, cell.status)];
     if !cell.message.trim().is_empty() {
         lines.push(cell.message.clone());
@@ -1995,6 +2092,139 @@ fn image_attachment_kind(uri: &str) -> &'static str {
 
 fn render_generic_app_cell_lines(cell: &GenericAppActivityData) -> Vec<Line<'static>> {
     vec![activity_header(format!("App: {}", cell.title))]
+}
+
+fn render_artifact_cell_lines(
+    cell: &super::ArtifactActivityData,
+    max_width: u16,
+    preview: Option<&mut ArtifactPreviewState>,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![activity_header(artifact_activity_summary(cell))];
+
+    let content_width = artifact_content_width(max_width);
+    let mut detail = vec![Line::from(Span::styled(
+        format!("{} \u{00b7} v{}", artifact_kind_label(cell.kind), cell.version),
+        dim_style(),
+    ))];
+    if let Some(description) = cell
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+    {
+        detail.extend(artifact_wrapped_text(
+            description,
+            content_width,
+            Style::default().fg(Color::Gray),
+        ));
+    }
+    let display_uri =
+        artifact_links::artifact_display_uri(cell, &artifact_links::daemon_base_url());
+    if !display_uri.is_empty() {
+        detail.extend(artifact_uri_lines(
+            &display_uri,
+            content_width,
+            Style::default().fg(Color::Gray),
+        ));
+    }
+    if let Some(size) = artifact_size_label(cell) {
+        detail.push(Line::from(Span::styled(size, dim_style())));
+    }
+    lines.extend(detail);
+
+    // Reserve the trailing rows for the inline preview; the graphics protocol is
+    // painted into these rows after the text layout is rendered.
+    if let Some(preview) = preview
+        && let Some(request) = preview.plan(cell, max_width)
+    {
+        for _ in 0..request.rows {
+            lines.push(Line::from(""));
+        }
+    }
+    lines
+}
+
+/// Width available to the card body. The feed renders cells inside an area that
+/// is already inset by one column, so the body uses the full width.
+fn artifact_content_width(max_width: u16) -> u16 {
+    max_width.max(1)
+}
+
+/// Lay out a signed artifact URI so the signature starts on its own visual
+/// line without breaking the clickable link.
+///
+/// The terminal hyperlink pass matches one URL per rendered line. A plain line
+/// break would leave the `?sig=` query off the link, so the break is a single
+/// NBSP: it wraps like a space but stays inside the matched URL.
+fn artifact_uri_lines(uri: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+    let width = usize::from(width.max(1));
+    let Some((path, query)) = uri.split_once("?sig=") else {
+        return artifact_wrapped_text(uri, width as u16, style);
+    };
+    let signature = format!("\u{00a0}?sig={query}");
+    if display_width(path) + display_width(&signature) <= width {
+        return artifact_wrapped_text(&format!("{path}{signature}"), width as u16, style);
+    }
+    let mut lines = artifact_wrapped_text(path, width as u16, style);
+    if display_width(&signature) <= width {
+        lines.push(Line::from(Span::styled(signature, style)));
+    } else {
+        lines.extend(artifact_wrapped_text(&signature, width as u16, style));
+    }
+    lines
+}
+
+fn artifact_wrapped_text(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+    let width = usize::from(width.max(1));
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        if current_width > 0 && current_width + ch_width > width {
+            lines.push(Line::from(Span::styled(std::mem::take(&mut current), style)));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+    if !current.is_empty() {
+        lines.push(Line::from(Span::styled(current, style)));
+    }
+    lines
+}
+
+fn artifact_size_label(cell: &super::ArtifactActivityData) -> Option<String> {
+    let byte_len = cell.byte_len?;
+    Some(if byte_len >= 1024 * 1024 {
+        format!("{:.1} MiB", byte_len as f64 / (1024.0 * 1024.0))
+    } else if byte_len >= 1024 {
+        format!("{:.1} KiB", byte_len as f64 / 1024.0)
+    } else {
+        format!("{byte_len} B")
+    })
+}
+
+const fn artifact_kind_label(kind: super::ArtifactKind) -> &'static str {
+    match kind {
+        super::ArtifactKind::Image => "image",
+        super::ArtifactKind::Svg => "svg",
+        super::ArtifactKind::Html => "html",
+        super::ArtifactKind::Url => "url",
+    }
+}
+
+fn artifact_activity_summary(cell: &super::ArtifactActivityData) -> String {
+    let version = if cell.version > 1 {
+        format!(" v{}", cell.version)
+    } else {
+        String::new()
+    };
+    format!(
+        "Presented {}{version}: {}",
+        artifact_kind_label(cell.kind),
+        cell.title
+    )
 }
 
 fn render_coding_open_project_cell_lines(
@@ -3075,6 +3305,284 @@ mod tests {
         PatchDiffLineKind, PatchFileOperation, ReplyDisposition, ReplySubject,
     };
     use crate::dashboard::assistant_activity_cell;
+    use crate::dashboard::cells::artifact_preview::{
+        ARTIFACT_PREVIEW_MAX_ROWS, ArtifactPreviewKey,
+    };
+
+    fn artifact_activity(
+        kind: crate::dashboard::cells::ArtifactKind,
+        uri: &str,
+    ) -> crate::dashboard::cells::ArtifactActivityData {
+        crate::dashboard::cells::ArtifactActivityData {
+            artifact_id: "artifact-1".to_string(),
+            version: 2,
+            kind,
+            title: "Quarterly Report".to_string(),
+            uri: uri.to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            local_path: None,
+            byte_len: Some(2048),
+            description: Some("Rendered by the agent".to_string()),
+        }
+    }
+
+    #[test]
+    fn artifact_cards_render_kind_version_description_and_uri() {
+        for (kind, label, uri) in [
+            (
+                crate::dashboard::cells::ArtifactKind::Image,
+                "image",
+                "/artifacts/a.png?sig=1",
+            ),
+            (
+                crate::dashboard::cells::ArtifactKind::Svg,
+                "svg",
+                "/artifacts/a.svg?sig=1",
+            ),
+            (
+                crate::dashboard::cells::ArtifactKind::Html,
+                "html",
+                "/artifacts/a.html?sig=1",
+            ),
+            (
+                crate::dashboard::cells::ArtifactKind::Url,
+                "url",
+                "http://127.0.0.1:5173/",
+            ),
+        ] {
+            let cell = artifact_activity(kind, uri);
+            let rendered = render_artifact_cell_lines(&cell, 120, None)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(rendered.contains("Presented"), "{rendered}");
+            assert!(rendered.contains(label), "{rendered}");
+            assert!(rendered.contains("v2"), "{rendered}");
+            assert!(rendered.contains("Rendered by the agent"), "{rendered}");
+            assert!(
+                rendered.contains(uri) || rendered.contains("/artifacts/a."),
+                "{rendered}"
+            );
+            assert!(rendered.contains("2.0 KiB"), "{rendered}");
+            let body: Vec<_> = rendered.lines().skip(1).collect();
+            assert!(
+                body.iter().all(|line| !line.starts_with(' ')),
+                "artifact body should share the header's left edge: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_uri_breaks_before_the_signature_instead_of_mid_token() {
+        let cell = artifact_activity(
+            crate::dashboard::cells::ArtifactKind::Svg,
+            "/artifacts/abc.svg?sig=0123456789abcdef",
+        );
+        let rendered = render_artifact_cell_lines(&cell, 48, None)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let uri_lines: Vec<_> = rendered
+            .lines()
+            .filter(|line| line.contains("/artifacts/") || line.contains("?sig="))
+            .collect();
+        assert!(
+            uri_lines.iter().any(|line| line.ends_with(".svg")),
+            "{rendered}"
+        );
+        assert!(
+            uri_lines
+                .iter()
+                .any(|line| line.trim_start_matches('\u{00a0}').starts_with("?sig=")),
+            "{rendered}"
+        );
+        assert!(
+            uri_lines.iter().all(|line| line.chars().count() <= 48),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn artifact_preview_reserves_rows_and_caches_by_path_and_width() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("preview.png");
+        image::RgbaImage::from_pixel(400, 200, image::Rgba([10, 20, 30, 255]))
+            .save(&path)
+            .expect("write png");
+
+        let mut previews =
+            ArtifactPreviewState::new(Some(ratatui_image::picker::Picker::halfblocks()));
+        let mut cell = artifact_activity(
+            crate::dashboard::cells::ArtifactKind::Image,
+            "/artifacts/preview.png?sig=1",
+        );
+        cell.local_path = Some(path.to_string_lossy().into_owned());
+
+        let without_preview = render_artifact_cell_lines(&cell, 40, None).len();
+
+        let plan = previews.plan(&cell, 40).expect("preview plan");
+        assert!(plan.rows >= 1 && plan.rows <= ARTIFACT_PREVIEW_MAX_ROWS);
+        assert_eq!(
+            plan.key,
+            ArtifactPreviewKey::new(path.to_string_lossy().into_owned(), 40)
+        );
+        assert_eq!(previews.resolve_count(), 1);
+        assert_eq!(previews.cached_entries(), 1);
+
+        // Same (path, width) is served from cache without re-resolving.
+        let cached = previews.plan(&cell, 40).expect("cached plan");
+        assert_eq!(cached.rows, plan.rows);
+        assert_eq!(previews.resolve_count(), 1);
+        assert_eq!(previews.cached_entries(), 1);
+
+        // A different width is a distinct cache entry.
+        assert!(previews.plan(&cell, 80).is_some());
+        assert_eq!(previews.resolve_count(), 2);
+        assert_eq!(previews.cached_entries(), 2);
+
+        // Dropping other widths keeps the entry for the active width.
+        previews.retain_width(40);
+        assert_eq!(previews.cached_entries(), 1);
+
+        // The card reserves exactly `rows` more lines than the text-only card.
+        let with_preview = render_artifact_cell_lines(&cell, 40, Some(&mut previews)).len();
+        assert_eq!(with_preview, without_preview + plan.rows as usize);
+    }
+
+    #[test]
+    fn artifact_preview_skips_missing_files() {
+        let mut previews =
+            ArtifactPreviewState::new(Some(ratatui_image::picker::Picker::halfblocks()));
+        let mut cell = artifact_activity(
+            crate::dashboard::cells::ArtifactKind::Image,
+            "/artifacts/missing.png?sig=1",
+        );
+        cell.local_path = Some("/definitely/not/here/preview.png".to_string());
+        assert!(previews.plan(&cell, 40).is_none());
+        let rendered = render_artifact_cell_lines(&cell, 40, Some(&mut previews));
+        assert!(rendered.iter().all(|line| !line_text(line).is_empty()));
+    }
+
+    #[test]
+    fn cached_lines_height_counts_trailing_placeholder_rows() {
+        let lines = vec![Line::from("card"), Line::from(""), Line::from("")];
+        assert_eq!(cached_lines_height(&lines, 40), 3);
+    }
+
+    #[test]
+    fn activity_feed_reserves_and_draws_artifact_preview() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("preview.png");
+        image::RgbaImage::from_pixel(320, 160, image::Rgba([90, 40, 200, 255]))
+            .save(&path)
+            .expect("write png");
+
+        let mut previews =
+            ArtifactPreviewState::new(Some(ratatui_image::picker::Picker::halfblocks()));
+        let mut cell = artifact_activity(
+            crate::dashboard::cells::ArtifactKind::Image,
+            "/artifacts/preview.png?sig=1",
+        );
+        cell.local_path = Some(path.to_string_lossy().into_owned());
+        let event = SessionActivityEvent::Artifact(cell);
+
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 24));
+        let mut cache = CachedActivityLines::new();
+        let mut hyperlink_areas = Vec::new();
+        let mut selectable_regions = Vec::new();
+        render_activity_feed_cached(
+            &mut buffer,
+            Rect::new(0, 0, 80, 24),
+            ActivityFeedRenderArgs {
+                cells: std::slice::from_ref(&event),
+                live_cells: &[],
+                expanded_thinking: &HashSet::new(),
+                scroll_offset: 0,
+                cache: &mut cache,
+                user_hyperlink_areas: &mut hyperlink_areas,
+                selection: &SelectionRegistry::default(),
+                selectable_regions: &mut selectable_regions,
+                artifact_previews: Some(&mut previews),
+                workflow_group: None,
+            },
+        );
+
+        let text = (0..buffer.area.height)
+            .map(|y| buffer_row_text(&buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Quarterly Report"), "{text}");
+        // The reserved preview rows are painted with the source image color
+        // (half-blocks fall back to a colored blank for a uniform image).
+        let preview_drawn = (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| {
+                buffer
+                    .cell((x, y))
+                    .is_some_and(|cell| cell.bg == Color::Rgb(90, 40, 200))
+            })
+        });
+        assert!(preview_drawn, "preview should be drawn: {text}");
+    }
+
+    #[test]
+    fn artifact_cells_emit_osc8_hyperlink_overlays() {
+        let mut previews = ArtifactPreviewState::default();
+        let base = crate::dashboard::artifact_links::daemon_base_url();
+        let cases = [
+            (
+                crate::dashboard::cells::ArtifactKind::Html,
+                "/artifacts/probe.html?sig=abc",
+                format!("{base}/artifacts/probe.html?sig=abc"),
+            ),
+            (
+                crate::dashboard::cells::ArtifactKind::Url,
+                "http://127.0.0.1:5173/app",
+                "http://127.0.0.1:5173/app".to_string(),
+            ),
+        ];
+        for (kind, uri, expected) in cases {
+            let event = SessionActivityEvent::Artifact(artifact_activity(kind, uri));
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 100, 12));
+            let mut cache = CachedActivityLines::new();
+            let mut hyperlink_areas = Vec::new();
+            let mut selectable_regions = Vec::new();
+            render_activity_feed_cached(
+                &mut buffer,
+                Rect::new(0, 0, 100, 12),
+                ActivityFeedRenderArgs {
+                    cells: std::slice::from_ref(&event),
+                    live_cells: &[],
+                    expanded_thinking: &HashSet::new(),
+                    scroll_offset: 0,
+                    cache: &mut cache,
+                    user_hyperlink_areas: &mut hyperlink_areas,
+                    selection: &SelectionRegistry::default(),
+                    selectable_regions: &mut selectable_regions,
+                    artifact_previews: Some(&mut previews),
+                    workflow_group: None,
+                },
+            );
+            assert!(
+                !hyperlink_areas.is_empty(),
+                "artifact rows should feed the OSC 8 pass"
+            );
+            let overlays =
+                crate::dashboard::terminal_hyperlinks::collect_terminal_hyperlink_overlays(
+                    &buffer,
+                    &hyperlink_areas,
+                );
+            assert!(
+                overlays.iter().any(|overlay| overlay.target == expected),
+                "expected overlay target {expected:?}, got {:?}",
+                overlays
+                    .iter()
+                    .map(|overlay| overlay.target.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 
     #[test]
     fn workflow_transcript_groups_sequential_runs_by_actor() {

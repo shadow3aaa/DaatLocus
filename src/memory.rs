@@ -826,6 +826,10 @@ fn summarize_activity_event(event: &SessionActivityEvent) -> String {
             summarize_runtime_inline_text(&data.workflow_id),
             data.status
         ),
+        SessionActivityEvent::Artifact(data) => format!(
+            "presented artifact {}",
+            summarize_runtime_inline_text(&data.title)
+        ),
     }
 }
 

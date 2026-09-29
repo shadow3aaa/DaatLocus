@@ -1,4 +1,5 @@
 mod apps;
+pub mod artifact_preview;
 mod common;
 mod exec;
 mod highlight;
@@ -42,6 +43,7 @@ pub use tui::render_activity_feed_cached;
 pub use tui::{ActivityFeedRenderArgs, CachedActivityLines};
 
 pub use common::ReducedMotion;
+pub use common::{ArtifactActivityData, ArtifactKind};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowActivityData {
@@ -79,6 +81,7 @@ pub enum SessionActivityEvent {
     Thinking(ThinkingActivityData),
     RuntimeStatus(RuntimeStatusActivityData),
     Workflow(WorkflowActivityData),
+    Artifact(ArtifactActivityData),
 }
 
 const RUNTIME_STATUS_LIVE_CELL_KEY: &str = "runtime-status";
@@ -207,6 +210,21 @@ pub fn activity_events_from_history_items(
             .map(|item| item.event.clone())
             .collect::<Vec<_>>(),
     )
+}
+
+/// Role label for one activity cell inside the shared conversation history.
+pub fn activity_event_history_role(event: &SessionActivityEvent) -> &'static str {
+    match event {
+        SessionActivityEvent::User(_) => "user",
+        SessionActivityEvent::Assistant(_) | SessionActivityEvent::Reply(_) => "assistant",
+        SessionActivityEvent::Thinking(_) => "thinking",
+        _ => "activity",
+    }
+}
+
+/// Plain text rendering of one activity cell for `read_history`.
+pub fn activity_event_history_text(event: &SessionActivityEvent) -> String {
+    tui::activity_cell_transcript_text(event)
 }
 
 pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivityEvent) {

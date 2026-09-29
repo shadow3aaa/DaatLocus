@@ -432,6 +432,18 @@ export type SessionActivityPrimitive = {
   primitive_id: string;
 };
 
+export type SessionActivityArtifact = {
+  artifact_id: string;
+  version: number;
+  kind: "image" | "svg" | "html" | "url" | (string & {});
+  title: string;
+  uri: string;
+  mime_type: string;
+  local_path?: string | null;
+  byte_len?: number | null;
+  description?: string | null;
+};
+
 export type WorkflowNodeStatus =
   | "pending"
   | "running"
@@ -563,6 +575,7 @@ export type SessionActivityEvent =
   | { Thinking: SessionActivityThinking }
   | { RuntimeStatus: SessionActivityRuntimeStatus }
   | { Workflow: SessionActivityWorkflow }
+  | { Artifact: SessionActivityArtifact }
   | Record<string, unknown>;
 
 export type WorkflowWorkerActivityItem = {

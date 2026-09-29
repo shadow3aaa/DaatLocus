@@ -392,8 +392,76 @@ const fn is_ctrl_c(key: KeyEvent) -> bool {
 const fn is_ctrl_t(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'t'))
 }
-const fn is_workflow_inspector_key(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char(c) if key.modifiers.is_empty() && c.eq_ignore_ascii_case(&'w'))
+
+const fn is_ctrl_o(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'o'))
+}
+
+/// Open the most recently presented artifact with the OS handler.  Images and
+/// SVGs open through their absolute local path (system viewer); HTML and URL
+/// artifacts open in the browser through the daemon URL.
+fn handle_open_artifact_key(view: &mut TuiViewState, state: &DashboardState) -> TuiInputOutcome {
+    let artifact = state
+        .activity_events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            super::SessionActivityEvent::Artifact(artifact) => Some(artifact),
+            _ => None,
+        });
+    let Some(artifact) = artifact else {
+        view.command_feedback = Some(artifact_open_feedback(
+            "No artifact to open yet.",
+            None,
+            CommandFeedbackLevel::Info,
+        ));
+        return TuiInputOutcome::Continue;
+    };
+
+    let base_url = crate::dashboard::artifact_links::daemon_base_url();
+    let Some(target) = crate::dashboard::artifact_links::artifact_open_target(artifact, &base_url)
+    else {
+        view.command_feedback = Some(artifact_open_feedback(
+            format!(
+                "Artifact '{}' has no openable location.",
+                artifact.title.trim()
+            ),
+            None,
+            CommandFeedbackLevel::Warning,
+        ));
+        return TuiInputOutcome::Continue;
+    };
+
+    match crate::open_url::open_url(&target) {
+        Ok(()) => {
+            view.command_feedback = Some(artifact_open_feedback(
+                format!("Opened artifact: {}", artifact.title.trim()),
+                Some(target),
+                CommandFeedbackLevel::Info,
+            ));
+        }
+        Err(err) => {
+            view.command_feedback = Some(artifact_open_feedback(
+                format!("Failed to open artifact: {err}"),
+                Some(target),
+                CommandFeedbackLevel::Error,
+            ));
+        }
+    }
+    TuiInputOutcome::Continue
+}
+
+fn artifact_open_feedback(
+    message: impl Into<String>,
+    detail: Option<String>,
+    level: CommandFeedbackLevel,
+) -> CommandFeedback {
+    CommandFeedback {
+        title: "Open artifact".to_string(),
+        message: message.into(),
+        detail,
+        level,
+    }
 }
 
 const fn is_ctrl_p(key: KeyEvent) -> bool {

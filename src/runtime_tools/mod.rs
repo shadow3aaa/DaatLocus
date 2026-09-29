@@ -25,6 +25,7 @@ use crate::{
 
 mod files;
 mod history;
+pub(crate) mod present_artifact;
 mod view_image;
 mod work;
 
@@ -1103,6 +1104,14 @@ async fn execute_worker_runtime_tool(
                 call,
             );
         }
+        "present_artifact" => {
+            return present_artifact::execute_worker_present_artifact(
+                app_context.execution_cwd.as_path(),
+                &app_context.sandbox_policy,
+                supports_vision,
+                call,
+            );
+        }
         "finish_and_send" => {
             return Ok(ToolExecutionResult::from_activity_event(
                 "worker completed",
@@ -1179,6 +1188,7 @@ fn build_static_runtime_tools() -> Vec<Box<dyn RuntimeTool>> {
     let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
     tools.extend(files::register_tools());
     tools.extend(view_image::register_tools());
+    tools.extend(present_artifact::register_tools());
     tools.extend(work::register_tools());
     tools
 }

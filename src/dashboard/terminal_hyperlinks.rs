@@ -33,6 +33,9 @@ pub(super) fn collect_terminal_hyperlink_overlays(
     areas: &[Rect],
 ) -> Vec<TerminalHyperlinkOverlay> {
     let mut overlays = Vec::new();
+    // Artifact cards wrap `?sig=` onto the next row. Remember the artifact URL
+    // so the signature row can complete its click target.
+    let mut pending_artifact_url: Option<String> = None;
     for area in areas {
         if area.width == 0 || area.height == 0 {
             continue;
@@ -43,6 +46,27 @@ pub(super) fn collect_terminal_hyperlink_overlays(
                 continue;
             }
             let mut occupied = Vec::new();
+            let trimmed = row.text.trim();
+            if let Some(signature) = trimmed.strip_prefix("?sig=") {
+                let signature = trim_trailing_link_punctuation(signature);
+                if !signature.is_empty()
+                    && let Some(base) = pending_artifact_url.take()
+                {
+                    let displayed = format!("?sig={signature}");
+                    let leading = row.text.find("?sig=").unwrap_or(0);
+                    if let Some(overlay) = row_overlay(
+                        &row,
+                        y,
+                        leading,
+                        &displayed,
+                        &format!("{base}{displayed}"),
+                    ) {
+                        overlays.push(overlay);
+                    }
+                }
+                continue;
+            }
+            let mut saw_artifact_url = false;
             for matched in url_regex().find_iter(&row.text) {
                 let text = trim_trailing_link_punctuation(matched.as_str());
                 if text.is_empty() {
@@ -51,9 +75,17 @@ pub(super) fn collect_terminal_hyperlink_overlays(
                 let start = matched.start();
                 let end = start + text.len();
                 occupied.push((start, end));
-                if let Some(overlay) = row_overlay(&row, y, start, text, text) {
+                let target = text.to_string();
+                if is_artifact_url_without_signature(text) {
+                    pending_artifact_url = Some(text.to_string());
+                    saw_artifact_url = true;
+                }
+                if let Some(overlay) = row_overlay(&row, y, start, text, &target) {
                     overlays.push(overlay);
                 }
+            }
+            if !saw_artifact_url {
+                pending_artifact_url = None;
             }
             for matched in file_regex().find_iter(&row.text) {
                 let matched_text = matched.as_str();
@@ -198,6 +230,10 @@ fn row_overlay(
 fn url_regex() -> &'static Regex {
     static URL_RE: OnceLock<Regex> = OnceLock::new();
     URL_RE.get_or_init(|| Regex::new(r#"https?://[^\s<>"')\]]+"#).expect("valid URL regex"))
+}
+
+fn is_artifact_url_without_signature(url: &str) -> bool {
+    url.contains("/artifacts/") && !url.contains("?sig=")
 }
 
 fn file_regex() -> &'static Regex {

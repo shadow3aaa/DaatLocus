@@ -53,6 +53,39 @@ pub struct MessageImageAttachment {
     pub description: Option<String>,
 }
 
+/// Visual content kind presented by the agent through `present_artifact`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    Image,
+    Svg,
+    Html,
+    Url,
+}
+
+/// Agent-presented visual artifact. File-backed kinds (`image`, `svg`,
+/// `html`) are content-addressed under the shared artifact store and exposed
+/// through a signed `/artifacts/...` URI; `url` artifacts carry the target URL
+/// directly (for example a local dev server).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactActivityData {
+    /// Stable logical id; re-presenting with the same id creates a new version.
+    pub artifact_id: String,
+    pub version: u32,
+    pub kind: ArtifactKind,
+    pub title: String,
+    /// Signed daemon-relative URI for file-backed kinds, or the target URL for `url`.
+    pub uri: String,
+    pub mime_type: String,
+    /// Absolute path of the stored artifact file on the daemon host (file-backed kinds only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_len: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GenericAppActivityData {
     pub title: String,

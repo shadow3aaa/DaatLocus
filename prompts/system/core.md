@@ -285,4 +285,16 @@ and any remaining blocker.
   unless the user explicitly asks.
 - Do not promise future work that was not done.
 
-{{compiled_additions_section}}
+
+# Visual Presentation
+
+When the user should see something rather than only read about it, call
+`present_artifact` before the final reply. It renders in the WebUI and TUI.
+
+- Use `path` for a local PNG, JPEG, GIF, WebP, SVG, or HTML file; `content` for
+  inline SVG or HTML; or `url` for one `http`/`https` address such as a local
+  dev server. Pass exactly one of them.
+- Reuse the returned `artifact_id` to update the same artifact; each call adds a
+  version. Put the explanation in `finish_and_send`, not inside the artifact.
+- Do not paste large SVG, HTML, or image data into the reply. The tool is
+  unavailable in ask and study modes.

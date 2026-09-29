@@ -1284,10 +1284,11 @@ fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
                 .join(" | ");
         }
         if input.trim().is_empty() {
-            return "Enter send. Shift+Enter newline. Ctrl+P queued inputs. Prefix / for commands. Esc clear."
+            return "Enter send. Shift+Enter newline. Ctrl+P queued inputs. Ctrl+O open artifact. w g workflow group. Prefix / for commands. Esc clear."
                 .to_string();
         }
-        return "Enter send. Shift+Enter newline. Prefix / for commands.".to_string();
+        return "Enter send. Shift+Enter newline. Ctrl+O open artifact. Prefix / for commands."
+            .to_string();
     }
     if command_completion_body(input)
         .map(str::trim)

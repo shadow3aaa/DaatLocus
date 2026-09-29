@@ -1,5 +1,6 @@
 //! Dashboard: activity feed + command console.
 
+mod artifact_links;
 pub mod cells;
 mod command_flow;
 mod command_input;
@@ -490,12 +491,23 @@ pub async fn run_tui_dashboard(
     view.replace_command_history(initial_command_history);
     view.seed_command_history_from_state(&rx.borrow());
 
+    // Detect terminal graphics support once, now that the alternate screen is
+    // active.  This must happen before the input event stream starts, because
+    // it queries the terminal over stdio.  Fall back to halfblocks when
+    // detection fails so artifact previews still render as block art.
+    let picker = ratatui_image::picker::Picker::from_query_stdio().unwrap_or_else(|err| {
+        tracing::warn!("terminal image protocol detection failed: {err}");
+        ratatui_image::picker::Picker::halfblocks()
+    });
+    view.artifact_previews.set_picker(picker);
+
     // Async event loop: terminal input, dashboard state updates, and scheduled draw requests.
     let mut event_stream = crossterm::event::EventStream::new();
     let (draw_tx, mut draw_rx) = tokio::sync::broadcast::channel::<()>(16);
     // FrameRequester spawns FrameScheduler; keep alive so the task isn't cancelled.
     let frame_requester = frame_requester::FrameRequester::new(draw_tx);
     frame_requester.schedule_frame();
+    let mut chord_sleep = std::pin::pin!(tokio::time::sleep(Duration::from_secs(86_400)));
 
     let mut frame_profiler = TuiFrameProfiler::new();
 
@@ -1358,6 +1370,7 @@ fn render_tui_dashboard_frame<B: Backend>(
             hyperlink_overlays,
         });
     }
+    let mut artifact_previews = std::mem::take(&mut view.artifact_previews);
     terminal.draw(|f| {
         let root = Layout::default()
             .direction(Direction::Vertical)
@@ -1441,6 +1454,7 @@ fn render_tui_dashboard_frame<B: Backend>(
         }
     })?;
     view.set_selectable_regions(selectable_regions);
+    view.artifact_previews = artifact_previews;
     let draw_elapsed = draw_start.elapsed();
     Ok(TuiFrameRender {
         timing: TuiFrameTiming {
