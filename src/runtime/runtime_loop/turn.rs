@@ -270,6 +270,7 @@ async fn prepare_coding_project_session(context: &mut Context) -> Result<()> {
             .tool_output_max_tokens
             .max(1),
         turn_epoch: context.runtime_turn_epoch,
+        scope_lsp_enabled: context.config.scope.lsp_enabled,
     };
     prepare_coding_project_app(&mut context.apps, &project_dir, &app_context).await
 }
@@ -1738,6 +1739,7 @@ mod tests {
             dashboard_tx: None,
             tool_output_max_tokens: 4096,
             turn_epoch: 0,
+            scope_lsp_enabled: true,
         };
 
         prepare_coding_project_app(&mut apps, project.path(), &app_context)
@@ -1770,6 +1772,7 @@ mod tests {
             dashboard_tx: None,
             tool_output_max_tokens: 4096,
             turn_epoch: 0,
+            scope_lsp_enabled: true,
         };
 
         prepare_coding_project_app(&mut apps, project.path(), &app_context)

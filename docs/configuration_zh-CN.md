@@ -33,6 +33,9 @@ cargo run -- config show
 - `[judge]`：judge / pairwise 评估配置。
 - `[sandbox]`：运行时沙箱控制。
 - `[telegram]`：Telegram transport 配置。
+- `[scope]`：SCOPE 引擎控制。`lsp_enabled` 默认为 `true`，运行中修改即可热生效。
+  下一次 coding 源码操作会为已打开的项目启动或停止语言服务器。
+  设为 `false` 时，tree-sitter 搜索和编辑仍然可用。
 
 ## 最小示例
 

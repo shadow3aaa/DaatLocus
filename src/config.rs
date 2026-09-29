@@ -257,9 +257,31 @@ impl Default for SleepConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Top-level config
+// SCOPE engine configuration
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct ScopeConfig {
+    /// Whether SCOPE may start a language server for an opened project.
+    ///
+    /// Language servers improve cross-file reference review, but each process
+    /// can use a large amount of memory. Disable this before launching many
+    /// subagents. Tree-sitter parsing, search, and hash-anchored edits stay
+    /// available. Changing this value in `config.toml` applies on the next
+    /// runtime turn and starts or stops the server for an already open project.
+    pub lsp_enabled: bool,
+}
+
+impl Default for ScopeConfig {
+    fn default() -> Self {
+        Self { lsp_enabled: true }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Top-level config
+// ---------------------------------------------------------------------------
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Config {
@@ -279,6 +301,7 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     pub telegram: TelegramConfig,
     pub sleep: SleepConfig,
+    pub scope: ScopeConfig,
 }
 
 impl Default for Config {
@@ -306,6 +329,7 @@ impl Default for Config {
             sandbox: SandboxConfig::default(),
             telegram: TelegramConfig::default(),
             sleep: SleepConfig::default(),
+            scope: ScopeConfig::default(),
         }
     }
 }

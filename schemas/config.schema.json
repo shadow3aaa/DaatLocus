@@ -84,6 +84,12 @@
         "enabled": true
       }
     },
+    "scope": {
+      "$ref": "#/$defs/ScopeConfig",
+      "default": {
+        "lsp_enabled": true
+      }
+    },
     "telegram": {
       "$ref": "#/$defs/TelegramConfig",
       "default": {
@@ -387,6 +393,16 @@
         "strong_filesystem": {
           "$ref": "#/$defs/StrongFilesystemSandboxMode",
           "default": "off"
+        }
+      }
+    },
+    "ScopeConfig": {
+      "type": "object",
+      "properties": {
+        "lsp_enabled": {
+          "description": "Whether SCOPE may start a language server for an opened project.\n\nLanguage servers improve cross-file reference review, but each process\ncan use a large amount of memory. Disable this before launching many\nsubagents. Tree-sitter parsing, search, and hash-anchored edits stay\navailable. Changing this value in `config.toml` applies on the next\nruntime turn and starts or stops the server for an already open project.",
+          "type": "boolean",
+          "default": true
         }
       }
     },

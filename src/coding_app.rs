@@ -497,7 +497,9 @@ impl CodingApp {
 
         let root_instructions = load_instruction_documents_in_dir(&project_root)?;
         let root_instruction_fingerprint = project_instruction_fingerprint(&root_instructions);
-        let output = self.scope.open_project(project_root.clone())?;
+        let output = self
+            .scope
+            .open_project(project_root.clone(), context.scope_lsp_enabled)?;
         let config_hints = ScopeEngineHandle::get_config_hints();
         let config_hint_summary = CodingConfigHintSummary::from_hints(&config_hints);
 
@@ -648,11 +650,13 @@ impl CodingApp {
         Ok(())
     }
 
-    fn require_project(&self) -> Result<()> {
-        if self.project_root.is_none() {
+    fn require_project(&mut self, context: &AppToolExecutionContext) -> Result<()> {
+        let Some(project_root) = self.project_root.clone() else {
             return Err(miette!("no coding project opened; call open_project first"));
-        }
-        Ok(())
+        };
+        self.scope
+            .open_project(project_root, context.scope_lsp_enabled)
+            .map(|_| ())
     }
 
     fn explored_event(
@@ -710,7 +714,9 @@ impl CodingApp {
             path: String,
         }
 
-        self.require_project()?;
+        if self.project_root.is_none() {
+            return Ok(());
+        }
         let args: EditFilePathArgs =
             serde_json::from_value(call.arguments.clone()).map_err(|err| {
                 miette!(
@@ -880,7 +886,7 @@ impl App for CodingApp {
                 self.open_project(&args, context)
             }
             "search_code" => {
-                self.require_project()?;
+                self.require_project(context)?;
                 let args: CodingSearchCodeArgs = parse_coding_tool_args(call)?;
                 let result = self.scope.search_code(&args.clone())?;
                 self.last_action = Some(format!("searched {}", args.query));
@@ -937,7 +943,7 @@ impl App for CodingApp {
                 Ok(output)
             }
             "read_code" => {
-                self.require_project()?;
+                self.require_project(context)?;
                 let args: CodingReadCodeArgs = parse_coding_tool_args(call)?;
                 let summary_target = read_args_summary(&args);
                 let input = scope_engine::api::ReadCodeInput {
@@ -993,7 +999,7 @@ impl App for CodingApp {
                 Ok(output)
             }
             "edit_code" => {
-                self.require_project()?;
+                self.require_project(context)?;
                 let args: CodingEditCodeArgs = parse_coding_tool_args(call)?;
                 let edit_result = self.scope.edit_code(&args.edits)?;
                 let results = edit_result.propagation_results;
@@ -1042,7 +1048,7 @@ impl App for CodingApp {
                 Ok(output)
             }
             "next_review" => {
-                self.require_project()?;
+                self.require_project(context)?;
                 let args: CodingNextReviewArgs = parse_coding_tool_args(call)?;
                 let output = self.scope.ack_next_events(args.limit);
                 self.last_action = Some(if output.returned == 1 {
@@ -1390,6 +1396,7 @@ mod tests {
             dashboard_tx: None,
             tool_output_max_tokens: 4096,
             turn_epoch: 1,
+            scope_lsp_enabled: true,
         }
     }
 

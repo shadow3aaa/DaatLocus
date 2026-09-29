@@ -44,9 +44,14 @@ impl ScopeEngineHandle {
     }
 
     /// Open a project, setting the root directory for subsequent operations.
+    ///
+    /// `lsp_enabled` controls whether the detected language server is started.
+    /// Passing the current project root again with a different value starts or
+    /// stops that server without clearing review state.
     pub fn open_project(
         &mut self,
         project_root: impl Into<PathBuf>,
+        lsp_enabled: bool,
     ) -> Result<api::OpenProjectOutput> {
         let project_root = project_root.into();
         let previous_project_root = self.project_root.clone();
@@ -54,6 +59,7 @@ impl ScopeEngineHandle {
             &project_root,
             previous_project_root.as_deref(),
             &self.lsp_analyzer,
+            lsp_enabled,
         )
         .map_err(|err| miette!("{err}"))?;
         if previous_project_root.as_deref() != Some(project_root.as_path()) {
@@ -250,7 +256,9 @@ mod tests {
             .accumulate(vec![open_result("src/main.rs::fn main")]);
         assert_eq!(handle.pending_review_count(), 1);
 
-        handle.open_project(temp_dir.path()).expect("open project");
+        handle
+            .open_project(temp_dir.path(), false)
+            .expect("open project");
         assert_eq!(handle.pending_review_count(), 0);
 
         handle
@@ -261,13 +269,13 @@ mod tests {
         assert_eq!(handle.pending_review_count(), 1);
 
         let output = handle
-            .open_project(temp_dir.path())
+            .open_project(temp_dir.path(), false)
             .expect("reopen same project");
         assert_eq!(output.status, "already_open");
         assert_eq!(handle.pending_review_count(), 1);
 
         handle
-            .open_project(other_temp_dir.path())
+            .open_project(other_temp_dir.path(), false)
             .expect("open other project");
         assert_eq!(handle.pending_review_count(), 0);
         assert!(
@@ -311,7 +319,7 @@ mod tests {
         std::fs::write(&file, "fn first() {}\nfn target() {}\n").unwrap();
 
         let mut handle = ScopeEngineHandle::new();
-        handle.open_project(temp_dir.path()).unwrap();
+        handle.open_project(temp_dir.path(), false).unwrap();
         let target_hash = scope_engine::patch::line_hash("fn target() {}");
         handle
             .read_code(&api::ReadCodeInput {
@@ -346,7 +354,7 @@ mod tests {
         std::fs::write(&file, "fn first() {}\nfn target() {}\n").unwrap();
 
         let mut handle = ScopeEngineHandle::new();
-        handle.open_project(temp_dir.path()).unwrap();
+        handle.open_project(temp_dir.path(), false).unwrap();
         let target_hash = scope_engine::patch::line_hash("fn target() {}");
         handle
             .read_code(&api::ReadCodeInput {

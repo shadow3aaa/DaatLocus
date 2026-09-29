@@ -153,6 +153,10 @@ pub struct AppToolExecutionContext {
     pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
     pub tool_output_max_tokens: usize,
     pub turn_epoch: u64,
+    /// Live `[scope].lsp_enabled` value. Coding reads it when opening a project
+    /// and before source operations so a hot-reloaded config can start or stop
+    /// the language server without reopening the project.
+    pub scope_lsp_enabled: bool,
 }
 
 impl AppToolExecutionContext {

@@ -988,6 +988,7 @@ mod tests {
             dashboard_tx: None,
             tool_output_max_tokens: 4096,
             turn_epoch: 0,
+            scope_lsp_enabled: true,
         }
     }
 }

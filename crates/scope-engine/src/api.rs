@@ -11,6 +11,8 @@ pub struct OpenProjectOutput {
     pub detected_lsp_language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp: Option<String>,
+    /// Whether an LSP process is attached after this open.
+    pub lsp_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

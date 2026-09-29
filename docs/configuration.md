@@ -38,6 +38,10 @@ Editors can reference it through GitHub raw, for example:
 - `[judge]`: judge / pairwise evaluation config.
 - `[sandbox]`: runtime sandbox controls.
 - `[telegram]`: Telegram transport config.
+- `[scope]`: SCOPE engine controls. `lsp_enabled` defaults to `true` and can be
+  changed in a running process. The next coding source operation starts or stops
+  the language server for an already open project. Tree-sitter search and edits
+  stay available when it is `false`.
 
 ## Minimal Example
 

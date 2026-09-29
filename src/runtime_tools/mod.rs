@@ -518,6 +518,7 @@ impl RuntimeTool for AppRuntimeTool {
                 .tool_output_max_tokens
                 .max(1),
             turn_epoch: context.runtime_turn_epoch,
+            scope_lsp_enabled: context.config.scope.lsp_enabled,
         };
         let app_call = call.with_name(self.app_tool_name.clone());
         let result = context
@@ -551,10 +552,14 @@ impl WorkflowRuntimeTool {
             name: definition.tool_name(),
             description: definition.description.clone(),
             input_spec: AgentToolInputSpec::JsonSchema {
-                schema: definition.input_schema.clone(),
+                schema: workflow_tool_input_schema(&definition.input_schema),
             },
         }
     }
+}
+
+fn workflow_tool_input_schema(input_schema: &Value) -> Value {
+    crate::workflow::workflow_tool_input_schema(input_schema)
 }
 
 #[async_trait]
@@ -906,6 +911,8 @@ pub struct WorkerRuntimeToolCallContext<'a> {
     pub(crate) worker_plan: &'a mut crate::plan::Plan,
     pub(crate) file_anchors: &'a mut crate::file_anchors::FileAnchorTable,
     pub(crate) dashboard_history: Option<&'a DashboardActivityHistoryStore>,
+    /// Live `[scope].lsp_enabled` value captured for this worker tool call.
+    pub(crate) scope_lsp_enabled: bool,
 }
 
 pub async fn execute_worker_runtime_tool_call_for_apps(
@@ -924,6 +931,7 @@ pub async fn execute_worker_runtime_tool_call_for_apps(
         worker_plan,
         file_anchors,
         dashboard_history,
+        scope_lsp_enabled,
     } = context;
     let tools = build_worker_runtime_tools_for_apps(apps, output_schema.clone());
     let tool = find_runtime_tool(&tools, &call.name)?;
@@ -943,6 +951,7 @@ pub async fn execute_worker_runtime_tool_call_for_apps(
         dashboard_tx: None,
         tool_output_max_tokens: tool_output_max_tokens.max(1),
         turn_epoch,
+        scope_lsp_enabled,
     };
     apps.before_runtime_tool_call(call, &app_context)?;
     execute_worker_runtime_tool(
@@ -1557,6 +1566,7 @@ pub async fn execute_agent_tool_call(
             .tool_output_max_tokens
             .max(1),
         turn_epoch: context.runtime_turn_epoch,
+        scope_lsp_enabled: context.config.scope.lsp_enabled,
     };
     context.apps.before_runtime_tool_call(call, &app_context)?;
     let result = tool.execute(context, call).await?;
@@ -1732,6 +1742,7 @@ mod tests {
                 worker_plan: &mut worker_plan,
                 file_anchors: &mut file_anchors,
                 dashboard_history: None,
+                scope_lsp_enabled: true,
             },
         )
         .await
@@ -1763,6 +1774,7 @@ mod tests {
                 worker_plan: &mut worker_plan,
                 file_anchors: &mut file_anchors,
                 dashboard_history: None,
+                scope_lsp_enabled: true,
             },
         )
         .await
@@ -1809,6 +1821,7 @@ mod tests {
                 worker_plan: &mut worker_plan,
                 file_anchors: &mut file_anchors,
                 dashboard_history: None,
+                scope_lsp_enabled: true,
             },
         )
         .await
@@ -1848,6 +1861,7 @@ mod tests {
                 worker_plan: &mut worker_plan,
                 file_anchors: &mut file_anchors,
                 dashboard_history: None,
+                scope_lsp_enabled: true,
             },
         )
         .await
@@ -1905,6 +1919,7 @@ mod tests {
                 worker_plan: &mut worker_plan,
                 file_anchors: &mut file_anchors,
                 dashboard_history: None,
+                scope_lsp_enabled: true,
             },
         )
         .await

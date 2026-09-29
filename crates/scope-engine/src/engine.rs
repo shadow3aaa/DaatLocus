@@ -156,7 +156,10 @@ fn open_existing_source_files_for_lsp(lsp: &dyn Analyzer, root: &Path, lsp_lang:
     }
 }
 
-/// Opens `project_root` and initializes its detected language server.
+/// Opens `project_root` and initializes its detected language server when LSP is enabled.
+///
+/// `lsp_enabled` is the live switch. Reopening the current project with a different
+/// value starts or stops the language server without resetting other project state.
 ///
 /// # Errors
 ///
@@ -165,29 +168,127 @@ pub fn open_project(
     project_root: &Path,
     current_project_root: Option<&Path>,
     lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
+    lsp_enabled: bool,
 ) -> Result<OpenProjectOutput, String> {
     if current_project_root == Some(project_root) {
-        return Ok(OpenProjectOutput {
-            status: "already_open".to_string(),
-            project_root: project_root.to_string_lossy().into_owned(),
-            detected_lsp_language: None,
-            lsp: None,
+        let lsp_active = applied_lsp_enabled(lsp_analyzer)?;
+        if lsp_active == lsp_enabled {
+            return Ok(OpenProjectOutput {
+                status: "already_open".to_string(),
+                project_root: project_root.to_string_lossy().into_owned(),
+                detected_lsp_language: None,
+                lsp: None,
+                lsp_enabled: lsp_active,
+            });
+        }
+        return sync_project_lsp(project_root, lsp_analyzer, lsp_enabled).map(|lsp_status| {
+            OpenProjectOutput {
+                status: "lsp_updated".to_string(),
+                project_root: project_root.to_string_lossy().into_owned(),
+                detected_lsp_language: None,
+                lsp: Some(lsp_status),
+                lsp_enabled,
+            }
         });
     }
 
+    sync_project_lsp(project_root, lsp_analyzer, lsp_enabled).map(|lsp_status| OpenProjectOutput {
+        status: "opened".to_string(),
+        project_root: project_root.to_string_lossy().into_owned(),
+        detected_lsp_language: detect_project_lsp_language(project_root).map(str::to_string),
+        lsp: Some(lsp_status),
+        lsp_enabled,
+    })
+}
+
+fn applied_lsp_enabled(
+    lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
+) -> Result<bool, String> {
+    let lsp_guard = lsp_analyzer
+        .lock()
+        .map_err(|_| "lock poisoned".to_string())?;
+    Ok(lsp_guard
+        .as_ref()
+        .is_some_and(|analyzer| analyzer.scope_lsp_enabled()))
+}
+
+struct DisabledLsp;
+
+impl Analyzer for DisabledLsp {
+    fn find_references_for_symbol(
+        &self,
+        _file_path: &Path,
+        _line: usize,
+        _character: usize,
+        _project_root: &Path,
+    ) -> Vec<crate::api::PropagationResult> {
+        Vec::new()
+    }
+
+    fn notify_did_open(&self, _file_path: &Path, _text: &str) {}
+
+    fn notify_did_change(&self, _file_path: &Path, _version: i32, _text: &str) {}
+
+    fn notify_did_close(&self, _file_path: &Path) {}
+
+    fn scope_lsp_enabled(&self) -> bool {
+        false
+    }
+
+    fn is_initialized(&self) -> bool {
+        false
+    }
+}
+
+struct UnsupportedLsp;
+
+impl Analyzer for UnsupportedLsp {
+    fn find_references_for_symbol(
+        &self,
+        _file_path: &Path,
+        _line: usize,
+        _character: usize,
+        _project_root: &Path,
+    ) -> Vec<crate::api::PropagationResult> {
+        Vec::new()
+    }
+
+    fn notify_did_open(&self, _file_path: &Path, _text: &str) {}
+
+    fn notify_did_change(&self, _file_path: &Path, _version: i32, _text: &str) {}
+
+    fn notify_did_close(&self, _file_path: &Path) {}
+
+    fn is_initialized(&self) -> bool {
+        false
+    }
+}
+
+/// Start or stop the language server for an already chosen project root.
+///
+/// Dropping the previous analyzer shuts the language-server process down.
+/// A placeholder remains installed so the applied switch can be read later.
+/// Returns the resulting LSP status: `disabled`, `unsupported`, or `started`.
+fn sync_project_lsp(
+    project_root: &Path,
+    lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
+    lsp_enabled: bool,
+) -> Result<String, String> {
     let detected_lsp_language = detect_project_lsp_language(project_root);
+    if !lsp_enabled {
+        let mut lsp_guard = lsp_analyzer
+            .lock()
+            .map_err(|_| "lock poisoned".to_string())?;
+        *lsp_guard = Some(Box::new(DisabledLsp));
+        return Ok("disabled".to_string());
+    }
+
     let Some(config) = detected_lsp_language.and_then(lsp_config_for_language) else {
         let mut lsp_guard = lsp_analyzer
             .lock()
             .map_err(|_| "lock poisoned".to_string())?;
-        *lsp_guard = None;
-        drop(lsp_guard);
-        return Ok(OpenProjectOutput {
-            status: "opened".to_string(),
-            project_root: project_root.to_string_lossy().into_owned(),
-            detected_lsp_language: detected_lsp_language.map(str::to_string),
-            lsp: Some("unsupported".to_string()),
-        });
+        *lsp_guard = Some(Box::new(UnsupportedLsp));
+        return Ok("unsupported".to_string());
     };
 
     {
@@ -208,12 +309,7 @@ pub fn open_project(
         }
     }
 
-    Ok(OpenProjectOutput {
-        status: "opened".to_string(),
-        project_root: project_root.to_string_lossy().into_owned(),
-        detected_lsp_language: detected_lsp_language.map(str::to_string),
-        lsp: None,
-    })
+    Ok("started".to_string())
 }
 
 /// Searches project source files using the supplied filters.
@@ -827,7 +923,7 @@ mod tests {
         .unwrap();
         let lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
 
-        let output = open_project(dir.path(), None, &lsp_analyzer).unwrap();
+        let output = open_project(dir.path(), None, &lsp_analyzer, true).unwrap();
 
         assert_eq!(output.detected_lsp_language.as_deref(), Some("rust"));
     }
@@ -837,10 +933,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
 
-        let output = open_project(dir.path(), Some(dir.path()), &lsp_analyzer).unwrap();
+        let opened = open_project(dir.path(), None, &lsp_analyzer, true).unwrap();
+        assert_eq!(opened.status, "opened");
+
+        let output = open_project(dir.path(), Some(dir.path()), &lsp_analyzer, true).unwrap();
 
         assert_eq!(output.status, "already_open");
         assert_eq!(output.detected_lsp_language, None);
+        assert!(output.lsp_enabled);
+    }
+
+    #[test]
+    fn open_project_skips_lsp_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"tmp\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        let lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+
+        let output = open_project(dir.path(), None, &lsp_analyzer, false).unwrap();
+
+        assert_eq!(output.lsp.as_deref(), Some("disabled"));
+        assert!(!output.lsp_enabled);
+        assert!(!applied_lsp_enabled(&lsp_analyzer).unwrap());
+    }
+
+    #[test]
+    fn reopening_current_project_stops_lsp_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+        open_project(dir.path(), None, &lsp_analyzer, true).unwrap();
+
+        let updated = open_project(dir.path(), Some(dir.path()), &lsp_analyzer, false).unwrap();
+
+        assert_eq!(updated.status, "lsp_updated");
+        assert_eq!(updated.lsp.as_deref(), Some("disabled"));
+        assert!(!updated.lsp_enabled);
+        assert!(!updated.lsp_enabled);
+        assert!(!applied_lsp_enabled(&lsp_analyzer).unwrap());
     }
 
     #[test]

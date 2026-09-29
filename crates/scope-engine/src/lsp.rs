@@ -1081,6 +1081,10 @@ impl Analyzer for LspClient {
     fn is_initialized(&self) -> bool {
         self.inner.borrow().initialized
     }
+
+    fn scope_lsp_enabled(&self) -> bool {
+        true
+    }
 }
 
 // ── Backward-compatible type alias ────────────────────────────

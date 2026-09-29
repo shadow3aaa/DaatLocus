@@ -2361,6 +2361,7 @@ async fn execute_worker_tool(
             worker_plan: &mut worker_runtime.worker_plan,
             file_anchors: &mut worker_runtime.file_anchors,
             dashboard_history: context.dashboard_history.as_ref(),
+            scope_lsp_enabled: context.config.scope.lsp_enabled,
         },
     )
     .await

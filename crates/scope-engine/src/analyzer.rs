@@ -32,6 +32,14 @@ pub trait Analyzer: Send {
     /// Notify the language server that a file was closed.
     fn notify_did_close(&self, file_path: &Path);
 
+    /// Whether this analyzer represents an enabled SCOPE LSP switch.
+    ///
+    /// Placeholders stay installed when the switch is on but no server can run,
+    /// so a later open can tell a deliberate disable apart from "not started".
+    fn scope_lsp_enabled(&self) -> bool {
+        true
+    }
+
     /// Whether the analyzer is available and initialized.
     fn is_initialized(&self) -> bool;
 }

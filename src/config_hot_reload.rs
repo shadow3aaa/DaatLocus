@@ -11,7 +11,9 @@
 //! - sandbox policy: the runtime sandbox policy is rebuilt;
 //! - telegram: the manager daemon watches the config file itself and rebuilds
 //!   its Telegram transport when the telegram section changes;
-//! - judge / sleep / locale: copied into `Context.config`.
+//! - judge / sleep / locale / scope: copied into `Context.config`. The scope
+//!   LSP switch is read again before coding source operations, so an already
+//!   open project starts or stops its language server on the next tool call;
 //!
 //! The daemon port cannot change on a live daemon; a warning is surfaced.
 
@@ -94,6 +96,9 @@ pub fn config_change_groups(old: &Config, new: &Config) -> (Vec<&'static str>, V
     }
     if old.locale != new.locale {
         groups.push("locale");
+    }
+    if old.scope != new.scope {
+        groups.push("scope");
     }
     let mut warnings = Vec::new();
     if old.daemon.port != new.daemon.port {
@@ -270,6 +275,10 @@ mod tests {
         let mut changed = sample_config();
         changed.locale = crate::i18n::Locale::ZhCn;
         assert!(config_change_groups(&old, &changed).0.contains(&"locale"));
+
+        let mut changed = sample_config();
+        changed.scope.lsp_enabled = false;
+        assert!(config_change_groups(&old, &changed).0.contains(&"scope"));
 
         let mut changed = sample_config();
         changed
