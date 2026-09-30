@@ -32,16 +32,6 @@ fn run() -> io::Result<()> {
     let home = daat_locus_home();
     let config_path = home.join("config").join(CONFIG_FILE_NAME);
     let config_exists = config_path.is_file();
-    if !config_exists && !should_start_without_config() {
-        log_launcher(
-            &home,
-            &format!(
-                "config file missing at {}; skipped daemon startup",
-                config_path.display()
-            ),
-        );
-        return Ok(());
-    }
     let port = if config_exists {
         configured_daemon_port(&config_path).unwrap_or(DEFAULT_DAEMON_PORT)
     } else {
@@ -209,9 +199,6 @@ fn percent_encode_url_component(value: &str) -> String {
         }
     }
     encoded
-}
-const fn should_start_without_config() -> bool {
-    true
 }
 const fn should_open_webui_after_launch() -> bool {
     cfg!(target_os = "macos")
