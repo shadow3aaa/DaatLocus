@@ -1,6 +1,6 @@
 use std::{
-    collections::BTreeMap,
-    ffi::{OsStr, c_void},
+    collections::{BTreeMap, HashSet},
+    ffi::{OsStr, OsString, c_void},
     io,
     os::windows::{
         ffi::OsStrExt,
@@ -163,6 +163,7 @@ pub fn spawn_restricted_async(
     let cap_sid_ptr = LocalSid::from_string(&cap_sid)?;
     let token = create_restricted_token(&cap_sid_ptr)?;
     let mut acl_guards = Vec::new();
+    let mut guarded_paths = HashSet::new();
     let process = match spawn_restricted_async_inner(RestrictedSpawnInput {
         policy,
         program,
@@ -173,6 +174,7 @@ pub fn spawn_restricted_async(
         psid_everyone: token.everyone_sid.as_ptr().cast::<c_void>().cast_mut(),
         token: token.handle.raw(),
         acl_guards: &mut acl_guards,
+        guarded_paths: &mut guarded_paths,
     }) {
         Ok(process) => process,
         Err(err) => {
@@ -194,6 +196,7 @@ struct RestrictedSpawnInput<'a> {
     psid_everyone: PSID,
     token: HANDLE,
     acl_guards: &'a mut Vec<AclGuard>,
+    guarded_paths: &'a mut HashSet<PathBuf>,
 }
 
 fn spawn_restricted_async_inner(
@@ -206,6 +209,7 @@ fn spawn_restricted_async_inner(
         input.psid_logon,
         input.psid_everyone,
         input.acl_guards,
+        input.guarded_paths,
     )?;
     let current_dir = input
         .options
@@ -278,18 +282,19 @@ fn apply_policy_acl_rules(
     psid_logon: PSID,
     psid_everyone: PSID,
     acl_guards: &mut Vec<AclGuard>,
+    guarded_paths: &mut HashSet<PathBuf>,
 ) -> io::Result<()> {
     if let Some(parent) = program.parent() {
-        add_program_read_ace(parent, psid, acl_guards)?;
+        add_program_read_ace(parent, psid, acl_guards, guarded_paths)?;
     }
-    add_program_read_ace(program, psid, acl_guards)?;
+    add_program_read_ace(program, psid, acl_guards, guarded_paths)?;
 
     for root in policy_paths_with_resolved(&policy.filesystem.readable_roots) {
-        add_guarded_ace(&root, psid, WORKER_READ_ALLOW_MASK, SET_ACCESS, acl_guards)?;
+        add_guarded_ace(&root, psid, WORKER_READ_ALLOW_MASK, SET_ACCESS, acl_guards, guarded_paths)?;
     }
     for writable_root in &policy.filesystem.writable_roots {
         for root in policy_paths_with_resolved(std::slice::from_ref(&writable_root.root)) {
-            add_guarded_ace(&root, psid, WORKER_WRITE_ALLOW_MASK, SET_ACCESS, acl_guards)?;
+            add_guarded_ace(&root, psid, WORKER_WRITE_ALLOW_MASK, SET_ACCESS, acl_guards, guarded_paths)?;
         }
         for subpath in policy_paths_with_resolved(&writable_root.read_only_subpaths) {
             add_guarded_ace_recursive(
@@ -298,11 +303,12 @@ fn apply_policy_acl_rules(
                 WORKER_DENY_WRITE_MASK,
                 DENY_ACCESS,
                 acl_guards,
+                guarded_paths,
             )?;
         }
     }
     for path in policy_paths_with_resolved(&policy.filesystem.deny_write_paths) {
-        add_guarded_ace_recursive(&path, psid, WORKER_DENY_WRITE_MASK, DENY_ACCESS, acl_guards)?;
+        add_guarded_ace_recursive(&path, psid, WORKER_DENY_WRITE_MASK, DENY_ACCESS, acl_guards, guarded_paths)?;
     }
     // File reads can be satisfied through the broader restricted SIDs, so
     // file-level deny-read guards must cover them as well as the capability SID.
@@ -318,13 +324,26 @@ fn apply_policy_acl_rules(
             &deny_read_entries,
             &deny_read_directory_entries,
             acl_guards,
+            guarded_paths,
         )?;
     }
     Ok(())
 }
 
-fn add_program_read_ace(path: &Path, psid: PSID, acl_guards: &mut Vec<AclGuard>) -> io::Result<()> {
-    match add_guarded_ace(path, psid, WORKER_READ_ALLOW_MASK, SET_ACCESS, acl_guards) {
+fn add_program_read_ace(
+    path: &Path,
+    psid: PSID,
+    acl_guards: &mut Vec<AclGuard>,
+    guarded_paths: &mut HashSet<PathBuf>,
+) -> io::Result<()> {
+    match add_guarded_ace(
+        path,
+        psid,
+        WORKER_READ_ALLOW_MASK,
+        SET_ACCESS,
+        acl_guards,
+        guarded_paths,
+    ) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
             tracing::warn!(
@@ -343,11 +362,12 @@ fn add_guarded_ace(
     mask: u32,
     mode: i32,
     acl_guards: &mut Vec<AclGuard>,
+    guarded_paths: &mut HashSet<PathBuf>,
 ) -> io::Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    ensure_acl_guard(path, acl_guards)?;
+    ensure_acl_guard(path, acl_guards, guarded_paths)?;
     add_explicit_aces(path, &[(psid, mask, mode)])?;
     Ok(())
 }
@@ -356,11 +376,12 @@ fn add_guarded_aces(
     path: &Path,
     entries: &[(PSID, u32, i32)],
     acl_guards: &mut Vec<AclGuard>,
+    guarded_paths: &mut HashSet<PathBuf>,
 ) -> io::Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    ensure_acl_guard(path, acl_guards)?;
+    ensure_acl_guard(path, acl_guards, guarded_paths)?;
     add_explicit_aces(path, entries)?;
     Ok(())
 }
@@ -371,6 +392,7 @@ fn add_guarded_ace_recursive(
     mask: u32,
     mode: i32,
     acl_guards: &mut Vec<AclGuard>,
+    guarded_paths: &mut HashSet<PathBuf>,
 ) -> io::Result<()> {
     if !path.exists() {
         return Ok(());
@@ -380,13 +402,13 @@ fn add_guarded_ace_recursive(
             let entry = entry?;
             let child = entry.path();
             if entry.file_type()?.is_dir() {
-                add_guarded_ace_recursive(&child, psid, mask, mode, acl_guards)?;
+                add_guarded_ace_recursive(&child, psid, mask, mode, acl_guards, guarded_paths)?;
             } else {
-                add_guarded_ace(&child, psid, mask, mode, acl_guards)?;
+                add_guarded_ace(&child, psid, mask, mode, acl_guards, guarded_paths)?;
             }
         }
     }
-    add_guarded_ace(path, psid, mask, mode, acl_guards)?;
+    add_guarded_ace(path, psid, mask, mode, acl_guards, guarded_paths)?;
     Ok(())
 }
 
@@ -395,6 +417,7 @@ fn add_guarded_read_denies_recursive(
     file_entries: &[(PSID, u32, i32)],
     directory_entries: &[(PSID, u32, i32)],
     acl_guards: &mut Vec<AclGuard>,
+    guarded_paths: &mut HashSet<PathBuf>,
 ) -> io::Result<()> {
     if !path.exists() {
         return Ok(());
@@ -409,20 +432,25 @@ fn add_guarded_read_denies_recursive(
                     file_entries,
                     directory_entries,
                     acl_guards,
+                    guarded_paths,
                 )?;
             } else {
-                add_guarded_aces(&child, file_entries, acl_guards)?;
+                add_guarded_aces(&child, file_entries, acl_guards, guarded_paths)?;
             }
         }
-        add_guarded_aces(path, directory_entries, acl_guards)?;
+        add_guarded_aces(path, directory_entries, acl_guards, guarded_paths)?;
     } else {
-        add_guarded_aces(path, file_entries, acl_guards)?;
+        add_guarded_aces(path, file_entries, acl_guards, guarded_paths)?;
     }
     Ok(())
 }
 
-fn ensure_acl_guard(path: &Path, acl_guards: &mut Vec<AclGuard>) -> io::Result<()> {
-    if acl_guards.iter().any(|guard| guard.path == path) {
+fn ensure_acl_guard(
+    path: &Path,
+    acl_guards: &mut Vec<AclGuard>,
+    guarded_paths: &mut HashSet<PathBuf>,
+) -> io::Result<()> {
+    if !guarded_paths.insert(path.to_path_buf()) {
         return Ok(());
     }
     let original_dacl = capture_dacl(path)?;
@@ -1034,7 +1062,7 @@ impl StartupHandles {
                 parent.stdin = Some(parent_write);
                 child_handle
             }
-            mode => stdio_handle(mode, STD_INPUT_HANDLE, true, &mut owned)?,
+            mode => stdio_handle(matches!(mode, SandboxStdio::Inherit), STD_INPUT_HANDLE, true, &mut owned)?,
         };
         let stdout = match options.stdout {
             SandboxStdio::Piped => {
@@ -1046,7 +1074,7 @@ impl StartupHandles {
                 parent.stdout = Some(parent_read);
                 child_handle
             }
-            mode => stdio_handle(mode, STD_OUTPUT_HANDLE, false, &mut owned)?,
+            mode => stdio_handle(matches!(mode, SandboxStdio::Inherit), STD_OUTPUT_HANDLE, false, &mut owned)?,
         };
         let stderr = match options.stderr {
             SandboxStdio::Piped => {
@@ -1058,7 +1086,7 @@ impl StartupHandles {
                 parent.stderr = Some(parent_read);
                 child_handle
             }
-            mode => stdio_handle(mode, STD_ERROR_HANDLE, false, &mut owned)?,
+            mode => stdio_handle(matches!(mode, SandboxStdio::Inherit), STD_ERROR_HANDLE, false, &mut owned)?,
         };
         Ok((
             Self {
@@ -1107,26 +1135,20 @@ fn startup_info(handles: &StartupHandles) -> STARTUPINFOW {
 }
 
 fn stdio_handle(
-    mode: SandboxStdio,
+    inherit: bool,
     standard_handle: u32,
     read_access: bool,
     owned: &mut Vec<OwnedHandle>,
 ) -> io::Result<HANDLE> {
-    let handle = match mode {
-        SandboxStdio::Inherit => {
-            let inherited = unsafe { GetStdHandle(standard_handle) };
-            if is_invalid_handle(inherited) {
-                open_nul(read_access, owned)?
-            } else {
-                inherited
-            }
+    let handle = if inherit {
+        let inherited = unsafe { GetStdHandle(standard_handle) };
+        if is_invalid_handle(inherited) {
+            open_nul(read_access, owned)?
+        } else {
+            inherited
         }
-        SandboxStdio::Null => open_nul(read_access, owned)?,
-        SandboxStdio::Piped => {
-            return Err(io::Error::other(
-                "Windows restricted sandbox does not support piped stdio yet",
-            ));
-        }
+    } else {
+        open_nul(read_access, owned)?
     };
     set_handle_inherit(handle, true)?;
     Ok(handle)
@@ -1186,24 +1208,34 @@ fn command_argv(program: &Path, args: Vec<String>) -> Vec<String> {
 }
 
 fn environment_block(policy: &RuntimeSandboxPolicy) -> Vec<u16> {
-    let mut env = BTreeMap::<String, String>::new();
+    let mut env = BTreeMap::<OsString, OsString>::new();
     for (name, value) in std::env::vars_os() {
-        let name = name.to_string_lossy().into_owned();
-        if policy.is_env_var_protected(&name) {
+        if os_env_name_is_protected(policy, &name) {
             continue;
         }
-        env.insert(name, value.to_string_lossy().into_owned());
+        env.insert(name, value);
     }
 
     let mut block = Vec::new();
     for (name, value) in env {
-        let mut item = to_wide(format!("{name}={value}"));
+        let mut item = to_wide(name);
         item.pop();
+        item.push(u16::from(b'='));
+        let mut value_wide = to_wide(value);
+        value_wide.pop();
         block.extend(item);
+        block.extend(value_wide);
         block.push(0);
     }
     block.push(0);
     block
+}
+
+fn os_env_name_is_protected(policy: &RuntimeSandboxPolicy, name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    policy.is_env_var_protected(name)
 }
 
 fn random_capability_sid() -> String {

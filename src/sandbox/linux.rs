@@ -43,6 +43,7 @@ pub fn wrap_command(
             StrongFilesystemSandboxMode::Required => {
                 Err(miette!("Linux filesystem sandbox requires `bwrap` on PATH"))
             }
+            // Returned above when the mode is Off. Kept so the match is exhaustive.
             StrongFilesystemSandboxMode::Off => Ok(unwrapped_spawn_spec(program, args)),
         };
     };

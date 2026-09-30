@@ -50,6 +50,8 @@ struct HeadTailOutputBuffer {
     tail_budget: usize,
     head: VecDeque<OutputSegment>,
     tail: VecDeque<OutputSegment>,
+    head_len: usize,
+    tail_len: usize,
     total_written: usize,
 }
 
@@ -188,15 +190,7 @@ impl TerminalProcess {
     }
 
     pub fn output_tail(&self, max_chars: usize) -> String {
-        let text = self.output.lock().retained_text();
-        let chars = text.chars().collect::<Vec<_>>();
-        if chars.len() <= max_chars {
-            text
-        } else {
-            chars[chars.len().saturating_sub(max_chars)..]
-                .iter()
-                .collect::<String>()
-        }
+        self.output.lock().tail_chars(max_chars)
     }
 
     pub fn output_stats(&self) -> TerminalOutputStats {
@@ -214,6 +208,8 @@ impl HeadTailOutputBuffer {
             tail_budget,
             head: VecDeque::new(),
             tail: VecDeque::new(),
+            head_len: 0,
+            tail_len: 0,
             total_written: 0,
         }
     }
@@ -225,11 +221,10 @@ impl HeadTailOutputBuffer {
             return;
         }
 
-        let head_bytes = self.head_bytes();
-        if head_bytes < self.head_budget {
-            let remaining_head = self.head_budget.saturating_sub(head_bytes);
+        if self.head_len < self.head_budget {
+            let remaining_head = self.head_budget.saturating_sub(self.head_len);
             if bytes.len() <= remaining_head {
-                self.head.push_back(OutputSegment {
+                self.push_head(OutputSegment {
                     start,
                     bytes: bytes.to_vec(),
                 });
@@ -238,7 +233,7 @@ impl HeadTailOutputBuffer {
 
             let (head_part, tail_part) = bytes.split_at(remaining_head);
             if !head_part.is_empty() {
-                self.head.push_back(OutputSegment {
+                self.push_head(OutputSegment {
                     start,
                     bytes: head_part.to_vec(),
                 });
@@ -258,22 +253,34 @@ impl HeadTailOutputBuffer {
         if bytes.len() >= self.tail_budget {
             let keep_from = bytes.len().saturating_sub(self.tail_budget);
             self.tail.clear();
-            self.tail.push_back(OutputSegment {
+            self.tail_len = 0;
+            self.push_tail_segment(OutputSegment {
                 start: start + keep_from,
                 bytes: bytes[keep_from..].to_vec(),
             });
             return;
         }
 
-        self.tail.push_back(OutputSegment {
+        self.push_tail_segment(OutputSegment {
             start,
             bytes: bytes.to_vec(),
         });
         self.trim_tail_to_budget();
     }
 
+    fn push_head(&mut self, segment: OutputSegment) {
+        self.head_len = self.head_len.saturating_add(segment.bytes.len());
+        self.head.push_back(segment);
+    }
+
+    fn push_tail_segment(&mut self, segment: OutputSegment) {
+        self.tail_len = self.tail_len.saturating_add(segment.bytes.len());
+        self.tail.push_back(segment);
+    }
+
     fn trim_tail_to_budget(&mut self) {
-        let mut overflow = self.tail_bytes().saturating_sub(self.tail_budget);
+        let mut overflow = self.tail_len.saturating_sub(self.tail_budget);
+        self.tail_len = self.tail_len.saturating_sub(overflow);
         while overflow > 0 {
             let Some(front) = self.tail.front_mut() else {
                 break;
@@ -289,16 +296,8 @@ impl HeadTailOutputBuffer {
         }
     }
 
-    fn head_bytes(&self) -> usize {
-        self.head.iter().map(|segment| segment.bytes.len()).sum()
-    }
-
-    fn tail_bytes(&self) -> usize {
-        self.tail.iter().map(|segment| segment.bytes.len()).sum()
-    }
-
     fn retained_bytes(&self) -> usize {
-        self.head_bytes().saturating_add(self.tail_bytes())
+        self.head_len.saturating_add(self.tail_len)
     }
 
     const fn end_offset(&self) -> usize {
@@ -309,7 +308,7 @@ impl HeadTailOutputBuffer {
         let end_offset = self.end_offset();
         let mut cursor = offset.min(end_offset);
         let mut missed_bytes = 0usize;
-        let mut bytes = Vec::new();
+        let mut text = String::new();
 
         for segment in self.iter_segments() {
             let segment_start = segment.start;
@@ -324,7 +323,7 @@ impl HeadTailOutputBuffer {
             }
 
             let local_start = cursor.saturating_sub(segment_start);
-            bytes.extend_from_slice(&segment.bytes[local_start..]);
+            text.push_str(&String::from_utf8_lossy(&segment.bytes[local_start..]));
             cursor = segment_end;
         }
 
@@ -333,20 +332,38 @@ impl HeadTailOutputBuffer {
         }
 
         TerminalOutputChunk {
-            text: String::from_utf8_lossy(&bytes).into_owned(),
+            text,
             next_offset: end_offset,
             missed_bytes,
             stats: self.stats(),
         }
     }
 
-    fn retained_text(&self) -> String {
-        let mut bytes = Vec::with_capacity(self.retained_bytes());
-        for segment in self.iter_segments() {
-            bytes.extend_from_slice(&segment.bytes);
+    fn tail_chars(&self, max_chars: usize) -> String {
+        if max_chars == 0 || self.retained_bytes() == 0 {
+            return String::new();
         }
-        String::from_utf8_lossy(&bytes).into_owned()
+        let mut parts = Vec::new();
+        let mut remaining = max_chars;
+        for segment in self.tail.iter().rev().chain(self.head.iter().rev()) {
+            let text = String::from_utf8_lossy(&segment.bytes);
+            let char_count = text.chars().count();
+            if char_count <= remaining {
+                parts.push(text.into_owned());
+                remaining -= char_count;
+                if remaining == 0 {
+                    break;
+                }
+                continue;
+            }
+            let skip = char_count - remaining;
+            parts.push(text.chars().skip(skip).collect::<String>());
+            break;
+        }
+        parts.reverse();
+        parts.concat()
     }
+
 
     fn stats(&self) -> TerminalOutputStats {
         TerminalOutputStats {

@@ -2,6 +2,8 @@ use miette::{Result, miette};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     ffi::OsString,
     path::{Component, Path, PathBuf},
     pin::Pin,
@@ -26,11 +28,12 @@ pub struct WritableRoot {
 
 impl WritableRoot {
     pub fn is_path_writable(&self, path: &Path) -> bool {
-        path_is_or_descends_resolved(path, &self.root)
-            && !self
-                .read_only_subpaths
-                .iter()
-                .any(|subpath| path_is_or_descends_logical_or_resolved(path, subpath))
+        with_path_resolution_cache(|| {
+            path_is_or_descends_resolved(path, &self.root)
+                && !self.read_only_subpaths.iter().any(|subpath| {
+                    path_is_or_descends_logical_or_resolved(path, subpath)
+                })
+        })
     }
 }
 
@@ -416,6 +419,24 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 }
 
 pub fn resolve_path_for_check(path: &Path) -> PathBuf {
+    if let Some(cached) = PATH_RESOLUTION_CACHE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|cache| cache.get(path).cloned())
+    }) {
+        return cached;
+    }
+
+    let resolved = resolve_path_for_check_uncached(path);
+    PATH_RESOLUTION_CACHE.with(|slot| {
+        if let Some(cache) = slot.borrow_mut().as_mut() {
+            cache.insert(path.to_path_buf(), resolved.clone());
+        }
+    });
+    resolved
+}
+
+fn resolve_path_for_check_uncached(path: &Path) -> PathBuf {
     let normalized = normalize_path(path);
     if !normalized.is_absolute() {
         return normalized;
@@ -446,14 +467,42 @@ pub fn resolve_path_for_check(path: &Path) -> PathBuf {
     }
 }
 
+thread_local! {
+    static PATH_RESOLUTION_CACHE: RefCell<Option<HashMap<PathBuf, PathBuf>>> =
+        const { RefCell::new(None) };
+}
+
+/// Cache canonicalized paths for one policy check. The cache is cleared before
+/// this returns, so a replaced path cannot be reused by a later check.
+fn with_path_resolution_cache<T>(check: impl FnOnce() -> T) -> T {
+    let installed = PATH_RESOLUTION_CACHE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(HashMap::new());
+            true
+        } else {
+            false
+        }
+    });
+    let result = check();
+    if installed {
+        PATH_RESOLUTION_CACHE.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+    result
+}
+
 pub fn policy_paths_with_resolved(paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut expanded = paths
-        .iter()
-        .flat_map(|path| [normalize_path(path), resolve_path_for_check(path)])
-        .collect::<Vec<_>>();
-    expanded.sort();
-    expanded.dedup();
-    expanded
+    with_path_resolution_cache(|| {
+        let mut expanded = paths
+            .iter()
+            .flat_map(|path| [normalize_path(path), resolve_path_for_check(path)])
+            .collect::<Vec<_>>();
+        expanded.sort();
+        expanded.dedup();
+        expanded
+    })
 }
 
 fn path_is_or_descends(path: &Path, root: &Path) -> bool {
@@ -506,43 +555,49 @@ impl FileSystemSandboxPolicy {
     }
 
     pub fn protected_paths(&self) -> Vec<PathBuf> {
-        let mut paths = self
-            .deny_read_paths
-            .iter()
-            .chain(self.deny_write_paths.iter())
-            .flat_map(|path| [normalize_path(path), resolve_path_for_check(path)])
-            .collect::<Vec<_>>();
-        paths.sort();
-        paths.dedup();
-        paths
+        with_path_resolution_cache(|| {
+            let mut paths = self
+                .deny_read_paths
+                .iter()
+                .chain(self.deny_write_paths.iter())
+                .flat_map(|path| [normalize_path(path), resolve_path_for_check(path)])
+                .collect::<Vec<_>>();
+            paths.sort();
+            paths.dedup();
+            paths
+        })
     }
 
     pub fn is_path_readable(&self, path: &Path) -> bool {
-        if path_is_denied(path, &self.deny_read_paths) {
-            return false;
-        }
-        if self.full_disk_read {
-            return true;
-        }
-        self.readable_roots
-            .iter()
-            .any(|root| path_is_or_descends_resolved(path, root))
-            || self
-                .writable_roots
+        with_path_resolution_cache(|| {
+            if path_is_denied(path, &self.deny_read_paths) {
+                return false;
+            }
+            if self.full_disk_read {
+                return true;
+            }
+            self.readable_roots
                 .iter()
-                .any(|root| root.is_path_writable(path))
+                .any(|root| path_is_or_descends_resolved(path, root))
+                || self
+                    .writable_roots
+                    .iter()
+                    .any(|root| root.is_path_writable(path))
+        })
     }
 
     pub fn is_path_writable(&self, path: &Path) -> bool {
-        if path_is_denied(path, &self.deny_write_paths) {
-            return false;
-        }
-        if self.full_disk_write {
-            return true;
-        }
-        self.writable_roots
-            .iter()
-            .any(|root| root.is_path_writable(path))
+        with_path_resolution_cache(|| {
+            if path_is_denied(path, &self.deny_write_paths) {
+                return false;
+            }
+            if self.full_disk_write {
+                return true;
+            }
+            self.writable_roots
+                .iter()
+                .any(|root| root.is_path_writable(path))
+        })
     }
 }
 
@@ -759,10 +814,23 @@ fn is_sensitive_env_var_name(name: &str) -> bool {
         "CREDENTIAL",
         "PRIVATE_KEY",
     ];
-    let upper = name.to_ascii_uppercase();
     SENSITIVE_MARKERS
         .iter()
-        .any(|marker| upper.contains(marker))
+        .any(|marker| ascii_contains_ignore_case(name, marker))
+}
+
+fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    let needle_bytes = needle.as_bytes();
+    if needle_bytes.is_empty() {
+        return true;
+    }
+    let haystack_bytes = haystack.as_bytes();
+    haystack_bytes.windows(needle_bytes.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle_bytes)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
 }
 
 #[cfg(test)]

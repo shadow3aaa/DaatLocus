@@ -1368,7 +1368,7 @@ fn refresh_terminal_session(session: &mut TerminalSession) {
     if let Some(process) = session.process.as_ref() {
         apply_terminal_output_stats(&mut session.state, process.output_stats());
     }
-    session.state.last_output_preview = summarize_terminal_preview(&output_tail);
+    session.state.last_output_preview = preview_from_output_tail(&output_tail);
     session.state.has_unread_output = session
         .process
         .as_ref()
@@ -1451,19 +1451,33 @@ fn render_session_state_line(state: &TerminalSessionState) -> String {
     )
 }
 
-fn summarize_terminal_preview(screen: &str) -> String {
-    screen
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.chars().take(120).collect::<String>())
-            }
-        })
-        .unwrap_or_default()
+fn preview_from_output_tail(screen: &str) -> String {
+    let bytes = screen.as_bytes();
+    let mut end = bytes.len();
+    loop {
+        while end > 0 && (bytes[end - 1] == b'\n' || bytes[end - 1] == b'\r') {
+            end -= 1;
+        }
+        if end == 0 {
+            return String::new();
+        }
+        let mut start = end;
+        while start > 0 && bytes[start - 1] != b'\n' && bytes[start - 1] != b'\r' {
+            start -= 1;
+        }
+        let line = screen.get(start..end).unwrap_or_default().trim();
+        if !line.is_empty() {
+            return line
+                .chars()
+                .rev()
+                .take(120)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+        }
+        end = start;
+    }
 }
 
 fn truncate_terminal_output(content: String, max_chars: Option<usize>) -> String {

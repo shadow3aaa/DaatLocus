@@ -208,45 +208,14 @@ impl TelegramTransportStateHandle {
                 },
             });
         }
-        persist_telegram_state_result(&self.inner, &state)?;
-        drop(state);
-        self.inner.outbound_notify.notify_one();
-        Ok(())
+        let snapshot = state.clone_for_persist();
+        let result = persist_telegram_snapshot_outside_lock(&self.inner, state, snapshot);
+        if result.is_ok() {
+            self.inner.outbound_notify.notify_one();
+        }
+        result
     }
 
-    pub fn enqueue_outgoing_draft(
-        &self,
-        chat_id: String,
-        draft_id: i64,
-        text: String,
-    ) -> Result<()> {
-        let mut state = self.inner.state.lock();
-        state.ensure_chat(&chat_id, chat_id.clone());
-        if let Some(existing) = state
-            .outbox
-            .iter_mut()
-            .find(|message| message.chat_id == chat_id && message.draft_id == Some(draft_id))
-        {
-            existing.text = text;
-            persist_telegram_state_result(&self.inner, &state)?;
-            drop(state);
-            self.inner.outbound_notify.notify_one();
-            return Ok(());
-        }
-        state.outbox.push_back(PendingOutboundMessage {
-            local_message_id: Uuid::new_v4().to_string(),
-            chat_id,
-            text,
-            draft_id: Some(draft_id),
-            related_event_id: None,
-            settle_status_on_delivery: None,
-            settle_note_on_delivery: None,
-        });
-        persist_telegram_state_result(&self.inner, &state)?;
-        drop(state);
-        self.inner.outbound_notify.notify_one();
-        Ok(())
-    }
 
     pub fn requeue_outbound_front(&self, message: PendingOutboundMessage) -> Result<()> {
         let mut state = self.inner.state.lock();
@@ -357,6 +326,26 @@ fn push_hard_wrapped_segment(chunks: &mut Vec<String>, segment: &str) {
 }
 
 impl TelegramState {
+    fn clone_for_persist(&self) -> Self {
+        Self {
+            order: self.order.clone(),
+            chats: self
+                .chats
+                .iter()
+                .map(|(id, chat)| {
+                    (
+                        id.clone(),
+                        TelegramChat {
+                            id: chat.id.clone(),
+                            title: chat.title.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            outbox: self.outbox.clone(),
+        }
+    }
+
     fn ensure_chat(&mut self, chat_id: &str, title: String) -> &mut TelegramChat {
         if !self.chats.contains_key(chat_id) {
             self.order.push(chat_id.to_string());
@@ -478,11 +467,62 @@ fn persist_telegram_state_result(inner: &TelegramInner, state: &TelegramState) -
     persist_telegram_state_bytes(&inner.persistence_path, state)
 }
 
+fn persist_telegram_snapshot_outside_lock(
+    inner: &TelegramInner,
+    state: parking_lot::MutexGuard<'_, TelegramState>,
+    snapshot: TelegramState,
+) -> Result<()> {
+    let path = inner.persistence_path.clone();
+    drop(state);
+    match persist_telegram_state_bytes(&path, &snapshot) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // The in-memory outbox is kept. If this snapshot did not reach disk,
+            // put its messages back in front without dropping anything appended
+            // after the lock was released.
+            if !persisted_outbox_contains(&path, &snapshot.outbox) {
+                let mut state = inner.state.lock();
+                prepend_missing_outbox(&mut state.outbox, snapshot.outbox);
+            }
+            Err(err)
+        }
+    }
+}
+
 fn persist_telegram_update_offset_result(
     inner: &TelegramInner,
     next_update_offset: Option<i64>,
 ) -> Result<()> {
     persist_telegram_update_offset_bytes(&inner.update_offset_path, next_update_offset)
+}
+
+fn persisted_outbox_contains(path: &Path, expected: &VecDeque<PendingOutboundMessage>) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Ok(persisted) = postcard::from_bytes::<PersistedTelegramState>(&bytes) else {
+        return false;
+    };
+    expected.iter().all(|message| {
+        persisted
+            .outbox
+            .iter()
+            .any(|saved| saved.local_message_id == message.local_message_id)
+    })
+}
+
+fn prepend_missing_outbox(
+    live: &mut VecDeque<PendingOutboundMessage>,
+    snapshot: VecDeque<PendingOutboundMessage>,
+) {
+    let mut missing = snapshot;
+    missing.retain(|message| {
+        !live
+            .iter()
+            .any(|existing| existing.local_message_id == message.local_message_id)
+    });
+    missing.append(live);
+    *live = missing;
 }
 
 fn persist_telegram_state_bytes(path: &Path, state: &TelegramState) -> Result<()> {
@@ -674,59 +714,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn enqueue_outgoing_draft_marks_outbox_message_as_draft_only() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let transport = TelegramTransportState {
-            inner: Arc::new(TelegramInner {
-                state: Mutex::new(TelegramState::default()),
-                update_offset: Mutex::new(None),
-                outbound_notify: Notify::new(),
-                persistence_path: dir.path().join("telegram_state"),
-                update_offset_path: dir.path().join("telegram_update_offset"),
-            }),
-        };
-        let handle = transport.handle();
-
-        handle
-            .enqueue_outgoing_draft("1".to_string(), 42, "Working...".to_string())
-            .expect("enqueue draft");
-
-        let outbound = handle.take_next_outbound().expect("draft outbound");
-        assert_eq!(outbound.chat_id, "1");
-        assert_eq!(outbound.text, "Working...");
-        assert_eq!(outbound.draft_id, Some(42));
-        assert!(outbound.related_event_id.is_none());
-        assert!(outbound.settle_status_on_delivery.is_none());
-        assert!(outbound.settle_note_on_delivery.is_none());
-    }
-
-    #[test]
-    fn enqueue_outgoing_draft_coalesces_pending_draft_updates() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let transport = TelegramTransportState {
-            inner: Arc::new(TelegramInner {
-                state: Mutex::new(TelegramState::default()),
-                update_offset: Mutex::new(None),
-                outbound_notify: Notify::new(),
-                persistence_path: dir.path().join("telegram_state"),
-                update_offset_path: dir.path().join("telegram_update_offset"),
-            }),
-        };
-        let handle = transport.handle();
-
-        handle
-            .enqueue_outgoing_draft("1".to_string(), 42, "Working".to_string())
-            .expect("enqueue draft");
-        handle
-            .enqueue_outgoing_draft("1".to_string(), 42, "Still working".to_string())
-            .expect("replace draft");
-
-        let outbound = handle.take_next_outbound().expect("draft outbound");
-        assert_eq!(outbound.text, "Still working");
-        assert_eq!(outbound.draft_id, Some(42));
-        assert!(handle.take_next_outbound().is_none());
-    }
 
     #[test]
     fn clear_outbox_removes_pending_messages() {

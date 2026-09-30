@@ -263,35 +263,9 @@ impl TelegramTransport {
     }
 
     async fn flush_outbox(&self) -> Result<()> {
-        while let Some(message) = self.handle.take_next_outbound() {
-            let chat_id = message
-                .chat_id
-                .parse::<i64>()
-                .map_err(|err| miette!("invalid telegram chat id {}: {err}", message.chat_id))?;
-            if self.acl.classify(chat_id) != AccessDecision::Approved {
-                tracing::warn!("dropping telegram outbound message for unapproved chat {chat_id}");
-                continue;
-            }
-
-            let send_result = if let Some(draft_id) = message.draft_id {
-                self.send_message_draft(chat_id, draft_id, &message.text)
-                    .await
-            } else {
-                self.send_message(chat_id, &message.text).await
-            };
-            match send_result {
-                Ok(()) => {}
-                Err(err) => {
-                    let reason = truncate_reason(&format!("{err:?}"));
-                    if let Err(requeue_err) = self.handle.requeue_outbound_front(message) {
-                        tracing::error!(
-                            "requeue telegram outbound message failed: {requeue_err:?}"
-                        );
-                    }
-                    return Err(miette!("telegram outbound delivery failed: {reason}"));
-                }
-            }
-        }
+        // Outbound delivery is owned by TelegramDeliveryClient in the daemon.
+        // This transport still receives updates and can enqueue via the state
+        // handle; draining here would race that client and spin the poll loop.
         Ok(())
     }
 
@@ -734,48 +708,6 @@ impl TelegramTransport {
         }
     }
 
-    async fn send_message_draft(&self, chat_id: i64, draft_id: i64, text: &str) -> Result<()> {
-        let response = self
-            .client
-            .post(self.endpoint("sendMessageDraft"))
-            .timeout(TELEGRAM_REQUEST_TIMEOUT)
-            .json(&serde_json::json!({
-                "chat_id": chat_id,
-                "draft_id": draft_id,
-                "text": text,
-                "parse_mode": "MarkdownV2",
-            }))
-            .send()
-            .await
-            .map_err(|err| {
-                miette!(
-                    "telegram sendMessageDraft request failed: {}",
-                    err.without_url()
-                )
-            })?
-            .error_for_status()
-            .map_err(|err| {
-                miette!(
-                    "telegram sendMessageDraft http error: {}",
-                    err.without_url()
-                )
-            })?;
-
-        let payload: TelegramApiResponse<bool> = response
-            .json()
-            .await
-            .map_err(|err| miette!("telegram sendMessageDraft json decode failed: {err}"))?;
-        if payload.ok {
-            Ok(())
-        } else {
-            bail!(
-                "telegram sendMessageDraft failed: {}",
-                payload
-                    .description
-                    .unwrap_or_else(|| "unknown api error".to_string())
-            );
-        }
-    }
 
     async fn send_text(&self, chat_id: i64, text: &str) -> Result<()> {
         for chunk in split_telegram_message_text(text) {

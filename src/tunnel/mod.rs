@@ -67,23 +67,43 @@ impl TunnelHandle {
     }
 
     async fn stop(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
-        if let Some(task) = self.task.take() {
-            let _ = tokio::time::timeout(SHUTDOWN_GRACE, task).await;
-        }
+        graceful_stop(self.shutdown_tx.take(), self.task.take()).await;
     }
 }
 
 impl Drop for TunnelHandle {
     fn drop(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
+        if self.shutdown_tx.is_none() && self.task.is_none() {
+            return;
         }
-        if let Some(task) = self.task.take() {
-            task.abort();
+        let shutdown_tx = self.shutdown_tx.take();
+        let task = self.task.take();
+        // Same graceful stop as `shutdown`, including SHUTDOWN_GRACE. Drop cannot
+        // await, so the wait runs on a helper when a runtime is already alive.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                graceful_stop(shutdown_tx, task).await;
+            });
+        } else {
+            if let Some(tx) = shutdown_tx {
+                let _ = tx.send(());
+            }
+            if let Some(task) = task {
+                task.abort();
+            }
         }
+    }
+}
+
+async fn graceful_stop(
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
+) {
+    if let Some(tx) = shutdown_tx {
+        let _ = tx.send(());
+    }
+    if let Some(task) = task {
+        let _ = tokio::time::timeout(SHUTDOWN_GRACE, task).await;
     }
 }
 
