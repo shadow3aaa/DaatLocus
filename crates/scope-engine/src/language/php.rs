@@ -34,10 +34,6 @@ impl LanguageAdapter for PhpAdapter {
                 (interface_declaration name: (name) @name) @def
                 (method_declaration name: (name) @name) @def
             ",
-            references: r"
-                (function_call_expression function: (name) @ref) @call
-                (name) @ref
-            ",
         }
     }
 }

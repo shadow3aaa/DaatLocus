@@ -34,11 +34,6 @@ impl LanguageAdapter for CppAdapter {
                 (struct_specifier name: (type_identifier) @name) @def
                 (declaration declarator: (init_declarator declarator: (identifier) @name)) @def
             ",
-            references: r"
-                (call_expression function: (identifier) @ref) @call
-                (call_expression function: (field_identifier) @ref) @call
-                (type_identifier) @ref
-            ",
         }
     }
 }

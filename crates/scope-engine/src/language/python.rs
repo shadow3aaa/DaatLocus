@@ -37,11 +37,6 @@ impl LanguageAdapter for PythonAdapter {
                 (decorated_definition (function_definition name: (identifier) @name)) @def
                 (decorated_definition (class_definition name: (identifier) @name)) @def
             ",
-            references: r"
-                (call function: (identifier) @ref) @call
-                (call function: (attribute attribute: (identifier) @ref)) @call
-                (identifier) @ref
-            ",
         }
     }
 }

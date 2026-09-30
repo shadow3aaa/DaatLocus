@@ -32,10 +32,6 @@ impl LanguageAdapter for CAdapter {
                 (function_definition declarator: (function_declarator declarator: (identifier) @name)) @def
                 (declaration declarator: (init_declarator declarator: (identifier) @name)) @def
             ",
-            references: r"
-                (call_expression function: (identifier) @ref) @call
-                (identifier) @ref
-            ",
         }
     }
 }

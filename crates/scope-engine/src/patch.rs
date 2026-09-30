@@ -25,6 +25,7 @@ struct PreparedFileEdits {
     original: String,
     new_content: String,
     planned: Vec<PlannedEdit>,
+    file_symbols: Option<Vec<crate::treesitter::SymbolMatch>>,
     semantic_source: bool,
 }
 
@@ -118,6 +119,7 @@ struct PropagationCollectionContext<'a> {
     project_root: &'a Path,
     lsp_analyzer: &'a Mutex<Option<Box<dyn Analyzer + Send>>>,
     analyzer: &'a TreeSitterAnalyzer,
+    file_symbols: Option<&'a [crate::treesitter::SymbolMatch]>,
 }
 
 fn collect_propagation_results(
@@ -131,6 +133,7 @@ fn collect_propagation_results(
         project_root,
         lsp_analyzer,
         analyzer,
+        file_symbols,
     } = context;
 
     let mut results: Vec<PropagationResult> = Vec::new();
@@ -141,8 +144,12 @@ fn collect_propagation_results(
         if let Some(ref name) = edit.primary_symbol_name {
             modified_symbol_names.insert(name.clone());
         }
-        if let Some(sel) = analyzer.find_containing_symbol(full_path, edit.start_line, project_root)
-            && let Ok(parsed) = crate::selector::parse_selector(&sel)
+        if let Some(sel) = analyzer.find_containing_symbol_with_symbols(
+            full_path,
+            edit.start_line,
+            project_root,
+            *file_symbols,
+        ) && let Ok(parsed) = crate::selector::parse_selector(&sel)
             && let Some(name) = parsed.name()
         {
             modified_symbol_names.insert(name.to_string());
@@ -259,6 +266,7 @@ pub fn edit_code_apply(
                     project_root,
                     lsp_analyzer,
                     analyzer: &analyzer,
+                    file_symbols: file.file_symbols.as_deref(),
                 },
                 &file.planned,
             ));
@@ -377,6 +385,7 @@ fn planned_edit_for(
     original: &str,
     context: &PreparedEditContext<'_>,
     semantic_source: bool,
+    cached_symbols: Option<&[crate::treesitter::SymbolMatch]>,
 ) -> Result<PlannedEdit, String> {
     let operation = edit_operation(edit, original.is_empty())?;
     let start = edit_start_anchor(edit, original.is_empty())?;
@@ -388,7 +397,12 @@ fn planned_edit_for(
     let primary_symbol_name = if semantic_source && !original.is_empty() {
         context
             .analyzer
-            .find_containing_symbol(full_path, start_line, context.project_root)
+            .find_containing_symbol_with_symbols(
+                full_path,
+                start_line,
+                context.project_root,
+                cached_symbols,
+            )
             .and_then(|selector| crate::selector::parse_selector(&selector).ok())
             .and_then(|parsed| parsed.name().map(str::to_string))
     } else {
@@ -446,10 +460,24 @@ fn prepare_file_edits(
     let (existed, original) = read_original_content(&group, &full_path)?;
     let semantic_source =
         context.validate_parse && context.analyzer.is_responsible_source_path(&full_path);
+    let file_symbols = if semantic_source && !original.is_empty() {
+        context.analyzer.symbols_in_file(&full_path).ok()
+    } else {
+        None
+    };
     let planned = group
         .edits
         .into_iter()
-        .map(|edit| planned_edit_for(edit, &full_path, &original, context, semantic_source))
+        .map(|edit| {
+            planned_edit_for(
+                edit,
+                &full_path,
+                &original,
+                context,
+                semantic_source,
+                file_symbols.as_deref(),
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let new_content =
         apply_planned_edits_to_content(&original, &planned, &full_path.to_string_lossy())?;
@@ -476,6 +504,7 @@ fn prepare_file_edits(
         original,
         new_content,
         planned,
+        file_symbols,
         semantic_source,
     })
 }

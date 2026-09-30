@@ -34,10 +34,6 @@ impl LanguageAdapter for RubyAdapter {
                 (class name: (constant) @name) @def
                 (module name: (constant) @name) @def
             ",
-            references: r"
-                (call method: (identifier) @ref) @call
-                (identifier) @ref
-            ",
         }
     }
 }

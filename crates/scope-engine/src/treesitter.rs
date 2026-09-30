@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tree_sitter::StreamingIterator;
 
@@ -127,7 +129,18 @@ impl TreeSitterAnalyzer {
         line_number: usize,
         project_root: &Path,
     ) -> Option<String> {
-        self.find_containing_symbol_match(file_path, line_number)
+        self.find_containing_symbol_with_symbols(file_path, line_number, project_root, None)
+    }
+
+    #[must_use]
+    pub fn find_containing_symbol_with_symbols(
+        &self,
+        file_path: &Path,
+        line_number: usize,
+        project_root: &Path,
+        cached_symbols: Option<&[SymbolMatch]>,
+    ) -> Option<String> {
+        self.find_containing_symbol_match(file_path, line_number, cached_symbols)
             .map(|m| m.canonical_selector(file_path, project_root))
     }
 
@@ -136,12 +149,20 @@ impl TreeSitterAnalyzer {
         &self,
         file_path: &Path,
         line_number: usize,
+        cached_symbols: Option<&[SymbolMatch]>,
     ) -> Option<SymbolMatch> {
-        let symbols = self.symbols_in_file(file_path).ok()?;
+        let owned;
+        let symbols = if let Some(cached_symbols) = cached_symbols {
+            cached_symbols
+        } else {
+            owned = self.symbols_in_file(file_path).ok()?;
+            &owned
+        };
         symbols
-            .into_iter()
+            .iter()
             .filter(|m| line_number >= m.start_line && line_number <= m.end_line)
             .max_by_key(|m| (m.start_line, usize::MAX - m.end_line))
+            .cloned()
     }
 
     /// # Errors
@@ -158,12 +179,7 @@ impl TreeSitterAnalyzer {
             .filter(|m| symbol_matches_selector(m, parsed))
             .collect();
 
-        let SelectorTarget::Symbol(symbol) = &parsed.target else {
-            return Err(format!(
-                "selector target is not a symbol and cannot be resolved as a symbol: {}",
-                file_path.display()
-            ));
-        };
+        let SelectorTarget::Symbol(symbol) = &parsed.target;
 
         if let Some((start, end)) = symbol.line_range {
             matches.retain(|m| m.start_line == start && m.end_line == end);
@@ -222,7 +238,7 @@ impl TreeSitterAnalyzer {
             .parse(&content, None)
             .ok_or_else(|| format!("failed to parse {}", file_path.display()))?;
         let mut symbols = Vec::new();
-        Self::collect_symbols(tree.root_node(), &content, &mut symbols);
+        Self::collect_symbols(tree.root_node(), &content, ext, &mut symbols);
         Ok(symbols)
     }
 
@@ -334,10 +350,15 @@ impl TreeSitterAnalyzer {
             .is_some()
     }
 
-    fn collect_symbols(node: tree_sitter::Node, source: &str, symbols: &mut Vec<SymbolMatch>) {
+    fn collect_symbols(
+        node: tree_sitter::Node,
+        source: &str,
+        adapter_key: &str,
+        symbols: &mut Vec<SymbolMatch>,
+    ) {
         let kind = node.kind();
         if is_definition_kind(kind)
-            && let Some(name) = Self::extract_def_name(node, source)
+            && let Some(name) = Self::extract_def_name(node, source, adapter_key)
         {
             let start_line = node.start_position().row + 1;
             let end_line = node.end_position().row + 1;
@@ -352,7 +373,7 @@ impl TreeSitterAnalyzer {
 
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i) {
-                Self::collect_symbols(child, source, symbols);
+                Self::collect_symbols(child, source, adapter_key, symbols);
             }
         }
     }
@@ -363,8 +384,13 @@ impl TreeSitterAnalyzer {
     /// adapter query cannot be compiled). It is not the primary grammar path:
     /// the first `identifier`/`type_identifier` child is often a qualifier,
     /// return type, or receiver rather than the declared name.
-    fn extract_def_name(node: tree_sitter::Node, source: &str) -> Option<String> {
-        captured_definition_name(node, source).or_else(|| fallback_child_def_name(node, source))
+    fn extract_def_name(
+        node: tree_sitter::Node,
+        source: &str,
+        adapter_key: &str,
+    ) -> Option<String> {
+        captured_definition_name(node, source, adapter_key)
+            .or_else(|| fallback_child_def_name(node, source))
     }
 
     /// Locate a definition by running the language adapter's definition query
@@ -411,18 +437,36 @@ impl TreeSitterAnalyzer {
 ///
 /// Query strings come from [`crate::language::LanguageAdapter::queries`]; this
 /// function does not duplicate them.
-fn captured_definition_name(node: tree_sitter::Node, source: &str) -> Option<String> {
-    let language = node.language();
+fn definition_query_cache() -> &'static Mutex<HashMap<String, Arc<tree_sitter::Query>>> {
+    static QUERIES: OnceLock<Mutex<HashMap<String, Arc<tree_sitter::Query>>>> = OnceLock::new();
+    QUERIES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_definition_query(
+    adapter_key: &str,
+    language: &tree_sitter::Language,
+) -> Option<Arc<tree_sitter::Query>> {
+    if let Ok(cache) = definition_query_cache().lock()
+        && let Some(query) = cache.get(adapter_key)
+    {
+        return Some(Arc::clone(query));
+    }
     let registry = LanguageRegistry::new();
-    let adapter = registry.list_languages().iter().find_map(|(_, exts)| {
-        let candidate = registry.get(exts.first().copied()?)?;
-        if candidate.language() == language.clone() {
-            Some(candidate)
-        } else {
-            None
-        }
-    })?;
-    let query = tree_sitter::Query::new(&language, adapter.queries().definitions).ok()?;
+    let adapter = registry.get(adapter_key)?;
+    let query = Arc::new(tree_sitter::Query::new(language, adapter.queries().definitions).ok()?);
+    if let Ok(mut cache) = definition_query_cache().lock() {
+        cache.insert(adapter_key.to_string(), Arc::clone(&query));
+    }
+    Some(query)
+}
+
+fn captured_definition_name(
+    node: tree_sitter::Node,
+    source: &str,
+    adapter_key: &str,
+) -> Option<String> {
+    let language = node.language();
+    let query = cached_definition_query(adapter_key, &language)?;
     let name_idx = query.capture_index_for_name("name")?;
     let mut cursor = tree_sitter::QueryCursor::new();
     let mut matches = cursor.matches(&query, node, source.as_bytes());

@@ -38,11 +38,6 @@ impl LanguageAdapter for RustAdapter {
                 (impl_item type: (type_identifier) @name) @def
                 (trait_item name: (type_identifier) @name) @def
             ",
-            references: r"
-                (call_expression function: (identifier) @ref) @call
-                (call_expression function: (scoped_identifier name: (identifier) @ref)) @call
-                (type_identifier) @ref
-            ",
         }
     }
 }

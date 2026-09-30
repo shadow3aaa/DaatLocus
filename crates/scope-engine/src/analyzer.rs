@@ -40,6 +40,4 @@ pub trait Analyzer: Send {
         true
     }
 
-    /// Whether the analyzer is available and initialized.
-    fn is_initialized(&self) -> bool;
 }

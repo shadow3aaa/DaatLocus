@@ -17,7 +17,6 @@ use tree_sitter::{Language, Parser};
 /// Each language provides patterns for finding definitions and references.
 pub struct LanguageQueries {
     pub definitions: &'static str,
-    pub references: &'static str,
 }
 
 pub trait LanguageAdapter: Send + Sync {

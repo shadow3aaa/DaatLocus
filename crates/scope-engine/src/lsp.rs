@@ -1,5 +1,6 @@
 use crate::analyzer::Analyzer;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -287,6 +288,63 @@ impl<W: Write> Write for BufWriter<W> {
     }
 }
 
+struct LspStream {
+    reader: std::io::BufReader<ChildStdout>,
+    pending: Vec<u8>,
+}
+
+impl LspStream {
+    fn new(reader: std::io::BufReader<ChildStdout>) -> Self {
+        Self {
+            reader,
+            pending: Vec::new(),
+        }
+    }
+
+    fn read_message(&mut self) -> Result<serde_json::Value, String> {
+        let mut chunk = [0u8; 1024];
+        let header_end = loop {
+            if let Some(end) = self.pending.windows(4).position(|window| window == b"\r\n\r\n") {
+                break end;
+            }
+            if self.pending.len() > 4096 {
+                return Err("header too long, possibly malformed LSP response".to_string());
+            }
+            let read = self
+                .reader
+                .read(&mut chunk)
+                .map_err(|e| format!("read header byte failed: {e}"))?;
+            if read == 0 {
+                return Err("read header byte failed: unexpected eof".to_string());
+            }
+            self.pending.extend_from_slice(&chunk[..read]);
+        };
+        let header = String::from_utf8_lossy(&self.pending[..header_end]).into_owned();
+        let content_length: usize = header
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Content-Length: ")
+                    .and_then(|value| value.trim().parse().ok())
+            })
+            .ok_or("missing Content-Length header")?;
+        let mut body = self.pending.split_off(header_end + 4);
+        while body.len() < content_length {
+            let read = self
+                .reader
+                .read(&mut chunk)
+                .map_err(|e| format!("read body failed: {e}"))?;
+            if read == 0 {
+                return Err("read body failed: unexpected eof".to_string());
+            }
+            body.extend_from_slice(&chunk[..read]);
+        }
+        if body.len() > content_length {
+            self.pending = body.split_off(content_length);
+        }
+        serde_json::from_slice(&body).map_err(|e| format!("json parse failed: {e}"))
+    }
+}
+
 impl LspClient {
     pub fn new(project_root: &Path, config: &dyn LspServerConfig) -> Self {
         let project_root = project_root.to_path_buf();
@@ -538,13 +596,14 @@ impl LspClient {
 
         let stdin = child.stdin.take().ok_or("cannot take stdin")?;
         let stdout = child.stdout.take().ok_or("cannot take stdout")?;
-
         let mut writer = BufWriter(stdin);
-        let mut reader = std::io::BufReader::new(stdout);
+
+
+        let mut reader = LspStream::new(std::io::BufReader::new(stdout));
         let (response_sender, response_receiver) = mpsc::channel();
         let reader_thread = std::thread::spawn(move || {
             loop {
-                let response = Self::read_message(&mut reader);
+                let response = reader.read_message();
                 let failed = response.is_err();
                 if response_sender.send(response).is_err() || failed {
                     break;
@@ -697,10 +756,16 @@ impl LspClient {
         project_root: &Path,
     ) -> Vec<PropagationResult> {
         let analyzer = TreeSitterAnalyzer::new();
+        let mut file_cache: HashMap<PathBuf, Option<String>> = HashMap::new();
         locations
             .iter()
             .filter_map(|location| {
-                Self::reference_result_from_location(&analyzer, location, project_root)
+                Self::reference_result_from_location(
+                    &analyzer,
+                    location,
+                    project_root,
+                    &mut file_cache,
+                )
             })
             .collect()
     }
@@ -709,6 +774,7 @@ impl LspClient {
         analyzer: &TreeSitterAnalyzer,
         location: &serde_json::Value,
         project_root: &Path,
+        file_cache: &mut HashMap<PathBuf, Option<String>>,
     ) -> Option<PropagationResult> {
         let uri = location.get("uri")?.as_str()?;
         let line = location
@@ -725,8 +791,11 @@ impl LspClient {
             || path.to_string_lossy().to_string(),
             |relative| relative.to_string_lossy().to_string(),
         );
-        let context_line = std::fs::read_to_string(&path)
-            .ok()
+        let cached = file_cache
+            .entry(path.clone())
+            .or_insert_with(|| std::fs::read_to_string(&path).ok());
+        let context_line = cached
+            .as_ref()
             .and_then(|content| content.lines().nth(line).map(str::to_string))
             .unwrap_or_default();
         let selector = analyzer
@@ -828,38 +897,6 @@ impl LspClient {
         Ok(())
     }
 
-    fn read_message(
-        reader: &mut std::io::BufReader<ChildStdout>,
-    ) -> Result<serde_json::Value, String> {
-        let mut header = String::new();
-        loop {
-            let mut byte = [0u8; 1];
-            reader
-                .read_exact(&mut byte)
-                .map_err(|e| format!("read header byte failed: {e}"))?;
-            header.push(byte[0] as char);
-            if header.ends_with("\r\n\r\n") {
-                break;
-            }
-            if header.len() > 4096 {
-                return Err("header too long, possibly malformed LSP response".to_string());
-            }
-        }
-
-        let content_length: usize = header
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("Content-Length: ")
-                    .and_then(|value| value.trim().parse().ok())
-            })
-            .ok_or("missing Content-Length header")?;
-
-        let mut body = vec![0u8; content_length];
-        reader
-            .read_exact(&mut body)
-            .map_err(|e| format!("read body failed: {e}"))?;
-        serde_json::from_slice(&body).map_err(|e| format!("json parse failed: {e}"))
-    }
 
     fn wait_for_response(
         response_receiver: &Receiver<LspResponse>,
@@ -1078,9 +1115,6 @@ impl Analyzer for LspClient {
         Self::notify_did_close(self, file_path);
     }
 
-    fn is_initialized(&self) -> bool {
-        self.inner.borrow().initialized
-    }
 
     fn scope_lsp_enabled(&self) -> bool {
         true

@@ -37,12 +37,12 @@ impl PropagationState {
     pub fn next_review(&mut self) -> Option<ReviewEvent> {
         let r = self.pending.pop()?;
         self.seen.remove(&r.selector);
-        match &r.source {
+        let selector = r.selector;
+        let reason = r.reason;
+        match r.source {
             PropagationSource::Lsp => {
-                // LSP found precise references — build KnownReferences event
-                let references: Vec<Reference> = r
+                let references = r
                     .lsp_references
-                    .clone()
                     .unwrap_or_default()
                     .into_iter()
                     .map(|(selector, line, context)| Reference {
@@ -52,22 +52,19 @@ impl PropagationState {
                     })
                     .collect();
                 Some(ReviewEvent::KnownReferences {
-                    modified_symbol: r.selector,
-                    change_summary: r.reason,
+                    modified_symbol: selector,
+                    change_summary: reason,
                     references,
-                    file_snippet: r.file_snippet.clone().unwrap_or_default(),
+                    file_snippet: r.file_snippet.unwrap_or_default(),
                 })
             }
-            PropagationSource::OpenEnded => {
-                // No LSP — build InvestigateImpact event
-                Some(ReviewEvent::InvestigateImpact {
-                    modified_symbol: r.selector,
-                    change_summary: r.reason,
-                    diff_summary: r.diff_summary.clone().unwrap_or_default(),
-                    file_snippet: r.file_snippet.clone().unwrap_or_default(),
-                    project_files: r.project_files.clone().unwrap_or_default(),
-                })
-            }
+            PropagationSource::OpenEnded => Some(ReviewEvent::InvestigateImpact {
+                modified_symbol: selector,
+                change_summary: reason,
+                diff_summary: r.diff_summary.unwrap_or_default(),
+                file_snippet: r.file_snippet.unwrap_or_default(),
+                project_files: r.project_files.unwrap_or_default(),
+            }),
         }
     }
 

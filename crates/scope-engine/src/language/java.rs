@@ -40,12 +40,6 @@ impl LanguageAdapter for JavaAdapter {
                 (field_declaration declarator: (variable_declarator name: (identifier) @name)) @def
                 (local_variable_declaration declarator: (variable_declarator name: (identifier) @name)) @def
             ",
-            references: r"
-                (method_invocation name: (identifier) @ref) @call
-                (object_creation_expression type: (type_identifier) @ref) @call
-                (type_identifier) @ref
-                (identifier) @ref
-            ",
         }
     }
 }

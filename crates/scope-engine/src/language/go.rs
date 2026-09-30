@@ -36,11 +36,6 @@ impl LanguageAdapter for GoAdapter {
                 (method_declaration name: (field_identifier) @name) @def
                 (type_declaration (type_identifier) @name) @def
             ",
-            references: r"
-                (call_expression function: (identifier) @ref) @call
-                (call_expression function: (selector_expression field: (field_identifier) @ref)) @call
-                (type_identifier) @ref
-            ",
         }
     }
 }

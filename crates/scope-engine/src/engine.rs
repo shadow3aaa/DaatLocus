@@ -1,8 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 #[cfg(test)]
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 use crate::analyzer::Analyzer;
 use crate::api::{
@@ -19,9 +22,9 @@ use crate::patch;
 use crate::state::PropagationState;
 use crate::treesitter::TreeSitterAnalyzer;
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use ignore::{DirEntry, WalkBuilder};
+use ignore::WalkBuilder;
 use regex::{Regex, RegexBuilder};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 const DEFAULT_SEARCH_LIMIT: usize = 100;
 const MAX_SEARCH_LIMIT: usize = 1000;
@@ -119,10 +122,30 @@ fn detect_project_lsp_language(root: &Path) -> Option<&'static str> {
         .filter(|language| counts.get(language).copied().unwrap_or(0) > 0)
 }
 
-fn open_existing_source_files_for_lsp(lsp: &dyn Analyzer, root: &Path, lsp_lang: &str) {
+struct OpenedSourceFile {
+    path: PathBuf,
+    content: String,
+}
+
+fn open_existing_source_files_for_lsp(
+    lsp: &dyn Analyzer,
+    _root: &Path,
+    lsp_lang: &str,
+    opened_files: &[OpenedSourceFile],
+) {
     let exts = lsp_extensions_for_language(lsp_lang);
     if exts.is_empty() {
         return;
+    }
+    for file in opened_files {
+        lsp.notify_did_open(&file.path, &file.content);
+    }
+}
+
+fn collect_opened_source_files(root: &Path, lsp_lang: &str) -> Vec<OpenedSourceFile> {
+    let exts = lsp_extensions_for_language(lsp_lang);
+    if exts.is_empty() {
+        return Vec::new();
     }
     let scan_root = {
         let src_dir = root.join("src");
@@ -132,6 +155,7 @@ fn open_existing_source_files_for_lsp(lsp: &dyn Analyzer, root: &Path, lsp_lang:
             root.to_path_buf()
         }
     };
+    let mut opened = Vec::new();
     for entry in WalkBuilder::new(scan_root)
         .hidden(false)
         .git_ignore(true)
@@ -151,9 +175,13 @@ fn open_existing_source_files_for_lsp(lsp: &dyn Analyzer, root: &Path, lsp_lang:
             && exts.contains(&ext)
             && let Ok(content) = std::fs::read_to_string(path)
         {
-            lsp.notify_did_open(path, &content);
+            opened.push(OpenedSourceFile {
+                path: path.to_path_buf(),
+                content,
+            });
         }
     }
+    opened
 }
 
 /// Opens `project_root` and initializes its detected language server when LSP is enabled.
@@ -181,7 +209,7 @@ pub fn open_project(
                 lsp_enabled: lsp_active,
             });
         }
-        return sync_project_lsp(project_root, lsp_analyzer, lsp_enabled).map(|lsp_status| {
+        return sync_project_lsp(project_root, lsp_analyzer, lsp_enabled, None).map(|lsp_status| {
             OpenProjectOutput {
                 status: "lsp_updated".to_string(),
                 project_root: project_root.to_string_lossy().into_owned(),
@@ -192,10 +220,17 @@ pub fn open_project(
         });
     }
 
-    sync_project_lsp(project_root, lsp_analyzer, lsp_enabled).map(|lsp_status| OpenProjectOutput {
+    let detected_lsp_language = detect_project_lsp_language(project_root);
+    sync_project_lsp(
+        project_root,
+        lsp_analyzer,
+        lsp_enabled,
+        detected_lsp_language,
+    )
+    .map(|lsp_status| OpenProjectOutput {
         status: "opened".to_string(),
         project_root: project_root.to_string_lossy().into_owned(),
-        detected_lsp_language: detect_project_lsp_language(project_root).map(str::to_string),
+        detected_lsp_language: detected_lsp_language.map(str::to_string),
         lsp: Some(lsp_status),
         lsp_enabled,
     })
@@ -235,9 +270,6 @@ impl Analyzer for DisabledLsp {
         false
     }
 
-    fn is_initialized(&self) -> bool {
-        false
-    }
 }
 
 struct UnsupportedLsp;
@@ -259,9 +291,6 @@ impl Analyzer for UnsupportedLsp {
 
     fn notify_did_close(&self, _file_path: &Path) {}
 
-    fn is_initialized(&self) -> bool {
-        false
-    }
 }
 
 /// Start or stop the language server for an already chosen project root.
@@ -273,8 +302,8 @@ fn sync_project_lsp(
     project_root: &Path,
     lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
     lsp_enabled: bool,
+    detected_lsp_language: Option<&str>,
 ) -> Result<String, String> {
-    let detected_lsp_language = detect_project_lsp_language(project_root);
     if !lsp_enabled {
         let mut lsp_guard = lsp_analyzer
             .lock()
@@ -291,6 +320,10 @@ fn sync_project_lsp(
         return Ok("unsupported".to_string());
     };
 
+    let opened_files = detected_lsp_language
+        .map(|lsp_lang| collect_opened_source_files(project_root, lsp_lang))
+        .unwrap_or_default();
+
     {
         let mut lsp_guard = lsp_analyzer
             .lock()
@@ -305,7 +338,12 @@ fn sync_project_lsp(
             .lock()
             .map_err(|_| "lock poisoned".to_string())?;
         if let (Some(lsp), Some(lsp_lang)) = (&*lsp_guard, detected_lsp_language) {
-            open_existing_source_files_for_lsp(lsp.as_ref(), project_root, lsp_lang);
+            open_existing_source_files_for_lsp(
+                lsp.as_ref(),
+                project_root,
+                lsp_lang,
+                &opened_files,
+            );
         }
     }
 
@@ -388,14 +426,10 @@ fn search_project_matches(
     let filters = SearchFileFilters::from_input(params)?;
     let mut matches = Vec::new();
 
-    for entry in project_files(project_root, target, &filters) {
-        let path = entry.path();
-        let relative = relative_file_path(project_root, path);
-        if !filters.matches(&relative, path) {
-            continue;
-        }
+    for path in project_files(project_root, target, &filters, limit) {
+        let relative = relative_file_path(project_root, &path);
 
-        let Ok(content) = fs::read_to_string(path) else {
+        let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
         for (line_index, text) in content.lines().enumerate() {
@@ -516,8 +550,41 @@ fn configure_project_walk(walk_root: &Path, filters: &SearchFileFilters) -> Walk
     builder
 }
 
-fn collect_project_files(builder: &WalkBuilder) -> Vec<DirEntry> {
-    builder
+struct SearchCandidate {
+    relative: String,
+    path: PathBuf,
+}
+
+impl PartialEq for SearchCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.relative == other.relative
+    }
+}
+
+impl Eq for SearchCandidate {}
+
+impl PartialOrd for SearchCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SearchCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.relative.cmp(&other.relative)
+    }
+}
+
+fn project_files(
+    project_root: &Path,
+    target: Option<&str>,
+    filters: &SearchFileFilters,
+    limit: usize,
+) -> Vec<PathBuf> {
+    let root = project_root.to_path_buf();
+    let walk_root = target.map_or_else(|| root.clone(), |target| root.join(target));
+    let mut selected: BinaryHeap<SearchCandidate> = BinaryHeap::new();
+    for entry in configure_project_walk(&walk_root, filters)
         .build()
         .filter_map(Result::ok)
         .filter(|entry| {
@@ -525,21 +592,27 @@ fn collect_project_files(builder: &WalkBuilder) -> Vec<DirEntry> {
                 .file_type()
                 .is_some_and(|file_type| file_type.is_file())
         })
-        .collect()
-}
+    {
+        let path = entry.path();
+        let relative = relative_file_path(&root, path);
+        if !filters.matches(&relative, path) {
+            continue;
+        }
+        selected.push(SearchCandidate {
+            relative,
+            path: path.to_path_buf(),
+        });
+        if selected.len() > limit {
+            selected.pop();
+        }
+    }
 
-fn project_files(
-    project_root: &Path,
-    target: Option<&str>,
-    filters: &SearchFileFilters,
-) -> Vec<DirEntry> {
-    let root = project_root.to_path_buf();
-    let walk_root = target.map_or_else(|| root.clone(), |target| root.join(target));
-    let mut entries = collect_project_files(&configure_project_walk(&walk_root, filters));
-    entries.sort_by(|left, right| {
-        relative_file_path(&root, left.path()).cmp(&relative_file_path(&root, right.path()))
-    });
-    entries
+    let mut files = Vec::with_capacity(selected.len());
+    while let Some(candidate) = selected.pop() {
+        files.push(candidate.path);
+    }
+    files.reverse();
+    files
 }
 
 fn build_optional_glob_set(patterns: &[String]) -> Result<Option<GlobSet>, String> {
@@ -566,6 +639,23 @@ fn build_glob_set(patterns: &[&str]) -> Result<GlobSet, String> {
     builder.build().map_err(|e| format!("glob error: {e}"))
 }
 
+fn language_extension_index() -> &'static HashMap<String, Vec<String>> {
+    static INDEX: OnceLock<HashMap<String, Vec<String>>> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let mut index: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, language_exts) in LanguageRegistry::new().list_languages() {
+            index.insert(
+                name.to_ascii_lowercase(),
+                language_exts
+                    .iter()
+                    .map(|ext| ext.to_ascii_lowercase())
+                    .collect(),
+            );
+        }
+        index
+    })
+}
+
 fn build_optional_type_exts(types: &[String]) -> Result<Option<HashSet<String>>, String> {
     let requested = types
         .iter()
@@ -581,19 +671,11 @@ fn build_optional_type_exts(types: &[String]) -> Result<Option<HashSet<String>>,
         return Ok(None);
     }
 
-    let registry = LanguageRegistry::new();
-    let languages = registry.list_languages();
+    let languages = language_extension_index();
     let mut exts = HashSet::new();
     for requested_type in requested {
-        let matching_language_exts = languages
-            .iter()
-            .filter(|(name, _)| name.eq_ignore_ascii_case(&requested_type))
-            .flat_map(|(_, language_exts)| language_exts.iter())
-            .map(|ext| ext.to_ascii_lowercase())
-            .collect::<Vec<_>>();
-
-        if !matching_language_exts.is_empty() {
-            exts.extend(matching_language_exts);
+        if let Some(matching_language_exts) = languages.get(&requested_type) {
+            exts.extend(matching_language_exts.iter().cloned());
             continue;
         }
         // Not a SCOPE language name: treat the requested value as a literal
@@ -717,7 +799,7 @@ fn read_range_for_mode(
         }
         ReadCodeMode::Full => {
             let analyzer = TreeSitterAnalyzer::new();
-            if let Some(symbol) = analyzer.find_containing_symbol_match(full_path, anchor_line) {
+            if let Some(symbol) = analyzer.find_containing_symbol_match(full_path, anchor_line, None) {
                 return clamp_range(symbol.start_line, symbol.end_line, line_count);
             }
             read_range_for_mode(ReadCodeMode::Around, full_path, anchor_line, line_count)
@@ -768,8 +850,10 @@ fn verify_anchor_line(
 }
 
 fn format_line_with_hash(line_num: usize, line: &str) -> String {
-    let hash = patch::line_hash(line);
-    format!("{line_num}#{hash}|{line}")
+    let mut hasher = Sha256::new();
+    hasher.update(line.as_bytes());
+    let hash = hasher.finalize();
+    format!("{line_num}#{:02x}|{line}", hash[0])
 }
 
 fn prefix_lines_with_hash(content: &str, start_line: usize) -> String {
@@ -893,9 +977,12 @@ pub fn ack_next_events(
     let mut state = propagation_state
         .lock()
         .map_err(|_| "lock poisoned".to_string())?;
-    let reviews = state.next_reviews(limit);
-    let review = reviews.first().cloned();
-    let returned = reviews.len();
+    let (review, reviews) = if limit == 1 {
+        (state.next_review(), Vec::new())
+    } else {
+        (None, state.next_reviews(limit))
+    };
+    let returned = usize::from(review.is_some()) + reviews.len();
     let remaining = state.pending_count();
     drop(state);
     Ok(ReviewBatch {

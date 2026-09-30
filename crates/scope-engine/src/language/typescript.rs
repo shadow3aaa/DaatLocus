@@ -103,12 +103,6 @@ impl TypeScriptAdapter {
                 (enum_declaration name: (identifier) @name) @def
                 (method_definition name: (property_identifier) @name) @def
             ",
-            references: r"
-                (call_expression function: (identifier) @ref) @call
-                (call_expression function: (member_expression property: (property_identifier) @ref)) @call
-                (new_expression constructor: (identifier) @ref) @call
-                (type_identifier) @ref
-            ",
         }
     }
 }
