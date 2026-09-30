@@ -1,14 +1,16 @@
-use std::{path::Path, sync::Arc};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axum::http::{HeaderMap, header::AUTHORIZATION};
 use miette::{Result, miette};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::{
     daat_locus_paths::daat_locus_paths,
-    persistence::{PersistenceFileMode, write_bytes_atomic},
+    persistence::{PersistenceFileMode, write_bytes_atomic, write_bytes_atomic_sync},
 };
 
 const BEARER_PREFIX: &str = "Bearer ";
@@ -50,11 +52,26 @@ impl DaemonAuthToken {
     }
 }
 
+const LAST_USED_FLUSH_INTERVAL_MS: i64 = 30_000;
+
+struct TokenCacheState {
+    loaded: bool,
+    records: Vec<DaemonTokenRecord>,
+    persisted_last_used: Vec<Option<i64>>,
+    dirty: bool,
+}
+
+struct TokenCache {
+    inner: RwLock<TokenCacheState>,
+    path: PathBuf,
+}
+
 #[derive(Clone)]
 pub struct DaemonTokenRegistryHandle {
-    path: std::path::PathBuf,
-    local_token_path: std::path::PathBuf,
+    path: PathBuf,
+    local_token_path: PathBuf,
     write_lock: Arc<Mutex<()>>,
+    cache: Arc<TokenCache>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,16 +105,93 @@ struct DaemonTokenRecord {
     token_hash: String,
 }
 
+impl Drop for TokenCache {
+    fn drop(&mut self) {
+        let state = self.inner.write();
+        if !state.loaded || !state.dirty {
+            return;
+        }
+        let registry = DaemonTokenRegistry {
+            tokens: state.records.clone(),
+        };
+        let Ok(bytes) = serde_json::to_vec_pretty(&registry) else {
+            return;
+        };
+        let _ = write_bytes_atomic_sync(&self.path, &bytes, PersistenceFileMode::Private);
+    }
+}
+
+enum AuthFlush {
+    Flush { index: usize, records: Vec<DaemonTokenRecord> },
+}
+
 impl DaemonTokenRegistryHandle {
+    fn open(path: PathBuf, local_token_path: PathBuf) -> Self {
+        let cache = Arc::new(TokenCache {
+            inner: RwLock::new(TokenCacheState {
+                loaded: false,
+                records: Vec::new(),
+                persisted_last_used: Vec::new(),
+                dirty: false,
+            }),
+            path: path.clone(),
+        });
+        Self {
+            path,
+            local_token_path,
+            write_lock: Arc::new(Mutex::new(())),
+            cache,
+        }
+    }
+
     pub async fn load_or_create() -> Result<Self> {
         let paths = daat_locus_paths().await;
-        let handle = Self {
-            path: paths.daemon_token_registry_file(),
-            local_token_path: paths.daemon_token_file(),
-            write_lock: Arc::new(Mutex::new(())),
-        };
+        let handle = Self::open(
+            paths.daemon_token_registry_file(),
+            paths.daemon_token_file(),
+        );
         handle.ensure_registry().await?;
         Ok(handle)
+    }
+
+    async fn ensure_loaded(&self) -> Result<()> {
+        if self.cache.inner.read().loaded {
+            return Ok(());
+        }
+        let registry = read_registry(&self.path).await?;
+        let mut state = self.cache.inner.write();
+        if state.loaded {
+            return Ok(());
+        }
+        state.persisted_last_used = registry
+            .tokens
+            .iter()
+            .map(|record| record.last_used_at_ms)
+            .collect();
+        state.records = registry.tokens;
+        state.loaded = true;
+        state.dirty = false;
+        Ok(())
+    }
+
+    fn install_records(&self, mut records: Vec<DaemonTokenRecord>) {
+        let mut state = self.cache.inner.write();
+        let mut persisted_last_used = Vec::with_capacity(records.len());
+        let mut dirty = false;
+        for record in &mut records {
+            let persisted = record.last_used_at_ms;
+            if let Some(previous) = state.records.iter().find(|item| item.id == record.id)
+                && previous.last_used_at_ms > record.last_used_at_ms
+            {
+                record.last_used_at_ms = previous.last_used_at_ms;
+                dirty = true;
+            }
+            persisted_last_used.push(persisted);
+        }
+        state.records = records;
+        state.persisted_last_used = persisted_last_used;
+        state.loaded = true;
+        state.dirty = dirty;
     }
 
     pub async fn authorize_headers(&self, headers: &HeaderMap) -> bool {
@@ -125,31 +219,70 @@ impl DaemonTokenRegistryHandle {
     }
 
     async fn authorize_token_record(&self, token: &str) -> Result<bool> {
-        let _guard = self.write_lock.lock().await;
-        let mut registry = read_registry(&self.path).await?;
+        self.ensure_loaded().await?;
         let token_hash = hash_token(token);
-        let Some(record) = registry
-            .tokens
-            .iter_mut()
-            .find(|record| constant_time_eq(&record.token_hash, &token_hash))
-        else {
-            return Ok(false);
+        let now = now_ms();
+        let decision = {
+            let mut state = self.cache.inner.write();
+            let Some(index) = state.records.iter().position(|record| {
+                constant_time_eq(&record.token_hash, &token_hash)
+            }) else {
+                return Ok(false);
+            };
+            state.records[index].last_used_at_ms = Some(now);
+            let persisted = state
+                .persisted_last_used
+                .get(index)
+                .copied()
+                .flatten();
+            let due = match persisted {
+                Some(previous) => now.saturating_sub(previous) >= LAST_USED_FLUSH_INTERVAL_MS,
+                None => true,
+            };
+            if !due {
+                state.dirty = true;
+                return Ok(true);
+            }
+            AuthFlush::Flush {
+                index,
+                records: state.records.clone(),
+            }
         };
-        record.last_used_at_ms = Some(now_ms());
-        write_registry(&self.path, &registry).await?;
+        let AuthFlush::Flush { index, records } = decision;
+        write_registry(
+            &self.path,
+            &DaemonTokenRegistry { tokens: records },
+        )
+        .await?;
+        let mut state = self.cache.inner.write();
+        if let Some(slot) = state.persisted_last_used.get_mut(index) {
+            *slot = Some(now);
+        }
+        let current = state
+            .records
+            .get(index)
+            .and_then(|record| record.last_used_at_ms);
+        if current == Some(now) {
+            state.dirty = false;
+        }
         Ok(true)
     }
 
     async fn ensure_registry(&self) -> Result<()> {
+        self.ensure_loaded().await?;
         let _guard = self.write_lock.lock().await;
-        let mut registry = read_registry(&self.path).await?;
-        let local_token = load_or_create_local_daemon_auth_token_at(&self.local_token_path).await?;
+        let local_token =
+            load_or_create_local_daemon_auth_token_at(&self.local_token_path).await?;
+        let mut registry = DaemonTokenRegistry {
+            tokens: self.cache.inner.read().records.clone(),
+        };
         let changed = ensure_local_cli_record(&mut registry, &local_token);
         if changed || !self.path.exists() {
             write_registry(&self.path, &registry).await?;
         } else {
             harden_private_file_permissions(&self.path)?;
         }
+        self.install_records(registry.tokens);
         Ok(())
     }
 
@@ -159,8 +292,11 @@ impl DaemonTokenRegistryHandle {
             return Err(miette!("token name `{LOCAL_CLI_TOKEN_ID}` is reserved"));
         }
 
+        self.ensure_loaded().await?;
         let _guard = self.write_lock.lock().await;
-        let mut registry = read_registry(&self.path).await?;
+        let mut registry = DaemonTokenRegistry {
+            tokens: self.cache.inner.read().records.clone(),
+        };
         reject_duplicate_name(&registry, &name)?;
 
         let token = DaemonAuthToken::generate();
@@ -179,18 +315,22 @@ impl DaemonTokenRegistryHandle {
         registry.tokens.push(record);
         sort_registry(&mut registry);
         write_registry(&self.path, &registry).await?;
+        self.install_records(registry.tokens);
         Ok(created)
     }
 
     pub async fn list_tokens(&self) -> Result<Vec<DaemonTokenListEntry>> {
-        let _guard = self.write_lock.lock().await;
-        let registry = read_registry(&self.path).await?;
-        Ok(registry.tokens.into_iter().map(Into::into).collect())
+        self.ensure_loaded().await?;
+        let records = self.cache.inner.read().records.clone();
+        Ok(records.into_iter().map(Into::into).collect())
     }
 
     pub async fn revoke_token(&self, selector: &str) -> Result<DaemonTokenListEntry> {
+        self.ensure_loaded().await?;
         let _guard = self.write_lock.lock().await;
-        let mut registry = read_registry(&self.path).await?;
+        let mut registry = DaemonTokenRegistry {
+            tokens: self.cache.inner.read().records.clone(),
+        };
         let index = find_token_index(&registry, selector)?;
         if registry.tokens[index].id == LOCAL_CLI_TOKEN_ID {
             return Err(miette!(
@@ -199,12 +339,16 @@ impl DaemonTokenRegistryHandle {
         }
         let removed = registry.tokens.remove(index);
         write_registry(&self.path, &registry).await?;
+        self.install_records(registry.tokens);
         Ok(removed.into())
     }
 
     pub async fn rotate_token(&self, selector: &str) -> Result<CreatedDaemonToken> {
+        self.ensure_loaded().await?;
         let _guard = self.write_lock.lock().await;
-        let mut registry = read_registry(&self.path).await?;
+        let mut registry = DaemonTokenRegistry {
+            tokens: self.cache.inner.read().records.clone(),
+        };
         let index = find_token_index(&registry, selector)?;
         let token = DaemonAuthToken::generate();
         registry.tokens[index].token_hash = hash_token(token.as_str());
@@ -218,6 +362,7 @@ impl DaemonTokenRegistryHandle {
             write_local_daemon_auth_token_at(&self.local_token_path, &token).await?;
         }
         write_registry(&self.path, &registry).await?;
+        self.install_records(registry.tokens);
         Ok(rotated)
     }
 }
@@ -479,11 +624,10 @@ mod tests {
     #[tokio::test]
     async fn registry_creates_private_local_cli_token_and_hash_record() {
         let temp = tempfile::tempdir().unwrap();
-        let handle = DaemonTokenRegistryHandle {
-            path: temp.path().join("runtime").join("daemon_tokens.json"),
-            local_token_path: temp.path().join("runtime").join("daemon.token"),
-            write_lock: Arc::new(Mutex::new(())),
-        };
+        let handle = DaemonTokenRegistryHandle::open(
+            temp.path().join("runtime").join("daemon_tokens.json"),
+            temp.path().join("runtime").join("daemon.token"),
+        );
 
         handle.ensure_registry().await.unwrap();
         let token = load_local_daemon_auth_token_at(&handle.local_token_path)
@@ -517,11 +661,10 @@ mod tests {
     #[tokio::test]
     async fn registry_authorizes_created_tokens_and_updates_last_used() {
         let temp = tempfile::tempdir().unwrap();
-        let handle = DaemonTokenRegistryHandle {
-            path: temp.path().join("runtime").join("daemon_tokens.json"),
-            local_token_path: temp.path().join("runtime").join("daemon.token"),
-            write_lock: Arc::new(Mutex::new(())),
-        };
+        let handle = DaemonTokenRegistryHandle::open(
+            temp.path().join("runtime").join("daemon_tokens.json"),
+            temp.path().join("runtime").join("daemon.token"),
+        );
         handle.ensure_registry().await.unwrap();
 
         let created = handle.create_token("web").await.unwrap();
@@ -550,11 +693,10 @@ mod tests {
     #[tokio::test]
     async fn registry_revokes_and_rotates_named_tokens() {
         let temp = tempfile::tempdir().unwrap();
-        let handle = DaemonTokenRegistryHandle {
-            path: temp.path().join("runtime").join("daemon_tokens.json"),
-            local_token_path: temp.path().join("runtime").join("daemon.token"),
-            write_lock: Arc::new(Mutex::new(())),
-        };
+        let handle = DaemonTokenRegistryHandle::open(
+            temp.path().join("runtime").join("daemon_tokens.json"),
+            temp.path().join("runtime").join("daemon.token"),
+        );
         handle.ensure_registry().await.unwrap();
 
         let created = handle.create_token("web").await.unwrap();

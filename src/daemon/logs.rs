@@ -144,15 +144,15 @@ pub(super) async fn read_handler(
 
 async fn log_sources(sessions: &session::SessionRegistry) -> Vec<LogSourceEntry> {
     let paths = daat_locus_paths().await;
-    let mut sources = vec![
-        log_source_entry(
-            "daemon-main",
-            "Daemon log",
-            "Daemon tracing plus stdout/stderr output.",
-            paths.logs_file(DAEMON_MAIN_LOG),
-        )
-        .await,
-    ];
+    let daemon_log = paths.logs_file(DAEMON_MAIN_LOG);
+    let daemon_metadata = tokio::fs::metadata(&daemon_log).await.ok();
+    let mut sources = vec![log_source_entry(
+        "daemon-main",
+        "Daemon log",
+        "Daemon tracing plus stdout/stderr output.",
+        daemon_log,
+        daemon_metadata,
+    )];
     sources.extend(session_log_sources(paths.sessions_dir(), sessions.list()).await);
     sources
 }
@@ -183,15 +183,13 @@ async fn session_log_sources(
         if !metadata.is_file() {
             continue;
         }
-        sources.push(
-            log_source_entry(
-                format!("session-log-{session_id}"),
-                session_log_label(session_id, &sessions),
-                session_id.to_string(),
-                path,
-            )
-            .await,
-        );
+        sources.push(log_source_entry(
+            format!("session-log-{session_id}"),
+            session_log_label(session_id, &sessions),
+            session_id.to_string(),
+            path,
+            Some(metadata),
+        ));
     }
     sources.sort_by(|left, right| left.label.cmp(&right.label));
     sources
@@ -208,13 +206,13 @@ fn session_log_label(session_id: &str, sessions: &[session::SessionInfo]) -> Str
         .to_string()
 }
 
-async fn log_source_entry(
+fn log_source_entry(
     id: impl Into<String>,
     label: impl Into<String>,
     description: impl Into<String>,
     path: PathBuf,
+    metadata: Option<std::fs::Metadata>,
 ) -> LogSourceEntry {
-    let metadata = tokio::fs::metadata(&path).await.ok();
     let modified_at_ms = metadata
         .as_ref()
         .and_then(|metadata| metadata.modified().ok())
@@ -233,15 +231,9 @@ async fn log_source_entry(
 }
 
 async fn read_log_path(path: &Path, query: &LogsReadQuery) -> Result<LogFileRead, ReadLogError> {
-    let metadata = tokio::fs::metadata(path).await?;
-    if !metadata.is_file() {
-        return Err(ReadLogError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "log source path is not a file",
-        )));
-    }
-
-    let file_size = metadata.len();
+    let mut file = File::open(path).await?;
+    let file_size = file.seek(std::io::SeekFrom::End(0)).await?;
+    drop(file);
     let limit = query
         .limit
         .unwrap_or(DEFAULT_LOG_LINE_LIMIT)
@@ -277,6 +269,7 @@ async fn read_tail(
     let mut file = File::open(path).await?;
     let mut position = file_size;
     let mut buffered_bytes = 0usize;
+    let mut newline_count = 0usize;
     let mut chunks = Vec::new();
 
     while position > 0 && buffered_bytes < LOG_TAIL_MAX_BYTES {
@@ -288,23 +281,17 @@ async fn read_tail(
         let mut chunk = vec![0; read_size];
         file.seek(std::io::SeekFrom::Start(position)).await?;
         file.read_exact(&mut chunk).await?;
+        newline_count += chunk.iter().filter(|byte| **byte == b'\n').count();
         buffered_bytes += chunk.len();
         chunks.push(chunk);
-
-        let newline_count = chunks
-            .iter()
-            .flat_map(|chunk| chunk.iter())
-            .filter(|byte| **byte == b'\n')
-            .count();
         if newline_count > limit {
             break;
         }
     }
 
-    chunks.reverse();
     let mut buffer = Vec::with_capacity(buffered_bytes);
-    for chunk in chunks {
-        buffer.extend(chunk);
+    for chunk in chunks.iter().rev() {
+        buffer.extend_from_slice(chunk);
     }
 
     let mut truncated_start = position > 0;

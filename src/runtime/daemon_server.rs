@@ -7,7 +7,7 @@ use crate::{
     daemon::{
         DAEMON_HOST_DISPLAY, DaemonControlCommand, DaemonLifecycleHandle, DaemonLifecycleState,
         DaemonLock, DaemonServerStartParams, SessionTokenStore, delete_session_by_id,
-        probe_persisted_session_ipc_token, session, session_client_for_id, session_ipc,
+        session, session_client_for_id, session_ipc,
         spawn_detached_daemon_process, start_server, terminate_process_backed_sessions,
     },
     daemon_tray::{DaemonTrayHandle, DaemonTrayStartup},
@@ -238,7 +238,8 @@ impl ManagerTelegramInputRouter {
             .collect::<Vec<_>>();
         sessions.sort_by_key(|info| info.started_at_ms);
         if sessions.is_empty() {
-            return "no sessions\n/session_new [title] creates and attaches one".to_string();
+            return "no sessions
+/session_new [title] creates and attaches one".to_string();
         }
 
         let mut lines = Vec::with_capacity(sessions.len() + 2);
@@ -262,7 +263,8 @@ impl ManagerTelegramInputRouter {
                 session_scope_label(&info.scope)
             )
         }));
-        lines.join("\n")
+        lines.join("
+")
     }
 }
 
@@ -328,13 +330,6 @@ fn parse_single_reference(remainder: &str, attach: bool) -> Option<TelegramSessi
         } else {
             TelegramSessionCommand::DeleteRejected
         }),
-    }
-}
-
-fn command_remainder(command: &str) -> Option<String> {
-    match parse_telegram_session_command(command)? {
-        TelegramSessionCommand::SessionNew { title } => title,
-        _ => None,
     }
 }
 
@@ -504,7 +499,8 @@ async fn run_daemon_serve_inner(
 
     daemon_lifecycle.mark_ready();
 
-    let mut config_fingerprint = crate::config_hot_reload::current_config_fingerprint();
+    let mut config_fingerprint =
+        crate::config_hot_reload::config_file_fingerprint_at(&config_poll_path());
     let mut config_watch_interval = tokio::time::interval(Duration::from_secs(3));
     let mut last_telegram_config = toml::to_string(&config.telegram).ok();
 
@@ -526,30 +522,18 @@ async fn run_daemon_serve_inner(
                 break;
             }
             Some(command) = dashboard_control_rx.recv() => {
-                match command {
-                    DashboardControlCommand::RestartDaemon => {
-                        shutdown_action = ManagerShutdownAction::Restart;
-                        break;
-                    }
-                    DashboardControlCommand::RunSleep => {
-                        tracing::warn!("manager received sleep run command, but sleep runs inside sessions");
-                    }
-                    DashboardControlCommand::ClearConversation => {
-                        tracing::warn!("manager received clear conversation command, but conversation state is session-scoped");
-                    }
-                    DashboardControlCommand::InterruptRuntime => {
-                        tracing::warn!("manager received interrupt command, but runtime turns are session-scoped");
-                    }
-                    DashboardControlCommand::ReloadSkills
-                    | DashboardControlCommand::RunWorkflow { .. }
-                    | DashboardControlCommand::SetSkillAutoUse { .. }
-                    | DashboardControlCommand::SetSleepEnabled { .. } => {
-                        tracing::warn!("manager received session-scoped command, but dashboard state is session-scoped");
-                    }
+                // Session-scoped commands are executed by the session runtime's
+                // handle_dashboard_control_command. This manager channel only
+                // acts on daemon restart; anything else is ignored here instead
+                // of being treated as handled.
+                if matches!(command, DashboardControlCommand::RestartDaemon) {
+                    shutdown_action = ManagerShutdownAction::Restart;
+                    break;
                 }
             }
             _ = config_watch_interval.tick() => {
-                let fingerprint = crate::config_hot_reload::current_config_fingerprint();
+                let fingerprint =
+                    crate::config_hot_reload::config_file_fingerprint_at(&config_poll_path());
                 if fingerprint.is_some() && fingerprint != config_fingerprint {
                     config_fingerprint = fingerprint;
                     reload_telegram_transport(
@@ -625,62 +609,106 @@ async fn run_daemon_serve_inner(
     Ok(())
 }
 
+struct ProcessBackedSession {
+    session_id: session::SessionId,
+    status: session::SessionStatus,
+    ipc_name: Option<String>,
+    pid: Option<u32>,
+    last_seen_at_ms: Option<i64>,
+}
+
+fn process_backed_sessions(sessions: &session::SessionRegistry) -> Vec<ProcessBackedSession> {
+    sessions
+        .list()
+        .into_iter()
+        .filter(|info| info.status.is_process_backed())
+        .map(|info| ProcessBackedSession {
+            session_id: info.session_id,
+            status: info.status,
+            ipc_name: info.ipc_name,
+            pid: info.pid,
+            last_seen_at_ms: info.last_seen_at_ms,
+        })
+        .collect()
+}
+
 async fn run_session_health_checks(
     sessions: session::SessionRegistry,
     session_tokens: SessionTokenStore,
 ) {
     loop {
-        for info in sessions.list() {
-            if !info.status.is_process_backed() {
-                continue;
-            }
-            let Some(ipc_name) = info.ipc_name.clone() else {
-                let _ = sessions.mark_dead(&info.session_id).await;
+        for target in process_backed_sessions(&sessions) {
+            let Some(ipc_name) = target.ipc_name.clone() else {
+                let _ = sessions.mark_dead(&target.session_id).await;
                 continue;
             };
-            let Some(ipc_token) = session_tokens.read().get(&info.session_id).cloned() else {
-                let _ = sessions.mark_dead(&info.session_id).await;
+            let Some(ipc_token) = session_tokens.read().get(&target.session_id).cloned() else {
+                let _ = sessions.mark_dead(&target.session_id).await;
                 continue;
             };
-            let client =
-                session_ipc::SessionIpcClient::new(info.session_id.clone(), ipc_name, ipc_token)
-                    .with_timeout(Duration::from_secs(2));
+            let client = session_ipc::SessionIpcClient::new(
+                target.session_id.clone(),
+                ipc_name,
+                ipc_token,
+            )
+            .with_timeout(Duration::from_secs(2));
             match client.request(session_ipc::SessionIpcRequest::Status).await {
                 Ok(session_ipc::SessionIpcResponse::Status { runtime_status })
                     if runtime_status.ready =>
                 {
-                    let _ = sessions.mark_ready(&info.session_id).await;
+                    let _ = sessions.mark_ready(&target.session_id).await;
                 }
                 Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => {
-                    tracing::warn!("session {} health check error: {message}", info.session_id);
-                    if probe_persisted_session_ipc_token(&session_tokens, &info).await {
+                    tracing::warn!(
+                        "session {} health check error: {message}",
+                        target.session_id
+                    );
+                    if probe_persisted_session_ipc_token_fields(
+                        &session_tokens,
+                        &target.session_id,
+                        target.ipc_name.as_deref(),
+                    )
+                    .await
+                    {
                         continue;
                     }
                 }
                 Ok(session_ipc::SessionIpcResponse::Status { .. } | _) => {}
                 Err(err) => {
-                    if session_is_within_starting_health_grace(&info) {
+                    if session_is_within_starting_health_grace_fields(
+                        target.status,
+                        target.last_seen_at_ms,
+                    ) {
                         tracing::debug!(
                             "session {} health check skipped during startup grace: {err:?}",
-                            info.session_id
+                            target.session_id
                         );
                         continue;
                     }
-                    tracing::warn!("session {} health check failed: {err:?}", info.session_id);
-                    if probe_persisted_session_ipc_token(&session_tokens, &info).await {
+                    tracing::warn!(
+                        "session {} health check failed: {err:?}",
+                        target.session_id
+                    );
+                    if probe_persisted_session_ipc_token_fields(
+                        &session_tokens,
+                        &target.session_id,
+                        target.ipc_name.as_deref(),
+                    )
+                    .await
+                    {
                         continue;
                     }
-                    session_tokens.write().remove(&info.session_id);
-                    if let Some(pid) = info.pid
+                    session_tokens.write().remove(&target.session_id);
+                    if let Some(pid) = target.pid
                         && pid != std::process::id()
                         && !crate::daemon::force_terminate_process(pid).await
                     {
                         tracing::warn!(
                             "session {} pid {pid} did not exit after forced termination",
-                            info.session_id
+                            target.session_id
                         );
                     }
-                    let _ = sessions.mark_dead(&info.session_id).await;
+                    let _ = sessions.mark_dead(&target.session_id).await;
                 }
             }
         }
@@ -688,18 +716,56 @@ async fn run_session_health_checks(
     }
 }
 
-fn session_is_within_starting_health_grace(info: &session::SessionInfo) -> bool {
-    session_is_within_starting_health_grace_at(info, chrono::Utc::now().timestamp_millis())
+
+fn session_is_within_starting_health_grace_fields(
+    status: session::SessionStatus,
+    last_seen_at_ms: Option<i64>,
+) -> bool {
+    session_is_within_starting_health_grace_at(
+        status,
+        last_seen_at_ms,
+        chrono::Utc::now().timestamp_millis(),
+    )
 }
 
-fn session_is_within_starting_health_grace_at(info: &session::SessionInfo, now_ms: i64) -> bool {
-    if info.status != session::SessionStatus::Starting {
+fn session_is_within_starting_health_grace_at(
+    status: session::SessionStatus,
+    last_seen_at_ms: Option<i64>,
+    now_ms: i64,
+) -> bool {
+    if status != session::SessionStatus::Starting {
         return false;
     }
-    let Some(last_seen_at_ms) = info.last_seen_at_ms else {
+    let Some(last_seen_at_ms) = last_seen_at_ms else {
         return false;
     };
     now_ms.saturating_sub(last_seen_at_ms) <= SESSION_STARTING_HEALTH_GRACE_MS
+}
+
+async fn probe_persisted_session_ipc_token_fields(
+    session_tokens: &SessionTokenStore,
+    session_id: &session::SessionId,
+    ipc_name: Option<&str>,
+) -> bool {
+    let Ok(Some(token)) = session::load_session_ipc_token(session_id).await else {
+        return false;
+    };
+    let Some(ipc_name) = ipc_name else {
+        return false;
+    };
+    let probe = session_ipc::SessionIpcClient::new(
+        session_id.clone(),
+        ipc_name.to_string(),
+        token.clone(),
+    )
+    .with_timeout(Duration::from_secs(2));
+    match probe.request(session_ipc::SessionIpcRequest::Status).await {
+        Ok(session_ipc::SessionIpcResponse::Status { .. }) => {
+            session_tokens.write().insert(session_id.clone(), token);
+            true
+        }
+        _ => false,
+    }
 }
 
 async fn run_session_telegram_outbox_delivery(
@@ -708,25 +774,26 @@ async fn run_session_telegram_outbox_delivery(
     session_tokens: SessionTokenStore,
 ) {
     loop {
-        for info in sessions.list() {
-            if !info.status.is_process_backed()
-                || !session_tokens.read().contains_key(&info.session_id)
-            {
+        for target in process_backed_sessions(&sessions) {
+            if !session_tokens.read().contains_key(&target.session_id) {
                 continue;
             }
-            let client =
-                match session_client_for_id(&sessions, &session_tokens, info.session_id.as_str())
-                    .await
-                {
-                    Ok(client) => client,
-                    Err(err) => {
-                        tracing::debug!(
-                            "skip telegram outbox drain for session {}: {err:?}",
-                            info.session_id
-                        );
-                        continue;
-                    }
-                };
+            let client = match session_client_for_id(
+                &sessions,
+                &session_tokens,
+                target.session_id.as_str(),
+            )
+            .await
+            {
+                Ok(client) => client,
+                Err(err) => {
+                    tracing::debug!(
+                        "skip telegram outbox drain for session {}: {err:?}",
+                        target.session_id
+                    );
+                    continue;
+                }
+            };
             let messages = match client
                 .request(session_ipc::SessionIpcRequest::DrainTelegramOutbox)
                 .await
@@ -735,21 +802,21 @@ async fn run_session_telegram_outbox_delivery(
                 Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => {
                     tracing::warn!(
                         "session {} rejected telegram outbox drain: {message}",
-                        info.session_id
+                        target.session_id
                     );
                     continue;
                 }
                 Ok(_) => {
                     tracing::warn!(
                         "session {} returned unexpected telegram outbox response",
-                        info.session_id
+                        target.session_id
                     );
                     continue;
                 }
                 Err(err) => {
                     tracing::debug!(
                         "telegram outbox drain failed for session {}: {err:?}",
-                        info.session_id
+                        target.session_id
                     );
                     continue;
                 }
@@ -761,7 +828,7 @@ async fn run_session_telegram_outbox_delivery(
                 {
                     tracing::warn!(
                         "telegram delivery failed for session {}: {err:?}",
-                        info.session_id
+                        target.session_id
                     );
                     break;
                 }
@@ -888,7 +955,8 @@ fn manager_dashboard_state(telegram_acl: &TelegramAclHandle) -> DashboardState {
     DashboardState {
         agent_name: dashboard_agent_name(),
         status_output:
-            "Manager daemon is running.\nSelect or create a session to view runtime state."
+            "Manager daemon is running.
+Select or create a session to view runtime state."
                 .to_string(),
         inspect_telegram_output: manager_telegram_status_output(telegram_acl),
         pending_access_requests: telegram_acl.pending_requests(),
@@ -919,7 +987,8 @@ fn manager_telegram_status_output(telegram_acl: &TelegramAclHandle) -> String {
             request.chat_id, request.title, request.sender, request.last_message_preview
         )
     }));
-    lines.join("\n")
+    lines.join("
+")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -954,6 +1023,10 @@ fn apply_daemon_control_command(
             *shutdown_action = ManagerShutdownAction::Restart;
         }
     }
+}
+
+fn config_poll_path() -> std::path::PathBuf {
+    crate::daat_locus_paths::daat_locus_paths_sync().config_file("config.toml")
 }
 
 /// Rebuild the manager Telegram transport (and outbox delivery) from the
@@ -1082,16 +1155,22 @@ mod tests {
         info.last_seen_at_ms = Some(1_000);
 
         assert!(session_is_within_starting_health_grace_at(
-            &info,
+            info.status,
+            info.last_seen_at_ms,
             1_000 + SESSION_STARTING_HEALTH_GRACE_MS
         ));
         assert!(!session_is_within_starting_health_grace_at(
-            &info,
+            info.status,
+            info.last_seen_at_ms,
             1_001 + SESSION_STARTING_HEALTH_GRACE_MS
         ));
 
         info.status = session::SessionStatus::Ready;
-        assert!(!session_is_within_starting_health_grace_at(&info, 1_000));
+        assert!(!session_is_within_starting_health_grace_at(
+            info.status,
+            info.last_seen_at_ms,
+            1_000
+        ));
     }
 
     #[test]
@@ -1108,10 +1187,10 @@ mod tests {
             parse_telegram_session_command("session_new"),
             Some(TelegramSessionCommand::SessionNew { title: None })
         ));
-        assert_eq!(
-            command_remainder("session_new keep 'raw remainder'").as_deref(),
-            Some("keep 'raw remainder'")
-        );
+        assert!(matches!(
+            parse_telegram_session_command("session_new keep 'raw remainder'"),
+            Some(TelegramSessionCommand::SessionNew { title: Some(title) }) if title == "keep 'raw remainder'"
+        ));
         assert!(matches!(
             parse_telegram_session_command("session_switch abc"),
             Some(TelegramSessionCommand::SessionAttach { reference: Some(reference) }) if reference == "abc"

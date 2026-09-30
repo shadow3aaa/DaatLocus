@@ -43,11 +43,6 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-impl Default for SessionId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -69,14 +64,12 @@ pub enum SessionStatus {
     Dormant,
     Starting,
     Ready,
-    Stopping,
     Dead,
-    Failed,
 }
 
 impl SessionStatus {
     pub const fn is_process_backed(self) -> bool {
-        matches!(self, Self::Starting | Self::Ready | Self::Stopping)
+        matches!(self, Self::Starting | Self::Ready)
     }
 }
 
@@ -220,17 +213,22 @@ impl SessionRegistry {
     }
 
     pub async fn set_title(&self, session_id: &SessionId, title: String) -> Result<bool> {
+        let normalized = normalize_title(Some(title));
         let changed = {
             let mut inner = self.inner.write();
             let Some(info) = inner.sessions.get_mut(session_id) else {
                 return Ok(false);
             };
-            info.title = normalize_title(Some(title));
-            let changed = true;
-            drop(inner);
-            changed
+            if info.title == normalized {
+                false
+            } else {
+                info.title = normalized;
+                true
+            }
         };
-        self.persist().await?;
+        if changed {
+            self.persist().await?;
+        }
         Ok(changed)
     }
 
@@ -241,36 +239,51 @@ impl SessionRegistry {
         ipc_name: String,
         ipc_token: &str,
     ) -> Result<()> {
-        self.update(session_id, |info| {
-            info.pid = Some(pid);
-            info.status = SessionStatus::Starting;
-            info.ipc_name = Some(ipc_name);
-            info.ipc_token_hash = Some(hash_ipc_token(ipc_token));
-            info.last_seen_at_ms = Some(chrono::Utc::now().timestamp_millis());
-        })
+        self.update(
+            session_id,
+            |info| {
+                info.pid = Some(pid);
+                info.status = SessionStatus::Starting;
+                info.ipc_name = Some(ipc_name);
+                info.ipc_token_hash = Some(hash_ipc_token(ipc_token));
+                info.last_seen_at_ms = Some(chrono::Utc::now().timestamp_millis());
+            },
+            false,
+        )
         .await
     }
 
     pub async fn mark_ready(&self, session_id: &SessionId) -> Result<()> {
-        self.update(session_id, |info| {
-            info.status = SessionStatus::Ready;
-            info.last_seen_at_ms = Some(chrono::Utc::now().timestamp_millis());
-        })
+        self.update(
+            session_id,
+            |info| {
+                info.status = SessionStatus::Ready;
+                info.last_seen_at_ms = Some(chrono::Utc::now().timestamp_millis());
+            },
+            true,
+        )
         .await
     }
 
     pub async fn mark_dead(&self, session_id: &SessionId) -> Result<()> {
-        self.update(session_id, |info| {
-            info.pid = None;
-            info.status = SessionStatus::Dead;
-            info.ipc_name = None;
-            info.ipc_token_hash = None;
-            info.last_seen_at_ms = Some(chrono::Utc::now().timestamp_millis());
-        })
+        self.update(
+            session_id,
+            |info| {
+                info.pid = None;
+                info.status = SessionStatus::Dead;
+                info.ipc_name = None;
+                info.ipc_token_hash = None;
+                info.last_seen_at_ms = Some(chrono::Utc::now().timestamp_millis());
+            },
+            true,
+        )
         .await
     }
 
-    async fn update<F>(&self, session_id: &SessionId, update: F) -> Result<()>
+    /// `persist` is false for intermediate states such as `mark_starting`, which is
+    /// always followed by `mark_ready` or `mark_dead`. Those terminal updates write
+    /// the registry once.
+    async fn update<F>(&self, session_id: &SessionId, update: F, persist: bool) -> Result<()>
     where
         F: FnOnce(&mut SessionInfo),
     {
@@ -280,9 +293,12 @@ impl SessionRegistry {
                 return Err(miette!("unknown session `{session_id}`"));
             };
             update(info);
-            drop(inner);
         }
-        self.persist().await
+        if persist {
+            self.persist().await
+        } else {
+            Ok(())
+        }
     }
 
     async fn persist(&self) -> Result<()> {

@@ -39,6 +39,8 @@ pub(super) const SHARE_COOKIE_NAME: &str = "daat_share";
 const IP_BUCKET_CAPACITY: f64 = 30.0;
 /// Tokens refilled per second for the per-IP bucket.
 const IP_BUCKET_REFILL_PER_SEC: f64 = 1.0 / 3.0;
+/// Remove an IP bucket after it has refilled and then stayed idle.
+const IP_BUCKET_STALE_AFTER_MS: i64 = 60_000;
 /// Attempt thresholds for the per-share backoff ladder.
 const BACKOFF_TIER_LOCK_UNTIL_EXPIRY: u32 = 20;
 const BACKOFF_TIER_10_MIN: u32 = 15;
@@ -288,6 +290,16 @@ impl TokenBucket {
         let missing = (1.0 - self.tokens).max(0.0);
         (missing / IP_BUCKET_REFILL_PER_SEC * 1000.0).ceil() as i64
     }
+
+    fn is_stale(&self, now_ms: i64) -> bool {
+        if self.last_refill_ms == 0 {
+            return false;
+        }
+        let deficit = (IP_BUCKET_CAPACITY - self.tokens).max(0.0);
+        let refill_ms = (deficit / IP_BUCKET_REFILL_PER_SEC * 1000.0).ceil() as i64;
+        now_ms.saturating_sub(self.last_refill_ms)
+            > refill_ms.saturating_add(IP_BUCKET_STALE_AFTER_MS)
+    }
 }
 
 /// Shared, cloneable share registry.
@@ -470,6 +482,7 @@ impl ShareRegistry {
         // (or creating a new share) does not reset an attacker's budget.
         {
             let mut buckets = self.buckets.lock().await;
+            buckets.retain(|_, bucket| !bucket.is_stale(now));
             let bucket = buckets.entry(ip.to_string()).or_default();
             if !bucket.consume(now) {
                 let retry_after_ms = bucket.retry_after_ms();
@@ -520,18 +533,20 @@ impl ShareRegistry {
         now: i64,
     ) -> Option<ShareAccess> {
         let cookie = share_cookie_value(headers)?;
-        let records = self.records.read().await;
-        for record in records.values() {
-            if record.is_expired(now) {
-                continue;
-            }
-            if verify_cookie(&cookie, record, now) {
-                return Some(ShareAccess {
-                    scope: record.scope.clone(),
-                });
-            }
+        let mut parts = cookie.split('.');
+        let version = parts.next()?;
+        let share_id = parts.next()?;
+        if version != "v1" || share_id.is_empty() {
+            return None;
         }
-        None
+        let records = self.records.read().await;
+        let record = records.get(share_id)?;
+        if record.is_expired(now) || !verify_cookie(&cookie, record, now) {
+            return None;
+        }
+        Some(ShareAccess {
+            scope: record.scope.clone(),
+        })
     }
 }
 

@@ -57,7 +57,7 @@ use crate::{
         DashboardCommandAttachment, DashboardCommandRunner, DashboardControlCommand,
         DashboardHistoryLoader, DashboardIncomingAttachment, DashboardInputHistory,
         DashboardSessionTitle, DashboardState, ask_message_text, dashboard_action_is_manager_owned,
-        dashboard_command_is_manager_owned, execute_control_command, execute_dashboard_action,
+        execute_control_command, execute_dashboard_action,
     },
     model_catalog::catalog_model_capacity,
     sandbox::StrongFilesystemSandboxMode,
@@ -1229,7 +1229,6 @@ fn decode_image_data_url(
 
 struct ParsedDataUrl<'a> {
     media_type: &'a str,
-    parameters: Vec<(&'a str, &'a str)>,
     base64: bool,
     payload: &'a str,
     /// Input had no `data:` scheme, so the whole string is a raw base64 payload.
@@ -1247,7 +1246,6 @@ fn parse_data_url(input: &str) -> Option<ParsedDataUrl<'_>> {
     let Some(rest) = trimmed.strip_prefix("data:") else {
         return Some(ParsedDataUrl {
             media_type: "",
-            parameters: Vec::new(),
             base64: true,
             payload: trimmed,
             is_bare_payload: true,
@@ -1256,19 +1254,14 @@ fn parse_data_url(input: &str) -> Option<ParsedDataUrl<'_>> {
     let (metadata, payload) = rest.split_once(',')?;
     let mut parts = metadata.split(';');
     let media_type = parts.next().unwrap_or("");
-    let mut parameters = Vec::new();
     let mut base64 = false;
     for part in parts {
         if part.eq_ignore_ascii_case("base64") {
             base64 = true;
-            continue;
         }
-        let (name, value) = part.split_once('=').unwrap_or((part, ""));
-        parameters.push((name, value));
     }
     Some(ParsedDataUrl {
         media_type,
-        parameters,
         base64,
         payload,
         is_bare_payload: false,
@@ -2203,23 +2196,6 @@ async fn command_handler(
             return response;
         }
         let trimmed = request.command.trim();
-        if let Some(command) = trimmed.strip_prefix('/')
-            && dashboard_command_is_manager_owned(command)
-        {
-            if !attachments.is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(CommandResponse {
-                        output: "dashboard commands cannot include attachments".to_string(),
-                    }),
-                )
-                    .into_response();
-            }
-            let snapshot = state.dashboard_rx.borrow().clone();
-            let output =
-                execute_control_command(command.trim(), &snapshot, &state.dashboard_control_tx);
-            return Json(CommandResponse { output }).into_response();
-        }
         let client = match session_client_for_request(&state, session_id).await {
             Ok(client) => client,
             Err(err) => {
@@ -5542,7 +5518,6 @@ mod tests {
     fn data_url_parser_splits_media_type_parameters_base64_and_payload() {
         let parsed = parse_data_url("data:text/plain;charset=utf-8;base64,aGVsbG8=").expect("data url");
         assert_eq!(parsed.media_type, "text/plain");
-        assert_eq!(parsed.parameters, vec![("charset", "utf-8")]);
         assert!(parsed.base64);
         assert_eq!(parsed.payload, "aGVsbG8=");
         assert!(!parsed.is_bare_payload);
@@ -5555,7 +5530,7 @@ mod tests {
 
         let image = parse_data_url("data:image/png;base64,aGVsbG8=").expect("image");
         assert_eq!(image.media_type, "image/png");
-        assert!(image.parameters.is_empty());
+        assert!(image.base64);
         assert!(image.base64);
         assert_eq!(
             decode_image_data_url("data:image/png;base64,aGVsbG8=", "image/png").expect("png"),
