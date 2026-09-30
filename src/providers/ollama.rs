@@ -1,16 +1,20 @@
 use std::{
-    collections::{HashSet, VecDeque},
-    sync::{Arc, LazyLock, Mutex},
+    collections::HashSet,
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use miette::{Result, miette};
-use parking_lot::Mutex as ParkingLotMutex;
 use serde_json::{Value, json};
 use tracing::warn;
 
+use super::payload::image_part_data_url;
+use super::{
+    extract_json_value_from_content, shared_request_rate_limiter,
+    thinking::thinking_budget_is_none,
+};
 use crate::{
     config::ModelConfig,
     context_budget::{ContextBudgetExceededError, RequestBudgetLimits},
@@ -24,7 +28,6 @@ use crate::{
         should_retry_request_without_thinking_budget, summarize_agent_turn_request,
         summarize_prompt_request, truncate_for_error,
     },
-    providers::thinking::thinking_budget_is_none,
     reasoning::runtime::{
         AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec,
         AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, PromptRequest,
@@ -32,12 +35,6 @@ use crate::{
 };
 
 const DEFAULT_OLLAMA_HOST: &str = "http://127.0.0.1:11434";
-
-type RequestRateLimiter = Arc<tokio::sync::Mutex<VecDeque<Instant>>>;
-type RequestRateLimiterMap = std::collections::HashMap<String, RequestRateLimiter>;
-
-static REQUEST_RATE_LIMITERS: LazyLock<ParkingLotMutex<RequestRateLimiterMap>> =
-    LazyLock::new(|| ParkingLotMutex::new(std::collections::HashMap::new()));
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OllamaThinkingMode {
@@ -95,28 +92,6 @@ fn ollama_prompt_response_to_value(
     }
 }
 
-fn extract_json_value_from_content(content: &str) -> Option<Value> {
-    let content = content.trim();
-    if let Some(fenced) = content
-        .strip_prefix("```json")
-        .and_then(|s| s.strip_suffix("```"))
-        .or_else(|| {
-            content
-                .strip_prefix("```")
-                .and_then(|s| s.strip_suffix("```"))
-        })
-        && let Ok(value) = serde_json::from_str::<Value>(fenced)
-    {
-        return Some(value);
-    }
-    if (content.starts_with('{') || content.starts_with('['))
-        && let Ok(value) = serde_json::from_str::<Value>(content)
-    {
-        return Some(value);
-    }
-    None
-}
-
 pub struct OllamaClient {
     client: reqwest::Client,
     host: String,
@@ -127,7 +102,7 @@ pub struct OllamaClient {
     thinking_mode: Mutex<OllamaThinkingMode>,
     vision_mode: Mutex<OllamaVisionMode>,
     rpm: Option<usize>,
-    request_rate_limiter: Option<RequestRateLimiter>,
+    request_rate_limiter: Option<std::sync::Arc<tokio::sync::Mutex<std::collections::VecDeque<Instant>>>>,
     keep_alive: Option<String>,
     request_timeout: Duration,
     stream_idle_timeout: Duration,
@@ -187,7 +162,7 @@ impl OllamaClient {
             thinking_mode: Mutex::new(thinking_mode_initial),
             vision_mode: Mutex::new(vision_mode_initial),
             rpm: model_config.rpm(),
-            request_rate_limiter: shared_ollama_rate_limiter(
+            request_rate_limiter: shared_request_rate_limiter(
                 &host,
                 &model_config.model_id,
                 model_config.rpm(),
@@ -478,11 +453,25 @@ impl OllamaClient {
                     }
                     if !self.vision_disabled() && looks_like_vision_unsupported_error(&err_str) {
                         self.mark_vision_disabled();
+                        if let Some(messages) = current_payload
+                            .get_mut("messages")
+                            .and_then(Value::as_array_mut)
+                        {
+                            for message in messages {
+                                if let Some(object) = message.as_object_mut() {
+                                    object.remove("images");
+                                }
+                            }
+                        }
+                        attempt += 1;
                         warn!(
-                            "ollama provider rejected image input; disabling vision for {} (no retry in non-streaming path)\n{}",
+                            "ollama provider rejected image input; retrying {} without images (attempt {}/{})\n{}",
                             request_kind,
+                            attempt,
+                            max_retries,
                             request_context.join("\n")
                         );
+                        continue;
                     }
                     return Err(err);
                 }
@@ -686,8 +675,10 @@ impl OllamaClient {
         let mut tool_calls: Vec<AgentToolCall> = Vec::new();
         let mut last_usage = None;
         let mut last_assistant_progress_emit_at = Instant::now();
+        let mut assistant_char_len = 0usize;
         let mut last_assistant_progress_char_len = 0usize;
         let mut last_reasoning_progress_emit_at = Instant::now();
+        let mut reasoning_char_len = 0usize;
         let mut last_reasoning_progress_char_len = 0usize;
         let mut buffer = Vec::new();
         let url = self.chat_url();
@@ -752,35 +743,29 @@ impl OllamaClient {
 
                 if let Some(delta_content) = message["content"].as_str() {
                     content.push_str(delta_content);
-                    let should_emit = content
-                        .chars()
-                        .count()
-                        .saturating_sub(last_assistant_progress_char_len)
-                        >= 64
+                    assistant_char_len += delta_content.chars().count();
+                    let should_emit = assistant_char_len.saturating_sub(last_assistant_progress_char_len) >= 64
                         || last_assistant_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !content.trim().is_empty() {
                         if let Some(progress) = progress {
                             progress.emit_assistant_content(content.clone());
                         }
                         last_assistant_progress_emit_at = Instant::now();
-                        last_assistant_progress_char_len = content.chars().count();
+                        last_assistant_progress_char_len = assistant_char_len;
                     }
                 }
 
                 if let Some(delta_thinking) = message["thinking"].as_str() {
                     thinking.push_str(delta_thinking);
-                    let should_emit = thinking
-                        .chars()
-                        .count()
-                        .saturating_sub(last_reasoning_progress_char_len)
-                        >= 64
+                    reasoning_char_len += delta_thinking.chars().count();
+                    let should_emit = reasoning_char_len.saturating_sub(last_reasoning_progress_char_len) >= 64
                         || last_reasoning_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !thinking.trim().is_empty() {
                         if let Some(progress) = progress {
                             progress.emit_reasoning_content(thinking.clone());
                         }
                         last_reasoning_progress_emit_at = Instant::now();
-                        last_reasoning_progress_char_len = thinking.chars().count();
+                        last_reasoning_progress_char_len = reasoning_char_len;
                     }
                 }
 
@@ -1114,10 +1099,8 @@ fn extract_ollama_multimodal_content(content: &AgentContent) -> (String, Vec<Str
     let mut images = Vec::new();
     for part in content.parts() {
         match part {
-            AgentContentPart::Image {
-                path, media_type, ..
-            } => {
-                let data_url = image_part_data_url_ollama(path, media_type);
+            AgentContentPart::Image { .. } => {
+                let data_url = image_part_data_url(part);
                 if let Some(url) = data_url {
                     images.push(url);
                 }
@@ -1128,59 +1111,49 @@ fn extract_ollama_multimodal_content(content: &AgentContent) -> (String, Vec<Str
     (text, images)
 }
 
-fn image_part_data_url_ollama(path: &str, media_type: &str) -> Option<String> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            tracing::warn!("failed to read multimodal image attachment {path}: {err}");
-            return None;
-        }
-    };
-    let media_type = normalize_ollama_image_media_type(path, media_type)?;
-    Some(format!(
-        "data:{media_type};base64,{}",
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
-    ))
-}
-
-fn normalize_ollama_image_media_type(path: &str, media_type: &str) -> Option<String> {
-    let media_type = media_type.trim();
-    if media_type.starts_with("image/") {
-        return Some(media_type.to_string());
-    }
-    match std::path::Path::new(path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("png") => Some("image/png".to_string()),
-        Some("jpg" | "jpeg") => Some("image/jpeg".to_string()),
-        Some("webp") => Some("image/webp".to_string()),
-        Some("gif") => Some("image/gif".to_string()),
-        _ => {
-            tracing::warn!(
-                "failed to infer image MIME type for multimodal attachment {path}: media_type={media_type}"
-            );
-            None
-        }
-    }
-}
 
 fn prompt_request_to_ollama_messages(request: &PromptRequest) -> Vec<Value> {
-    let mut messages = Vec::new();
-    for msg in &request.system_messages {
-        messages.push(json!({"role": "system", "content": msg}));
+    let mut valid_tool_call_ids = HashSet::new();
+    for message in request
+        .long_term_memory_messages
+        .iter()
+        .chain(request.history_messages.iter())
+        .chain(request.retry_messages.iter())
+    {
+        if let AgentMessage::AssistantToolCallProtocol { calls, .. } = &message.message {
+            for call in calls {
+                valid_tool_call_ids.insert(call.id.clone());
+            }
+        }
     }
-    for msg in request.all_messages() {
-        messages.push(agent_message_to_ollama_content(
-            &msg.message,
-            true,
-            &HashSet::new(),
-            false,
-        ));
-    }
-    messages
+    request
+        .system_messages
+        .iter()
+        .map(|message| json!({"role": "system", "content": message}))
+        .chain(
+            request
+                .long_term_memory_messages
+                .iter()
+                .map(|message| {
+                    agent_message_to_ollama_content(
+                        &message.message,
+                        true,
+                        &valid_tool_call_ids,
+                        false,
+                    )
+                }),
+        )
+        .chain(request.history_messages.iter().map(|message| {
+            agent_message_to_ollama_content(&message.message, true, &valid_tool_call_ids, false)
+        }))
+        .chain(std::iter::once(json!({
+            "role": "user",
+            "content": request.current_user_message,
+        })))
+        .chain(request.retry_messages.iter().map(|message| {
+            agent_message_to_ollama_content(&message.message, true, &valid_tool_call_ids, false)
+        }))
+        .collect()
 }
 
 fn agent_turn_request_to_ollama_messages(request: &AgentTurnRequest) -> Vec<Value> {
@@ -1239,23 +1212,3 @@ fn parse_usage_from_ollama_response(response: &Value) -> Option<TokenUsage> {
     })
 }
 
-fn shared_ollama_rate_limiter(
-    host: &str,
-    model_id: &str,
-    rpm: Option<usize>,
-) -> Option<RequestRateLimiter> {
-    let rpm = rpm?;
-    let key = format!(
-        "{}\u{1f}{}\u{1f}{}",
-        host.trim_end_matches('/'),
-        model_id,
-        rpm
-    );
-    let mut registry = REQUEST_RATE_LIMITERS.lock();
-    Some(
-        registry
-            .entry(key)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(VecDeque::new())))
-            .clone(),
-    )
-}

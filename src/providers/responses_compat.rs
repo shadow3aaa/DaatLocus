@@ -12,8 +12,8 @@ use tracing::warn;
 
 use super::io::{
     default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
-    non_empty_string, normalize_sse_buffer, parse_retry_after_seconds,
-    read_response_text_with_timeout, send_request_for_streaming_response, take_next_sse_event,
+    non_empty_string, parse_retry_after_seconds,
+    read_response_text_with_timeout, send_request_for_streaming_response,
     truncate_for_error, truncate_for_json_error,
 };
 use super::payload::{flatten_tool_result_as_assistant_text, image_part_data_url};
@@ -255,7 +255,7 @@ impl ResponsesCompatibleClient {
         emit_progress: bool,
     ) -> Result<AgentTurnStreamResult> {
         let url = self.url();
-        let mut buffer = Vec::new();
+        let mut buffer = super::io::SseBuffer::default();
         let mut delta_content = String::new();
         let mut output_messages = Vec::new();
         let mut reasoning_content = String::new();
@@ -263,8 +263,10 @@ impl ResponsesCompatibleClient {
         let mut tool_calls = Vec::new();
         let mut completed = false;
         let mut last_assistant_progress_emit_at = Instant::now();
+        let mut assistant_char_len = 0usize;
         let mut last_assistant_progress_char_len = 0usize;
         let mut last_reasoning_progress_emit_at = Instant::now();
+        let mut reasoning_char_len = 0usize;
         let mut last_reasoning_progress_char_len = 0usize;
         let mut stream = response.bytes_stream();
         let stream_request_context = [
@@ -295,9 +297,9 @@ impl ResponsesCompatibleClient {
                 )
             })?;
             buffer.extend_from_slice(&chunk);
-            normalize_sse_buffer(&mut buffer);
+            buffer.normalize();
 
-            while let Some(event) = take_next_sse_event(&mut buffer) {
+            while let Some(event) = buffer.next_event() {
                 let data = event
                     .lines()
                     .filter_map(|line| line.strip_prefix("data:"))
@@ -321,10 +323,9 @@ impl ResponsesCompatibleClient {
                     Some("response.output_text.delta") => {
                         if let Some(delta) = value.get("delta").and_then(Value::as_str) {
                             delta_content.push_str(delta);
+                            assistant_char_len += delta.chars().count();
                             if emit_progress {
-                                let should_emit = delta_content
-                                    .chars()
-                                    .count()
+                                let should_emit = assistant_char_len
                                     .saturating_sub(last_assistant_progress_char_len)
                                     >= 64
                                     || last_assistant_progress_emit_at.elapsed()
@@ -334,8 +335,7 @@ impl ResponsesCompatibleClient {
                                         progress.emit_assistant_content(delta_content.clone());
                                     }
                                     last_assistant_progress_emit_at = Instant::now();
-                                    last_assistant_progress_char_len =
-                                        delta_content.chars().count();
+                                    last_assistant_progress_char_len = assistant_char_len;
                                 }
                             }
                         }
@@ -345,10 +345,9 @@ impl ResponsesCompatibleClient {
                     ) => {
                         if let Some(delta) = value.get("delta").and_then(Value::as_str) {
                             reasoning_content.push_str(delta);
+                            reasoning_char_len += delta.chars().count();
                             if emit_progress {
-                                let should_emit = reasoning_content
-                                    .chars()
-                                    .count()
+                                let should_emit = reasoning_char_len
                                     .saturating_sub(last_reasoning_progress_char_len)
                                     >= 64
                                     || last_reasoning_progress_emit_at.elapsed()
@@ -358,8 +357,7 @@ impl ResponsesCompatibleClient {
                                         progress.emit_reasoning_content(reasoning_content.clone());
                                     }
                                     last_reasoning_progress_emit_at = Instant::now();
-                                    last_reasoning_progress_char_len =
-                                        reasoning_content.chars().count();
+                                    last_reasoning_progress_char_len = reasoning_char_len;
                                 }
                             }
                         }
@@ -400,18 +398,19 @@ impl ResponsesCompatibleClient {
 
         if reasoning_content.trim().is_empty() {
             reasoning_content = reasoning_item_content;
+            reasoning_char_len = reasoning_content.chars().count();
         }
 
         if emit_progress
             && !reasoning_content.trim().is_empty()
-            && reasoning_content.chars().count() != last_reasoning_progress_char_len
+            && reasoning_char_len != last_reasoning_progress_char_len
             && let Some(progress) = progress
         {
             progress.emit_reasoning_content(reasoning_content.clone());
         }
         if emit_progress
             && !delta_content.trim().is_empty()
-            && delta_content.chars().count() != last_assistant_progress_char_len
+            && assistant_char_len != last_assistant_progress_char_len
             && let Some(progress) = progress
         {
             progress.emit_assistant_content(delta_content.clone());
@@ -517,7 +516,7 @@ impl ModelProvider for ResponsesCompatibleClient {
             super::opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
         let mut strip_images = !self.supports_vision.load(Ordering::Relaxed);
         loop {
-            let payload = build_agent_payload(self, request.clone(), strip_images);
+            let payload = build_agent_payload(self, &request, strip_images);
             let response = self
                 .post_responses_with_retry(&payload, &request_context, &session_headers)
                 .await?;
@@ -659,13 +658,15 @@ fn responses_reasoning_payload(
 
 fn build_agent_payload(
     client: &ResponsesCompatibleClient,
-    request: AgentTurnRequest,
+    request: &AgentTurnRequest,
     strip_images: bool,
 ) -> Value {
-    let (instructions, input) = agent_messages_to_responses_parts(request.messages, strip_images);
+    let (instructions, input) =
+        agent_messages_to_responses_parts(&request.messages, strip_images);
     let tools = request
         .tools
-        .into_iter()
+        .iter()
+        .cloned()
         .map(agent_tool_to_responses_tool)
         .collect::<Vec<_>>();
     base_payload(
@@ -685,11 +686,11 @@ fn history_messages_to_responses_parts(
         .into_iter()
         .map(|message| message.message)
         .collect::<Vec<_>>();
-    agent_messages_to_responses_parts(messages, strip_images)
+    agent_messages_to_responses_parts(&messages, strip_images)
 }
 
 fn agent_messages_to_responses_parts(
-    messages: Vec<AgentMessage>,
+    messages: &[AgentMessage],
     strip_images: bool,
 ) -> (String, Vec<Value>) {
     let mut instructions = Vec::new();
@@ -698,16 +699,19 @@ fn agent_messages_to_responses_parts(
 
     for message in messages {
         match message {
-            AgentMessage::System { content } => instructions.push(content),
+            AgentMessage::System { content } => instructions.push(content.clone()),
             AgentMessage::User { content } => {
-                input.push(responses_user_message(&content, strip_images));
+                input.push(responses_user_message(content, strip_images));
             }
             AgentMessage::Assistant { content } => {
-                input.push(responses_message("assistant", "output_text", &content));
+                input.push(responses_message("assistant", "output_text", content));
             }
             AgentMessage::AssistantToolCallProtocol { content, calls, .. } => {
-                if let Some(content) = content.filter(|content| !content.trim().is_empty()) {
-                    input.push(responses_message("assistant", "output_text", &content));
+                if let Some(content) = content
+                    .as_deref()
+                    .filter(|content| !content.trim().is_empty())
+                {
+                    input.push(responses_message("assistant", "output_text", content));
                 }
                 for call in calls {
                     valid_tool_call_ids.insert(call.id.clone());
@@ -724,7 +728,7 @@ fn agent_messages_to_responses_parts(
                 name,
                 content,
             } => {
-                if valid_tool_call_ids.contains(&tool_call_id) {
+                if valid_tool_call_ids.contains(tool_call_id) {
                     input.push(json!({
                         "type": "function_call_output",
                         "call_id": tool_call_id,
@@ -734,7 +738,7 @@ fn agent_messages_to_responses_parts(
                     input.push(responses_message(
                         "assistant",
                         "output_text",
-                        &flatten_tool_result_as_assistant_text(&name, &content),
+                        &flatten_tool_result_as_assistant_text(name, content),
                     ));
                 }
             }
@@ -1053,7 +1057,7 @@ mod tests {
 
         let payload = build_agent_payload(
             &client,
-            AgentTurnRequest {
+            &AgentTurnRequest {
                 messages: vec![AgentMessage::system("base"), AgentMessage::user("work")],
                 tools: Vec::new(),
             },
@@ -1105,7 +1109,7 @@ mod tests {
         std::fs::write(&image_path, b"\x89PNG\r\n\x1a\nfixture").expect("write image");
         let payload = build_agent_payload(
             &client,
-            AgentTurnRequest {
+            &AgentTurnRequest {
                 messages: vec![
                     AgentMessage::assistant_tool_call_protocol_with_reasoning(
                         None,

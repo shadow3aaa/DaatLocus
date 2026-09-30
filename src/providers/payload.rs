@@ -10,6 +10,9 @@ pub(super) fn build_agent_turn_payload_common(
     include_reasoning_content: bool,
     tool_strict_mode: ToolStrictMode,
 ) -> serde_json::Value {
+    // Every in-repo caller passes stream=true. Non-streaming agent turns are
+    // unused, so the JSON stays the streaming shape instead of emitting stream:false.
+    let _ = stream;
     let strip_images = client.adapter_state_guard().vision_mode == VisionMode::Disabled;
     let messages = agent_turn_request_to_openai_messages(
         request.messages,
@@ -60,12 +63,8 @@ pub(super) fn build_agent_turn_payload_common(
         "tools": tools,
         "temperature": client.temperature,
         "max_tokens": max_completion_tokens_for_chat_payload(client),
-        "stream": stream,
-        "stream_options": if stream {
-            json!({ "include_usage": true })
-        } else {
-            serde_json::Value::Null
-        },
+        "stream": true,
+        "stream_options": json!({ "include_usage": true }),
     });
     apply_provider_thinking_config(
         &mut payload,
@@ -254,8 +253,17 @@ pub(super) fn image_part_data_url(part: &AgentContentPart) -> Option<String> {
     else {
         return None;
     };
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+    let path_buf = std::path::PathBuf::from(path);
+    let bytes = match tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(tokio::task::spawn_blocking(move || {
+            std::fs::read(&path_buf)
+        }))
+    }) {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(err)) => {
+            warn!("failed to read multimodal image attachment {path}: {err}");
+            return None;
+        }
         Err(err) => {
             warn!("failed to read multimodal image attachment {path}: {err}");
             return None;

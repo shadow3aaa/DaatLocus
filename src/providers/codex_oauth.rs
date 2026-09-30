@@ -36,7 +36,7 @@ use super::{
     default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
     non_empty_string, read_response_text_with_timeout, send_request_for_streaming_response,
     shared_request_rate_limiter, summarize_agent_turn_request, summarize_prompt_request,
-    take_next_sse_event, truncate_for_error, truncate_for_json_error,
+    truncate_for_error, truncate_for_json_error,
 };
 
 const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -475,7 +475,7 @@ impl CodexResponsesClient {
         loop {
             let payload = build_agent_responses_payload(
                 self,
-                request.clone(),
+                &request,
                 strip_images,
                 request_identity.as_ref(),
             );
@@ -546,7 +546,7 @@ impl CodexResponsesClient {
         emit_progress: bool,
     ) -> Result<AgentTurnStreamResult> {
         let url = self.url();
-        let mut buffer = Vec::new();
+        let mut buffer = super::io::SseBuffer::default();
         let mut delta_content = String::new();
         let mut output_messages = Vec::new();
         let mut reasoning_content = String::new();
@@ -554,8 +554,10 @@ impl CodexResponsesClient {
         let mut tool_calls = Vec::new();
         let mut completed = false;
         let mut last_assistant_progress_emit_at = Instant::now();
+        let mut assistant_char_len = 0usize;
         let mut last_assistant_progress_char_len = 0usize;
         let mut last_reasoning_progress_emit_at = Instant::now();
+        let mut reasoning_char_len = 0usize;
         let mut last_reasoning_progress_char_len = 0usize;
         let mut stream = response.bytes_stream();
         let stream_request_context = [
@@ -586,9 +588,9 @@ impl CodexResponsesClient {
                 )
             })?;
             buffer.extend_from_slice(&chunk);
-            super::normalize_sse_buffer(&mut buffer);
+            buffer.normalize();
 
-            while let Some(event) = take_next_sse_event(&mut buffer) {
+            while let Some(event) = buffer.next_event() {
                 let data = event
                     .lines()
                     .filter_map(|line| line.strip_prefix("data:"))
@@ -612,10 +614,9 @@ impl CodexResponsesClient {
                     Some("response.output_text.delta") => {
                         if let Some(delta) = value.get("delta").and_then(Value::as_str) {
                             delta_content.push_str(delta);
+                            assistant_char_len += delta.chars().count();
                             if emit_progress {
-                                let should_emit = delta_content
-                                    .chars()
-                                    .count()
+                                let should_emit = assistant_char_len
                                     .saturating_sub(last_assistant_progress_char_len)
                                     >= 64
                                     || last_assistant_progress_emit_at.elapsed()
@@ -625,8 +626,7 @@ impl CodexResponsesClient {
                                         progress.emit_assistant_content(delta_content.clone());
                                     }
                                     last_assistant_progress_emit_at = Instant::now();
-                                    last_assistant_progress_char_len =
-                                        delta_content.chars().count();
+                                    last_assistant_progress_char_len = assistant_char_len;
                                 }
                             }
                         }
@@ -636,10 +636,9 @@ impl CodexResponsesClient {
                     ) => {
                         if let Some(delta) = value.get("delta").and_then(Value::as_str) {
                             reasoning_content.push_str(delta);
+                            reasoning_char_len += delta.chars().count();
                             if emit_progress {
-                                let should_emit = reasoning_content
-                                    .chars()
-                                    .count()
+                                let should_emit = reasoning_char_len
                                     .saturating_sub(last_reasoning_progress_char_len)
                                     >= 64
                                     || last_reasoning_progress_emit_at.elapsed()
@@ -649,8 +648,7 @@ impl CodexResponsesClient {
                                         progress.emit_reasoning_content(reasoning_content.clone());
                                     }
                                     last_reasoning_progress_emit_at = Instant::now();
-                                    last_reasoning_progress_char_len =
-                                        reasoning_content.chars().count();
+                                    last_reasoning_progress_char_len = reasoning_char_len;
                                 }
                             }
                         }
@@ -691,18 +689,19 @@ impl CodexResponsesClient {
 
         if reasoning_content.trim().is_empty() {
             reasoning_content = reasoning_item_content;
+            reasoning_char_len = reasoning_content.chars().count();
         }
 
         if emit_progress
             && !reasoning_content.trim().is_empty()
-            && reasoning_content.chars().count() != last_reasoning_progress_char_len
+            && reasoning_char_len != last_reasoning_progress_char_len
             && let Some(progress) = progress
         {
             progress.emit_reasoning_content(reasoning_content.clone());
         }
         if emit_progress
             && !delta_content.trim().is_empty()
-            && delta_content.chars().count() != last_assistant_progress_char_len
+            && assistant_char_len != last_assistant_progress_char_len
             && let Some(progress) = progress
         {
             progress.emit_assistant_content(delta_content.clone());
@@ -791,6 +790,17 @@ impl CodexOAuthClient {
     }
 
     async fn ensure_auth(&self) -> Result<()> {
+        {
+            let cached = self.cached.lock().await;
+            if let Some(access) = cached.as_ref()
+                && access.expires_at_ms.is_none_or(|expires_at_ms| {
+                    now_ms().saturating_add(ACCESS_TOKEN_REFRESH_SKEW_MS) < expires_at_ms
+                })
+            {
+                return Ok(());
+            }
+        }
+
         let access = codex_oauth_access_from_file_with_client(&self.auth_file, &self.auth_client)
             .await
             .map_err(|err| {
@@ -907,14 +917,16 @@ fn build_prompt_responses_payload(
 
 fn build_agent_responses_payload(
     client: &CodexResponsesClient,
-    request: AgentTurnRequest,
+    request: &AgentTurnRequest,
     strip_images: bool,
     request_identity: Option<&CodexRequestIdentity>,
 ) -> Value {
-    let (instructions, input) = agent_messages_to_responses_parts(request.messages, strip_images);
+    let (instructions, input) =
+        agent_messages_to_responses_parts(&request.messages, strip_images);
     let tools = request
         .tools
-        .into_iter()
+        .iter()
+        .cloned()
         .map(agent_tool_to_responses_tool)
         .collect::<Vec<_>>();
     base_responses_payload(
@@ -1005,11 +1017,11 @@ fn history_messages_to_responses_parts(
         .into_iter()
         .map(|message| message.message)
         .collect::<Vec<_>>();
-    agent_messages_to_responses_parts(messages, strip_images)
+    agent_messages_to_responses_parts(&messages, strip_images)
 }
 
 fn agent_messages_to_responses_parts(
-    messages: Vec<AgentMessage>,
+    messages: &[AgentMessage],
     strip_images: bool,
 ) -> (String, Vec<Value>) {
     let mut instructions = Vec::new();
@@ -1018,16 +1030,19 @@ fn agent_messages_to_responses_parts(
 
     for message in messages {
         match message {
-            AgentMessage::System { content } => instructions.push(content),
+            AgentMessage::System { content } => instructions.push(content.clone()),
             AgentMessage::User { content } => {
-                input.push(responses_user_message(&content, strip_images));
+                input.push(responses_user_message(content, strip_images));
             }
             AgentMessage::Assistant { content } => {
-                input.push(responses_message("assistant", "output_text", &content));
+                input.push(responses_message("assistant", "output_text", content));
             }
             AgentMessage::AssistantToolCallProtocol { content, calls, .. } => {
-                if let Some(content) = content.filter(|content| !content.trim().is_empty()) {
-                    input.push(responses_message("assistant", "output_text", &content));
+                if let Some(content) = content
+                    .as_deref()
+                    .filter(|content| !content.trim().is_empty())
+                {
+                    input.push(responses_message("assistant", "output_text", content));
                 }
                 for call in calls {
                     valid_tool_call_ids.insert(call.id.clone());
@@ -1044,7 +1059,7 @@ fn agent_messages_to_responses_parts(
                 name,
                 content,
             } => {
-                if valid_tool_call_ids.contains(&tool_call_id) {
+                if valid_tool_call_ids.contains(tool_call_id) {
                     input.push(json!({
                         "type": "function_call_output",
                         "call_id": tool_call_id,
@@ -1054,7 +1069,7 @@ fn agent_messages_to_responses_parts(
                     input.push(responses_message(
                         "assistant",
                         "output_text",
-                        &super::flatten_tool_result_as_assistant_text(&name, &content),
+                        &super::flatten_tool_result_as_assistant_text(name, content),
                     ));
                 }
             }
@@ -2064,7 +2079,7 @@ mod tests {
     fn codex_agent_payload_requests_reasoning_summary() {
         let payload = build_agent_responses_payload(
             &test_client(),
-            AgentTurnRequest {
+            &AgentTurnRequest {
                 messages: vec![AgentMessage::system("base"), AgentMessage::user("work")],
                 tools: Vec::new(),
             },
@@ -2080,7 +2095,7 @@ mod tests {
     fn codex_agent_payload_requests_encrypted_reasoning_include() {
         let payload = build_agent_responses_payload(
             &test_client(),
-            AgentTurnRequest {
+            &AgentTurnRequest {
                 messages: vec![AgentMessage::system("base"), AgentMessage::user("work")],
                 tools: Vec::new(),
             },
@@ -2227,7 +2242,7 @@ mod tests {
             ],
         };
 
-        let payload = build_agent_responses_payload(&client, request, false, None);
+        let payload = build_agent_responses_payload(&client, &request, false, None);
 
         assert_eq!(payload["instructions"], "base instructions");
         assert_eq!(payload["input"][1]["type"], "function_call");
@@ -2262,8 +2277,8 @@ mod tests {
         let identity = test_identity();
         let cache_key = "daat-locus:session-test:agent";
 
-        let first = build_agent_responses_payload(&client, request.clone(), false, Some(&identity));
-        let second = build_agent_responses_payload(&client, request, false, Some(&identity));
+        let first = build_agent_responses_payload(&client, &request, false, Some(&identity));
+        let second = build_agent_responses_payload(&client, &request, false, Some(&identity));
 
         assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
         assert_eq!(first["prompt_cache_key"], cache_key);
@@ -2285,7 +2300,7 @@ mod tests {
             tools: Vec::new(),
         };
 
-        let payload = build_agent_responses_payload(&client, request, false, None);
+        let payload = build_agent_responses_payload(&client, &request, false, None);
 
         assert!(payload.get("prompt_cache_key").is_none());
     }
@@ -2332,7 +2347,7 @@ mod tests {
 
         let first = build_agent_responses_payload(
             &client,
-            AgentTurnRequest {
+            &AgentTurnRequest {
                 messages: first_messages,
                 tools: tools.clone(),
             },
@@ -2341,7 +2356,7 @@ mod tests {
         );
         let second = build_agent_responses_payload(
             &client,
-            AgentTurnRequest {
+            &AgentTurnRequest {
                 messages: second_messages,
                 tools,
             },
@@ -2380,7 +2395,7 @@ mod tests {
             tools: vec![],
         };
 
-        let payload = build_agent_responses_payload(&client, request, false, None);
+        let payload = build_agent_responses_payload(&client, &request, false, None);
 
         assert_eq!(payload["input"][0]["role"], "user");
         assert_eq!(payload["input"][0]["content"][0]["type"], "input_text");
@@ -2419,7 +2434,7 @@ mod tests {
             }],
         };
 
-        let payload = build_agent_responses_payload(&client, request, false, None);
+        let payload = build_agent_responses_payload(&client, &request, false, None);
 
         assert_eq!(payload["tools"][0]["type"], "custom");
         assert_eq!(payload["tools"][0]["format"]["type"], "grammar");

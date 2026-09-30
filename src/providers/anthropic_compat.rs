@@ -25,10 +25,10 @@ use tracing::warn;
 
 use super::io::{
     default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
-    looks_like_vision_unsupported_error, non_empty_string, normalize_sse_buffer,
+    looks_like_vision_unsupported_error, non_empty_string,
     parse_retry_after_seconds, read_response_text_with_timeout,
     send_request_for_streaming_response, summarize_agent_turn_request, summarize_prompt_request,
-    take_next_sse_event, truncate_for_error, truncate_for_json_error,
+    truncate_for_error, truncate_for_json_error,
 };
 use super::payload::{flatten_tool_result_as_assistant_text, image_part_data_url};
 use super::{extract_json_value_from_content, shared_request_rate_limiter};
@@ -308,7 +308,7 @@ impl AnthropicCompatibleClient {
         emit_progress: bool,
     ) -> Result<AgentTurnStreamResult> {
         let url = self.url();
-        let mut buffer = Vec::new();
+        let mut buffer = super::io::SseBuffer::default();
         let mut state = AnthropicStreamState::default();
         let mut stream = response.bytes_stream();
         let stream_request_context = [
@@ -339,9 +339,9 @@ impl AnthropicCompatibleClient {
                 )
             })?;
             buffer.extend_from_slice(&chunk);
-            normalize_sse_buffer(&mut buffer);
+            buffer.normalize();
 
-            while let Some(event) = take_next_sse_event(&mut buffer) {
+            while let Some(event) = buffer.next_event() {
                 let data = sse_event_data(&event);
                 if data.is_empty() {
                     continue;
@@ -464,7 +464,7 @@ impl ModelProvider for AnthropicCompatibleClient {
         let mut strip_images = !self.supports_vision.load(Ordering::Relaxed);
         let mut thinking_retries = 0u8;
         loop {
-            let payload = build_agent_payload(self, request.clone(), strip_images);
+            let payload = build_agent_payload(self, &request, strip_images);
             let response = self
                 .post_messages_with_retry(&payload, &request_context, &session_headers)
                 .await?;
@@ -585,12 +585,15 @@ fn looks_like_anthropic_context_error(body: &str) -> bool {
 
 fn build_agent_payload(
     client: &AnthropicCompatibleClient,
-    request: AgentTurnRequest,
+    request: &AgentTurnRequest,
     strip_images: bool,
 ) -> Value {
     let include_reasoning_blocks = thinking_enabled_for_request(client);
-    let (system, messages) =
-        agent_messages_to_anthropic(request.messages, strip_images, include_reasoning_blocks);
+    let (system, messages) = agent_messages_to_anthropic(
+        &request.messages,
+        strip_images,
+        include_reasoning_blocks,
+    );
     let mut payload = json!({
         "model": client.model,
         "max_tokens": client.max_output_tokens(),
@@ -603,7 +606,8 @@ fn build_agent_payload(
 
     let tools = request
         .tools
-        .into_iter()
+        .iter()
+        .cloned()
         .map(agent_tool_to_anthropic_tool)
         .collect::<Vec<_>>();
     if !tools.is_empty() {
@@ -621,8 +625,9 @@ fn build_prompt_payload(
     request: &PromptRequest,
     force_tool: bool,
 ) -> Value {
+    let messages = collect_prompt_messages(request);
     let (system, messages) = agent_messages_to_anthropic(
-        collect_prompt_messages(request),
+        &messages,
         !client.supports_vision.load(Ordering::Relaxed),
         false,
     );
@@ -743,17 +748,17 @@ fn explicit_thinking_budget(budget: &str) -> Option<u64> {
 }
 
 /// Apply the configured extended thinking when the trailing turn allows it.
-/// Returns `true` when thinking was enabled (in which case sampling parameters
-/// must be omitted).
-fn apply_thinking(client: &AnthropicCompatibleClient, payload: &mut Value) -> bool {
+/// Sampling parameters must be omitted whenever thinking is configured, which
+/// [`apply_temperature`] already enforces independently of this function.
+fn apply_thinking(client: &AnthropicCompatibleClient, payload: &mut Value) {
     if !thinking_enabled_for_request(client) {
-        return false;
+        return;
     }
     let Some(budget) = client.thinking_budget.as_deref() else {
-        return false;
+        return;
     };
     let Some(messages) = payload.get("messages").and_then(Value::as_array) else {
-        return false;
+        return;
     };
     let prefer_adaptive = match client.thinking_mode.load(Ordering::Relaxed) {
         THINKING_MODE_ADAPTIVE => true,
@@ -768,15 +773,15 @@ fn apply_thinking(client: &AnthropicCompatibleClient, payload: &mut Value) -> bo
     // [`trailing_turn_supports_thinking`]); gating adaptive on it would switch
     // thinking off for the rest of a tool loop after the first skipped step.
     if !prefer_adaptive && !trailing_turn_supports_thinking(messages) {
-        return false;
+        return;
     }
     if prefer_adaptive && let Some(effort) = adaptive_effort(budget) {
         payload["thinking"] = json!({ "type": "adaptive" });
         payload["output_config"] = json!({ "effort": effort });
-        return true;
+        return;
     }
     let Some(budget_tokens) = explicit_thinking_budget(budget) else {
-        return false;
+        return;
     };
     let max_tokens = payload
         .get("max_tokens")
@@ -784,10 +789,9 @@ fn apply_thinking(client: &AnthropicCompatibleClient, payload: &mut Value) -> bo
         .unwrap_or(0);
     let budget_tokens = budget_tokens.min(max_tokens / 2);
     if budget_tokens < MIN_THINKING_BUDGET_TOKENS {
-        return false;
+        return;
     }
     payload["thinking"] = json!({ "type": "enabled", "budget_tokens": budget_tokens });
-    true
 }
 
 /// Next thinking shape to try after a 400 that mentions thinking, or `None`
@@ -884,7 +888,7 @@ fn empty_user_message() -> Value {
 // ---------------------------------------------------------------------------
 
 fn agent_messages_to_anthropic(
-    messages: Vec<AgentMessage>,
+    messages: &[AgentMessage],
     strip_images: bool,
     include_reasoning_blocks: bool,
 ) -> (Option<String>, Vec<Value>) {
@@ -897,14 +901,14 @@ fn agent_messages_to_anthropic(
         match message {
             AgentMessage::System { content } => {
                 if !content.trim().is_empty() {
-                    system_parts.push(content);
+                    system_parts.push(content.clone());
                 }
             }
             AgentMessage::User { content } => {
                 push_message_blocks(
                     &mut anthropic_messages,
                     "user",
-                    anthropic_user_blocks(&content, strip_images),
+                    anthropic_user_blocks(content, strip_images),
                 );
             }
             AgentMessage::Assistant { content } => {
@@ -939,7 +943,7 @@ fn agent_messages_to_anthropic(
                         "signature": signature,
                     }));
                 }
-                if let Some(text) = content.filter(|text| !text.trim().is_empty()) {
+                if let Some(text) = content.as_deref().filter(|text| !text.trim().is_empty()) {
                     blocks.push(json!({ "type": "text", "text": text }));
                 }
                 for call in calls {
@@ -958,7 +962,7 @@ fn agent_messages_to_anthropic(
                 name,
                 content,
             } => {
-                if valid_tool_call_ids.contains(&tool_call_id) {
+                if valid_tool_call_ids.contains(tool_call_id) {
                     push_tool_result_block(
                         &mut anthropic_messages,
                         json!({
@@ -973,7 +977,7 @@ fn agent_messages_to_anthropic(
                         "user",
                         vec![json!({
                             "type": "text",
-                            "text": flatten_tool_result_as_assistant_text(&name, &content),
+                            "text": flatten_tool_result_as_assistant_text(name, content),
                         })],
                     );
                 }
@@ -1068,7 +1072,6 @@ fn anthropic_image_block_from_data_url(data_url: &str) -> Option<Value> {
 
 struct DataUrl<'a> {
     media_type: &'a str,
-    parameters: Vec<(&'a str, Option<&'a str>)>,
     base64: bool,
     data: &'a str,
 }
@@ -1085,26 +1088,19 @@ fn parse_data_url(data_url: &str) -> Option<DataUrl<'_>> {
     } else {
         media_type
     };
-    let mut parameters = Vec::new();
     let mut base64 = false;
     for param in parts {
         let param = param.trim();
         if param.is_empty() {
             continue;
         }
-        if let Some((name, value)) = param.split_once('=') {
-            parameters.push((name.trim(), Some(value.trim())));
-        } else {
-            let name = param;
-            if name.eq_ignore_ascii_case("base64") {
-                base64 = true;
-            }
-            parameters.push((name, None));
+        let name = param.split_once('=').map(|(name, _)| name.trim()).unwrap_or(param);
+        if name.eq_ignore_ascii_case("base64") {
+            base64 = true;
         }
     }
     Some(DataUrl {
         media_type,
-        parameters,
         base64,
         data,
     })
@@ -1165,26 +1161,28 @@ fn push_tool_result_block(messages: &mut Vec<Value>, block: Value) {
 /// `tool_use` / user `tool_result` pair (a compacted or resumed history can
 /// break the pairing, and Anthropic rejects such turns).
 fn drop_incomplete_tool_turns(messages: &mut Vec<Value>) {
-    let original = std::mem::take(messages);
+    let mut original = std::mem::take(messages);
     let mut sanitized = Vec::with_capacity(original.len());
     let mut index = 0;
 
     while index < original.len() {
-        let message = &original[index];
-        let is_assistant = message.get("role").and_then(Value::as_str) == Some("assistant");
+        let is_assistant =
+            original[index].get("role").and_then(Value::as_str) == Some("assistant");
         let tool_use_ids = if is_assistant {
-            message_block_ids(message, "tool_use", "id")
+            message_block_ids(&original[index], "tool_use", "id")
         } else {
             Vec::new()
         };
 
         if !tool_use_ids.is_empty() {
-            let paired_user = original
+            let has_paired_user = original
                 .get(index + 1)
-                .filter(|next| next.get("role").and_then(Value::as_str) == Some("user"));
-            let tool_result_ids = paired_user
-                .map(|user| message_block_ids(user, "tool_result", "tool_use_id"))
-                .unwrap_or_default();
+                .is_some_and(|next| next.get("role").and_then(Value::as_str) == Some("user"));
+            let tool_result_ids = if has_paired_user {
+                message_block_ids(&original[index + 1], "tool_result", "tool_use_id")
+            } else {
+                Vec::new()
+            };
             let unique_tool_uses: std::collections::HashSet<&str> =
                 tool_use_ids.iter().copied().collect();
             let unique_tool_results: std::collections::HashSet<&str> =
@@ -1196,21 +1194,21 @@ fn drop_incomplete_tool_turns(messages: &mut Vec<Value>) {
                 && unique_tool_uses == unique_tool_results;
 
             if complete {
-                sanitized.push(message.clone());
-                sanitized.push(paired_user.unwrap().clone());
-            } else if let Some(user) = paired_user {
-                let mut user = user.clone();
+                sanitized.push(std::mem::take(&mut original[index]));
+                sanitized.push(std::mem::take(&mut original[index + 1]));
+            } else if has_paired_user {
+                let mut user = std::mem::take(&mut original[index + 1]);
                 drop_tool_result_blocks(&mut user);
                 if message_has_content(&user) {
                     sanitized.push(user);
                 }
             }
 
-            index += if paired_user.is_some() { 2 } else { 1 };
+            index += if has_paired_user { 2 } else { 1 };
             continue;
         }
 
-        let mut message = message.clone();
+        let mut message = std::mem::take(&mut original[index]);
         if message.get("role").and_then(Value::as_str) == Some("user") {
             drop_tool_result_blocks(&mut message);
         }
@@ -1287,6 +1285,8 @@ struct AnthropicStreamState {
     cache_creation_input_tokens: i64,
     output_tokens: i64,
     completed: bool,
+    assistant_char_len: usize,
+    reasoning_char_len: usize,
     last_assistant_progress_emit_at: Option<Instant>,
     last_assistant_progress_char_len: usize,
     last_reasoning_progress_emit_at: Option<Instant>,
@@ -1338,29 +1338,37 @@ impl AnthropicStreamState {
                 }
             }
             "content_block_delta" => {
-                if let Some(index) = value.get("index").and_then(Value::as_u64) {
-                    let delta = value.get("delta").cloned().unwrap_or_default();
-                    let entry = self.blocks.entry(index).or_default();
+                if let Some(index) = value.get("index").and_then(Value::as_u64)
+                    && let Some(delta) = value.get("delta")
+                {
                     match delta.get("type").and_then(Value::as_str).unwrap_or("") {
                         "text_delta" => {
                             if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                                let entry = self.blocks.entry(index).or_default();
                                 entry.text.push_str(text);
+                                self.assistant_char_len += text.chars().count();
                             }
                         }
                         "thinking_delta" => {
                             if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                                let entry = self.blocks.entry(index).or_default();
                                 entry.thinking.push_str(text);
+                                self.reasoning_char_len += text.chars().count();
                             }
                         }
                         "input_json_delta" => {
-                            if let Some(partial) = delta.get("partial_json").and_then(Value::as_str)
+                            if let Some(partial) =
+                                delta.get("partial_json").and_then(Value::as_str)
                             {
+                                let entry = self.blocks.entry(index).or_default();
                                 entry.partial_json.push_str(partial);
                             }
                         }
                         "signature_delta" => {
-                            if let Some(signature) = delta.get("signature").and_then(Value::as_str)
+                            if let Some(signature) =
+                                delta.get("signature").and_then(Value::as_str)
                             {
+                                let entry = self.blocks.entry(index).or_default();
                                 entry.signature.push_str(signature);
                             }
                         }
@@ -1414,7 +1422,7 @@ impl AnthropicStreamState {
         let Some(progress) = progress else {
             return;
         };
-        let text_len = self.assistant_text().chars().count();
+        let text_len = self.assistant_char_len;
         let should_emit_text = text_len > self.last_assistant_progress_char_len
             && (text_len.saturating_sub(self.last_assistant_progress_char_len) >= 64
                 || self
@@ -1425,7 +1433,7 @@ impl AnthropicStreamState {
             self.last_assistant_progress_emit_at = Some(Instant::now());
             self.last_assistant_progress_char_len = text_len;
         }
-        let reasoning_len = self.reasoning_text().chars().count();
+        let reasoning_len = self.reasoning_char_len;
         let should_emit_reasoning = reasoning_len > self.last_reasoning_progress_char_len
             && (reasoning_len.saturating_sub(self.last_reasoning_progress_char_len) >= 64
                 || self
@@ -1542,10 +1550,6 @@ mod tests {
         assert_eq!(parsed.media_type, "image/png");
         assert!(parsed.base64);
         assert_eq!(parsed.data, "aGVs,bG8=");
-        assert_eq!(
-            parsed.parameters,
-            vec![("charset", Some("utf-8")), ("base64", None)]
-        );
 
         assert!(anthropic_image_block_from_data_url("data:image/png,raw").is_none());
         assert!(anthropic_image_block_from_data_url("data:text/plain;base64,YQ==").is_none());
@@ -1604,7 +1608,7 @@ mod tests {
         let client = test_client("claude-sonnet-4-5");
         let payload = build_agent_payload(
             &client,
-            AgentTurnRequest {
+            &AgentTurnRequest {
                 messages: vec![
                     AgentMessage::system("base"),
                     AgentMessage::user("hi"),
@@ -1640,7 +1644,7 @@ mod tests {
     #[test]
     fn agent_payload_merges_consecutive_user_messages() {
         let (_, messages) = agent_messages_to_anthropic(
-            vec![
+            &vec![
                 AgentMessage::user("one"),
                 AgentMessage::assistant("ack"),
                 AgentMessage::user("two"),
@@ -1656,7 +1660,7 @@ mod tests {
     #[test]
     fn orphan_tool_result_is_flattened_instead_of_rejected() {
         let (_, messages) = agent_messages_to_anthropic(
-            vec![
+            &vec![
                 AgentMessage::user("hi"),
                 AgentMessage::tool("missing", "read", "orphan"),
             ],
@@ -1699,7 +1703,7 @@ mod tests {
 
         let fresh = build_agent_payload(
             &client,
-            AgentTurnRequest {
+            &AgentTurnRequest {
                 messages: vec![AgentMessage::user("hi")],
                 tools: Vec::new(),
             },
@@ -1710,7 +1714,7 @@ mod tests {
         assert!(fresh.get("temperature").is_none());
 
         // Adaptive thinking may skip a step; the next step must still ask for it.
-        let continuation = build_agent_payload(&client, unsigned_continuation(), false);
+        let continuation = build_agent_payload(&client, &unsigned_continuation(), false);
         assert_eq!(continuation["thinking"]["type"], "adaptive");
         assert_eq!(continuation["output_config"]["effort"], "high");
 
@@ -1718,7 +1722,7 @@ mod tests {
         client
             .thinking_mode
             .store(THINKING_MODE_BUDGET, Ordering::Relaxed);
-        let budget_continuation = build_agent_payload(&client, unsigned_continuation(), false);
+        let budget_continuation = build_agent_payload(&client, &unsigned_continuation(), false);
         assert!(budget_continuation.get("thinking").is_none());
         assert!(budget_continuation.get("temperature").is_none());
     }
@@ -1738,7 +1742,7 @@ mod tests {
 
         let payload = build_agent_payload(
             &client,
-            AgentTurnRequest {
+            &AgentTurnRequest {
                 messages: vec![
                     AgentMessage::user("hi"),
                     AgentMessage::assistant_tool_call_protocol_with_signed_reasoning(
@@ -1784,7 +1788,7 @@ mod tests {
         );
         let payload = build_agent_payload(
             &client,
-            AgentTurnRequest {
+            &AgentTurnRequest {
                 messages: vec![AgentMessage::user("hi")],
                 tools: Vec::new(),
             },
@@ -1816,7 +1820,7 @@ mod tests {
             .store(THINKING_MODE_BUDGET, Ordering::Relaxed);
         let payload = build_agent_payload(
             &client,
-            AgentTurnRequest {
+            &AgentTurnRequest {
                 messages: vec![AgentMessage::user("hi")],
                 tools: Vec::new(),
             },
@@ -1886,7 +1890,7 @@ mod tests {
     #[test]
     fn signed_thinking_block_is_replayed_without_visible_text() {
         let (_, messages) = agent_messages_to_anthropic(
-            vec![
+            &vec![
                 AgentMessage::user("hi"),
                 AgentMessage::assistant_tool_call_protocol_with_signed_reasoning(
                     None,
