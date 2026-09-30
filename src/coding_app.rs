@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -392,10 +392,13 @@ fn format_install_command(value: Option<&Value>) -> Option<String> {
 pub struct CodingApp {
     scope: ScopeEngineHandle,
     project_root: Option<PathBuf>,
+    scope_opened_root: Option<PathBuf>,
+    scope_opened_lsp_enabled: bool,
     config_hint_summary: Option<CodingConfigHintSummary>,
     root_instructions: Vec<ProjectInstructionDocument>,
     root_instruction_fingerprint: Option<String>,
     delivered_scoped_instructions: HashSet<DeliveredProjectInstructionKey>,
+    scoped_instruction_cache: HashMap<(u64, String), Vec<ProjectInstructionDocument>>,
     last_action: Option<String>,
 }
 
@@ -404,10 +407,13 @@ impl CodingApp {
         Self {
             scope: ScopeEngineHandle::new(),
             project_root: None,
+            scope_opened_root: None,
+            scope_opened_lsp_enabled: false,
             config_hint_summary: None,
             root_instructions: Vec::new(),
             root_instruction_fingerprint: None,
             delivered_scoped_instructions: HashSet::new(),
+            scoped_instruction_cache: HashMap::new(),
             last_action: None,
         }
     }
@@ -504,10 +510,13 @@ impl CodingApp {
         let config_hint_summary = CodingConfigHintSummary::from_hints(&config_hints);
 
         self.project_root = Some(project_root.clone());
+        self.scope_opened_root = Some(project_root.clone());
+        self.scope_opened_lsp_enabled = context.scope_lsp_enabled;
         self.config_hint_summary = Some(config_hint_summary.clone());
         self.root_instructions.clone_from(&root_instructions);
         self.root_instruction_fingerprint = Some(root_instruction_fingerprint.clone());
         self.delivered_scoped_instructions.clear();
+        self.scoped_instruction_cache.clear();
         self.last_action = Some("opened project".to_string());
 
         let model_parts = [
@@ -580,6 +589,10 @@ impl CodingApp {
             current_dir = parent;
         }
         scope_dirs.reverse();
+        let cache_key = (turn_epoch, relative_or_absolute_path.to_string());
+        if let Some(cached) = self.scoped_instruction_cache.get(&cache_key) {
+            return Ok(cached.clone());
+        }
         let mut scoped = Vec::new();
         for scope_dir in scope_dirs {
             scoped.extend(load_instruction_documents_in_dir(&scope_dir)?);
@@ -595,6 +608,8 @@ impl CodingApp {
                 newly_delivered.push(instruction);
             }
         }
+        self.scoped_instruction_cache
+            .insert(cache_key, newly_delivered.clone());
         Ok(newly_delivered)
     }
 
@@ -654,9 +669,17 @@ impl CodingApp {
         let Some(project_root) = self.project_root.clone() else {
             return Err(miette!("no coding project opened; call open_project first"));
         };
+        if self.scope_opened_root.as_deref() == Some(project_root.as_path())
+            && self.scope_opened_lsp_enabled == context.scope_lsp_enabled
+        {
+            return Ok(());
+        }
         self.scope
-            .open_project(project_root, context.scope_lsp_enabled)
-            .map(|_| ())
+            .open_project(project_root.clone(), context.scope_lsp_enabled)
+            .map(|_| ())?;
+        self.scope_opened_root = Some(project_root);
+        self.scope_opened_lsp_enabled = context.scope_lsp_enabled;
+        Ok(())
     }
 
     fn explored_event(
@@ -888,7 +911,7 @@ impl App for CodingApp {
             "search_code" => {
                 self.require_project(context)?;
                 let args: CodingSearchCodeArgs = parse_coding_tool_args(call)?;
-                let result = self.scope.search_code(&args.clone())?;
+                let result = self.scope.search_code(&args)?;
                 self.last_action = Some(format!("searched {}", args.query));
                 let mut detail_lines = Vec::new();
                 if !args.include.is_empty() {

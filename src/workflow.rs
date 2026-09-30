@@ -648,62 +648,89 @@ impl WorkflowInspectorPublisher {
         };
         let snapshot = self.transport_snapshot();
         let live_key = format!("workflow:{}", snapshot.run_id);
+        let run_id = snapshot.run_id.clone();
+        let workflow_id = snapshot.workflow_id.clone();
+        let node_status = snapshot.status;
+        let completed_at_ms = snapshot.completed_at_ms;
+        let output = snapshot.output.clone();
+        let error = snapshot.error.clone();
+        let message = workflow_snapshot_message(&snapshot);
+        let active = matches!(
+            node_status,
+            WorkflowNodeStatus::Pending | WorkflowNodeStatus::Running
+        );
         let event = crate::dashboard::SessionActivityEvent::Workflow(
             crate::dashboard::WorkflowActivityData {
-                workflow_id: snapshot.workflow_id.clone(),
-                status: invocation_status_from_node_status(snapshot.status),
-                output: snapshot.output.clone(),
-                message: workflow_snapshot_message(&snapshot),
-                snapshot: Some(snapshot.clone()),
+                workflow_id,
+                status: invocation_status_from_node_status(node_status),
+                output,
+                message,
+                snapshot: None,
             },
         );
         tx.send_modify(|state| {
-            if matches!(
-                snapshot.status,
-                WorkflowNodeStatus::Pending | WorkflowNodeStatus::Running
-            ) {
-                if let Some(existing) = state
+            let crate::dashboard::SessionActivityEvent::Workflow(data) = event else {
+                return;
+            };
+            let group_index = state
+                .workflow_group
+                .nodes
+                .iter()
+                .position(|node| node.run_id == run_id);
+            if active {
+                let active_index = state
                     .active_workflow_runs
-                    .iter_mut()
-                    .find(|run| run.run_id == snapshot.run_id)
-                {
-                    *existing = snapshot.clone();
+                    .iter()
+                    .position(|run| run.run_id == run_id);
+                if let Some(group_index) = group_index {
+                    let node = &mut state.workflow_group.nodes[group_index];
+                    node.status = node_status;
+                    node.completed_at_ms = completed_at_ms;
+                    node.output = data.output.clone();
+                    node.error = error.clone();
+                    if let Some(active_index) = active_index {
+                        let existing = &mut state.active_workflow_runs[active_index];
+                        existing.status = node_status;
+                        existing.completed_at_ms = completed_at_ms;
+                        existing.output = data.output.clone();
+                        existing.error = error;
+                    }
+                    node.snapshot = Some(snapshot);
+                } else if let Some(active_index) = active_index {
+                    state.active_workflow_runs[active_index] = snapshot;
                 } else {
-                    state.active_workflow_runs.push(snapshot.clone());
+                    state.active_workflow_runs.push(snapshot);
                 }
+                let live_event = crate::dashboard::SessionActivityEvent::Workflow(data);
                 if let Some(existing) = state
                     .live_activity_events
                     .iter_mut()
                     .find(|live| live.key == live_key)
                 {
-                    existing.event = event.clone();
+                    existing.event = live_event;
                 } else {
                     state
                         .live_activity_events
                         .push(crate::dashboard::LiveActivityEvent {
                             key: live_key,
-                            event,
+                            event: live_event,
                         });
                 }
             } else {
                 state
                     .active_workflow_runs
-                    .retain(|run| run.run_id != snapshot.run_id);
+                    .retain(|run| run.run_id != run_id);
                 state
                     .live_activity_events
                     .retain(|live| live.key != live_key);
-            }
-            if let Some(node) = state
-                .workflow_group
-                .nodes
-                .iter_mut()
-                .find(|node| node.run_id == snapshot.run_id)
-            {
-                node.status = snapshot.status;
-                node.completed_at_ms = snapshot.completed_at_ms;
-                node.output = snapshot.output.clone();
-                node.error = snapshot.error.clone();
-                node.snapshot = Some(snapshot.clone());
+                if let Some(group_index) = group_index {
+                    let node = &mut state.workflow_group.nodes[group_index];
+                    node.status = node_status;
+                    node.completed_at_ms = completed_at_ms;
+                    node.output = data.output;
+                    node.error = error;
+                    node.snapshot = Some(snapshot);
+                }
             }
             crate::dashboard::repin_runtime_status_live_cell(&mut state.live_activity_events);
         });
@@ -5925,6 +5952,7 @@ fn run_sandboxed_shell(
                 {
                     break status;
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             };
             let stdout = stdout_task
                 .await

@@ -10,7 +10,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use daat_locus_md::markdown::{MarkdownBlock, MarkdownRenderer};
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -619,19 +618,12 @@ fn split_frontmatter(raw: &str) -> (Option<String>, &str) {
     (None, raw)
 }
 
-/// First ATX H1, parsed by `daat_locus_md`.
+/// First ATX H1 under the same line rule used to strip it from the body.
 ///
 /// Only a level-1 heading counts. Closing hashes are stripped so
 /// `# Title #` and an indented `# Title` both yield `Title`.
 fn first_atx_h1(markdown: &str) -> Option<String> {
-    let blocks = MarkdownRenderer::new(80).parse(markdown);
-    blocks.into_iter().find_map(|block| match block {
-        MarkdownBlock::Heading1(text) => {
-            let title = strip_atx_closing_hashes(&text);
-            if title.is_empty() { None } else { Some(title) }
-        }
-        _ => None,
-    })
+    markdown.lines().find_map(atx_h1_title)
 }
 
 fn strip_atx_closing_hashes(text: &str) -> String {
@@ -652,7 +644,7 @@ fn strip_first_atx_h1(markdown: &str) -> String {
     let mut heading_taken = false;
     let mut body_lines = Vec::new();
     for line in markdown.lines() {
-        if !heading_taken && is_atx_h1_line(line) {
+        if !heading_taken && atx_h1_title(line).is_some() {
             heading_taken = true;
             continue;
         }
@@ -662,21 +654,25 @@ fn strip_first_atx_h1(markdown: &str) -> String {
 }
 
 /// CommonMark ATX H1: up to three leading spaces, one `#`, a required space,
-/// and an optional run of closing hashes.
-fn is_atx_h1_line(line: &str) -> bool {
+/// and an optional run of closing hashes. Returns the title when the line matches.
+fn atx_h1_title(line: &str) -> Option<String> {
     let bytes = line.as_bytes();
     let mut index = 0;
     while index < bytes.len() && index < 3 && bytes[index] == b' ' {
         index += 1;
     }
     if index >= bytes.len() || bytes[index] != b'#' {
-        return false;
+        return None;
     }
     index += 1;
     if index < bytes.len() && bytes[index] == b'#' {
-        return false;
+        return None;
     }
-    index < bytes.len() && (bytes[index] == b' ' || bytes[index] == b'\t')
+    if index >= bytes.len() || (bytes[index] != b' ' && bytes[index] != b'\t') {
+        return None;
+    }
+    let title = strip_atx_closing_hashes(&line[index..]);
+    if title.is_empty() { None } else { Some(title) }
 }
 
 fn yaml_string_list(value: Option<&serde_yaml::Value>) -> Vec<String> {
@@ -717,20 +713,20 @@ fn split_comma_separated(text: &str) -> Vec<String> {
 /// (`[[target|alias#heading]]`) split on the first unescaped `|` and `#`.
 fn extract_wikilinks(text: &str) -> Vec<String> {
     let mut links = Vec::new();
-    let chars: Vec<char> = text.chars().collect();
+    let bytes = text.as_bytes();
     let mut index = 0;
-    while index < chars.len() {
-        if chars[index] == '`' {
-            let fence = scan_backtick_run(&chars, index);
-            if let Some(close) = find_backtick_run(&chars, index + fence, fence) {
+    while index < bytes.len() {
+        if bytes[index] == b'`' {
+            let fence = scan_backtick_run(bytes, index);
+            if let Some(close) = find_backtick_run(bytes, index + fence, fence) {
                 index = close + fence;
                 continue;
             }
         }
-        if chars[index] == '[' && index + 1 < chars.len() && chars[index + 1] == '[' {
-            if let Some(end) = find_wikilink_close(&chars, index + 2) {
-                let inner: String = chars[index + 2..end].iter().collect();
-                if let Some(target) = wikilink_target(&inner) {
+        if bytes[index] == b'[' && index + 1 < bytes.len() && bytes[index + 1] == b'[' {
+            if let Some(end) = find_wikilink_close(bytes, index + 2) {
+                let inner = &text[index + 2..end];
+                if let Some(target) = wikilink_target(inner) {
                     links.push(target);
                 }
                 index = end + 2;
@@ -742,19 +738,22 @@ fn extract_wikilinks(text: &str) -> Vec<String> {
     links
 }
 
-fn scan_backtick_run(chars: &[char], start: usize) -> usize {
+fn scan_backtick_run(bytes: &[u8], start: usize) -> usize {
     let mut end = start;
-    while end < chars.len() && chars[end] == '`' {
+    while end < bytes.len() && bytes[end] == b'`' {
         end += 1;
     }
     end - start
 }
 
-fn find_backtick_run(chars: &[char], from: usize, width: usize) -> Option<usize> {
+fn find_backtick_run(bytes: &[u8], from: usize, width: usize) -> Option<usize> {
+    if width == 0 {
+        return None;
+    }
     let mut index = from;
-    while index + width <= chars.len() {
-        if chars[index..index + width].iter().all(|ch| *ch == '`')
-            && (index + width == chars.len() || chars[index + width] != '`')
+    while index + width <= bytes.len() {
+        if bytes[index..index + width].iter().all(|byte| *byte == b'`')
+            && (index + width == bytes.len() || bytes[index + width] != b'`')
         {
             return Some(index);
         }
@@ -763,10 +762,10 @@ fn find_backtick_run(chars: &[char], from: usize, width: usize) -> Option<usize>
     None
 }
 
-fn find_wikilink_close(chars: &[char], from: usize) -> Option<usize> {
+fn find_wikilink_close(bytes: &[u8], from: usize) -> Option<usize> {
     let mut index = from;
-    while index + 1 < chars.len() {
-        if chars[index] == ']' && chars[index + 1] == ']' {
+    while index + 1 < bytes.len() {
+        if bytes[index] == b']' && bytes[index + 1] == b']' {
             return Some(index);
         }
         index += 1;
@@ -949,7 +948,7 @@ mod tests {
         write(&vault.join("Group.md"), "# Group\n\nImported body.");
 
         let module = store
-            .create_module("Algebra", "", StudyWriteOrigin::Agent)
+            .create_module("Algebra", "")
             .expect("module");
         store
             .create_node(

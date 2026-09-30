@@ -5,9 +5,14 @@
 //! invariants that code can enforce mechanically. Semantic judgments, such as
 //! whether two concepts are the same node, remain the model's responsibility.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use miette::{IntoDiagnostic, Result, miette};
+use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -121,7 +126,6 @@ pub struct StudyMaintenance {
     pub orphan_node_ids: Vec<String>,
     pub empty_module_ids: Vec<String>,
     pub duplicate_candidate_groups: Vec<Vec<String>>,
-    pub unlinked_node_ids: Vec<String>,
     pub stale_question_count: usize,
 }
 
@@ -255,7 +259,9 @@ impl StudyWriteOrigin {
 
 #[derive(Clone, Debug)]
 pub struct StudyStore {
-    db_path: PathBuf,
+    /// Shared SQLite connection. `rusqlite::Connection` is not `Sync`, so every
+    /// store operation takes this mutex and uses the connection on one thread.
+    connection: Arc<Mutex<Connection>>,
     fts_enabled: bool,
     revision: std::sync::Arc<std::sync::atomic::AtomicI64>,
 }
@@ -332,21 +338,19 @@ impl StudyStore {
     }
 
     pub fn open_at(db_path: PathBuf) -> Result<Self> {
-        let store = Self {
-            db_path,
-            fts_enabled: false,
-            revision: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
-        };
-        let connection = store.open_connection()?;
+        let connection = Connection::open(&db_path).into_diagnostic()?;
         let fts_enabled = migrate(&connection)?;
         Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
             fts_enabled,
-            ..store
+            revision: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         })
     }
 
-    fn open_connection(&self) -> Result<Connection> {
-        Connection::open(&self.db_path).into_diagnostic()
+    /// Lock the store's single SQLite connection. Callers must not open another
+    /// connection for the same operation; `Connection` is used on this thread only.
+    fn connection(&self) -> parking_lot::MutexGuard<'_, Connection> {
+        self.connection.lock()
     }
 
     /// Monotonic revision of the graph data. It changes on every successful
@@ -360,12 +364,7 @@ impl StudyStore {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn create_module(
-        &self,
-        title: &str,
-        description: &str,
-        origin: StudyWriteOrigin,
-    ) -> Result<StudyModule> {
+    pub fn create_module(&self, title: &str, description: &str) -> Result<StudyModule> {
         let title = title.trim();
         if title.is_empty() {
             return Err(miette!("module title cannot be empty"));
@@ -378,7 +377,8 @@ impl StudyStore {
             created_at_ms: now,
             updated_at_ms: now,
         };
-        let connection = self.open_connection()?;
+        // study_modules has no updated_by column, so origin is not accepted.
+        let connection = self.connection();
         connection
             .execute(
                 "INSERT INTO study_modules (id, title, description, created_at_ms, updated_at_ms)
@@ -393,79 +393,19 @@ impl StudyStore {
             )
             .into_diagnostic()
             .map_err(|err| miette!("insert module failed: {err}"))?;
-        let _ = origin;
         self.bump_revision();
         Ok(module)
     }
 
     pub fn list_modules(&self) -> Result<Vec<StudyModuleSummary>> {
-        let connection = self.open_connection()?;
-        let mut statement = connection
-            .prepare(
-                "SELECT m.id, m.title, m.description, m.created_at_ms, m.updated_at_ms,
-                        n.id, COALESCE(p.understanding, 0)
-                 FROM study_modules m
-                 LEFT JOIN study_nodes n ON n.module_id = m.id
-                 LEFT JOIN study_progress p ON p.node_id = n.id
-                 ORDER BY m.created_at_ms ASC, m.id ASC",
-            )
-            .into_diagnostic()?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    StudyModule {
-                        id: row.get(0)?,
-                        title: row.get(1)?,
-                        description: row.get(2)?,
-                        created_at_ms: row.get(3)?,
-                        updated_at_ms: row.get(4)?,
-                    },
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, i64>(6)?,
-                ))
-            })
-            .into_diagnostic()?;
-
-        let mut modules: Vec<StudyModuleSummary> = Vec::new();
-        let mut understanding_totals: Vec<(i64, usize)> = Vec::new();
-        for row in rows {
-            let (module, node_id, understanding) = row.into_diagnostic()?;
-            let index = modules
-                .iter()
-                .position(|item| item.module.id == module.id)
-                .unwrap_or_else(|| {
-                    modules.push(StudyModuleSummary {
-                        module,
-                        node_count: 0,
-                        mastered_count: 0,
-                        in_progress_count: 0,
-                        unseen_count: 0,
-                        average_understanding: 0,
-                    });
-                    understanding_totals.push((0, 0));
-                    modules.len() - 1
-                });
-            if node_id.is_none() {
-                continue;
-            }
-            apply_understanding(&mut modules[index], understanding);
-            understanding_totals[index].0 += understanding;
-            understanding_totals[index].1 += 1;
-        }
-        for (index, (total, count)) in understanding_totals.iter().enumerate() {
-            modules[index].average_understanding = if *count == 0 {
-                0
-            } else {
-                total / *count as i64
-            };
-        }
-        Ok(modules)
+        let connection = self.connection();
+        list_modules_on(&connection)
     }
 
     pub fn graph_snapshot(&self) -> Result<StudyGraphSnapshot> {
-        let connection = self.open_connection()?;
-        let modules = self.list_modules()?;
+        let connection = self.connection();
         let nodes = load_node_summaries(&connection)?;
+        let modules = list_modules_from_nodes(&connection, &nodes)?;
         let edges = load_edges(&connection)?;
         let question_count = count_rows(&connection, "study_questions")?;
         let stale_question_count = stale_question_count(&connection)?;
@@ -511,7 +451,7 @@ impl StudyStore {
     }
 
     pub fn node_detail(&self, node_id: &str) -> Result<StudyNodeDetail> {
-        let connection = self.open_connection()?;
+        let connection = self.connection();
         let node = load_node(&connection, node_id)?;
         let progress = load_progress(&connection, node_id)?;
         let questions = load_questions(&connection, node_id, node.content_version)?;
@@ -530,30 +470,8 @@ impl StudyStore {
         module_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<StudyNodeSummary>> {
-        let query = query.trim();
-        let limit = limit.clamp(1, 100);
-        let connection = self.open_connection()?;
-        let mut matched_ids = Vec::new();
-        if self.fts_enabled && !query.is_empty() {
-            matched_ids = fts_search(&connection, query, limit)?;
-        }
-        if matched_ids.is_empty() {
-            matched_ids = like_search(&connection, query, limit)?;
-        }
-
-        let mut nodes = load_node_summaries(&connection)?;
-        if let Some(module_id) = module_id {
-            nodes.retain(|node| node.module_id == module_id);
-        }
-        if query.is_empty() {
-            nodes.truncate(limit);
-            return Ok(nodes);
-        }
-        nodes.retain(|node| {
-            matched_ids.iter().any(|id| id == &node.id)
-                || node.title.to_lowercase().contains(&query.to_lowercase())
-        });
-        Ok(nodes)
+        let connection = self.connection();
+        search_nodes_on(&connection, self.fts_enabled, query, module_id, limit)
     }
 
     pub fn find_similar(&self, needle: &str, limit: usize) -> Result<Vec<StudyNodeSummary>> {
@@ -561,22 +479,14 @@ impl StudyStore {
         if normalized.is_empty() {
             return Ok(Vec::new());
         }
-        let connection = self.open_connection()?;
-        let nodes = load_node_summaries(&connection)?;
-        let mut candidates: Vec<StudyNodeSummary> = nodes
-            .into_iter()
-            .filter(|node| {
-                normalize_identity(&node.title) == normalized
-                    || node
-                        .aliases
-                        .iter()
-                        .any(|alias| normalize_identity(alias) == normalized)
-            })
-            .collect();
+        let connection = self.connection();
+        let limit = limit.clamp(1, 20);
+        let ids = similar_node_ids(&connection, &normalized, limit)?;
+        let mut candidates = load_node_summaries_by_ids(&connection, &ids)?;
         if candidates.is_empty() {
-            candidates = self.search_nodes(needle, None, limit)?;
+            candidates = search_nodes_on(&connection, self.fts_enabled, needle, None, limit)?;
         }
-        candidates.truncate(limit.clamp(1, 20));
+        candidates.truncate(limit);
         Ok(candidates)
     }
 
@@ -609,7 +519,7 @@ impl StudyStore {
             updated_at_ms: now,
         };
 
-        let mut connection = self.open_connection()?;
+        let mut connection = self.connection();
         let transaction = connection.transaction().into_diagnostic()?;
         let module_exists: bool = transaction
             .query_row(
@@ -670,7 +580,7 @@ impl StudyStore {
         node_id: &str,
         input: &UpdateNodeInput,
     ) -> Result<StudyNodeUpdateResult> {
-        let connection = self.open_connection()?;
+        let connection = self.connection();
         let mut node = load_node(&connection, node_id)?;
 
         let mut content_changed = false;
@@ -754,7 +664,7 @@ impl StudyStore {
         if from_node_id == to_node_id {
             return Err(miette!("cannot link a node to itself"));
         }
-        let connection = self.open_connection()?;
+        let connection = self.connection();
         ensure_node_exists(&connection, from_node_id)?;
         ensure_node_exists(&connection, to_node_id)?;
         let existing: Option<i64> = connection
@@ -805,7 +715,7 @@ impl StudyStore {
         to_node_id: &str,
         relation: Option<&str>,
     ) -> Result<StudyRemoveEdgeResult> {
-        let connection = self.open_connection()?;
+        let connection = self.connection();
         let removed = match relation {
             Some(relation) => connection
                 .execute(
@@ -839,7 +749,7 @@ impl StudyStore {
         if merged_node_id == canonical_node_id {
             return Err(miette!("cannot merge a node into itself"));
         }
-        let mut connection = self.open_connection()?;
+        let mut connection = self.connection();
         let transaction = connection.transaction().into_diagnostic()?;
         let merged = load_node(&transaction, merged_node_id)?;
         let mut canonical = load_node(&transaction, canonical_node_id)?;
@@ -990,7 +900,7 @@ impl StudyStore {
         if questions.is_empty() {
             return Err(miette!("at least one question is required"));
         }
-        let mut connection = self.open_connection()?;
+        let mut connection = self.connection();
         let node = load_node(&connection, node_id)?;
         let transaction = connection.transaction().into_diagnostic()?;
         let mut added = Vec::new();
@@ -1062,7 +972,7 @@ impl StudyStore {
                 ATTEMPT_OUTCOMES.join(", ")
             ));
         }
-        let connection = self.open_connection()?;
+        let connection = self.connection();
         let node_id: String = connection
             .query_row(
                 "SELECT node_id FROM study_questions WHERE id = ?1",
@@ -1101,7 +1011,7 @@ impl StudyStore {
                 "understanding must be a percentage between 0 and 100, got {understanding}"
             ));
         }
-        let connection = self.open_connection()?;
+        let connection = self.connection();
         ensure_node_exists(&connection, node_id)?;
         let now = now_ms();
         connection
@@ -1128,16 +1038,16 @@ impl StudyStore {
     }
 
     pub fn maintenance_report(&self) -> Result<StudyMaintenance> {
-        let connection = self.open_connection()?;
-        let modules = self.list_modules()?;
+        let connection = self.connection();
         let nodes = load_node_summaries(&connection)?;
+        let modules = list_modules_from_nodes(&connection, &nodes)?;
         load_maintenance(&connection, &modules, &nodes)
     }
 
     /// Normalized title/alias identity to node id, used by import adapters to
     /// detect duplicates without loading full node bodies.
     pub fn node_identity_index(&self) -> Result<BTreeMap<String, String>> {
-        let connection = self.open_connection()?;
+        let connection = self.connection();
         let mut statement = connection
             .prepare("SELECT id, title, aliases FROM study_nodes")
             .into_diagnostic()?;
@@ -1164,7 +1074,7 @@ impl StudyStore {
     }
 
     pub fn all_nodes(&self, module_id: Option<&str>) -> Result<Vec<StudyNode>> {
-        let connection = self.open_connection()?;
+        let connection = self.connection();
         let mut statement = connection
             .prepare(
                 "SELECT id, module_id, title, summary, body, aliases, tags, sources,
@@ -1199,7 +1109,7 @@ impl StudyStore {
     }
 
     pub fn all_questions(&self) -> Result<Vec<StudyQuestion>> {
-        let connection = self.open_connection()?;
+        let connection = self.connection();
         let mut statement = connection
             .prepare(
                 "SELECT q.id, q.node_id, q.question, q.answer, q.difficulty,
@@ -1246,7 +1156,7 @@ impl StudyStore {
         edges: &[(String, String)],
         merge_duplicates: bool,
     ) -> Result<StudyImportOutcome> {
-        let mut connection = self.open_connection()?;
+        let mut connection = self.connection();
         let transaction = connection.transaction().into_diagnostic()?;
 
         let module = match module_id {
@@ -1505,7 +1415,23 @@ fn create_fts_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )
         .into_diagnostic()
-        .map_err(|err| miette!("create study FTS schema failed: {err}"))
+        .map_err(|err| miette!("create study FTS schema failed: {err}"))?;
+    // Backfill nodes created before the FTS table. Insert triggers do not see
+    // those rows. Existing indexed ids are skipped so reopening does not insert
+    // duplicate content rows, and the virtual table definition stays the same.
+    connection
+        .execute(
+            "INSERT INTO study_nodes_fts (node_id, title, summary, body, aliases)
+             SELECT n.id, n.title, n.summary, n.body, n.aliases
+             FROM study_nodes n
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM study_nodes_fts f WHERE f.node_id = n.id
+             )",
+            [],
+        )
+        .into_diagnostic()
+        .map_err(|err| miette!("backfill study FTS failed: {err}"))?;
+    Ok(())
 }
 
 fn fts_search(connection: &Connection, query: &str, limit: usize) -> Result<Vec<String>> {
@@ -1619,6 +1545,214 @@ fn load_node_summaries(connection: &Connection) -> Result<Vec<StudyNodeSummary>>
         nodes.push(row.into_diagnostic()?);
     }
     Ok(nodes)
+}
+
+const NODE_SUMMARY_SELECT: &str = "SELECT n.id, n.module_id, n.title, n.summary, n.aliases, n.tags, n.content_version,
+        COALESCE(p.understanding, 0), COALESCE(p.evidence, ''), COALESCE(p.updated_by, 'code'),
+        COALESCE(p.updated_at_ms, 0),
+        (SELECT COUNT(*) FROM study_questions q WHERE q.node_id = n.id),
+        (SELECT COUNT(*) FROM study_questions q
+          WHERE q.node_id = n.id AND q.node_content_version != n.content_version)
+ FROM study_nodes n
+ LEFT JOIN study_progress p ON p.node_id = n.id";
+
+fn map_node_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<StudyNodeSummary> {
+    Ok(StudyNodeSummary {
+        id: row.get(0)?,
+        module_id: row.get(1)?,
+        title: row.get(2)?,
+        summary: row.get(3)?,
+        aliases: decode_string_list(&row.get::<_, String>(4)?),
+        tags: decode_string_list(&row.get::<_, String>(5)?),
+        content_version: row.get(6)?,
+        progress: StudyProgress {
+            understanding: row.get(7)?,
+            evidence: row.get(8)?,
+            updated_by: row.get(9)?,
+            updated_at_ms: row.get(10)?,
+        },
+        question_count: row.get::<_, i64>(11)? as usize,
+        stale_question_count: row.get::<_, i64>(12)? as usize,
+    })
+}
+
+fn load_node_summaries_by_ids(
+    connection: &Connection,
+    ids: &[String],
+) -> Result<Vec<StudyNodeSummary>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "{NODE_SUMMARY_SELECT} WHERE n.id IN ({placeholders}) ORDER BY n.module_id ASC, n.created_at_ms ASC, n.id ASC"
+    );
+    let mut statement = connection.prepare(&sql).into_diagnostic()?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(ids.iter()), map_node_summary)
+        .into_diagnostic()?;
+    let mut by_id = HashMap::new();
+    for row in rows {
+        let node = row.into_diagnostic()?;
+        by_id.insert(node.id.clone(), node);
+    }
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+}
+
+fn search_nodes_on(
+    connection: &Connection,
+    fts_enabled: bool,
+    query: &str,
+    module_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<StudyNodeSummary>> {
+    let query = query.trim();
+    let limit = limit.clamp(1, 100);
+    let mut matched_ids = Vec::new();
+    if fts_enabled && !query.is_empty() {
+        matched_ids = fts_search(connection, query, limit)?;
+    }
+    if matched_ids.is_empty() {
+        matched_ids = like_search(connection, query, limit)?;
+    }
+    if query.is_empty() {
+        let mut nodes = if let Some(module_id) = module_id {
+            load_node_summaries_for_module(connection, module_id, limit)?
+        } else {
+            load_node_summaries(connection)?
+        };
+        nodes.truncate(limit);
+        return Ok(nodes);
+    }
+
+    let query_lower = query.to_lowercase();
+    let mut matched = HashSet::with_capacity(matched_ids.len());
+    for id in &matched_ids {
+        matched.insert(id.clone());
+    }
+    let mut nodes = load_node_summaries_by_ids(connection, &matched_ids)?;
+    if let Some(module_id) = module_id {
+        nodes.retain(|node| node.module_id == module_id);
+    }
+    nodes.retain(|node| matched.contains(&node.id) || node.title.to_lowercase().contains(&query_lower));
+    nodes.truncate(limit);
+    Ok(nodes)
+}
+
+fn sql_normalized_identity(column: &str) -> String {
+    let mut expr = format!("lower(trim({column}))");
+    for token in [" ", "\t", "\n", "\r", "-", "_", "·", "/", "(", ")", "（", "）"] {
+        let escaped = token.replace('\\', "\\\\").replace('\"', "\\\"");
+        expr = format!("replace({expr}, '{escaped}', '')");
+    }
+    expr
+}
+
+fn similar_node_ids(connection: &Connection, normalized: &str, limit: usize) -> Result<Vec<String>> {
+    let title = sql_normalized_identity("title");
+    let alias = sql_normalized_identity("value");
+    let sql = format!(
+        "SELECT id FROM study_nodes
+         WHERE {title} = ?1
+            OR EXISTS (
+                SELECT 1
+                FROM json_each(study_nodes.aliases)
+                WHERE {alias} = ?1
+            )
+         ORDER BY updated_at_ms DESC, id ASC
+         LIMIT ?2"
+    );
+    let mut statement = connection.prepare(&sql).into_diagnostic()?;
+    let rows = statement
+        .query_map(params![normalized, limit as i64], |row| row.get::<_, String>(0))
+        .into_diagnostic()?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row.into_diagnostic()?);
+    }
+    Ok(ids)
+}
+
+fn load_node_summaries_for_module(
+    connection: &Connection,
+    module_id: &str,
+    limit: usize,
+) -> Result<Vec<StudyNodeSummary>> {
+    let sql = format!(
+        "{NODE_SUMMARY_SELECT} WHERE n.module_id = ?1 ORDER BY n.created_at_ms ASC, n.id ASC LIMIT ?2"
+    );
+    let mut statement = connection.prepare(&sql).into_diagnostic()?;
+    let rows = statement
+        .query_map(params![module_id, limit as i64], map_node_summary)
+        .into_diagnostic()?;
+    let mut nodes = Vec::new();
+    for row in rows {
+        nodes.push(row.into_diagnostic()?);
+    }
+    Ok(nodes)
+}
+
+fn list_modules_on(connection: &Connection) -> Result<Vec<StudyModuleSummary>> {
+    list_modules_from_nodes(connection, &load_node_summaries(connection)?)
+}
+
+fn list_modules_from_nodes(
+    connection: &Connection,
+    nodes: &[StudyNodeSummary],
+) -> Result<Vec<StudyModuleSummary>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, title, description, created_at_ms, updated_at_ms
+             FROM study_modules
+             ORDER BY created_at_ms ASC, id ASC",
+        )
+        .into_diagnostic()?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(StudyModule {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                created_at_ms: row.get(3)?,
+                updated_at_ms: row.get(4)?,
+            })
+        })
+        .into_diagnostic()?;
+    let mut modules = Vec::new();
+    let mut index_by_id = HashMap::new();
+    let mut understanding_totals = Vec::new();
+    for row in rows {
+        let module = row.into_diagnostic()?;
+        index_by_id.insert(module.id.clone(), modules.len());
+        modules.push(StudyModuleSummary {
+            module,
+            node_count: 0,
+            mastered_count: 0,
+            in_progress_count: 0,
+            unseen_count: 0,
+            average_understanding: 0,
+        });
+        understanding_totals.push((0i64, 0usize));
+    }
+    for node in nodes {
+        let Some(&index) = index_by_id.get(&node.module_id) else {
+            continue;
+        };
+        let understanding = node.progress.understanding;
+        apply_understanding(&mut modules[index], understanding);
+        understanding_totals[index].0 += understanding;
+        understanding_totals[index].1 += 1;
+    }
+    for (index, (total, count)) in understanding_totals.iter().enumerate() {
+        modules[index].average_understanding = if *count == 0 {
+            0
+        } else {
+            total / *count as i64
+        };
+    }
+    Ok(modules)
 }
 
 fn load_edges(connection: &Connection) -> Result<Vec<StudyEdge>> {
@@ -1759,25 +1893,55 @@ fn load_questions(
 }
 
 fn load_neighbors(connection: &Connection, node: &StudyNode) -> Result<Vec<StudyNeighbor>> {
-    let summaries = load_node_summaries(connection)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT
+                 CASE WHEN e.from_node_id = ?1 THEN 'out' ELSE 'in' END,
+                 e.relation,
+                 e.note,
+                 n.id, n.module_id, n.title, n.summary, n.aliases, n.tags, n.content_version,
+                 COALESCE(p.understanding, 0), COALESCE(p.evidence, ''), COALESCE(p.updated_by, 'code'),
+                 COALESCE(p.updated_at_ms, 0),
+                 (SELECT COUNT(*) FROM study_questions q WHERE q.node_id = n.id),
+                 (SELECT COUNT(*) FROM study_questions q
+                   WHERE q.node_id = n.id AND q.node_content_version != n.content_version)
+             FROM study_edges e
+             JOIN study_nodes n
+               ON n.id = CASE WHEN e.from_node_id = ?1 THEN e.to_node_id ELSE e.from_node_id END
+             LEFT JOIN study_progress p ON p.node_id = n.id
+             WHERE e.from_node_id = ?1 OR e.to_node_id = ?1
+             ORDER BY e.id ASC",
+        )
+        .into_diagnostic()?;
+    let rows = statement
+        .query_map(params![node.id], |row| {
+            Ok(StudyNeighbor {
+                direction: row.get(0)?,
+                relation: row.get(1)?,
+                note: row.get(2)?,
+                node: StudyNodeSummary {
+                    id: row.get(3)?,
+                    module_id: row.get(4)?,
+                    title: row.get(5)?,
+                    summary: row.get(6)?,
+                    aliases: decode_string_list(&row.get::<_, String>(7)?),
+                    tags: decode_string_list(&row.get::<_, String>(8)?),
+                    content_version: row.get(9)?,
+                    progress: StudyProgress {
+                        understanding: row.get(10)?,
+                        evidence: row.get(11)?,
+                        updated_by: row.get(12)?,
+                        updated_at_ms: row.get(13)?,
+                    },
+                    question_count: row.get::<_, i64>(14)? as usize,
+                    stale_question_count: row.get::<_, i64>(15)? as usize,
+                },
+            })
+        })
+        .into_diagnostic()?;
     let mut neighbors = Vec::new();
-    for edge in load_edges(connection)? {
-        let (neighbor_id, direction) = if edge.from == node.id {
-            (edge.to.clone(), "out")
-        } else if edge.to == node.id {
-            (edge.from.clone(), "in")
-        } else {
-            continue;
-        };
-        let Some(neighbor) = summaries.iter().find(|item| item.id == neighbor_id) else {
-            continue;
-        };
-        neighbors.push(StudyNeighbor {
-            node: neighbor.clone(),
-            relation: edge.relation,
-            direction: direction.to_string(),
-            note: edge.note,
-        });
+    for row in rows {
+        neighbors.push(row.into_diagnostic()?);
     }
     Ok(neighbors)
 }
@@ -1841,7 +2005,6 @@ fn load_maintenance(
         orphan_node_ids,
         empty_module_ids,
         duplicate_candidate_groups,
-        unlinked_node_ids: Vec::new(),
         stale_question_count: stale_question_count(connection)?,
     })
 }
@@ -1869,7 +2032,12 @@ fn count_rows(connection: &Connection, table: &str) -> Result<usize> {
 }
 
 fn prerequisite_path_exists(connection: &Connection, from: &str, target: &str) -> Result<bool> {
-    let mut visited = std::collections::HashSet::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT to_node_id FROM study_edges WHERE from_node_id = ?1 AND relation = 'prerequisite'",
+        )
+        .into_diagnostic()?;
+    let mut visited = HashSet::new();
     let mut queue = std::collections::VecDeque::new();
     queue.push_back(from.to_string());
     while let Some(current) = queue.pop_front() {
@@ -1879,9 +2047,6 @@ fn prerequisite_path_exists(connection: &Connection, from: &str, target: &str) -
         if !visited.insert(current.clone()) {
             continue;
         }
-        let mut statement = connection
-            .prepare("SELECT to_node_id FROM study_edges WHERE from_node_id = ?1 AND relation = 'prerequisite'")
-            .into_diagnostic()?;
         let rows = statement
             .query_map(params![current], |row| row.get::<_, String>(0))
             .into_diagnostic()?;
@@ -2001,7 +2166,7 @@ mod tests {
 
     fn create_module(store: &StudyStore, title: &str) -> StudyModule {
         store
-            .create_module(title, "", StudyWriteOrigin::Agent)
+            .create_module(title, "")
             .expect("create module")
     }
 

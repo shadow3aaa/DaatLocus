@@ -43,6 +43,7 @@ pub struct BrowserApp {
     context: Option<BrowserContext>,
     backend: Option<BrowserBackend>,
     pages: BTreeMap<String, BrowserPageState>,
+    live_pages: HashMap<String, Page>,
     init_error: Option<String>,
 }
 
@@ -135,11 +136,12 @@ struct RenderedSnapshotLines {
 }
 
 impl BrowserApp {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             context: None,
             backend: None,
             pages: BTreeMap::new(),
+            live_pages: HashMap::new(),
             init_error: None,
         }
     }
@@ -184,6 +186,7 @@ impl BrowserApp {
         self.backend = Some(backend);
         self.init_error = None;
         self.pages.clear();
+        self.live_pages.clear();
         Ok(())
     }
 
@@ -195,11 +198,17 @@ impl BrowserApp {
 
     async fn find_page(&mut self, page_id: &str) -> Result<Page> {
         self.ensure_ready().await?;
-        let pages = list_browser_pages(self.context_ref()?).await?;
-        pages
-            .into_iter()
-            .find(|page| page.target_id() == page_id)
-            .ok_or_else(|| miette!("unknown browser page `{page_id}`"))
+        if self.pages.contains_key(page_id) {
+            return self.live_pages.remove(page_id).ok_or_else(|| {
+                miette!("browser page `{page_id}` is known but has no live handle")
+            });
+        }
+        let mut indexed = self.refresh_pages().await?;
+        let page = indexed.remove(page_id).ok_or_else(|| {
+            miette!("unknown browser page `{page_id}`")
+        })?;
+        self.live_pages = indexed;
+        Ok(page)
     }
 
     async fn capture_page_state(&self, page: &Page) -> BrowserPageState {
@@ -247,19 +256,22 @@ impl BrowserApp {
         }
     }
 
-    async fn refresh_pages(&mut self) -> Result<()> {
+    async fn refresh_pages(&mut self) -> Result<HashMap<String, Page>> {
         if self.context.is_none() {
-            return Ok(());
+            return Ok(HashMap::new());
         }
         let pages = list_browser_pages(self.context_ref()?).await?;
         self.pages.clear();
+        self.live_pages.clear();
         let mut updated = BTreeMap::new();
+        let mut indexed = HashMap::with_capacity(pages.len());
         for page in pages {
             let state = self.capture_page_state(&page).await;
+            indexed.insert(state.page_id.clone(), page);
             updated.insert(state.page_id.clone(), state);
         }
         self.pages = updated;
-        Ok(())
+        Ok(indexed)
     }
 
     pub async fn open_page(&mut self, url: &str) -> Result<BrowserOpenResult> {
@@ -280,14 +292,9 @@ impl BrowserApp {
             return Err(err);
         }
         let state = self.capture_page_state(&page).await;
+        self.live_pages.insert(state.page_id.clone(), page);
         self.pages.insert(state.page_id.clone(), state.clone());
-        self.refresh_pages().await?;
-        let page = self
-            .pages
-            .get(&state.page_id)
-            .cloned()
-            .ok_or_else(|| miette!("opened browser page disappeared"))?;
-        Ok(BrowserOpenResult { page })
+        Ok(BrowserOpenResult { page: state })
     }
 
     pub async fn snapshot_page(&mut self, page_id: &str) -> Result<BrowserSnapshotResult> {
@@ -418,7 +425,7 @@ impl BrowserApp {
         let action = format!("failed to close page `{page_id}`");
         browser_operation_timeout(&action, BROWSER_STATE_TIMEOUT, page.close()).await?;
         self.pages.remove(page_id);
-        self.refresh_pages().await?;
+        self.live_pages.remove(page_id);
         Ok(BrowserActionResult { page: state })
     }
 }
@@ -532,27 +539,50 @@ fn should_include_snapshot_node(role: &str, name: Option<&str>) -> bool {
     !(is_structural_role(role) && name.is_none())
 }
 
-fn collect_snapshot_ref_duplicate_counts(node: &AriaSnapshot, counts: &mut HashMap<String, usize>) {
-    let role = normalize_snapshot_role(node);
-    let name = normalized_snapshot_text(node.name.as_deref());
-    if node.node_ref.is_some() && should_create_snapshot_ref(&role, name.as_deref()) {
-        let key = format!("{role}:{}", name.as_deref().unwrap_or(""));
+#[derive(Debug, Clone)]
+struct PreparedSnapshotNode {
+    role: String,
+    name: Option<String>,
+    children: Vec<PreparedSnapshotNode>,
+}
+
+fn prepare_snapshot_node(node: &AriaSnapshot) -> PreparedSnapshotNode {
+    PreparedSnapshotNode {
+        role: normalize_snapshot_role(node),
+        name: normalized_snapshot_text(node.name.as_deref()),
+        children: node.children.iter().map(prepare_snapshot_node).collect(),
+    }
+}
+
+fn collect_snapshot_ref_duplicate_counts(
+    node: &AriaSnapshot,
+    prepared: &PreparedSnapshotNode,
+    counts: &mut HashMap<String, usize>,
+) {
+    if node.node_ref.is_some() && should_create_snapshot_ref(&prepared.role, prepared.name.as_deref())
+    {
+        let key = format!(
+            "{}:{}",
+            prepared.role,
+            prepared.name.as_deref().unwrap_or("")
+        );
         *counts.entry(key).or_insert(0) += 1;
     }
-    for child in &node.children {
-        collect_snapshot_ref_duplicate_counts(child, counts);
+    for (child, prepared_child) in node.children.iter().zip(&prepared.children) {
+        collect_snapshot_ref_duplicate_counts(child, prepared_child, counts);
     }
 }
 
 fn build_snapshot_line(
     node: &AriaSnapshot,
-    role: &str,
-    name: Option<&str>,
+    prepared: &PreparedSnapshotNode,
     depth: usize,
     duplicate_counts: &HashMap<String, usize>,
     duplicate_seen: &mut HashMap<String, usize>,
     stats: &mut CompactSnapshotStats,
 ) -> String {
+    let role = prepared.role.as_str();
+    let name = prepared.name.as_deref();
     let indent = "  ".repeat(depth);
     let mut line = format!("{indent}- {role}");
     if let Some(name) = name {
@@ -626,6 +656,7 @@ fn build_snapshot_line(
 
 fn render_compact_snapshot_lines(
     node: &AriaSnapshot,
+    prepared: &PreparedSnapshotNode,
     depth: usize,
     duplicate_counts: &HashMap<String, usize>,
     duplicate_seen: &mut HashMap<String, usize>,
@@ -638,14 +669,15 @@ fn render_compact_snapshot_lines(
         };
     }
 
-    let role = normalize_snapshot_role(node);
-    let name = normalized_snapshot_text(node.name.as_deref());
+    let role = prepared.role.as_str();
+    let name = prepared.name.as_deref();
 
     let mut child_lines = Vec::new();
     let mut child_relevant = false;
-    for child in &node.children {
+    for (child, prepared_child) in node.children.iter().zip(&prepared.children) {
         let rendered = render_compact_snapshot_lines(
             child,
+            prepared_child,
             depth + 1,
             duplicate_counts,
             duplicate_seen,
@@ -657,7 +689,7 @@ fn render_compact_snapshot_lines(
         }
     }
 
-    let has_ref = node.node_ref.is_some() && should_create_snapshot_ref(&role, name.as_deref());
+    let has_ref = node.node_ref.is_some() && should_create_snapshot_ref(role, name);
     let has_meaningful_text = name.is_some()
         || node
             .value_text
@@ -667,16 +699,15 @@ fn render_compact_snapshot_lines(
             .description
             .as_deref()
             .is_some_and(|description| !description.trim().is_empty());
-    let include_node = should_include_snapshot_node(&role, name.as_deref());
-    let include_line = include_node
-        && (!is_structural_role(&role) || has_ref || has_meaningful_text || child_relevant);
+    let include_node = should_include_snapshot_node(role, name);
+    let include_line =
+        include_node && (!is_structural_role(role) || has_ref || has_meaningful_text || child_relevant);
 
     let mut lines = Vec::new();
     if include_line {
         lines.push(build_snapshot_line(
             node,
-            &role,
-            name.as_deref(),
+            prepared,
             depth,
             duplicate_counts,
             duplicate_seen,
@@ -692,14 +723,17 @@ fn render_compact_snapshot_lines(
 }
 
 fn compact_browser_snapshot(snapshot: &AriaSnapshot) -> (String, CompactSnapshotStats) {
-    let snapshot_root = preferred_snapshot_root(snapshot).unwrap_or(snapshot);
+    let prepared_tree = prepare_snapshot_node(snapshot);
+    let (snapshot_root, prepared_root) =
+        preferred_snapshot_root(snapshot, &prepared_tree).unwrap_or((snapshot, &prepared_tree));
     let mut duplicate_counts = HashMap::new();
-    collect_snapshot_ref_duplicate_counts(snapshot_root, &mut duplicate_counts);
+    collect_snapshot_ref_duplicate_counts(snapshot_root, prepared_root, &mut duplicate_counts);
 
     let mut duplicate_seen = HashMap::new();
     let mut stats = CompactSnapshotStats::default();
     let rendered = render_compact_snapshot_lines(
         snapshot_root,
+        prepared_root,
         0,
         &duplicate_counts,
         &mut duplicate_seen,
@@ -714,31 +748,39 @@ fn compact_browser_snapshot(snapshot: &AriaSnapshot) -> (String, CompactSnapshot
     (snapshot, stats)
 }
 
-fn preferred_snapshot_root(snapshot: &AriaSnapshot) -> Option<&AriaSnapshot> {
+fn preferred_snapshot_root<'a>(
+    snapshot: &'a AriaSnapshot,
+    prepared: &'a PreparedSnapshotNode,
+) -> Option<(&'a AriaSnapshot, &'a PreparedSnapshotNode)> {
     let mut best_main = None;
     let mut best_article = None;
-    collect_preferred_snapshot_root(snapshot, &mut best_main, &mut best_article);
+    collect_preferred_snapshot_root(
+        snapshot,
+        prepared,
+        &mut best_main,
+        &mut best_article,
+    );
     best_main.or(best_article)
 }
 
 fn collect_preferred_snapshot_root<'a>(
     node: &'a AriaSnapshot,
-    best_main: &mut Option<&'a AriaSnapshot>,
-    best_article: &mut Option<&'a AriaSnapshot>,
+    prepared: &'a PreparedSnapshotNode,
+    best_main: &mut Option<(&'a AriaSnapshot, &'a PreparedSnapshotNode)>,
+    best_article: &mut Option<(&'a AriaSnapshot, &'a PreparedSnapshotNode)>,
 ) {
-    let role = normalize_snapshot_role(node);
-    if role == "main" && best_main.is_none() {
-        *best_main = Some(node);
-    } else if role == "article" && best_article.is_none() {
-        *best_article = Some(node);
+    if prepared.role == "main" && best_main.is_none() {
+        *best_main = Some((node, prepared));
+    } else if prepared.role == "article" && best_article.is_none() {
+        *best_article = Some((node, prepared));
     }
 
     if best_main.is_some() && best_article.is_some() {
         return;
     }
 
-    for child in &node.children {
-        collect_preferred_snapshot_root(child, best_main, best_article);
+    for (child, prepared_child) in node.children.iter().zip(&prepared.children) {
+        collect_preferred_snapshot_root(child, prepared_child, best_main, best_article);
         if best_main.is_some() && best_article.is_some() {
             break;
         }
@@ -910,7 +952,6 @@ fn browser_snapshot_model_content(
 }
 
 fn browser_action_result(
-    action: BrowserActivityAction,
     title: &str,
     result: &BrowserActionResult,
     extra_lines: Vec<String>,
@@ -921,18 +962,7 @@ fn browser_action_result(
         title.to_string(),
         json!({ "page": result.page }),
         Some(model_content),
-        browser_committed_activity_event(BrowserActivityDescriptor {
-            action,
-            title: title.to_string(),
-            body_lines: {
-                let mut lines = vec![format!("page={}", result.page.page_id)];
-                lines.extend(extra_lines);
-                lines
-            },
-            url: Some(result.page.url.clone()),
-            line_count: None,
-            ref_count: None,
-        }),
+        None,
     )
 }
 
@@ -951,35 +981,8 @@ fn browser_wait_result(result: &BrowserWaitResult, max_tokens: usize) -> AppTool
             "wait_state": result.wait_state,
         }),
         Some(model_content),
-        browser_committed_activity_event(BrowserActivityDescriptor {
-            action: BrowserActivityAction::Wait,
-            title: "waited for browser page".to_string(),
-            body_lines: {
-                let mut lines = vec![format!("page={}", result.page.page_id)];
-                lines.extend(extra_lines);
-                lines
-            },
-            url: Some(result.page.url.clone()),
-            line_count: None,
-            ref_count: None,
-        }),
+        None,
     )
-}
-
-fn browser_committed_activity_event(
-    data: BrowserActivityDescriptor,
-) -> Option<SessionActivityEvent> {
-    match data.action {
-        BrowserActivityAction::Snapshot => Some(SessionActivityEvent::Browser(data.into())),
-        BrowserActivityAction::OpenPage
-        | BrowserActivityAction::Wait
-        | BrowserActivityAction::Click
-        | BrowserActivityAction::Fill
-        | BrowserActivityAction::Back
-        | BrowserActivityAction::Forward
-        | BrowserActivityAction::Reload
-        | BrowserActivityAction::ClosePage => None,
-    }
 }
 
 #[async_trait]
@@ -1274,17 +1277,7 @@ impl App for BrowserApp {
                     summary,
                     json!({ "page": result.page }),
                     Some(model_content),
-                    browser_committed_activity_event(BrowserActivityDescriptor {
-                        action: BrowserActivityAction::OpenPage,
-                        title: "opened browser page".to_string(),
-                        body_lines: vec![
-                            format!("page={}", result.page.page_id),
-                            format!("url={}", result.page.url),
-                        ],
-                        url: Some(result.page.url),
-                        line_count: None,
-                        ref_count: None,
-                    }),
+                    None,
                 ))
             }
             "browser_snapshot" => {
@@ -1306,18 +1299,21 @@ impl App for BrowserApp {
                         "interactive_ref_count": result.interactive_ref_count,
                     }),
                     Some(model_content),
-                    browser_committed_activity_event(BrowserActivityDescriptor {
-                        action: BrowserActivityAction::Snapshot,
-                        title: "captured browser snapshot".to_string(),
-                        body_lines: vec![
-                            format!("page={}", result.page.page_id),
-                            format!("lines={}", result.line_count),
-                            format!("refs={}", result.ref_count),
-                        ],
-                        url: Some(result.page.url.clone()),
-                        line_count: Some(result.line_count),
-                        ref_count: Some(result.ref_count),
-                    }),
+                    Some(SessionActivityEvent::Browser(
+                        BrowserActivityDescriptor {
+                            action: BrowserActivityAction::Snapshot,
+                            title: "captured browser snapshot".to_string(),
+                            body_lines: vec![
+                                format!("page={}", result.page.page_id),
+                                format!("lines={}", result.line_count),
+                                format!("refs={}", result.ref_count),
+                            ],
+                            url: Some(result.page.url.clone()),
+                            line_count: Some(result.line_count),
+                            ref_count: Some(result.ref_count),
+                        }
+                        .into(),
+                    )),
                 ))
             }
             "browser_wait" => {
@@ -1331,7 +1327,6 @@ impl App for BrowserApp {
                 let args: BrowserClickArgs = parse_browser_tool_args(call)?;
                 let result = self.click(&args.page_id, &args.element_ref).await?;
                 Ok(browser_action_result(
-                    BrowserActivityAction::Click,
                     "clicked browser element",
                     &result,
                     vec![format!("ref={}", args.element_ref)],
@@ -1344,7 +1339,6 @@ impl App for BrowserApp {
                     .fill(&args.page_id, &args.element_ref, &args.value)
                     .await?;
                 Ok(browser_action_result(
-                    BrowserActivityAction::Fill,
                     "filled browser element",
                     &result,
                     vec![
@@ -1358,7 +1352,6 @@ impl App for BrowserApp {
                 let args: BrowserBackArgs = parse_browser_tool_args(call)?;
                 let result = self.go_back(&args.page_id).await?;
                 Ok(browser_action_result(
-                    BrowserActivityAction::Back,
                     "went back in browser",
                     &result,
                     Vec::new(),
@@ -1369,7 +1362,6 @@ impl App for BrowserApp {
                 let args: BrowserForwardArgs = parse_browser_tool_args(call)?;
                 let result = self.go_forward(&args.page_id).await?;
                 Ok(browser_action_result(
-                    BrowserActivityAction::Forward,
                     "went forward in browser",
                     &result,
                     Vec::new(),
@@ -1380,7 +1372,6 @@ impl App for BrowserApp {
                 let args: BrowserReloadArgs = parse_browser_tool_args(call)?;
                 let result = self.reload(&args.page_id).await?;
                 Ok(browser_action_result(
-                    BrowserActivityAction::Reload,
                     "reloaded browser page",
                     &result,
                     Vec::new(),
@@ -1391,7 +1382,6 @@ impl App for BrowserApp {
                 let args: BrowserClosePageArgs = parse_browser_tool_args(call)?;
                 let result = self.close_page(&args.page_id).await?;
                 Ok(browser_action_result(
-                    BrowserActivityAction::ClosePage,
                     "closed browser page",
                     &result,
                     Vec::new(),

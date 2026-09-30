@@ -138,23 +138,11 @@ impl ToolExecutionResult {
         self.default_content_for_payload(&self.payload)
     }
 
-    pub fn history_content(&self, tool_call_id: &str, tool_name: &str) -> String {
+    #[cfg(test)]
+    fn history_content(&self, tool_call_id: &str, tool_name: &str) -> String {
         format!(
             "tool_call_id={tool_call_id}\nname={tool_name}\n{}",
             self.default_content_for_payload(&self.payload)
-        )
-    }
-
-    pub fn history_content_with_budget(
-        &self,
-        tool_call_id: &str,
-        tool_name: &str,
-        max_tokens: usize,
-    ) -> String {
-        truncate_text_to_token_budget_with_notice(
-            &self.history_content(tool_call_id, tool_name),
-            max_tokens.max(1),
-            "... [tool output too long; history content truncated]",
         )
     }
 
@@ -189,6 +177,10 @@ pub trait RuntimeTool: Send + Sync {
     fn input_spec(&self) -> AgentToolInputSpec;
 
     fn app_tool_name(&self) -> Option<&str> {
+        None
+    }
+
+    fn owner_app_id(&self) -> Option<&AppId> {
         None
     }
 
@@ -246,6 +238,22 @@ impl StaticRuntimeTool {
             call_ui,
             execute,
         }
+    }
+
+    /// Register a tool whose only live surface is its schema.
+    fn new_schema_only(
+        name: &'static str,
+        description: &'static str,
+        schema: serde_json::Value,
+    ) -> Self {
+        Self::new_with_schema(
+            name,
+            description,
+            schema,
+            unreachable_static_tool_summary,
+            unreachable_static_tool_activity,
+            unreachable_static_tool_execute,
+        )
     }
 
     fn new_with_schema_and_availability(
@@ -308,6 +316,27 @@ impl RuntimeTool for StaticRuntimeTool {
     ) -> miette::Result<ToolExecutionResult> {
         (self.execute)(context, call).await
     }
+}
+
+fn unreachable_static_tool_summary(call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
+    Err(miette!(
+        "runtime tool `{}` has no summarize callback", call.name
+    ))
+}
+
+fn unreachable_static_tool_activity(
+    call: &AgentToolCall,
+) -> miette::Result<ToolCallActivityEvent> {
+    Err(miette!(
+        "runtime tool `{}` has no activity callback", call.name
+    ))
+}
+
+fn unreachable_static_tool_execute<'a>(
+    _context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move { Err(miette!("runtime tool `{}` has no executor", call.name)) })
 }
 
 struct AppRuntimeTool {
@@ -391,6 +420,10 @@ impl RuntimeTool for AppGetStateRuntimeTool {
 
     fn app_tool_name(&self) -> Option<&str> {
         Some(APP_GET_STATE_TOOL_NAME)
+    }
+
+    fn owner_app_id(&self) -> Option<&AppId> {
+        Some(&self.owner_app_id)
     }
 
     fn description(&self) -> &'static str {
@@ -479,6 +512,10 @@ impl RuntimeTool for AppRuntimeTool {
         Some(&self.app_tool_name)
     }
 
+    fn owner_app_id(&self) -> Option<&AppId> {
+        Some(&self.owner_app_id)
+    }
+
     fn description(&self) -> &str {
         &self.description
     }
@@ -553,14 +590,10 @@ impl WorkflowRuntimeTool {
             name: definition.tool_name(),
             description: definition.description.clone(),
             input_spec: AgentToolInputSpec::JsonSchema {
-                schema: workflow_tool_input_schema(&definition.input_schema),
+                schema: crate::workflow::workflow_tool_input_schema(&definition.input_schema),
             },
         }
     }
-}
-
-fn workflow_tool_input_schema(input_schema: &Value) -> Value {
-    crate::workflow::workflow_tool_input_schema(input_schema)
 }
 
 #[async_trait]
@@ -837,41 +870,14 @@ fn build_workflow_runtime_tools(
 }
 
 pub fn worker_finish_and_send_tool(output_schema: Value) -> Box<dyn RuntimeTool> {
-    Box::new(StaticRuntimeTool::new_with_schema(
+    // Worker turns never reach summarize, activity, or execute. `workflow.rs`
+    // intercepts `finish_and_send` before the worker runtime dispatcher, which
+    // also returns before `RuntimeTool::execute`. Schema registration remains.
+    Box::new(StaticRuntimeTool::new_schema_only(
         "finish_and_send",
         "Finish this isolated workflow worker by returning its declared typed output.",
         output_schema,
-        |call| Ok(summarize_worker_finish_and_send_tool(call)),
-        |call| Ok(render_worker_finish_and_send_tool(call)),
-        execute_worker_finish_and_send_tool,
     ))
-}
-
-fn summarize_worker_finish_and_send_tool(call: &AgentToolCall) -> EpisodeActionRecord {
-    EpisodeActionRecord {
-        kind: "finish_and_send".to_string(),
-        summary: summarize_inline_text(&call.arguments.to_string()),
-    }
-}
-
-fn render_worker_finish_and_send_tool(call: &AgentToolCall) -> ToolCallActivityEvent {
-    ToolCallActivityEvent::app(
-        "finish_and_send",
-        vec![summarize_inline_text(&call.arguments.to_string())],
-    )
-}
-
-fn execute_worker_finish_and_send_tool<'a>(
-    _context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        Ok(ToolExecutionResult::from_activity_event(
-            "worker completed",
-            call.arguments.clone(),
-            None,
-        ))
-    })
 }
 
 fn build_worker_runtime_tools_for_apps(
@@ -1112,13 +1118,6 @@ async fn execute_worker_runtime_tool(
                 call,
             );
         }
-        "finish_and_send" => {
-            return Ok(ToolExecutionResult::from_activity_event(
-                "worker completed",
-                call.arguments.clone(),
-                None,
-            ));
-        }
         "read_history" => {
             let store = dashboard_history
                 .ok_or_else(|| miette!("read_history requires an active session history store"))?;
@@ -1133,27 +1132,9 @@ async fn execute_worker_runtime_tool(
     }
     if let Some(app_tool_name) = tool.app_tool_name() {
         let app_call = call.with_name(app_tool_name.to_string());
-        let app_id = if app_tool_name == APP_GET_STATE_TOOL_NAME {
-            apps.all_tool_specs()
-                .into_iter()
-                .find_map(|(app_id, _)| {
-                    (app_id.mangle_tool_name(APP_GET_STATE_TOOL_NAME) == tool.name())
-                        .then_some(app_id)
-                })
-                .ok_or_else(|| {
-                    miette!("worker app state tool owner missing for `{}`", tool.name())
-                })?
-        } else {
-            apps.all_tool_specs()
-                .into_iter()
-                .find_map(|(app_id, specs)| {
-                    specs
-                        .iter()
-                        .any(|spec| app_id.mangle_tool_name(&spec.name) == tool.name())
-                        .then_some(app_id)
-                })
-                .ok_or_else(|| miette!("worker app tool owner missing for `{}`", tool.name()))?
-        };
+        let app_id = tool.owner_app_id().cloned().ok_or_else(|| {
+            miette!("worker app tool owner missing for `{}`", tool.name())
+        })?;
         if app_tool_name == APP_GET_STATE_TOOL_NAME {
             let args: AppGetStateArgs = parse_tool_args(call)?;
             let state = apps
@@ -1278,6 +1259,55 @@ pub fn build_runtime_tools(context: &Context) -> Vec<Box<dyn RuntimeTool>> {
     tools
 }
 
+/// Activity, summary, spec, and execute are separate entries of one tool call.
+/// Keep the built executor table for the current context so that chain builds once.
+fn runtime_tools_for_context(context: &Context) -> std::sync::Arc<Vec<Box<dyn RuntimeTool>>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    struct CachedRuntimeTools {
+        key: usize,
+        epoch: u64,
+        catalog: Option<Vec<crate::catalog_hot_reload::CatalogFileEntry>>,
+        study_mode: bool,
+        dashboard_history: bool,
+        ask_mode: bool,
+        tools: Arc<Vec<Box<dyn RuntimeTool>>>,
+    }
+
+    static CACHE: OnceLock<Mutex<Option<CachedRuntimeTools>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let key = std::ptr::from_ref(context) as usize;
+    let catalog = context.catalog_hot_reload_fingerprint.clone();
+    let study_mode = context.study_mode();
+    let dashboard_history = context.dashboard_history.is_some();
+    let ask_mode = context.current_turn_input_mode.is_ask();
+    if let Ok(slot) = cache.lock() {
+        if let Some(cached) = slot.as_ref()
+            && cached.key == key
+            && cached.epoch == context.runtime_turn_epoch
+            && cached.catalog == catalog
+            && cached.study_mode == study_mode
+            && cached.dashboard_history == dashboard_history
+            && cached.ask_mode == ask_mode
+        {
+            return Arc::clone(&cached.tools);
+        }
+    }
+    let tools = Arc::new(build_runtime_tools(context));
+    if let Ok(mut slot) = cache.lock() {
+        *slot = Some(CachedRuntimeTools {
+            key,
+            epoch: context.runtime_turn_epoch,
+            catalog,
+            study_mode,
+            dashboard_history,
+            ask_mode,
+            tools: Arc::clone(&tools),
+        });
+    }
+    tools
+}
+
 fn is_valid_dynamic_tool_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -1296,18 +1326,24 @@ fn find_runtime_tool<'a>(
     tools: &'a [Box<dyn RuntimeTool>],
     name: &str,
 ) -> miette::Result<&'a dyn RuntimeTool> {
-    let canonical_name = canonical_runtime_tool_name(name);
     tools
         .iter()
-        .find(|tool| tool.name() == canonical_name)
+        .find(|tool| tool.name() == name)
         .map(std::convert::AsRef::as_ref)
         .ok_or_else(|| miette!("unknown runtime tool: {name}"))
 }
 
 pub fn build_runtime_tool_specs(context: &Context) -> Vec<AgentToolSpec> {
+    runtime_tool_specs_from_tools(&runtime_tools_for_context(context), context)
+}
+
+fn runtime_tool_specs_from_tools(
+    tools: &[Box<dyn RuntimeTool>],
+    context: &Context,
+) -> Vec<AgentToolSpec> {
     let study_mode = context.study_mode();
-    build_runtime_tools(context)
-        .into_iter()
+    tools
+        .iter()
         .filter(|tool| tool.is_available(context))
         .filter(|tool| !study_mode || !study_mode_denies_tool(tool.name()))
         .map(|tool| tool.spec())
@@ -1415,8 +1451,15 @@ pub fn summarize_action_from_tool_call(
     context: &Context,
     call: &AgentToolCall,
 ) -> Result<EpisodeActionRecord> {
-    let tools = build_runtime_tools(context);
-    let tool = find_runtime_tool(&tools, &call.name)?;
+    summarize_action_from_tool_call_with_tools(&runtime_tools_for_context(context), context, call)
+}
+
+fn summarize_action_from_tool_call_with_tools(
+    tools: &[Box<dyn RuntimeTool>],
+    context: &Context,
+    call: &AgentToolCall,
+) -> Result<EpisodeActionRecord> {
+    let tool = find_runtime_tool(tools, &call.name)?;
     let tool_call = tool_call_for_runtime_tool(tool, call);
     tool.summarize_action(&tool_call)
         .map_or_else(|_| context.apps.summarize_tool_call(call), Ok)
@@ -1426,7 +1469,11 @@ pub fn build_tool_call_activity_event(
     context: &Context,
     call: &AgentToolCall,
 ) -> Result<Option<ToolCallActivityEvent>> {
-    build_tool_call_activity_event_from_tools(&build_runtime_tools(context), call, &context.apps)
+    build_tool_call_activity_event_from_tools(
+        &runtime_tools_for_context(context),
+        call,
+        &context.apps,
+    )
 }
 
 fn build_tool_call_activity_event_from_tools(
@@ -1442,7 +1489,6 @@ fn build_tool_call_activity_event_from_tools(
         Err(_) => apps.tool_call_activity_event(call),
     }
 }
-
 fn tool_call_for_runtime_tool(tool: &dyn RuntimeTool, call: &AgentToolCall) -> AgentToolCall {
     tool.app_tool_name().map_or_else(
         || call.clone(),
@@ -1514,12 +1560,8 @@ fn demangle_known_app_tool_name(tool_name: &str) -> &str {
     if let Some((app_id, app_tool_name)) = tool_name.split_once(AppId::TOOL_NAME_SEPARATOR)
         && AppId::is_valid_name(app_id)
     {
-        return canonical_runtime_tool_name(app_tool_name);
+        return app_tool_name;
     }
-    canonical_runtime_tool_name(tool_name)
-}
-
-const fn canonical_runtime_tool_name(tool_name: &str) -> &str {
     tool_name
 }
 
@@ -1557,8 +1599,16 @@ pub async fn execute_agent_tool_call(
     context: &mut Context,
     call: &AgentToolCall,
 ) -> Result<ToolExecutionResult> {
-    let tools = build_runtime_tools(context);
-    let tool = find_runtime_tool(&tools, &call.name)?;
+    let tools = runtime_tools_for_context(context);
+    execute_agent_tool_call_with_tools(context, &tools, call).await
+}
+
+async fn execute_agent_tool_call_with_tools(
+    context: &mut Context,
+    tools: &[Box<dyn RuntimeTool>],
+    call: &AgentToolCall,
+) -> Result<ToolExecutionResult> {
+    let tool = find_runtime_tool(tools, &call.name)?;
     if ask_mode_denies_tool(context.current_turn_input_mode, &call.name) {
         return Ok(ask_mode_tool_result(call));
     }

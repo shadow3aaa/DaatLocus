@@ -135,6 +135,7 @@ async fn execute_read_history_with_store(
         .clamp(1, HISTORY_QUERY_LIMIT_MAX);
     let query = args.query.unwrap_or_default();
     let items = store.query_history(mode, limit, args.before_seq, args.start_seq, &query)?;
+    // `count_history` is SQL `COUNT(*)` for both empty and non-empty needles.
     let total = store.count_history(&query)?;
     let max_tokens = tool_output_max_tokens.max(1);
     let max_chars = max_tokens.saturating_mul(APPROX_BYTES_PER_TOKEN).max(1);

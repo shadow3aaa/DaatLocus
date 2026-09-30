@@ -83,6 +83,19 @@ struct PendingLaunch {
     cancellation_registry: super::WorkflowCancellationRegistry,
 }
 
+struct PreparedLaunch {
+    definition: super::WorkflowDefinition,
+    input: Value,
+    execution: WorkflowExecutionContext,
+    dashboard_tx: Option<tokio::sync::watch::Sender<crate::dashboard::DashboardState>>,
+    dashboard_history: Option<crate::dashboard::DashboardActivityHistoryStore>,
+    cancellation_registry: super::WorkflowCancellationRegistry,
+    cancellation: WorkflowCancellation,
+    started_at_ms: i64,
+    result_tx: Option<watch::Sender<Option<SharedResult>>>,
+    install: bool,
+}
+
 impl RegistryInner {
     fn prune_completed(&mut self) {
         let mut finished = self
@@ -116,12 +129,17 @@ impl RegistryInner {
             let Some(run) = self.runs.get(&node.run_id) else {
                 continue;
             };
-            let live = run.snapshot.lock().clone();
+            let live = run.snapshot.lock();
             node.status = live.status;
             node.completed_at_ms = live.completed_at_ms;
             node.output = live.output.clone();
             node.error = live.error.clone();
-            node.snapshot = Some(live);
+            if let Some(nested) = node.snapshot.as_mut() {
+                nested.status = live.status;
+                nested.completed_at_ms = live.completed_at_ms;
+                nested.output = node.output.clone();
+                nested.error = node.error.clone();
+            }
         }
         publish_workflow_group(dashboard_tx, &snapshot);
     }
@@ -153,12 +171,15 @@ fn pending_invocation_result(
     workflow_id: String,
     snapshot: WorkflowRunSnapshot,
 ) -> WorkflowInvocationResult {
+    // `WorkflowInvocationStatus` has no Pending variant. Reporting Running
+    // would disagree with the still-pending node, so the invocation status stays
+    // absent from the message and the snapshot carries the real node status.
     WorkflowInvocationResult {
         run_id,
         workflow_id,
         status: WorkflowInvocationStatus::Running,
         output: None,
-        message: "pending".to_string(),
+        message: "pending; invocation status has no pending variant, so status stays running until the node starts".to_string(),
         snapshot,
     }
 }
@@ -305,78 +326,19 @@ impl WorkflowRunRegistry {
         run_id: String,
         started_at_ms: i64,
     ) -> Result<WorkflowInvocationResult> {
-        let inspector = WorkflowInspectorPublisher::new_with_history_publishing(
-            definition.id.clone(),
-            input.clone(),
-            context.dashboard_tx.clone(),
-            context.dashboard_history.clone(),
-            false,
-        );
-        {
-            let shared = inspector.shared_snapshot();
-            let mut snapshot = shared.lock();
-            snapshot.run_id = run_id.clone();
-            snapshot.started_at_ms = started_at_ms;
-        }
-        inspector.publish();
-        let running_snapshot = inspector.snapshot();
-
-        let cancellation = context.workflow_cancellation.begin(&run_id);
-        let cancellation_registry = context.workflow_cancellation.clone();
-        let execution = WorkflowExecutionContext::from(&*context);
-        let initial = WorkflowInvocationResult {
-            run_id: run_id.clone(),
-            workflow_id: definition.id.clone(),
-            status: WorkflowInvocationStatus::Running,
-            output: None,
-            message: workflow_snapshot_message(&running_snapshot),
-            snapshot: running_snapshot.clone(),
+        let launch = PreparedLaunch {
+            definition,
+            input,
+            execution: WorkflowExecutionContext::from(&*context),
+            dashboard_tx: context.dashboard_tx.clone(),
+            dashboard_history: context.dashboard_history.clone(),
+            cancellation_registry: context.workflow_cancellation.clone(),
+            cancellation: context.workflow_cancellation.begin(&run_id),
+            started_at_ms,
+            result_tx: None,
+            install: true,
         };
-
-        let (result_tx, result_rx) = watch::channel(None);
-        {
-            let mut inner = self.inner.lock();
-            inner.group.remember_snapshot(&running_snapshot);
-            inner.runs.insert(
-                run_id.clone(),
-                RunState {
-                    snapshot: inspector.shared_snapshot(),
-                    cancellation: cancellation.clone(),
-                    result_rx,
-                    result_tx: Some(result_tx.clone()),
-                    handle: None,
-                    spawned: true,
-                    launch: None,
-                },
-            );
-            inner.publish_group(context.dashboard_tx.as_ref());
-        }
-
-        let registry = self.clone();
-        let dashboard_tx = context.dashboard_tx.clone();
-        let run_id_for_task = run_id.clone();
-        let cancellation_for_task = cancellation.clone();
-        let handle = tokio::spawn(async move {
-            let result = execute_run(
-                &execution,
-                &definition,
-                input,
-                &cancellation_for_task,
-                &inspector,
-            )
-            .await;
-            cancellation_registry.clear(&run_id_for_task, &cancellation_for_task);
-            registry.finish_run(dashboard_tx.as_ref(), result.clone());
-            // A watch send is level-triggered: waiters observe the value even if
-            // they subscribe after completion, so no wakeup can be lost.
-            let _ = result_tx.send(Some(Arc::new(result)));
-        });
-
-        let mut inner = self.inner.lock();
-        if let Some(state) = inner.runs.get_mut(&run_id) {
-            state.handle = Some(handle);
-        }
-        Ok(initial)
+        self.launch_run(run_id, launch)
     }
 
     /// Apply a finished inner snapshot, then spawn every pending run that this
@@ -436,6 +398,41 @@ impl WorkflowRunRegistry {
             dashboard_history,
             cancellation_registry,
         } = launch;
+        let cancellation = cancellation_registry.begin(run_id);
+        if already_interrupted {
+            cancellation.interrupt();
+        }
+        self.launch_run(
+            run_id.to_string(),
+            PreparedLaunch {
+                definition,
+                input,
+                execution,
+                dashboard_tx,
+                dashboard_history,
+                cancellation_registry,
+                cancellation,
+                started_at_ms,
+                result_tx: Some(result_tx),
+                install: false,
+            },
+        )?;
+        Ok(())
+    }
+
+    fn launch_run(&self, run_id: String, launch: PreparedLaunch) -> Result<WorkflowInvocationResult> {
+        let PreparedLaunch {
+            definition,
+            input,
+            execution,
+            dashboard_tx,
+            dashboard_history,
+            cancellation_registry,
+            cancellation,
+            started_at_ms,
+            result_tx,
+            install,
+        } = launch;
         let inspector = WorkflowInspectorPublisher::new_with_history_publishing(
             definition.id.clone(),
             input.clone(),
@@ -446,31 +443,60 @@ impl WorkflowRunRegistry {
         {
             let shared = inspector.shared_snapshot();
             let mut snapshot = shared.lock();
-            snapshot.run_id = run_id.to_string();
+            snapshot.run_id = run_id.clone();
             snapshot.started_at_ms = started_at_ms;
-        }
-        let cancellation = cancellation_registry.begin(run_id);
-        if already_interrupted {
-            cancellation.interrupt();
         }
         inspector.publish();
         let running_snapshot = inspector.snapshot();
+        let initial = WorkflowInvocationResult {
+            run_id: run_id.clone(),
+            workflow_id: definition.id.clone(),
+            status: WorkflowInvocationStatus::Running,
+            output: None,
+            message: workflow_snapshot_message(&running_snapshot),
+            snapshot: running_snapshot.clone(),
+        };
+        let (owned_tx, result_rx) = if install {
+            let (tx, rx) = watch::channel(None);
+            (tx, Some(rx))
+        } else {
+            (
+                result_tx.ok_or_else(|| miette!("workflow run `{run_id}` cannot publish a result"))?,
+                None,
+            )
+        };
         {
             let mut inner = self.inner.lock();
-            let state = inner
-                .runs
-                .get_mut(run_id)
-                .ok_or_else(|| miette!("unknown workflow run `{run_id}`"))?;
-            state.snapshot = inspector.shared_snapshot();
-            state.cancellation = cancellation.clone();
-            state.spawned = true;
+            if install {
+                inner.runs.insert(
+                    run_id.clone(),
+                    RunState {
+                        snapshot: inspector.shared_snapshot(),
+                        cancellation: cancellation.clone(),
+                        result_rx: result_rx.expect("install creates a result receiver"),
+                        result_tx: Some(owned_tx.clone()),
+                        handle: None,
+                        spawned: true,
+                        launch: None,
+                    },
+                );
+            } else {
+                let state = inner
+                    .runs
+                    .get_mut(&run_id)
+                    .ok_or_else(|| miette!("unknown workflow run `{run_id}`"))?;
+                state.snapshot = inspector.shared_snapshot();
+                state.cancellation = cancellation.clone();
+                state.spawned = true;
+            }
             inner.group.remember_snapshot(&running_snapshot);
             inner.publish_group(dashboard_tx.as_ref());
         }
 
         let registry = self.clone();
-        let run_id_owned = run_id.to_string();
+        let run_id_for_task = run_id.clone();
         let cancellation_for_task = cancellation.clone();
+        let result_tx = owned_tx;
         let handle = tokio::spawn(async move {
             let result = execute_run(
                 &execution,
@@ -480,15 +506,18 @@ impl WorkflowRunRegistry {
                 &inspector,
             )
             .await;
-            cancellation_registry.clear(&run_id_owned, &cancellation_for_task);
+            cancellation_registry.clear(&run_id_for_task, &cancellation_for_task);
             registry.finish_run(dashboard_tx.as_ref(), result.clone());
+            // A watch send is level-triggered: waiters observe the value even if
+            // they subscribe after completion, so no wakeup can be lost.
             let _ = result_tx.send(Some(Arc::new(result)));
         });
+
         let mut inner = self.inner.lock();
-        if let Some(state) = inner.runs.get_mut(run_id) {
+        if let Some(state) = inner.runs.get_mut(&run_id) {
             state.handle = Some(handle);
         }
-        Ok(())
+        Ok(initial)
     }
 
     /// Wait for one run to finish and return its final result. Awaiting an

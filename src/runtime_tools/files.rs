@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use daat_locus_macros::model_schema;
@@ -5,6 +7,7 @@ use miette::{Result, miette};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::{
     activity_event::{
@@ -159,48 +162,29 @@ async fn execute_read_file(
         Some(execution_cwd),
     );
     sandbox_policy.ensure_path_readable(&resolved, "read_file target")?;
-    let file_text = tokio::fs::read_to_string(&resolved)
-        .await
-        .map_err(|err| miette!("failed to read {}: {err}", resolved.display()))?;
     let start_line = args.start_line.unwrap_or(1);
     if start_line == 0 {
         return Err(miette!("read_file `start_line` must be >= 1"));
     }
     let line_count = args.line_count.unwrap_or(DEFAULT_READ_LINE_COUNT).max(1);
-    let total_lines = file_text.lines().count();
-    if total_lines == 0 {
-        if start_line != 1 {
-            return Err(miette!(
-                "read_file line range starts after end of empty file: {start_line}"
-            ));
-        }
-    } else if start_line > total_lines {
-        return Err(miette!(
-            "read_file line range starts after end of file: {start_line} > {total_lines}"
-        ));
-    }
-    let end_line = if total_lines == 0 {
-        0
-    } else {
-        start_line
-            .saturating_add(line_count)
-            .saturating_sub(1)
-            .min(total_lines)
-    };
-    let model_content = prefix_file_lines_with_hash(&file_text, start_line, line_count);
+    let file = std::fs::File::open(&resolved)
+        .map_err(|err| miette!("failed to read {}: {err}", resolved.display()))?;
+    let ReadLinePage {
+        model_content,
+        total_lines,
+        end_line,
+        actual_line_count,
+        reached_eof,
+    } = read_anchored_line_page(file, start_line, line_count)?;
     anchors.observe_anchored_content(&args.path, &model_content);
     let display_path = display_tool_path(&args.path, &resolved);
-    let actual_line_count = if total_lines == 0 {
-        0
-    } else {
-        end_line - start_line + 1
-    };
-    let summary = if total_lines == 0 {
+    let empty_file = total_lines == Some(0);
+    let summary = if empty_file {
         format!("read {display_path} (empty file)")
     } else {
         format!("read {display_path}#L{start_line}-L{end_line}")
     };
-    let ui_summary = if total_lines == 0 {
+    let ui_summary = if empty_file {
         format!("{display_path} (empty file)")
     } else {
         format!("{display_path}#L{start_line}-L{end_line}")
@@ -233,7 +217,7 @@ async fn execute_read_file(
         // A read that reached EOF has nothing to continue into, and a spill copy
         // of a file the model can already page through would be a pointless
         // round trip.
-        (end_line < total_lines).then(|| {
+        (!reached_eof).then(|| {
             format!(
                 "Continue with read_file({{ \"path\": {display_path}, \"start_line\": {}, \"line_count\": {} }}).",
                 end_line + 1,
@@ -400,19 +384,98 @@ fn read_file_target_summary(args: &ReadFileArgs) -> String {
     }
 }
 
-fn prefix_file_lines_with_hash(content: &str, start_line: usize, line_count: usize) -> String {
-    content
-        .lines()
-        .skip(start_line.saturating_sub(1))
-        .take(line_count)
-        .enumerate()
-        .map(|(index, line)| {
-            let line_num = start_line + index;
-            let hash = scope_engine::patch::line_hash(line);
-            format!("{line_num}#{hash}|{line}")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+struct ReadLinePage {
+    model_content: String,
+    /// Exact file length only after EOF. A stopped window leaves this unknown.
+    total_lines: Option<usize>,
+    end_line: usize,
+    actual_line_count: usize,
+    reached_eof: bool,
+}
+
+/// Read through `start_line + line_count` once. Lines before the window are
+/// counted and discarded; the window is hashed as it is read. One extra line,
+/// when present, proves the file continues without scanning it again.
+fn read_anchored_line_page(
+    file: std::fs::File,
+    start_line: usize,
+    line_count: usize,
+) -> Result<ReadLinePage> {
+    let stop_after = start_line.saturating_add(line_count);
+    let mut reader = BufReader::new(file);
+    let mut raw = String::new();
+    let mut line_number = 0usize;
+    let mut anchored = Vec::new();
+    loop {
+        raw.clear();
+        let read = reader
+            .read_line(&mut raw)
+            .map_err(|err| miette!("failed to read file lines: {err}"))?;
+        if read == 0 {
+            break;
+        }
+        line_number += 1;
+        if line_number < start_line {
+            continue;
+        }
+        if line_number == stop_after {
+            break;
+        }
+        if raw.ends_with('\n') {
+            raw.pop();
+            if raw.ends_with('\r') {
+                raw.pop();
+            }
+        }
+        let hash = cached_line_hash_byte(&raw);
+        anchored.push(format!("{line_number}#{hash:02x}|{raw}"));
+    }
+    if line_number == 0 {
+        if start_line != 1 {
+            return Err(miette!(
+                "read_file line range starts after end of empty file: {start_line}"
+            ));
+        }
+        return Ok(ReadLinePage {
+            model_content: String::new(),
+            total_lines: Some(0),
+            end_line: 0,
+            actual_line_count: 0,
+            reached_eof: true,
+        });
+    }
+    if line_number < start_line {
+        return Err(miette!(
+            "read_file line range starts after end of file: {start_line} > {line_number}"
+        ));
+    }
+    let reached_eof = line_number < stop_after;
+    let end_line = if reached_eof {
+        line_number
+    } else {
+        stop_after.saturating_sub(1)
+    };
+    Ok(ReadLinePage {
+        model_content: anchored.join("\n"),
+        total_lines: reached_eof.then_some(line_number),
+        end_line,
+        actual_line_count: anchored.len(),
+        reached_eof,
+    })
+}
+
+/// Same first-byte SHA-256 digest as `scope_engine::patch::line_hash`, with the
+/// hasher reused on this thread instead of allocated for every line.
+fn cached_line_hash_byte(line: &str) -> u8 {
+    thread_local! {
+        static HASHER: RefCell<Sha256> = RefCell::new(Sha256::new());
+    }
+    HASHER.with(|hasher| {
+        let mut hasher = hasher.borrow_mut();
+        hasher.update(line.as_bytes());
+        let digest = hasher.finalize_reset();
+        digest[0]
+    })
 }
 
 fn display_tool_path(requested: &str, resolved: &Path) -> String {

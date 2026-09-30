@@ -537,11 +537,7 @@ impl StudyApp {
             }
             "create_module" => {
                 let args: StudyCreateModuleArgs = parse_args(call)?;
-                let module = self.store.create_module(
-                    &args.title,
-                    &args.description,
-                    StudyWriteOrigin::Agent,
-                )?;
+                let module = self.store.create_module(&args.title, &args.description)?;
                 Ok(result_payload(
                     format!("created module {}", module.title),
                     json!({ "module": module }),
@@ -839,7 +835,7 @@ mod tests {
         let (_dir, mut app) = test_app();
         let module = app
             .store()
-            .create_module("Algebra", "", StudyWriteOrigin::Agent)
+            .create_module("Algebra", "")
             .expect("module");
         let (tx, rx) = tokio::sync::watch::channel(crate::dashboard::DashboardState::default());
         let context = AppToolExecutionContext {
@@ -894,7 +890,7 @@ mod tests {
         let (_dir, mut app) = test_app();
         let module = app
             .store()
-            .create_module("Algebra", "", StudyWriteOrigin::Agent)
+            .create_module("Algebra", "")
             .expect("module");
         let error = app
             .execute_tool(
@@ -925,7 +921,7 @@ mod tests {
         let (_dir, mut app) = test_app();
         let module = app
             .store()
-            .create_module("Algebra", "", StudyWriteOrigin::Agent)
+            .create_module("Algebra", "")
             .expect("module");
         let node = app
             .store()
