@@ -62,7 +62,7 @@ pub(super) fn clear_runtime_failures_after_model_success(
     context.clear_model_request_failure(fingerprint);
 }
 
-pub(super) fn clear_runtime_overflow_failure_after_compaction(
+pub(super) fn clear_runtime_overflow_failure_after_history_reset(
     context: &Context,
     fingerprint: Option<&str>,
 ) {
@@ -539,7 +539,7 @@ pub async fn execute_agent_loop_step(
         let tools = build_runtime_tool_specs(context);
         match maybe_reset_runtime_history(context, &mut runtime_step, &tools, false).await {
             Ok(true) => {
-                clear_runtime_overflow_failure_after_compaction(
+                clear_runtime_overflow_failure_after_history_reset(
                     context,
                     claimed_input_fingerprint.as_deref(),
                 );
@@ -587,7 +587,7 @@ pub async fn execute_agent_loop_step(
                         .await
                     {
                         Ok(true) => {
-                            clear_runtime_overflow_failure_after_compaction(
+                            clear_runtime_overflow_failure_after_history_reset(
                                 context,
                                 claimed_input_fingerprint.as_deref(),
                             );

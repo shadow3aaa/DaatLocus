@@ -213,42 +213,109 @@ fn line_hash_call_path(call: &AgentToolCall) -> Option<String> {
         .map(ToString::to_string)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CodingAnchor<'a> {
+    pub(crate) line: usize,
+    pub(crate) hash: &'a str,
+    pub(crate) elided: bool,
+}
+
+/// Parse `line#hash` or an elided `line#hash~` marker.
+///
+/// Hashes are the lowercase hex digests emitted by `line_hash` (currently two
+/// characters). `~` is only the trailing elision marker, never part of the hash.
+pub(crate) fn parse_coding_anchor(anchor: &str) -> Option<CodingAnchor<'_>> {
+    let (body, elided) = match anchor.strip_suffix('~') {
+        Some(body) => (body, true),
+        None => (anchor, false),
+    };
+    let (line, hash) = body.split_once('#')?;
+    if line.is_empty()
+        || hash.is_empty()
+        || !line.bytes().all(|byte| byte.is_ascii_digit())
+        || !hash.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let line = line.parse::<usize>().ok()?;
+    if line == 0 {
+        return None;
+    }
+    Some(CodingAnchor { line, hash, elided })
+}
+
+/// Locate the anchor in one displayed record without splitting the path on `|`.
+///
+/// Read lines are `line#hash|source`. Search hits are `path|line#hash|source`
+/// because writers do `format!("{path}|{hit}")` and `hit` is already
+/// `line#hash|source`. The anchor is therefore the last `|digits#hex|` (or a
+/// trailing `|digits#hex` / elided `~` marker), so a `|` inside the path stays
+/// in the path.
+pub(crate) fn split_anchored_record(line: &str) -> Option<(&str, &str, &str)> {
+    let bytes = line.as_bytes();
+    let mut search_end = bytes.len();
+    while let Some(relative) = line[..search_end].rfind('|') {
+        let candidate = &line[relative + 1..];
+        if let Some(anchor) = anchored_prefix(candidate) {
+            let path = &line[..relative];
+            let source = &candidate[anchor.len()..];
+            let source = source.strip_prefix('|').unwrap_or(source);
+            return Some((path, anchor, source));
+        }
+        search_end = relative;
+    }
+    let anchor = anchored_prefix(line)?;
+    let source = &line[anchor.len()..];
+    let source = source.strip_prefix('|').unwrap_or(source);
+    Some(("", anchor, source))
+}
+
+/// Longest `line#hash` or `line#hash~` prefix, stopping before `|` or source text.
+fn anchored_prefix(value: &str) -> Option<&str> {
+    let hash_start = value.find('#')?;
+    if hash_start == 0 || !value[..hash_start].bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let mut end = hash_start + 1;
+    let bytes = value.as_bytes();
+    while end < bytes.len() && bytes[end].is_ascii_hexdigit() && !bytes[end].is_ascii_uppercase() {
+        end += 1;
+    }
+    if end == hash_start + 1 {
+        return None;
+    }
+    if end < bytes.len() && bytes[end] == b'~' {
+        end += 1;
+    }
+    let anchor = &value[..end];
+    parse_coding_anchor(anchor).is_some().then_some(anchor)
+}
+
 fn parse_line_hash_read_full_record(line: &str) -> Option<CodingSourceRecord<'_>> {
-    let (anchor, _source) = line.split_once('|')?;
-    parse_coding_anchor(anchor)?;
+    let (path, anchor, _source) = split_anchored_record(line)?;
+    let parsed = parse_coding_anchor(anchor)?;
+    if !path.is_empty() || parsed.elided {
+        return None;
+    }
     Some(CodingSourceRecord { path: None, anchor })
 }
 
 fn parse_coding_search_full_record(line: &str) -> Option<CodingSourceRecord<'_>> {
-    let (path, rest) = line.split_once('|')?;
-    let (anchor, _source) = rest.split_once('|')?;
-    if path.is_empty() {
+    let (path, anchor, _source) = split_anchored_record(line)?;
+    let parsed = parse_coding_anchor(anchor)?;
+    if path.is_empty() || parsed.elided {
         return None;
     }
-    parse_coding_anchor(anchor)?;
     Some(CodingSourceRecord {
         path: Some(path),
         anchor,
     })
 }
 
-fn parse_coding_anchor(anchor: &str) -> Option<(usize, &str)> {
-    let (line, hash) = anchor.split_once('#')?;
-    if line.is_empty()
-        || hash.is_empty()
-        || !line.bytes().all(|byte| byte.is_ascii_digit())
-        || hash
-            .bytes()
-            .any(|byte| matches!(byte, b'|' | b'~' | b'.') || byte.is_ascii_whitespace())
-    {
-        return None;
-    }
-    let line = line.parse::<usize>().ok()?;
-    Some((line, hash))
-}
-
 fn anchor_line_number(anchor: &str) -> Option<usize> {
-    parse_coding_anchor(anchor).map(|(line, _)| line)
+    parse_coding_anchor(anchor)
+        .filter(|parsed| !parsed.elided)
+        .map(|parsed| parsed.line)
 }
 
 #[cfg(test)]
@@ -399,5 +466,63 @@ mod tests {
             elide_tool_model_content(&mut visible, &call, "src/foo.rs|42#ab|    call_target();");
 
         assert_eq!(output, "src/foo.rs|42#ab|    call_target();");
+    }
+
+    #[test]
+    fn search_record_keeps_pipe_inside_path() {
+        let record = parse_coding_search_full_record("src/a|b.rs|42#ab|call(|x|)")
+            .expect("path may contain |");
+        assert_eq!(record.path, Some("src/a|b.rs"));
+        assert_eq!(record.anchor, "42#ab");
+        assert!(parse_coding_search_full_record("src/a|b.rs|42#ZZ|nope").is_none());
+        assert!(parse_coding_search_full_record("src/a|b.rs|42#ab~").is_none());
+    }
+
+    #[test]
+    fn anchor_parser_rejects_unexpected_hash_chars_and_reads_elision() {
+        assert!(parse_coding_anchor("3#not-hex").is_none());
+        assert!(parse_coding_anchor("3#AB").is_none());
+        assert!(parse_coding_anchor("0#aa").is_none());
+        assert!(parse_line_hash_read_full_record("3#aa~").is_none());
+        assert!(parse_line_hash_read_full_record("3#not-hex|text").is_none());
+        let elided = parse_coding_anchor("3#aa~").expect("tilde is the elision marker");
+        assert!(elided.elided);
+        assert_eq!((elided.line, elided.hash), (3, "aa"));
+        let read = parse_line_hash_read_full_record("3#aa|a | b").expect("read record");
+        assert_eq!(read.anchor, "3#aa");
+        assert!(read.path.is_none());
+    }
+
+    #[test]
+    fn elides_repeated_search_hit_whose_path_contains_a_pipe() {
+        let mut visible = make_visible("src/a|b.rs", &["42#ab"]);
+        let call = AgentToolCall {
+            id: "call_search_pipe".to_string(),
+            name: "coding__search_code".to_string(),
+            arguments: serde_json::json!({
+                "query": "x",
+                "mode": "literal",
+                "path": null,
+                "include": [],
+                "exclude": [],
+                "types": [],
+                "type_not": [],
+                "case": "smart",
+                "word": false,
+                "whole_line": false,
+                "hidden": false,
+                "respect_ignore": true,
+                "follow": false,
+                "limit": 20,
+            }),
+        };
+
+        let output = elide_tool_model_content(
+            &mut visible,
+            &call,
+            "src/a|b.rs|42#ab|call(|x|)\nsrc/a|b.rs|43#ac|fresh\n",
+        );
+
+        assert_eq!(output, "src/a|b.rs|42#ab~\nsrc/a|b.rs|43#ac|fresh\n");
     }
 }

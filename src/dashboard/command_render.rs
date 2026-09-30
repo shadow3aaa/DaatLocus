@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::DashboardPendingUserInput;
 use super::command_flow::{
-    command_completion_body, dashboard_command_parts, dashboard_parts_open_panel,
+    command_completion_body, dashboard_command_parts_ref, dashboard_parts_open_panel,
     dashboard_parts_run_action, is_dashboard_command_input, matching_commands,
     selected_command_completion,
 };
@@ -1310,7 +1310,7 @@ fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
             .collect::<Vec<_>>()
             .join(" | ");
     }
-    if let Some(parts) = dashboard_command_parts(input) {
+    if let Some(parts) = dashboard_command_parts_ref(input) {
         if dashboard_parts_open_panel(&parts) {
             return "Enter open panel. Shift+Enter newline. Esc clear.".to_string();
         }

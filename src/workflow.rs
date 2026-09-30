@@ -768,27 +768,31 @@ impl WorkflowInspectorPublisher {
                 "register workflow worker activity stream failed: {err:?}"
             );
         }
-        let mut snapshot = self.snapshot.lock();
-        if snapshot.status == WorkflowNodeStatus::Pending {
-            snapshot.status = WorkflowNodeStatus::Running;
+        {
+            let mut snapshot = self.snapshot.lock();
+            if snapshot.status == WorkflowNodeStatus::Pending {
+                snapshot.status = WorkflowNodeStatus::Running;
+            }
+            snapshot.workers.push(WorkflowWorkerSnapshot {
+                worker_id,
+                actor_id,
+                await_group_id: group_id.to_string(),
+                role: definition.role.clone(),
+                model: definition.model.label().to_string(),
+                status: WorkflowNodeStatus::Running,
+                started_at_ms: current_time_ms(),
+                completed_at_ms: None,
+                agent_run_time_ms: 0,
+                input,
+                output: None,
+                error: None,
+                activity_count: 0,
+                activity_revision: 0,
+                activity: Vec::new(),
+            });
         }
-        snapshot.workers.push(WorkflowWorkerSnapshot {
-            worker_id,
-            actor_id,
-            await_group_id: group_id.to_string(),
-            role: definition.role.clone(),
-            model: definition.model.label().to_string(),
-            status: WorkflowNodeStatus::Running,
-            started_at_ms: current_time_ms(),
-            completed_at_ms: None,
-            agent_run_time_ms: 0,
-            input,
-            output: None,
-            error: None,
-            activity_count: 0,
-            activity_revision: 0,
-            activity: Vec::new(),
-        });
+        // `publish` locks the same snapshot. Parking_lot mutexes are not
+        // reentrant, so publishing while this guard is held deadlocks the run.
         self.publish();
     }
 
@@ -2772,11 +2776,12 @@ mod tests {
         .expect("history store");
         let (dashboard_tx, dashboard_rx) =
             tokio::sync::watch::channel(crate::dashboard::DashboardState::default());
-        let inspector = WorkflowInspectorPublisher::new_with_history(
+        let inspector = WorkflowInspectorPublisher::new_with_history_publishing(
             "session-backed-workflow".to_string(),
             json!({}),
             Some(dashboard_tx),
             Some(history.clone()),
+            true,
         );
         let definition = WorkerDefinition {
             role: "researcher".to_string(),
@@ -4847,7 +4852,7 @@ workflow.define({{
             AgentMessage::User { content }
                 if content
                     .as_text()
-                    .contains(crate::runtime_context::HISTORY_ARCHIVE_PROMPT_MESSAGE)
+                    .contains(crate::runtime_context::RUNTIME_HISTORY_RESET_PROMPT_MESSAGE)
         )));
         let actor = actor.lock().await;
         assert_eq!(actor.runtime.worker_plan.steps().len(), 1);
@@ -4859,7 +4864,7 @@ workflow.define({{
             .conversation
             .agent_messages()
             .iter()
-            .any(|message| matches!(message, AgentMessage::User { content } if content.as_text().contains(crate::runtime_context::HISTORY_ARCHIVE_PROMPT_MESSAGE))));
+            .any(|message| matches!(message, AgentMessage::User { content } if content.as_text().contains(crate::runtime_context::RUNTIME_HISTORY_RESET_PROMPT_MESSAGE))));
     }
 
     #[tokio::test]
@@ -4936,7 +4941,7 @@ workflow.define({{
             AgentMessage::User { content }
                 if content
                     .as_text()
-                    .contains(crate::runtime_context::HISTORY_ARCHIVE_PROMPT_MESSAGE)
+                    .contains(crate::runtime_context::RUNTIME_HISTORY_RESET_PROMPT_MESSAGE)
         )));
     }
 

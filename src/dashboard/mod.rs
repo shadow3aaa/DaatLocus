@@ -17,7 +17,7 @@ mod input_controller;
 pub mod render;
 pub mod renderable;
 mod selection;
-mod terminal_hyperlinks;
+pub(crate) mod terminal_hyperlinks;
 mod transcript_overlay;
 mod tui_animation;
 pub mod tui_event;
@@ -36,7 +36,7 @@ pub use cells::{
     terminal_activity_event_from_terminal_data, thinking_activity_cell, user_activity_cell,
     user_activity_cell_from_event,
 };
-pub(crate) use command_flow::ask_message_text;
+pub(crate) use command_flow::{ask_message_text, dashboard_command_parts, tokenize_shell_words};
 pub use command_flow::{dashboard_command_is_manager_owned, execute_control_command};
 pub use commands::{
     DashboardAction, DashboardActionResult, DashboardCommandAttachment, DashboardCommandRunner,

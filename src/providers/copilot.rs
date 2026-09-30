@@ -130,25 +130,124 @@ async fn exchange_copilot_session_token_with_client(
 
 /// Session token is a semicolon-separated key=value string; derive API base URL from proxy-ep.
 fn derive_copilot_base_url(session_token: &str) -> String {
-    session_token
-        .split(';')
-        .find_map(|part| {
-            let trimmed = part.trim();
-            let val = trimmed.to_lowercase();
-            val.strip_prefix("proxy-ep=").and_then(|_| {
-                let host = &trimmed[9..];
-                if host.is_empty() {
-                    return None;
-                }
-                let host = if host.to_lowercase().starts_with("proxy.") {
-                    format!("api.{}", &host[6..])
-                } else {
-                    host.to_string()
-                };
-                Some(format!("https://{host}"))
-            })
-        })
+    copilot_base_url_from_session_token(session_token)
         .unwrap_or_else(|| COPILOT_INTERNAL_BASE_URL.to_string())
+}
+
+/// Parse `proxy-ep` from a Copilot session token without positional offsets.
+///
+/// The token is semicolon-separated `key=value` pairs. `proxy-ep` is a host
+/// (`proxy.example.com` is rewritten to `api.example.com`) or an absolute URL.
+pub(crate) fn copilot_base_url_from_session_token(session_token: &str) -> Option<String> {
+    let endpoint = semicolon_field(session_token, "proxy-ep")?;
+    copilot_proxy_endpoint_to_base_url(&endpoint)
+}
+
+fn semicolon_field<'a>(token: &'a str, key: &str) -> Option<&'a str> {
+    token.split(';').find_map(|part| {
+        let (field, value) = part.trim().split_once('=')?;
+        field.trim().eq_ignore_ascii_case(key).then_some(value.trim())
+    })
+}
+
+fn copilot_proxy_endpoint_to_base_url(endpoint: &str) -> Option<String> {
+    if endpoint.is_empty() {
+        return None;
+    }
+    let parsed = parse_copilot_endpoint(endpoint)?;
+    let host = copilot_host_string(parsed.host()?)?;
+    let host = rewrite_copilot_proxy_host(&host);
+    Some(format_copilot_base_url(&parsed, &host))
+}
+
+/// Parse an absolute HTTP(S) endpoint, or a host/port/path with an implied `https` scheme.
+///
+/// Userinfo is parsed so it does not become part of the host, but it is not copied
+/// into the rebuilt base URL.
+fn parse_copilot_endpoint(endpoint: &str) -> Option<url::Url> {
+    if let Ok(parsed) = url::Url::parse(endpoint)
+        && (parsed.scheme() == "http" || parsed.scheme() == "https")
+        && parsed.host().is_some()
+    {
+        return Some(parsed);
+    }
+    let parsed = url::Url::parse(&format!("https://{endpoint}")).ok()?;
+    parsed.host().is_some().then_some(parsed)
+}
+
+/// Rebuild `scheme://host[:port][path][?query]` after the proxy host rewrite.
+///
+/// A host-only URL has path `/` from the parser; that slash is omitted so
+/// `proxy.example.com` stays `https://api.example.com`.
+fn format_copilot_base_url(parsed: &url::Url, host: &str) -> String {
+    let mut base = format!("{}://{host}", parsed.scheme());
+    if let Some(port) = parsed.port() {
+        base.push(':');
+        base.push_str(&port.to_string());
+    }
+    let path = parsed.path();
+    if path != "/" {
+        base.push_str(path);
+    }
+    if let Some(query) = parsed.query() {
+        base.push('?');
+        base.push_str(query);
+    }
+    base
+}
+
+fn copilot_host_string(host: url::Host<&str>) -> Option<String> {
+    match host {
+        url::Host::Domain(domain) if !domain.is_empty() => Some(domain.to_string()),
+        url::Host::Ipv4(addr) => Some(addr.to_string()),
+        url::Host::Ipv6(addr) => Some(format!("[{addr}]")),
+        url::Host::Domain(_) => None,
+    }
+}
+
+fn rewrite_copilot_proxy_host(host: &str) -> String {
+    let (name, rest) = host.split_once('.').unwrap_or((host, ""));
+    if name.eq_ignore_ascii_case("proxy") && !rest.is_empty() {
+        format!("api.{rest}")
+    } else {
+        host.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_ep_parses_without_magic_offset() {
+        // "proxy-ep=" is 9 bytes; a shorter or longer key must not use that offset.
+        let token = "tid=abc; Proxy-EP=proxy.individual.githubcopilot.com;exp=1";
+        assert_eq!(
+            derive_copilot_base_url(token),
+            "https://api.individual.githubcopilot.com"
+        );
+
+        let short_key = "ep=proxy.individual.githubcopilot.com";
+        assert_eq!(derive_copilot_base_url(short_key), COPILOT_INTERNAL_BASE_URL);
+
+        let with_port_and_path = "proxy-ep=proxy.individual.githubcopilot.com:8443/v1";
+        assert_eq!(
+            derive_copilot_base_url(with_port_and_path),
+            "https://api.individual.githubcopilot.com:8443/v1"
+        );
+
+        let absolute = "proxy-ep=https://user:secret@proxy.individual.githubcopilot.com:8443/v1?q=1";
+        assert_eq!(
+            derive_copilot_base_url(absolute),
+            "https://api.individual.githubcopilot.com:8443/v1?q=1"
+        );
+
+        let ipv6 = "proxy-ep=[2001:db8::1]:8443/v1";
+        assert_eq!(
+            derive_copilot_base_url(ipv6),
+            "https://[2001:db8::1]:8443/v1"
+        );
+    }
 }
 
 #[async_trait]

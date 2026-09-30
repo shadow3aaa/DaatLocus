@@ -34,9 +34,23 @@ use crate::{
 use sha2::Digest;
 use tokio::{net::TcpListener, sync::oneshot};
 
-// ---------------------------------------------------------------------------
-// GitHub OAuth device code flow
-// ---------------------------------------------------------------------------
+#[derive(serde::Deserialize)]
+struct GithubDeviceCodeResponse {
+    device_code: String,
+    user_code: String,
+    #[serde(default)]
+    verification_uri: Option<String>,
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    interval: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct GithubAccessTokenResponse {
+    access_token: Option<String>,
+    error: Option<String>,
+}
 
 // Public Client ID used by the official GitHub Copilot app.
 // Tokens from this flow can be exchanged through copilot_internal/v2/token
@@ -101,27 +115,20 @@ where
         ));
     }
 
-    let device: serde_json::Value = resp.json().await.map_err(|e| {
+    let device: GithubDeviceCodeResponse = resp.json().await.map_err(|e| {
         miette!(
             "{}",
             crate::tr!(locale, "github.parse_device_code_failed", error = e)
         )
     })?;
 
-    let device_code = device["device_code"]
-        .as_str()
-        .ok_or_else(|| miette!("{}", crate::tr!(locale, "github.missing_device_code")))?
-        .to_string();
-    let user_code = device["user_code"]
-        .as_str()
-        .ok_or_else(|| miette!("{}", crate::tr!(locale, "github.missing_user_code")))?
-        .to_string();
-    let verification_uri = device["verification_uri"]
-        .as_str()
-        .unwrap_or("https://github.com/login/device")
-        .to_string();
-    let expires_in = device["expires_in"].as_u64().unwrap_or(900);
-    let interval_secs = device["interval"].as_u64().unwrap_or(5).max(5);
+    let device_code = device.device_code;
+    let user_code = device.user_code;
+    let verification_uri = device
+        .verification_uri
+        .unwrap_or_else(|| "https://github.com/login/device".to_string());
+    let expires_in = device.expires_in.unwrap_or(900);
+    let interval_secs = device.interval.unwrap_or(5).max(5);
 
     let auth_title = crate::tr!(locale, "github.authorization");
     let auth_lines = vec![
@@ -165,14 +172,14 @@ where
             .await
             .map_err(|e| miette!("{}", crate::tr!(locale, "github.poll_failed", error = e)))?;
 
-        let body: serde_json::Value = poll_resp.json().await.map_err(|e| {
+        let body: GithubAccessTokenResponse = poll_resp.json().await.map_err(|e| {
             miette!(
                 "{}",
                 crate::tr!(locale, "github.parse_token_failed", error = e)
             )
         })?;
 
-        if let Some(token) = body["access_token"].as_str() {
+        if let Some(token) = body.access_token.as_deref() {
             status(
                 auth_title.clone(),
                 vec![crate::tr!(locale, "github.success")],
@@ -180,7 +187,7 @@ where
             return Ok(token.to_string());
         }
 
-        match body["error"].as_str() {
+        match body.error.as_deref() {
             Some("authorization_pending") => {}
             Some("slow_down") => {
                 // GitHub asks clients to slow down by adding an extra delay.
@@ -201,7 +208,14 @@ where
             None => {
                 return Err(miette!(
                     "{}",
-                    crate::tr!(locale, "github.unknown_response", body = body)
+                    crate::tr!(
+                        locale,
+                        "github.unknown_response",
+                        body = format!(
+                            "access_token={:?} error={:?}",
+                            body.access_token, body.error
+                        )
+                    )
                 ));
             }
         }
@@ -214,7 +228,22 @@ struct CodexDeviceUserCodeResponse {
     #[serde(alias = "usercode")]
     user_code: String,
     #[serde(default)]
-    interval: serde_json::Value,
+    interval: CodexDeviceInterval,
+}
+
+/// Codex returns the poll interval as either a JSON number or a numeric string.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum CodexDeviceInterval {
+    Number(u64),
+    String(String),
+    Missing,
+}
+
+impl Default for CodexDeviceInterval {
+    fn default() -> Self {
+        Self::Missing
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -574,11 +603,12 @@ where
     Ok(tokens)
 }
 
-fn parse_codex_device_interval(value: &serde_json::Value) -> u64 {
-    value
-        .as_u64()
-        .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-        .unwrap_or(5)
+fn parse_codex_device_interval(value: &CodexDeviceInterval) -> u64 {
+    match value {
+        CodexDeviceInterval::Number(n) => *n,
+        CodexDeviceInterval::String(s) => s.trim().parse::<u64>().unwrap_or(5),
+        CodexDeviceInterval::Missing => 5,
+    }
 }
 
 async fn poll_codex_device_authorization<F>(
@@ -1892,11 +1922,7 @@ async fn prompt_model(
 
     let capacity = resolve_model_capacity(provider, &model_id, api_ctx, api_out, api_vision);
 
-    let default_name = model_id
-        .split(['/', ':'])
-        .next_back()
-        .unwrap_or(&model_id)
-        .to_string();
+    let default_name = model_display_name(&model_id);
     let name = ui.text(
         &crate::tr!(locale, "config.model_name"),
         Some(&default_name),
@@ -2798,6 +2824,18 @@ fn mask_secret(s: &str) -> String {
     format!("{prefix}...{suffix}")
 }
 
+/// Default display name for a model id.
+///
+/// Only the last `/` path segment is a display name. `:` is not a separator,
+/// so owners and tags such as `org/model:tag` stay intact except for the owner.
+fn model_display_name(model_id: &str) -> String {
+    model_id
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(model_id)
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3325,5 +3363,57 @@ mod tests {
 
         assert!(is_setup_cancelled(&navigate_parent));
         assert!(is_setup_cancelled(&cancelled));
+    }
+
+    #[test]
+    fn github_device_and_token_json_deserialize_typed() {
+        let device: GithubDeviceCodeResponse = serde_json::from_str(
+            r#"{"device_code":"dc","user_code":"UC","verification_uri":"https://github.com/login/device","expires_in":600,"interval":5}"#,
+        )
+        .expect("device code");
+        assert_eq!(device.device_code, "dc");
+        assert_eq!(device.user_code, "UC");
+        assert_eq!(device.expires_in, Some(600));
+        assert_eq!(device.interval, Some(5));
+
+        let pending: GithubAccessTokenResponse =
+            serde_json::from_str(r#"{"error":"authorization_pending"}"#).expect("pending");
+        assert!(pending.access_token.is_none());
+        assert_eq!(pending.error.as_deref(), Some("authorization_pending"));
+
+        let granted: GithubAccessTokenResponse =
+            serde_json::from_str(r#"{"access_token":"gho_token"}"#).expect("granted");
+        assert_eq!(granted.access_token.as_deref(), Some("gho_token"));
+    }
+
+    #[test]
+    fn codex_interval_accepts_number_or_string() {
+        let number: CodexDeviceUserCodeResponse =
+            serde_json::from_str(r#"{"device_auth_id":"id","user_code":"code","interval":8}"#)
+                .expect("number interval");
+        assert_eq!(parse_codex_device_interval(&number.interval), 8);
+
+        let string: CodexDeviceUserCodeResponse = serde_json::from_str(
+            r#"{"device_auth_id":"id","user_code":"code","interval":"12"}"#,
+        )
+        .expect("string interval");
+        assert_eq!(parse_codex_device_interval(&string.interval), 12);
+
+        let missing: CodexDeviceUserCodeResponse =
+            serde_json::from_str(r#"{"device_auth_id":"id","user_code":"code"}"#)
+                .expect("missing interval");
+        assert_eq!(parse_codex_device_interval(&missing.interval), 5);
+        assert_eq!(
+            parse_codex_device_interval(&CodexDeviceInterval::String("nope".into())),
+            5
+        );
+    }
+
+    #[test]
+    fn model_display_name_keeps_colon_and_drops_only_owner_path() {
+        assert_eq!(model_display_name("openai/gpt-4.1"), "gpt-4.1");
+        assert_eq!(model_display_name("org/model:tag"), "model:tag");
+        assert_eq!(model_display_name("vendor:model"), "vendor:model");
+        assert_eq!(model_display_name("plain-model"), "plain-model");
     }
 }

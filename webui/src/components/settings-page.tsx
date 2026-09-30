@@ -67,6 +67,10 @@ type SleepSettingsValue = {
   enabled: boolean;
 };
 
+type ScopeSettingsValue = {
+  lspEnabled: boolean;
+};
+
 type SettingsPageProps = {
   mockSetupConfig?: SetupConfigResponse;
   onSaveSetupConfig?: (
@@ -119,6 +123,11 @@ export function SettingsPage({
     mockSetupConfig
       ? setupConfigRequestToSleepSettingsValue(mockSetupConfig.config)
       : createDefaultSleepSettingsValue(),
+  );
+  const [scopeSettings, setScopeSettings] = useState<ScopeSettingsValue>(() =>
+    mockSetupConfig
+      ? setupConfigRequestToScopeSettingsValue(mockSetupConfig.config)
+      : createDefaultScopeSettingsValue(),
   );
   const [loadState, setLoadState] = useState<LoadState>(
     () => (mockSetupConfig ? "idle" : "loading"),
@@ -203,6 +212,7 @@ export function SettingsPage({
     modelAccess,
     onSaveSetupConfig,
     sleepSettings,
+    scopeSettings,
     telegramSettings,
     t,
   ]);
@@ -223,6 +233,7 @@ export function SettingsPage({
     void setWebUiLanguage(nextInterfaceSettings.locale);
     setTelegramSettings(setupConfigRequestToTelegramSettingsValue(config));
     setSleepSettings(setupConfigRequestToSleepSettingsValue(config));
+    setScopeSettings(setupConfigRequestToScopeSettingsValue(config));
     setLoadState("idle");
     setLoadError(null);
     setSaveState("idle");
@@ -265,6 +276,7 @@ export function SettingsPage({
       ...interfaceSettingsValueToSetupRequest(interfaceSettings),
       ...telegramSettingsValueToSetupRequest(telegramSettings),
       ...sleepSettingsValueToSetupRequest(sleepSettings),
+      ...scopeSettingsValueToSetupRequest(scopeSettings),
     };
     delete request.daemon_port;
     return request;
@@ -357,6 +369,14 @@ export function SettingsPage({
               value={sleepSettings}
               onChange={(nextValue) => {
                 setSleepSettings(nextValue);
+                markDirty();
+              }}
+            />
+
+            <ScopeSettingsEditor
+              value={scopeSettings}
+              onChange={(nextValue) => {
+                setScopeSettings(nextValue);
                 markDirty();
               }}
             />
@@ -560,6 +580,28 @@ function sleepSettingsValueToSetupRequest(
   };
 }
 
+function createDefaultScopeSettingsValue(): ScopeSettingsValue {
+  return {
+    lspEnabled: true,
+  };
+}
+
+function setupConfigRequestToScopeSettingsValue(
+  request: SetupConfigRequest,
+): ScopeSettingsValue {
+  return {
+    lspEnabled: request.scope_lsp_enabled ?? true,
+  };
+}
+
+function scopeSettingsValueToSetupRequest(
+  value: ScopeSettingsValue,
+): Pick<SetupConfigRequest, "scope_lsp_enabled"> {
+  return {
+    scope_lsp_enabled: value.lspEnabled,
+  };
+}
+
 function TelegramSettingsEditor({
   value,
   onChange,
@@ -668,6 +710,48 @@ function SleepSettingsEditor({
             checked={value.enabled}
             onCheckedChange={(enabled) => onChange({ ...value, enabled })}
             aria-label={t("settings.sleep.enableAria")}
+          />
+        </Field>
+      </FieldGroup>
+    </section>
+  );
+}
+
+function ScopeSettingsEditor({
+  value,
+  onChange,
+}: {
+  value: ScopeSettingsValue;
+  onChange: (value: ScopeSettingsValue) => void;
+}) {
+  const { t } = useTranslation();
+
+  return (
+    <section className="flex flex-col gap-6">
+      <div className="flex flex-col gap-2">
+        <h2 className="text-3xl font-medium tracking-normal">
+          {t("settings.scope.title")}
+        </h2>
+        <p className="max-w-2xl text-base text-muted-foreground">
+          {t("settings.scope.description")}
+        </p>
+      </div>
+
+      <FieldGroup>
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel htmlFor="scope-settings-lsp-enabled">
+              {t("settings.scope.lspLabel")}
+            </FieldLabel>
+            <FieldDescription>
+              {t("settings.scope.lspDescription")}
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="scope-settings-lsp-enabled"
+            checked={value.lspEnabled}
+            onCheckedChange={(lspEnabled) => onChange({ ...value, lspEnabled })}
+            aria-label={t("settings.scope.lspAria")}
           />
         </Field>
       </FieldGroup>

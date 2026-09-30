@@ -357,19 +357,120 @@ impl TreeSitterAnalyzer {
         }
     }
 
+    /// Definition name from the language adapter's existing `@name` capture.
+    ///
+    /// The child walk is only a fallback when the query yields nothing (or the
+    /// adapter query cannot be compiled). It is not the primary grammar path:
+    /// the first `identifier`/`type_identifier` child is often a qualifier,
+    /// return type, or receiver rather than the declared name.
     fn extract_def_name(node: tree_sitter::Node, source: &str) -> Option<String> {
-        for i in 0..node.child_count() {
-            let child = node.child(i)?;
-            let kind = child.kind();
-            if kind == "identifier" || kind == "type_identifier" {
-                return child
-                    .utf8_text(source.as_bytes())
-                    .ok()
-                    .map(std::string::ToString::to_string);
+        captured_definition_name(node, source).or_else(|| fallback_child_def_name(node, source))
+    }
+
+    /// Locate a definition by running the language adapter's definition query
+    /// and returning the `@name` capture whose text matches `symbol_name`.
+    ///
+    /// `line`/`character` are 1-based / 0-based to match `textDocument/references`.
+    /// This does not substring-search the file.
+    #[must_use]
+    pub fn definition_name_position(
+        &self,
+        file_path: &Path,
+        source: &str,
+        symbol_name: &str,
+    ) -> Option<(usize, usize)> {
+        let ext = file_path.extension().and_then(|e| e.to_str())?;
+        let adapter = self.registry.get(ext)?;
+        let mut parser = adapter.parser();
+        let tree = parser.parse(source, None)?;
+        let query = tree_sitter::Query::new(&adapter.language(), adapter.queries().definitions)
+            .ok()?;
+        let name_idx = query.capture_index_for_name("name")?;
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        while let Some(query_match) = matches.next() {
+            for capture in query_match.captures {
+                if capture.index != name_idx {
+                    continue;
+                }
+                let Ok(text) = capture.node.utf8_text(source.as_bytes()) else {
+                    continue;
+                };
+                if text == symbol_name {
+                    let point = capture.node.start_position();
+                    return Some((point.row + 1, point.column));
+                }
             }
         }
         None
     }
+}
+
+/// Run the language adapter definition query against `node` and return the
+/// text of the first `@name` capture that belongs to that node.
+///
+/// Query strings come from [`crate::language::LanguageAdapter::queries`]; this
+/// function does not duplicate them.
+fn captured_definition_name(node: tree_sitter::Node, source: &str) -> Option<String> {
+    let language = node.language();
+    let registry = LanguageRegistry::new();
+    let adapter = registry.list_languages().iter().find_map(|(_, exts)| {
+        let candidate = registry.get(exts.first().copied()?)?;
+        if candidate.language() == language.clone() {
+            Some(candidate)
+        } else {
+            None
+        }
+    })?;
+    let query = tree_sitter::Query::new(&language, adapter.queries().definitions).ok()?;
+    let name_idx = query.capture_index_for_name("name")?;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut matches = cursor.matches(&query, node, source.as_bytes());
+    while let Some(query_match) = matches.next() {
+        for capture in query_match.captures {
+            if capture.index != name_idx {
+                continue;
+            }
+            // Nested definitions also match when the query is rooted at an
+            // outer node (for example a decorated definition). Prefer the
+            // capture whose parent is this node, but accept a capture inside
+            // the node when the pattern's `@def` node is an ancestor.
+            let captured = capture.node;
+            let belongs = captured.parent().is_some_and(|parent| parent.id() == node.id())
+                || node_contains(node, captured);
+            if !belongs {
+                continue;
+            }
+            if let Ok(text) = captured.utf8_text(source.as_bytes()) {
+                if !text.is_empty() {
+                    return Some(text.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn node_contains(outer: tree_sitter::Node, inner: tree_sitter::Node) -> bool {
+    let start = outer.start_byte();
+    let end = outer.end_byte();
+    inner.start_byte() >= start && inner.end_byte() <= end
+}
+
+/// Last-resort name: first direct `identifier` / `type_identifier` child.
+/// Used only when the language query yields nothing.
+fn fallback_child_def_name(node: tree_sitter::Node, source: &str) -> Option<String> {
+    for i in 0..node.child_count() {
+        let child = node.child(i)?;
+        let kind = child.kind();
+        if kind == "identifier" || kind == "type_identifier" {
+            return child
+                .utf8_text(source.as_bytes())
+                .ok()
+                .map(std::string::ToString::to_string);
+        }
+    }
+    None
 }
 
 fn symbol_matches_selector(symbol: &SymbolMatch, parsed: &ParsedSelector) -> bool {
@@ -479,6 +580,66 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
+    }
+    #[test]
+    fn query_capture_names_pointer_return_and_qualified_impl() {
+        let dir = tempfile::tempdir().unwrap();
+        let code = "fn takes_ptr(value: *const u8) -> *mut u8 {\n    value as *mut u8\n}\n\nimpl crate::engine::Hints for Alpha {\n    fn setup_hints(&self) {}\n}\n";
+        let path = write_temp_rust_file(dir.path(), "names.rs", code);
+        let analyzer = TreeSitterAnalyzer::new();
+        let symbols = analyzer.symbols_in_file(&path).unwrap();
+        let names: Vec<&str> = symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+        assert!(
+            names.contains(&"takes_ptr"),
+            "definition query should capture the function name, not the pointer type; got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| *name == "const" || *name == "u8" || *name == "mut"),
+            "pointer type tokens must not be treated as definition names; got {names:?}"
+        );
+        assert!(
+            names.contains(&"setup_hints"),
+            "method name should come from the @name capture; got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| *name == "crate"),
+            "qualified impl path must not be the impl name; got {names:?}"
+        );
+
+        let position = analyzer
+            .definition_name_position(&path, code, "takes_ptr")
+            .expect("@name capture locates takes_ptr");
+        assert_eq!(position, (1, 3));
+        let impl_code = "impl Hints for Alpha {\n    fn setup_hints(&self) {}\n}\n";
+        let impl_path = write_temp_rust_file(dir.path(), "impls.rs", impl_code);
+        let impl_symbols = analyzer.symbols_in_file(&impl_path).unwrap();
+        let impl_names: Vec<&str> = impl_symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+        assert!(
+            impl_names.contains(&"Alpha"),
+            "impl name is the adapter query's type: capture, not the first type_identifier child; got {impl_names:?}"
+        );
+        assert!(
+            !impl_names.iter().any(|name| *name == "Hints"),
+            "the implemented trait is not the impl_item type: capture; got {impl_names:?}"
+        );
+        let impl_position = analyzer
+            .definition_name_position(&impl_path, impl_code, "Alpha")
+            .expect("impl @name capture is the type: node");
+        assert_eq!(impl_position, (1, 15));
+
+        let qualified = "impl crate::engine::Hints for Alpha {\n    fn setup_hints(&self) {}\n}\n";
+        let qualified_path = write_temp_rust_file(dir.path(), "qualified.rs", qualified);
+        let qualified_names: Vec<String> = analyzer
+            .symbols_in_file(&qualified_path)
+            .unwrap()
+            .into_iter()
+            .map(|symbol| symbol.name)
+            .collect();
+        assert!(
+            !qualified_names.iter().any(|name| name == "crate"),
+            "when the impl query does not match a scoped type, the child-walk fallback must not invent the path qualifier; got {qualified_names:?}"
+        );
+        assert!(analyzer.definition_name_position(&path, code, "u8").is_none());
     }
 
     const RUST_CODE: &str = "// line 1\n                 fn startup() {\n                    inner_call();\n                }\n            }\n            ";

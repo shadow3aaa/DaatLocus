@@ -431,33 +431,69 @@ fn push_secret_env_ref(vars: &mut Vec<String>, value: &str) {
     }
 }
 
-fn env_ref_name(value: &str) -> Option<String> {
+/// Parsed environment-variable reference from a credential string.
+///
+/// Forms: `${NAME}` ([`EnvRef::Brace`]), `$NAME` ([`EnvRef::Dollar`]),
+/// and `env:NAME` ([`EnvRef::EnvPrefix`]). Names must match
+/// `[A-Za-z_][A-Za-z0-9_]*`. Empty names, whitespace-only names, and a `$`
+/// form that is actually `${...}` are rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EnvRef {
+    Brace(String),
+    Dollar(String),
+    EnvPrefix(String),
+}
+
+impl EnvRef {
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Brace(name) | Self::Dollar(name) | Self::EnvPrefix(name) => name,
+        }
+    }
+}
+
+/// Parse one complete credential string as an environment reference.
+///
+/// Leading and trailing whitespace around the whole value is ignored. The
+/// name itself must not contain whitespace. `${` is never treated as `$` plus
+/// a name, even when the brace form is incomplete.
+pub(crate) fn parse_env_ref(value: &str) -> Option<EnvRef> {
     let trimmed = value.trim();
-    let name = if let Some(inner) = trimmed
-        .strip_prefix("${")
-        .and_then(|inner| inner.strip_suffix('}'))
-    {
-        inner
-    } else if let Some(inner) = trimmed.strip_prefix("env:") {
-        inner
-    } else {
-        trimmed.strip_prefix('$')?
-    };
-    let name = name.trim();
-    if is_valid_env_ref_name(name) {
-        Some(name.to_string())
+    if let Some(rest) = trimmed.strip_prefix("${") {
+        let inner = rest.strip_suffix('}')?;
+        let name = valid_env_ref_name(inner)?;
+        return Some(EnvRef::Brace(name.to_string()));
+    }
+    if let Some(inner) = trimmed.strip_prefix("env:") {
+        let name = valid_env_ref_name(inner)?;
+        return Some(EnvRef::EnvPrefix(name.to_string()));
+    }
+    if let Some(inner) = trimmed.strip_prefix('$') {
+        // `$` must not consume a form that starts as `${`.
+        if inner.starts_with('{') {
+            return None;
+        }
+        let name = valid_env_ref_name(inner)?;
+        return Some(EnvRef::Dollar(name.to_string()));
+    }
+    None
+}
+
+fn valid_env_ref_name(name: &str) -> Option<&str> {
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    if chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        Some(name)
     } else {
         None
     }
 }
 
-fn is_valid_env_ref_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
-        _ => return false,
-    }
-    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+fn env_ref_name(value: &str) -> Option<String> {
+    parse_env_ref(value).map(|env_ref| env_ref.name().to_string())
 }
 
 // ---------------------------------------------------------------------------

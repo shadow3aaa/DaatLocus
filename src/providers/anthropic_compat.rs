@@ -342,12 +342,7 @@ impl AnthropicCompatibleClient {
             normalize_sse_buffer(&mut buffer);
 
             while let Some(event) = take_next_sse_event(&mut buffer) {
-                let data = event
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("data:"))
-                    .map(str::trim_start)
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let data = sse_event_data(&event);
                 if data.is_empty() {
                     continue;
                 }
@@ -1051,26 +1046,85 @@ fn anthropic_user_blocks(content: &AgentContent, strip_images: bool) -> Vec<Valu
     blocks
 }
 
-/// Convert a `data:<media-type>;base64,<data>` URL into an Anthropic image
-/// content block.
+/// Convert a `data:<media-type>[;param][;base64],<data>` URL into an Anthropic
+/// image content block. Non-base64 and non-image URLs stay unavailable.
 fn anthropic_image_block_from_data_url(data_url: &str) -> Option<Value> {
-    let rest = data_url.strip_prefix("data:")?;
-    let (meta, data) = rest.split_once(',')?;
-    if !meta.contains("base64") || data.is_empty() {
+    let parsed = parse_data_url(data_url)?;
+    if !parsed.base64 || parsed.data.is_empty() {
         return None;
     }
-    let media_type = meta.split(';').next()?.trim();
-    if !media_type.starts_with("image/") {
+    if !parsed.media_type.starts_with("image/") {
         return None;
     }
     Some(json!({
         "type": "image",
         "source": {
             "type": "base64",
-            "media_type": media_type,
-            "data": data,
+            "media_type": parsed.media_type,
+            "data": parsed.data,
         },
     }))
+}
+
+struct DataUrl<'a> {
+    media_type: &'a str,
+    parameters: Vec<(&'a str, Option<&'a str>)>,
+    base64: bool,
+    data: &'a str,
+}
+
+/// Parse a `data:` URL into media type, parameters, the base64 flag, and payload.
+/// Percent-decoding is not applied; callers that need the raw payload keep it.
+fn parse_data_url(data_url: &str) -> Option<DataUrl<'_>> {
+    let rest = data_url.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let mut parts = meta.split(';');
+    let media_type = parts.next()?.trim();
+    let media_type = if media_type.is_empty() {
+        "text/plain"
+    } else {
+        media_type
+    };
+    let mut parameters = Vec::new();
+    let mut base64 = false;
+    for param in parts {
+        let param = param.trim();
+        if param.is_empty() {
+            continue;
+        }
+        if let Some((name, value)) = param.split_once('=') {
+            parameters.push((name.trim(), Some(value.trim())));
+        } else {
+            let name = param;
+            if name.eq_ignore_ascii_case("base64") {
+                base64 = true;
+            }
+            parameters.push((name, None));
+        }
+    }
+    Some(DataUrl {
+        media_type,
+        parameters,
+        base64,
+        data,
+    })
+}
+
+/// Join SSE `data:` lines for one event.
+/// A single optional space after `data:` is removed. Further spaces and any
+/// colons inside the field value are kept. Lines that only share the `data`
+/// prefix (for example `database:`) are not data fields.
+fn sse_event_data(event: &str) -> String {
+    event
+        .lines()
+        .filter_map(sse_data_field_value)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sse_data_field_value(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("data:")?;
+    Some(rest.strip_prefix(' ').unwrap_or(rest))
 }
 
 /// Append blocks to the trailing message when it already has the same role,
@@ -1471,6 +1525,43 @@ mod tests {
                 ..ModelConfig::default()
             },
         )
+    }
+
+    #[test]
+    fn data_url_parser_keeps_image_blocks_and_structured_parts() {
+        let block = anthropic_image_block_from_data_url(
+            "data:image/png;charset=utf-8;base64,aGVsbG8=",
+        )
+        .expect("png data url");
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["source"]["type"], "base64");
+        assert_eq!(block["source"]["media_type"], "image/png");
+        assert_eq!(block["source"]["data"], "aGVsbG8=");
+
+        let parsed = parse_data_url("data:image/png;charset=utf-8;base64,aGVs,bG8=").unwrap();
+        assert_eq!(parsed.media_type, "image/png");
+        assert!(parsed.base64);
+        assert_eq!(parsed.data, "aGVs,bG8=");
+        assert_eq!(
+            parsed.parameters,
+            vec![("charset", Some("utf-8")), ("base64", None)]
+        );
+
+        assert!(anthropic_image_block_from_data_url("data:image/png,raw").is_none());
+        assert!(anthropic_image_block_from_data_url("data:text/plain;base64,YQ==").is_none());
+        assert!(anthropic_image_block_from_data_url("data:image/png;base64,").is_none());
+        assert!(anthropic_image_block_from_data_url("https://example.test/a.png").is_none());
+    }
+
+    #[test]
+    fn sse_data_join_strips_one_space_and_keeps_colons() {
+        let event = "event: content_block_delta\ndata: {\"type\":\"x\",\"text\":\"a:b\"}\ndata:  spaced";
+        assert_eq!(
+            sse_event_data(event),
+            "{\"type\":\"x\",\"text\":\"a:b\"}\n spaced"
+        );
+        assert_eq!(sse_event_data("data:no-space\ndata:"), "no-space\n");
+        assert!(sse_event_data("database: nope\nevent: ping").is_empty());
     }
 
     fn read_tool() -> AgentToolSpec {

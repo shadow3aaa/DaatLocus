@@ -484,23 +484,11 @@ pub(crate) fn validate_artifact_url(url: &str) -> Result<()> {
 }
 
 fn url_host(url: &str) -> String {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host_port = authority.rsplit('@').next().unwrap_or(authority);
-    if let Some(bracketed) = host_port.strip_prefix('[')
-        && let Some(end) = bracketed.find(']')
-    {
-        return bracketed[..end].to_string();
-    }
-    let host = host_port.split(':').next().unwrap_or(host_port);
-    if host.is_empty() {
-        "artifact".to_string()
-    } else {
-        host.to_string()
-    }
+    url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| "artifact".to_string())
 }
 
 fn present_artifact(
@@ -896,6 +884,14 @@ mod tests {
             "0".repeat(63)
         )));
         assert!(!is_valid_artifact_file_name("manifest.json"));
+    }
+
+    #[test]
+    fn url_host_uses_parsed_url_host() {
+        assert_eq!(url_host("https://example.com/path?q=1"), "example.com");
+        assert_eq!(url_host("http://user:pw@127.0.0.1:8080/index"), "127.0.0.1");
+        assert_eq!(url_host("https://[::1]/artifact"), "[::1]");
+        assert_eq!(url_host("not a url"), "artifact");
     }
 
     #[test]

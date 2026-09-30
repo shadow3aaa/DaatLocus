@@ -320,32 +320,21 @@ fn is_strong_markdown(value: &str) -> bool {
 }
 
 fn is_markdown_block_syntax(value: &str) -> bool {
-    value.starts_with("# ")
-        || value.starts_with("## ")
-        || value.starts_with("### ")
-        || value.starts_with("#### ")
-        || value.starts_with("##### ")
-        || value.starts_with("###### ")
-        || value.starts_with("- ")
-        || value.starts_with("* ")
-        || value.starts_with("+ ")
-        || value.starts_with("> ")
-        || value.starts_with("```")
-        || value.starts_with("~~~")
-        || value.starts_with('|')
-        || ordered_list_prefix(value)
-}
-
-fn ordered_list_prefix(value: &str) -> bool {
-    let mut chars = value.chars().peekable();
-    let mut saw_digit = false;
-    while chars.peek().is_some_and(char::is_ascii_digit) {
-        saw_digit = true;
-        chars.next();
-    }
-    saw_digit
-        && matches!(chars.next(), Some('.' | ')'))
-        && chars.next().is_some_and(char::is_whitespace)
+    let blocks = daat_locus_md::markdown::MarkdownRenderer::new(usize::MAX).parse(value);
+    matches!(
+        blocks.first(),
+        Some(
+            daat_locus_md::markdown::MarkdownBlock::Heading1(_)
+                | daat_locus_md::markdown::MarkdownBlock::Heading2(_)
+                | daat_locus_md::markdown::MarkdownBlock::Heading3(_)
+                | daat_locus_md::markdown::MarkdownBlock::ListItem(_, _)
+                | daat_locus_md::markdown::MarkdownBlock::TaskItem { .. }
+                | daat_locus_md::markdown::MarkdownBlock::Blockquote { .. }
+                | daat_locus_md::markdown::MarkdownBlock::CodeBlock { .. }
+                | daat_locus_md::markdown::MarkdownBlock::Table { .. }
+                | daat_locus_md::markdown::MarkdownBlock::HorizontalRule
+        )
+    )
 }
 
 fn is_common_han(ch: char) -> bool {
@@ -529,6 +518,12 @@ mod tests {
     fn thinking_markdown_does_not_split_inline_bold_phrases() {
         let content = "I should keep **important phrase**\n\nas normal prose.";
 
+        assert_eq!(normalize_thinking_markdown_sections(content), content);
+    }
+
+    #[test]
+    fn thinking_markdown_keeps_parser_recognized_blocks() {
+        let content = "# Heading\n\n- item\n\n1. ordered\n\n| A | B |\n| --- | --- |\n| 1 | 2 |";
         assert_eq!(normalize_thinking_markdown_sections(content), content);
     }
 }

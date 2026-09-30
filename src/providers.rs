@@ -30,6 +30,7 @@ use crate::{
 
 mod copilot;
 pub use copilot::CopilotClient;
+pub(crate) use copilot::copilot_base_url_from_session_token;
 mod codex_oauth;
 pub use codex_oauth::{
     CodexOAuthClient, CodexOAuthTokens, codex_cli_auth_file, codex_oauth_access_from_file,
@@ -773,7 +774,7 @@ impl OpenAIClient {
             ));
         };
 
-        if !content_type.contains("text/event-stream") {
+        if !content_type_is_event_stream(&content_type) {
             let body = read_response_text_with_timeout(
                 response,
                 self.request_timeout,
@@ -842,12 +843,9 @@ impl OpenAIClient {
             buffer.extend_from_slice(&chunk);
             normalize_sse_buffer(&mut buffer);
             while let Some(event) = take_next_sse_event(&mut buffer) {
-                let data = event
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("data:"))
-                    .map(str::trim_start)
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let Some(data) = sse_event_data(&event) else {
+                    continue;
+                };
                 if data.is_empty() {
                     continue;
                 }
@@ -1195,8 +1193,7 @@ impl ChatCompletionsAdapter for ActiveChatCompletionsAdapter {
 }
 
 fn is_standard_openai_base_url(base_url: &str) -> bool {
-    let normalized = base_url.trim_end_matches('/');
-    normalized.contains("api.openai.com")
+    http_url_host(base_url).is_some_and(|host| host.eq_ignore_ascii_case("api.openai.com"))
 }
 
 const OPENCODE_CLIENT_ID: &str = "daat-locus";
@@ -1214,17 +1211,90 @@ pub(crate) fn is_opencode_gateway_base_url(base_url: &str) -> bool {
     }
 }
 
-fn opencode_gateway_host(base_url: &str) -> Option<&str> {
-    let rest = base_url.trim();
+fn opencode_gateway_host(base_url: &str) -> Option<String> {
+    http_url_host(base_url)
+}
+
+/// Host of an `http`/`https` URL, including bracketed IPv6 literals.
+///
+/// Returns `None` when the input is not an absolute HTTP(S) URL or has no host.
+/// Path, query, userinfo, and port never contribute to the host.
+fn http_url_host(raw: &str) -> Option<String> {
+    let url = url::Url::parse(raw.trim()).ok()?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return None;
+    }
+    match url.host()? {
+        url::Host::Domain(domain) => Some(domain.to_string()),
+        url::Host::Ipv4(addr) => Some(addr.to_string()),
+        url::Host::Ipv6(addr) => Some(format!("[{addr}]")),
+    }
+}
+
+/// True when the Content-Type media type is `text/event-stream`.
+///
+/// Parameters (for example `charset`) are ignored and matching is case-insensitive.
+/// A substring inside another type or a parameter does not match.
+fn content_type_is_event_stream(content_type: &str) -> bool {
+    let media_type = content_type.split(';').next().unwrap_or("").trim();
+    let Some((type_, subtype)) = media_type.split_once('/') else {
+        return false;
+    };
+    !type_.is_empty()
+        && !subtype.is_empty()
+        && !subtype.contains('/')
+        && type_.eq_ignore_ascii_case("text")
+        && subtype.eq_ignore_ascii_case("event-stream")
+}
+
+/// Join `data:` fields from one SSE event.
+///
+/// Follows the SSE spec: a single optional space after `data:` is removed, comment
+/// lines are ignored, and multiple data lines are joined with `\n`. The `event:`
+/// field is recognized so it is not treated as data. Returns `None` when the event
+/// has no data field.
+fn sse_event_data(event: &str) -> Option<String> {
+    let mut data_lines = Vec::new();
+    let mut saw_data = false;
+    for line in event.lines() {
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        let (field, value) = line.split_once(':').unwrap_or((line, ""));
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        match field {
+            "data" => {
+                saw_data = true;
+                data_lines.push(value);
+            }
+            "event" | "id" | "retry" => {}
+            _ => {}
+        }
+    }
+    saw_data.then(|| data_lines.join("\n"))
+}
+
+/// Remove one leading and one trailing markdown fence, if both are present.
+///
+/// Only a single fenced block is accepted. Surrounding prose is left untouched so
+/// later JSON parsing fails instead of extracting an embedded snippet.
+fn strip_single_markdown_fence(content: &str) -> &str {
+    let Some(rest) = content.strip_prefix("```") else {
+        return content;
+    };
     let rest = rest
-        .strip_prefix("https://")
-        .or_else(|| rest.strip_prefix("http://"))
+        .strip_prefix("json")
+        .or_else(|| rest.strip_prefix("JSON"))
         .unwrap_or(rest);
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let host = authority.rsplit('@').next()?;
-    let host = host.split(':').next()?;
-    let host = host.trim();
-    (!host.is_empty()).then_some(host)
+    let rest = rest.strip_prefix(['\r', '\n']).unwrap_or(rest);
+    let Some(stripped) = rest.strip_suffix("```") else {
+        return content;
+    };
+    let stripped = stripped.trim_end_matches(['\r', '\n', ' ', '\t']);
+    if stripped.contains("```") {
+        return content;
+    }
+    stripped
 }
 
 pub(crate) fn opencode_gateway_headers(
@@ -1275,21 +1345,11 @@ fn extract_json_value_from_content(content: &str) -> Option<serde_json::Value> {
     if trimmed.is_empty() {
         return None;
     }
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        return Some(value);
+    let candidate = strip_single_markdown_fence(trimmed).trim();
+    if candidate.is_empty() {
+        return None;
     }
-    let fenced = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```JSON"))
-        .or_else(|| trimmed.strip_prefix("```"));
-    if let Some(fenced) = fenced {
-        let fenced = fenced.trim();
-        let fenced = fenced.strip_suffix("```").unwrap_or(fenced).trim();
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(fenced) {
-            return Some(value);
-        }
-    }
-    None
+    serde_json::from_str::<serde_json::Value>(candidate).ok()
 }
 
 #[async_trait]
@@ -1824,6 +1884,76 @@ mod tests {
             versioned.url(),
             "https://api.deepseek.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn openai_host_is_not_matched_inside_path_query_userinfo_or_port() {
+        assert!(is_standard_openai_base_url("https://api.openai.com/v1"));
+        assert!(is_standard_openai_base_url("https://API.OPENAI.COM"));
+        assert!(is_standard_openai_base_url(
+            "https://user:pass@api.openai.com:443/v1"
+        ));
+        assert!(!is_standard_openai_base_url(
+            "https://evil.example/api.openai.com"
+        ));
+        assert!(!is_standard_openai_base_url(
+            "https://evil.example/?host=api.openai.com"
+        ));
+        assert!(!is_standard_openai_base_url(
+            "https://api.openai.com.evil.test/v1"
+        ));
+        assert!(!is_standard_openai_base_url("https://notapi.openai.com/v1"));
+    }
+
+    #[test]
+    fn opencode_gateway_host_parses_userinfo_port_and_ipv6() {
+        assert!(is_opencode_gateway_base_url(
+            "https://user:token@api.opencode.ai:8443/zen/v1"
+        ));
+        assert_eq!(
+            opencode_gateway_host("http://[2001:db8::1]:8080/zen").as_deref(),
+            Some("[2001:db8::1]")
+        );
+        assert!(!is_opencode_gateway_base_url(
+            "https://evil.example/opencode.ai"
+        ));
+        assert!(!is_opencode_gateway_base_url(
+            "https://[2001:db8::1]/opencode.ai"
+        ));
+    }
+
+    #[test]
+    fn event_stream_content_type_ignores_parameters_and_case() {
+        assert!(content_type_is_event_stream(
+            "text/event-stream; charset=utf-8"
+        ));
+        assert!(content_type_is_event_stream("Text/Event-Stream"));
+        assert!(!content_type_is_event_stream(
+            "application/json; charset=text/event-stream"
+        ));
+        assert!(!content_type_is_event_stream("text/not-event-stream"));
+    }
+
+    #[test]
+    fn sse_data_joins_fields_and_ignores_comments() {
+        let event = ": keep-alive\nevent: message\ndata: {\"a\":\ndata: 1}\n";
+        assert_eq!(sse_event_data(event).as_deref(), Some("{\"a\":\n1}"));
+        assert_eq!(
+            sse_event_data("data:{\"ok\":true}").as_deref(),
+            Some("{\"ok\":true}")
+        );
+        assert!(sse_event_data(": comment only\nevent: ping").is_none());
+    }
+
+    #[test]
+    fn fenced_json_block_is_parsed_without_accepting_prose() {
+        let fenced = "```json\n{\"ok\":true}\n```";
+        assert_eq!(
+            extract_json_value_from_content(fenced),
+            Some(json!({"ok": true}))
+        );
+        assert!(extract_json_value_from_content("here is {\"ok\":true} thanks").is_none());
+        assert!(extract_json_value_from_content("```json\n{\"ok\":true}").is_none());
     }
 
     #[test]

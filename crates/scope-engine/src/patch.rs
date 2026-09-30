@@ -156,8 +156,9 @@ fn collect_propagation_results(
         let Some(lsp) = &*lsp_guard else {
             return Vec::new();
         };
-        let (line, character) =
-            find_symbol_position(new_content, symbol_name).unwrap_or_else(|| {
+        let (line, character) = analyzer
+            .definition_name_position(full_path, new_content, symbol_name)
+            .unwrap_or_else(|| {
                 let hint_line = edits.first().map_or(1, |edit| edit.start_line);
                 (hint_line, 0)
             });
@@ -230,13 +231,6 @@ fn collect_propagation_results(
     }
 
     results
-}
-
-fn find_symbol_position(content: &str, symbol_name: &str) -> Option<(usize, usize)> {
-    content.lines().enumerate().find_map(|(line_idx, line)| {
-        line.find(symbol_name)
-            .map(|character| (line_idx + 1, character))
-    })
 }
 
 /// Applies structured edits and discovers references that need propagation review.
@@ -584,6 +578,28 @@ mod e2e_tests {
     use crate::api;
     use std::io::Write;
     use std::path::PathBuf;
+
+    #[test]
+    fn reference_position_uses_definition_capture_not_substring() {
+        let dir = setup_temp_rust_project();
+        let rust_code = "pub fn hello() {\n    let hello_note = 1;\n    let _ = hello_note;\n}\n";
+        let (path, _) = write_rust_file(dir.path(), "lib.rs", rust_code);
+        let analyzer = TreeSitterAnalyzer::new();
+        let position = analyzer
+            .definition_name_position(&path, rust_code, "hello")
+            .expect("definition query locates hello");
+        assert_eq!(
+            position,
+            (1, 7),
+            "position is the @name node, not the earlier 'fn' token or the later hello_note substring"
+        );
+        assert!(
+            analyzer
+                .definition_name_position(&path, rust_code, "hello_note")
+                .is_none(),
+            "a non-definition substring must not be reported as the symbol position"
+        );
+    }
 
     fn setup_temp_rust_project() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()

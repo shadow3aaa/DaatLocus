@@ -270,27 +270,7 @@ async fn try_fetch_via_session_token(
         .ok_or_else(|| miette!("copilot session token response missing token"))?
         .to_string();
 
-    let base_url = session_token
-        .split(';')
-        .find_map(|part| {
-            let trimmed = part.trim();
-            let host = trimmed.strip_prefix("proxy-ep=").or_else(|| {
-                if trimmed.to_lowercase().starts_with("proxy-ep=") {
-                    Some(&trimmed[9..])
-                } else {
-                    None
-                }
-            })?;
-            if host.is_empty() {
-                return None;
-            }
-            let host = if host.to_lowercase().starts_with("proxy.") {
-                format!("api.{}", &host[6..])
-            } else {
-                host.to_string()
-            };
-            Some(format!("https://{host}"))
-        })
+    let base_url = crate::providers::copilot_base_url_from_session_token(&session_token)
         .unwrap_or_else(|| "https://api.individual.githubcopilot.com".to_string());
 
     let models =
@@ -719,5 +699,15 @@ mod tests {
         };
 
         assert!(values.contains(&"xhigh".to_string()));
+    }
+
+    #[test]
+    fn copilot_session_token_proxy_ep_uses_key_value_parse() {
+        let token = "exp=1; proxy-ep=proxy.individual.githubcopilot.com; sku=x";
+        assert_eq!(
+            crate::providers::copilot_base_url_from_session_token(token).as_deref(),
+            Some("https://api.individual.githubcopilot.com")
+        );
+        assert!(crate::providers::copilot_base_url_from_session_token("proxy-ep=").is_none());
     }
 }

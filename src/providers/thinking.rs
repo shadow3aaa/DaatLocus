@@ -14,10 +14,26 @@ pub(super) fn max_completion_tokens_for_chat_payload(client: &OpenAIClient) -> u
 }
 
 pub(super) fn is_deepseek_api_base_url(base_url: &str) -> bool {
-    base_url
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
-        .contains("api.deepseek.com")
+    http_url_host_eq_or_suffix(base_url, "api.deepseek.com")
+}
+
+/// True when an HTTP(S) URL's host equals `expected` or ends with `.{expected}`.
+///
+/// Matching is case-insensitive and uses only the host. A path, query, userinfo,
+/// or port that merely contains the name does not match.
+fn http_url_host_eq_or_suffix(raw: &str, expected: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw.trim()) else {
+        return false;
+    };
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return false;
+    }
+    let Some(url::Host::Domain(domain)) = url.host() else {
+        return false;
+    };
+    let host = domain.to_ascii_lowercase();
+    let expected = expected.to_ascii_lowercase();
+    host == expected || host.ends_with(&format!(".{expected}"))
 }
 
 pub(super) fn is_deepseek_thinking_request(client: &OpenAIClient) -> bool {
@@ -148,4 +164,30 @@ pub(super) fn thinking_budget_is_none(budget: &str) -> bool {
 
 fn normalized_thinking_budget(budget: &str) -> String {
     budget.trim().to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deepseek_host_matches_host_only() {
+        assert!(is_deepseek_api_base_url("https://api.deepseek.com/v1"));
+        assert!(is_deepseek_api_base_url(
+            "https://user:pass@API.DEEPSEEK.COM:443/chat"
+        ));
+        assert!(is_deepseek_api_base_url(
+            "https://region.api.deepseek.com/v1"
+        ));
+        assert!(!is_deepseek_api_base_url(
+            "https://evil.example/api.deepseek.com"
+        ));
+        assert!(!is_deepseek_api_base_url(
+            "https://evil.example/?q=api.deepseek.com"
+        ));
+        assert!(!is_deepseek_api_base_url(
+            "https://api.deepseek.com.evil.test/v1"
+        ));
+        assert!(!is_deepseek_api_base_url("https://[2001:db8::1]/api.deepseek.com"));
+    }
 }

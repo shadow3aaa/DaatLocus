@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use std::{
     collections::BTreeSet,
     env,
@@ -584,35 +585,18 @@ fn parse_persona_prompt_binding(path: &Path, content: &str) -> PersonaPromptBind
 fn parse_persona_prompt_binding_inner(content: &str) -> Result<PersonaPromptBinding, String> {
     let (frontmatter, body) = split_prompt_frontmatter(content)
         .ok_or_else(|| "expected leading frontmatter delimited by ---".to_string())?;
-    let mut name = None::<String>;
-    let mut language = default_prompt_persona_language().to_string();
-
-    for line in frontmatter.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(value) = trimmed.strip_prefix("name:") {
-            let value = value.trim();
-            if value.is_empty() {
-                return Err("name cannot be empty".to_string());
-            }
-            name = Some(value.to_string());
-            continue;
-        }
-        if let Some(value) = trimmed.strip_prefix("language:") {
-            let value = value.trim();
-            language = if value.is_empty() {
-                default_prompt_persona_language().to_string()
-            } else {
-                value.to_string()
-            };
-            continue;
-        }
-        return Err(format!("unsupported frontmatter line: {line}"));
+    let parsed: PersonaFrontmatter = serde_yaml::from_str(frontmatter)
+        .map_err(|error| format!("invalid persona frontmatter: {error}"))?;
+    let name = parsed.name.trim().to_string();
+    if name.is_empty() {
+        return Err("name cannot be empty".to_string());
     }
-
-    let name = name.ok_or_else(|| "missing name".to_string())?;
+    let language = parsed.language.trim().to_string();
+    let language = if language.is_empty() {
+        default_prompt_persona_language().to_string()
+    } else {
+        language
+    };
     let identity_summary = body.trim().to_string();
     if identity_summary.is_empty() {
         return Err("missing persona body".to_string());
@@ -624,24 +608,73 @@ fn parse_persona_prompt_binding_inner(content: &str) -> Result<PersonaPromptBind
     })
 }
 
+#[derive(Deserialize)]
+struct PersonaFrontmatter {
+    name: String,
+    #[serde(default)]
+    language: String,
+}
+
 const fn default_prompt_persona_language() -> &'static str {
     "configured-locale"
 }
 
+/// YAML between a leading `---` line and the next closing `---` line.
+///
+/// LF and CRLF are both accepted. Missing, unclosed, or empty frontmatter is
+/// rejected. Returns the raw frontmatter text and the body after the fence.
 fn split_prompt_frontmatter(content: &str) -> Option<(&str, &str)> {
-    let content = content.strip_prefix("---\r\n").or_else(|| {
-        content
-            .strip_prefix("---\n")
-            .or_else(|| content.strip_prefix("---"))
-    })?;
-    let delimiter = content
-        .find("\n---\n")
-        .map(|index| (index, 5))
-        .or_else(|| content.find("\r\n---\r\n").map(|index| (index, 7)))
-        .or_else(|| content.find("\n---\r\n").map(|index| (index, 6)))
-        .or_else(|| content.find("\r\n---\n").map(|index| (index, 6)))?;
-    let (frontmatter, rest) = content.split_at(delimiter.0);
-    Some((frontmatter, &rest[delimiter.1..]))
+    let mut offset = 0usize;
+    let mut lines = Vec::new();
+    for segment in content.split_inclusive('\n') {
+        let start = offset;
+        offset += segment.len();
+        let body_len = segment.trim_end_matches(['\r', '\n']).len();
+        lines.push((start, start + body_len, offset));
+    }
+
+    let (open_start, open_end, _) = lines.first().copied()?;
+    if content[open_start..open_end].trim() != "---" || open_end == content.len() {
+        return None;
+    }
+
+    let mut close = None;
+    for &(start, end, next) in lines.iter().skip(1) {
+        if content[start..end].trim() == "---" {
+            close = Some((start, next));
+            break;
+        }
+    }
+    let (close_start, body_start) = close?;
+    let frontmatter = content[open_end..close_start].trim();
+    if frontmatter.is_empty() {
+        return None;
+    }
+    Some((frontmatter, &content[body_start..]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_persona_prompt_binding_inner;
+
+    #[test]
+    fn persona_frontmatter_accepts_crlf() {
+        let parsed = parse_persona_prompt_binding_inner(
+            "---\r\nname: Test Persona\r\nlanguage: zh-CN\r\n---\r\n\r\nUse Chinese.\r\n",
+        )
+        .expect("crlf frontmatter");
+        assert_eq!(parsed.name, "Test Persona");
+        assert_eq!(parsed.language, "zh-CN");
+        assert_eq!(parsed.identity_summary, "Use Chinese.");
+    }
+
+    #[test]
+    fn persona_frontmatter_rejects_missing_closing_fence() {
+        let parsed = parse_persona_prompt_binding_inner(
+            "---\nname: Test Persona\nlanguage: en-US\n\nBody.\n",
+        );
+        assert!(parsed.is_err(), "unclosed frontmatter should fail");
+    }
 }
 
 fn write_builtin_skill_bindings(manifest_dir: &Path) {

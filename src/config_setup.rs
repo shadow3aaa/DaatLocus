@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use crate::{
     config::{
-        Config, DaemonConfig, ModelConfig, ProviderConfig, SleepConfig, TelegramConfig,
-        ThinkingBudget, load_config, normalize_provider_base_url, write_config,
+        Config, DaemonConfig, ModelConfig, ProviderConfig, ScopeConfig, SleepConfig, TelegramConfig,
+        ThinkingBudget, load_config, normalize_provider_base_url, parse_env_ref, write_config,
     },
     daat_locus_paths::daat_locus_paths,
     i18n::Locale,
@@ -118,6 +118,8 @@ pub struct SetupConfigRequest {
     pub telegram_bot_token: Option<String>,
     #[serde(default)]
     pub sleep_enabled: Option<bool>,
+    #[serde(default)]
+    pub scope_lsp_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -563,6 +565,7 @@ fn setup_config_from_config(config: &Config) -> SetupConfigRequest {
         telegram_enabled: Some(config.telegram.enabled),
         telegram_bot_token: Some(config.telegram.bot_token.clone()),
         sleep_enabled: Some(config.sleep.enabled),
+        scope_lsp_enabled: Some(config.scope.lsp_enabled),
         ..SetupConfigRequest::default()
     }
 }
@@ -681,8 +684,7 @@ fn setup_model_from_config(name: &str, model: &ModelConfig) -> SetupModelRequest
 }
 
 fn looks_like_env_reference(value: &str) -> bool {
-    let trimmed = value.trim();
-    trimmed.starts_with('$') || trimmed.starts_with("env:")
+    parse_env_ref(value).is_some()
 }
 
 fn config_from_setup_request(request: &SetupConfigRequest) -> Result<Config> {
@@ -727,6 +729,11 @@ fn config_from_setup_request_with_base(
         telegram,
         sleep: SleepConfig {
             enabled: request.sleep_enabled.unwrap_or(base.sleep.enabled),
+        },
+        scope: ScopeConfig {
+            lsp_enabled: request
+                .scope_lsp_enabled
+                .unwrap_or(base.scope.lsp_enabled),
         },
         ..base
     })
@@ -1583,13 +1590,33 @@ fn optional_normalized_url(value: &str) -> Option<String> {
 
 fn expand_user_path(path: &str) -> PathBuf {
     let trimmed = path.trim();
-    if trimmed == "~" {
-        return std::env::home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
+    let Some(rest) = home_relative_suffix(trimmed) else {
+        return PathBuf::from(trimmed);
+    };
+    std::env::home_dir().map_or_else(
+        || PathBuf::from(trimmed),
+        |home| {
+            if rest.is_empty() {
+                home
+            } else {
+                home.join(rest)
+            }
+        },
+    )
+}
+
+/// `~`, `~/...`, and `~\\...` expand to the current user. `~user` does not.
+fn home_relative_suffix(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.strip_prefix('~')?;
+    if rest.is_empty() {
+        return Some(rest);
     }
-    if let Some(rest) = trimmed.strip_prefix("~/") {
-        return std::env::home_dir().map_or_else(|| PathBuf::from(trimmed), |home| home.join(rest));
+    let mut chars = rest.chars();
+    if chars.next().is_some_and(std::path::is_separator) {
+        Some(chars.as_str())
+    } else {
+        None
     }
-    PathBuf::from(trimmed)
 }
 
 async fn recover_damaged_config(
@@ -1865,28 +1892,7 @@ fn credential_error(
 }
 
 fn env_reference_name(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    let name = if let Some(inner) = trimmed
-        .strip_prefix("${")
-        .and_then(|inner| inner.strip_suffix('}'))
-    {
-        inner
-    } else if let Some(inner) = trimmed.strip_prefix("env:") {
-        inner
-    } else {
-        trimmed.strip_prefix('$')?
-    };
-    let name = name.trim();
-    is_valid_env_name(name).then(|| name.to_string())
-}
-
-fn is_valid_env_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
-        _ => return false,
-    }
-    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    parse_env_ref(value).map(|env_ref| env_ref.name().to_string())
 }
 
 fn model_completeness_error(config: &Config) -> Option<String> {
@@ -2127,6 +2133,25 @@ model_id = "gpt-4.1-mini"
         assert_eq!(next_config.telegram.poll_timeout_secs, 45);
     }
 
+    #[test]
+    fn setup_config_round_trips_scope_lsp_enabled() {
+        let base_config = Config {
+            scope: ScopeConfig { lsp_enabled: false },
+            ..Config::default()
+        };
+
+        let request = setup_config_from_config(&base_config);
+
+        assert_eq!(request.scope_lsp_enabled, Some(false));
+
+        let mut next_request = request;
+        next_request.scope_lsp_enabled = Some(true);
+
+        let next_config = config_from_setup_request_with_base(&next_request, base_config).unwrap();
+
+        assert!(next_config.scope.lsp_enabled);
+    }
+
     #[tokio::test]
     async fn import_auth_file_copies_cli_tokens_to_provider_file() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2213,5 +2238,60 @@ model_id = "gpt-4.1-mini"
             persona.identity_summary,
             "{{name}} answers with extra context.\nKeep a calm tone."
         );
+    }
+
+    #[test]
+    fn env_ref_parser_accepts_brace_dollar_and_env_prefix() {
+        use crate::config::EnvRef;
+
+        assert_eq!(
+            parse_env_ref("${FOO}"),
+            Some(EnvRef::Brace("FOO".to_string()))
+        );
+        assert_eq!(env_reference_name("${FOO}").as_deref(), Some("FOO"));
+        assert!(looks_like_env_reference("${FOO}"));
+
+        assert_eq!(
+            parse_env_ref("$FOO"),
+            Some(EnvRef::Dollar("FOO".to_string()))
+        );
+        assert_eq!(env_reference_name("$FOO").as_deref(), Some("FOO"));
+        assert!(looks_like_env_reference("$FOO"));
+
+        assert_eq!(
+            parse_env_ref("env:FOO"),
+            Some(EnvRef::EnvPrefix("FOO".to_string()))
+        );
+        assert_eq!(env_reference_name("env:FOO").as_deref(), Some("FOO"));
+        assert!(looks_like_env_reference("env:FOO"));
+
+        assert_eq!(parse_env_ref("${}"), None);
+        assert_eq!(env_reference_name("${}"), None);
+        assert!(!looks_like_env_reference("${}"));
+
+        assert_eq!(parse_env_ref("$1"), None);
+        assert_eq!(env_reference_name("$1"), None);
+        assert!(!looks_like_env_reference("$1"));
+
+        assert_eq!(parse_env_ref("${1}"), None);
+        assert_eq!(parse_env_ref("env:"), None);
+        assert_eq!(parse_env_ref("env:1"), None);
+        assert_eq!(parse_env_ref("${ FOO }"), None);
+        assert_eq!(parse_env_ref("$ FOO"), None);
+        assert_eq!(parse_env_ref("${FOO"), None);
+        assert_eq!(parse_env_ref("$"), None);
+        assert!(!looks_like_env_reference("$not a name"));
+        assert!(!looks_like_env_reference("~"));
+    }
+
+    #[test]
+    fn expand_user_path_accepts_backslash_and_forward_slash_home() {
+        let home = std::env::home_dir().expect("home dir");
+        assert_eq!(expand_user_path(r"~\foo"), home.join("foo"));
+        assert_eq!(expand_user_path("~/foo"), home.join("foo"));
+        assert_eq!(expand_user_path("~"), home);
+        assert_eq!(expand_user_path("~/"), home);
+        assert_eq!(expand_user_path("~user"), PathBuf::from("~user"));
+        assert_eq!(expand_user_path("~user/foo"), PathBuf::from("~user/foo"));
     }
 }

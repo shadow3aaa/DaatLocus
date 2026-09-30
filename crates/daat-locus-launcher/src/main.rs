@@ -9,6 +9,8 @@ use std::{
     process::{Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+use serde::Deserialize;
 const CONFIG_FILE_NAME: &str = "config.toml";
 const DEFAULT_DAEMON_PORT: u16 = 53825;
 const ENABLE_TRAY_ENV: &str = "DAAT_LOCUS_ENABLE_TRAY";
@@ -138,31 +140,23 @@ fn configured_daemon_port(config_path: &Path) -> Option<u16> {
     daemon_port_from_config(&content)
 }
 fn daemon_port_from_config(content: &str) -> Option<u16> {
-    let mut in_daemon_section = false;
-    for raw_line in content.lines() {
-        let line = raw_line.split('#').next().unwrap_or_default().trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(section) = line
-            .strip_prefix('[')
-            .and_then(|line| line.strip_suffix(']'))
-        {
-            in_daemon_section = section.trim() == "daemon";
-            continue;
-        }
-        if !in_daemon_section {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() != "port" {
-            continue;
-        }
-        return value.trim().trim_matches('"').parse::<u16>().ok();
+    #[derive(Deserialize)]
+    struct LauncherConfig {
+        daemon: Option<LauncherDaemonConfig>,
     }
-    None
+    #[derive(Deserialize)]
+    struct LauncherDaemonConfig {
+        port: Option<toml::Value>,
+    }
+    let port = toml::from_str::<LauncherConfig>(content)
+        .ok()
+        .and_then(|config| config.daemon)
+        .and_then(|daemon| daemon.port)?;
+    match port {
+        toml::Value::Integer(value) => u16::try_from(value).ok(),
+        toml::Value::String(value) => value.trim().trim_matches('"').parse().ok(),
+        _ => None,
+    }
 }
 fn daemon_port_is_active(port: u16) -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -292,6 +286,12 @@ mod tests {
     fn daemon_port_parser_ignores_missing_daemon_section() {
         let config = "[provider]\nport = 1234\n";
         assert_eq!(daemon_port_from_config(config), None);
+    }
+
+    #[test]
+    fn daemon_port_parser_reads_comments_and_quoted_port() {
+        let config = "# launcher config\n[daemon]\n# listen port\nport = \"53828\" # quoted\n";
+        assert_eq!(daemon_port_from_config(config), Some(53828));
     }
 
     #[test]

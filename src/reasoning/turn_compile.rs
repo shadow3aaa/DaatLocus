@@ -173,22 +173,41 @@ fn normalized_persona_language(language: &str) -> String {
 }
 
 fn split_prompt_persona_frontmatter(content: &str) -> Result<(&str, &str)> {
-    let rest = content
-        .strip_prefix("---\r\n")
-        .or_else(|| {
-            content
-                .strip_prefix("---\n")
-                .or_else(|| content.strip_prefix("---"))
-        })
-        .ok_or_else(|| miette!("persona file missing frontmatter start"))?;
-    let delimiter = rest
-        .find("\n---\n")
-        .map(|index| (index, 5))
-        .or_else(|| rest.find("\r\n---\r\n").map(|index| (index, 7)))
-        .or_else(|| rest.find("\n---\r\n").map(|index| (index, 6)))
-        .or_else(|| rest.find("\r\n---\n").map(|index| (index, 6)))
-        .ok_or_else(|| miette!("persona file missing frontmatter end"))?;
-    Ok((&rest[..delimiter.0], &rest[delimiter.0 + delimiter.1..]))
+    split_yaml_frontmatter_block(content).ok_or_else(|| miette!("persona file missing frontmatter"))
+}
+
+/// Split a leading YAML frontmatter fence from the markdown body.
+///
+/// Requires a leading `---` line and a later closing `---` line. LF and CRLF
+/// are accepted. Returns the raw frontmatter text and the body after the fence.
+fn split_yaml_frontmatter_block(contents: &str) -> Option<(&str, &str)> {
+    let mut offset = 0usize;
+    let mut lines = Vec::new();
+    for segment in contents.split_inclusive('\n') {
+        let start = offset;
+        offset += segment.len();
+        let body_len = segment.trim_end_matches(['\r', '\n']).len();
+        lines.push((start, start + body_len, offset));
+    }
+
+    let (open_start, open_end, _) = lines.first().copied()?;
+    if contents[open_start..open_end].trim() != "---" || open_end == contents.len() {
+        return None;
+    }
+
+    let mut close = None;
+    for &(start, end, next) in lines.iter().skip(1) {
+        if contents[start..end].trim() == "---" {
+            close = Some((start, next));
+            break;
+        }
+    }
+    let (close_start, body_start) = close?;
+    let frontmatter = contents[open_end..close_start].trim();
+    if frontmatter.is_empty() {
+        return None;
+    }
+    Some((frontmatter, &contents[body_start..]))
 }
 
 pub fn render_prompt_persona_markdown(spec: &PromptPersonaSpec) -> String {
@@ -292,6 +311,14 @@ Use the configured locale by default.
         assert_eq!(parsed.name, "Test Persona");
         assert_eq!(parsed.language, "zh-CN");
         assert_eq!(parsed.identity_summary, "Use Chinese.");
+    }
+
+    #[test]
+    fn parse_prompt_persona_markdown_rejects_frontmatter_without_closing_fence() {
+        let error = parse_prompt_persona_markdown("---\nname: Test Persona\nlanguage: en-US\n\nBody.\n")
+            .expect_err("unclosed frontmatter should fail");
+        let message = format!("{error:?}");
+        assert!(message.contains("frontmatter"), "{message}");
     }
 
     #[test]

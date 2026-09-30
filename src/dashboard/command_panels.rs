@@ -393,7 +393,7 @@ fn default_value_text(schema: &serde_json::Value) -> String {
     if let Some(default) = schema.get("default") {
         return default_value_to_text(default);
     }
-    match schema_type(schema).as_deref() {
+    match primary_schema_type(schema).as_deref() {
         Some("integer" | "number") => "0".to_string(),
         Some("boolean") => "false".to_string(),
         Some("array") => "[]".to_string(),
@@ -409,23 +409,29 @@ fn default_value_to_text(value: &serde_json::Value) -> String {
     }
 }
 
-fn schema_type(schema: &serde_json::Value) -> Option<String> {
+fn schema_type_names(schema: &serde_json::Value) -> Vec<String> {
+    match schema.get("type") {
+        Some(serde_json::Value::String(kind)) => vec![kind.clone()],
+        Some(serde_json::Value::Array(types)) => types
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn primary_schema_type(schema: &serde_json::Value) -> Option<String> {
+    schema_type_names(schema)
+        .into_iter()
+        .find(|kind| kind != "null")
+}
+
+fn schema_enum_values(schema: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
     schema
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            schema
-                .get("type")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|types| {
-                    types
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .find(|kind| *kind != "null")
-                        .map(str::to_string)
-                })
-        })
+        .get("enum")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
 }
 
 fn parse_workflow_field_value(
@@ -434,31 +440,118 @@ fn parse_workflow_field_value(
     schema: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let trimmed = value.trim();
-    let nullable = schema
-        .get("type")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|types| types.iter().any(|kind| kind.as_str() == Some("null")));
+    let type_names = schema_type_names(schema);
+    let nullable = type_names.iter().any(|kind| kind == "null");
     if nullable && (trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null")) {
         return Ok(serde_json::Value::Null);
     }
-    match schema_type(schema).as_deref() {
-        Some("integer") => trimmed
+
+    let parsed = coerce_schema_text(field_name, value, trimmed, schema, &type_names)?;
+    if let Some(enum_values) = schema_enum_values(schema)
+        && !enum_values.iter().any(|candidate| candidate == &parsed)
+    {
+        return Err(format!("{field_name} must be one of the allowed values"));
+    }
+    Ok(parsed)
+}
+
+fn coerce_schema_text(
+    field_name: &str,
+    raw: &str,
+    trimmed: &str,
+    schema: &serde_json::Value,
+    type_names: &[String],
+) -> Result<serde_json::Value, String> {
+    let concrete: Vec<&str> = type_names
+        .iter()
+        .map(String::as_str)
+        .filter(|kind| *kind != "null")
+        .collect();
+    if concrete.is_empty() {
+        if schema_enum_values(schema).is_some() {
+            return Ok(coerce_untyped_enum_text(trimmed));
+        }
+        return Ok(serde_json::Value::String(raw.to_string()));
+    }
+
+    let mut errors = Vec::new();
+    for kind in concrete {
+        match coerce_typed_text(field_name, raw, trimmed, kind) {
+            Ok(value) => return Ok(value),
+            Err(error) => errors.push(error),
+        }
+    }
+    Err(errors
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| format!("{field_name} does not match the schema")))
+}
+
+fn coerce_typed_text(
+    field_name: &str,
+    raw: &str,
+    trimmed: &str,
+    kind: &str,
+) -> Result<serde_json::Value, String> {
+    match kind {
+        "string" => Ok(serde_json::Value::String(raw.to_string())),
+        "integer" => trimmed
             .parse::<i64>()
             .map(serde_json::Value::from)
             .map_err(|_| format!("{field_name} must be an integer")),
-        Some("number") => trimmed
-            .parse::<f64>()
-            .map(serde_json::Value::from)
-            .map_err(|_| format!("{field_name} must be a number")),
-        Some("boolean") => trimmed
+        "number" => parse_schema_number(field_name, trimmed),
+        "boolean" => trimmed
             .parse::<bool>()
             .map(serde_json::Value::from)
             .map_err(|_| format!("{field_name} must be true or false")),
-        Some("array" | "object") => {
-            serde_json::from_str(trimmed).map_err(|_| format!("{field_name} must be valid JSON"))
+        "array" => parse_schema_json_kind(field_name, trimmed, serde_json::Value::is_array, "array"),
+        "object" => {
+            parse_schema_json_kind(field_name, trimmed, serde_json::Value::is_object, "object")
         }
-        _ => Ok(serde_json::Value::String(value.to_string())),
+        "null" => {
+            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                Ok(serde_json::Value::Null)
+            } else {
+                Err(format!("{field_name} must be null"))
+            }
+        }
+        _ => Err(format!("{field_name} has unsupported schema type {kind}")),
     }
+}
+
+fn parse_schema_number(field_name: &str, trimmed: &str) -> Result<serde_json::Value, String> {
+    if let Ok(integer) = trimmed.parse::<i64>() {
+        return Ok(serde_json::Value::from(integer));
+    }
+    let number = trimmed
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .and_then(serde_json::Number::from_f64)
+        .ok_or_else(|| format!("{field_name} must be a number"))?;
+    Ok(serde_json::Value::Number(number))
+}
+
+fn parse_schema_json_kind(
+    field_name: &str,
+    trimmed: &str,
+    matches_kind: fn(&serde_json::Value) -> bool,
+    label: &str,
+) -> Result<serde_json::Value, String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(trimmed)
+        .map_err(|_| format!("{field_name} must be valid JSON"))?;
+    if matches_kind(&parsed) {
+        Ok(parsed)
+    } else {
+        Err(format!("{field_name} must be a {label}"))
+    }
+}
+
+fn coerce_untyped_enum_text(trimmed: &str) -> serde_json::Value {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return parsed;
+    }
+    serde_json::Value::String(trimmed.to_string())
 }
 
 impl PendingUserInputQueuePanel {
@@ -1062,5 +1155,59 @@ fn adjusted_list_scroll(
             .min(max_scroll)
     } else {
         current_scroll.min(max_scroll)
+    }
+}
+
+#[cfg(test)]
+mod workflow_form_tests {
+    use super::{default_value_text, parse_workflow_field_value};
+
+    #[test]
+    fn string_schema_keeps_defaults_and_rejects_non_enum_values() {
+        let string_schema = serde_json::json!({"type": "string", "default": "keep"});
+        assert_eq!(default_value_text(&string_schema), "keep");
+        assert_eq!(
+            parse_workflow_field_value("name", "42", &string_schema).unwrap(),
+            serde_json::json!("42")
+        );
+        let enumerated = serde_json::json!({"type": "string", "enum": ["alpha", "beta"]});
+        assert!(parse_workflow_field_value("name", "42", &enumerated).is_err());
+        assert_eq!(
+            parse_workflow_field_value("name", "alpha", &enumerated).unwrap(),
+            serde_json::json!("alpha")
+        );
+    }
+
+    #[test]
+    fn type_arrays_honor_numbers_enums_and_null() {
+        let nullable_number = serde_json::json!({"type": ["number", "null"], "default": 3});
+        assert_eq!(default_value_text(&nullable_number), "3");
+        assert_eq!(
+            parse_workflow_field_value("count", "null", &nullable_number).unwrap(),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            parse_workflow_field_value("count", "1.5", &nullable_number).unwrap(),
+            serde_json::json!(1.5)
+        );
+        assert!(parse_workflow_field_value("count", "nope", &nullable_number).is_err());
+
+        let mode = serde_json::json!({"type": ["string", "null"], "enum": ["fast", "slow", null]});
+        assert_eq!(
+            parse_workflow_field_value("mode", "fast", &mode).unwrap(),
+            serde_json::json!("fast")
+        );
+        assert!(parse_workflow_field_value("mode", "other", &mode).is_err());
+        assert_eq!(
+            parse_workflow_field_value("mode", "", &mode).unwrap(),
+            serde_json::Value::Null
+        );
+
+        let items = serde_json::json!({"type": "array"});
+        assert!(parse_workflow_field_value("items", "{}", &items).is_err());
+        assert_eq!(
+            parse_workflow_field_value("items", "[1]", &items).unwrap(),
+            serde_json::json!([1])
+        );
     }
 }

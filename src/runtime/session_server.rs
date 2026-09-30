@@ -959,24 +959,29 @@ fn publish_study_revision(state: &SessionIpcServerState) {
 /// Study sessions expose only the generic session commands; work-mode
 /// dashboard commands (skills, workflows, app state, sleep, debug views) are
 /// not part of the study capability domain.
+fn study_mode_dashboard_verb(command: &str) -> Option<String> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    };
+    crate::dashboard::dashboard_command_parts(&normalized)
+        .and_then(|mut parts| parts.drain(..1).next())
+}
+
 fn study_mode_allows_dashboard_command(command: &str) -> bool {
     matches!(
-        command
-            .trim()
-            .trim_start_matches('/')
-            .split_whitespace()
-            .next(),
+        study_mode_dashboard_verb(command).as_deref(),
         Some("status" | "clear")
     )
 }
 
 fn study_mode_command_rejection(command: &str) -> String {
-    let verb = command
-        .trim()
-        .trim_start_matches('/')
-        .split_whitespace()
-        .next()
-        .unwrap_or_default();
+    let verb = study_mode_dashboard_verb(command).unwrap_or_default();
     format!(
         "`/{verb}` is not available in study mode; study sessions support `/status` and `/clear`."
     )
@@ -1887,6 +1892,8 @@ mod tests {
             study_mode_command_rejection("/skills list").contains("not available in study mode")
         );
         assert!(study_mode_command_rejection("/skills list").contains("/skills"));
+        assert!(study_mode_allows_dashboard_command("/status extra"));
+        assert!(study_mode_command_rejection("/skills 'quoted name'").contains("/skills"));
     }
 
     #[test]

@@ -10,8 +10,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use daat_locus_md::markdown::{MarkdownBlock, MarkdownRenderer};
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use super::store::{
     StudyGraphSnapshot, StudyImportMergeInput, StudyImportNodeInput, StudyQuestion, StudyStore,
@@ -566,21 +568,10 @@ fn parse_obsidian_note(rel_path: &str, raw: &str) -> Result<ObsidianNote> {
         .and_then(|stem| stem.to_str())
         .map(str::to_string)
         .unwrap_or_else(|| rel_path.to_string());
-    let mut body_lines = Vec::new();
-    let mut heading_taken = false;
-    for line in rest.lines() {
-        if !heading_taken && !line.trim().is_empty() && line.trim_start().starts_with("# ") {
-            title = line
-                .trim_start()
-                .trim_start_matches("# ")
-                .trim()
-                .to_string();
-            heading_taken = true;
-            continue;
-        }
-        body_lines.push(line);
+    if let Some(heading) = first_atx_h1(rest) {
+        title = heading;
     }
-    let body = body_lines.join("\n");
+    let body = strip_first_atx_h1(rest);
     let links = extract_wikilinks(&body);
 
     Ok(ObsidianNote {
@@ -594,24 +585,98 @@ fn parse_obsidian_note(rel_path: &str, raw: &str) -> Result<ObsidianNote> {
     })
 }
 
+/// Split a leading YAML frontmatter block from the note body.
+///
+/// The opening fence must be the first line (`---` plus a newline). The closing
+/// fence is a later line that is exactly `---` or `...`. The returned YAML does
+/// not include either fence. A missing closer leaves the input unchanged.
 fn split_frontmatter(raw: &str) -> (Option<String>, &str) {
-    let Some(remainder) = raw
-        .strip_prefix("---\r\n")
-        .or_else(|| raw.strip_prefix("---\n"))
-    else {
+    let bytes = raw.as_bytes();
+    let open_len = if raw.starts_with("---\r\n") {
+        5
+    } else if raw.starts_with("---\n") {
+        4
+    } else {
         return (None, raw);
     };
-    let mut offset = 0usize;
-    for line in remainder.split_inclusive('\n') {
+
+    let mut offset = open_len;
+    while offset <= bytes.len() {
+        let rest = &raw[offset..];
+        let line_len = rest.find('\n').map(|index| index + 1).unwrap_or(rest.len());
+        if line_len == 0 {
+            break;
+        }
+        let line = &rest[..line_len];
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed == "---" || trimmed == "..." {
-            let frontmatter = remainder[..offset].to_string();
-            let rest = &remainder[offset + line.len()..];
-            return (Some(frontmatter), rest);
+            let frontmatter = raw[open_len..offset].to_string();
+            let body = &raw[offset + line_len..];
+            return (Some(frontmatter), body);
         }
-        offset += line.len();
+        offset += line_len;
     }
     (None, raw)
+}
+
+/// First ATX H1, parsed by `daat_locus_md`.
+///
+/// Only a level-1 heading counts. Closing hashes are stripped so
+/// `# Title #` and an indented `# Title` both yield `Title`.
+fn first_atx_h1(markdown: &str) -> Option<String> {
+    let blocks = MarkdownRenderer::new(80).parse(markdown);
+    blocks.into_iter().find_map(|block| match block {
+        MarkdownBlock::Heading1(text) => {
+            let title = strip_atx_closing_hashes(&text);
+            if title.is_empty() { None } else { Some(title) }
+        }
+        _ => None,
+    })
+}
+
+fn strip_atx_closing_hashes(text: &str) -> String {
+    let trimmed = text.trim();
+    if !trimmed.ends_with('#') {
+        return trimmed.to_string();
+    }
+    let hashless = trimmed.trim_end_matches('#').trim_end();
+    if hashless.is_empty() {
+        trimmed.to_string()
+    } else {
+        hashless.to_string()
+    }
+}
+
+/// Body with the first ATX H1 line removed, matching the previous import.
+fn strip_first_atx_h1(markdown: &str) -> String {
+    let mut heading_taken = false;
+    let mut body_lines = Vec::new();
+    for line in markdown.lines() {
+        if !heading_taken && is_atx_h1_line(line) {
+            heading_taken = true;
+            continue;
+        }
+        body_lines.push(line);
+    }
+    body_lines.join("\n").trim().to_string()
+}
+
+/// CommonMark ATX H1: up to three leading spaces, one `#`, a required space,
+/// and an optional run of closing hashes.
+fn is_atx_h1_line(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && index < 3 && bytes[index] == b' ' {
+        index += 1;
+    }
+    if index >= bytes.len() || bytes[index] != b'#' {
+        return false;
+    }
+    index += 1;
+    if index < bytes.len() && bytes[index] == b'#' {
+        return false;
+    }
+    index < bytes.len() && (bytes[index] == b' ' || bytes[index] == b'\t')
 }
 
 fn yaml_string_list(value: Option<&serde_yaml::Value>) -> Vec<String> {
@@ -619,37 +684,120 @@ fn yaml_string_list(value: Option<&serde_yaml::Value>) -> Vec<String> {
         return Vec::new();
     };
     match value {
-        serde_yaml::Value::Sequence(items) => items
-            .iter()
-            .filter_map(|item| item.as_str().map(str::to_string))
-            .collect(),
-        serde_yaml::Value::String(text) => text
-            .split(',')
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .map(str::to_string)
-            .collect(),
+        serde_yaml::Value::Sequence(items) => items.iter().filter_map(yaml_scalar_string).collect(),
+        // Compatibility: some vault files store aliases/tags as one comma-separated string.
+        serde_yaml::Value::String(text) => split_comma_separated(text),
         _ => Vec::new(),
     }
 }
 
+fn yaml_scalar_string(value: &serde_yaml::Value) -> Option<String> {
+    match value {
+        serde_yaml::Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() { None } else { Some(text.to_string()) }
+        }
+        serde_yaml::Value::Number(number) => Some(number.to_string()),
+        serde_yaml::Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+fn split_comma_separated(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Obsidian wikilink targets.
+///
+/// `` `[[not a link]]` `` inside a code span is ignored. Alias and heading
+/// (`[[target|alias#heading]]`) split on the first unescaped `|` and `#`.
 fn extract_wikilinks(text: &str) -> Vec<String> {
     let mut links = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("[[") {
-        let after_start = &rest[start + 2..];
-        let Some(end) = after_start.find("]]") else {
-            break;
-        };
-        let inner = &after_start[..end];
-        let target = inner.split('|').next().unwrap_or(inner);
-        let target = target.split('#').next().unwrap_or(target).trim();
-        if !target.is_empty() {
-            links.push(target.to_string());
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '`' {
+            let fence = scan_backtick_run(&chars, index);
+            if let Some(close) = find_backtick_run(&chars, index + fence, fence) {
+                index = close + fence;
+                continue;
+            }
         }
-        rest = &after_start[end + 2..];
+        if chars[index] == '[' && index + 1 < chars.len() && chars[index + 1] == '[' {
+            if let Some(end) = find_wikilink_close(&chars, index + 2) {
+                let inner: String = chars[index + 2..end].iter().collect();
+                if let Some(target) = wikilink_target(&inner) {
+                    links.push(target);
+                }
+                index = end + 2;
+                continue;
+            }
+        }
+        index += 1;
     }
     links
+}
+
+fn scan_backtick_run(chars: &[char], start: usize) -> usize {
+    let mut end = start;
+    while end < chars.len() && chars[end] == '`' {
+        end += 1;
+    }
+    end - start
+}
+
+fn find_backtick_run(chars: &[char], from: usize, width: usize) -> Option<usize> {
+    let mut index = from;
+    while index + width <= chars.len() {
+        if chars[index..index + width].iter().all(|ch| *ch == '`')
+            && (index + width == chars.len() || chars[index + width] != '`')
+        {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn find_wikilink_close(chars: &[char], from: usize) -> Option<usize> {
+    let mut index = from;
+    while index + 1 < chars.len() {
+        if chars[index] == ']' && chars[index + 1] == ']' {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn wikilink_target(inner: &str) -> Option<String> {
+    let mut target = String::new();
+    let mut escaped = false;
+    for ch in inner.chars() {
+        if escaped {
+            target.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '|' || ch == '#' {
+            break;
+        }
+        target.push(ch);
+    }
+    let target = target.trim();
+    if target.is_empty() {
+        None
+    } else {
+        Some(target.to_string())
+    }
 }
 
 fn note_identities(note: &ObsidianNote) -> Vec<String> {
@@ -731,7 +879,9 @@ fn yaml_list(values: &[String]) -> String {
 }
 
 fn file_url(path: &Path) -> String {
-    format!("file:///{}", path.display().to_string().replace('\\', "/"))
+    Url::from_file_path(path)
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| format!("file:///{}", path.display().to_string().replace('\\', "/")))
 }
 
 #[cfg(test)]
@@ -855,5 +1005,29 @@ mod tests {
         let size = write_export_zip(&files, &dest).expect("zip");
         assert!(size > 0);
         assert!(dest.exists());
+    }
+
+    #[test]
+    fn parses_frontmatter_heading_and_wikilinks() {
+        let note = parse_obsidian_note(
+            "Algebra/Numbers.md",
+            "\u{feff}---\r\naliases: [Arithmetic, \"Set theory\"]\r\ntags: basics, core\r\n---\r\n\r\n  # Numbers #\r\n\r\nSee [[Group|alias#heading]] and [[Escaped\\|Name#section]].\r\nCode `[[NotALink]]` stays text.\r\n",
+        )
+        .expect("parse");
+
+        assert_eq!(note.title, "Numbers");
+        assert_eq!(note.aliases, vec!["Arithmetic", "Set theory"]);
+        assert_eq!(note.tags, vec!["basics", "core"]);
+        assert_eq!(note.links, vec!["Group", "Escaped|Name"]);
+        assert!(!note.body.contains("# Numbers"));
+        assert!(note.body.contains("`[[NotALink]]`"));
+    }
+
+    #[test]
+    fn file_url_uses_url_crate() {
+        let url = file_url(Path::new("C:/notes/Algebra/Numbers.md"));
+        assert!(url.starts_with("file://"));
+        assert!(url.contains("Numbers.md"));
+        assert!(!url.contains('\\'));
     }
 }

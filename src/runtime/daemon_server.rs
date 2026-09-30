@@ -94,18 +94,16 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
         command: &str,
     ) -> Result<Option<String>> {
         let command = command.trim();
-        let Some(verb) = command.split_whitespace().next() else {
+        let Some(parsed) = parse_telegram_session_command(command) else {
             return Ok(None);
         };
-        match verb {
-            "session_list" => Ok(Some(self.telegram_session_list(chat_id))),
-            "session_new" => {
-                let title = command_remainder(command)
-                    .filter(|title| !title.trim().is_empty())
-                    .map_or_else(
-                        || default_telegram_session_title(chat_id, chat_title),
-                        ToString::to_string,
-                    );
+        match parsed {
+            TelegramSessionCommand::SessionList => Ok(Some(self.telegram_session_list(chat_id))),
+            TelegramSessionCommand::SessionNew { title } => {
+                let title = title.filter(|title| !title.trim().is_empty()).map_or_else(
+                    || default_telegram_session_title(chat_id, chat_title),
+                    |title| title,
+                );
                 let info = self
                     .sessions
                     .create(session::SessionScope::General, Some(title))
@@ -118,13 +116,13 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
                     info.session_id.as_str()
                 )))
             }
-            "session_attach" | "session_switch" => {
-                let Some(reference) = command.split_whitespace().nth(1) else {
+            TelegramSessionCommand::SessionAttach { reference } => {
+                let Some(reference) = reference else {
                     return Ok(Some(
                         "usage: /session_attach <session_id_or_unique_prefix>".to_string(),
                     ));
                 };
-                match resolve_session_reference(&self.sessions, reference) {
+                match resolve_session_reference(&self.sessions, &reference) {
                     Ok(info) if info.scope.is_study() => Ok(Some(
                         "the study session is not available to Telegram".to_string(),
                     )),
@@ -141,13 +139,13 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
                     Err(message) => Ok(Some(message)),
                 }
             }
-            "session_delete" => {
-                let Some(reference) = command.split_whitespace().nth(1) else {
+            TelegramSessionCommand::SessionDelete { reference } => {
+                let Some(reference) = reference else {
                     return Ok(Some(
                         "usage: /session_delete <session_id_or_unique_prefix>".to_string(),
                     ));
                 };
-                let info = match resolve_session_reference(&self.sessions, reference) {
+                let info = match resolve_session_reference(&self.sessions, &reference) {
                     Ok(info) if info.scope.is_study() => {
                         return Ok(Some(
                             "the study session is not available to Telegram".to_string(),
@@ -183,11 +181,15 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
                     current_chat_note
                 )))
             }
-            "ask" => Ok(Some(
+            TelegramSessionCommand::Ask => Ok(Some(
                 "ask mode is only available from the dashboard composer or `daat-locus send`."
                     .to_string(),
             )),
-            _ => Ok(None),
+            TelegramSessionCommand::AttachRejected | TelegramSessionCommand::DeleteRejected => {
+                Ok(Some(
+                    "usage: pass exactly one session id or unique prefix".to_string(),
+                ))
+            }
         }
     }
 
@@ -264,13 +266,76 @@ impl ManagerTelegramInputRouter {
     }
 }
 
-fn command_remainder(command: &str) -> Option<&str> {
+enum TelegramSessionCommand {
+    SessionList,
+    SessionNew { title: Option<String> },
+    SessionAttach { reference: Option<String> },
+    SessionDelete { reference: Option<String> },
+    AttachRejected,
+    DeleteRejected,
+    Ask,
+}
+
+/// Parse a Telegram session command once.
+/// `session_new` keeps the raw remainder as the title.
+/// `session_attach` / `session_switch` and `session_delete` accept exactly one reference.
+fn parse_telegram_session_command(command: &str) -> Option<TelegramSessionCommand> {
+    let command = command.trim().trim_start_matches('/');
     let command = command.trim();
-    let verb = command.split_whitespace().next()?;
-    command
-        .get(verb.len()..)
-        .map(str::trim)
-        .filter(|remainder| !remainder.is_empty())
+    if command.is_empty() {
+        return None;
+    }
+    let mut chars = command.char_indices();
+    let verb_end = chars
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(index, _)| index)
+        .unwrap_or(command.len());
+    let verb = &command[..verb_end];
+    let remainder = command[verb_end..].trim();
+    match verb {
+        "session_list" => Some(TelegramSessionCommand::SessionList),
+        "session_new" => Some(TelegramSessionCommand::SessionNew {
+            title: (!remainder.is_empty()).then(|| remainder.to_string()),
+        }),
+        "session_attach" | "session_switch" => parse_single_reference(remainder, true),
+        "session_delete" => parse_single_reference(remainder, false),
+        "ask" => Some(TelegramSessionCommand::Ask),
+        _ => None,
+    }
+}
+
+fn parse_single_reference(remainder: &str, attach: bool) -> Option<TelegramSessionCommand> {
+    if remainder.is_empty() {
+        return Some(if attach {
+            TelegramSessionCommand::SessionAttach { reference: None }
+        } else {
+            TelegramSessionCommand::SessionDelete { reference: None }
+        });
+    }
+    let words = crate::dashboard::tokenize_shell_words(remainder)?;
+    match words.as_slice() {
+        [reference] => Some(if attach {
+            TelegramSessionCommand::SessionAttach {
+                reference: Some(reference.clone()),
+            }
+        } else {
+            TelegramSessionCommand::SessionDelete {
+                reference: Some(reference.clone()),
+            }
+        }),
+        _ => Some(if attach {
+            TelegramSessionCommand::AttachRejected
+        } else {
+            TelegramSessionCommand::DeleteRejected
+        }),
+    }
+}
+
+fn command_remainder(command: &str) -> Option<String> {
+    match parse_telegram_session_command(command)? {
+        TelegramSessionCommand::SessionNew { title } => title,
+        _ => None,
+    }
 }
 
 fn default_telegram_session_title(chat_id: &str, chat_title: &str) -> String {
@@ -1028,4 +1093,42 @@ mod tests {
         info.status = session::SessionStatus::Ready;
         assert!(!session_is_within_starting_health_grace_at(&info, 1_000));
     }
+
+    #[test]
+    fn telegram_session_commands_parse_into_one_enum() {
+        assert!(matches!(
+            parse_telegram_session_command("/session_list"),
+            Some(TelegramSessionCommand::SessionList)
+        ));
+        assert!(matches!(
+            parse_telegram_session_command("session_new a title with spaces"),
+            Some(TelegramSessionCommand::SessionNew { title: Some(title) }) if title == "a title with spaces"
+        ));
+        assert!(matches!(
+            parse_telegram_session_command("session_new"),
+            Some(TelegramSessionCommand::SessionNew { title: None })
+        ));
+        assert_eq!(
+            command_remainder("session_new keep 'raw remainder'").as_deref(),
+            Some("keep 'raw remainder'")
+        );
+        assert!(matches!(
+            parse_telegram_session_command("session_switch abc"),
+            Some(TelegramSessionCommand::SessionAttach { reference: Some(reference) }) if reference == "abc"
+        ));
+        assert!(matches!(
+            parse_telegram_session_command("session_attach 'sess ion'"),
+            Some(TelegramSessionCommand::SessionAttach { reference: Some(reference) }) if reference == "sess ion"
+        ));
+        assert!(matches!(
+            parse_telegram_session_command("session_delete one two"),
+            Some(TelegramSessionCommand::DeleteRejected)
+        ));
+        assert!(matches!(
+            parse_telegram_session_command("session_attach"),
+            Some(TelegramSessionCommand::SessionAttach { reference: None })
+        ));
+        assert!(parse_telegram_session_command("status").is_none());
+    }
+
 }

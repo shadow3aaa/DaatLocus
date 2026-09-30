@@ -228,12 +228,21 @@ async fn run_reactor(
 }
 
 /// Strip any scheme/trailing slash so callers always get a bare hostname.
+///
+/// When a scheme is present the value is parsed with [`url::Url`] and the
+/// host is compared, not the raw string. A bare host (no scheme) is kept
+/// after trimming whitespace and a single trailing slash.
 fn normalize_hostname(raw: &str) -> String {
-    raw.trim()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .to_string()
+    let raw = raw.trim();
+    if raw.contains("://") {
+        if let Ok(url) = url::Url::parse(raw) {
+            if let Some(host) = url.host_str() {
+                return host.to_string();
+            }
+        }
+        return String::new();
+    }
+    raw.trim_end_matches('/').to_string()
 }
 
 /// Map the crate's error model onto the share API's stable codes.
@@ -289,6 +298,15 @@ mod tests {
             normalize_hostname(" a.trycloudflare.com "),
             "a.trycloudflare.com"
         );
+        assert_eq!(
+            normalize_hostname("https://User:pw@A.TryCloudflare.com:443/path?q=1"),
+            "a.trycloudflare.com"
+        );
+        assert_eq!(
+            normalize_hostname("http://a.trycloudflare.com/extra/"),
+            "a.trycloudflare.com"
+        );
+        assert_eq!(normalize_hostname("https://not a host"), "");
     }
 
     #[tokio::test]

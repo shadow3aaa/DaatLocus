@@ -275,24 +275,15 @@ impl BrowserArchiveIntegrity {
             etag: headers
                 .get(ETAG)
                 .and_then(|value| value.to_str().ok())
-                .map(|value| value.trim_matches('"').to_string())
-                .filter(|value| !value.is_empty()),
+                .and_then(parse_etag),
         };
 
         for value in headers.get_all("x-goog-hash") {
             let Ok(value) = value.to_str() else {
                 continue;
             };
-            for part in value.split(',') {
-                let Some((name, hash)) = part.trim().split_once('=') else {
-                    continue;
-                };
-                if name.trim().eq_ignore_ascii_case("md5") {
-                    let hash = hash.trim();
-                    if !hash.is_empty() {
-                        integrity.md5_base64 = Some(hash.to_string());
-                    }
-                }
+            if let Some(hash) = goog_hash_value(value, "md5") {
+                integrity.md5_base64 = Some(hash);
             }
         }
 
@@ -303,6 +294,47 @@ impl BrowserArchiveIntegrity {
         }
         Ok(integrity)
     }
+}
+
+/// Parse an HTTP entity-tag: optional `W/`, then one quoted-string.
+///
+/// Backslash-escaped quotes inside the quotes are unescaped. Values that are
+/// not a single quoted-string (including ones that only look trimmed of
+/// surrounding quotes) are rejected.
+fn parse_etag(raw: &str) -> Option<String> {
+    let rest = raw.trim().strip_prefix("W/").unwrap_or(raw.trim());
+    let inner = rest.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            out.push(chars.next()?);
+        } else if ch == '"' {
+            return None;
+        } else {
+            out.push(ch);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// Select `wanted` from a comma-separated list of `name=value` pairs.
+///
+/// Matching is on the trimmed key, not a substring of another key.
+fn goog_hash_value(header: &str, wanted: &str) -> Option<String> {
+    let mut found = None;
+    for part in header.split(',') {
+        let Some((name, hash)) = part.trim().split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case(wanted) {
+            let hash = hash.trim();
+            if !hash.is_empty() {
+                found = Some(hash.to_string());
+            }
+        }
+    }
+    found
 }
 
 fn verify_browser_archive_integrity(
@@ -403,5 +435,43 @@ mod tests {
             .expect_err("missing md5 header should fail");
 
         assert!(err.to_string().contains("x-goog-hash md5"));
+    }
+
+    #[test]
+    fn etag_parses_one_quoted_string_and_rejects_loose_quotes() {
+        assert_eq!(parse_etag("\"etag-value\"").as_deref(), Some("etag-value"));
+        assert_eq!(
+            parse_etag("W/\"weak-tag\"").as_deref(),
+            Some("weak-tag")
+        );
+        assert_eq!(
+            parse_etag("\"quote\\\"inside\"").as_deref(),
+            Some("quote\"inside")
+        );
+        assert_eq!(parse_etag("etag-value"), None);
+        assert_eq!(parse_etag("\"a\"\"b\""), None);
+        assert_eq!(parse_etag("\"only-leading"), None);
+        assert_eq!(parse_etag(""), None);
+    }
+
+    #[test]
+    fn goog_hash_selects_md5_by_key_not_substring() {
+        assert_eq!(
+            goog_hash_value("crc32c=AAAAAA==,md5=abc123==", "md5").as_deref(),
+            Some("abc123==")
+        );
+        assert_eq!(
+            goog_hash_value("crc32c=AAAAAA==, md5 = abc123== ", "md5").as_deref(),
+            Some("abc123==")
+        );
+        assert_eq!(goog_hash_value("notmd5=abc123==", "md5"), None);
+        assert_eq!(goog_hash_value("md5-prefix=abc123==", "md5"), None);
+        assert_eq!(goog_hash_value("md5abc=abc123==", "md5"), None);
+        assert_eq!(goog_hash_value("crc32c=AAAAAA==", "md5"), None);
+        assert_eq!(goog_hash_value("not,a=pair", "md5"), None);
+        assert_eq!(
+            goog_hash_value("garbage,md5=abc123==", "md5").as_deref(),
+            Some("abc123==")
+        );
     }
 }

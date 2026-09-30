@@ -1205,57 +1205,130 @@ fn sanitize_attachment_extension(extension: &str) -> String {
 }
 
 fn decode_attachment_data_url(data_url: &str) -> std::result::Result<Vec<u8>, String> {
-    let trimmed = data_url.trim();
-    let payload = if let Some(rest) = trimmed.strip_prefix("data:") {
-        let (metadata, payload) = rest
-            .split_once(',')
-            .ok_or_else(|| "invalid attachment data URL".to_string())?;
-        if !metadata
-            .split(';')
-            .any(|part| part.eq_ignore_ascii_case("base64"))
-        {
-            return Err("attachment data URL must be base64 encoded".to_string());
-        }
-        payload
-    } else {
-        trimmed
-    };
-
-    base64::engine::general_purpose::STANDARD
-        .decode(payload)
-        .map_err(|err| format!("invalid base64 attachment: {err}"))
+    let parsed = parse_data_url(data_url).ok_or_else(|| "invalid attachment data URL".to_string())?;
+    decode_parsed_data_url_payload(&parsed, "invalid base64 attachment", false)
 }
 
 fn decode_image_data_url(
     data_url: &str,
     expected_media_type: &str,
 ) -> std::result::Result<Vec<u8>, String> {
-    let trimmed = data_url.trim();
-    let payload = if let Some(rest) = trimmed.strip_prefix("data:") {
-        let (metadata, payload) = rest
-            .split_once(',')
-            .ok_or_else(|| "invalid image data URL".to_string())?;
-        let mut metadata_parts = metadata.split(';');
-        let data_media_type = metadata_parts
-            .next()
-            .and_then(normalize_dashboard_image_media_type)
-            .ok_or_else(|| "unsupported image data URL media type".to_string())?;
-        if data_media_type != expected_media_type {
-            return Err(
-                "image data URL media type does not match attachment media type".to_string(),
-            );
-        }
-        if !metadata_parts.any(|part| part.eq_ignore_ascii_case("base64")) {
-            return Err("image data URL must be base64 encoded".to_string());
-        }
-        payload
-    } else {
-        trimmed
-    };
+    let parsed = parse_data_url(data_url).ok_or_else(|| "invalid image data URL".to_string())?;
+    if parsed.is_bare_payload {
+        return decode_parsed_data_url_payload(&parsed, "invalid base64 image attachment", false);
+    }
+    let data_media_type = normalize_dashboard_image_media_type(parsed.media_type)
+        .ok_or_else(|| "unsupported image data URL media type".to_string())?;
+    if data_media_type != expected_media_type {
+        return Err(
+            "image data URL media type does not match attachment media type".to_string(),
+        );
+    }
+    decode_parsed_data_url_payload(&parsed, "invalid base64 image attachment", false)
+}
 
+struct ParsedDataUrl<'a> {
+    media_type: &'a str,
+    parameters: Vec<(&'a str, &'a str)>,
+    base64: bool,
+    payload: &'a str,
+    /// Input had no `data:` scheme, so the whole string is a raw base64 payload.
+    is_bare_payload: bool,
+}
+
+/// Parse a data URL into media type, parameters, the base64 flag, and payload.
+///
+/// A string without a `data:` prefix is treated as a bare base64 payload so
+/// existing attachment callers keep accepting the inputs they already do.
+/// Percent-decoding is only applied for non-base64 payloads; current callers
+/// require base64 and therefore decode the payload as base64 instead.
+fn parse_data_url(input: &str) -> Option<ParsedDataUrl<'_>> {
+    let trimmed = input.trim();
+    let Some(rest) = trimmed.strip_prefix("data:") else {
+        return Some(ParsedDataUrl {
+            media_type: "",
+            parameters: Vec::new(),
+            base64: true,
+            payload: trimmed,
+            is_bare_payload: true,
+        });
+    };
+    let (metadata, payload) = rest.split_once(',')?;
+    let mut parts = metadata.split(';');
+    let media_type = parts.next().unwrap_or("");
+    let mut parameters = Vec::new();
+    let mut base64 = false;
+    for part in parts {
+        if part.eq_ignore_ascii_case("base64") {
+            base64 = true;
+            continue;
+        }
+        let (name, value) = part.split_once('=').unwrap_or((part, ""));
+        parameters.push((name, value));
+    }
+    Some(ParsedDataUrl {
+        media_type,
+        parameters,
+        base64,
+        payload,
+        is_bare_payload: false,
+    })
+}
+/// Decode a parsed data URL into bytes.
+///
+/// Bare payloads and base64 data URLs are base64-decoded, matching the inputs
+/// existing attachment callers already accept. A non-base64 data URL is
+/// percent-decoded only when `decode_non_base64` is set; otherwise it is rejected.
+fn decode_parsed_data_url_payload(
+    parsed: &ParsedDataUrl<'_>,
+    base64_error_prefix: &str,
+    decode_non_base64: bool,
+) -> std::result::Result<Vec<u8>, String> {
+    if parsed.is_bare_payload || parsed.base64 {
+        return decode_base64_payload(parsed.payload, base64_error_prefix);
+    }
+    if !decode_non_base64 {
+        return Err("data URL must be base64 encoded".to_string());
+    }
+    percent_decode_data_url_payload(parsed.payload)
+}
+fn decode_base64_payload(payload: &str, error_prefix: &str) -> std::result::Result<Vec<u8>, String> {
     base64::engine::general_purpose::STANDARD
         .decode(payload)
-        .map_err(|err| format!("invalid base64 image attachment: {err}"))
+        .map_err(|err| format!("{error_prefix}: {err}"))
+}
+
+/// Percent-decode a non-base64 data-URL payload into bytes.
+fn percent_decode_data_url_payload(payload: &str) -> std::result::Result<Vec<u8>, String> {
+    let mut bytes = Vec::with_capacity(payload.len());
+    let input = payload.as_bytes();
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == b'%' {
+            if index + 2 >= input.len() {
+                return Err("invalid percent-encoding in data URL payload".to_string());
+            }
+            let hi = hex_nibble(input[index + 1])
+                .ok_or_else(|| "invalid percent-encoding in data URL payload".to_string())?;
+            let lo = hex_nibble(input[index + 2])
+                .ok_or_else(|| "invalid percent-encoding in data URL payload".to_string())?;
+            bytes.push((hi << 4) | lo);
+            index += 3;
+            continue;
+        }
+        bytes.push(input[index]);
+        index += 1;
+    }
+    Ok(bytes)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn normalize_dashboard_image_media_type(media_type: &str) -> Option<String> {
@@ -2601,10 +2674,21 @@ async fn open_path_handler(
 /// Normalize a local file target before handing it to the system opener.
 /// `file://` URLs are unwrapped, and relative paths are resolved against the
 /// daemon working directory so the opener always receives a usable target.
+///
+/// Non-file schemes and remote file hosts are rejected by returning the original
+/// target unchanged so the opener does not treat them as local paths. Empty
+/// hosts and `localhost` are accepted. Percent-encoding and Windows drive
+/// letters are decoded through `url::Url`.
 fn resolve_local_open_target(target: &str) -> String {
     let trimmed = target.trim();
-    if let Some(rest) = trimmed.strip_prefix("file://") {
-        return unwrap_file_url_path(rest);
+    if let Ok(parsed) = url::Url::parse(trimmed) {
+        if parsed.scheme() == "file" {
+            if let Some(path) = file_url_to_local_path(trimmed) {
+                return path;
+            }
+        } else if !parsed.scheme().is_empty() && parsed.has_host() {
+            return trimmed.to_string();
+        }
     }
     if is_absolute_local_path(trimmed) {
         return trimmed.to_string();
@@ -2615,19 +2699,44 @@ fn resolve_local_open_target(target: &str) -> String {
     }
 }
 
-fn unwrap_file_url_path(rest: &str) -> String {
-    #[cfg(windows)]
-    {
-        if is_windows_drive_path(rest) {
-            return rest.to_string();
-        }
-        if let Some(stripped) = rest.strip_prefix('/')
-            && is_windows_drive_path(stripped)
-        {
-            return stripped.to_string();
-        }
+fn file_url_to_local_path(target: &str) -> Option<String> {
+    let parsed = url::Url::parse(target).ok()?;
+    if parsed.scheme() != "file" {
+        return None;
     }
-    rest.to_string()
+    match parsed.host_str() {
+        None | Some("") | Some("localhost") => {}
+        Some(_) => return None,
+    }
+    if let Ok(path) = parsed.to_file_path() {
+        return Some(path.to_string_lossy().to_string());
+    }
+    // `url` rejects non-drive absolute paths on Windows (`file:///tmp/a`).
+    // Keep the percent-decoded POSIX path so existing callers still unwrap them.
+    let path = parsed.path();
+    if path.is_empty() {
+        return None;
+    }
+    Some(percent_decode_file_url_path(path))
+}
+
+fn percent_decode_file_url_path(path: &str) -> String {
+    let mut bytes = Vec::with_capacity(path.len());
+    let input = path.as_bytes();
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == b'%' && index + 2 < input.len() {
+            if let (Some(hi), Some(lo)) = (hex_nibble(input[index + 1]), hex_nibble(input[index + 2]))
+            {
+                bytes.push((hi << 4) | lo);
+                index += 3;
+                continue;
+            }
+        }
+        bytes.push(input[index]);
+        index += 1;
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| path.to_string())
 }
 
 fn is_absolute_local_path(value: &str) -> bool {
@@ -5408,7 +5517,7 @@ mod tests {
         {
             assert_eq!(
                 resolve_local_open_target("file:///C:/Users/me/a.md"),
-                "C:/Users/me/a.md"
+                "C:\\Users\\me\\a.md"
             );
             assert_eq!(
                 resolve_local_open_target("C:\\Users\\me\\a.md"),
@@ -5427,6 +5536,83 @@ mod tests {
         let cwd = std::env::current_dir().expect("current dir");
         let relative = resolve_local_open_target("./notes.md");
         assert_eq!(PathBuf::from(relative), cwd.join("./notes.md"));
+    }
+
+    #[test]
+    fn data_url_parser_splits_media_type_parameters_base64_and_payload() {
+        let parsed = parse_data_url("data:text/plain;charset=utf-8;base64,aGVsbG8=").expect("data url");
+        assert_eq!(parsed.media_type, "text/plain");
+        assert_eq!(parsed.parameters, vec![("charset", "utf-8")]);
+        assert!(parsed.base64);
+        assert_eq!(parsed.payload, "aGVsbG8=");
+        assert!(!parsed.is_bare_payload);
+        assert_eq!(
+            decode_attachment_data_url("data:application/octet-stream;base64,aGVsbG8=").expect("bytes"),
+            b"hello"
+        );
+        assert_eq!(decode_attachment_data_url("aGVsbG8=").expect("bare"), b"hello");
+        assert!(decode_attachment_data_url("data:text/plain,hello").is_err());
+
+        let image = parse_data_url("data:image/png;base64,aGVsbG8=").expect("image");
+        assert_eq!(image.media_type, "image/png");
+        assert!(image.parameters.is_empty());
+        assert!(image.base64);
+        assert_eq!(
+            decode_image_data_url("data:image/png;base64,aGVsbG8=", "image/png").expect("png"),
+            b"hello"
+        );
+        assert!(decode_image_data_url("data:image/gif;base64,aGVsbG8=", "image/png").is_err());
+
+        let plain = parse_data_url("data:text/plain,hello%20world").expect("plain");
+        assert!(!plain.base64);
+        assert_eq!(
+            percent_decode_data_url_payload(plain.payload).expect("decoded"),
+            b"hello world"
+        );
+        assert_eq!(
+            decode_parsed_data_url_payload(&plain, "unused", true).expect("opt-in"),
+            b"hello world"
+        );
+        assert!(decode_parsed_data_url_payload(&plain, "unused", false).is_err());
+        assert!(parse_data_url("data:text/plain").is_none());
+    }
+
+    #[test]
+    fn file_url_parser_handles_localhost_encoding_and_rejects_remote_hosts() {
+        assert_eq!(
+            file_url_to_local_path("file:///tmp/a%20b.md").as_deref(),
+            Some("/tmp/a b.md")
+        );
+        assert_eq!(
+            file_url_to_local_path("file://localhost/tmp/notes.md").as_deref(),
+            Some("/tmp/notes.md")
+        );
+        assert!(file_url_to_local_path("file://remote.example/tmp/notes.md").is_none());
+        assert!(file_url_to_local_path("https://example.com/tmp/notes.md").is_none());
+        assert_eq!(
+            resolve_local_open_target("https://example.com/tmp/notes.md"),
+            "https://example.com/tmp/notes.md"
+        );
+
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                file_url_to_local_path("file:///C:/Users/me/a%20b.md").as_deref(),
+                Some("C:\\Users\\me\\a b.md")
+            );
+            assert_eq!(
+                file_url_to_local_path("file://localhost/C:/Users/me/a.md").as_deref(),
+                Some("C:\\Users\\me\\a.md")
+            );
+        }
+
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                file_url_to_local_path("file:///C:/Users/me/a.md").as_deref(),
+                Some("/C:/Users/me/a.md")
+            );
+        }
     }
 
     #[test]

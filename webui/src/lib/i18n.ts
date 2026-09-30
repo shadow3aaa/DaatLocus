@@ -547,7 +547,7 @@ const resources = {
       settings: {
         pageAria: "Settings",
         hotReloadNote:
-          "Model, provider, sandbox, telegram, judge and sleep settings apply immediately. The daemon port change applies after a daemon restart.",
+          "Model, provider, sandbox, telegram, judge, sleep, and SCOPE settings apply immediately. The daemon port change applies after a daemon restart.",
         unableToLoad: "Unable to load settings",
         configRestored: "Configuration file restored",
         unableToSave: "Unable to save settings",
@@ -584,6 +584,15 @@ const resources = {
           enableDescription:
             "When enabled, background self-improvement runs automatically while idle or when the error backlog grows. Manual runs from the status page stay available either way.",
           enableAria: "Enable automatic sleep self-improvement",
+        },
+        scope: {
+          title: "SCOPE",
+          description:
+            "Control whether opened coding projects start a language server. Tree-sitter search and edits stay available either way.",
+          lspLabel: "Enable language servers",
+          lspDescription:
+            "Language servers improve cross-file reference review, but each process can use a large amount of memory. Turn this off before launching many subagents. The next coding operation starts or stops the server for an already open project.",
+          lspAria: "Enable SCOPE language servers",
         },
         modelAccess: {
           providerDescription:
@@ -1211,7 +1220,7 @@ const resources = {
       settings: {
         pageAria: "设置",
         hotReloadNote:
-          "模型、提供商、沙箱、Telegram、judge 与 sleep 设置保存后即时生效；daemon 端口变更需重启 daemon 后生效。",
+          "模型、提供商、沙箱、Telegram、judge、sleep 与 SCOPE 设置保存后即时生效；daemon 端口变更需重启 daemon 后生效。",
         unableToLoad: "无法加载设置",
         configRestored: "配置文件已恢复",
         unableToSave: "无法保存设置",
@@ -1246,6 +1255,15 @@ const resources = {
           enableDescription:
             "开启后，后台自我改进会在空闲或错误积压增长时自动运行；无论开关状态，状态页的手动运行始终可用。",
           enableAria: "启用自动休眠自我改进",
+        },
+        scope: {
+          title: "SCOPE",
+          description:
+            "控制已打开的编程项目是否启动语言服务器。无论开关状态，tree-sitter 搜索和编辑都仍可用。",
+          lspLabel: "启用语言服务器",
+          lspDescription:
+            "语言服务器能改善跨文件引用审查，但每个进程都可能占用大量内存。启动大量子代理前可以关闭。下一次编程操作会为已打开的项目启动或停止语言服务器。",
+          lspAria: "启用 SCOPE 语言服务器",
         },
         modelAccess: {
           providerDescription: "调校代理模型能力背后的安全访问层。",

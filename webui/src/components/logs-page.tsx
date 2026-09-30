@@ -699,13 +699,124 @@ function emptyStateMessage({
   return null;
 }
 
+type ParsedLogLine = {
+  timestamp: string;
+  level: string;
+  target: string | null;
+  message: string;
+};
+
+const LOG_LEVELS = ["TRACE", "DEBUG", "INFO", "WARN", "WARNING", "ERROR"] as const;
+
+function isLogLevel(value: string) {
+  return LOG_LEVELS.includes(value.toUpperCase() as (typeof LOG_LEVELS)[number]);
+}
+
+/**
+ * Parse one log line into timestamp, level, target, and message.
+ *
+ * Python (`ts - LEVEL - target - message`) is tried first, then tracing
+ * (`ts LEVEL [ThreadId(n)] [target:] message`). A line that matches neither
+ * shape is not forced into those fields.
+ */
+function parseStructuredLogLine(raw: string): ParsedLogLine | null {
+  return parsePythonLogLine(raw) ?? parseTracingLogLine(raw);
+}
+
+function parsePythonLogLine(raw: string): ParsedLogLine | null {
+  const timestamp = readTimestamp(raw, "python");
+  if (!timestamp) {
+    return null;
+  }
+  let cursor = skipSpace(raw, timestamp.end);
+  if (raw.slice(cursor, cursor + 1) !== "-") {
+    return null;
+  }
+  cursor = skipSpace(raw, cursor + 1);
+  const level = readLevel(raw, cursor);
+  if (!level) {
+    return null;
+  }
+  cursor = skipSpace(raw, level.end);
+  if (raw.slice(cursor, cursor + 1) !== "-") {
+    return null;
+  }
+  cursor = skipSpace(raw, cursor + 1);
+  const separator = raw.indexOf(" - ", cursor);
+  if (separator < 0) {
+    return null;
+  }
+  const target = raw.slice(cursor, separator).trim();
+  if (!target) {
+    return null;
+  }
+  return {
+    timestamp: timestamp.value,
+    level: level.value,
+    target,
+    message: raw.slice(separator + 3),
+  };
+}
+
+function parseTracingLogLine(raw: string): ParsedLogLine | null {
+  const timestamp = readTimestamp(raw, "tracing");
+  if (!timestamp) {
+    return null;
+  }
+  let cursor = skipSpace(raw, timestamp.end);
+  const level = readLevel(raw, cursor);
+  if (!level) {
+    return null;
+  }
+  cursor = skipSpace(raw, level.end);
+  const thread = raw.slice(cursor).match(/^ThreadId\([^)]*\)/);
+  if (thread) {
+    cursor = skipSpace(raw, cursor + thread[0].length);
+  }
+  const rest = raw.slice(cursor);
+  const targetMatch = rest.match(/^([^:\s][^:]*):\s*([\s\S]*)$/);
+  return {
+    timestamp: timestamp.value,
+    level: level.value,
+    target: targetMatch ? targetMatch[1].trim() || null : null,
+    message: targetMatch ? targetMatch[2] : rest,
+  };
+}
+
+function readTimestamp(raw: string, kind: "python" | "tracing") {
+  const match =
+    kind === "python"
+      ? raw.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[,.]\d+)?)/)
+      : raw.match(/^(\d{4}-\d{2}-\d{2}[T ]\S+)/);
+  if (!match) {
+    return null;
+  }
+  return { value: match[1], end: match[1].length };
+}
+
+function readLevel(raw: string, start: number) {
+  const match = raw.slice(start).match(/^([A-Za-z]+)/);
+  if (!match || !isLogLevel(match[1])) {
+    return null;
+  }
+  return { value: match[1], end: start + match[1].length };
+}
+
+function skipSpace(raw: string, start: number) {
+  let cursor = start;
+  while (cursor < raw.length && /\s/.test(raw[cursor])) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
 function parseLogEntry(line: LogLine, blankMessage: string): LogEntry {
   const raw = line.text.trimEnd();
   const fallback: LogEntry = {
     id: line.id,
     raw,
     timestamp: null,
-    level: inferLevel(raw),
+    level: null,
     target: null,
     message: raw || blankMessage,
   };
@@ -714,35 +825,18 @@ function parseLogEntry(line: LogLine, blankMessage: string): LogEntry {
     return fallback;
   }
 
-  const pythonMatch = raw.match(
-    /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[,.]\d+)?)\s+-\s+([A-Z]+)\s+-\s+(.+?)\s+-\s+(.*)$/,
-  );
-  if (pythonMatch) {
-    return {
-      id: line.id,
-      raw,
-      timestamp: pythonMatch[1],
-      level: normalizeLevel(pythonMatch[2]),
-      target: pythonMatch[3],
-      message: pythonMatch[4],
-    };
+  const parsed = parseStructuredLogLine(raw);
+  if (!parsed) {
+    return fallback;
   }
-
-  const tracingMatch = raw.match(
-    /^(\d{4}-\d{2}-\d{2}[T ][^\s]+)\s+([A-Z]+)\s+(?:ThreadId\([^)]+\)\s+)?(?:([^:]+):\s*)?(.*)$/,
-  );
-  if (tracingMatch) {
-    return {
-      id: line.id,
-      raw,
-      timestamp: tracingMatch[1],
-      level: normalizeLevel(tracingMatch[2]),
-      target: tracingMatch[3] ?? null,
-      message: tracingMatch[4] || raw,
-    };
-  }
-
-  return fallback;
+  return {
+    id: line.id,
+    raw,
+    timestamp: parsed.timestamp,
+    level: normalizeLevel(parsed.level),
+    target: parsed.target,
+    message: parsed.message || raw,
+  };
 }
 
 type LogHighlightSpan = {
@@ -783,43 +877,33 @@ export function logEntryHighlightSpans(entry: LogEntry): LogHighlightSpan[] {
     return index === -1 ? searchFrom : index + needle.length;
   };
 
-  const pythonMatch = raw.match(
-    /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[,.]\d+)?)\s+-\s+([A-Z]+)\s+-\s+(.+?)\s+-\s+(.*)$/,
-  );
-  if (pythonMatch) {
-    let searchFrom = pushSpan(pythonMatch[1], "log-ts");
-    const levelClass = logLevelHighlightClass(pythonMatch[2]);
+  const parsed = parseStructuredLogLine(raw);
+  if (parsed) {
+    let searchFrom = pushSpan(parsed.timestamp, "log-ts");
+    const levelClass = logLevelHighlightClass(parsed.level);
     searchFrom = levelClass
-      ? pushSpan(pythonMatch[2], levelClass, searchFrom)
-      : pushSpan(pythonMatch[2], "log-ts", searchFrom);
-    pushSpan(pythonMatch[3], "log-target", searchFrom);
-    return spans;
-  }
-
-  const tracingMatch = raw.match(
-    /^(\d{4}-\d{2}-\d{2}[T ][^\s]+)\s+([A-Z]+)\s+(?:ThreadId\([^)]+\)\s+)?(?:([^:]+):\s*)?(.*)$/,
-  );
-  if (tracingMatch) {
-    let searchFrom = pushSpan(tracingMatch[1], "log-ts");
-    const levelClass = logLevelHighlightClass(tracingMatch[2]);
-    searchFrom = levelClass
-      ? pushSpan(tracingMatch[2], levelClass, searchFrom)
-      : pushSpan(tracingMatch[2], "log-ts", searchFrom);
-    if (tracingMatch[3]) {
-      pushSpan(tracingMatch[3], "log-target", searchFrom);
+      ? pushSpan(parsed.level, levelClass, searchFrom)
+      : pushSpan(parsed.level, "log-ts", searchFrom);
+    if (parsed.target) {
+      pushSpan(parsed.target, "log-target", searchFrom);
     }
     return spans;
   }
 
-  const inferred = logLevelHighlightClass(inferLevel(raw));
-  if (inferred) {
-    pushSpan(inferred.toUpperCase(), inferred);
+  const level = inferLevel(raw);
+  const inferred = logLevelHighlightClass(level);
+  if (inferred && level) {
+    pushSpan(displayLevel(level), inferred);
   }
   return spans;
 }
 
 function inferLevel(text: string): string | null {
-  const match = text.match(/\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR)\b/i);
+  const parsed = parseStructuredLogLine(text);
+  if (parsed) {
+    return normalizeLevel(parsed.level);
+  }
+  const match = text.match(/\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR)\b/);
   return match ? normalizeLevel(match[1]) : null;
 }
 

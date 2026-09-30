@@ -6,7 +6,13 @@
 //! surface from the failure counter. State lives in [`ShareRegistry`], which is
 //! cheap to clone because every field is an `Arc`.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     Json,
@@ -858,6 +864,43 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 
 /// `v1.<share_id>.<exp_ms>.<hex_hmac>`; the HMAC covers share id, scope hash
 /// and expiry so a tampered cookie fails closed.
+struct ShareCookie {
+    version: String,
+    share_id: String,
+    expires_at_ms: i64,
+    mac: String,
+}
+
+impl FromStr for ShareCookie {
+    type Err = ();
+
+    fn from_str(cookie: &str) -> Result<Self, Self::Err> {
+        let mut parts = cookie.split('.');
+        let version = parts.next().ok_or(())?;
+        let share_id = parts.next().ok_or(())?;
+        let expires = parts.next().ok_or(())?;
+        let mac = parts.next().ok_or(())?;
+        if parts.next().is_some() {
+            return Err(());
+        }
+        if version.is_empty()
+            || share_id.is_empty()
+            || expires.is_empty()
+            || mac.is_empty()
+            || version != "v1"
+        {
+            return Err(());
+        }
+        let expires_at_ms = expires.parse::<i64>().map_err(|_| ())?;
+        Ok(Self {
+            version: version.to_string(),
+            share_id: share_id.to_string(),
+            expires_at_ms,
+            mac: mac.to_string(),
+        })
+    }
+}
+
 fn sign_cookie(
     secret: &[u8; 32],
     share_id: &str,
@@ -876,25 +919,13 @@ fn sign_cookie(
 }
 
 fn verify_cookie(cookie: &str, record: &ShareRecord, now_ms: i64) -> bool {
-    let mut parts = cookie.split('.');
-    let version = parts.next();
-    let share_id = parts.next();
-    let expires = parts.next();
-    let mac = parts.next();
-    if parts.next().is_some() {
-        return false;
-    }
-    let (Some("v1"), Some(share_id), Some(expires), Some(mac)) = (version, share_id, expires, mac)
-    else {
+    let Ok(parsed) = ShareCookie::from_str(cookie) else {
         return false;
     };
-    if share_id != record.share_id {
+    if parsed.version != "v1" || parsed.share_id != record.share_id {
         return false;
     }
-    let Ok(expires_at_ms) = expires.parse::<i64>() else {
-        return false;
-    };
-    if expires_at_ms != record.expires_at_ms || now_ms >= expires_at_ms {
+    if parsed.expires_at_ms != record.expires_at_ms || now_ms >= parsed.expires_at_ms {
         return false;
     }
     let Some(expected) = sign_cookie(
@@ -905,8 +936,10 @@ fn verify_cookie(cookie: &str, record: &ShareRecord, now_ms: i64) -> bool {
     ) else {
         return false;
     };
-    let expected_mac = expected.rsplit('.').next().unwrap_or("");
-    constant_time_str_eq(expected_mac, mac)
+    let Ok(expected_cookie) = ShareCookie::from_str(&expected) else {
+        return false;
+    };
+    constant_time_str_eq(&expected_cookie.mac, &parsed.mac)
 }
 
 fn constant_time_eq(left: &[u8; 2], right: &Option<[u8; 2]>) -> bool {
@@ -967,11 +1000,22 @@ fn share_cookie_value(headers: &HeaderMap) -> Option<String> {
         let Ok(raw) = header.to_str() else {
             continue;
         };
-        for pair in raw.split(';') {
-            let pair = pair.trim();
-            if let Some(value) = pair.strip_prefix(&format!("{SHARE_COOKIE_NAME}=")) {
-                return Some(value.to_string());
-            }
+        if let Some(value) = cookie_pair_value(raw, SHARE_COOKIE_NAME) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Split a Cookie header into name/value pairs. Names are matched exactly after
+/// trimming, so a cookie whose name merely contains the target is ignored.
+fn cookie_pair_value(header: &str, name: &str) -> Option<String> {
+    for pair in header.split(';') {
+        let Some((cookie_name, value)) = pair.trim().split_once('=') else {
+            continue;
+        };
+        if cookie_name.trim() == name {
+            return Some(value.trim().to_string());
         }
     }
     None
@@ -1166,6 +1210,53 @@ mod tests {
         let mut other = record.clone();
         other.cookie_secret = [8u8; 32];
         assert!(!verify_cookie(&cookie, &other, 0));
+    }
+
+    #[test]
+    fn share_cookie_from_str_rejects_empty_segments_and_extra_dots() {
+        let secret = [7u8; 32];
+        let scope = ShareScope::Sessions(Vec::new());
+        let cookie = sign_cookie(&secret, "share-1", &scope.hash(), 1_000).expect("sign");
+        let parsed = ShareCookie::from_str(&cookie).expect("parse");
+        assert_eq!(parsed.version, "v1");
+        assert_eq!(parsed.share_id, "share-1");
+        assert_eq!(parsed.expires_at_ms, 1_000);
+        assert!(!parsed.mac.is_empty());
+        assert!(cookie.ends_with(&parsed.mac));
+
+        assert!(ShareCookie::from_str("v1..1000.abcd").is_err());
+        assert!(ShareCookie::from_str("v1.share-1..abcd").is_err());
+        assert!(ShareCookie::from_str("v1.share-1.1000.").is_err());
+        assert!(ShareCookie::from_str("v1.share-1.1000.abcd.extra").is_err());
+        assert!(ShareCookie::from_str("v2.share-1.1000.abcd").is_err());
+        assert!(ShareCookie::from_str("not-a-cookie").is_err());
+    }
+
+    #[test]
+    fn cookie_pair_parser_matches_exact_name_not_a_substring() {
+        assert_eq!(
+            cookie_pair_value("theme=dark; daat_share=v1.share.1.ab", SHARE_COOKIE_NAME).as_deref(),
+            Some("v1.share.1.ab")
+        );
+        assert_eq!(
+            cookie_pair_value(" not_daat_share=nope ; daat_share = kept ", SHARE_COOKIE_NAME)
+                .as_deref(),
+            Some("kept")
+        );
+        assert_eq!(
+            cookie_pair_value("xdaat_share=nope; other=1", SHARE_COOKIE_NAME),
+            None
+        );
+        assert_eq!(cookie_pair_value("daat_share", SHARE_COOKIE_NAME), None);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "not_daat_share=substring; daat_share=real-value"
+                .parse()
+                .expect("cookie header"),
+        );
+        assert_eq!(share_cookie_value(&headers).as_deref(), Some("real-value"));
     }
 
     #[test]

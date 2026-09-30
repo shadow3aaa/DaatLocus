@@ -47,6 +47,7 @@ pub(super) fn command_panel_for_input(
     context: &DashboardCommandContext<'_>,
 ) -> Option<CommandPanel> {
     let parts = dashboard_command_parts(input)?;
+    let parts = command_parts_ref(&parts);
     match parts.as_slice() {
         ["status"] => Some(detail_panel(
             "STATUS",
@@ -86,6 +87,7 @@ pub(super) fn dashboard_action_for_input(
     let Some(parts) = dashboard_command_parts(input) else {
         return Ok(None);
     };
+    let parts = command_parts_ref(&parts);
     let invocation = match parts.as_slice() {
         ["clear"] => DashboardActionInvocation {
             title: "CLEAR".to_string(),
@@ -170,9 +172,10 @@ pub fn execute_control_command(
     }
     let input = format!("/{command}");
     let context = DashboardCommandContext { state };
-    let Some(parts) = dashboard_command_parts(&input) else {
+    let Some(owned_parts) = dashboard_command_parts(&input) else {
         return "empty command".to_string();
     };
+    let parts = command_parts_ref(&owned_parts);
 
     if matches!(parts.as_slice(), ["quit" | "q" | "exit"]) {
         return "quit command is only available in the local dashboard".to_string();
@@ -516,10 +519,7 @@ fn skill_detail_panel(state: &DashboardState, target: &str) -> Option<CommandPan
 }
 
 pub(super) fn is_clear_command_input(input: &str) -> bool {
-    matches!(
-        dashboard_command_parts(input).as_deref(),
-        Some(["clear", ..])
-    )
+    dashboard_command_parts(input).is_some_and(|parts| parts.first().is_some_and(|verb| verb == "clear"))
 }
 
 fn debug_subcommand_is_read_only(subcommand: &str) -> bool {
@@ -534,10 +534,108 @@ fn debug_subcommand_is_read_only(subcommand: &str) -> bool {
     )
 }
 
-pub(super) fn dashboard_command_parts(input: &str) -> Option<Vec<&str>> {
+/// Tokenize POSIX-like shell words: single quotes, double quotes, and backslash escapes.
+/// Returns `None` when a quote or escape is left open.
+pub(crate) fn tokenize_shell_words(input: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
+                in_word = true;
+            }
+            Some('"') => {
+                if ch == '\\' {
+                    match chars.next() {
+                        Some(escaped @ ('"' | '\\' | '$' | '`')) => current.push(escaped),
+                        Some('\n') => {}
+                        Some(other) => {
+                            current.push('\\');
+                            current.push(other);
+                        }
+                        None => return None,
+                    }
+                    in_word = true;
+                } else if ch == '"' {
+                    quote = None;
+                    in_word = true;
+                } else {
+                    current.push(ch);
+                    in_word = true;
+                }
+            }
+            None if ch == '\\' => {
+                match chars.next() {
+                    Some('\n') => {}
+                    Some(escaped) => {
+                        current.push(escaped);
+                        in_word = true;
+                    }
+                    None => return None,
+                }
+            }
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                in_word = true;
+            }
+            None if ch.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            None => {
+                current.push(ch);
+                in_word = true;
+            }
+            Some(_) => unreachable!(),
+        }
+    }
+
+    if quote.is_some() {
+        return None;
+    }
+    if in_word {
+        words.push(current);
+    }
+    Some(words)
+}
+
+/// Slash-command verb plus arguments. Quoted and escaped words stay intact.
+/// Returns `None` when the body is empty or a quote/escape is left open.
+pub(crate) fn dashboard_command_parts(input: &str) -> Option<Vec<String>> {
     let body = dashboard_command_body(input)?;
-    let parts = body.split_whitespace().collect::<Vec<_>>();
+    let parts = tokenize_shell_words(body)?;
     (!parts.is_empty()).then_some(parts)
+}
+/// Slash-command verb plus arguments borrowed from `input` when no word needs
+/// unquoting. Quoted input returns `None`; callers that must keep quotes use
+/// [`dashboard_command_parts`].
+pub(super) fn dashboard_command_parts_ref(input: &str) -> Option<Vec<&str>> {
+    let body = dashboard_command_body(input)?;
+    let owned = tokenize_shell_words(body)?;
+    let borrowed = body.split_whitespace().collect::<Vec<_>>();
+    if !owned.is_empty()
+        && borrowed.len() == owned.len()
+        && borrowed.iter().zip(&owned).all(|(raw, word)| *raw == word)
+    {
+        Some(borrowed)
+    } else {
+        None
+    }
+}
+
+fn command_parts_ref(parts: &[String]) -> Vec<&str> {
+    parts.iter().map(String::as_str).collect()
 }
 
 pub(super) fn command_live_feedback(
@@ -549,7 +647,10 @@ pub(super) fn command_live_feedback(
     if trimmed.is_empty() {
         return None;
     }
-    let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+    let Some(owned_parts) = tokenize_shell_words(trimmed) else {
+        return None;
+    };
+    let parts = command_parts_ref(&owned_parts);
     let verb = parts.first().copied().unwrap_or_default();
     let command = dashboard_commands()
         .iter()
@@ -777,7 +878,8 @@ pub(super) fn command_blocks_submission(
 
 pub(super) fn unsupported_dashboard_command_feedback(input: &str) -> CommandFeedback {
     let command = dashboard_command_body(input)
-        .and_then(|body| body.split_whitespace().next())
+        .and_then(tokenize_shell_words)
+        .and_then(|parts| parts.into_iter().next())
         .unwrap_or_default();
     CommandFeedback {
         title: "COMMAND".to_string(),
@@ -839,14 +941,17 @@ fn matching_slash_commands(command_input: &str) -> Vec<CommandSuggestion> {
             })
             .collect::<Vec<_>>();
     }
-    let parts = trimmed.split_whitespace().collect::<Vec<_>>();
-    if parts.len() > 1 || command_input.ends_with(' ') {
+    let Some(parts) = tokenize_shell_words(trimmed) else {
+        return Vec::new();
+    };
+    if parts.len() > 1 || command_input.ends_with(|ch: char| ch.is_whitespace()) {
         return Vec::new();
     }
+    let verb = parts[0].as_str();
     dashboard_commands()
         .iter()
         .copied()
-        .filter(|command| command.primary_verb.starts_with(parts[0]))
+        .filter(|command| command.primary_verb.starts_with(verb))
         .map(|command| CommandSuggestion {
             display: command.primary_verb.to_string(),
             completion: format!("/{}", command.primary_verb),
@@ -930,9 +1035,10 @@ pub(super) fn adjusted_popup_scroll(
     }
 }
 
-pub(super) fn dashboard_parts_open_panel(parts: &[&str]) -> bool {
+pub(super) fn dashboard_parts_open_panel(parts: &[impl AsRef<str>]) -> bool {
+    let parts = parts.iter().map(AsRef::as_ref).collect::<Vec<_>>();
     matches!(
-        parts,
+        parts.as_slice(),
         ["status" | "debug" | "sleep" | "skills"]
             | [
                 "debug",
@@ -946,13 +1052,14 @@ pub(super) fn dashboard_parts_open_panel(parts: &[&str]) -> bool {
             | ["sleep", "status"]
             | ["skills", "list" | "show"]
             | ["skills", "show", _]
-    ) || matches!(parts, [verb] if app_status_command_accepts(verb))
-        || matches!(parts, [verb, _] if app_status_command_accepts(verb))
+    ) || matches!(parts.as_slice(), [verb] if app_status_command_accepts(verb))
+        || matches!(parts.as_slice(), [verb, _] if app_status_command_accepts(verb))
 }
 
-pub(super) fn dashboard_parts_run_action(parts: &[&str]) -> bool {
+pub(super) fn dashboard_parts_run_action(parts: &[impl AsRef<str>]) -> bool {
+    let parts = parts.iter().map(AsRef::as_ref).collect::<Vec<_>>();
     matches!(
-        parts,
+        parts.as_slice(),
         ["clear" | "restart"]
             | ["sleep", "run"]
             | ["sleep", "auto" | "toggle"]
@@ -978,4 +1085,42 @@ mod tests {
         assert_eq!(ask_message_text("/asking a question"), None);
         assert_eq!(ask_message_text("hello"), None);
     }
+
+    #[test]
+    fn dashboard_command_parts_keep_quotes() {
+        assert_eq!(
+            super::dashboard_command_parts("/skills show 'my skill'").as_deref(),
+            Some(["skills".to_string(), "show".to_string(), "my skill".to_string()].as_slice())
+        );
+        assert_eq!(
+            super::dashboard_command_parts("/skills enable \"quoted name\"").as_deref(),
+            Some(
+                [
+                    "skills".to_string(),
+                    "enable".to_string(),
+                    "quoted name".to_string()
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            super::dashboard_command_parts("/asking now").as_deref(),
+            Some(["asking".to_string(), "now".to_string()].as_slice())
+        );
+        assert_eq!(super::ask_message_text("/asking now"), None);
+        assert_eq!(
+            super::tokenize_shell_words("echo 'a b' \"c d\" e\\ f").as_deref(),
+            Some(
+                [
+                    "echo".to_string(),
+                    "a b".to_string(),
+                    "c d".to_string(),
+                    "e f".to_string()
+                ]
+                .as_slice()
+            )
+        );
+        assert!(super::tokenize_shell_words("echo 'unterminated").is_none());
+    }
+
 }

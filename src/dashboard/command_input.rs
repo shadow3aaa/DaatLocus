@@ -69,6 +69,36 @@ fn display_line_height(display_width: usize, first_row_width: usize, wrap_width:
     }
 }
 
+/// One collapsed paste on the input state.
+///
+/// `display` is the visible text stored in the input (`[Pasted Content N chars]`).
+/// Expansion matches `id`, so an identical display typed by the user is not replaced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PastePlaceholder {
+    pub(super) id: String,
+    pub(super) display: String,
+    pub(super) body: String,
+}
+
+impl PastePlaceholder {
+    pub(super) fn new(
+        id: impl Into<String>,
+        display: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            display: display.into(),
+            body: body.into(),
+        }
+    }
+}
+
+/// Visible placeholder text. Input already stores `display`, so this is identity.
+pub(super) fn render_paste_placeholders(text: &str, _pending: &[PastePlaceholder]) -> String {
+    text.to_string()
+}
+
 /// Threshold above which pasted text gets a placeholder block instead of being inserted inline.
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 500;
 
@@ -78,48 +108,125 @@ const LARGE_PASTE_CHAR_THRESHOLD: usize = 500;
 /// - Pastes exceeding `LARGE_PASTE_CHAR_THRESHOLD` chars -> placeholder
 /// - Pastes containing newlines and > 10 chars -> placeholder
 /// - Otherwise -> insert inline as normal text
+///
 pub(super) fn handle_paste_placeholder(
     text: &str,
     input: &mut String,
     pending: &mut Vec<(String, String)>,
+) {
+    let mut placeholders = pending
+        .iter()
+        .enumerate()
+        .map(|(index, (display, body))| {
+            PastePlaceholder::new(format!("paste-{}", index + 1), display.clone(), body.clone())
+        })
+        .collect::<Vec<_>>();
+    handle_paste_placeholder_tokens(text, input, &mut placeholders);
+    pending.clear();
+    pending.extend(
+        placeholders
+            .into_iter()
+            .map(|placeholder| (placeholder.display, placeholder.body)),
+    );
+}
+
+fn handle_paste_placeholder_tokens(
+    text: &str,
+    input: &mut String,
+    pending: &mut Vec<PastePlaceholder>,
 ) {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     let char_count = normalized.chars().count();
     let is_multi_line = normalized.contains('\n');
 
     if char_count > LARGE_PASTE_CHAR_THRESHOLD || (char_count > 10 && is_multi_line) {
-        let base = format!("[Pasted Content {char_count} chars]");
-        let prefix = format!("{base} #");
-        let mut max_suffix: usize = 0;
-        for (ph, _) in pending.iter() {
-            if ph == &base {
-                max_suffix = max_suffix.max(1);
-            } else if let Some(suffix) = ph.strip_prefix(&prefix)
-                && let Ok(n) = suffix.parse::<usize>()
-            {
-                max_suffix = max_suffix.max(n);
-            }
-        }
-        let placeholder = if max_suffix == 0 {
-            base
-        } else {
-            format!("{base} #{max}", max = max_suffix + 1)
-        };
-        input.push_str(&placeholder);
-        pending.push((placeholder, normalized));
+        let placeholder = next_paste_placeholder(pending, char_count, normalized);
+        input.push_str(&placeholder.display);
+        pending.push(placeholder);
     } else {
         input.push_str(&normalized);
     }
 }
 
-/// Replace all `[Pasted Content N chars]` placeholders in `text` with their stored full text.
+fn next_paste_placeholder(
+    pending: &[PastePlaceholder],
+    char_count: usize,
+    body: String,
+) -> PastePlaceholder {
+    let base = format!("[Pasted Content {char_count} chars]");
+    let prefix = format!("{base} #");
+    let mut max_suffix: usize = 0;
+    for placeholder in pending {
+        if placeholder.display == base {
+            max_suffix = max_suffix.max(1);
+        } else if let Some(suffix) = placeholder.display.strip_prefix(&prefix)
+            && let Ok(n) = suffix.parse::<usize>()
+        {
+            max_suffix = max_suffix.max(n);
+        }
+    }
+    let display = if max_suffix == 0 {
+        base
+    } else {
+        format!("{base} #{max}", max = max_suffix + 1)
+    };
+    PastePlaceholder::new(format!("paste-{}", pending.len() + 1), display, body)
+}
+
 pub(super) fn expand_paste_placeholders(text: &str, pending: &[(String, String)]) -> String {
+    let placeholders = pending
+        .iter()
+        .enumerate()
+        .map(|(index, (display, body))| {
+            PastePlaceholder::new(format!("paste-{}", index + 1), display.clone(), body.clone())
+        })
+        .collect::<Vec<_>>();
+    expand_paste_placeholder_tokens(text, &placeholders)
+}
+
+fn expand_paste_placeholder_tokens(text: &str, pending: &[PastePlaceholder]) -> String {
     let mut result = text.to_string();
-    for (placeholder, full_text) in pending {
-        result = result.replace(placeholder, full_text);
+    let mut consumed = vec![false; pending.len()];
+    let mut cursor = 0usize;
+    while cursor < result.len() {
+        let Some((index, start)) = next_owned_placeholder(&result[cursor..], pending, &consumed)
+        else {
+            break;
+        };
+        let start = cursor + start;
+        let placeholder = &pending[index];
+        let end = start + placeholder.display.len();
+        result.replace_range(start..end, &placeholder.body);
+        consumed[index] = true;
+        cursor = start + placeholder.body.len();
     }
     result
 }
+
+fn next_owned_placeholder(
+    text: &str,
+    pending: &[PastePlaceholder],
+    consumed: &[bool],
+) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize)> = None;
+    for (index, placeholder) in pending.iter().enumerate() {
+        if consumed[index] {
+            continue;
+        }
+        let Some(start) = text.find(placeholder.display.as_str()) else {
+            continue;
+        };
+        let replace = match best {
+            Some((_, best_start)) => start < best_start,
+            None => true,
+        };
+        if replace {
+            best = Some((index, start));
+        }
+    }
+    best
+}
+
 
 /// Compute the visual row for a byte cursor position within the input text.
 /// Accounts for prompt/continuation prefixes and terminal wrapping.
@@ -376,4 +483,58 @@ fn split_display_prefix(text: &str, max_width: usize) -> (&str, &str) {
         }
     }
     (text, "")
+}
+
+#[cfg(test)]
+mod paste_placeholder_tests {
+    use super::{
+        expand_paste_placeholder_tokens, handle_paste_placeholder_tokens,
+        render_paste_placeholders,
+    };
+
+    #[test]
+    fn paste_placeholders_render_display_text_and_expand_by_id() {
+        let mut input = String::from("before ");
+        let mut pending = Vec::new();
+        handle_paste_placeholder_tokens("line one\nline two", &mut input, &mut pending);
+        input.push_str(" [Pasted Content 17 chars] after");
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "paste-1");
+        assert_eq!(pending[0].display, "[Pasted Content 17 chars]");
+        assert_eq!(
+            render_paste_placeholders(&input, &pending),
+            "before [Pasted Content 17 chars] [Pasted Content 17 chars] after"
+        );
+
+        let expanded = expand_paste_placeholder_tokens(&input, &pending);
+        assert_eq!(
+            expanded,
+            "before line one\nline two [Pasted Content 17 chars] after"
+        );
+        assert!(!expanded.contains("line one\nline two\n"));
+        assert!(expanded.contains("[Pasted Content 17 chars] after"));
+    }
+
+    #[test]
+    fn duplicate_paste_displays_expand_independently() {
+        let mut input = String::new();
+        let mut pending = Vec::new();
+        let body = "alpha\nbeta!!";
+        handle_paste_placeholder_tokens(body, &mut input, &mut pending);
+        input.push(' ');
+        handle_paste_placeholder_tokens(body, &mut input, &mut pending);
+
+        assert_eq!(pending[0].display, "[Pasted Content 12 chars]");
+        assert_eq!(pending[1].display, "[Pasted Content 12 chars] #2");
+        assert_ne!(pending[0].id, pending[1].id);
+        assert_eq!(
+            render_paste_placeholders(&input, &pending),
+            "[Pasted Content 12 chars] [Pasted Content 12 chars] #2"
+        );
+        assert_eq!(
+            expand_paste_placeholder_tokens(&input, &pending),
+            "alpha\nbeta!! alpha\nbeta!!"
+        );
+    }
 }

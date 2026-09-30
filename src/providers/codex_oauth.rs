@@ -1578,21 +1578,37 @@ fn jwt_openai_auth_claims(jwt: &str) -> Option<OpenAiAuthClaims> {
     decode_jwt_payload::<JwtPayload>(jwt).ok()?.auth
 }
 
+/// Unsigned JWT payload decoder. Signature verification is intentionally off:
+/// this path only reads claims from tokens we already hold.
 fn decode_jwt_payload<T: DeserializeOwned>(jwt: &str) -> Result<T> {
-    let mut parts = jwt.split('.');
-    let (_header, payload, _signature) = match (parts.next(), parts.next(), parts.next()) {
-        (Some(header), Some(payload), Some(signature))
+    let payload = jwt_payload_segment(jwt)?;
+    let bytes = decode_jwt_base64url_segment(payload)?;
+    serde_json::from_slice(&bytes).map_err(|err| miette!("invalid JWT JSON payload: {err}"))
+}
+
+/// A JWT is exactly three non-empty dot-separated segments. Extra segments
+/// (a fourth `.`) are rejected rather than ignored.
+fn jwt_payload_segment(jwt: &str) -> Result<&str> {
+    let mut segments = jwt.split('.');
+    let header = segments.next();
+    let payload = segments.next();
+    let signature = segments.next();
+    let extra = segments.next();
+    match (header, payload, signature, extra) {
+        (Some(header), Some(payload), Some(signature), None)
             if !header.is_empty() && !payload.is_empty() && !signature.is_empty() =>
         {
-            (header, payload, signature)
+            Ok(payload)
         }
-        _ => return Err(miette!("invalid JWT format")),
-    };
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
-        .map_err(|err| miette!("invalid JWT base64 payload: {err}"))?;
-    serde_json::from_slice(&bytes).map_err(|err| miette!("invalid JWT JSON payload: {err}"))
+        _ => Err(miette!("invalid JWT format")),
+    }
+}
+
+fn decode_jwt_base64url_segment(segment: &str) -> Result<Vec<u8>> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(segment)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(segment))
+        .map_err(|err| miette!("invalid JWT base64 payload: {err}"))
 }
 
 fn now_ms() -> i64 {
@@ -1705,6 +1721,31 @@ mod tests {
 
         assert!(error.to_string().contains("tokens object"));
     }
+    #[test]
+    fn decode_jwt_payload_rejects_four_segments() {
+        let token = jwt(&serde_json::json!({ "sub": "user" }));
+        let four_segment = format!("{token}.extra");
+
+        let error = decode_jwt_payload::<serde_json::Value>(&four_segment)
+            .expect_err("a fourth JWT segment must be rejected");
+
+        assert!(error.to_string().contains("invalid JWT format"));
+    }
+
+    #[test]
+    fn decode_jwt_payload_reads_unsigned_three_segment_claims() {
+        let token = jwt(&serde_json::json!({
+            "sub": "user-1",
+            "exp": 4_102_444_800_i64
+        }));
+
+        let payload = decode_jwt_payload::<serde_json::Value>(&token).expect("unsigned JWT payload");
+
+        assert_eq!(payload["sub"], "user-1");
+        assert_eq!(payload["exp"], 4_102_444_800_i64);
+        assert_eq!(token.matches('.').count(), 3 - 1);
+    }
+
     #[test]
     fn codex_oauth_access_extracts_account_headers_from_id_token() {
         let id_token = jwt(&serde_json::json!({

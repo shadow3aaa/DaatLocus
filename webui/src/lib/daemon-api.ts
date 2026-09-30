@@ -953,6 +953,7 @@ export type SetupConfigRequest = {
   telegram_enabled?: boolean | null;
   telegram_bot_token?: string | null;
   sleep_enabled?: boolean | null;
+  scope_lsp_enabled?: boolean | null;
 };
 export type SetupConfigResponse = {
   config: SetupConfigRequest;
@@ -1229,13 +1230,21 @@ export async function fetchDashboardActivityHistoryCount({
 }
 
 export function getDashboardAttachmentUrl(uri: string) {
-  if (!uri.startsWith("/dashboard/attachments/")) {
+  let url: URL;
+  try {
+    url = new URL(uri, "http://daemon.local");
+  } catch {
+    return uri;
+  }
+  if (url.pathname.startsWith("/dashboard/attachments/") === false || url.origin !== "http://daemon.local") {
     return uri;
   }
 
   const token = getStoredDaemonToken().trim();
-  const separator = uri.includes("?") ? "&" : "?";
-  return token ? `${uri}${separator}token=${encodeURIComponent(token)}` : uri;
+  if (token) {
+    url.searchParams.set("token", token);
+  }
+  return `${url.pathname}${url.search}${url.hash}`;
 }
 
 export async function fetchSettingsSummary({

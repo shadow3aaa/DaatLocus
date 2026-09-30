@@ -42,90 +42,177 @@ function lastOutputLineIsBlank(lines: string[]) {
   return lines.length === 0 || lines[lines.length - 1].trim() === "";
 }
 
-function nextSourceLineIsBlank(lines: string[], index: number) {
-  return index + 1 >= lines.length || lines[index + 1].trim() === "";
-}
-
+/**
+ * Normalize agent thinking text before it is rendered as markdown.
+ *
+ * Fenced code is parsed by a small scanner first, so `**` inside a fence is
+ * left alone. Outside fences, a standalone `**heading**` that is glued to the
+ * previous sentence is split onto its own paragraph. `react-markdown` renders
+ * the result in the chat UI.
+ */
 export function normalizeThinkingMarkdown(text: string) {
-  const normalized = splitEmbeddedThinkingHeadings(
-    text.replace(/\r\n/g, "\n").replace(/\r/g, "\n"),
-  );
-  const lines = normalized.split("\n");
+  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const output: string[] = [];
-  let inFence = false;
 
-  lines.forEach((line, index) => {
-    const trimmed = line.trim();
-    const fenceLine = /^(```|~~~)/.test(trimmed);
-    const heading = !inFence && isStandaloneThinkingHeading(trimmed);
-
-    if (heading && !lastOutputLineIsBlank(output)) {
-      output.push("");
+  for (const block of scanMarkdownBlocks(normalized)) {
+    if (block.kind === "fence") {
+      for (const line of block.text.split("\n")) {
+        output.push(line);
+      }
+      continue;
     }
 
-    output.push(line);
-
-    if (heading && !nextSourceLineIsBlank(lines, index)) {
-      output.push("");
-    }
-
-    if (fenceLine) {
-      inFence = !inFence;
-    }
-  });
+    const lines = block.text.split("\n");
+    lines.forEach((line, index) => {
+      const pieces = splitInlineThinkingHeadings(line);
+      pieces.forEach((piece, pieceIndex) => {
+        const heading = isStandaloneThinkingHeading(piece.trim());
+        if (heading && !lastOutputLineIsBlank(output)) {
+          output.push("");
+        }
+        output.push(piece);
+        const morePieces = pieceIndex + 1 < pieces.length;
+        const moreLines =
+          index + 1 < lines.length && lines[index + 1].trim() !== "";
+        if (heading && (morePieces || moreLines)) {
+          output.push("");
+        }
+      });
+    });
+  }
 
   return output.join("\n");
 }
 
-function splitEmbeddedThinkingHeadings(text: string) {
-  let output = "";
-  let cursor = 0;
+type MarkdownBlock =
+  | { kind: "fence"; text: string }
+  | { kind: "text"; text: string };
 
-  while (true) {
-    const start = text.indexOf("**", cursor);
+/** Split text into fenced-code blocks and the prose between them. */
+function scanMarkdownBlocks(text: string): MarkdownBlock[] {
+  const blocks: MarkdownBlock[] = [];
+  const lines = text.split("\n");
+  let textLines: string[] = [];
+  let fence: { marker: "`" | "~"; width: number } | null = null;
+  let fenceLines: string[] = [];
+
+  const flushText = () => {
+    if (textLines.length === 0) {
+      return;
+    }
+    blocks.push({ kind: "text", text: textLines.join("\n") });
+    textLines = [];
+  };
+
+  for (const line of lines) {
+    if (!fence) {
+      const opener = fenceOpener(line);
+      if (opener) {
+        flushText();
+        fence = opener;
+        fenceLines = [line];
+        continue;
+      }
+      textLines.push(line);
+      continue;
+    }
+
+    fenceLines.push(line);
+    if (fenceCloser(line, fence.marker, fence.width)) {
+      blocks.push({ kind: "fence", text: fenceLines.join("\n") });
+      fence = null;
+      fenceLines = [];
+    }
+  }
+
+  if (fenceLines.length > 0) {
+    blocks.push({ kind: "fence", text: fenceLines.join("\n") });
+  } else {
+    flushText();
+  }
+  return blocks;
+}
+
+
+function fenceOpener(line: string): { marker: "`" | "~"; width: number } | null {
+  let index = 0;
+  while (index < line.length && index < 3 && line[index] === " ") {
+    index += 1;
+  }
+  const marker = line[index];
+  if (marker !== "`" && marker !== "~") {
+    return null;
+  }
+  let width = 0;
+  while (index + width < line.length && line[index + width] === marker) {
+    width += 1;
+  }
+  if (width < 3) {
+    return null;
+  }
+  const info = line.slice(index + width);
+  if (marker === "`" && info.includes("`")) {
+    return null;
+  }
+  return { marker, width };
+}
+
+function fenceCloser(line: string, marker: "`" | "~", width: number) {
+  let index = 0;
+  while (index < line.length && index < 3 && line[index] === " ") {
+    index += 1;
+  }
+  let seen = 0;
+  while (index < line.length && line[index] === marker) {
+    seen += 1;
+    index += 1;
+  }
+  if (seen < width) {
+    return false;
+  }
+  return line.slice(index).trim() === "";
+}
+
+function splitInlineThinkingHeadings(line: string) {
+  const pieces: string[] = [];
+  let cursor = 0;
+  let search = 0;
+  while (search < line.length) {
+    const start = line.indexOf("**", search);
     if (start < 0) {
       break;
     }
-    const endMarker = text.indexOf("**", start + 2);
-    if (endMarker < 0) {
+    if (isInsideInlineCode(line, start)) {
+      search = start + 2;
+      continue;
+    }
+    const endMarker = line.indexOf("**", start + 2);
+    if (endMarker < 0 || isInsideInlineCode(line, endMarker)) {
       break;
     }
     const end = endMarker + 2;
-    const candidate = text.slice(start, end);
-
-    output += text.slice(cursor, start);
-    if (embeddedThinkingHeadingNeedsBreak(text, start, end, candidate)) {
-      output = appendParagraphBreak(output);
+    const candidate = line.slice(start, end);
+    if (
+      start > 0 &&
+      line[start - 1].trim() !== "" &&
+      isStandaloneThinkingHeading(candidate)
+    ) {
+      pieces.push(line.slice(cursor, start));
+      pieces.push(candidate);
+      cursor = end;
     }
-    output += candidate;
-    cursor = end;
+    search = end;
   }
-
-  return output + text.slice(cursor);
+  pieces.push(line.slice(cursor));
+  return pieces.filter((piece, index) => piece.length > 0 || index === 0);
 }
 
-function embeddedThinkingHeadingNeedsBreak(
-  text: string,
-  start: number,
-  end: number,
-  candidate: string,
-) {
-  if (start === 0 || text.slice(0, start).endsWith("\n")) {
-    return false;
+function isInsideInlineCode(line: string, index: number) {
+  let ticks = 0;
+  for (let cursor = 0; cursor < index; cursor += 1) {
+    if (line[cursor] === "`") {
+      ticks += 1;
+    }
   }
-  if (!text.slice(end).startsWith("\n\n")) {
-    return false;
-  }
-  const previous = text.slice(start - 1, start);
-  return previous.trim() !== "" && isStandaloneThinkingHeading(candidate);
-}
-
-function appendParagraphBreak(text: string) {
-  if (text.endsWith("\n\n")) {
-    return text;
-  }
-  if (text.endsWith("\n")) {
-    return `${text}\n`;
-  }
-  return `${text}\n\n`;
+  return ticks % 2 === 1;
 }

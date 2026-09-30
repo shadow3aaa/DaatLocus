@@ -1080,6 +1080,7 @@ dependencies = [
  "tray-icon",
  "two-face",
  "unicode-width 0.2.2",
+ "url",
  "uuid",
  "viewpoint-core",
  "windows-sys 0.61.2",
@@ -1089,6 +1090,10 @@ dependencies = [
 [[package]]
 name = "daat-locus-launcher"
 version = "0.5.0"
+dependencies = [
+ "serde",
+ "toml 1.1.2+spec-1.1.0",
+]
 
 [[package]]
 name = "daat-locus-macros"
@@ -1103,6 +1108,9 @@ dependencies = [
 name = "daat-locus-md"
 version = "0.3.6"
 dependencies = [
+ "anyhow",
+ "pest",
+ "pest_derive",
  "pulldown-cmark",
  "ratatui",
  "unicode-width 0.2.2",

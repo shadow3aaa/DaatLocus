@@ -89,6 +89,13 @@ impl LiveExecActivityData {
 }
 
 impl TerminalExecutionMeta {
+    /// Parse a stored terminal protocol line.
+    ///
+    /// Producers (`terminal_session_meta`, `render_session_state_line`, and
+    /// `terminal_output_metadata_lines`) persist this as text, not a structured
+    /// status object. One key=value grammar reads the meta line and any output
+    /// line that is itself a byte-count protocol record. Free-form output is not
+    /// scanned.
     pub fn parse(meta_line: Option<&str>, output_lines: &[String]) -> Self {
         let mut meta = Self::default();
         if let Some(line) = meta_line {
@@ -96,7 +103,7 @@ impl TerminalExecutionMeta {
         }
         for line in output_lines {
             if is_output_metadata_line(line) {
-                meta.parse_key_value_tokens(line);
+                meta.parse_meta_line(line);
             }
         }
         meta
@@ -105,7 +112,7 @@ impl TerminalExecutionMeta {
     pub fn is_running(&self) -> bool {
         self.status
             .as_deref()
-            .is_some_and(|status| matches!(status, "running" | "status=running"))
+            .is_some_and(|status| status == "running")
     }
 
     fn parse_meta_line(&mut self, line: &str) {
@@ -113,34 +120,26 @@ impl TerminalExecutionMeta {
         if trimmed.is_empty() {
             return;
         }
+        self.raw_fields.push(trimmed.to_string());
 
         let mut positional = Vec::new();
-        for segment in trimmed.split("  ").map(str::trim).filter(|s| !s.is_empty()) {
-            if segment.contains('=') {
-                self.parse_key_value_tokens(segment);
-            } else {
-                positional.push(segment.to_string());
+        for token in trimmed.split_whitespace() {
+            if let Some((key, value)) = token.split_once('=') {
+                self.set_key_value(key, value);
+            } else if positional.len() < 2 {
+                positional.push(token);
             }
         }
 
-        if positional.len() >= 2 {
-            self.session_id.get_or_insert_with(|| positional[0].clone());
-            self.status.get_or_insert_with(|| positional[1].clone());
-        } else {
-            self.parse_key_value_tokens(trimmed);
+        if self.session_id.is_none()
+            && let Some(session) = positional.first()
+        {
+            self.session_id = Some((*session).to_string());
         }
-
-        if self.raw_fields.is_empty() {
-            self.raw_fields.push(trimmed.to_string());
-        }
-    }
-
-    fn parse_key_value_tokens(&mut self, text: &str) {
-        for part in text.split_whitespace() {
-            let Some((key, value)) = part.split_once('=') else {
-                continue;
-            };
-            self.set_key_value(key, value);
+        if self.status.is_none()
+            && let Some(status) = positional.get(1)
+        {
+            self.status = Some((*status).to_string());
         }
     }
 
@@ -156,12 +155,12 @@ impl TerminalExecutionMeta {
             "cwd" | "workdir" => self.cwd = Some(value.to_string()),
             "wait_mode" => self.wait_mode = Some(value.to_string()),
             "yield_time_ms" => self.yield_time_ms = value.parse::<u64>().ok(),
-            "output_missed_bytes" => self.output_missed_bytes = value.parse::<u64>().ok(),
+            "output_missed_bytes" => self.output_missed_bytes = parse_byte_count(value),
             "output_dropped_bytes" | "dropped" => {
                 self.output_dropped_bytes = parse_byte_count(value);
             }
-            "output_retained_bytes" => self.output_retained_bytes = value.parse::<u64>().ok(),
-            "output_buffer_capacity" => self.output_buffer_capacity = value.parse::<u64>().ok(),
+            "output_retained_bytes" => self.output_retained_bytes = parse_byte_count(value),
+            "output_buffer_capacity" => self.output_buffer_capacity = parse_byte_count(value),
             "buffer" => parse_buffer_pair(value, self),
             _ => {}
         }
@@ -187,10 +186,26 @@ impl From<TextActivityDescriptor> for ExecResultActivityData {
 }
 
 pub(super) fn is_output_metadata_line(line: &str) -> bool {
-    line.contains("output_missed_bytes=")
-        || line.contains("output_dropped_bytes=")
-        || line.contains("output_retained_bytes=")
-        || line.contains("output_buffer_capacity=")
+    let mut saw_byte_count_field = false;
+    for token in line.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            return false;
+        };
+        if !matches!(
+            key,
+            "output_missed_bytes"
+                | "output_dropped_bytes"
+                | "output_retained_bytes"
+                | "output_buffer_capacity"
+        ) {
+            return false;
+        }
+        if parse_byte_count(value).is_none() {
+            return false;
+        }
+        saw_byte_count_field = true;
+    }
+    saw_byte_count_field
 }
 
 fn parse_byte_count(value: &str) -> Option<u64> {
@@ -247,10 +262,10 @@ mod tests {
             title: "cargo check".to_string(),
             terminal_action: Some(TerminalActivityAction::Execute),
             terminal_origin: Some(TerminalActivityOrigin::Agent),
-            meta: Some("main  exited  exit=0  cwd=C:/repo".to_string()),
-            output_lines: vec![
-                "output_missed_bytes=0 output_dropped_bytes=12 output_retained_bytes=256 output_buffer_capacity=1024".to_string(),
-            ],
+            meta: Some(
+                "main  exited  exit=0  cwd=C:/repo  dropped=12B  buffer=256/1024B".to_string(),
+            ),
+            output_lines: vec!["Compiling dashboard".to_string()],
         };
 
         let output = cell.command_output();
@@ -263,18 +278,52 @@ mod tests {
         assert_eq!(output.meta.output_dropped_bytes, Some(12));
         assert_eq!(output.meta.output_retained_bytes, Some(256));
         assert_eq!(output.meta.output_buffer_capacity, Some(1024));
+        assert!(!output.meta.is_running());
     }
 
     #[test]
     fn parses_terminal_call_meta_into_structured_output() {
         let meta = TerminalExecutionMeta::parse(
             Some("session=new workdir=C:/repo yield_time_ms=500 wait_mode=timeout"),
-            &[],
+            &["this output mentions output_dropped_bytes=99 but is not protocol".to_string()],
         );
 
         assert_eq!(meta.session_id.as_deref(), Some("new"));
         assert_eq!(meta.cwd.as_deref(), Some("C:/repo"));
         assert_eq!(meta.yield_time_ms, Some(500));
         assert_eq!(meta.wait_mode.as_deref(), Some("timeout"));
+        assert_eq!(meta.output_dropped_bytes, None);
+    }
+
+    #[test]
+    fn parses_byte_count_protocol_fields_without_scanning_free_form_output() {
+        let meta = TerminalExecutionMeta::parse(
+            Some(
+                "session=main status=running exit=- cwd=C:/repo output_missed_bytes=0 output_dropped_bytes=4 output_retained_bytes=8 output_buffer_capacity=16",
+            ),
+            &["output_dropped_bytes=99 dropped=1B buffer=2/3B".to_string()],
+        );
+
+        assert!(meta.is_running());
+        assert_eq!(meta.exit_code, None);
+        assert_eq!(meta.output_missed_bytes, Some(0));
+        assert_eq!(meta.output_dropped_bytes, Some(4));
+        assert_eq!(meta.output_retained_bytes, Some(8));
+        assert_eq!(meta.output_buffer_capacity, Some(16));
+        assert!(is_output_metadata_line(
+            "output_missed_bytes=0 output_dropped_bytes=4 output_retained_bytes=8 output_buffer_capacity=16"
+        ));
+        assert!(!is_output_metadata_line(
+            "log output_dropped_bytes=4 is not a metadata record"
+        ));
+
+        let from_output_record = TerminalExecutionMeta::parse(
+            Some("main  exited  exit=0  cwd=C:/repo"),
+            &["output_missed_bytes=0 output_dropped_bytes=12 output_retained_bytes=256 output_buffer_capacity=1024".to_string()],
+        );
+        assert_eq!(from_output_record.output_missed_bytes, Some(0));
+        assert_eq!(from_output_record.output_dropped_bytes, Some(12));
+        assert_eq!(from_output_record.output_retained_bytes, Some(256));
+        assert_eq!(from_output_record.output_buffer_capacity, Some(1024));
     }
 }

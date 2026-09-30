@@ -27,17 +27,25 @@ pub(super) fn absolute_artifact_uri(uri: &str, base_url: &str) -> Option<String>
     if uri.is_empty() {
         return None;
     }
-    if uri.starts_with("http://") || uri.starts_with("https://") {
-        return Some(uri.to_string());
-    }
-    if let Some(relative) = uri.strip_prefix('/') {
-        let base = base_url.trim().trim_end_matches('/');
-        if base.is_empty() {
-            return None;
+    let parsed = url::Url::parse(uri).ok();
+    if let Some(parsed) = parsed.as_ref() {
+        if parsed.scheme() == "http" || parsed.scheme() == "https" {
+            return Some(parsed.to_string());
         }
-        return Some(format!("{base}/{relative}"));
+        return None;
     }
-    None
+    if !uri.starts_with('/') {
+        return None;
+    }
+    let base = base_url.trim();
+    if base.is_empty() {
+        return None;
+    }
+    let base = url::Url::parse(base).ok()?;
+    if base.scheme() != "http" && base.scheme() != "https" {
+        return None;
+    }
+    base.join(uri).ok().map(|joined| joined.to_string())
 }
 
 /// URI text to show on the artifact card.  Daemon-relative URIs are expanded so
@@ -129,6 +137,21 @@ mod tests {
         assert_eq!(absolute_artifact_uri("relative/nope", BASE), None);
         assert_eq!(absolute_artifact_uri("   ", BASE), None);
         assert_eq!(absolute_artifact_uri("/x", "  "), None);
+    }
+
+    #[test]
+    fn absolute_artifact_uri_joins_with_url_crate() {
+        assert_eq!(
+            absolute_artifact_uri("/artifacts/ab.png?sig=1", "http://localhost:53825/ui/")
+                .as_deref(),
+            Some("http://localhost:53825/artifacts/ab.png?sig=1")
+        );
+        assert_eq!(
+            absolute_artifact_uri("https://example.com/a%20b", BASE).as_deref(),
+            Some("https://example.com/a%20b")
+        );
+        assert_eq!(absolute_artifact_uri("/x", "not a base"), None);
+        assert_eq!(absolute_artifact_uri("file:///tmp/a.png", BASE), None);
     }
 
     #[test]

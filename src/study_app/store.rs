@@ -1531,12 +1531,27 @@ fn fts_search(connection: &Connection, query: &str, limit: usize) -> Result<Vec<
 fn build_fts_query(query: &str) -> String {
     query
         .split_whitespace()
-        .map(|token| {
-            let escaped = token.replace('"', "\"\"");
-            format!("\"{escaped}\"*")
-        })
+        .map(quote_fts5_prefix_token)
         .collect::<Vec<_>>()
         .join(" AND ")
+}
+
+/// Quote one FTS5 MATCH token.
+///
+/// FTS5 string literals double an embedded `"`. The token is wrapped in quotes
+/// and a trailing `*` keeps the existing prefix-search behavior.
+fn quote_fts5_prefix_token(token: &str) -> String {
+    let mut quoted = String::with_capacity(token.len() + 4);
+    quoted.push('"');
+    for ch in token.chars() {
+        if ch == '"' {
+            quoted.push('"');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted.push('*');
+    quoted
 }
 
 fn like_search(connection: &Connection, query: &str, limit: usize) -> Result<Vec<String>> {
@@ -2300,5 +2315,12 @@ mod tests {
         assert_eq!(snapshot.modules[0].node_count, 2);
         assert_eq!(snapshot.nodes.len(), 2);
         assert_eq!(snapshot.edges[0].relation, "prerequisite");
+    }
+
+    #[test]
+    fn fts_query_quotes_tokens_and_doubles_embedded_quotes() {
+        assert_eq!(build_fts_query(""), "");
+        assert_eq!(build_fts_query("  group   theory "), "\"group\"* AND \"theory\"*");
+        assert_eq!(quote_fts5_prefix_token("say \"hi\""), "\"say \"\"hi\"\"\"*");
     }
 }

@@ -121,41 +121,61 @@ impl TerminalApp {
     }
 
     fn forbidden_input_reason(text: &str) -> Option<&'static str> {
-        let normalized = text.trim().to_ascii_lowercase();
-        let forbidden_prefixes = [
-            "gh auth login",
-            "gh auth refresh",
-            "gh auth setup-git",
-            "docker login",
-            "npm login",
-            "pnpm login",
-            "huggingface-cli login",
-            "hf auth login",
+        let forbidden = [
+            ["gh", "auth", "login"].as_slice(),
+            &["gh", "auth", "refresh"],
+            &["gh", "auth", "setup-git"],
+            &["docker", "login"],
+            &["npm", "login"],
+            &["pnpm", "login"],
+            &["huggingface-cli", "login"],
+            &["hf", "auth", "login"],
         ];
-
-        forbidden_prefixes
+        let Some(argv) = tokenize_shell_words(text).or_else(|| tokenize_powershell_words(text))
+        else {
+            let normalized = text.trim().to_ascii_lowercase();
+            return forbidden
+                .iter()
+                .find(|prefix| {
+                    let rendered = prefix.join(" ");
+                    normalized == rendered
+                        || normalized.starts_with(&(rendered.clone() + " "))
+                        || normalized.starts_with(&(rendered + "\t"))
+                })
+                .map(|_| LOGIN_COMMAND_REJECTION);
+        };
+        let argv = argv
             .iter()
-            .find(|prefix| normalized.starts_with(**prefix))
-            .map(|_| "interactive authentication/login commands are not allowed in Terminal; abort and use a non-interactive alternative")
+            .map(|word| word.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let head = argv.iter().map(String::as_str).collect::<Vec<_>>();
+        forbidden
+            .iter()
+            .find(|prefix| {
+                head.len() >= prefix.len() && head[..prefix.len()] == prefix[..]
+            })
+            .map(|_| LOGIN_COMMAND_REJECTION)
     }
 
     fn cwd_from_shell_input(text: &str) -> Option<String> {
         let trimmed = text.trim();
         if cfg!(windows) {
-            let prefix = "Set-Location -LiteralPath '";
-            let suffix = "'";
-            return trimmed
-                .strip_prefix(prefix)
-                .and_then(|rest| rest.strip_suffix(suffix))
-                .map(|path| path.replace("''", "'"));
+            let words = tokenize_powershell_words(trimmed)?;
+            if words.len() == 3
+                && words[0].eq_ignore_ascii_case("Set-Location")
+                && words[1].eq_ignore_ascii_case("-LiteralPath")
+            {
+                return Some(words[2].clone());
+            }
+            return None;
         }
 
-        let prefix = "cd -- '";
-        let suffix = "'";
-        trimmed
-            .strip_prefix(prefix)
-            .and_then(|rest| rest.strip_suffix(suffix))
-            .map(|path| path.replace("'\"'\"'", "'"))
+        let words = tokenize_shell_words(trimmed)?;
+        if words.len() == 3 && words[0] == "cd" && words[1] == "--" {
+            Some(words[2].clone())
+        } else {
+            None
+        }
     }
 
     pub async fn exec_command_with_progress<F>(
@@ -590,10 +610,174 @@ fn spawn_terminal_process(
     }
 }
 
+const LOGIN_COMMAND_REJECTION: &str = "interactive authentication/login commands are not allowed in Terminal; abort and use a non-interactive alternative";
+
+/// POSIX-like words. `None` means an open quote or trailing backslash.
+fn tokenize_shell_words(input: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
+                in_word = true;
+            }
+            Some('"') => {
+                if ch == '\\' {
+                    match chars.next() {
+                        Some(escaped @ ('"' | '\\' | '$' | '`')) => current.push(escaped),
+                        Some('\n') => {}
+                        Some(other) => {
+                            current.push('\\');
+                            current.push(other);
+                        }
+                        None => return None,
+                    }
+                    in_word = true;
+                } else if ch == '"' {
+                    quote = None;
+                    in_word = true;
+                } else {
+                    current.push(ch);
+                    in_word = true;
+                }
+            }
+            None if ch == '\\' => match chars.next() {
+                Some('\n') => {}
+                Some(escaped) => {
+                    current.push(escaped);
+                    in_word = true;
+                }
+                None => return None,
+            },
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                in_word = true;
+            }
+            None if ch.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            None => {
+                current.push(ch);
+                in_word = true;
+            }
+            Some(_) => unreachable!(),
+        }
+    }
+
+    if quote.is_some() {
+        return None;
+    }
+    if in_word {
+        words.push(current);
+    }
+    Some(words)
+}
+
+/// PowerShell words. Single quotes are literal and `''` is an escaped quote.
+fn tokenize_powershell_words(input: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut in_word = false;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while let Some(ch) = chars.next() {
+        if in_single {
+            if ch == '\'' {
+                if chars.peek().copied() == Some('\'') {
+                    chars.next();
+                    current.push('\'');
+                } else {
+                    in_single = false;
+                }
+            } else {
+                current.push(ch);
+            }
+            in_word = true;
+            continue;
+        }
+        if in_double {
+            if ch == '`' {
+                match chars.next() {
+                    Some(escaped) => current.push(escaped),
+                    None => return None,
+                }
+            } else if ch == '"' {
+                in_double = false;
+            } else {
+                current.push(ch);
+            }
+            in_word = true;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single = true;
+                in_word = true;
+            }
+            '"' => {
+                in_double = true;
+                in_word = true;
+            }
+            '`' => match chars.next() {
+                Some(escaped) => {
+                    current.push(escaped);
+                    in_word = true;
+                }
+                None => return None,
+            },
+            ch if ch.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            other => {
+                current.push(other);
+                in_word = true;
+            }
+        }
+    }
+
+    if in_single || in_double {
+        return None;
+    }
+    if in_word {
+        words.push(current);
+    }
+    Some(words)
+}
+
 fn command_mentions_protected_paths(context: &AppToolExecutionContext, text: &str) -> bool {
     if context.sandbox_policy.is_disabled() {
         return false;
     }
+    let Some(words) = tokenize_shell_words(text).or_else(|| tokenize_powershell_words(text)) else {
+        return command_mentions_protected_paths_fallback(context, text);
+    };
+    let roots = context.sandbox_policy.protected_paths();
+    words
+        .iter()
+        .any(|word| shell_word_mentions_protected_path(word, &roots))
+}
+
+fn command_mentions_protected_paths_fallback(
+    context: &AppToolExecutionContext,
+    text: &str,
+) -> bool {
     let lowered = text.to_ascii_lowercase();
     if lowered.contains(".daat-locus") {
         return true;
@@ -602,6 +786,76 @@ fn command_mentions_protected_paths(context: &AppToolExecutionContext, text: &st
         let rendered = root.display().to_string();
         !rendered.is_empty() && text.contains(&rendered)
     })
+}
+
+fn shell_word_mentions_protected_path(word: &str, roots: &[std::path::PathBuf]) -> bool {
+    path_candidate_mentions_protected_path(word, roots)
+        || option_attached_path(word).is_some_and(|path| {
+            path_candidate_mentions_protected_path(path, roots)
+        })
+}
+
+fn path_candidate_mentions_protected_path(word: &str, roots: &[std::path::PathBuf]) -> bool {
+    if !word_looks_like_path(word) {
+        return false;
+    }
+    if word.to_ascii_lowercase().contains(".daat-locus") {
+        return true;
+    }
+    let candidate = Path::new(word);
+    roots
+        .iter()
+        .any(|root| path_is_within_protected_root(candidate, root))
+}
+
+/// Path glued to a flag: `--file=<path>` or a short option cluster `-o<path>`.
+fn option_attached_path(word: &str) -> Option<&str> {
+    let rest = word.strip_prefix('-')?;
+    if rest.starts_with('-') {
+        let body = rest.strip_prefix('-')?;
+        let (_, value) = body.split_once('=')?;
+        return (!value.is_empty()).then_some(value);
+    }
+    let mut chars = rest.chars();
+    let _flag = chars.next()?;
+    let value = chars.as_str();
+    (!value.is_empty()).then_some(value)
+}
+
+fn word_looks_like_path(word: &str) -> bool {
+    if word.is_empty() || word.starts_with('-') {
+        return false;
+    }
+    word.contains('/')
+        || word.contains('\\')
+        || word.to_ascii_lowercase().contains(".daat-locus")
+        || Path::new(word).is_absolute()
+        || word.starts_with('.')
+        || word.starts_with('~')
+}
+
+fn path_is_within_protected_root(path: &Path, root: &Path) -> bool {
+    let path = normalize_terminal_path(path);
+    let root = normalize_terminal_path(root);
+    if root.as_os_str().is_empty() {
+        return false;
+    }
+    path == root || path.starts_with(&root)
+}
+
+fn normalize_terminal_path(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn terminal_protection_error(label: &str) -> miette::Report {
@@ -2003,5 +2257,103 @@ mod tests {
             app.terminate_session(&waited.session.session_id)
                 .expect("terminate should succeed");
         }
+    }
+
+    #[test]
+    fn shell_tokenizers_preserve_quotes_and_login_argv() {
+        assert_eq!(
+            tokenize_shell_words("cd -- 'a b'").as_deref(),
+            Some(["cd".to_string(), "--".to_string(), "a b".to_string()].as_slice())
+        );
+        assert_eq!(
+            tokenize_powershell_words("Set-Location -LiteralPath 'a''b'").as_deref(),
+            Some(
+                [
+                    "Set-Location".to_string(),
+                    "-LiteralPath".to_string(),
+                    "a'b".to_string()
+                ]
+                .as_slice()
+            )
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                TerminalApp::cwd_from_shell_input("Set-Location -LiteralPath 'C:\\tmp\\a''b'").as_deref(),
+                Some("C:\\tmp\\a'b")
+            );
+        } else {
+            assert_eq!(
+                TerminalApp::cwd_from_shell_input("cd -- '/tmp/my dir'").as_deref(),
+                Some("/tmp/my dir")
+            );
+        }
+        assert!(TerminalApp::forbidden_input_reason("gh auth login --web").is_some());
+        assert!(TerminalApp::forbidden_input_reason("echo gh auth login").is_none());
+        assert!(TerminalApp::forbidden_input_reason("'gh auth login'").is_none());
+        assert!(TerminalApp::forbidden_input_reason("GH AUTH LOGIN extra").is_some());
+    }
+
+    #[test]
+    fn protected_path_mention_uses_path_components() {
+        let protected = std::path::Path::new("/tmp/protected-root");
+        assert!(path_is_within_protected_root(
+            std::path::Path::new("/tmp/protected-root/secret"),
+            protected
+        ));
+        assert!(path_is_within_protected_root(
+            std::path::Path::new("/tmp/protected-root/../protected-root/secret"),
+            protected
+        ));
+        assert!(!path_is_within_protected_root(
+            std::path::Path::new("/tmp/protected-root-other/secret"),
+            protected
+        ));
+        assert!(!word_looks_like_path("protected-root"));
+        assert!(word_looks_like_path(".daat-locus/config"));
+        assert!(shell_word_mentions_protected_path(
+            ".daat-locus/config",
+            &[]
+        ));
+        assert!(!shell_word_mentions_protected_path(
+            "just-text",
+            &[protected.to_path_buf()]
+        ));
+        let mut policy = test_sandbox_policy();
+        policy
+            .filesystem
+            .deny_read_paths
+            .push(protected.to_path_buf());
+        let context = AppToolExecutionContext {
+            execution_cwd: std::path::PathBuf::from("/tmp"),
+            sandbox_policy: policy,
+            dashboard_tx: None,
+            tool_output_max_tokens: 0,
+            turn_epoch: 0,
+            scope_lsp_enabled: false,
+        };
+        assert!(command_mentions_protected_paths(
+            &context,
+            "cat 'unterminated .daat-locus"
+        ));
+        assert!(!command_mentions_protected_paths(
+            &context,
+            "echo protected-root is just text"
+        ));
+        assert!(command_mentions_protected_paths(
+            &context,
+            "cat /tmp/protected-root/secret"
+        ));
+        assert!(command_mentions_protected_paths(
+            &context,
+            "cmd --file=/tmp/protected-root/.daat-locus/config.toml"
+        ));
+        assert!(command_mentions_protected_paths(
+            &context,
+            "cmd -o/tmp/protected-root"
+        ));
+        assert!(!command_mentions_protected_paths(
+            &context,
+            "echo --note=protected-root is just text"
+        ));
     }
 }

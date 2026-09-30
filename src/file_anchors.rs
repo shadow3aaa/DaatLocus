@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::runtime::runtime_loop::coding_source_elision::parse_coding_anchor;
 use miette::{Result, miette};
 use scope_engine::api::{EditOp, StructuredEdit};
 
@@ -49,13 +50,10 @@ impl FileAnchorTable {
             let Some((path, anchor, text)) = parse_anchor_record(line, path) else {
                 continue;
             };
-            let Some((line_number, hash)) = anchor.rsplit_once('#') else {
+            let Some(parsed) = parse_coding_anchor(anchor) else {
                 continue;
             };
-            let Ok(line) = line_number.parse::<usize>() else {
-                continue;
-            };
-            if line == 0 || hash.is_empty() || hash.ends_with('~') {
+            if parsed.elided {
                 continue;
             }
             self.next_use = self.next_use.wrapping_add(1);
@@ -63,8 +61,8 @@ impl FileAnchorTable {
             self.entries.insert(
                 (PathBuf::from(path), anchor.to_string()),
                 TrackedAnchor {
-                    line,
-                    hash: hash.to_string(),
+                    line: parsed.line,
+                    hash: parsed.hash.to_string(),
                     text: text.to_string(),
                     last_used,
                 },
@@ -124,8 +122,8 @@ impl FileAnchorTable {
             let end_line = edit
                 .end
                 .as_deref()
-                .and_then(|value| value.split_once('#'))
-                .and_then(|(line, _)| line.parse::<usize>().ok())
+                .and_then(parse_coding_anchor)
+                .map(|parsed| parsed.line)
                 .unwrap_or(start_line);
             mutations.push(AnchorMutation {
                 path,
@@ -189,20 +187,13 @@ fn parse_anchor_record<'a>(
     line: &'a str,
     default_path: &'a str,
 ) -> Option<(&'a str, &'a str, &'a str)> {
-    let (first, rest) = line.split_once('|')?;
-    if let Some((anchor, text)) = rest.split_once('|')
-        && !first.contains('#')
-        && looks_like_anchor(anchor)
-    {
-        return Some((first, anchor, text));
+    let (path, anchor, text) =
+        crate::runtime::runtime_loop::coding_source_elision::split_anchored_record(line)?;
+    if path.is_empty() {
+        Some((default_path, anchor, text))
+    } else {
+        Some((path, anchor, text))
     }
-    looks_like_anchor(first).then_some((default_path, first, rest))
-}
-
-fn looks_like_anchor(value: &str) -> bool {
-    value
-        .split_once('#')
-        .is_some_and(|(line, hash)| !hash.is_empty() && line.parse::<u64>().is_ok())
 }
 
 fn replacement_delta(mutation: &AnchorMutation) -> isize {
@@ -406,5 +397,50 @@ mod tests {
                 .map(|anchor| anchor.line),
             Some(42)
         );
+    }
+
+    #[test]
+    fn observe_keeps_pipe_inside_the_path_and_skips_bad_hash_and_elision() {
+        let mut table = FileAnchorTable::default();
+        let hash = scope_engine::patch::line_hash("body");
+        table.observe_anchored_content(
+            "fallback.rs",
+            &format!(
+                "src/a|b.rs|4#{hash}|body\n9#ZZ|nope\n9#not-hex|nope\n2#{hash}~\n5#{hash}|kept"
+            ),
+        );
+
+        assert!(
+            table
+                .entries
+                .contains_key(&(PathBuf::from("src/a|b.rs"), format!("4#{hash}")))
+        );
+        assert!(
+            table
+                .entries
+                .contains_key(&(PathBuf::from("fallback.rs"), format!("5#{hash}")))
+        );
+        assert_eq!(table.entries.len(), 2);
+        let tracked = table
+            .entries
+            .get(&(PathBuf::from("src/a|b.rs"), format!("4#{hash}")))
+            .expect("pipe path");
+        assert_eq!(tracked.line, 4);
+        assert_eq!(tracked.hash, hash);
+        assert_eq!(tracked.text, "body");
+    }
+
+    #[test]
+    fn typed_parse_rejects_zero_uppercase_and_marks_elision() {
+        assert!(parse_coding_anchor("0#aa").is_none());
+        assert!(parse_coding_anchor("1#GG").is_none());
+        assert!(parse_coding_anchor("1#not-hex").is_none());
+        assert!(parse_coding_anchor("1#").is_none());
+        let elided = parse_coding_anchor("12#ab~").expect("elided marker");
+        assert!(elided.elided);
+        assert_eq!(elided.line, 12);
+        assert_eq!(elided.hash, "ab");
+        let plain = parse_coding_anchor("12#ab").expect("plain anchor");
+        assert!(!plain.elided);
     }
 }

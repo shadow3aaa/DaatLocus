@@ -2158,20 +2158,36 @@ fn artifact_content_width(max_width: u16) -> u16 {
 /// NBSP: it wraps like a space but stays inside the matched URL.
 fn artifact_uri_lines(uri: &str, width: u16, style: Style) -> Vec<Line<'static>> {
     let width = usize::from(width.max(1));
-    let Some((path, query)) = uri.split_once("?sig=") else {
+    let Some((path, pairs)) = crate::dashboard::terminal_hyperlinks::split_url_query(uri) else {
         return artifact_wrapped_text(uri, width as u16, style);
     };
-    let signature = format!("\u{00a0}?sig={query}");
-    if display_width(path) + display_width(&signature) <= width {
+    if !pairs.iter().any(|(key, _)| key == "sig") {
+        return artifact_wrapped_text(uri, width as u16, style);
+    }
+    let signature = format!("\u{00a0}{}", artifact_query_display(&pairs));
+    if display_width(&path) + display_width(&signature) <= width {
         return artifact_wrapped_text(&format!("{path}{signature}"), width as u16, style);
     }
-    let mut lines = artifact_wrapped_text(path, width as u16, style);
+    let mut lines = artifact_wrapped_text(&path, width as u16, style);
     if display_width(&signature) <= width {
         lines.push(Line::from(Span::styled(signature, style)));
     } else {
         lines.extend(artifact_wrapped_text(&signature, width as u16, style));
     }
     lines
+}
+
+fn artifact_query_display(pairs: &[(String, String)]) -> String {
+    let mut query = String::from("?");
+    for (index, (key, value)) in pairs.iter().enumerate() {
+        if index > 0 {
+            query.push('&');
+        }
+        query.push_str(key);
+        query.push('=');
+        query.push_str(value);
+    }
+    query
 }
 
 fn artifact_wrapped_text(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
@@ -2313,22 +2329,31 @@ fn explored_call_action(call: &ExploredCallActivityData) -> Option<ExploredCallA
 }
 
 fn explored_read_target(call: &ExploredCallActivityData) -> String {
-    call.target.as_deref().map_or_else(
-        || compact_coding_summary_path(&call.summary),
-        compact_coding_summary_path,
-    )
+    if let Some(target) = call.target.as_deref() {
+        return compact_coding_path(target);
+    }
+    compact_coding_summary_path(&call.summary)
 }
 
 fn explored_search_target(call: &ExploredCallActivityData) -> String {
     if let Some(query) = call.target.as_deref() {
         return match call.secondary_target.as_deref() {
             Some(path) if !path.trim().is_empty() => {
-                format!("{} in {}", query.trim(), compact_coding_summary_path(path))
+                format!("{} in {}", query.trim(), compact_coding_path(path))
             }
             _ => query.trim().to_string(),
         };
     }
     format_coding_search_summary(&call.summary)
+}
+
+fn compact_coding_path(path: &str) -> String {
+    std::path::Path::new(path.trim())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path.trim())
+        .to_string()
 }
 
 fn coding_action_line(title: &str, detail: String) -> Line<'static> {
@@ -2356,10 +2381,11 @@ fn format_coding_search_summary(summary: &str) -> String {
 
 fn strip_coding_result_count(summary: &str) -> &str {
     summary
-        .rsplit_once(" — ")
+        .rsplit_once(" \u{2014} ")
         .map_or_else(|| summary.trim(), |(query, _)| query.trim())
 }
 
+/// Fallback for legacy summary prose that was not stored in structured fields.
 fn compact_coding_summary_path(summary: &str) -> String {
     let target = summary
         .split_once(" -> ")
@@ -2367,12 +2393,7 @@ fn compact_coding_summary_path(summary: &str) -> String {
         .trim();
     let path = target.split_once(":L").map_or(target, |(path, _)| path);
     let path = path.split_once('#').map_or(path, |(path, _)| path).trim();
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or(path)
-        .to_string()
+    compact_coding_path(path)
 }
 
 fn render_coding_edit_cell_lines(
@@ -5117,5 +5138,49 @@ That's it.";
         assert!(!text.contains("beta"), "{text}");
         assert!(!text.contains("[w inspect]"), "{text}");
         assert!(text.contains("after workflows"), "{text}");
+    }
+
+    #[test]
+    fn explored_legacy_summary_without_structured_fields_keeps_string_fallback() {
+        let cell = ExploredActivityData {
+            stable_id: "legacy".to_string(),
+            title: "Explored".to_string(),
+            calls: vec![
+                ExploredCallActivityData {
+                    tool_name: "Read".to_string(),
+                    action: None,
+                    target: None,
+                    secondary_target: None,
+                    summary: "src/dashboard/mod.rs:L1268#anchor -> body".to_string(),
+                    detail_lines: Vec::new(),
+                    detail_title: None,
+                },
+                ExploredCallActivityData {
+                    tool_name: "Search".to_string(),
+                    action: None,
+                    target: None,
+                    secondary_target: None,
+                    summary: "needle \u{2014} 3 targets in src/dashboard/mod.rs".to_string(),
+                    detail_lines: Vec::new(),
+                    detail_title: None,
+                },
+            ],
+        };
+
+        let rendered = render_explored_cell_lines(&cell, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(
+            rendered.iter().any(|line| line.contains("Read mod.rs")),
+            "legacy read prose should still compact the path: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Search needle in mod.rs")),
+            "legacy search prose should still drop the count: {rendered:?}"
+        );
     }
 }

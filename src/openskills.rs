@@ -673,23 +673,46 @@ fn default_skill_name(path: &Path) -> String {
         .unwrap_or_else(|| "skill".to_string())
 }
 
-fn extract_frontmatter(contents: &str) -> Option<String> {
-    let mut lines = contents.lines();
-    if !matches!(lines.next(), Some(line) if line.trim() == "---") {
+/// YAML between a leading `---` line and the next closing `---` line.
+///
+/// LF and CRLF are both accepted. Missing, unclosed, or empty frontmatter is
+/// rejected. The returned slice is the original YAML text with surrounding
+/// blank lines removed.
+fn split_yaml_frontmatter(contents: &str) -> Option<&str> {
+    let mut offset = 0usize;
+    let mut lines = Vec::new();
+    for segment in contents.split_inclusive('\n') {
+        let start = offset;
+        offset += segment.len();
+        let body_len = segment.trim_end_matches(['\r', '\n']).len();
+        lines.push((start, start + body_len));
+    }
+
+    let (open_start, open_end) = lines.first().copied()?;
+    if contents[open_start..open_end].trim() != "---" || open_end == contents.len() {
         return None;
     }
 
-    let mut frontmatter_lines = Vec::new();
-    let mut found_closing = false;
-    for line in lines.by_ref() {
-        if line.trim() == "---" {
-            found_closing = true;
+    let mut close_index = None;
+    for (index, &(start, end)) in lines.iter().enumerate().skip(1) {
+        if contents[start..end].trim() == "---" {
+            close_index = Some(index);
             break;
         }
-        frontmatter_lines.push(line);
     }
+    let close_index = close_index?;
+    let body = &lines[1..close_index];
+    let start = body.iter().find_map(|&(start, end)| {
+        (!contents[start..end].trim().is_empty()).then_some(start)
+    })?;
+    let end = body.iter().rev().find_map(|&(start, end)| {
+        (!contents[start..end].trim().is_empty()).then_some(end)
+    })?;
+    Some(&contents[start..end])
+}
 
-    (!frontmatter_lines.is_empty() && found_closing).then(|| frontmatter_lines.join("\n"))
+fn extract_frontmatter(contents: &str) -> Option<String> {
+    split_yaml_frontmatter(contents).map(str::to_string)
 }
 
 fn sanitize_single_line(raw: &str) -> String {
@@ -1113,5 +1136,24 @@ mod tests {
         let injections = catalog.explicit_skill_injections_for_text("use $dup");
 
         assert!(injections.is_empty());
+    }
+
+    #[test]
+    fn extract_frontmatter_accepts_crlf() {
+        let yaml = extract_frontmatter(
+            "---\r\nname: charts\r\ndescription: Build charts\r\n---\r\n\r\n# Charts\r\n",
+        )
+        .expect("crlf frontmatter");
+        let parsed: SkillFrontmatter = serde_yaml::from_str(&yaml).expect("yaml");
+        assert_eq!(parsed.name.as_deref(), Some("charts"));
+        assert_eq!(parsed.description.as_deref(), Some("Build charts"));
+    }
+
+    #[test]
+    fn extract_frontmatter_rejects_missing_closing_fence() {
+        assert!(extract_frontmatter("---\nname: charts\ndescription: Build charts\n").is_none());
+        assert!(extract_frontmatter("---\r\nname: charts\r\n").is_none());
+        assert!(extract_frontmatter("name: charts\n").is_none());
+        assert!(extract_frontmatter("---\n\n---\n").is_none());
     }
 }
