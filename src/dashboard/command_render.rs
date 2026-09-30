@@ -11,9 +11,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::DashboardPendingUserInput;
 use super::command_flow::{
-    command_completion_body, dashboard_command_parts_ref, dashboard_parts_open_panel,
-    dashboard_parts_run_action, is_dashboard_command_input, matching_commands,
-    selected_command_completion,
+    command_completion_body, dashboard_parts_open_panel, dashboard_parts_run_action,
+    is_dashboard_command_input, prepare_command_input, slash_parts_match_literal_words,
 };
 use super::command_input::{
     command_input_display_text_for_width, command_input_selectable_region, cursor_display_row,
@@ -21,8 +20,8 @@ use super::command_input::{
 };
 use super::command_panels::{
     CommandDetailPanel, CommandFeedback, CommandFeedbackLevel, CommandPanel, CommandSelectionPanel,
-    DashboardCommandContext, PendingUserInputQueuePanel, SkillsListPanel, SkillsTogglePanel,
-    WorkflowFormPanel,
+    CommandSuggestion, DashboardCommandContext, PendingUserInputQueuePanel, SkillsListPanel,
+    SkillsTogglePanel, WorkflowFormPanel,
 };
 use super::command_registry::dashboard_command_is_known;
 use super::command_text::{truncate_command_text, truncate_display_width};
@@ -34,7 +33,7 @@ impl CommandPanel {
         match self {
             Self::Detail(panel) => {
                 let line_count =
-                    u16::try_from(render_panel_text_lines(&panel.text).len()).unwrap_or(u16::MAX);
+                    u16::try_from(panel_text_line_count(&panel.text)).unwrap_or(u16::MAX);
                 line_count.saturating_add(3).clamp(5, 16)
             }
             Self::Selection(panel) => {
@@ -128,7 +127,10 @@ pub(super) fn command_panel_row_count(
 }
 
 pub(super) fn command_popup_row_count(input: &str, context: &DashboardCommandContext<'_>) -> u16 {
-    let matches = matching_commands(input, context);
+    popup_row_count_from_matches(&prepare_command_input(input, context).matches)
+}
+
+fn popup_row_count_from_matches(matches: &[CommandSuggestion]) -> u16 {
     if matches.is_empty() {
         0
     } else {
@@ -241,7 +243,8 @@ fn command_panel_copy_lines(panel: &CommandPanel) -> (Vec<String>, u16) {
             lines.extend(
                 panel
                     .visible_indices()
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .skip(panel.scroll)
                     .filter_map(|idx| {
                         let item = panel.items.get(idx)?;
@@ -268,7 +271,8 @@ fn command_panel_copy_lines(panel: &CommandPanel) -> (Vec<String>, u16) {
             lines.extend(
                 panel
                     .visible_indices()
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .skip(panel.scroll)
                     .filter_map(|idx| {
                         let item = panel.items.get(idx)?;
@@ -341,21 +345,24 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
         selectable_regions,
     } = state;
 
-    let completion = if panel.is_none() && !editing_pending_user_input {
-        selected_command_completion(input, 0, context)
-    } else {
+    let prepared = if panel.is_some() || editing_pending_user_input {
         None
-    };
-    let hint = if editing_pending_user_input {
-        String::new()
     } else {
-        command_hint(input, context)
+        Some(prepare_command_input(input, context))
     };
-    let popup_rows = if panel.is_some() || editing_pending_user_input {
-        0
-    } else {
-        command_popup_row_count(input, context)
+    let completion = prepared.as_ref().and_then(|prepared| {
+        prepared
+            .matches
+            .first()
+            .map(|suggestion| suggestion.completion.clone())
+    });
+    let hint = match prepared.as_ref() {
+        Some(prepared) => command_hint(input, &prepared.matches, prepared.slash_parts.as_deref()),
+        None => String::new(),
     };
+    let popup_rows = prepared
+        .as_ref()
+        .map_or(0, |prepared| popup_row_count_from_matches(&prepared.matches));
     let feedback_rows = if panel.is_some() {
         0
     } else {
@@ -452,8 +459,10 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
         render_command_popup(
             f,
             rows[popup_row_index],
-            input,
-            context,
+            prepared
+                .as_ref()
+                .map(|prepared| prepared.matches.as_slice())
+                .unwrap_or(&[]),
             popup_selection,
             popup_scroll,
         );
@@ -766,6 +775,11 @@ fn pending_user_input_preview_text(input: &DashboardPendingUserInput) -> String 
     text
 }
 
+fn panel_text_line_count(text: &str) -> usize {
+    let count = text.lines().count();
+    if count == 0 { 1 } else { count }
+}
+
 fn render_panel_text_lines(text: &str) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut previous_blank = true;
@@ -856,18 +870,16 @@ fn render_panel_bullet_line(content: &str) -> Line<'static> {
 fn render_command_popup(
     f: &mut Frame,
     area: Rect,
-    input: &str,
-    context: &DashboardCommandContext<'_>,
+    matches: &[CommandSuggestion],
     selected_index: usize,
     scroll: usize,
 ) {
-    let matches = matching_commands(input, context);
     if matches.is_empty() {
         return;
     }
 
     let lines = matches
-        .into_iter()
+        .iter()
         .skip(scroll)
         .take(6)
         .enumerate()
@@ -886,9 +898,9 @@ fn render_command_popup(
             };
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled(suggestion.display, style),
+                Span::styled(suggestion.display.as_str(), style),
                 Span::raw("  "),
-                Span::styled(suggestion.description, desc_style),
+                Span::styled(suggestion.description.as_str(), desc_style),
             ])
         })
         .collect::<Vec<_>>();
@@ -1019,20 +1031,14 @@ fn render_selection_panel(f: &mut Frame, area: Rect, panel: &CommandSelectionPan
             let idx = panel.scroll + visible_idx;
             let selected = idx == panel.selected;
             let marker = if selected { "›" } else { " " };
-            let name_style = if item.disabled {
-                Style::default().fg(Color::DarkGray)
-            } else if selected {
+            let name_style = if selected {
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
-            let description_style = if item.disabled {
-                Style::default().fg(Color::DarkGray)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
+            let description_style = Style::default().fg(Color::Gray);
             Line::from(vec![
                 Span::styled(marker, Style::default().fg(Color::Cyan)),
                 Span::raw(" "),
@@ -1268,12 +1274,15 @@ fn render_skills_toggle_panel(f: &mut Frame, area: Rect, panel: &SkillsTogglePan
     f.render_widget(Paragraph::new(Text::from(lines)), rest);
 }
 
-fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
-    let matches = matching_commands(input, context);
+fn command_hint(
+    input: &str,
+    matches: &[CommandSuggestion],
+    slash_parts: Option<&[String]>,
+) -> String {
     if !is_dashboard_command_input(input) {
         if matches.len() == 1 {
             let suggestion = &matches[0];
-            return format!("{} — {}", suggestion.display, suggestion.description);
+            return format!("{} \u{2014} {}", suggestion.display, suggestion.description);
         }
         if matches.len() > 1 {
             return matches
@@ -1295,12 +1304,11 @@ fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
         .unwrap_or_default()
         .is_empty()
     {
-        return "Up/Down select. Tab accept. Enter run. Shift+Enter newline. Esc clear."
-            .to_string();
+        return "Up/Down select. Tab accept. Enter run. Shift+Enter newline. Esc clear.".to_string();
     }
     if matches.len() == 1 {
         let suggestion = &matches[0];
-        return format!("{} — {}", suggestion.display, suggestion.description);
+        return format!("{} \u{2014} {}", suggestion.display, suggestion.description);
     }
     if matches.len() > 1 {
         return matches
@@ -1310,14 +1318,15 @@ fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
             .collect::<Vec<_>>()
             .join(" | ");
     }
-    if let Some(parts) = dashboard_command_parts_ref(input) {
-        if dashboard_parts_open_panel(&parts) {
+    if let Some(parts) = slash_parts.filter(|parts| slash_parts_match_literal_words(input, parts))
+    {
+        if dashboard_parts_open_panel(parts) {
             return "Enter open panel. Shift+Enter newline. Esc clear.".to_string();
         }
-        if dashboard_parts_run_action(&parts) {
+        if dashboard_parts_run_action(parts) {
             return "Enter run action. Shift+Enter newline. Esc clear.".to_string();
         }
-        if dashboard_command_is_known(parts[0]) {
+        if dashboard_command_is_known(parts[0].as_str()) {
             return "Enter run command. Shift+Enter newline. Esc clear.".to_string();
         }
     }

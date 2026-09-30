@@ -4,7 +4,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
     DashboardAction, DashboardPendingUserInput, DashboardPendingUserInputMoveDirection,
-    DashboardState, DashboardWorkflowSummary, command_text::skill_status_description,
+    DashboardState, DashboardWorkflowSummary,
+    command_text::{format_skill_detail, skill_status_description},
 };
 use crate::openskills::{OpenSkillDashboardError, OpenSkillDashboardSummary};
 
@@ -26,7 +27,6 @@ pub(super) struct CommandSelectionItem {
     pub(super) name: String,
     pub(super) description: String,
     pub(super) action: CommandSelectionAction,
-    pub(super) disabled: bool,
 }
 
 pub(super) enum CommandSelectionAction {
@@ -46,12 +46,48 @@ pub(super) enum CommandSelectionAction {
     },
 }
 
+pub(super) struct SkillSearchKey {
+    name: String,
+    description: String,
+    path: String,
+    scope: String,
+}
+
+impl SkillSearchKey {
+    fn from_list(item: &SkillsListPanelItem) -> Self {
+        Self {
+            name: item.name.to_ascii_lowercase(),
+            description: item.description.to_ascii_lowercase(),
+            path: item.path.to_ascii_lowercase(),
+            scope: item.scope.to_ascii_lowercase(),
+        }
+    }
+
+    fn from_toggle(item: &SkillsTogglePanelItem) -> Self {
+        Self {
+            name: item.name.to_ascii_lowercase(),
+            description: item.description.to_ascii_lowercase(),
+            path: item.path.to_ascii_lowercase(),
+            scope: String::new(),
+        }
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        self.name.contains(query)
+            || self.description.contains(query)
+            || self.path.contains(query)
+            || (!self.scope.is_empty() && self.scope.contains(query))
+    }
+}
+
 pub(super) struct SkillsListPanel {
     pub(super) items: Vec<SkillsListPanelItem>,
     pub(super) errors: Vec<OpenSkillDashboardError>,
     pub(super) selected: usize,
     pub(super) scroll: usize,
     pub(super) search: String,
+    pub(super) visible: Vec<usize>,
+    pub(super) search_keys: Vec<SkillSearchKey>,
 }
 
 #[derive(Clone)]
@@ -68,6 +104,8 @@ pub(super) struct SkillsTogglePanel {
     pub(super) selected: usize,
     pub(super) scroll: usize,
     pub(super) search: String,
+    pub(super) visible: Vec<usize>,
+    pub(super) search_keys: Vec<SkillSearchKey>,
     pub(super) feedback: Option<CommandFeedback>,
 }
 
@@ -221,7 +259,7 @@ impl CommandPanel {
 
 impl SkillsListPanel {
     pub(super) fn from_state(state: &DashboardState) -> Self {
-        Self {
+        let mut panel = Self {
             items: state
                 .skills
                 .iter()
@@ -231,8 +269,14 @@ impl SkillsListPanel {
             selected: 0,
             scroll: 0,
             search: String::new(),
-        }
+            visible: Vec::new(),
+            search_keys: Vec::new(),
+        };
+        panel.rebuild_search_keys();
+        panel.rebuild_visible();
+        panel
     }
+
 
     pub(super) fn sync_state(&mut self, state: &DashboardState) {
         let selected_path = self
@@ -244,6 +288,8 @@ impl SkillsListPanel {
             .iter()
             .map(SkillsListPanelItem::from_summary)
             .collect();
+        self.rebuild_search_keys();
+        self.rebuild_visible();
         self.errors.clone_from(&state.skill_errors);
         if let Some(selected_path) = selected_path
             && let Some(actual_idx) = self
@@ -260,24 +306,26 @@ impl SkillsListPanel {
         self.clamp_after_filter_change();
     }
 
-    pub(super) fn visible_indices(&self) -> Vec<usize> {
+    pub(super) fn visible_indices(&self) -> &[usize] {
+        &self.visible
+    }
+
+    fn rebuild_search_keys(&mut self) {
+        self.search_keys = self.items.iter().map(SkillSearchKey::from_list).collect();
+    }
+
+    fn rebuild_visible(&mut self) {
         let query = self.search.trim().to_ascii_lowercase();
-        self.items
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, item)| {
-                if query.is_empty()
-                    || item.name.to_ascii_lowercase().contains(&query)
-                    || item.description.to_ascii_lowercase().contains(&query)
-                    || item.path.to_ascii_lowercase().contains(&query)
-                    || item.scope.to_ascii_lowercase().contains(&query)
-                {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .collect()
+        self.visible.clear();
+        if query.is_empty() {
+            self.visible.extend(0..self.items.len());
+            return;
+        }
+        for (idx, key) in self.search_keys.iter().enumerate() {
+            if key.matches(&query) {
+                self.visible.push(idx);
+            }
+        }
     }
 
     fn selected_actual_index(&self) -> Option<usize> {
@@ -289,14 +337,13 @@ impl SkillsListPanel {
         let item = self.items.get(idx)?;
         Some(detail_panel(
             format!("SKILL {}", item.name),
-            [
-                format!("Name: {}", item.name),
-                format!("Status: {}", item.status),
-                format!("Scope: {}", item.scope),
-                format!("Path: {}", item.path),
-                format!("Description: {}", item.description),
-            ]
-            .join("\n"),
+            format_skill_detail(
+                &item.name,
+                &item.status,
+                &item.scope,
+                &item.path,
+                &item.description,
+            ),
         ))
     }
 
@@ -602,7 +649,7 @@ impl CommandSelectionPanel {
 
 impl SkillsTogglePanel {
     pub(super) fn from_state(state: &DashboardState) -> Self {
-        Self {
+        let mut panel = Self {
             items: state
                 .skills
                 .iter()
@@ -611,9 +658,15 @@ impl SkillsTogglePanel {
             selected: 0,
             scroll: 0,
             search: String::new(),
+            visible: Vec::new(),
+            search_keys: Vec::new(),
             feedback: None,
-        }
+        };
+        panel.rebuild_search_keys();
+        panel.rebuild_visible();
+        panel
     }
+
 
     pub(super) fn sync_state(&mut self, state: &DashboardState) {
         let selected_path = self
@@ -625,6 +678,8 @@ impl SkillsTogglePanel {
             .iter()
             .map(SkillsTogglePanelItem::from_summary)
             .collect();
+        self.rebuild_search_keys();
+        self.rebuild_visible();
         if let Some(selected_path) = selected_path
             && let Some(actual_idx) = self
                 .items
@@ -640,23 +695,26 @@ impl SkillsTogglePanel {
         self.clamp_after_filter_change();
     }
 
-    pub(super) fn visible_indices(&self) -> Vec<usize> {
+    pub(super) fn visible_indices(&self) -> &[usize] {
+        &self.visible
+    }
+
+    fn rebuild_search_keys(&mut self) {
+        self.search_keys = self.items.iter().map(SkillSearchKey::from_toggle).collect();
+    }
+
+    fn rebuild_visible(&mut self) {
         let query = self.search.trim().to_ascii_lowercase();
-        self.items
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, item)| {
-                if query.is_empty()
-                    || item.name.to_ascii_lowercase().contains(&query)
-                    || item.description.to_ascii_lowercase().contains(&query)
-                    || item.path.to_ascii_lowercase().contains(&query)
-                {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .collect()
+        self.visible.clear();
+        if query.is_empty() {
+            self.visible.extend(0..self.items.len());
+            return;
+        }
+        for (idx, key) in self.search_keys.iter().enumerate() {
+            if key.matches(&query) {
+                self.visible.push(idx);
+            }
+        }
     }
 
     fn selected_actual_index(&self) -> Option<usize> {
@@ -797,9 +855,6 @@ fn handle_selection_panel_key(
             let Some(item) = panel.items.get(panel.selected) else {
                 return CommandPanelAction::None;
             };
-            if item.disabled {
-                return CommandPanelAction::None;
-            }
             match &item.action {
                 CommandSelectionAction::ShowDetail { title, text } => {
                     CommandPanelAction::Replace(detail_panel(title.clone(), text.clone()))
@@ -1045,6 +1100,7 @@ fn handle_skills_list_panel_key(panel: &mut SkillsListPanel, key: KeyEvent) -> C
         }
         KeyCode::Backspace => {
             panel.search.pop();
+            panel.rebuild_visible();
             panel.clamp_after_filter_change();
             CommandPanelAction::None
         }
@@ -1056,6 +1112,7 @@ fn handle_skills_list_panel_key(panel: &mut SkillsListPanel, key: KeyEvent) -> C
                 && !key.modifiers.contains(KeyModifiers::ALT) =>
         {
             panel.search.push(c);
+            panel.rebuild_visible();
             panel.clamp_after_filter_change();
             CommandPanelAction::None
         }
@@ -1103,6 +1160,7 @@ fn handle_skills_toggle_panel_key(
         }
         KeyCode::Backspace => {
             panel.search.pop();
+            panel.rebuild_visible();
             panel.clamp_after_filter_change();
             CommandPanelAction::None
         }
@@ -1130,6 +1188,7 @@ fn handle_skills_toggle_panel_key(
                 && !key.modifiers.contains(KeyModifiers::ALT) =>
         {
             panel.search.push(c);
+            panel.rebuild_visible();
             panel.clamp_after_filter_change();
             CommandPanelAction::None
         }

@@ -13,7 +13,8 @@ use super::command_registry::{
 };
 use super::command_text::{
     fallback_output, render_app_status_text, render_available_app_statuses, render_skill_detail,
-    render_skills_list, resolve_skill_target, skill_status_description, truncate_command_text,
+    render_skills_list, resolve_skill_target, skill_detail_text, skill_status_description,
+    truncate_command_text,
 };
 use super::{
     DashboardAction, DashboardActionResult, DashboardControlCommand, DashboardState,
@@ -22,7 +23,7 @@ use super::{
 use crate::{
     openskills::OpenSkillDashboardSummary,
     reasoning::turn_compile::{
-        load_prompt_persona_spec_sync, prompt_persona_path_sync, render_prompt_persona_markdown,
+        PromptPersonaSpec, prompt_persona_path_sync, render_prompt_persona_markdown,
     },
 };
 
@@ -218,11 +219,6 @@ pub fn execute_control_command(
         [] => "empty command".to_string(),
     }
 }
-
-pub const fn dashboard_command_is_manager_owned(_command: &str) -> bool {
-    false
-}
-
 fn debug_command_panel(state: &DashboardState) -> CommandPanel {
     CommandPanel::Selection(CommandSelectionPanel {
         title: "Debug".to_string(),
@@ -235,7 +231,6 @@ fn debug_command_panel(state: &DashboardState) -> CommandPanel {
                     title: "DEBUG PERSONA".to_string(),
                     text: debug_persona_text(),
                 },
-                disabled: false,
             },
             CommandSelectionItem {
                 name: "System prompt".to_string(),
@@ -244,7 +239,6 @@ fn debug_command_panel(state: &DashboardState) -> CommandPanel {
                     title: "DEBUG SYSTEM PROMPT".to_string(),
                     text: fallback_output(&state.system_prompt_output),
                 },
-                disabled: false,
             },
             CommandSelectionItem {
                 name: "Runtime context".to_string(),
@@ -253,7 +247,6 @@ fn debug_command_panel(state: &DashboardState) -> CommandPanel {
                     title: "DEBUG CONTEXT".to_string(),
                     text: fallback_output(&state.preturn_context_output),
                 },
-                disabled: false,
             },
         ],
         selected: 0,
@@ -263,8 +256,10 @@ fn debug_command_panel(state: &DashboardState) -> CommandPanel {
 
 fn debug_persona_text() -> String {
     let path = prompt_persona_path_sync();
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| render_prompt_persona_markdown(&load_prompt_persona_spec_sync()))
+    match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(_) => render_prompt_persona_markdown(&PromptPersonaSpec::default()),
+    }
 }
 
 fn debug_persona_panel() -> CommandPanel {
@@ -297,7 +292,6 @@ fn sleep_command_panel(state: &DashboardState) -> CommandPanel {
                     title: "SLEEP STATUS".to_string(),
                     text: fallback_output(&state.sleep_status_output),
                 },
-                disabled: false,
             },
             CommandSelectionItem {
                 name: "Start sleep run".to_string(),
@@ -307,7 +301,6 @@ fn sleep_command_panel(state: &DashboardState) -> CommandPanel {
                     action: DashboardAction::RunSleep,
                     keep_panel: false,
                 },
-                disabled: false,
             },
             CommandSelectionItem {
                 name: "Automatic sleep".to_string(),
@@ -323,7 +316,6 @@ fn sleep_command_panel(state: &DashboardState) -> CommandPanel {
                     },
                     keep_panel: false,
                 },
-                disabled: false,
             },
         ],
         selected: 0,
@@ -352,7 +344,6 @@ fn app_status_selection_panel(state: &DashboardState) -> CommandPanel {
                 title: format!("APP STATUS {}", name.to_uppercase()),
                 text: output.clone(),
             },
-            disabled: false,
         })
         .collect::<Vec<_>>();
     if items.is_empty() {
@@ -425,7 +416,6 @@ fn workflow_selection_item(workflow: &DashboardWorkflowSummary) -> CommandSelect
         action: CommandSelectionAction::OpenWorkflowForm {
             workflow: workflow.clone(),
         },
-        disabled: false,
     }
 }
 
@@ -437,7 +427,6 @@ fn workflow_error_selection_item(error: &DashboardWorkflowLoadError) -> CommandS
             title: "WORKFLOW LOAD ERROR".to_string(),
             text: format!("Path: {}\nError: {}", error.path, error.message),
         },
-        disabled: false,
     }
 }
 
@@ -489,13 +478,11 @@ fn skills_command_panel(state: &DashboardState) -> CommandPanel {
                 name: "List skills".to_string(),
                 description: "show loaded skills and load errors".to_string(),
                 action: CommandSelectionAction::OpenSkillsList,
-                disabled: false,
             },
             CommandSelectionItem {
                 name: "Enable/Disable Skills".to_string(),
                 description: "toggle whether skills may be selected automatically".to_string(),
                 action: CommandSelectionAction::OpenSkillsToggle,
-                disabled: state.skills.is_empty(),
             },
         ],
         selected: 0,
@@ -507,14 +494,7 @@ fn skill_detail_panel(state: &DashboardState, target: &str) -> Option<CommandPan
     let skill = resolve_skill_target(state, target).ok()?;
     Some(detail_panel(
         format!("SKILL {}", skill.name),
-        [
-            format!("Name: {}", skill.name),
-            format!("Status: {}", skill_status_description(skill)),
-            format!("Scope: {}", skill.scope),
-            format!("Path: {}", skill.path),
-            format!("Description: {}", skill.description),
-        ]
-        .join("\n"),
+        skill_detail_text(skill),
     ))
 }
 
@@ -617,22 +597,6 @@ pub(crate) fn dashboard_command_parts(input: &str) -> Option<Vec<String>> {
     let parts = tokenize_shell_words(body)?;
     (!parts.is_empty()).then_some(parts)
 }
-/// Slash-command verb plus arguments borrowed from `input` when no word needs
-/// unquoting. Quoted input returns `None`; callers that must keep quotes use
-/// [`dashboard_command_parts`].
-pub(super) fn dashboard_command_parts_ref(input: &str) -> Option<Vec<&str>> {
-    let body = dashboard_command_body(input)?;
-    let owned = tokenize_shell_words(body)?;
-    let borrowed = body.split_whitespace().collect::<Vec<_>>();
-    if !owned.is_empty()
-        && borrowed.len() == owned.len()
-        && borrowed.iter().zip(&owned).all(|(raw, word)| *raw == word)
-    {
-        Some(borrowed)
-    } else {
-        None
-    }
-}
 
 fn command_parts_ref(parts: &[String]) -> Vec<&str> {
     parts.iter().map(String::as_str).collect()
@@ -657,7 +621,12 @@ pub(super) fn command_live_feedback(
         .copied()
         .find(|command| command.accepts(verb));
     let Some(_command) = command else {
-        if matching_commands(input, context).is_empty() {
+        let completing = owned_parts.len() == 1
+            && !command_input.ends_with(|ch: char| ch.is_whitespace())
+            && dashboard_commands().iter().any(|command| {
+                command.primary_verb.starts_with(owned_parts[0].as_str())
+            });
+        if !completing {
             return Some(CommandFeedback {
                 title: "UNKNOWN COMMAND".to_string(),
                 message: format!("No dashboard command named '{verb}'."),
@@ -729,24 +698,27 @@ pub(super) fn command_live_feedback(
             _ => {}
         }
     } else if app_status_command_accepts(verb) {
-        let apps = context
-            .state
-            .app_status_outputs
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>();
         let target = parts[1].to_ascii_lowercase();
-        let known = apps.iter().any(|name| *name == target);
-        let possible = apps.iter().any(|name| name.starts_with(&target));
+        let outputs = &context.state.app_status_outputs;
+        let known = outputs.iter().any(|(name, _)| name == &target);
+        let possible = outputs.iter().any(|(name, _)| name.starts_with(&target));
         if !known && !possible {
+            let detail = if outputs.is_empty() {
+                "No app state is currently available.".to_string()
+            } else {
+                let mut available = String::new();
+                for (index, (name, _)) in outputs.iter().enumerate() {
+                    if index > 0 {
+                        available.push_str(", ");
+                    }
+                    available.push_str(name);
+                }
+                format!("available: {available}")
+            };
             return Some(CommandFeedback {
                 title: "APP STATUS".to_string(),
                 message: format!("Unknown app '{target}'."),
-                detail: Some(if apps.is_empty() {
-                    "No app state is currently available.".to_string()
-                } else {
-                    format!("available: {}", apps.join(", "))
-                }),
+                detail: Some(detail),
                 level: CommandFeedbackLevel::Error,
             });
         }
@@ -919,32 +891,69 @@ pub(super) fn is_dashboard_command_input(input: &str) -> bool {
     dashboard_command_body(input).is_some()
 }
 
+pub(super) struct PreparedCommandInput {
+    pub(super) matches: Vec<CommandSuggestion>,
+    /// Tokenized slash-command body. `None` for ordinary text or an unclosed quote.
+    pub(super) slash_parts: Option<Vec<String>>,
+}
+
+pub(super) fn prepare_command_input(
+    input: &str,
+    context: &DashboardCommandContext<'_>,
+) -> PreparedCommandInput {
+    if let Some(command_input) = command_completion_body(input) {
+        let trimmed = command_input.trim();
+        if trimmed.is_empty() {
+            return PreparedCommandInput {
+                matches: all_slash_suggestions(),
+                slash_parts: Some(Vec::new()),
+            };
+        }
+        let Some(parts) = tokenize_shell_words(trimmed) else {
+            return PreparedCommandInput {
+                matches: Vec::new(),
+                slash_parts: None,
+            };
+        };
+        let matches = slash_suggestions_from_parts(command_input, &parts);
+        return PreparedCommandInput {
+            matches,
+            slash_parts: Some(parts),
+        };
+    }
+    PreparedCommandInput {
+        matches: matching_skill_mentions(input, context),
+        slash_parts: None,
+    }
+}
+
 pub(super) fn matching_commands(
     input: &str,
     context: &DashboardCommandContext<'_>,
 ) -> Vec<CommandSuggestion> {
-    if let Some(command_input) = command_completion_body(input) {
-        return matching_slash_commands(command_input);
-    }
-    matching_skill_mentions(input, context)
+    prepare_command_input(input, context).matches
 }
 
-fn matching_slash_commands(command_input: &str) -> Vec<CommandSuggestion> {
-    let trimmed = command_input.trim();
-    if trimmed.is_empty() {
-        return dashboard_commands()
-            .iter()
-            .map(|command| CommandSuggestion {
-                display: command.primary_verb.to_string(),
-                completion: format!("/{}", command.primary_verb),
-                description: command.description.to_string(),
-            })
-            .collect::<Vec<_>>();
+
+fn all_slash_suggestions() -> Vec<CommandSuggestion> {
+    dashboard_commands()
+        .iter()
+        .map(|command| CommandSuggestion {
+            display: command.primary_verb.to_string(),
+            completion: format!("/{}", command.primary_verb),
+            description: command.description.to_string(),
+        })
+        .collect()
+}
+
+fn slash_suggestions_from_parts(
+    command_input: &str,
+    parts: &[String],
+) -> Vec<CommandSuggestion> {
+    if command_input.trim().is_empty() {
+        return all_slash_suggestions();
     }
-    let Some(parts) = tokenize_shell_words(trimmed) else {
-        return Vec::new();
-    };
-    if parts.len() > 1 || command_input.ends_with(|ch: char| ch.is_whitespace()) {
+    if parts.len() != 1 || command_input.ends_with(|ch: char| ch.is_whitespace()) {
         return Vec::new();
     }
     let verb = parts[0].as_str();
@@ -957,7 +966,19 @@ fn matching_slash_commands(command_input: &str) -> Vec<CommandSuggestion> {
             completion: format!("/{}", command.primary_verb),
             description: command.description.to_string(),
         })
-        .collect::<Vec<_>>()
+        .collect()
+}
+
+/// True when tokenized parts are identical to raw whitespace-separated words.
+/// Quoted or escaped words do not count, matching `dashboard_command_parts_ref`.
+pub(super) fn slash_parts_match_literal_words(input: &str, parts: &[String]) -> bool {
+    let Some(body) = dashboard_command_body(input) else {
+        return false;
+    };
+    let raw: Vec<&str> = body.split_whitespace().collect();
+    !parts.is_empty()
+        && raw.len() == parts.len()
+        && raw.iter().zip(parts).all(|(raw, word)| *raw == word.as_str())
 }
 
 fn matching_skill_mentions(
@@ -1039,7 +1060,7 @@ pub(super) fn dashboard_parts_open_panel(parts: &[impl AsRef<str>]) -> bool {
     let parts = parts.iter().map(AsRef::as_ref).collect::<Vec<_>>();
     matches!(
         parts.as_slice(),
-        ["status" | "debug" | "sleep" | "skills"]
+        ["status" | "debug" | "sleep" | "skills" | "workflows"]
             | [
                 "debug",
                 "persona"

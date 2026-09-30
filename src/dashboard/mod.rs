@@ -37,7 +37,7 @@ pub use cells::{
     user_activity_cell_from_event,
 };
 pub(crate) use command_flow::{ask_message_text, dashboard_command_parts, tokenize_shell_words};
-pub use command_flow::{dashboard_command_is_manager_owned, execute_control_command};
+pub use command_flow::execute_control_command;
 pub use commands::{
     DashboardAction, DashboardActionResult, DashboardCommandAttachment, DashboardCommandRunner,
     DashboardControlCommand, DashboardPendingUserInputMoveDirection,
@@ -1475,7 +1475,7 @@ fn render_tui_dashboard_frame<B: Backend>(
 mod tests {
     use super::command_flow::{
         command_blocks_submission, command_live_feedback, command_panel_for_input,
-        dashboard_action_for_input, dashboard_command_body, dashboard_command_is_manager_owned,
+        dashboard_action_for_input, dashboard_command_body,
         is_clear_command_input, matching_commands,
     };
     use super::selection::{SelectableId, SelectableRegion};
@@ -2297,6 +2297,8 @@ fn workflow_group_state(snapshot: crate::workflow::WorkflowRunSnapshot) -> Dashb
             selected: 0,
             scroll: 0,
             search: String::new(),
+            visible: vec![0, 1],
+            search_keys: Vec::new(),
         });
         let backend = TestBackend::new(72, panel.desired_height());
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -2400,8 +2402,6 @@ fn workflow_group_state(snapshot: crate::workflow::WorkflowRunSnapshot) -> Dashb
 
     #[test]
     fn dashboard_commands_route_session_work_and_manager_restart() {
-        assert!(!dashboard_command_is_manager_owned("/status"));
-        assert!(!dashboard_command_is_manager_owned("/skills reload"));
 
         assert!(!dashboard_action_is_manager_owned(
             &DashboardAction::InterruptRuntime
@@ -2462,6 +2462,8 @@ fn workflow_group_state(snapshot: crate::workflow::WorkflowRunSnapshot) -> Dashb
             selected: 0,
             scroll: 0,
             search: String::new(),
+            visible: Vec::new(),
+            search_keys: Vec::new(),
             feedback: None,
         });
 

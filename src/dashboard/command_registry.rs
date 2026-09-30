@@ -6,7 +6,6 @@ pub(super) struct DashboardCommandSpec {
     pub(super) description: &'static str,
     aliases: &'static [&'static str],
     remote_command: Option<&'static str>,
-    remote_description: Option<&'static str>,
 }
 
 impl DashboardCommandSpec {
@@ -14,9 +13,6 @@ impl DashboardCommandSpec {
         self.primary_verb == verb || self.aliases.contains(&verb)
     }
 
-    fn remote_description(self) -> &'static str {
-        self.remote_description.unwrap_or(self.description)
-    }
 }
 
 const NO_ALIASES: &[&str] = &[];
@@ -29,77 +25,66 @@ static DASHBOARD_COMMANDS: [DashboardCommandSpec; 11] = [
         description: "exit the dashboard",
         aliases: QUIT_ALIASES,
         remote_command: None,
-        remote_description: None,
     },
     DashboardCommandSpec {
         primary_verb: "clear",
         description: "clear runtime conversation history, current plan, and all events",
         aliases: NO_ALIASES,
         remote_command: Some("clear"),
-        remote_description: None,
     },
     DashboardCommandSpec {
         primary_verb: "debug",
         description: "debug outputs and internal runtime views",
         aliases: NO_ALIASES,
         remote_command: Some("debug"),
-        remote_description: None,
     },
     DashboardCommandSpec {
         primary_verb: "app-status",
         description: "show current structured app state and llm-facing note",
         aliases: APP_STATUS_ALIASES,
         remote_command: Some("app_status"),
-        remote_description: None,
     },
     DashboardCommandSpec {
         primary_verb: "status",
         description: "show overall status",
         aliases: NO_ALIASES,
         remote_command: Some("status"),
-        remote_description: None,
     },
     DashboardCommandSpec {
         primary_verb: "restart",
         description: "restart the daemon",
         aliases: NO_ALIASES,
         remote_command: Some("restart"),
-        remote_description: None,
     },
     DashboardCommandSpec {
         primary_verb: "think",
         description: "show or hide model thinking (TUI only)",
         aliases: NO_ALIASES,
         remote_command: None,
-        remote_description: None,
     },
     DashboardCommandSpec {
         primary_verb: "sleep",
         description: "sleep controls and status",
         aliases: NO_ALIASES,
         remote_command: Some("sleep"),
-        remote_description: None,
     },
     DashboardCommandSpec {
         primary_verb: "skills",
         description: "list and manage OpenSkills automatic use",
         aliases: NO_ALIASES,
         remote_command: Some("skills"),
-        remote_description: None,
     },
     DashboardCommandSpec {
         primary_verb: "workflows",
         description: "browse loaded Lua workflows and their typed input schemas",
         aliases: NO_ALIASES,
         remote_command: Some("workflows"),
-        remote_description: None,
     },
     DashboardCommandSpec {
         primary_verb: "ask",
         description: "start a discussion turn; only history reads and the final reply",
         aliases: NO_ALIASES,
         remote_command: None,
-        remote_description: None,
     },
 ];
 
@@ -179,7 +164,7 @@ pub fn remote_dashboard_commands() -> Vec<RemoteDashboardCommand> {
                 .remote_command
                 .map(|remote_command| RemoteDashboardCommand {
                     command: remote_command,
-                    description: command.remote_description(),
+                    description: command.description,
                 })
         })
         .collect()

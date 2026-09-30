@@ -7,15 +7,10 @@ use ratatui::{
 
 use syntect::{
     easy::HighlightLines,
-    highlighting::{FontStyle, Highlighter, Theme, ThemeSet},
-    parsing::{Scope, SyntaxReference, SyntaxSet},
+    highlighting::{FontStyle, Theme, ThemeSet},
+    parsing::{SyntaxReference, SyntaxSet},
     util::LinesWithEndings,
 };
-
-#[cfg(test)]
-use std::str::FromStr;
-#[cfg(test)]
-use syntect::highlighting::{StyleModifier, ThemeItem, ThemeSettings};
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
@@ -166,70 +161,11 @@ pub(super) fn highlight_patch_lines(
     highlighted
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct DiffScopeBackgrounds {
-    pub inserted: Option<Color>,
-    pub deleted: Option<Color>,
-}
-
-pub(super) fn diff_scope_backgrounds() -> DiffScopeBackgrounds {
-    diff_scope_backgrounds_for_theme(theme())
-}
-
-fn diff_scope_backgrounds_for_theme(theme: &Theme) -> DiffScopeBackgrounds {
-    let highlighter = Highlighter::new(theme);
-    DiffScopeBackgrounds {
-        inserted: scope_background_color(&highlighter, "markup.inserted")
-            .or_else(|| scope_background_color(&highlighter, "diff.inserted")),
-        deleted: scope_background_color(&highlighter, "markup.deleted")
-            .or_else(|| scope_background_color(&highlighter, "diff.deleted")),
-    }
-}
-
-fn scope_background_color(highlighter: &Highlighter<'_>, scope_name: &str) -> Option<Color> {
-    let scope = Scope::new(scope_name).ok()?;
-    let background = highlighter.style_mod_for_stack(&[scope]).background?;
-    convert_color(background)
-}
-
-#[cfg(test)]
-fn theme_item(scope: &str, background: (u8, u8, u8)) -> ThemeItem {
-    ThemeItem {
-        scope: syntect::highlighting::ScopeSelectors::from_str(scope)
-            .expect("scope selector should parse"),
-        style: StyleModifier {
-            background: Some(syntect::highlighting::Color {
-                r: background.0,
-                g: background.1,
-                b: background.2,
-                a: 255,
-            }),
-            ..StyleModifier::default()
-        },
-    }
-}
-
-#[cfg(test)]
-fn theme_with_diff_backgrounds() -> Theme {
-    Theme {
-        name: Some("test-diff-theme".to_string()),
-        author: None,
-        settings: ThemeSettings::default(),
-        scopes: vec![
-            theme_item("markup.inserted", (10, 20, 30)),
-            theme_item("markup.deleted", (40, 50, 60)),
-        ],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use ratatui::style::Color;
 
-    use super::{
-        diff_scope_backgrounds_for_theme, find_syntax_for_path, highlight_patch_lines,
-        theme_with_diff_backgrounds,
-    };
+    use super::{find_syntax_for_path, highlight_patch_lines};
     use crate::activity_event::{PatchDiffLineActivityDescriptor, PatchDiffLineKind};
 
     #[test]
@@ -245,13 +181,6 @@ mod tests {
         );
         let spans = highlighted[0].as_ref().expect("expected highlight spans");
         assert!(spans.iter().any(|span| span.style.fg.is_some()));
-    }
-
-    #[test]
-    fn diff_scope_backgrounds_expose_insert_or_delete_theme_color() {
-        let backgrounds = diff_scope_backgrounds_for_theme(&theme_with_diff_backgrounds());
-        assert!(backgrounds.inserted.is_some());
-        assert!(backgrounds.deleted.is_some());
     }
 
     #[test]

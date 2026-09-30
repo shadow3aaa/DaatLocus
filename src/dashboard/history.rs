@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -9,7 +10,6 @@ use miette::{Context as _, IntoDiagnostic, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
 const DASHBOARD_ACTIVITY_HISTORY_DB_FILE: &str = "dashboard_activity.sqlite3";
 const DASHBOARD_ACTIVITY_HISTORY_LIMIT_MAX: usize = 200;
 pub const DASHBOARD_ACTIVITY_HISTORY_INITIAL_LIMIT: usize = 80;
@@ -61,7 +61,10 @@ impl DashboardActivityHistoryWindow {
             self.items.drain(0..drop_count);
             self.has_more_before = true;
         }
-        self.newest_cursor = None;
+        self.newest_cursor = self.items.last().and_then(|item| history_seq_from_item_id(&item.id));
+        if self.oldest_cursor.is_none() {
+            self.oldest_cursor = self.items.first().and_then(|item| history_seq_from_item_id(&item.id));
+        }
     }
 }
 
@@ -171,11 +174,41 @@ impl DashboardActivityHistoryStore {
         }
     }
 
-    pub fn append_items(&self, items: &[DashboardActivityHistoryItem]) -> Result<()> {
+    /// Reload only rows newer than `after_seq`.
+    ///
+    /// Callers that must refresh a window after an append use this instead of
+    /// re-reading the whole initial page in the same write.
+    pub fn load_window_after(&self, after_seq: i64) -> DashboardActivityHistoryWindow {
+        match self.query_after(Some(after_seq), DASHBOARD_ACTIVITY_HISTORY_INITIAL_LIMIT) {
+            Ok(page) => DashboardActivityHistoryWindow {
+                items: page.items,
+                oldest_cursor: page.oldest_cursor,
+                newest_cursor: page.newest_cursor,
+                has_more_before: page.has_more_before,
+            },
+            Err(err) => {
+                tracing::warn!("load dashboard activity history delta window failed: {err:?}");
+                Self::empty_window()
+            }
+        }
+    }
+
+    pub fn append_items(&self, items: &[DashboardActivityHistoryItem]) -> Result<i64> {
         if items.is_empty() {
-            return Ok(());
+            return self.max_seq();
         }
         self.try_append_items(items)
+    }
+
+    fn max_seq(&self) -> Result<i64> {
+        let conn = self.open_connection()?;
+        conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM dashboard_activity",
+            [],
+            |row| row.get(0),
+        )
+        .into_diagnostic()
+        .wrap_err("query dashboard activity max seq failed")
     }
 
     pub fn register_workflow_worker(&self, run_id: &str, worker_id: &str) -> Result<()> {
@@ -361,39 +394,72 @@ impl DashboardActivityHistoryStore {
         start_seq: Option<i64>,
         query: &str,
     ) -> Result<Vec<HistoryQueryItem>> {
-        let limit = clamp_history_limit(limit);
-        let needle = query.trim().to_lowercase();
+        let limit = i64::try_from(clamp_history_limit(limit))
+            .expect("history query limit is clamped below i64::MAX");
+        let needle = query.trim();
         let conn = self.open_connection()?;
         let sql = match mode {
             HistoryQueryMode::Range => {
                 "SELECT seq, item_json FROM dashboard_activity
                  WHERE seq >= ?1
-                 ORDER BY seq ASC"
+                 ORDER BY seq ASC
+                 LIMIT ?2"
+            }
+            HistoryQueryMode::Search if !needle.is_empty() && before_seq.is_some() => {
+                "SELECT seq, item_json FROM dashboard_activity
+                 WHERE seq < ?1
+                   AND instr(lower(item_json), lower(?2)) > 0
+                 ORDER BY seq DESC
+                 LIMIT ?3"
+            }
+            HistoryQueryMode::Search if !needle.is_empty() => {
+                "SELECT seq, item_json FROM dashboard_activity
+                 WHERE instr(lower(item_json), lower(?1)) > 0
+                 ORDER BY seq DESC
+                 LIMIT ?2"
+            }
+            HistoryQueryMode::Recent | HistoryQueryMode::Search if before_seq.is_some() => {
+                "SELECT seq, item_json FROM dashboard_activity
+                 WHERE seq < ?1
+                 ORDER BY seq DESC
+                 LIMIT ?2"
             }
             HistoryQueryMode::Recent | HistoryQueryMode::Search => {
-                if before_seq.is_some() {
-                    "SELECT seq, item_json FROM dashboard_activity
-                     WHERE seq < ?1
-                     ORDER BY seq DESC"
-                } else {
-                    "SELECT seq, item_json FROM dashboard_activity ORDER BY seq DESC"
-                }
+                "SELECT seq, item_json FROM dashboard_activity
+                 ORDER BY seq DESC
+                 LIMIT ?1"
             }
         };
         let mut statement = conn
             .prepare(sql)
             .into_diagnostic()
             .wrap_err("prepare history query failed")?;
-        let rows = match (mode, before_seq) {
-            (HistoryQueryMode::Range, _) => statement
-                .query_map(params![start_seq.unwrap_or(1)], decode_history_row)
+        let rows = match mode {
+            HistoryQueryMode::Range => statement
+                .query_map(params![start_seq.unwrap_or(1), limit], decode_history_row)
                 .into_diagnostic(),
-            (_, Some(before)) => statement
-                .query_map(params![before], decode_history_row)
-                .into_diagnostic(),
-            _ => statement
-                .query_map([], decode_history_row)
-                .into_diagnostic(),
+            HistoryQueryMode::Search if !needle.is_empty() => {
+                if let Some(before) = before_seq {
+                    statement
+                        .query_map(params![before, needle, limit], decode_history_row)
+                        .into_diagnostic()
+                } else {
+                    statement
+                        .query_map(params![needle, limit], decode_history_row)
+                        .into_diagnostic()
+                }
+            }
+            HistoryQueryMode::Recent | HistoryQueryMode::Search => {
+                if let Some(before) = before_seq {
+                    statement
+                        .query_map(params![before, limit], decode_history_row)
+                        .into_diagnostic()
+                } else {
+                    statement
+                        .query_map(params![limit], decode_history_row)
+                        .into_diagnostic()
+                }
+            }
         }
         .wrap_err("query history rows failed")?;
 
@@ -403,13 +469,10 @@ impl DashboardActivityHistoryStore {
                 .into_diagnostic()
                 .wrap_err("decode history row failed")?;
             let entry = history_query_item(seq, &item);
-            if !needle.is_empty() && !entry.content.to_lowercase().contains(&needle) {
+            if !needle.is_empty() && !contains_ignore_ascii_case(&entry.content, needle) {
                 continue;
             }
             items.push(entry);
-            if items.len() >= limit {
-                break;
-            }
         }
         if matches!(mode, HistoryQueryMode::Recent | HistoryQueryMode::Search) {
             items.reverse();
@@ -419,7 +482,7 @@ impl DashboardActivityHistoryStore {
 
     /// Count the history entries a `read_history` query can see.
     pub fn count_history(&self, query: &str) -> Result<usize> {
-        let needle = query.trim().to_lowercase();
+        let needle = query.trim();
         let conn = self.open_connection()?;
         if needle.is_empty() {
             let count = conn
@@ -430,28 +493,16 @@ impl DashboardActivityHistoryStore {
                 .wrap_err("count history rows failed")?;
             return Ok(count.max(0) as usize);
         }
-        let mut statement = conn
-            .prepare("SELECT seq, item_json FROM dashboard_activity")
+        let count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dashboard_activity
+                 WHERE instr(lower(item_json), lower(?1)) > 0",
+                params![needle],
+                |row| row.get::<_, i64>(0),
+            )
             .into_diagnostic()
-            .wrap_err("prepare history count query failed")?;
-        let rows = statement
-            .query_map([], decode_history_row)
-            .into_diagnostic()
-            .wrap_err("query history rows for count failed")?;
-        let mut count = 0usize;
-        for row in rows {
-            let (seq, item) = row
-                .into_diagnostic()
-                .wrap_err("decode history row failed")?;
-            if history_query_item(seq, &item)
-                .content
-                .to_lowercase()
-                .contains(&needle)
-            {
-                count += 1;
-            }
-        }
-        Ok(count)
+            .wrap_err("count history search rows failed")?;
+        Ok(count.max(0) as usize)
     }
     pub fn query_before(
         &self,
@@ -494,7 +545,7 @@ impl DashboardActivityHistoryStore {
             .into_diagnostic()
             .wrap_err("decode dashboard activity history before failed")?;
         rows.reverse();
-        self.page_from_rows(rows)
+        page_from_rows(&conn, rows)
     }
 
     pub fn query_after(
@@ -526,34 +577,27 @@ impl DashboardActivityHistoryStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .into_diagnostic()
             .wrap_err("decode dashboard activity history after failed")?;
-        self.page_from_rows(rows)
+        page_from_rows(&conn, rows)
     }
 
     pub fn query_user_input_count(&self) -> Result<DashboardActivityHistoryCount> {
         let conn = self.open_connection()?;
-        let mut statement = conn
-            .prepare("SELECT item_json FROM dashboard_activity")
-            .into_diagnostic()
-            .wrap_err("prepare dashboard activity history count query failed")?;
-        let rows = statement
-            .query_map([], |row| {
-                let item_json: String = row.get(0)?;
-                Ok(serde_json::from_str::<DashboardActivityHistoryItem>(&item_json).ok())
+        let total_items = conn
+            .query_row("SELECT COUNT(*) FROM dashboard_activity", [], |row| {
+                row.get::<_, i64>(0)
             })
             .into_diagnostic()
-            .wrap_err("query dashboard activity history count failed")?;
-
-        let mut matching_items = 0;
-        let mut total_items = 0;
-        for item in rows {
-            if let Some(item) = item.into_diagnostic()? {
-                total_items += 1;
-                if history_item_is_user_input(&item) {
-                    matching_items += 1;
-                }
-            }
-        }
-
+            .wrap_err("count dashboard activity history failed")?
+            .max(0) as usize;
+        let matching_items = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dashboard_activity WHERE item_json LIKE '%\"User\":%'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .into_diagnostic()
+            .wrap_err("count dashboard user input history failed")?
+            .max(0) as usize;
         Ok(DashboardActivityHistoryCount {
             matching_items,
             total_items,
@@ -561,29 +605,28 @@ impl DashboardActivityHistoryStore {
     }
 
     pub fn query_recent_user_inputs(&self, limit: usize) -> Result<DashboardInputHistory> {
-        let limit = clamp_history_limit(limit);
+        let limit = i64::try_from(clamp_history_limit(limit))
+            .expect("history query limit is clamped below i64::MAX");
         let conn = self.open_connection()?;
         let mut statement = conn
-            .prepare("SELECT item_json FROM dashboard_activity ORDER BY seq DESC")
+            .prepare(
+                "SELECT item_json FROM dashboard_activity
+                 WHERE item_json LIKE '%\"User\":%'
+                 ORDER BY seq DESC
+                 LIMIT ?1",
+            )
             .into_diagnostic()
             .wrap_err("prepare dashboard input history query failed")?;
-        let mut rows = statement
-            .query([])
+        let rows = statement
+            .query_map(params![limit], |row| row.get::<_, String>(0))
             .into_diagnostic()
             .wrap_err("query dashboard input history failed")?;
         let mut entries = Vec::new();
-
-        while let Some(row) = rows
-            .next()
-            .into_diagnostic()
-            .wrap_err("read dashboard input history row failed")?
-        {
-            let item_json: String = row
-                .get(0)
+        for item_json in rows {
+            let item_json = item_json
                 .into_diagnostic()
                 .wrap_err("read dashboard input history item json failed")?;
-            let Some(item) = serde_json::from_str::<DashboardActivityHistoryItem>(&item_json).ok()
-            else {
+            let Ok(item) = serde_json::from_str::<DashboardActivityHistoryItem>(&item_json) else {
                 continue;
             };
             let Some(text) = history_item_user_input_text(&item) else {
@@ -593,11 +636,7 @@ impl DashboardActivityHistoryStore {
                 continue;
             }
             entries.push(text);
-            if entries.len() >= limit {
-                break;
-            }
         }
-
         entries.reverse();
         Ok(DashboardInputHistory { entries })
     }
@@ -651,7 +690,7 @@ impl DashboardActivityHistoryStore {
         Ok(())
     }
 
-    fn try_append_items(&self, items: &[DashboardActivityHistoryItem]) -> Result<()> {
+    fn try_append_items(&self, items: &[DashboardActivityHistoryItem]) -> Result<i64> {
         let _guard = self
             .write_lock
             .lock()
@@ -661,7 +700,15 @@ impl DashboardActivityHistoryStore {
             .transaction()
             .into_diagnostic()
             .wrap_err("begin dashboard activity history transaction failed")?;
-        let mut existing_items = load_all_history_items(&transaction)?;
+        let before_seq: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM dashboard_activity",
+                [],
+                |row| row.get(0),
+            )
+            .into_diagnostic()
+            .wrap_err("query dashboard activity seq before append failed")?;
+        let mut explored_index = load_explored_group_index(&transaction, items)?;
         {
             let mut statement = transaction
                 .prepare(
@@ -677,8 +724,10 @@ impl DashboardActivityHistoryStore {
 
             for item in items {
                 let mut item = item.clone();
-                normalize_legacy_workflow_worker_activity(&transaction, &mut item)?;
-                normalize_window_explored_item(&mut item, &existing_items);
+                if item_needs_legacy_workflow_migration(&item) {
+                    normalize_legacy_workflow_worker_activity(&transaction, &mut item)?;
+                }
+                normalize_window_explored_item_indexed(&mut item, &mut explored_index);
                 let item_json = serde_json::to_string(&item)
                     .into_diagnostic()
                     .wrap_err("encode dashboard activity item failed")?;
@@ -691,21 +740,13 @@ impl DashboardActivityHistoryStore {
                     ])
                     .into_diagnostic()
                     .wrap_err("insert dashboard activity item failed")?;
-                if let Some(existing) = existing_items
-                    .iter_mut()
-                    .find(|existing| existing.id == item.id)
-                {
-                    *existing = item;
-                } else {
-                    existing_items.push(item);
-                }
             }
         }
         transaction
             .commit()
             .into_diagnostic()
             .wrap_err("commit dashboard activity history transaction failed")?;
-        Ok(())
+        Ok(before_seq)
     }
 
     fn open_connection(&self) -> Result<Connection> {
@@ -719,62 +760,82 @@ impl DashboardActivityHistoryStore {
             })
     }
 
-    fn page_from_rows(
-        &self,
-        rows: Vec<(i64, DashboardActivityHistoryItem)>,
-    ) -> Result<DashboardActivityHistoryPage> {
-        let oldest_cursor = rows.first().map(|(seq, _)| *seq);
-        let newest_cursor = rows.last().map(|(seq, _)| *seq);
-        let items = rows
-            .into_iter()
-            .map(|(seq, mut item)| {
-                item.id = format!("history-{seq}");
-                item
-            })
-            .collect();
+}
 
-        Ok(DashboardActivityHistoryPage {
-            items,
-            oldest_cursor,
-            newest_cursor,
-            has_more_before: self.has_record_before(oldest_cursor)?,
-            has_more_after: self.has_record_after(newest_cursor)?,
+fn page_from_rows(
+    conn: &Connection,
+    rows: Vec<(i64, DashboardActivityHistoryItem)>,
+) -> Result<DashboardActivityHistoryPage> {
+    let oldest_cursor = rows.first().map(|(seq, _)| *seq);
+    let newest_cursor = rows.last().map(|(seq, _)| *seq);
+    let items = rows
+        .into_iter()
+        .map(|(seq, mut item)| {
+            item.id = format!("history-{seq}");
+            item
         })
-    }
+        .collect();
+    let (has_more_before, has_more_after) =
+        history_page_bounds(conn, oldest_cursor, newest_cursor)?;
 
-    fn has_record_before(&self, cursor: Option<i64>) -> Result<bool> {
-        let Some(cursor) = cursor else {
-            return Ok(false);
-        };
-        let conn = self.open_connection()?;
-        let value = conn
-            .query_row(
-                "SELECT 1 FROM dashboard_activity WHERE seq < ?1 LIMIT 1",
-                params![cursor],
-                |_| Ok(()),
-            )
-            .optional()
-            .into_diagnostic()
-            .wrap_err("query older dashboard activity existence failed")?;
-        Ok(value.is_some())
-    }
+    Ok(DashboardActivityHistoryPage {
+        items,
+        oldest_cursor,
+        newest_cursor,
+        has_more_before,
+        has_more_after,
+    })
+}
 
-    fn has_record_after(&self, cursor: Option<i64>) -> Result<bool> {
-        let Some(cursor) = cursor else {
-            return Ok(false);
-        };
-        let conn = self.open_connection()?;
-        let value = conn
-            .query_row(
-                "SELECT 1 FROM dashboard_activity WHERE seq > ?1 LIMIT 1",
-                params![cursor],
-                |_| Ok(()),
-            )
-            .optional()
-            .into_diagnostic()
-            .wrap_err("query newer dashboard activity existence failed")?;
-        Ok(value.is_some())
+fn history_page_bounds(
+    conn: &Connection,
+    oldest_cursor: Option<i64>,
+    newest_cursor: Option<i64>,
+) -> Result<(bool, bool)> {
+    match (oldest_cursor, newest_cursor) {
+        (Some(oldest), Some(newest)) => {
+            let (has_before, has_after) = conn
+                .query_row(
+                    "SELECT
+                        EXISTS(SELECT 1 FROM dashboard_activity WHERE seq < ?1),
+                        EXISTS(SELECT 1 FROM dashboard_activity WHERE seq > ?2)",
+                    params![oldest, newest],
+                    |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
+                )
+                .into_diagnostic()
+                .wrap_err("query dashboard activity page bounds failed")?;
+            Ok((has_before, has_after))
+        }
+        (Some(oldest), None) => Ok((record_exists_before(conn, oldest)?, false)),
+        (None, Some(newest)) => Ok((false, record_exists_after(conn, newest)?)),
+        (None, None) => Ok((false, false)),
     }
+}
+
+fn record_exists_before(conn: &Connection, cursor: i64) -> Result<bool> {
+    let value = conn
+        .query_row(
+            "SELECT 1 FROM dashboard_activity WHERE seq < ?1 LIMIT 1",
+            params![cursor],
+            |_| Ok(()),
+        )
+        .optional()
+        .into_diagnostic()
+        .wrap_err("query older dashboard activity existence failed")?;
+    Ok(value.is_some())
+}
+
+fn record_exists_after(conn: &Connection, cursor: i64) -> Result<bool> {
+    let value = conn
+        .query_row(
+            "SELECT 1 FROM dashboard_activity WHERE seq > ?1 LIMIT 1",
+            params![cursor],
+            |_| Ok(()),
+        )
+        .optional()
+        .into_diagnostic()
+        .wrap_err("query newer dashboard activity existence failed")?;
+    Ok(value.is_some())
 }
 
 fn normalize_legacy_workflow_worker_activity(
@@ -1016,10 +1077,6 @@ fn clamp_history_limit(limit: usize) -> usize {
     limit.clamp(1, DASHBOARD_ACTIVITY_HISTORY_LIMIT_MAX)
 }
 
-const fn history_item_is_user_input(item: &DashboardActivityHistoryItem) -> bool {
-    matches!(item.event, SessionActivityEvent::User(_))
-}
-
 fn history_item_user_input_text(item: &DashboardActivityHistoryItem) -> Option<String> {
     let SessionActivityEvent::User(cell) = &item.event else {
         return None;
@@ -1046,25 +1103,159 @@ fn history_query_item(seq: i64, item: &DashboardActivityHistoryItem) -> HistoryQ
         content: super::cells::activity_event_history_text(&item.event),
     }
 }
-fn load_all_history_items(
+
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
+}
+
+fn history_seq_from_item_id(item_id: &str) -> Option<i64> {
+    item_id
+        .strip_prefix("history-")
+        .and_then(|seq| seq.parse::<i64>().ok())
+}
+
+#[derive(Clone)]
+struct ExploredGroupState {
+    latest_item_id: String,
+    max_segment: usize,
+    is_tail: bool,
+}
+
+fn load_explored_group_index(
     transaction: &rusqlite::Transaction<'_>,
-) -> Result<Vec<DashboardActivityHistoryItem>> {
+    incoming: &[DashboardActivityHistoryItem],
+) -> Result<HashMap<String, ExploredGroupState>> {
     let mut statement = transaction
-        .prepare("SELECT item_json FROM dashboard_activity ORDER BY seq ASC")
+        .prepare("SELECT seq, item_id FROM dashboard_activity ORDER BY seq ASC")
         .into_diagnostic()
-        .wrap_err("prepare dashboard activity history scan failed")?;
+        .wrap_err("prepare explored group index query failed")?;
     let rows = statement
         .query_map([], |row| {
-            let item_json: String = row.get(0)?;
-            Ok(serde_json::from_str::<DashboardActivityHistoryItem>(&item_json).ok())
+            let seq: i64 = row.get(0)?;
+            let item_id: String = row.get(1)?;
+            Ok((seq, item_id))
         })
         .into_diagnostic()
-        .wrap_err("query dashboard activity history scan failed")?;
+        .wrap_err("query explored group index failed")?;
+    let mut index: HashMap<String, ExploredGroupState> = HashMap::new();
+    let mut latest_seq_by_group: HashMap<String, i64> = HashMap::new();
+    let mut overall_latest_seq = None;
+    for row in rows {
+        let (seq, item_id) = row
+            .into_diagnostic()
+            .wrap_err("decode explored group index row failed")?;
+        overall_latest_seq = Some(seq);
+        let Some(stable_id) = explored_stable_id_from_item_id(&item_id, incoming) else {
+            continue;
+        };
+        let segment = explored_segment(&item_id).unwrap_or(0);
+        let is_newer = latest_seq_by_group
+            .get(&stable_id)
+            .is_none_or(|previous| seq >= *previous);
+        latest_seq_by_group.insert(stable_id.clone(), seq);
+        if let Some(state) = index.get_mut(&stable_id) {
+            state.max_segment = state.max_segment.max(segment);
+            if is_newer {
+                state.latest_item_id = item_id;
+            }
+        } else {
+            index.insert(
+                stable_id,
+                ExploredGroupState {
+                    latest_item_id: item_id,
+                    max_segment: segment,
+                    is_tail: false,
+                },
+            );
+        }
+    }
+    if let Some(latest_seq) = overall_latest_seq {
+        for (stable_id, state) in &mut index {
+            state.is_tail = latest_seq_by_group.get(stable_id).copied() == Some(latest_seq);
+        }
+    }
+    Ok(index)
+}
 
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .into_diagnostic()
-        .wrap_err("decode dashboard activity history scan failed")
-        .map(|items| items.into_iter().flatten().collect())
+fn explored_stable_id_from_item_id(
+    item_id: &str,
+    incoming: &[DashboardActivityHistoryItem],
+) -> Option<String> {
+    let base_id = item_id
+        .rsplit_once("-segment-")
+        .map(|(base, _)| base)
+        .unwrap_or(item_id);
+    incoming.iter().find_map(|item| {
+        let stable_id = explored_stable_id(item)?;
+        let bare = format!("activity-{stable_id}");
+        (item.id == base_id || item.id == item_id || bare == base_id).then(|| stable_id.to_string())
+    })
+}
+
+fn normalize_window_explored_item_indexed(
+    item: &mut DashboardActivityHistoryItem,
+    index: &mut HashMap<String, ExploredGroupState>,
+) {
+    let Some(group_stable_id) = explored_stable_id(item).map(str::to_owned) else {
+        for state in index.values_mut() {
+            state.is_tail = false;
+        }
+        return;
+    };
+
+    if let Some(active) = index.get(&group_stable_id).filter(|state| state.is_tail) {
+        item.id.clone_from(&active.latest_item_id);
+    } else if let Some(existing) = index.get(&group_stable_id) {
+        let segment = existing.max_segment.saturating_add(1);
+        item.id = format!("{}-segment-{segment}", item.id);
+    }
+
+    let segment = explored_segment(&item.id).unwrap_or(0);
+    let stored = ExploredGroupState {
+        latest_item_id: item.id.clone(),
+        max_segment: segment,
+        is_tail: true,
+    };
+    if let Some(existing) = index.get_mut(&group_stable_id) {
+        existing.latest_item_id = stored.latest_item_id;
+        existing.max_segment = existing.max_segment.max(stored.max_segment);
+        existing.is_tail = true;
+    } else {
+        index.insert(group_stable_id.clone(), stored);
+    }
+    let latest_id = item.id.clone();
+    for (stable_id, state) in index.iter_mut() {
+        if stable_id.as_str() != explored_stable_id(item).unwrap_or_default() {
+            state.is_tail = false;
+        } else if state.latest_item_id != latest_id {
+            state.is_tail = false;
+        }
+    }
+}
+
+fn item_needs_legacy_workflow_migration(item: &DashboardActivityHistoryItem) -> bool {
+    let SessionActivityEvent::Workflow(workflow) = &item.event else {
+        return false;
+    };
+    workflow.snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot
+            .workers
+            .iter()
+            .any(|worker| !worker.activity.is_empty() && worker.activity_count == 0)
+    })
 }
 
 fn normalize_window_explored_item(
@@ -1108,6 +1299,7 @@ fn normalize_window_explored_item(
     item.id = format!("{}-segment-{segment}", item.id);
 }
 
+
 const fn explored_stable_id(item: &DashboardActivityHistoryItem) -> Option<&str> {
     match &item.event {
         SessionActivityEvent::Explored(group) => Some(group.stable_id.as_str()),
@@ -1124,15 +1316,22 @@ fn explored_segment(item_id: &str) -> Option<usize> {
 fn dedupe_activity_items_keep_latest(
     items: Vec<DashboardActivityHistoryItem>,
 ) -> Vec<DashboardActivityHistoryItem> {
-    let mut deduped: Vec<DashboardActivityHistoryItem> = Vec::new();
-    for item in items {
-        if let Some(existing) = deduped.iter_mut().find(|existing| existing.id == item.id) {
-            *existing = item;
+    let mut order = Vec::with_capacity(items.len());
+    let mut by_id = HashMap::with_capacity(items.len());
+    for (index, item) in items.into_iter().enumerate() {
+        if let Some(slot) = by_id.get_mut(&item.id) {
+            *slot = (index, item);
         } else {
-            deduped.push(item);
+            order.push(item.id.clone());
+            by_id.insert(item.id.clone(), (index, item));
         }
     }
-    deduped
+    let mut ranked = order
+        .into_iter()
+        .filter_map(|id| by_id.remove(&id))
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(index, _)| *index);
+    ranked.into_iter().map(|(_, item)| item).collect()
 }
 
 #[cfg(test)]

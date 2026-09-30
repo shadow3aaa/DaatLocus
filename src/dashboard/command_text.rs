@@ -62,19 +62,38 @@ pub(super) fn render_skills_list(state: &DashboardState) -> String {
     lines.join("\n")
 }
 
-pub(super) fn render_skill_detail(state: &DashboardState, target: &str) -> String {
-    let skill = match resolve_skill_target(state, target) {
-        Ok(skill) => skill,
-        Err(message) => return message,
-    };
+pub(super) fn format_skill_detail(
+    name: &str,
+    status: &str,
+    scope: &str,
+    path: &str,
+    description: &str,
+) -> String {
     [
-        format!("Name: {}", skill.name),
-        format!("Status: {}", skill_status_description(skill)),
-        format!("Scope: {}", skill.scope),
-        format!("Path: {}", skill.path),
-        format!("Description: {}", skill.description),
+        format!("Name: {name}"),
+        format!("Status: {status}"),
+        format!("Scope: {scope}"),
+        format!("Path: {path}"),
+        format!("Description: {description}"),
     ]
     .join("\n")
+}
+
+pub(super) fn skill_detail_text(skill: &OpenSkillDashboardSummary) -> String {
+    format_skill_detail(
+        &skill.name,
+        &skill_status_description(skill),
+        &skill.scope,
+        &skill.path,
+        &skill.description,
+    )
+}
+
+pub(super) fn render_skill_detail(state: &DashboardState, target: &str) -> String {
+    match resolve_skill_target(state, target) {
+        Ok(skill) => skill_detail_text(skill),
+        Err(message) => message,
+    }
 }
 
 pub(super) fn resolve_skill_target<'a>(

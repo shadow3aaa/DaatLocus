@@ -31,12 +31,13 @@ pub fn sync_dashboard_state(
     sleep_status: &SleepStatusSnapshot,
     last_cycle_elapsed_ms: Option<u128>,
 ) {
+    let status_command = status_command_snapshot_for_dashboard(context);
     tx.send_modify(|state| {
-        let app_renders = context.apps.state_renders();
         state.agent_name = dashboard_agent_name();
         state.session_title = context.session_title.snapshot();
-        state.status_output = render_status_command_output_for_dashboard(context, &app_renders);
-        state.status_command = status_command_snapshot_for_dashboard(context);
+        state.status_output =
+            render_status_command_output_from_snapshot(context, &status_command);
+        state.status_command = status_command;
         state.sleep_status_output = render_sleep_status_output_for_dashboard(context, sleep_status);
         state.inspect_telegram_output = render_telegram_status_for_dashboard(context);
         state.system_prompt_output = render_system_prompt_output_for_dashboard(context);
@@ -581,9 +582,15 @@ pub fn render_status_command_output_for_dashboard(
     context: &Context,
     _: &[(crate::app::AppId, crate::app::AppStateRender)],
 ) -> String {
-    let mut sections = Vec::new();
     let status = status_command_snapshot_for_dashboard(context);
+    render_status_command_output_from_snapshot(context, &status)
+}
 
+fn render_status_command_output_from_snapshot(
+    context: &Context,
+    status: &DashboardStatusCommandSnapshot,
+) -> String {
+    let mut sections = Vec::new();
     sections.push(format!(
         "Overview\nRuntime turn: {}\nPlans: {}\nEvents: {}",
         status.runtime_turn, status.active_plans, status.events
@@ -592,7 +599,7 @@ pub fn render_status_command_output_for_dashboard(
     let usage_lines = render_status_usage_lines(context);
     sections.push(format!("Model usage\n{}", usage_lines.join("\n")));
 
-    let plan_lines = render_status_plan_lines(&status);
+    let plan_lines = render_status_plan_lines(status);
     sections.push(format!("Plan\n{}", plan_lines.join("\n")));
 
     sections.join("\n\n")

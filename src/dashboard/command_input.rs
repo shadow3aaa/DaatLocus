@@ -94,10 +94,6 @@ impl PastePlaceholder {
     }
 }
 
-/// Visible placeholder text. Input already stores `display`, so this is identity.
-pub(super) fn render_paste_placeholders(text: &str, _pending: &[PastePlaceholder]) -> String {
-    text.to_string()
-}
 
 /// Threshold above which pasted text gets a placeholder block instead of being inserted inline.
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 500;
@@ -185,46 +181,40 @@ pub(super) fn expand_paste_placeholders(text: &str, pending: &[(String, String)]
 }
 
 fn expand_paste_placeholder_tokens(text: &str, pending: &[PastePlaceholder]) -> String {
-    let mut result = text.to_string();
+    if pending.is_empty() || text.is_empty() {
+        return text.to_string();
+    }
     let mut consumed = vec![false; pending.len()];
+    let mut result = String::with_capacity(text.len());
     let mut cursor = 0usize;
-    while cursor < result.len() {
-        let Some((index, start)) = next_owned_placeholder(&result[cursor..], pending, &consumed)
-        else {
-            break;
-        };
-        let start = cursor + start;
-        let placeholder = &pending[index];
-        let end = start + placeholder.display.len();
-        result.replace_range(start..end, &placeholder.body);
-        consumed[index] = true;
-        cursor = start + placeholder.body.len();
+    while cursor < text.len() {
+        let rest = &text[cursor..];
+        let mut matched: Option<(usize, usize)> = None;
+        for (index, placeholder) in pending.iter().enumerate() {
+            if consumed[index] || placeholder.display.is_empty() {
+                continue;
+            }
+            if rest.starts_with(placeholder.display.as_str()) {
+                let take = match matched {
+                    Some((best, _)) => index < best,
+                    None => true,
+                };
+                if take {
+                    matched = Some((index, placeholder.display.len()));
+                }
+            }
+        }
+        if let Some((index, len)) = matched {
+            result.push_str(&pending[index].body);
+            consumed[index] = true;
+            cursor += len;
+        } else {
+            let ch = rest.chars().next().expect("cursor inside text");
+            result.push(ch);
+            cursor += ch.len_utf8();
+        }
     }
     result
-}
-
-fn next_owned_placeholder(
-    text: &str,
-    pending: &[PastePlaceholder],
-    consumed: &[bool],
-) -> Option<(usize, usize)> {
-    let mut best: Option<(usize, usize)> = None;
-    for (index, placeholder) in pending.iter().enumerate() {
-        if consumed[index] {
-            continue;
-        }
-        let Some(start) = text.find(placeholder.display.as_str()) else {
-            continue;
-        };
-        let replace = match best {
-            Some((_, best_start)) => start < best_start,
-            None => true,
-        };
-        if replace {
-            best = Some((index, start));
-        }
-    }
-    best
 }
 
 
@@ -489,7 +479,6 @@ fn split_display_prefix(text: &str, max_width: usize) -> (&str, &str) {
 mod paste_placeholder_tests {
     use super::{
         expand_paste_placeholder_tokens, handle_paste_placeholder_tokens,
-        render_paste_placeholders,
     };
 
     #[test]
@@ -502,10 +491,7 @@ mod paste_placeholder_tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, "paste-1");
         assert_eq!(pending[0].display, "[Pasted Content 17 chars]");
-        assert_eq!(
-            render_paste_placeholders(&input, &pending),
-            "before [Pasted Content 17 chars] [Pasted Content 17 chars] after"
-        );
+        assert!(input.contains("[Pasted Content 17 chars]"));
 
         let expanded = expand_paste_placeholder_tokens(&input, &pending);
         assert_eq!(
@@ -529,7 +515,7 @@ mod paste_placeholder_tests {
         assert_eq!(pending[1].display, "[Pasted Content 12 chars] #2");
         assert_ne!(pending[0].id, pending[1].id);
         assert_eq!(
-            render_paste_placeholders(&input, &pending),
+            input.trim(),
             "[Pasted Content 12 chars] [Pasted Content 12 chars] #2"
         );
         assert_eq!(

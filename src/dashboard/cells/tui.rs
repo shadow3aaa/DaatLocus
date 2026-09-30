@@ -2,13 +2,14 @@ use ratatui::{
     buffer::Buffer,
     prelude::*,
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Clear, Paragraph, Wrap},
+    text::{Line, Span},
+    widgets::{Clear, Paragraph},
 };
 use unicode_width::UnicodeWidthChar;
 
 use super::artifact_preview::{ArtifactPreviewRequest, ArtifactPreviewState};
 use super::markdown::render_markdown_with_width;
+use super::super::renderable::Renderable;
 use super::{
     LiveActivityEvent, SessionActivityEvent,
     apps::{BrowserActivityData, LiveBrowserActivityData, WebSearchActivityData},
@@ -21,7 +22,7 @@ use super::{
     },
     exec::{ExecResultActivityData, LiveExecActivityData, TerminalExecutionMeta},
     highlight::{
-        DiffScopeBackgrounds, diff_scope_backgrounds, highlight_patch_lines,
+        highlight_patch_lines,
         highlight_shell_command,
     },
     messages::{PatchActivityData, ReplyActivityData, TelegramActivityData},
@@ -34,7 +35,7 @@ use crate::activity_event::{
     WebSearchActivityAction,
 };
 use crate::dashboard::artifact_links;
-use crate::dashboard::renderable::{FlexRenderable, Renderable, ViewportCulledColumn};
+use crate::dashboard::renderable::{FlexRenderable, ViewportCulledColumn};
 use crate::dashboard::selection::{
     SelectableId, SelectableRegion, SelectionRegistry, line_plain_text,
 };
@@ -74,8 +75,9 @@ struct CacheEntry {
     cell: SessionActivityEvent,
     /// Workflow group identity used by the single group entry. Other cells ignore it.
     workflow_group_key: u64,
-    lines: Vec<Line<'static>>,
+    lines: std::sync::Arc<[Line<'static>]>,
     height: u16,
+    selectable_id: SelectableId,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -137,35 +139,27 @@ impl CachedActivityLines {
         cell: &SessionActivityEvent,
         options: ActivityDataRenderOptions,
         workflow_group_key: u64,
-    ) -> Option<CachedCellLines> {
-        let cached = self.entries.get(index).and_then(|e| {
-            e.as_ref().and_then(|entry| {
-                if entry.width == width
+    ) -> Option<&CacheEntry> {
+        let hit = self.entries.get(index).and_then(|entry| {
+            entry.as_ref().filter(|entry| {
+                entry.width == width
                     && entry.options == options
                     && entry.cell == *cell
                     && entry.workflow_group_key == workflow_group_key
-                {
-                    Some(CachedCellLines {
-                        lines: entry.lines.clone(),
-                        height: entry.height,
-                    })
-                } else {
-                    None
-                }
             })
         });
         #[cfg(feature = "tui-perf-cmd")]
         {
-            if cached.is_some() {
+            if hit.is_some() {
                 self.hits = self.hits.saturating_add(1);
             } else {
                 self.misses = self.misses.saturating_add(1);
             }
         }
-        cached
+        hit
     }
 
-    /// Store rendered lines for cell `index`.
+    /// Store rendered lines for cell `index`. The entry keeps the only copy.
     fn set(
         &mut self,
         index: usize,
@@ -174,39 +168,46 @@ impl CachedActivityLines {
         cell: SessionActivityEvent,
         workflow_group_key: u64,
         lines: Vec<Line<'static>>,
-    ) -> CachedCellLines {
+    ) -> &CacheEntry {
         if index >= self.entries.len() {
             self.entries.resize_with(index + 1, || None);
         }
         let height = cached_lines_height(&lines, width);
+        let selectable_id = self
+            .entries
+            .get(index)
+            .and_then(|entry| entry.as_ref())
+            .filter(|entry| entry.cell == cell)
+            .map(|entry| entry.selectable_id.clone())
+            .unwrap_or_else(|| committed_activity_selectable_id(&cell));
         self.entries[index] = Some(CacheEntry {
             width,
             options,
             cell,
             workflow_group_key,
-            lines: lines.clone(),
+            lines: lines.into(),
             height,
+            selectable_id,
         });
-        CachedCellLines { lines, height }
+        self.entries[index]
+            .as_ref()
+            .expect("cache entry was just inserted")
+    }
+
+    fn entry(&self, index: usize) -> Option<&CacheEntry> {
+        self.entries.get(index).and_then(Option::as_ref)
     }
 }
 
-/// Thin Renderable wrapper around pre-computed lines.
-#[derive(Clone)]
-struct CachedCellLines {
-    lines: Vec<Line<'static>>,
+/// Shared view of one cached cell. Rendering borrows the stored lines.
+struct ActivityRenderSlot {
+    lines: std::sync::Arc<[Line<'static>]>,
     height: u16,
 }
 
-impl Renderable for CachedCellLines {
+impl Renderable for ActivityRenderSlot {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        if self.lines.is_empty() {
-            return;
-        }
-        Clear.render(area, buf);
-        Paragraph::new(Text::from(self.lines.clone()))
-            .wrap(Wrap { trim: false })
-            .render(area, buf);
+        render_cached_lines(self.lines.as_ref(), 0, area, buf);
     }
 
     fn desired_height(&self, _width: u16) -> u16 {
@@ -214,18 +215,34 @@ impl Renderable for CachedCellLines {
     }
 
     fn render_skip(&self, area: Rect, skip: u16, buf: &mut Buffer) {
-        if self.lines.is_empty() {
-            return;
+        render_cached_lines(self.lines.as_ref(), skip, area, buf);
+    }
+}
+
+fn render_cached_lines(lines: &[Line<'static>], skip: u16, area: Rect, buf: &mut Buffer) {
+    if lines.is_empty() || area.width == 0 || area.height == 0 {
+        return;
+    }
+    Clear.render(area, buf);
+    let mut screen_row = 0u16;
+    let mut remaining_skip = skip;
+    for line in lines {
+        let rows = cached_line_rows(line, area.width);
+        if remaining_skip >= rows {
+            remaining_skip = remaining_skip.saturating_sub(rows);
+            continue;
         }
-        if skip == 0 {
-            self.render(area, buf);
-            return;
+        let first_row = remaining_skip;
+        remaining_skip = 0;
+        for wrap_row in first_row..rows {
+            if screen_row >= area.height {
+                return;
+            }
+            let y = area.y.saturating_add(screen_row);
+            buf.set_style(Rect::new(area.x, y, area.width, 1), line.style);
+            write_cached_line_row(line, wrap_row, area.x, y, area.width, buf);
+            screen_row = screen_row.saturating_add(1);
         }
-        Clear.render(area, buf);
-        Paragraph::new(Text::from(self.lines.clone()))
-            .wrap(Wrap { trim: false })
-            .scroll((skip, 0))
-            .render(area, buf);
     }
 }
 
@@ -233,11 +250,90 @@ fn cached_lines_height(lines: &[Line<'static>], width: u16) -> u16 {
     if lines.is_empty() || width == 0 {
         return 0;
     }
-    Paragraph::new(Text::from(lines.to_vec()))
-        .wrap(Wrap { trim: false })
-        .line_count(width)
-        .try_into()
-        .unwrap_or(u16::MAX)
+    lines.iter().fold(0u16, |total, line| {
+        total.saturating_add(cached_line_rows(line, width))
+    })
+}
+
+fn cached_line_rows(line: &Line<'static>, width: u16) -> u16 {
+    let width = usize::from(width).max(1);
+    let mut rows = 1u16;
+    let mut used = 0usize;
+    for span in &line.spans {
+        for ch in span.content.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if ch_width == 0 {
+                continue;
+            }
+            if ch_width > width {
+                if used > 0 {
+                    rows = rows.saturating_add(1);
+                }
+                rows = rows.saturating_add(1);
+                used = 0;
+                continue;
+            }
+            if used > 0 && used + ch_width > width {
+                rows = rows.saturating_add(1);
+                used = ch_width;
+            } else {
+                used += ch_width;
+            }
+        }
+    }
+    rows
+}
+
+fn write_cached_line_row(
+    line: &Line<'static>,
+    wrap_row: u16,
+    x: u16,
+    y: u16,
+    width: u16,
+    buf: &mut Buffer,
+) {
+    let width_usize = usize::from(width).max(1);
+    let start_width = usize::from(wrap_row).saturating_mul(width_usize);
+    let end_width = start_width.saturating_add(width_usize);
+    let mut seen = 0usize;
+    let mut column = 0u16;
+    for span in &line.spans {
+        let style = line.style.patch(span.style);
+        let mut byte = 0usize;
+        for ch in span.content.chars() {
+            let next_byte = byte + ch.len_utf8();
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if ch_width == 0 {
+                byte = next_byte;
+                continue;
+            }
+            let ch_start = seen;
+            seen = seen.saturating_add(ch_width);
+            if ch_width > width_usize {
+                if ch_start >= start_width {
+                    return;
+                }
+                byte = next_byte;
+                continue;
+            }
+            if seen <= start_width {
+                byte = next_byte;
+                continue;
+            }
+            if ch_start >= end_width || column >= width {
+                return;
+            }
+            buf.set_stringn(
+                x.saturating_add(column),
+                y,
+                &span.content[byte..next_byte],
+                usize::from(width.saturating_sub(column)),
+                style,
+            );
+            column = column.saturating_add(u16::try_from(ch_width).unwrap_or(u16::MAX));
+            byte = next_byte;
+        }
+    }
 }
 
 /// Viewport-culled activity feed renderer with per-cell cache.
@@ -308,12 +404,8 @@ pub fn render_activity_feed_cached(
     let mut column_rows = 0u16;
     let mut hyperlink_cell_rows = Vec::new();
     let mut selectable_cell_rows = Vec::new();
-
-    let spacer_line = CachedCellLines {
-        lines: vec![Line::from("")],
-        height: 1,
-    };
-
+    let mut render_slots: Vec<ActivityRenderSlot> = Vec::with_capacity(total_cells);
+    let spacer_lines: std::sync::Arc<[Line<'static>]> = std::sync::Arc::from(vec![Line::from("")]);
     // Committed cells: use cache to skip markdown re-render.
     // Every workflow event shares one group entry. Later events stay in history
     // but do not render another cell, so `w g` cannot point at a single run.
@@ -334,11 +426,10 @@ pub fn render_activity_feed_cached(
         } else {
             0
         };
-        let cached = if let Some(cached) =
-            cache.get(i, inner.width, cell, options, workflow_group_key)
+        if cache
+            .get(i, inner.width, cell, options, workflow_group_key)
+            .is_none()
         {
-            cached
-        } else {
             let lines = render_activity_cell_lines_with_options(
                 cell,
                 inner.width,
@@ -357,9 +448,12 @@ pub fn render_activity_feed_cached(
                 cell.clone(),
                 workflow_group_key,
                 lines,
-            )
-        };
+            );
+        }
+        let cached = cache.entry(i).expect("activity cell was just cached");
         let cached_height = cached.height;
+        let cached_lines = std::sync::Arc::clone(&cached.lines);
+        let selectable_id = cached.selectable_id.clone();
         record_preview_placement(
             &mut preview_placements,
             artifact_previews.as_deref_mut(),
@@ -377,17 +471,23 @@ pub fn render_activity_feed_cached(
             hyperlink_cell_rows.push((column_rows, cached_height));
         }
         selectable_cell_rows.push(SelectableActivityDataRows {
-            id: committed_activity_selectable_id(cell),
+            id: selectable_id,
             start: column_rows,
             height: cached_height,
-            lines: cached.lines.iter().map(line_plain_text).collect(),
+            lines: cached_lines.iter().map(line_plain_text).collect(),
         });
-        column.push(cached);
+        render_slots.push(ActivityRenderSlot {
+            lines: cached_lines,
+            height: cached_height,
+        });
         column_rows = column_rows.saturating_add(cached_height);
         // Blank line spacing between adjacent cells (matches old Vec<Line> behavior).
         if !live_cells.is_empty() || i + 1 < cells.len() {
-            column.push(spacer_line.clone());
-            column_rows = column_rows.saturating_add(spacer_line.height);
+            render_slots.push(ActivityRenderSlot {
+                lines: std::sync::Arc::clone(&spacer_lines),
+                height: 1,
+            });
+            column_rows = column_rows.saturating_add(1);
         }
     }
 
@@ -417,7 +517,7 @@ pub fn render_activity_feed_cached(
                 None
             },
         );
-        let cached = cache.set(
+        cache.set(
             idx,
             inner.width,
             options,
@@ -425,7 +525,11 @@ pub fn render_activity_feed_cached(
             workflow_group_key,
             lines,
         );
+        let cached = cache
+            .entry(idx)
+            .expect("live activity cell was just cached");
         let cached_height = cached.height;
+        let cached_lines = std::sync::Arc::clone(&cached.lines);
         record_preview_placement(
             &mut preview_placements,
             artifact_previews.as_deref_mut(),
@@ -444,15 +548,25 @@ pub fn render_activity_feed_cached(
             id: SelectableId::new(format!("activity-live:{}", lc.key)),
             start: column_rows,
             height: cached_height,
-            lines: cached.lines.iter().map(line_plain_text).collect(),
+            lines: cached_lines.iter().map(line_plain_text).collect(),
         });
-        column.push(cached);
+        render_slots.push(ActivityRenderSlot {
+            lines: cached_lines,
+            height: cached_height,
+        });
         column_rows = column_rows.saturating_add(cached_height);
         // Blank line spacing between adjacent cells.
         if i + 1 < live_cells.len() {
-            column.push(spacer_line.clone());
-            column_rows = column_rows.saturating_add(spacer_line.height);
+            render_slots.push(ActivityRenderSlot {
+                lines: std::sync::Arc::clone(&spacer_lines),
+                height: 1,
+            });
+            column_rows = column_rows.saturating_add(1);
         }
+    }
+
+    for slot in render_slots {
+        column.push(slot);
     }
 
     let total_height = column.desired_height(inner.width);
@@ -465,7 +579,7 @@ pub fn render_activity_feed_cached(
     column.set_scroll(effective_scroll);
 
     // Render through the layout tree.
-    // ViewportCulledColumn calls render_skip on each child — CachedCellLines
+    // ViewportCulledColumn calls render_skip on each child — ActivityRenderSlot
     // overrides render_skip with Paragraph::scroll((n,0)), so cells whose
     // top rows have scrolled above the viewport render correctly without
     // sticky-header artefacts.
@@ -645,38 +759,6 @@ fn push_visible_hyperlink_areas(
             out.push(Rect::new(area.x, screen_y, area.width, visible_height));
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Renderable impl for SessionActivityEvent
-// ---------------------------------------------------------------------------
-
-impl Renderable for SessionActivityEvent {
-    fn render(&self, area: Rect, buf: &mut Buffer) {
-        let lines = render_activity_cell_lines(self, area.width);
-        if lines.is_empty() {
-            return;
-        }
-        Clear.render(area, buf);
-        Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .render(area, buf);
-    }
-
-    fn desired_height(&self, width: u16) -> u16 {
-        let lines = render_activity_cell_lines(self, width);
-        cached_lines_height(&lines, width)
-    }
-}
-
-fn render_activity_cell_lines(cell: &SessionActivityEvent, max_width: u16) -> Vec<Line<'static>> {
-    render_activity_cell_lines_with_options(
-        cell,
-        max_width,
-        ActivityDataRenderOptions::default(),
-        None,
-        None,
-    )
 }
 
 fn render_activity_cell_lines_with_options(
@@ -1000,7 +1082,6 @@ fn workflow_snapshot_outline_lines(
                 .saturating_add(worker.agent_run_time_ms);
             if worker.started_at_ms >= actor.latest_started_at_ms {
                 actor.latest_started_at_ms = worker.started_at_ms;
-                actor.model = worker.model.clone();
                 actor.status = worker.status;
             }
         } else {
@@ -1008,7 +1089,6 @@ fn workflow_snapshot_outline_lines(
                 actor_id,
                 role: workflow_snapshot_worker_role(worker),
                 label: String::new(),
-                model: worker.model.clone(),
                 status: worker.status,
                 agent_run_time_ms: worker.agent_run_time_ms,
                 attempt_count: 1,
@@ -1057,7 +1137,6 @@ struct WorkflowSnapshotActor {
     actor_id: String,
     role: String,
     label: String,
-    model: String,
     status: crate::workflow::WorkflowNodeStatus,
     agent_run_time_ms: u64,
     attempt_count: usize,
@@ -1175,7 +1254,6 @@ fn patch_transcript_styled_lines(
             width,
         ));
     }
-    let diff_backgrounds = diff_scope_backgrounds();
     let old_lineno_width = files
         .iter()
         .flat_map(|file| file.diff_lines.iter().filter_map(|line| line.old_lineno))
@@ -1196,7 +1274,6 @@ fn patch_transcript_styled_lines(
         let mut file_lines = vec![render_patch_file_header(file)];
         file_lines.extend(render_patch_file_diff_lines(
             file,
-            diff_backgrounds,
             old_lineno_width,
             new_lineno_width,
         ));
@@ -1840,6 +1917,8 @@ fn prefixed_wrapped_line(
     let mut current_spans = current_prefix.clone();
     let mut current_width = 0usize;
     let mut has_content = false;
+    let mut prefix_width = spans_display_width(&current_prefix);
+    let mut content_width = usize::from(max_width.saturating_sub(u16::try_from(prefix_width).unwrap_or(u16::MAX)).max(1));
 
     for span in content.spans {
         let style = span.style;
@@ -1848,9 +1927,6 @@ fn prefixed_wrapped_line(
 
         for ch in span.content.chars() {
             let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            let prefix_width =
-                u16::try_from(spans_display_width(&current_prefix)).unwrap_or(u16::MAX);
-            let content_width = usize::from(max_width.saturating_sub(prefix_width).max(1));
             if current_width + chunk_width > 0
                 && current_width + chunk_width + ch_width > content_width
             {
@@ -1867,6 +1943,12 @@ fn prefixed_wrapped_line(
                 out.push(line);
                 current_prefix = subsequent_prefix.to_vec();
                 current_width = 0;
+                prefix_width = spans_display_width(&current_prefix);
+                content_width = usize::from(
+                    max_width
+                        .saturating_sub(u16::try_from(prefix_width).unwrap_or(u16::MAX))
+                        .max(1),
+                );
             }
 
             chunk.push(ch);
@@ -2401,7 +2483,6 @@ fn render_coding_edit_cell_lines(
     max_width: u16,
 ) -> Vec<Line<'static>> {
     let diff_files = cell.diff_files.as_slice();
-    let diff_backgrounds = diff_scope_backgrounds();
     let old_lineno_width = diff_files
         .iter()
         .flat_map(|file| file.diff_lines.iter().filter_map(|line| line.old_lineno))
@@ -2432,7 +2513,6 @@ fn render_coding_edit_cell_lines(
         };
         file_lines.extend(render_patch_file_diff_lines(
             file,
-            diff_backgrounds,
             old_lineno_width,
             new_lineno_width,
         ));
@@ -2705,9 +2785,9 @@ fn render_web_search_cell_lines(
 }
 
 fn render_exec_cell_lines(cell: &ExecResultActivityData, max_width: u16) -> Vec<Line<'static>> {
-    let output = cell.command_output();
-    let exit_code = output.meta.exit_code;
-    let running = output.meta.is_running();
+    let meta = TerminalExecutionMeta::parse(cell.meta.as_deref(), &cell.output_lines);
+    let exit_code = meta.exit_code;
+    let running = meta.is_running();
     let indicator_style = if running {
         Style::default()
             .fg(Color::White)
@@ -2724,8 +2804,8 @@ fn render_exec_cell_lines(cell: &ExecResultActivityData, max_width: u16) -> Vec<
             .add_modifier(Modifier::BOLD)
     };
     let mut lines = command_header_lines_from_line(
-        exec_header_title(cell, &output.meta),
-        highlighted_shell_command_line(&output.command),
+        exec_header_title(cell, &meta),
+        highlighted_shell_command_line(&cell.title),
         indicator_style,
         max_width,
     );
@@ -2796,7 +2876,6 @@ fn highlighted_shell_command_line(command: &str) -> Line<'static> {
 
 fn render_patch_cell_lines(cell: &PatchActivityData, max_width: u16) -> Vec<Line<'static>> {
     let files = cell.files.as_slice();
-    let diff_backgrounds = diff_scope_backgrounds();
     let old_lineno_width = files
         .iter()
         .flat_map(|file| file.diff_lines.iter().filter_map(|line| line.old_lineno))
@@ -2838,7 +2917,6 @@ fn render_patch_cell_lines(cell: &PatchActivityData, max_width: u16) -> Vec<Line
         };
         file_lines.extend(render_patch_file_diff_lines(
             file,
-            diff_backgrounds,
             old_lineno_width,
             new_lineno_width,
         ));
@@ -3154,7 +3232,6 @@ fn patch_single_file_title(file: &PatchFileActivityDescriptor) -> String {
 
 fn render_patch_file_diff_lines(
     file: &PatchFileActivityDescriptor,
-    diff_backgrounds: DiffScopeBackgrounds,
     old_lineno_width: usize,
     new_lineno_width: usize,
 ) -> Vec<Line<'static>> {
@@ -3169,7 +3246,6 @@ fn render_patch_file_diff_lines(
                     .get(index)
                     .and_then(|spans| spans.as_ref())
                     .cloned(),
-                diff_backgrounds,
                 old_lineno_width,
                 new_lineno_width,
             )
@@ -3180,7 +3256,6 @@ fn render_patch_file_diff_lines(
 fn render_patch_diff_line(
     line: &PatchDiffLineActivityDescriptor,
     highlighted_spans: Option<Vec<Span<'static>>>,
-    _diff_backgrounds: DiffScopeBackgrounds,
     old_lineno_width: usize,
     new_lineno_width: usize,
 ) -> Line<'static> {
