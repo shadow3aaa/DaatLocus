@@ -14,6 +14,8 @@ const SHIKI_MAX_CODE_CHARS = 200_000;
 const SHIKI_MAX_CODE_LINES = 5_000;
 const SHIKI_MAX_LINE_LENGTH = 2_000;
 const SHIKI_TOKENIZE_TIME_LIMIT_MS = 250;
+const SHIKI_HIGHLIGHT_CACHE_LIMIT = 32;
+const shikiHighlightCache = new Map<string, Promise<ShikiHighlightedCode | null>>();
 
 const shikiLanguageAliases: Record<string, BundledLanguage> = {
   csharp: "c#",
@@ -46,6 +48,27 @@ export async function highlightCodeWithShiki(
   code: string,
   languageOrPath: string,
   colorScheme: ShikiColorScheme = "light",
+): Promise<ShikiHighlightedCode | null> {
+  const cacheKey = `${colorScheme}\0${languageOrPath}\0${code}`;
+  const cached = shikiHighlightCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const pending = highlightCodeWithShikiUncached(code, languageOrPath, colorScheme);
+  shikiHighlightCache.set(cacheKey, pending);
+  if (shikiHighlightCache.size > SHIKI_HIGHLIGHT_CACHE_LIMIT) {
+    const oldest = shikiHighlightCache.keys().next().value;
+    if (oldest !== undefined) {
+      shikiHighlightCache.delete(oldest);
+    }
+  }
+  return pending;
+}
+
+async function highlightCodeWithShikiUncached(
+  code: string,
+  languageOrPath: string,
+  colorScheme: ShikiColorScheme,
 ): Promise<ShikiHighlightedCode | null> {
   const { codeToTokensBase, bundledLanguages } = await import("shiki");
   const language = resolveShikiLanguage(languageOrPath, bundledLanguages);

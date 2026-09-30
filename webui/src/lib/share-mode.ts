@@ -111,13 +111,3 @@ export function enableShareMode(): void {
 }
 
 /** Open the share dialog for a specific session (or the picker). */
-export function requestShareDialog(sessionId: string | null): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-  window.dispatchEvent(
-    new CustomEvent<ShareDialogRequest>(SHARE_DIALOG_EVENT, {
-      detail: { sessionId },
-    }),
-  );
-}

@@ -14,8 +14,6 @@ import type {
   StudyStats,
 } from "@/lib/daemon-api";
 
-export const MOCK_STUDY_SESSION_ID = "mock-study-session";
-
 const MOCK_STUDY_NOW_MS = 1_786_800_000_000;
 
 const ALGEBRA_MODULE_ID = "module-algebra";
@@ -337,7 +335,6 @@ function buildMockGraph(): StudyGraphSnapshot {
       orphan_node_ids: [],
       empty_module_ids: [],
       duplicate_candidate_groups: [],
-      unlinked_node_ids: [],
       stale_question_count: nodes.reduce(
         (total, node) => total + node.stale_question_count,
         0,

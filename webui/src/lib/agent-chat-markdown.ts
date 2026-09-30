@@ -50,8 +50,14 @@ function lastOutputLineIsBlank(lines: string[]) {
  * previous sentence is split onto its own paragraph. `react-markdown` renders
  * the result in the chat UI.
  */
+const NORMALIZE_THINKING_MARKDOWN_MAX_LINES = 2000;
+
 export function normalizeThinkingMarkdown(text: string) {
-  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const normalizedLines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const normalized =
+    normalizedLines.length > NORMALIZE_THINKING_MARKDOWN_MAX_LINES
+      ? normalizedLines.slice(0, NORMALIZE_THINKING_MARKDOWN_MAX_LINES).join("\n")
+      : normalizedLines.join("\n");
   const output: string[] = [];
 
   for (const block of scanMarkdownBlocks(normalized)) {

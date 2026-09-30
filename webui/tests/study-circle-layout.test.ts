@@ -81,7 +81,6 @@ function graph(
       orphan_node_ids: [],
       empty_module_ids: [],
       duplicate_candidate_groups: [],
-      unlinked_node_ids: [],
       stale_question_count: 0,
     },
   };

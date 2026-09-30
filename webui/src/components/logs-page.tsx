@@ -628,6 +628,9 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
               EditorView.decorations.of(logHighlightDecorations),
             ]}
             aria-label={t("logs.pageAria")}
+            onCreateEditor={(view) => {
+              editorViewRef.current = view;
+            }}
           />
         )}
       </div>
@@ -869,7 +872,10 @@ export function logEntryHighlightSpans(entry: LogEntry): LogHighlightSpan[] {
   }
 
   const spans: LogHighlightSpan[] = [];
-  const pushSpan = (needle: string, className: string, searchFrom = 0) => {
+  const pushSpan = (needle: string | null, className: string, searchFrom = 0) => {
+    if (!needle) {
+      return searchFrom;
+    }
     const index = raw.indexOf(needle, searchFrom);
     if (index !== -1) {
       spans.push({ from: index, to: index + needle.length, className });
@@ -877,15 +883,15 @@ export function logEntryHighlightSpans(entry: LogEntry): LogHighlightSpan[] {
     return index === -1 ? searchFrom : index + needle.length;
   };
 
-  const parsed = parseStructuredLogLine(raw);
-  if (parsed) {
-    let searchFrom = pushSpan(parsed.timestamp, "log-ts");
-    const levelClass = logLevelHighlightClass(parsed.level);
+  if (entry.timestamp || entry.level || entry.target) {
+    let searchFrom = pushSpan(entry.timestamp, "log-ts");
+    const levelClass = logLevelHighlightClass(entry.level);
+    const levelText = entry.level ? displayLevel(entry.level) : null;
     searchFrom = levelClass
-      ? pushSpan(parsed.level, levelClass, searchFrom)
-      : pushSpan(parsed.level, "log-ts", searchFrom);
-    if (parsed.target) {
-      pushSpan(parsed.target, "log-target", searchFrom);
+      ? pushSpan(levelText, levelClass, searchFrom)
+      : pushSpan(levelText, "log-ts", searchFrom);
+    if (entry.target) {
+      pushSpan(entry.target, "log-target", searchFrom);
     }
     return spans;
   }

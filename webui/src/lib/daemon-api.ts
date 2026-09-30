@@ -102,7 +102,6 @@ export type StudyMaintenance = {
   orphan_node_ids: string[];
   empty_module_ids: string[];
   duplicate_candidate_groups: string[][];
-  unlinked_node_ids: string[];
   stale_question_count: number;
 };
 
@@ -1039,24 +1038,6 @@ export class DaemonApiError extends Error {
   }
 }
 
-export async function fetchDaemonStatus({
-  signal,
-}: FetchOptions = {}): Promise<DaemonStatus> {
-  const response = await fetch("/status", {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-    },
-    signal,
-  });
-
-  return parseJsonResponse<DaemonStatus>(response, "Daemon status");
-}
-
-/**
- * Share visitors authenticate through the HttpOnly share cookie rather than a
- * bearer token, so a missing token is only fatal outside share mode.
- */
 function ensureDaemonAuth(token: string, purpose: string): void {
   if (!token && !isShareMode()) {
     throw new DaemonApiError(`Missing daemon token for ${purpose}.`);
@@ -1081,30 +1062,6 @@ export async function fetchStatusSummary({
   });
 
   return parseJsonResponse<StatusSummary>(response, "Status summary");
-}
-
-export async function fetchDashboardSnapshot({
-  signal,
-  token = getStoredDaemonToken(),
-  sessionId,
-}: FetchOptions & { sessionId: string }): Promise<DashboardSnapshot> {
-  const daemonToken = token.trim();
-
-  ensureDaemonAuth(daemonToken, "dashboard snapshot");
-
-  const url = new URL("/dashboard/snapshot", window.location.href);
-  url.searchParams.set("session_id", sessionId);
-
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${daemonToken}`,
-    },
-    signal,
-  });
-
-  return parseJsonResponse<DashboardSnapshot>(response, "Dashboard snapshot");
 }
 
 export async function fetchDashboardActivityHistory({
@@ -1197,35 +1154,6 @@ export async function fetchWorkflowWorkerActivity({
   return parseJsonResponse<WorkflowWorkerActivityPage>(
     response,
     "Workflow worker activity",
-  );
-}
-
-export async function fetchDashboardActivityHistoryCount({
-  signal,
-  token = getStoredDaemonToken(),
-  sessionId,
-}: FetchOptions & {
-  sessionId: string;
-}): Promise<DashboardActivityHistoryCount> {
-  const daemonToken = token.trim();
-
-  ensureDaemonAuth(daemonToken, "dashboard activity history count");
-
-  const url = new URL("/dashboard/activity-history/count", window.location.href);
-  url.searchParams.set("session_id", sessionId);
-
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${daemonToken}`,
-    },
-    signal,
-  });
-
-  return parseJsonResponse<DashboardActivityHistoryCount>(
-    response,
-    "Dashboard activity history count",
   );
 }
 
@@ -1336,37 +1264,6 @@ export async function saveSetupConfig(
   const result = await parseJsonResponse<ConfigReadinessResponse>(
     response,
     "Config setup",
-  );
-  return result.readiness;
-}
-
-export async function probeSetupConfig(
-  request: SetupConfigRequest,
-  {
-    signal,
-    token = getStoredDaemonToken(),
-  }: FetchOptions = {},
-): Promise<ConfigReadinessReport> {
-  const daemonToken = token.trim();
-
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for setup probe.");
-  }
-
-  const response = await fetch("/config/probe", {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${daemonToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(request),
-    signal,
-  });
-
-  const result = await parseJsonResponse<ConfigReadinessResponse>(
-    response,
-    "Config probe",
   );
   return result.readiness;
 }
@@ -1829,51 +1726,6 @@ export async function fetchStudyNode({
   return parseJsonResponse<StudyNodeDetail>(response, "Study node");
 }
 
-export async function updateStudyProgress({
-  signal,
-  token = getStoredDaemonToken(),
-  sessionId,
-  nodeId,
-  understanding,
-  evidence,
-}: FetchOptions & {
-  sessionId: string;
-  nodeId: string;
-  understanding: number;
-  evidence?: string;
-}): Promise<StudyProgressUpdate> {
-  const daemonToken = token.trim();
-
-  ensureDaemonAuth(daemonToken, "study progress");
-
-  const body: {
-    session_id: string;
-    node_id: string;
-    understanding: number;
-    evidence?: string;
-  } = {
-    session_id: sessionId,
-    node_id: nodeId,
-    understanding: Math.round(understanding),
-  };
-  if (evidence) {
-    body.evidence = evidence;
-  }
-
-  const response = await fetch("/study/progress", {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${daemonToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
-
-  return parseJsonResponse<StudyProgressUpdate>(response, "Study progress");
-}
-
 export type ObsidianImportDuplicate = {
   title: string;
   rel_path: string;
@@ -2299,32 +2151,6 @@ export async function createShare({
 }
 
 /** List active shares (never includes PINs). */
-export async function fetchShares({
-  signal,
-  token = getStoredDaemonToken(),
-}: FetchOptions = {}): Promise<ShareSummary[]> {
-  if (isShareMockMode()) {
-    return [];
-  }
-  const daemonToken = token.trim();
-
-  if (!daemonToken) {
-    throw new DaemonApiError("Missing daemon token for share listing.");
-  }
-
-  const response = await fetch("/shares", {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${daemonToken}`,
-    },
-    signal,
-  });
-
-  return parseJsonResponse<ShareSummary[]>(response, "List shares");
-}
-
-/** Poll a single share; includes the PIN so the owner can hand it over. */
 export async function fetchShare({
   shareId,
   signal,

@@ -1,5 +1,3 @@
-import type { SessionActivityArtifact } from "@/lib/daemon-api";
-
 /** Normalized, defensively parsed Artifact activity payload. */
 export type SessionActivityArtifactData = {
   artifactId: string;
@@ -188,8 +186,3 @@ export function isAllowedMarkdownImageSource(src: unknown): src is string {
 }
 
 /** Narrow helper for callers holding the raw union payload type. */
-export function normalizeArtifactVariant(
-  value: SessionActivityArtifact | unknown,
-): SessionActivityArtifactData | null {
-  return normalizeSessionActivityArtifact(value);
-}

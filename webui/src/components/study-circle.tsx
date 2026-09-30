@@ -165,8 +165,53 @@ function StudyCircleCanvas({
   }, [graph.nodes, searchActive, searchQuery]);
 
   const rotationRef = useRef<StudyQuaternion>(STUDY_IDENTITY_QUATERNION);
-  const [rotation, setRotation] = useState<StudyQuaternion>(
-    STUDY_IDENTITY_QUATERNION,
+
+
+  const cloudLayout = useMemo(
+    () => projectStudyNetwork(network, STUDY_IDENTITY_QUATERNION),
+    [network],
+  );
+  const cloudLayoutRef = useRef(cloudLayout);
+  cloudLayoutRef.current = cloudLayout;
+
+  const { setViewport } = useReactFlow();
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const applyProjectedRotation = useCallback(
+    (rotation: StudyQuaternion) => {
+      const root = wrapperRef.current;
+      if (!root) {
+        return;
+      }
+      const projected = projectStudyNetwork(network, rotation);
+      const byId = new Map(projected.nodes.map((node) => [node.id, node]));
+      for (const node of projected.nodes) {
+        const element = root.querySelector<HTMLElement>(
+          `.react-flow__node[data-id="${CSS.escape(node.id)}"]`,
+        );
+        if (!element) {
+          continue;
+        }
+        element.style.transform = `translate(${node.x}px, ${node.y}px)`;
+        element.style.zIndex = String(Math.round(1000 + node.depth));
+        element.style.width = `${node.radius * 2}px`;
+        element.style.height = `${node.radius * 2}px`;
+      }
+      for (const edge of graph.edges) {
+        const from = byId.get(edge.from);
+        const to = byId.get(edge.to);
+        const line = root.querySelector<SVGLineElement>(
+          `[data-study-edge="${CSS.escape(String(edge.id))}"]`,
+        );
+        if (!from || !to || !line) {
+          continue;
+        }
+        line.setAttribute("x1", String(from.x));
+        line.setAttribute("y1", String(from.y));
+        line.setAttribute("x2", String(to.x));
+        line.setAttribute("y2", String(to.y));
+      }
+    },
+    [graph.edges, network],
   );
 
   useEffect(() => {
@@ -175,7 +220,7 @@ function StudyCircleCanvas({
       : STUDY_IDENTITY_QUATERNION;
     if (instantTransitions) {
       rotationRef.current = target;
-      setRotation(target);
+      applyProjectedRotation(target);
       return;
     }
     let raf = 0;
@@ -191,7 +236,7 @@ function StudyCircleCanvas({
       const current = rotationRef.current;
       if (studyQuaternionAngle(current, target) < ROTATION_ANGLE_EPSILON) {
         rotationRef.current = target;
-        setRotation(target);
+        applyProjectedRotation(target);
         return;
       }
       const next = slerpStudyQuaternions(
@@ -200,7 +245,7 @@ function StudyCircleCanvas({
         1 - Math.exp(-delta * ROTATION_APPROACH_PER_SECOND),
       );
       rotationRef.current = next;
-      setRotation(next);
+      applyProjectedRotation(next);
       raf = requestAnimationFrame(step);
     };
 
@@ -209,17 +254,8 @@ function StudyCircleCanvas({
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-  }, [instantTransitions, matchedIds, network]);
+  }, [applyProjectedRotation, instantTransitions, matchedIds, network]);
 
-  const cloudLayout = useMemo(
-    () => projectStudyNetwork(network, rotation),
-    [network, rotation],
-  );
-  const cloudLayoutRef = useRef(cloudLayout);
-  cloudLayoutRef.current = cloudLayout;
-
-  const { setViewport } = useReactFlow();
-  const wrapperRef = useRef<HTMLDivElement>(null);
   const frameCircle = useCallback(
     (extent: number, duration?: number) => {
       const rect = wrapperRef.current?.getBoundingClientRect();
@@ -382,13 +418,10 @@ function StudyCircleCanvas({
     [displayLayout, matchedIds, selectedNodeId, summaryById],
   );
 
-  const flowEdges: never[] = [];
-
   return (
     <div ref={wrapperRef} className="h-full w-full bg-background">
       <ReactFlow
         nodes={flowNodes}
-        edges={flowEdges}
         nodeTypes={STUDY_CIRCLE_NODE_TYPES}
         onInit={() => {
           frameCircle(cloudLayout.extent);
@@ -454,6 +487,7 @@ function StudyEdgeLayer({
           return (
             <line
               key={`study-edge-${edge.id}`}
+              data-study-edge={edge.id}
               x1={from.x}
               y1={from.y}
               x2={to.x}

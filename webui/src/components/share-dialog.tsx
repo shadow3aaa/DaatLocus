@@ -236,12 +236,18 @@ function ShareDialog({
       setError(null);
       return;
     }
-    setSelected(
-      initialSessionId
-        ? [initialSessionId]
-        : eligibleSessions.map((session) => session.session_id),
-    );
     setUnrestricted(initialUnrestricted);
+    setSelected((current) => {
+      const ids = new Set(eligibleSessions.map((session) => session.session_id));
+      const selectionIsUsable =
+        current.length > 0 && current.every((id) => ids.has(id));
+      if (selectionIsUsable) {
+        return current;
+      }
+      return initialSessionId
+        ? [initialSessionId]
+        : eligibleSessions.map((session) => session.session_id);
+    });
   }, [open, initialSessionId, initialUnrestricted, eligibleSessions]);
 
   // Poll the share until the tunnel resolves to ready/failed.

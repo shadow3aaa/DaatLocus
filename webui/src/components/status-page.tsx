@@ -168,14 +168,15 @@ import { cn } from "@/lib/utils";
 export { StatusPage } from "@/components/status-dashboard-page";
 
 const AGENT_CHAT_HISTORY_PAGE_LIMIT = 80;
-const AGENT_CHAT_NAV_HISTORY_PAGE_LIMIT = 40;
 const AGENT_CHAT_QUICK_NAV_MAX_ITEMS = 120;
 const AGENT_CHAT_MESSAGE_LINE_LIMIT = 5;
 const AGENT_CHAT_ACTIVITY_BLOCK_LINE_LIMIT = 12;
-const AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT = Number.MAX_SAFE_INTEGER;
+const AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT = 2000;
 const AGENT_CHAT_PLAN_STEP_LIMIT = 8;
 const AGENT_CHAT_TERMINAL_OUTPUT_HEAD_LINES = 4;
 const AGENT_CHAT_TERMINAL_OUTPUT_TAIL_LINES = 4;
+const AGENT_CHAT_DIFF_HEAD_LINES = AGENT_CHAT_TERMINAL_OUTPUT_HEAD_LINES;
+const AGENT_CHAT_DIFF_TAIL_LINES = AGENT_CHAT_TERMINAL_OUTPUT_TAIL_LINES;
 const AGENT_CHAT_TELEGRAM_DETAIL_LIMIT = 6;
 const AGENT_CHAT_TELEGRAM_MESSAGE_LIMIT = 6;
 const AGENT_CHAT_TERMINAL_WAIT_LINE_LIMIT = 6;
@@ -381,7 +382,6 @@ type AgentChatBubble = {
   createdAt: number;
   updatedAt: number;
   blocks: AgentChatBlock[];
-  planSteps: AgentChatPlanStep[];
   live?: boolean;
   toolName?: string;
   appName?: string;
@@ -401,7 +401,6 @@ type AgentChatActivityItem = {
   source?: Record<string, unknown> | null;
   tool?: Record<string, unknown> | null;
   blocks?: AgentChatBlock[];
-  detail_blocks?: AgentChatBlock[];
   error?: {
     message: string;
     details?: string[];
@@ -597,7 +596,6 @@ type AgentChatSessionActivityRender =
       title: string;
       outputLines: string[];
       running?: boolean;
-      exitCode?: number | null;
     }
   | {
       kind: "explored";
@@ -4625,18 +4623,11 @@ function AgentChatBubbles({
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const [navHistoryBubbles, setNavHistoryBubbles] = useState<AgentChatBubble[]>([]);
-  const [navOldestCursor, setNavOldestCursor] = useState<number | null>(null);
-  const [hasMoreNavBefore, setHasMoreNavBefore] = useState(false);
-  const [isLoadingNavHistory, setIsLoadingNavHistory] = useState(false);
-  const [navHistoryError, setNavHistoryError] = useState<string | null>(null);
-  const [workflowGroupOpen, setWorkflowGroupOpen] = useState(initiallyOpenWorkflowGroup);
-  const navHistoryAbortRef = useRef<AbortController | null>(null);
   const historySessionIdRef = useRef<string | null>(null);
   const loadedOlderHistoryRef = useRef(false);
-  const navHistorySessionIdRef = useRef<string | null>(null);
-  const navHistoryInitializedRef = useRef(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  // nav history state removed
+  const [workflowGroupOpen, setWorkflowGroupOpen] = useState(initiallyOpenWorkflowGroup);
   const bubbles = useMemo(() => {
     const merged = mergeAgentChatBubbles(historyBubbles, snapshotBubbles);
     const visible = showThinking
@@ -4770,8 +4761,8 @@ function AgentChatBubbles({
     string | null
   >(null);
   const quickNavItems = useMemo(() => {
-    const allNavBubbles = mergeAgentChatBubbles(navHistoryBubbles, bubbles);
-    return allNavBubbles
+    return bubbles
+    // nav bubbles come from the main list
       .flatMap((bubble): AgentChatQuickNavItem[] => {
         const label = agentChatQuickNavLabelForBubble(bubble);
         return label
@@ -4785,7 +4776,7 @@ function AgentChatBubbles({
           : [];
       })
       .sort(agentChatQuickNavItemCompare);
-  }, [bubbles, navHistoryBubbles]);
+  }, [bubbles]);
   const visibleQuickNavItems = useMemo(
     () => quickNavItems.slice(-AGENT_CHAT_QUICK_NAV_MAX_ITEMS),
     [quickNavItems],
@@ -4804,7 +4795,6 @@ function AgentChatBubbles({
       })
       .filter((item): item is AgentChatQuickNavDisplayTarget => Boolean(item));
   }, [displayItems, visibleQuickNavItems]);
-  const navReachedMax = quickNavItems.length >= AGENT_CHAT_QUICK_NAV_MAX_ITEMS;
   const displayItemElementsRef = useRef(new Map<string, HTMLDivElement>());
 
   const [pendingQuickNavTargetId, setPendingQuickNavTargetId] = useState<
@@ -5002,19 +4992,8 @@ function AgentChatBubbles({
       setHistoryBubbles((current) =>
         mergeAgentChatBubbles(olderBubbles, current),
       );
-      setNavHistoryBubbles((current) =>
-        mergeAgentChatBubbles(olderBubbles, current),
-      );
       setOldestCursor(page.oldest_cursor ?? oldestCursor);
-      setNavOldestCursor((current) => {
-        const nextCursor = page.oldest_cursor ?? current;
-        if (nextCursor === null) {
-          return null;
-        }
-        return current === null ? nextCursor : Math.min(current, nextCursor);
-      });
       setHasMoreBefore(page.has_more_before);
-      setHasMoreNavBefore(page.has_more_before);
     } catch (error) {
       setHistoryError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -5056,68 +5035,6 @@ function AgentChatBubbles({
     scrollToQuickNavTarget,
   ]);
 
-  const loadOlderNavHistory = useCallback(async () => {
-    if (
-      isLoadingNavHistory ||
-      !hasMoreNavBefore ||
-      navOldestCursor === null ||
-      navReachedMax
-    ) {
-      return;
-    }
-
-    navHistoryAbortRef.current?.abort();
-    const controller = new AbortController();
-    navHistoryAbortRef.current = controller;
-    setIsLoadingNavHistory(true);
-    setNavHistoryError(null);
-    try {
-      const page = await fetchDashboardActivityHistory({
-        before: navOldestCursor,
-        limit: AGENT_CHAT_NAV_HISTORY_PAGE_LIMIT,
-        sessionId,
-        signal: controller.signal,
-      });
-      const olderBubbles = agentChatBubblesFromHistoryPage(page);
-      setNavHistoryBubbles((current) =>
-        mergeAgentChatBubbles(olderBubbles, current),
-      );
-      setNavOldestCursor(page.oldest_cursor ?? navOldestCursor);
-      setHasMoreNavBefore(page.has_more_before);
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        setNavHistoryError(error instanceof Error ? error.message : String(error));
-      }
-    } finally {
-      if (navHistoryAbortRef.current === controller) {
-        navHistoryAbortRef.current = null;
-      }
-      if (!controller.signal.aborted) {
-        setIsLoadingNavHistory(false);
-      }
-    }
-  }, [
-    hasMoreNavBefore,
-    isLoadingNavHistory,
-    navOldestCursor,
-    navReachedMax,
-    sessionId,
-  ]);
-
-
-  useEffect(() => {
-    navHistoryAbortRef.current?.abort();
-    navHistoryAbortRef.current = null;
-    navHistorySessionIdRef.current = null;
-    navHistoryInitializedRef.current = false;
-    setPendingQuickNavTargetId(null);
-    setNavHistoryBubbles([]);
-    setNavOldestCursor(null);
-    setHasMoreNavBefore(false);
-    setIsLoadingNavHistory(false);
-    setNavHistoryError(null);
-  }, [sessionId]);
-
   useEffect(() => {
     const historyWindow = snapshot?.activity_history;
     const committedBubbles = agentChatCommittedBubblesFromSnapshot(snapshot);
@@ -5128,6 +5045,9 @@ function AgentChatBubbles({
       committedBubbles.length === 0 && snapshotNewestCursor === null;
 
     historySessionIdRef.current = sessionId;
+    if (sessionChanged) {
+      setPendingQuickNavTargetId(null);
+    }
 
     if (sessionChanged || historyCleared || !loadedOlderHistoryRef.current) {
       loadedOlderHistoryRef.current = false;
@@ -5149,33 +5069,7 @@ function AgentChatBubbles({
       });
     }
 
-    const navSessionChanged = navHistorySessionIdRef.current !== sessionId;
-    navHistorySessionIdRef.current = sessionId;
-    if (navSessionChanged || historyCleared || !navHistoryInitializedRef.current) {
-      navHistoryInitializedRef.current = true;
-      setNavHistoryBubbles(committedBubbles);
-      setNavOldestCursor(snapshotOldestCursor);
-      setHasMoreNavBefore(Boolean(historyWindow?.has_more_before));
-    } else {
-      setNavHistoryBubbles((current) =>
-        mergeAgentChatBubbles(current, committedBubbles),
-      );
-      setNavOldestCursor((current) => {
-        if (snapshotOldestCursor === null) {
-          return current;
-        }
-        if (current === null) {
-          return snapshotOldestCursor;
-        }
-        return Math.min(current, snapshotOldestCursor);
-      });
-      setHasMoreNavBefore((current) =>
-        current || Boolean(historyWindow?.has_more_before),
-      );
-    }
-
     setHistoryError(null);
-    setNavHistoryError(null);
   }, [sessionId, snapshot?.activity_history?.newest_cursor]);
 
 
@@ -5504,12 +5398,12 @@ function AgentChatBubbles({
         items={visibleQuickNavItems}
         activeItemId={activeQuickNavItemId}
         resetKey={sessionId}
-        hasMoreBefore={hasMoreNavBefore && !navReachedMax}
-        isLoadingHistory={isLoadingNavHistory}
-        historyError={navHistoryError}
+        hasMoreBefore={hasMoreBefore && quickNavItems.length < AGENT_CHAT_QUICK_NAV_MAX_ITEMS}
+        isLoadingHistory={isLoadingHistory}
+        historyError={historyError}
         embedded={embedded}
         onNearTop={() => {
-          void loadOlderNavHistory();
+          void loadOlderHistory();
         }}
         onSelect={handleQuickNavSelect}
       />
@@ -5854,7 +5748,7 @@ function AgentChatFoldedActivityGroup({
   );
 }
 
-function AgentChatBubbleItem({
+const AgentChatBubbleItem = memo(function AgentChatBubbleItem({
   bubble,
   activeRuntimeStatusBubbleId,
   isFocused = true,
@@ -5874,7 +5768,10 @@ function AgentChatBubbleItem({
   compact?: boolean;
 }) {
   const isConversationMessage = agentChatBubbleIsConversationMessage(bubble);
-  const SessionActivityRender = agentChatSessionActivityRenderForBubble(bubble);
+  const SessionActivityRender = useMemo(
+    () => agentChatSessionActivityRenderForBubble(bubble),
+    [bubble],
+  );
   const latestArtifactVersions = useContext(AgentChatArtifactLatestVersionContext);
   const artifactVersionInfo = (() => {
     if (SessionActivityRender?.kind !== "artifact" || !latestArtifactVersions) {
@@ -5890,14 +5787,11 @@ function AgentChatBubbleItem({
   const useCanonicalSessionActivity = Boolean(SessionActivityRender);
   const primaryBlocks = useCanonicalSessionActivity
     ? []
-    : agentChatDisplayBlocksForBubble(
-        bubble,
-        bubble.blocks.length > 0
-          ? bubble.blocks
-          : isConversationMessage
-            ? ([{ type: "text", text: bubble.title }] as AgentChatBlock[])
-            : [],
-      );
+    : bubble.blocks.length > 0
+      ? bubble.blocks
+      : isConversationMessage
+        ? ([{ type: "text", text: bubble.title }] as AgentChatBlock[])
+        : [];
   const visibleBlockLimit =
     isConversationMessage && isFocused
       ? primaryBlocks.length
@@ -5966,7 +5860,7 @@ function AgentChatBubbleItem({
       {content}
     </article>
   );
-}
+});
 
 function AgentChatWorkedDivider({
   label,
@@ -6201,7 +6095,6 @@ function AgentChatSessionActivityView({
         icon={render.icon}
         title={render.title}
         outputLines={render.outputLines}
-        exitCode={render.exitCode}
       />
     );
   }
@@ -7948,6 +7841,24 @@ function AgentChatRuntimeStatusCell({
   );
 }
 
+const AgentChatRuntimeShimmerLetter = memo(function AgentChatRuntimeShimmerLetter({
+  char,
+  delayMs,
+}: {
+  char: string;
+  delayMs: number;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      className="agent-chat-runtime-shimmer-letter"
+      style={{ animationDelay: `${delayMs}ms` }}
+    >
+      {char}
+    </span>
+  );
+});
+
 function AgentChatRuntimeShimmerText({
   text,
   startedAtMs,
@@ -7955,31 +7866,31 @@ function AgentChatRuntimeShimmerText({
   text: string;
   startedAtMs?: number | null;
 }) {
-  const baseDelayMs = useMemo(() => {
-    if (!startedAtMs) {
-      return 0;
-    }
+  const letters = useMemo(() => Array.from(text), [text]);
+  const [phaseMs, setPhaseMs] = useState(0);
 
-    return -(
-      Math.max(0, Date.now() - startedAtMs) % AGENT_CHAT_RUNTIME_SHIMMER_MS
-    );
+  useEffect(() => {
+    if (!startedAtMs) {
+      setPhaseMs(0);
+      return;
+    }
+    const sync = () =>
+      setPhaseMs(
+        -(Math.max(0, Date.now() - startedAtMs) % AGENT_CHAT_RUNTIME_SHIMMER_MS),
+      );
+    sync();
+    const interval = window.setInterval(sync, 1000);
+    return () => window.clearInterval(interval);
   }, [startedAtMs]);
 
   return (
     <span className="agent-chat-runtime-shimmer" aria-label={text}>
-      {Array.from(text).map((char, index) => (
-        <span
-          key={`${index}-${char}`}
-          aria-hidden="true"
-          className="agent-chat-runtime-shimmer-letter"
-          style={{
-            animationDelay: `${
-              baseDelayMs + index * AGENT_CHAT_RUNTIME_SHIMMER_STAGGER_MS
-            }ms`,
-          }}
-        >
-          {char}
-        </span>
+      {letters.map((char, index) => (
+        <AgentChatRuntimeShimmerLetter
+          key={index}
+          char={char}
+          delayMs={phaseMs + index * AGENT_CHAT_RUNTIME_SHIMMER_STAGGER_MS}
+        />
       ))}
     </span>
   );
@@ -8224,7 +8135,6 @@ function AgentChatCommandExecutionPanel({
   icon: AgentChatActivityMarkerKind;
   title: string;
   outputLines: string[];
-  exitCode?: number | null;
 }) {
   const renderedOutput =
     outputLines.length > 0
@@ -8353,8 +8263,9 @@ function AgentChatPatchFileBlock({
 }) {
   const oldWidth = agentChatDiffLineNumberWidth(file.lines, "old_lineno");
   const newWidth = agentChatDiffLineNumberWidth(file.lines, "new_lineno");
+  const diffLines = agentChatDiffLinesForHighlight(file.lines);
   const highlighted = useShikiHighlightedCode(
-    agentChatDiffHighlightSource(file.lines),
+    agentChatDiffHighlightSource(diffLines),
     file.path,
   );
 
@@ -8373,9 +8284,9 @@ function AgentChatPatchFileBlock({
           </span>
         </div>
       ) : null}
-      {file.lines.length > 0 ? (
+      {diffLines.length > 0 ? (
         <div className="min-w-0 max-w-full overflow-hidden font-mono text-xs leading-5 [overflow-wrap:anywhere]">
-          {file.lines.map((line, index) => (
+          {diffLines.map((line, index) => (
             <AgentChatPatchDiffRow
               key={`patch-line-${index}`}
               line={line}
@@ -8452,6 +8363,22 @@ function AgentChatPatchDiffRow({
       </span>
     </div>
   );
+}
+
+function agentChatDiffLinesForHighlight(lines: AgentChatDiffLine[]) {
+  const limit = AGENT_CHAT_DIFF_HEAD_LINES + AGENT_CHAT_DIFF_TAIL_LINES;
+  if (lines.length <= limit) {
+    return lines;
+  }
+  const hiddenCount = lines.length - limit;
+  return [
+    ...lines.slice(0, AGENT_CHAT_DIFF_HEAD_LINES),
+    {
+      kind: "hunk_break",
+      text: `… +${hiddenCount} more line(s)`,
+    },
+    ...lines.slice(lines.length - AGENT_CHAT_DIFF_TAIL_LINES),
+  ];
 }
 
 function agentChatDiffHighlightSource(lines: AgentChatDiffLine[]) {
@@ -9006,37 +8933,7 @@ function AgentChatMarkdownImage({
 }
 
 
-const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
-  text,
-  limit,
-  tone = "default",
-  preserveSoftBreaks = false,
-}: {
-  text: string;
-  limit: number;
-  tone?: "default" | "error" | "muted";
-  preserveSoftBreaks?: boolean;
-}) {
-  const { t } = useTranslation();
-  const limitedText = limitMarkdownInput(text, limit);
-  const markdownId = useId();
-
-  if (!limitedText.trim()) {
-    return null;
-  }
-
-
-  return (
-    <div
-      className={cn(
-        "flex min-w-0 max-w-full flex-col gap-2 text-sm leading-6 text-foreground/90 [overflow-wrap:anywhere]",
-        tone === "error" && "text-destructive",
-        tone === "muted" && "text-muted-foreground",
-      )}
-    >
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
+const AGENT_CHAT_MARKDOWN_COMPONENTS = {
           h1: ({ children }: any) => (
             <h3 className="mt-3 break-words text-base font-semibold leading-7 text-foreground first:mt-0">
               {children}
@@ -9088,7 +8985,7 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
           hr: () => <Separator />,
           table: ({ children }: any) => (
             <div
-              aria-label={t("chat.scrollableMarkdownTable")}
+              aria-label="Scrollable markdown table"
               className="my-2 min-w-0 max-w-full overflow-x-auto rounded-xl border border-border/80 bg-background/70 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin]"
               tabIndex={0}
             >
@@ -9121,14 +9018,7 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
             </td>
           ),
           p: ({ children }: any) => (
-            <p
-              className={cn(
-                "break-words",
-                preserveSoftBreaks && "whitespace-pre-wrap",
-              )}
-            >
-              {children}
-            </p>
+            <p className="whitespace-pre-wrap break-words">{children}</p>
           ),
           pre: ({ children }: { children?: ReactNode }) => {
             const codeProps = markdownPreCodeProps(children);
@@ -9137,7 +9027,7 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
               const code = markdownNodeText(codeProps.children).replace(/\n$/, "");
               return (
                 <AgentChatCodeBlock
-                  id={`${markdownId}-code-${language || "plain"}`}
+                  id={`agent-chat-code-${language || "plain"}`}
                   code={code}
                   language={language}
                 />
@@ -9177,7 +9067,65 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
           img: ({ src, alt }: any) => (
             <AgentChatMarkdownImage src={src} alt={alt} />
           ),
-        }}
+        };
+
+const AGENT_CHAT_MARKDOWN_PARAGRAPH = ({ children }: { children?: ReactNode }) => (
+  <p className="break-words">{children}</p>
+);
+const AGENT_CHAT_MARKDOWN_SOFT_PARAGRAPH = ({ children }: { children?: ReactNode }) => (
+  <p className="whitespace-pre-wrap break-words">{children}</p>
+);
+
+const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
+  text,
+  limit,
+  tone = "default",
+  preserveSoftBreaks = false,
+}: {
+  text: string;
+  limit: number;
+  tone?: "default" | "error" | "muted";
+  preserveSoftBreaks?: boolean;
+}) {
+  const { t } = useTranslation();
+  const limitedText = limitMarkdownInput(text, limit);
+  const components = useMemo(
+    () => ({
+      ...AGENT_CHAT_MARKDOWN_COMPONENTS,
+      p: preserveSoftBreaks
+        ? AGENT_CHAT_MARKDOWN_SOFT_PARAGRAPH
+        : AGENT_CHAT_MARKDOWN_PARAGRAPH,
+      table: ({ children }: { children?: ReactNode }) => (
+        <div
+          aria-label={t("chat.scrollableMarkdownTable")}
+          className="my-2 min-w-0 max-w-full overflow-x-auto rounded-xl border border-border/80 bg-background/70 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin]"
+          tabIndex={0}
+        >
+          <table className="w-full min-w-[44rem] border-separate border-spacing-0 text-left text-[0.8125rem] leading-5 [overflow-wrap:normal]">
+            {children}
+          </table>
+        </div>
+      ),
+    }),
+    [preserveSoftBreaks, t],
+  );
+
+  if (!limitedText.trim()) {
+    return null;
+  }
+
+
+  return (
+    <div
+      className={cn(
+        "flex min-w-0 max-w-full flex-col gap-2 text-sm leading-6 text-foreground/90 [overflow-wrap:anywhere]",
+        tone === "error" && "text-destructive",
+        tone === "muted" && "text-muted-foreground",
+      )}
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={components}
       >
         {limitedText}
       </ReactMarkdown>
@@ -9541,8 +9489,9 @@ function AgentChatDiffBlockFile({
 }: {
   file: AgentChatDiffFile;
 }) {
+  const diffLines = agentChatDiffLinesForHighlight(file.lines);
   const highlighted = useShikiHighlightedCode(
-    agentChatDiffHighlightSource(file.lines),
+    agentChatDiffHighlightSource(diffLines),
     file.path,
   );
 
@@ -9556,7 +9505,7 @@ function AgentChatDiffBlockFile({
         </span>
       </div>
       <pre className="max-h-72 min-w-0 max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap break-words px-2 leading-5 [overflow-wrap:anywhere] [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin] sm:px-3">
-        {file.lines.map((line, lineIndex) => (
+        {diffLines.map((line, lineIndex) => (
           <Fragment key={`${file.path}-legacy-diff-${lineIndex}`}>
             <span
               className={cn(
@@ -9577,7 +9526,7 @@ function AgentChatDiffBlockFile({
                 fallback={line.text}
               />
             </span>
-            {lineIndex < file.lines.length - 1 ? "\n" : null}
+            {lineIndex < diffLines.length - 1 ? "\n" : null}
           </Fragment>
         ))}
       </pre>
@@ -9720,7 +9669,6 @@ function agentChatActivityItemFromEvent(
     created_at: createdAt,
     updated_at: updatedAt,
     blocks: [],
-    detail_blocks: [],
     activityEvent: event,
   };
 }
@@ -9731,7 +9679,8 @@ function agentChatActivityMetaFromEvent(event: SessionActivityEvent): {
   title: string;
   uiHint?: string;
 } {
-  const user = agentChatSessionActivityPayload(event, "User");
+  const matched = agentChatMatchedActivity(event);
+  const user = matched?.variant === "User" ? matched.payload : null;
   if (user) {
     return {
       kind: "message",
@@ -9740,7 +9689,7 @@ function agentChatActivityMetaFromEvent(event: SessionActivityEvent): {
     };
   }
 
-  const assistant = agentChatSessionActivityPayload(event, "Assistant");
+  const assistant = matched?.variant === "Assistant" ? matched.payload : null;
   if (assistant) {
     return {
       kind: "message",
@@ -9749,36 +9698,36 @@ function agentChatActivityMetaFromEvent(event: SessionActivityEvent): {
     };
   }
 
-  if (agentChatSessionActivityPayload(event, "Thinking")) {
+  if (matched?.variant === "Thinking") {
     return { kind: "message", actor: "assistant", title: "Thinking" };
   }
 
-  const plan = agentChatSessionActivityPayload(event, "PlanResult");
+  const plan = matched?.variant === "PlanResult" ? matched.payload : null;
   if (plan) {
     return { kind: "plan", actor: "system", title: "Updated Plan" };
   }
 
-  const reply = agentChatSessionActivityPayload(event, "Reply");
+  const reply = matched?.variant === "Reply" ? matched.payload : null;
   if (reply) {
     return { kind: "message", actor: "assistant", title: "Reply" };
   }
 
-  const patch = agentChatSessionActivityPayload(event, "Patch");
+  const patch = matched?.variant === "Patch" ? matched.payload : null;
   if (patch) {
     return { kind: "patch", actor: "tool", title: stringValue(patch.summary_line, "Patch") };
   }
 
-  const warning = agentChatSessionActivityPayload(event, "Warning");
+  const warning = matched?.variant === "Warning" ? matched.payload : null;
   if (warning) {
     return { kind: "warning", actor: "system", title: stringValue(warning.title, "Warning") };
   }
 
-  const error = agentChatSessionActivityPayload(event, "Error");
+  const error = matched?.variant === "Error" ? matched.payload : null;
   if (error) {
     return { kind: "error", actor: "system", title: stringValue(error.title, "Error") };
   }
 
-  const telegram = agentChatSessionActivityPayload(event, "Telegram");
+  const telegram = matched?.variant === "Telegram" ? matched.payload : null;
   if (telegram) {
     return {
       kind: "message",
@@ -9787,7 +9736,7 @@ function agentChatActivityMetaFromEvent(event: SessionActivityEvent): {
     };
   }
 
-  const runtimeStatus = agentChatSessionActivityPayload(event, "RuntimeStatus");
+  const runtimeStatus = matched?.variant === "RuntimeStatus" ? matched.payload : null;
   if (runtimeStatus) {
     return {
       kind: "tool",
@@ -9806,13 +9755,15 @@ function agentChatActivityMetaFromEvent(event: SessionActivityEvent): {
 
 
   const title =
-    stringValue(agentChatSessionActivityPayload(event, "GenericApp")?.title, "") ||
-    stringValue(agentChatSessionActivityPayload(event, "TerminalWait")?.title, "") ||
-    stringValue(agentChatSessionActivityPayload(event, "ExecResult")?.title, "") ||
-    stringValue(agentChatSessionActivityPayload(event, "LiveExec")?.title, "") ||
-    stringValue(agentChatSessionActivityPayload(event, "Browser")?.title, "") ||
-    stringValue(agentChatSessionActivityPayload(event, "LiveBrowser")?.title, "") ||
-    "Activity";
+    (matched &&
+    (matched.variant === "GenericApp" ||
+      matched.variant === "TerminalWait" ||
+      matched.variant === "ExecResult" ||
+      matched.variant === "LiveExec" ||
+      matched.variant === "Browser" ||
+      matched.variant === "LiveBrowser")
+      ? stringValue(matched.payload.title, "")
+      : "") || "Activity";
   return { kind: "tool", actor: "tool", title };
 }
 
@@ -9915,7 +9866,6 @@ function agentChatBubbleFromActivityItem(
     createdAt: numberValue(record.created_at, 0),
     updatedAt: numberValue(record.updated_at, 0),
     blocks: agentChatBlocksValue(record.blocks),
-    planSteps: agentChatPlanStepsFromMetadata(record.metadata),
     live,
     toolName: tool ? stringValue(tool.name, "") : undefined,
     appName: tool ? stringValue(tool.app, "") : undefined,
@@ -10095,11 +10045,6 @@ function agentChatQuickNavLabelForBubble(bubble: AgentChatBubble) {
 }
 
 function agentChatQuickNavOrderForBubble(bubble: AgentChatBubble) {
-  const historySequence = agentChatHistorySequenceFromId(bubble.id);
-  if (historySequence !== null) {
-    return historySequence;
-  }
-
   if (Number.isFinite(bubble.createdAt) && bubble.createdAt > 0) {
     return bubble.createdAt;
   }
@@ -10120,16 +10065,6 @@ function agentChatQuickNavItemCompare(
   }
 
   return left.id.localeCompare(right.id);
-}
-
-function agentChatHistorySequenceFromId(id: string) {
-  const match = /^history-(\d+)$/.exec(id);
-  if (!match) {
-    return null;
-  }
-
-  const sequence = Number(match[1]);
-  return Number.isFinite(sequence) ? sequence : null;
 }
 
 function agentChatQuickNavLabelFromPayload(
@@ -10235,35 +10170,27 @@ function agentChatQuickNavCollapsedItems(
     .filter((item): item is AgentChatQuickNavItem => Boolean(item));
 }
 
-function agentChatDisplayBlocksForBubble(
-  bubble: AgentChatBubble,
-  blocks: AgentChatBlock[],
-): AgentChatBlock[] {
-  if (!agentChatBubbleIsConversationMessage(bubble)) {
-    return blocks;
-  }
-
-  return blocks;
-}
-
 function agentChatSessionActivityRenderForBubble(
   bubble: AgentChatBubble,
 ): AgentChatSessionActivityRender | null {
   const activityEvent = bubble.activityEvent;
+  const matched = agentChatMatchedActivity(activityEvent);
+  const payloadOf = (variant: string) =>
+    matched?.variant === variant ? matched.payload : null;
 
-  const assistant = agentChatSessionActivityPayload(activityEvent, "Assistant");
+  const assistant = payloadOf("Assistant");
   if (assistant) {
     return agentChatMessageActivityRender("activity", assistant, "Activity");
   }
 
-  const user = agentChatSessionActivityPayload(activityEvent, "User");
+  const user = payloadOf("User");
   if (user) {
     const render = agentChatMessageActivityRender("user", user, "user");
     render.imageAttachments = imageAttachmentsValue(user.image_attachments);
     return render;
   }
 
-  const browser = agentChatSessionActivityPayload(activityEvent, "Browser");
+  const browser = payloadOf("Browser");
   if (browser) {
     return {
       kind: "browser",
@@ -10273,7 +10200,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const liveBrowser = agentChatSessionActivityPayload(activityEvent, "LiveBrowser");
+  const liveBrowser = payloadOf("LiveBrowser");
   if (liveBrowser) {
     const url = nullableStringValue(liveBrowser.url);
     return {
@@ -10287,7 +10214,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const webSearch = agentChatSessionActivityPayload(activityEvent, "WebSearch");
+  const webSearch = payloadOf("WebSearch");
   if (webSearch) {
     const action = stringValue(webSearch.action, "searched").toLowerCase();
     const url = nullableStringValue(webSearch.url);
@@ -10315,7 +10242,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const codingReview = agentChatSessionActivityPayload(activityEvent, "CodingReview");
+  const codingReview = payloadOf("CodingReview");
   if (codingReview) {
     const title = stringValue(codingReview.title, "Review").trim();
     return {
@@ -10326,7 +10253,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const genericApp = agentChatSessionActivityPayload(activityEvent, "GenericApp");
+  const genericApp = payloadOf("GenericApp");
   if (genericApp) {
     return {
       kind: "text",
@@ -10336,7 +10263,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const plan = agentChatSessionActivityPayload(activityEvent, "PlanResult");
+  const plan = payloadOf("PlanResult");
   if (plan) {
     return {
       kind: "plan",
@@ -10372,7 +10299,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const explored = agentChatSessionActivityPayload(activityEvent, "Explored");
+  const explored = payloadOf("Explored");
   if (explored) {
     return {
       kind: "explored",
@@ -10382,18 +10309,17 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const execResult = agentChatSessionActivityPayload(activityEvent, "ExecResult");
+  const execResult = payloadOf("ExecResult");
   if (execResult) {
     return {
       kind: "exec",
       icon: "activity",
       title: stringValue(execResult.title, "Command"),
       outputLines: stringArrayValuePreserveWhitespace(execResult.output_lines),
-      exitCode: parseAgentChatExitCode(nullableStringValue(execResult.meta)),
     };
   }
 
-  const liveExec = agentChatSessionActivityPayload(activityEvent, "LiveExec");
+  const liveExec = payloadOf("LiveExec");
   if (liveExec) {
     return {
       kind: "exec",
@@ -10401,11 +10327,10 @@ function agentChatSessionActivityRenderForBubble(
       title: stringValue(liveExec.title, "Tool running"),
       outputLines: stringArrayValuePreserveWhitespace(liveExec.output_lines),
       running: true,
-      exitCode: null,
     };
   }
 
-  const codingEdit = agentChatSessionActivityPayload(activityEvent, "CodingEdit");
+  const codingEdit = payloadOf("CodingEdit");
   if (codingEdit) {
     const files = agentChatCodingEditFilesFromSessionActivity(codingEdit);
     return {
@@ -10416,7 +10341,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const patch = agentChatSessionActivityPayload(activityEvent, "Patch");
+  const patch = payloadOf("Patch");
   if (patch) {
     const files = agentChatPatchFilesFromSessionActivity(patch);
     return {
@@ -10427,7 +10352,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const telegram = agentChatSessionActivityPayload(activityEvent, "Telegram");
+  const telegram = payloadOf("Telegram");
   if (telegram) {
     return {
       kind: "messageActivity",
@@ -10440,7 +10365,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const reply = agentChatSessionActivityPayload(activityEvent, "Reply");
+  const reply = payloadOf("Reply");
   if (reply) {
     const disposition = normalizeAgentChatReplyDisposition(reply.disposition);
     return {
@@ -10455,7 +10380,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const terminalWait = agentChatSessionActivityPayload(activityEvent, "TerminalWait");
+  const terminalWait = payloadOf("TerminalWait");
   if (terminalWait) {
     return {
       kind: "text",
@@ -10466,7 +10391,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const warning = agentChatSessionActivityPayload(activityEvent, "Warning");
+  const warning = payloadOf("Warning");
   if (warning) {
     return {
       kind: "text",
@@ -10478,7 +10403,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const error = agentChatSessionActivityPayload(activityEvent, "Error");
+  const error = payloadOf("Error");
   if (error) {
     return {
       kind: "text",
@@ -10491,7 +10416,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const thinking = agentChatSessionActivityPayload(activityEvent, "Thinking");
+  const thinking = payloadOf("Thinking");
   if (thinking) {
     return {
       kind: "thinking",
@@ -10500,7 +10425,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const runtimeStatus = agentChatSessionActivityPayload(activityEvent, "RuntimeStatus");
+  const runtimeStatus = payloadOf("RuntimeStatus");
   if (runtimeStatus) {
     return {
       kind: "runtimeStatus",
@@ -10512,7 +10437,7 @@ function agentChatSessionActivityRenderForBubble(
     };
   }
 
-  const workflow = agentChatSessionActivityPayload(activityEvent, "Workflow");
+  const workflow = payloadOf("Workflow");
   if (workflow) {
     return {
       kind: "workflow",
@@ -10795,13 +10720,7 @@ function agentChatCodingEditTitle(
 }
 
 function agentChatPatchTitle(files: AgentChatDiffFile[]) {
-  if (files.length === 1) {
-    const file = files[0];
-    return `Edited ${file.path} (+${file.added_lines} -${file.removed_lines})`;
-  }
-
-  const fileNoun = files.length === 1 ? "File" : "Files";
-  return `Edited ${files.length} ${fileNoun}`;
+  return `Edited ${files.length} Files`;
 }
 
 function agentChatPlanTitleFromSessionActivity(payload: Record<string, unknown>) {
@@ -10838,11 +10757,6 @@ function agentChatReplyTitle(disposition: string, subject: string) {
   }
 
   return "Reply";
-}
-
-function parseAgentChatExitCode(meta: string | null) {
-  const match = meta?.match(/exit=(-?\d+)/);
-  return match ? Number(match[1]) : null;
 }
 
 function truncateAgentChatLinesMiddle(
@@ -10899,12 +10813,32 @@ function agentChatPlanStepsFromSessionActivity(
     .filter((step): step is AgentChatPlanStep => Boolean(step));
 }
 
+type AgentChatMatchedActivity = {
+  variant: string;
+  payload: Record<string, unknown>;
+};
+
+function agentChatMatchedActivity(
+  event: SessionActivityEvent | null | undefined,
+): AgentChatMatchedActivity | null {
+  const record = asSessionActivityEvent(event) as Record<string, unknown> | null;
+  if (!record) {
+    return null;
+  }
+  const variant = Object.keys(record)[0];
+  if (!variant) {
+    return null;
+  }
+  const payload = asRecord(record[variant]);
+  return payload ? { variant, payload } : null;
+}
+
 function agentChatSessionActivityPayload(
   event: SessionActivityEvent | null | undefined,
   variant: string,
 ): Record<string, unknown> | null {
-  const record = asSessionActivityEvent(event) as Record<string, unknown> | null;
-  return asRecord(record?.[variant]);
+  const matched = agentChatMatchedActivity(event);
+  return matched?.variant === variant ? matched.payload : null;
 }
 
 function normalizeCanonicalPlanStepStatus(
@@ -10923,39 +10857,6 @@ function normalizeCanonicalPlanStepStatus(
   }
 
   return "unknown";
-}
-
-function agentChatPlanStepsFromMetadata(value: unknown): AgentChatPlanStep[] {
-  const metadata = asRecord(value);
-  const steps = Array.isArray(metadata?.steps) ? metadata.steps : [];
-
-  return steps
-    .map((entry) => {
-      const record = asRecord(entry);
-      if (!record) {
-        return null;
-      }
-      const text = stringValue(record.text, "");
-      if (!text) {
-        return null;
-      }
-      return {
-        status: normalizeAgentChatPlanStepStatus(record.status) ?? "unknown",
-        text,
-      } satisfies AgentChatPlanStep;
-    })
-    .filter((step): step is AgentChatPlanStep => Boolean(step));
-}
-
-function normalizeAgentChatPlanStepStatus(
-  value: unknown,
-): AgentChatPlanStepStatus | null {
-  return value === "pending" ||
-    value === "in_progress" ||
-    value === "completed" ||
-    value === "unknown"
-    ? value
-    : null;
 }
 
 type AgentChatDiffFile = {

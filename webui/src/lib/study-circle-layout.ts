@@ -592,10 +592,13 @@ function simulateNetwork(
         spring.from !== undefined && spring.to !== undefined,
     );
 
-  for (let step = 0; step < SIMULATION_STEPS; step += 1) {
+  const steps = count > 80 ? 40 : SIMULATION_STEPS;
+  for (let step = 0; step < steps; step += 1) {
     const forces = nodes.map(() => ({ x: 0, y: 0, z: 0 }));
 
-    for (let a = 0; a < nodes.length; a += 1) {
+    if (count > 80) {
+      applyGridRepulsion(nodes, forces);
+    } else for (let a = 0; a < nodes.length; a += 1) {
       for (let b = a + 1; b < nodes.length; b += 1) {
         const dx = nodes[a].position.x - nodes[b].position.x;
         const dy = nodes[a].position.y - nodes[b].position.y;
@@ -645,6 +648,61 @@ function simulateNetwork(
   }
 
   return normalizeCloud(nodes);
+}
+
+
+function applyGridRepulsion(
+  nodes: SimNode[],
+  forces: Vec3[],
+) {
+  const cellSize = SPRING_LENGTH;
+  const grid = new Map<string, number[]>();
+  const cellOf = (value: number) => Math.floor(value / cellSize);
+  nodes.forEach((node, index) => {
+    const key = `${cellOf(node.position.x)}:${cellOf(node.position.y)}:${cellOf(node.position.z)}`;
+    const bucket = grid.get(key);
+    if (bucket) {
+      bucket.push(index);
+    } else {
+      grid.set(key, [index]);
+    }
+  });
+  for (const [key, bucket] of grid) {
+    const [cx, cy, cz] = key.split(":").map(Number);
+    const neighbors: number[] = [];
+    for (let ox = -1; ox <= 1; ox += 1) {
+      for (let oy = -1; oy <= 1; oy += 1) {
+        for (let oz = -1; oz <= 1; oz += 1) {
+          const adjacent = grid.get(`${cx + ox}:${cy + oy}:${cz + oz}`);
+          if (adjacent) {
+            neighbors.push(...adjacent);
+          }
+        }
+      }
+    }
+    for (const a of bucket) {
+      for (const b of neighbors) {
+        if (b <= a) {
+          continue;
+        }
+        const dx = nodes[a].position.x - nodes[b].position.x;
+        const dy = nodes[a].position.y - nodes[b].position.y;
+        const dz = nodes[a].position.z - nodes[b].position.z;
+        const distanceSquared = Math.max(dx * dx + dy * dy + dz * dz, 1);
+        const distance = Math.sqrt(distanceSquared);
+        const magnitude = FORCE_REPULSION / distanceSquared;
+        const fx = (dx / distance) * magnitude;
+        const fy = (dy / distance) * magnitude;
+        const fz = (dz / distance) * magnitude;
+        forces[a].x += fx;
+        forces[a].y += fy;
+        forces[a].z += fz;
+        forces[b].x -= fx;
+        forces[b].y -= fy;
+        forces[b].z -= fz;
+      }
+    }
+  }
 }
 
 function normalizeCloud(nodes: SimNode[]): SimNode[] {
