@@ -84,14 +84,7 @@ pub struct EvaluationArtifactsStore {
 
 impl EvaluationArtifactsStore {
     pub async fn open() -> Result<Self> {
-        Self::open_scoped(None).await
-    }
-
-    pub async fn open_scoped(scope: Option<&str>) -> Result<Self> {
-        let mut root = daat_locus_paths().await.artifact_dir(EVALUATIONS_DIR_NAME);
-        if let Some(scope) = scope {
-            root = root.join(artifact_file_stem(scope));
-        }
+        let root = daat_locus_paths().await.artifact_dir(EVALUATIONS_DIR_NAME);
         ensure_dir(&root).await?;
         ensure_dir(&root.join(RUNTIME_ERROR_CASES_DIR)).await?;
         ensure_dir(&root.join(PROMPT_REFLECTIONS_DIR)).await?;

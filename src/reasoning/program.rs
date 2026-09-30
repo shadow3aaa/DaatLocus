@@ -3,7 +3,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::schema_utils::{ModelSchema, model_schema_for};
 
-use super::{examples::ProgramExample, optimizer::PromptTuningConfig, signature::Signature};
+use super::{optimizer::PromptTuningConfig, signature::Signature};
 
 pub trait Program: Sync {
     type Output: DeserializeOwned + Serialize + JsonSchema + ModelSchema + Clone + Send + Sync;
@@ -22,18 +22,10 @@ pub trait Program: Sync {
 
     fn signature(&self) -> Signature;
 
-    fn examples(&self) -> Vec<ProgramExample<Self::Output>> {
-        Vec::new()
-    }
-
     fn default_tuning(&self) -> PromptTuningConfig<Self::Output> {
         PromptTuningConfig {
             extra_instructions: Vec::new(),
-            examples: self.examples(),
+            examples: Vec::new(),
         }
-    }
-
-    fn include_history_messages(&self) -> bool {
-        false
     }
 }

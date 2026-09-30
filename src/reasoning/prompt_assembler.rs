@@ -1,3 +1,6 @@
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
+
 use crate::{context::Context, preturn_state::PreTurnState};
 
 use super::{
@@ -8,7 +11,8 @@ use super::{
     },
     prompts::{SYSTEM_CORE, build_app_docs_prompt},
     turn_compile::{
-        PromptPersonaSpec, load_or_create_prompt_persona_spec_sync, resolve_prompt_persona_language,
+        PromptPersonaSpec, load_or_create_prompt_persona_spec_sync, prompt_persona_path_sync,
+        resolve_prompt_persona_language,
     },
 };
 
@@ -18,6 +22,25 @@ const PERSONA_NAME_PLACEHOLDER: &str = "{{name}}";
 const SKILLS_SECTION_PLACEHOLDER: &str = "{{skills_section}}";
 const APP_DOCS_SECTION_PLACEHOLDER: &str = "{{app_docs_section}}";
 const COMPILED_ADDITIONS_SECTION_PLACEHOLDER: &str = "{{compiled_additions_section}}";
+const RUNTIME_SYSTEM_PROMPT_TEMPLATE_VERSION: u64 = 1;
+
+struct RuntimeSystemPromptCache {
+    template_version: u64,
+    persona_modified: Option<SystemTime>,
+    persona_exists: bool,
+    configured_locale: String,
+    workspace_path: String,
+    study_mode: bool,
+    skills_section: String,
+    app_docs_section: String,
+    compiled_additions_section: String,
+    rendered: String,
+}
+
+fn runtime_system_prompt_cache() -> &'static Mutex<Option<RuntimeSystemPromptCache>> {
+    static CACHE: OnceLock<Mutex<Option<RuntimeSystemPromptCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
 
 pub struct PreTurnContextAssembler {
     parts: Vec<Box<dyn PreTurnContextPart>>,
@@ -37,27 +60,69 @@ struct RuntimeSystemPromptSections {
 
 pub fn runtime_system_prompt_text(ctx: &Context) -> String {
     let configured_locale = ctx.config.locale.as_str();
+    let workspace_path = format!(
+        "Your absolute workspace path is `{}`.",
+        ctx.execution_cwd.display()
+    );
+    let study_mode = ctx.study_mode();
+    let skills_section = if study_mode {
+        String::new()
+    } else {
+        ctx.openskills.render_prompt_block().unwrap_or_default()
+    };
+    let app_docs_section = render_app_docs_section(ctx);
+    let compiled_additions_section =
+        render_compiled_additions_section(ctx.compiled_prompts.runtime_system_additions());
+    let persona_path = prompt_persona_path_sync();
+    let persona_metadata = std::fs::metadata(&persona_path).ok();
+    let persona_exists = persona_metadata.is_some();
+    let persona_modified = persona_metadata.as_ref().and_then(|metadata| metadata.modified().ok());
+
+    if let Ok(cache) = runtime_system_prompt_cache().lock()
+        && let Some(cached) = cache.as_ref()
+        && cached.template_version == RUNTIME_SYSTEM_PROMPT_TEMPLATE_VERSION
+        && cached.persona_modified == persona_modified
+        && cached.persona_exists == persona_exists
+        && cached.configured_locale == configured_locale
+        && cached.workspace_path == workspace_path
+        && cached.study_mode == study_mode
+        && cached.skills_section == skills_section
+        && cached.app_docs_section == app_docs_section
+        && cached.compiled_additions_section == compiled_additions_section
+    {
+        return cached.rendered.clone();
+    }
+
     let persona = load_or_create_prompt_persona_spec_sync(configured_locale);
-    render_runtime_system_prompt(&RuntimeSystemPromptSections {
-        workspace_path: format!(
-            "Your absolute workspace path is `{}`.",
-            ctx.execution_cwd.display()
-        ),
+    let persona_metadata = std::fs::metadata(&persona_path).ok();
+    let rendered = render_runtime_system_prompt(&RuntimeSystemPromptSections {
+        workspace_path: workspace_path.clone(),
         persona_section: render_persona_section(
             &persona,
             &resolve_prompt_persona_language(&persona, configured_locale),
             configured_locale,
         ),
-        skills_section: if ctx.study_mode() {
-            String::new()
-        } else {
-            ctx.openskills.render_prompt_block().unwrap_or_default()
-        },
-        app_docs_section: render_app_docs_section(ctx),
-        compiled_additions_section: render_compiled_additions_section(
-            ctx.compiled_prompts.runtime_system_additions(),
-        ),
-    })
+        skills_section: skills_section.clone(),
+        app_docs_section: app_docs_section.clone(),
+        compiled_additions_section: compiled_additions_section.clone(),
+    });
+    if let Ok(mut cache) = runtime_system_prompt_cache().lock() {
+        *cache = Some(RuntimeSystemPromptCache {
+            template_version: RUNTIME_SYSTEM_PROMPT_TEMPLATE_VERSION,
+            persona_modified: persona_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.modified().ok()),
+            persona_exists: persona_metadata.is_some(),
+            configured_locale: configured_locale.to_string(),
+            workspace_path,
+            study_mode,
+            skills_section,
+            app_docs_section,
+            compiled_additions_section,
+            rendered: rendered.clone(),
+        });
+    }
+    rendered
 }
 
 #[cfg(test)]

@@ -414,18 +414,17 @@ Strict requirements:\n\
         ))
     }
 
-    pub(crate) fn with_semantic_retry_note(&self, note: impl Into<String>) -> Self {
-        self.push_retry_message(format!(
-            "The previous output passed JSON schema validation but failed program semantic validation. Fix the content according to the specific error and retry.\n\
-Error: {}\n\
-Strict requirements:\n\
-1. Keep the result as exactly one JSON object matching the schema.\n\
-2. Correct every missing item, duplicate, unknown item, or coverage gap named in the error; do not ignore them.\n\
-3. If the error mentions a missing test, group, rule, or field, add it explicitly to the output instead of only implying it elsewhere.\n\
-4. Do not delete valid content that already satisfies requirements unless it directly conflicts with the error.\n\
-5. Do not return markdown or explanatory text; return only the corrected JSON.",
-            note.into()
-        ))
+    fn empty_for_trace() -> Self {
+        Self {
+            tool_name: String::new(),
+            tool_description: String::new(),
+            output_schema: Value::Null,
+            system_messages: Vec::new(),
+            long_term_memory_messages: Vec::new(),
+            history_messages: Vec::new(),
+            current_user_message: String::new(),
+            retry_messages: Vec::new(),
+        }
     }
 
     pub fn all_messages(&self) -> Vec<HistoryMessage> {
@@ -657,7 +656,7 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
     tuning: &PromptTuningConfig<P::Output>,
     trace_origin: TraceOrigin,
 ) -> Result<ProgramExecutionOutcome<P::Output>> {
-    execute_program_with_ir_report_with_retry_hook_and_validator(
+    execute_program_with_ir_report_with_retry_hook(
         ProgramExecutionRequest {
             model_provider,
             context,
@@ -668,24 +667,16 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
             trace_origin,
             max_retry_count: DEFAULT_PROGRAM_RETRY_COUNT,
         },
-        |_| Ok(()),
         |_| {},
     )
     .await
 }
 
-async fn execute_program_with_ir_report_with_retry_hook_and_validator<
-    P: Program,
-    R: Renderer,
-    V,
-    F,
->(
+async fn execute_program_with_ir_report_with_retry_hook<P: Program, R: Renderer, F>(
     execution: ProgramExecutionRequest<'_, P, R>,
-    mut validate_output: V,
     mut on_retry: F,
 ) -> Result<ProgramExecutionOutcome<P::Output>>
 where
-    V: FnMut(&P::Output) -> std::result::Result<(), String> + Send,
     F: FnMut(&PromptRequest) + Send,
 {
     let ProgramExecutionRequest {
@@ -700,7 +691,7 @@ where
     } = execution;
 
     let request = renderer.render(context, program, ir, tuning);
-    execute_prompt_request_with_retry_hook_and_validator(
+    execute_prompt_request_with_retry_hook(
         PromptRequestExecution {
             model_provider,
             context,
@@ -710,20 +701,17 @@ where
             trace_origin,
             max_retry_count,
         },
-        &mut validate_output,
         &mut on_retry,
     )
     .await
 }
 
-async fn execute_prompt_request_with_retry_hook_and_validator<O, V, F>(
+async fn execute_prompt_request_with_retry_hook<O, F>(
     execution: PromptRequestExecution<'_>,
-    validate_output: &mut V,
     on_retry: &mut F,
 ) -> Result<ProgramExecutionOutcome<O>>
 where
     O: DeserializeOwned + Serialize,
-    V: FnMut(&O) -> std::result::Result<(), String>,
     F: FnMut(&PromptRequest),
 {
     let PromptRequestExecution {
@@ -739,25 +727,40 @@ where
     let mut last_error = None;
 
     for attempt in 0..=max_retry_count {
-        let options =
-            ModelRequestOptions::for_prompt(model_provider, &request, context.session_id.clone())?;
-        let value = match model_provider.complete_json(request.clone(), options).await {
+        let options = ModelRequestOptions::for_prompt(
+            model_provider,
+            &request,
+            context.session_id.clone(),
+        )?;
+        let may_retry = attempt < max_retry_count;
+        // complete_json takes ownership. Clone only so a later retry can keep
+        // the original, or so the final attempt can still move that original
+        // into the trace. The success path does not clone again.
+        let value = match model_provider
+            .complete_json(request.clone(), options)
+            .await
+        {
             Ok(value) => value,
             Err(err) => {
                 let error_text = err.to_string();
+                let traced_request = if may_retry {
+                    request.clone()
+                } else {
+                    std::mem::replace(&mut request, PromptRequest::empty_for_trace())
+                };
                 append_program_trace(ProgramTraceRecord::new(ProgramTraceRecordParts {
                     origin: trace_origin,
                     program_name: program_name.to_string(),
                     attempt: attempt + 1,
                     signature: signature.clone(),
-                    request: request.clone(),
+                    request: traced_request,
                     raw_response: json!({ "provider_error": error_text }),
                     parsed_output: None,
                     deserialization_error: Some(err.to_string()),
                 }))
                 .await;
                 last_error = Some(error_text.clone());
-                if attempt < max_retry_count {
+                if may_retry {
                     request = request.with_schema_retry_note(error_text);
                     on_retry(&request);
                 }
@@ -767,55 +770,38 @@ where
         match serde_json::from_value::<O>(value.clone()) {
             Ok(output) => {
                 let parsed_output = serde_json::to_value(&output).ok();
-                match validate_output(&output) {
-                    Ok(()) => {
-                        append_program_trace(ProgramTraceRecord::new(ProgramTraceRecordParts {
-                            origin: trace_origin,
-                            program_name: program_name.to_string(),
-                            attempt: attempt + 1,
-                            signature: signature.clone(),
-                            request: request.clone(),
-                            raw_response: value,
-                            parsed_output,
-                            deserialization_error: None,
-                        }))
-                        .await;
-                        return Ok(ProgramExecutionOutcome { output });
-                    }
-                    Err(validation_error) => {
-                        append_program_trace(ProgramTraceRecord::new(ProgramTraceRecordParts {
-                            origin: trace_origin,
-                            program_name: program_name.to_string(),
-                            attempt: attempt + 1,
-                            signature: signature.clone(),
-                            request: request.clone(),
-                            raw_response: value,
-                            parsed_output,
-                            deserialization_error: Some(validation_error.clone()),
-                        }))
-                        .await;
-                        last_error = Some(validation_error.clone());
-                        if attempt < max_retry_count {
-                            request = request.with_semantic_retry_note(validation_error);
-                            on_retry(&request);
-                        }
-                    }
-                }
-            }
-            Err(err) => {
-                last_error = Some(err.to_string());
                 append_program_trace(ProgramTraceRecord::new(ProgramTraceRecordParts {
                     origin: trace_origin,
                     program_name: program_name.to_string(),
                     attempt: attempt + 1,
                     signature: signature.clone(),
-                    request: request.clone(),
+                    request,
+                    raw_response: value,
+                    parsed_output,
+                    deserialization_error: None,
+                }))
+                .await;
+                return Ok(ProgramExecutionOutcome { output });
+            }
+            Err(err) => {
+                last_error = Some(err.to_string());
+                let traced_request = if may_retry {
+                    request.clone()
+                } else {
+                    std::mem::replace(&mut request, PromptRequest::empty_for_trace())
+                };
+                append_program_trace(ProgramTraceRecord::new(ProgramTraceRecordParts {
+                    origin: trace_origin,
+                    program_name: program_name.to_string(),
+                    attempt: attempt + 1,
+                    signature: signature.clone(),
+                    request: traced_request,
                     raw_response: value,
                     parsed_output: None,
                     deserialization_error: Some(err.to_string()),
                 }))
                 .await;
-                if attempt < max_retry_count {
+                if may_retry {
                     request = request.with_schema_retry_note(err.to_string());
                     on_retry(&request);
                 }

@@ -1,5 +1,4 @@
 pub mod compiled;
-pub mod datasets;
 pub mod episode;
 pub mod evaluation_artifacts;
 pub mod examples;

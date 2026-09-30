@@ -18,7 +18,6 @@ use super::{
 
 pub const COMPILED_DIR_NAME: &str = "reasoning_compiled";
 pub const RUNTIME_SYSTEM_PROMPT_COMPILE_KEY: &str = "runtime_agent_system";
-pub const RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY: &str = "runtime_agent_system_previous";
 
 fn model_scoped_runtime_compile_key(base: &str, model_name: &str) -> String {
     let normalized = model_name
@@ -245,6 +244,7 @@ pub async fn load_all_compiled_programs_from_dir(
         return Ok(Vec::new());
     };
 
+    let runtime_system_prefix = format!("{RUNTIME_SYSTEM_PROMPT_COMPILE_KEY}--");
     let mut newest_by_suite: HashMap<String, (SystemTime, CompiledProgram)> = HashMap::new();
     while let Some(entry) = entries
         .next_entry()
@@ -259,11 +259,7 @@ pub async fn load_all_compiled_programs_from_dir(
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("");
-        if stem == RUNTIME_SYSTEM_PROMPT_COMPILE_KEY
-            || stem == RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY
-            || stem.starts_with(&format!("{RUNTIME_SYSTEM_PROMPT_COMPILE_KEY}--"))
-            || stem.starts_with(&format!("{RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY}--"))
-        {
+        if stem == RUNTIME_SYSTEM_PROMPT_COMPILE_KEY || stem.starts_with(&runtime_system_prefix) {
             continue;
         }
         if !stem_has_model_scope(stem, model_name) {

@@ -1,4 +1,5 @@
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,16 @@ use crate::{
 
 const RUNTIME_ERROR_CASES_FILE_NAME: &str = "runtime_error_cases.jsonl";
 static RUNTIME_ERROR_CASE_IO_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static UNREAD_RUNTIME_ERROR_CASE_COUNT_CACHE: OnceLock<
+    Mutex<Option<UnreadRuntimeErrorCaseCountCache>>,
+> = OnceLock::new();
+
+#[derive(Clone, Copy)]
+struct UnreadRuntimeErrorCaseCountCache {
+    modified: Option<SystemTime>,
+    len: u64,
+    count: usize,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -88,7 +99,6 @@ pub struct RuntimeErrorCase {
 
 pub struct RuntimeErrorCaseBatch {
     pub cases: Vec<RuntimeErrorCase>,
-    pub unread_case_count: usize,
     pub next_offset: u64,
 }
 
@@ -137,6 +147,8 @@ pub async fn append_runtime_error_case(case: RuntimeErrorCase) {
     line.push(b'\n');
     if let Err(err) = append_bytes_durable(path, line).await {
         tracing::warn!("failed to append runtime error case: {err}");
+    } else {
+        invalidate_unread_runtime_error_case_count_cache();
     }
 }
 
@@ -150,7 +162,6 @@ pub async fn load_runtime_error_case_batch() -> miette::Result<RuntimeErrorCaseB
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return Ok(RuntimeErrorCaseBatch {
                 cases: Vec::new(),
-                unread_case_count: 0,
                 next_offset: 0,
             });
         }
@@ -179,14 +190,87 @@ pub async fn load_runtime_error_case_batch() -> miette::Result<RuntimeErrorCaseB
     }
 
     Ok(RuntimeErrorCaseBatch {
-        unread_case_count: cases.len(),
         cases,
         next_offset: offset,
     })
 }
 
 pub async fn unread_runtime_error_case_count() -> miette::Result<usize> {
-    Ok(load_runtime_error_case_batch().await?.unread_case_count)
+    let _guard = runtime_error_case_io_lock().lock().await;
+    let path = daat_locus_paths()
+        .await
+        .journal_file(RUNTIME_ERROR_CASES_FILE_NAME);
+    let metadata = match fs::metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            store_unread_runtime_error_case_count_cache(None, 0, 0);
+            return Ok(0);
+        }
+        Err(err) => {
+            return Err(miette::miette!(
+                "failed to stat runtime error case file {}: {err}",
+                path.display()
+            ));
+        }
+    };
+    let modified = metadata.modified().ok();
+    let len = metadata.len();
+    if let Some(cached) = cached_unread_runtime_error_case_count(modified, len) {
+        return Ok(cached);
+    }
+
+    let bytes = fs::read(&path).await.map_err(|err| {
+        miette::miette!(
+            "failed to read runtime error case file {}: {err}",
+            path.display()
+        )
+    })?;
+    let count = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .count();
+    store_unread_runtime_error_case_count_cache(modified, len, count);
+    Ok(count)
+}
+
+fn cached_unread_runtime_error_case_count(
+    modified: Option<SystemTime>,
+    len: u64,
+) -> Option<usize> {
+    unread_runtime_error_case_count_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .as_ref()
+                .filter(|cached| cached.modified == modified && cached.len == len)
+                .map(|cached| cached.count)
+        })
+}
+
+fn store_unread_runtime_error_case_count_cache(
+    modified: Option<SystemTime>,
+    len: u64,
+    count: usize,
+) {
+    if let Ok(mut cache) = unread_runtime_error_case_count_cache().lock() {
+        *cache = Some(UnreadRuntimeErrorCaseCountCache {
+            modified,
+            len,
+            count,
+        });
+    }
+}
+
+fn invalidate_unread_runtime_error_case_count_cache() {
+    if let Ok(mut cache) = unread_runtime_error_case_count_cache().lock() {
+        *cache = None;
+    }
+}
+
+fn unread_runtime_error_case_count_cache(
+) -> &'static Mutex<Option<UnreadRuntimeErrorCaseCountCache>> {
+    UNREAD_RUNTIME_ERROR_CASE_COUNT_CACHE.get_or_init(|| Mutex::new(None))
 }
 
 pub async fn compact_runtime_error_case_file(consumed_offset: u64) -> miette::Result<()> {
@@ -218,7 +302,9 @@ pub async fn compact_runtime_error_case_file(consumed_offset: u64) -> miette::Re
             "failed to rewrite runtime error case file {} during compaction: {err}",
             path.display()
         )
-    })
+    })?;
+    invalidate_unread_runtime_error_case_count_cache();
+    Ok(())
 }
 
 fn runtime_error_case_io_lock() -> &'static tokio::sync::Mutex<()> {
