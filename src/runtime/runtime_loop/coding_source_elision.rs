@@ -98,13 +98,15 @@ impl CodingSourceElider<'_> {
     }
 
     fn is_visible(&self, path: &str, anchor: &str) -> bool {
-        self.visible_full_lines.contains(&CodingSourceLineKey {
-            path: path.to_string(),
-            anchor: anchor.to_string(),
-        })
+        self.visible_full_lines
+            .iter()
+            .any(|key| key.path == path && key.anchor == anchor)
     }
 
     fn mark_visible(&mut self, path: &str, anchor: &str) {
+        if self.is_visible(path, anchor) {
+            return;
+        }
         self.visible_full_lines.insert(CodingSourceLineKey {
             path: path.to_string(),
             anchor: anchor.to_string(),

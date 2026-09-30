@@ -5,9 +5,7 @@ use super::{
     write_current_turn_response_dump, write_current_turn_response_error_dump,
 };
 use crate::{
-    context_budget::{
-        TokenEstimateBaseline, estimate_agent_message_tokens, estimate_tool_spec_tokens,
-    },
+    context_budget::{TokenEstimateBaseline, approx_token_count},
     core::{
         AgentTurnRetryObserver, ModelProgressSink, ModelRequestOptions,
         complete_agent_turn_with_retry_with_observer,
@@ -141,19 +139,13 @@ fn build_context_composition_snapshot(
     request: &AgentTurnRequest,
     model_context_window: usize,
 ) -> DashboardContextCompositionSnapshot {
-    let mut segments = request
-        .messages
-        .iter()
-        .enumerate()
-        .map(|(index, message)| context_composition_message_segment(index, message))
-        .collect::<Vec<_>>();
-    segments.extend(
-        request
-            .tools
-            .iter()
-            .enumerate()
-            .map(|(index, tool)| context_composition_tool_segment(index, tool)),
-    );
+    let mut segments = Vec::with_capacity(request.messages.len() + request.tools.len());
+    for (index, message) in request.messages.iter().enumerate() {
+        segments.push(context_composition_message_segment(index, message));
+    }
+    for (index, tool) in request.tools.iter().enumerate() {
+        segments.push(context_composition_tool_segment(index, tool));
+    }
 
     let total_estimated_tokens = segments.iter().map(|segment| segment.tokens).sum::<usize>();
     let total_bytes = segments.iter().map(|segment| segment.bytes).sum::<usize>();
@@ -191,10 +183,10 @@ fn build_context_composition_snapshot(
         .skip(common_unit_count)
         .map(|unit| unit.tokens)
         .sum::<usize>();
-    let tools_schema_tokens = request
-        .tools
+    let tools_schema_tokens = segments
         .iter()
-        .map(estimate_tool_spec_tokens)
+        .skip(request.messages.len())
+        .map(|segment| segment.tokens)
         .sum::<usize>();
 
     DashboardContextCompositionSnapshot {
@@ -227,7 +219,7 @@ fn context_composition_message_segment(
     DashboardContextCompositionSegment {
         label: context_composition_label_for_name(&name).to_string(),
         source: source.to_string(),
-        tokens: estimate_agent_message_tokens(message),
+        tokens: estimate_rendered_message_tokens(message, &rendered),
         bytes: rendered.len(),
         percent: 0.0,
         hash: hash_text(&rendered),
@@ -245,12 +237,40 @@ fn context_composition_tool_segment(
         name: "tools_schema".to_string(),
         label: "Tools schema".to_string(),
         source: "request_tools".to_string(),
-        tokens: estimate_tool_spec_tokens(tool),
+        tokens: estimate_rendered_tool_spec_tokens(&rendered),
         bytes: rendered.len(),
         percent: 0.0,
         hash: hash_text(&rendered),
         cache_role: if index == 0 { "tools" } else { "tools_schema" }.to_string(),
     }
+}
+
+fn estimate_rendered_message_tokens(message: &AgentMessage, rendered: &str) -> usize {
+    match message {
+        AgentMessage::System { .. } => message_overhead("system") + approx_token_count(rendered),
+        AgentMessage::User { content } => {
+            message_overhead("user")
+                + approx_token_count(rendered)
+                + content.parts().len().saturating_mul(1024)
+        }
+        AgentMessage::Assistant { .. } => {
+            message_overhead("assistant") + approx_token_count(rendered)
+        }
+        AgentMessage::AssistantToolCallProtocol { calls, .. } => {
+            message_overhead("assistant")
+                + approx_token_count(rendered)
+                + calls.len().saturating_mul(16)
+        }
+        AgentMessage::Tool { .. } => message_overhead("tool") + approx_token_count(rendered) + 8,
+    }
+}
+
+fn estimate_rendered_tool_spec_tokens(rendered: &str) -> usize {
+    approx_token_count(rendered).saturating_add(24)
+}
+
+const fn message_overhead(role: &str) -> usize {
+    approx_token_count(role) + 4
 }
 
 const fn context_composition_message_source(message: &AgentMessage) -> &'static str {

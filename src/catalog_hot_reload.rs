@@ -10,7 +10,8 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::context::Context;
@@ -40,18 +41,72 @@ pub fn compute_fingerprint_for_roots(
     entries
 }
 
+/// Last observed root-directory mtimes plus the fingerprint computed from them.
+///
+/// When every watched root's mtime is unchanged, the full recursive scan is skipped.
+/// A fingerprint change is recorded from that same scan; the tree is not walked again.
+struct CatalogScanCache {
+    root_mtimes: Vec<(PathBuf, Option<SystemTime>)>,
+    fingerprint: Vec<CatalogFileEntry>,
+}
+
+fn catalog_scan_cache() -> &'static Mutex<Option<CatalogScanCache>> {
+    static CACHE: Mutex<Option<CatalogScanCache>> = Mutex::new(None);
+    &CACHE
+}
+
+fn root_mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|metadata| metadata.modified()).ok()
+}
+
+fn watched_root_mtimes(skill_roots: &[PathBuf], workflows_dir: &Path) -> Vec<(PathBuf, Option<SystemTime>)> {
+    let mut roots = skill_roots.to_vec();
+    roots.push(workflows_dir.to_path_buf());
+    roots
+        .into_iter()
+        .map(|path| {
+            let mtime = root_mtime(&path);
+            (path, mtime)
+        })
+        .collect()
+}
+
 /// Compute the fingerprint for the current runtime's skill roots and workflow directory.
+///
+/// Unchanged root-directory mtimes reuse the previous fingerprint. A changed root triggers
+/// one full scan, which is cached immediately so a later identical check does not rescan.
 pub fn compute_catalogs_fingerprint(execution_cwd: &Path) -> Vec<CatalogFileEntry> {
     let roots = crate::openskills::skill_roots(execution_cwd)
         .into_iter()
         .map(|root| root.path)
         .collect::<Vec<_>>();
     let workflows_dir = crate::daat_locus_paths::daat_locus_paths_sync().workflows_dir();
-    compute_fingerprint_for_roots(&roots, &workflows_dir)
+    let root_mtimes = watched_root_mtimes(&roots, &workflows_dir);
+
+    let mut cache = catalog_scan_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = cache.as_ref()
+        && cached.root_mtimes == root_mtimes
+    {
+        return cached.fingerprint.clone();
+    }
+
+    let fingerprint = compute_fingerprint_for_roots(&roots, &workflows_dir);
+    *cache = Some(CatalogScanCache {
+        root_mtimes,
+        fingerprint: fingerprint.clone(),
+    });
+    fingerprint
 }
 
 /// Reload the skills and workflow catalogs when their input files changed since
 /// the last turn. Called at the start of every runtime turn; a no-op otherwise.
+///
+/// The fingerprint comes from [`compute_catalogs_fingerprint`], which skips the
+/// recursive directory walk when watched root mtimes are unchanged. After a real
+/// change the post-reload fingerprint is taken from that same cached scan — it is
+/// not computed by walking the tree a second time.
 pub fn maybe_hot_reload_catalogs(context: &mut Context) {
     let fingerprint = compute_catalogs_fingerprint(&context.execution_cwd);
     if context.catalog_hot_reload_fingerprint.as_deref() == Some(&fingerprint) {
@@ -63,10 +118,9 @@ pub fn maybe_hot_reload_catalogs(context: &mut Context) {
         "skills and workflows catalogs hot-reloaded after file change; fingerprint entries: {}",
         fingerprint.len()
     );
-    // Recompute after reload so catalog writes (e.g. builtin skill materialization)
-    // do not trigger a second reload on the next turn.
-    context.catalog_hot_reload_fingerprint =
-        Some(compute_catalogs_fingerprint(&context.execution_cwd));
+    // Keep the fingerprint from the scan that decided to reload. Catalog writes
+    // during reload bump root mtimes, but we do not walk the tree again here.
+    context.catalog_hot_reload_fingerprint = Some(fingerprint);
 }
 
 fn file_entry(path: &Path) -> Option<CatalogFileEntry> {

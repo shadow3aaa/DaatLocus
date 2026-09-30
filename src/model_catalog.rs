@@ -1,7 +1,7 @@
 //! The current catalog is downloaded into Cargo's `OUT_DIR` by `build.rs` and
 //! compiled into the binary. A newer runtime cache can override that snapshot.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::daat_locus_paths::daat_locus_paths;
 #[cfg(not(test))]
@@ -31,22 +31,23 @@ pub const fn conservative_model_capacity() -> ModelCapacity {
 }
 
 /// Load the best available model catalog: cached file > compiled snapshot.
-fn load_catalog_json() -> serde_json::Value {
-    static CATALOG: OnceLock<serde_json::Value> = OnceLock::new();
-    CATALOG
-        .get_or_init(|| {
-            #[cfg(not(test))]
+///
+/// The parsed tree lives behind `Arc` in a `OnceLock`. Callers clone the `Arc`
+/// (reference count) instead of deep-copying the `serde_json::Value`.
+fn load_catalog_json() -> Arc<serde_json::Value> {
+    static CATALOG: OnceLock<Arc<serde_json::Value>> = OnceLock::new();
+    Arc::clone(CATALOG.get_or_init(|| {
+        #[cfg(not(test))]
+        {
+            let paths = daat_locus_paths_sync();
+            if let Ok(text) = std::fs::read_to_string(paths.models_dev_cache())
+                && let Ok(root) = serde_json::from_str::<serde_json::Value>(&text)
             {
-                let paths = daat_locus_paths_sync();
-                if let Ok(text) = std::fs::read_to_string(paths.models_dev_cache())
-                    && let Ok(root) = serde_json::from_str::<serde_json::Value>(&text)
-                {
-                    return root;
-                }
+                return Arc::new(root);
             }
-            serde_json::from_str(COMPILED_API_JSON).unwrap_or(serde_json::Value::Null)
-        })
-        .clone()
+        }
+        Arc::new(serde_json::from_str(COMPILED_API_JSON).unwrap_or(serde_json::Value::Null))
+    }))
 }
 
 /// Refresh the local cache from models.dev. Returns Ok if cache was written.

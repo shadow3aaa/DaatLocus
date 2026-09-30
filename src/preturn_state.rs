@@ -51,15 +51,6 @@ impl PreTurnState {
     }
 }
 
-impl Display for PreTurnState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Sensory:")?;
-        writeln!(f, "{}", self.sensory)?;
-        writeln!(f, "Plan:")?;
-        write!(f, "{}", self.plan)
-    }
-}
-
 struct Sensory {
     time: String,
     machine_status: SystemInfo,

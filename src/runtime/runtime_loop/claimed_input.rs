@@ -1,6 +1,6 @@
 use super::{
     AfterClaimContextInput, AgentLoopStepOutput, Context, EventPayload, EventStatus, EventView,
-    PendingWork, RUNTIME_OVERFLOW_FUSE_THRESHOLD, Result,
+    PendingWork, RUNTIME_OVERFLOW_FUSE_THRESHOLD,
 };
 
 pub(super) fn runtime_work_origin(inputs: &[ClaimedRuntimeInput]) -> Option<String> {
@@ -305,33 +305,72 @@ pub(super) fn finalize_claimed_runtime_events(
     clear_finished_telegram_live_drafts(context, event_ids);
 }
 
-fn clear_finished_telegram_live_drafts(context: &Context, event_ids: &[String]) {
+struct ClaimedEventSnapshot {
+    event_id: String,
+    status: EventStatus,
+    is_telegram_incoming: bool,
+}
+
+fn claimed_event_snapshots(context: &Context, event_ids: &[String]) -> Vec<ClaimedEventSnapshot> {
+    let mut snapshots = Vec::with_capacity(event_ids.len());
     for event_id in event_ids {
         let Ok(event) = context.events.view(event_id) else {
             continue;
         };
-        if !matches!(event.payload, EventPayload::TelegramIncoming(_)) {
+        snapshots.push(ClaimedEventSnapshot {
+            event_id: event_id.clone(),
+            status: event.status,
+            is_telegram_incoming: matches!(event.payload, EventPayload::TelegramIncoming(_)),
+        });
+    }
+    snapshots
+}
+
+fn clear_finished_telegram_live_drafts_from(
+    snapshots: &[ClaimedEventSnapshot],
+    mut clear_draft: impl FnMut(&str),
+) {
+    for snapshot in snapshots {
+        if !snapshot.is_telegram_incoming {
             continue;
         }
-        if !matches!(event.status, EventStatus::Pending | EventStatus::Claimed) {
-            context.clear_telegram_live_draft(event_id);
+        if !matches!(snapshot.status, EventStatus::Pending | EventStatus::Claimed) {
+            clear_draft(&snapshot.event_id);
         }
     }
+}
+
+fn clear_finished_telegram_live_drafts(context: &Context, event_ids: &[String]) {
+    let snapshots = claimed_event_snapshots(context, event_ids);
+    clear_finished_telegram_live_drafts_from(&snapshots, |event_id| {
+        context.clear_telegram_live_draft(event_id);
+    });
 }
 
 pub(super) fn claimed_events_are_terminal(context: &Context, event_ids: &[String]) -> bool {
     if event_ids.is_empty() {
         return false;
     }
+    let snapshots = claimed_event_snapshots(context, event_ids);
+    let (terminal, _) = judge_claimed_event_snapshots(event_ids, &snapshots);
+    terminal
+}
 
-    let statuses = event_ids
+fn judge_claimed_event_snapshots(
+    event_ids: &[String],
+    snapshots: &[ClaimedEventSnapshot],
+) -> (bool, bool) {
+    let statuses = snapshots
         .iter()
-        .map(|event_id| context.events.view(event_id).map(|event| event.status))
-        .collect::<Result<Vec<_>, _>>()
-        .ok();
-    statuses
-        .as_deref()
-        .is_some_and(claimed_event_statuses_are_terminal)
+        .map(|snapshot| snapshot.status)
+        .collect::<Vec<_>>();
+    let terminal = snapshots.len() == event_ids.len()
+        && !event_ids.is_empty()
+        && claimed_event_statuses_are_terminal(&statuses);
+    let explicit = snapshots
+        .iter()
+        .any(|snapshot| snapshot.status == EventStatus::Claimed);
+    (terminal, explicit)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -396,10 +435,7 @@ pub(super) fn claimed_events_require_explicit_completion(
     context: &Context,
     claimed_event_ids: &[String],
 ) -> bool {
-    claimed_event_ids.iter().any(|event_id| {
-        matches!(
-            context.events.view(event_id).map(|event| event.status),
-            Ok(EventStatus::Claimed)
-        )
-    })
+    let snapshots = claimed_event_snapshots(context, claimed_event_ids);
+    let (_, explicit) = judge_claimed_event_snapshots(claimed_event_ids, &snapshots);
+    explicit
 }

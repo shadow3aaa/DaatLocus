@@ -2,8 +2,8 @@ use super::sleep_driver::{maybe_start_forced_sleep, maybe_start_idle_sleep};
 use super::{
     Context, DashboardState, Duration, EventStatus, PendingWork, RuntimeStatusLevel,
     RuntimeTurnPhase, SleepStatusSnapshot, SleepTaskResult, clear_runtime_status,
-    execute_agent_loop_step, refresh_sleep_status_queues, requeue_claimed_runtime_events,
-    set_runtime_status, set_runtime_status_only, sync_dashboard_state,
+    execute_agent_loop_step, requeue_claimed_runtime_events, set_runtime_status,
+    set_runtime_status_only, sync_dashboard_state,
 };
 
 pub enum RuntimeLoopCycle {
@@ -30,7 +30,7 @@ pub async fn daat_locus_loop(
 
     let forced_sleep_status =
         maybe_start_forced_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await;
-    refresh_sleep_status_queues(sleep_status).await;
+    refresh_cached_sleep_status_queues(sleep_status).await;
     sync_driver_frontier_from_sources(context);
     if context.active_runtime_turn {
         tracing::warn!(
@@ -211,4 +211,118 @@ pub fn interrupt_active_runtime_turn(context: &mut Context, reason: &str) -> usi
     clear_stale_live_activity_cells(context);
 
     failed_events
+}
+
+#[derive(Clone, Copy)]
+struct QueueFileStamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+    count: usize,
+    present: bool,
+}
+
+struct SleepQueueCountCache {
+    runtime_error_cases: Option<QueueFileStamp>,
+    skill_run_records: Option<QueueFileStamp>,
+}
+
+fn sleep_queue_count_cache() -> &'static std::sync::Mutex<SleepQueueCountCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<SleepQueueCountCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        std::sync::Mutex::new(SleepQueueCountCache {
+            runtime_error_cases: None,
+            skill_run_records: None,
+        })
+    })
+}
+
+async fn refresh_cached_sleep_status_queues(status: &mut SleepStatusSnapshot) {
+    let paths = crate::daat_locus_paths::daat_locus_paths().await;
+    let error_cases = paths.journal_file("runtime_error_cases.jsonl");
+    let skill_runs = paths
+        .runtime_dir()
+        .join("skills")
+        .join("run_records.jsonl");
+    if let Some(count) =
+        cached_nonempty_line_count(error_cases, QueueCacheSlot::RuntimeErrorCases).await
+    {
+        status.unread_runtime_error_backlog = count;
+    }
+    if let Some(count) =
+        cached_nonempty_line_count(skill_runs, QueueCacheSlot::SkillRunRecords).await
+    {
+        status.skill_evidence_records = count;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum QueueCacheSlot {
+    RuntimeErrorCases,
+    SkillRunRecords,
+}
+
+async fn cached_nonempty_line_count(
+    path: std::path::PathBuf,
+    slot: QueueCacheSlot,
+) -> Option<usize> {
+    let metadata = match tokio::fs::metadata(&path).await {
+        Ok(metadata) => Some(metadata),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            tracing::warn!("failed to stat sleep queue file {}: {err}", path.display());
+            return None;
+        }
+    };
+    let stamp = metadata.as_ref().map(|metadata| {
+        (
+            metadata.modified().ok(),
+            metadata.len(),
+        )
+    });
+    if let Ok(cache) = sleep_queue_count_cache().lock()
+        && let Some(cached) = cache_slot(&cache, slot)
+        && cached.present == metadata.is_some()
+        && metadata.as_ref().is_none_or(|metadata| {
+            cached.modified == metadata.modified().ok() && cached.len == metadata.len()
+        })
+    {
+        return Some(cached.count);
+    }
+
+    let count = match metadata {
+        None => 0,
+        Some(_) => match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+                .count(),
+            Err(err) => {
+                tracing::warn!(
+                    "failed to read sleep queue file {}: {err}",
+                    path.display()
+                );
+                return None;
+            }
+        },
+    };
+    if let Ok(mut cache) = sleep_queue_count_cache().lock() {
+        let stored = QueueFileStamp {
+            modified: stamp.and_then(|(modified, _)| modified),
+            len: stamp.map_or(0, |(_, len)| len),
+            count,
+            present: metadata.is_some(),
+        };
+        match slot {
+            QueueCacheSlot::RuntimeErrorCases => cache.runtime_error_cases = Some(stored),
+            QueueCacheSlot::SkillRunRecords => cache.skill_run_records = Some(stored),
+        }
+    }
+    Some(count)
+}
+
+fn cache_slot(cache: &SleepQueueCountCache, slot: QueueCacheSlot) -> Option<QueueFileStamp> {
+    match slot {
+        QueueCacheSlot::RuntimeErrorCases => cache.runtime_error_cases,
+        QueueCacheSlot::SkillRunRecords => cache.skill_run_records,
+    }
 }

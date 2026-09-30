@@ -1,6 +1,9 @@
 //! Runtime conversation state.
-use std::{collections::VecDeque, future::Future};
-
+use std::{
+    collections::VecDeque,
+    future::Future,
+    pin::Pin,
+};
 use crate::{
     context_budget::{
         RequestBudgetBreakdown, RequestBudgetLimits, TokenEstimateBaseline,
@@ -308,9 +311,10 @@ impl RuntimeRequestEnvelope {
         )
     }
 
-    fn agent_messages_with_history(
+    fn agent_messages_with_history_and_injected(
         &self,
         conversation_messages: &[HistoryMessage],
+        injected_messages: &[HistoryMessage],
     ) -> Vec<AgentMessage> {
         let mut messages = self
             .system_messages
@@ -321,6 +325,7 @@ impl RuntimeRequestEnvelope {
         messages.extend(
             conversation_messages
                 .iter()
+                .chain(injected_messages)
                 .cloned()
                 .map(|message| message.message),
         );
@@ -391,7 +396,7 @@ impl RuntimeStepConversation {
         self.turn_draft.take_checkpoint()
     }
 
-    pub async fn maybe_reset<F, Fut>(
+    pub async fn maybe_reset<F>(
         &mut self,
         tools: &[AgentToolSpec],
         limits: RequestBudgetLimits,
@@ -401,8 +406,10 @@ impl RuntimeStepConversation {
         mut build_reset_outcome: F,
     ) -> Result<bool, String>
     where
-        F: FnMut(Vec<AgentMessage>) -> Fut,
-        Fut: Future<Output = Result<RuntimeHistoryResetOutcome, String>>,
+        F: for<'a> FnMut(
+                &'a [AgentMessage],
+            ) -> Pin<Box<dyn Future<Output = Result<RuntimeHistoryResetOutcome, String>> + Send + 'a>>
+            + Send,
     {
         if reset_for_overflow {
             self.reset_once(&mut build_reset_outcome).await?;
@@ -422,23 +429,26 @@ impl RuntimeStepConversation {
         Ok(reset_any)
     }
 
-    async fn reset_once<F, Fut>(&mut self, build_reset_outcome: &mut F) -> Result<(), String>
+    async fn reset_once<F>(&mut self, build_reset_outcome: &mut F) -> Result<(), String>
     where
-        F: FnMut(Vec<AgentMessage>) -> Fut,
-        Fut: Future<Output = Result<RuntimeHistoryResetOutcome, String>>,
+        F: for<'a> FnMut(
+                &'a [AgentMessage],
+            ) -> Pin<Box<dyn Future<Output = Result<RuntimeHistoryResetOutcome, String>> + Send + 'a>>
+            + Send,
     {
-        let source_messages = self.agent_messages.clone();
-        if source_messages.is_empty() {
+        if self.agent_messages.is_empty() {
             return Err("runtime history reset has no messages to clear".to_string());
         }
-        let has_non_system = source_messages
+        let has_non_system = self
+            .agent_messages
             .iter()
             .any(|message| !matches!(message, AgentMessage::System { .. }));
         if !has_non_system {
             return Err("runtime history reset has no non-system messages to clear".to_string());
         }
 
-        let outcome = build_reset_outcome(source_messages.clone()).await?;
+        let outcome = build_reset_outcome(self.agent_messages()).await?;
+        let source_messages = std::mem::take(&mut self.agent_messages);
         self.agent_messages =
             rebuild_reset_agent_messages(&source_messages, outcome.recovery_prompt.clone());
         self.turn_draft.record_history_reset(outcome.record);
@@ -567,7 +577,7 @@ impl RuntimeConversation {
     }
 
     pub fn messages(&self) -> Vec<HistoryMessage> {
-        normalize_runtime_prompt_messages(self.messages.clone())
+        self.messages.clone()
     }
 
     pub fn select_messages_for_runtime(
@@ -584,18 +594,16 @@ impl RuntimeConversation {
         input: PlanHistoryResetInput<'_>,
     ) -> Option<RuntimeHistoryResetPlan> {
         let _ = input.min_messages;
-        let all_messages = self.messages();
-        let mut request_messages = all_messages.clone();
-        request_messages.extend(input.injected_messages.iter().cloned());
-        let agent_messages = input
-            .envelope
-            .agent_messages_with_history(&request_messages);
+        let agent_messages =
+            input
+                .envelope
+                .agent_messages_with_history_and_injected(&self.messages, input.injected_messages);
         let breakdown = estimate_agent_turn_request(&agent_messages, input.tools, input.limits)
             .with_conservative_calibrated_input_tokens(input.baseline);
         if !breakdown.above_auto_compact_threshold() {
             return None;
         }
-        Self::history_reset_plan_from_messages(all_messages)
+        Self::history_reset_plan_from_messages(self.messages.clone())
     }
 
     fn history_reset_plan_from_messages(
@@ -931,8 +939,9 @@ mod tests {
                 &baseline,
                 true,
                 RuntimeStepResetPolicy { max_recoveries: 1 },
-                |_messages| async {
-                    Ok(RuntimeHistoryResetOutcome {
+                |_messages| {
+                    Box::pin(async {
+                        Ok(RuntimeHistoryResetOutcome {
                         recovery_prompt: "recovery prompt".to_string(),
                         record: RuntimeHistoryResetRecord {
                             timestamp_ms: 0,
@@ -946,6 +955,7 @@ mod tests {
                             retained_user_message_count: 0,
                             recovery_prompt: "recovery prompt".to_string(),
                         },
+                        })
                     })
                 },
             )

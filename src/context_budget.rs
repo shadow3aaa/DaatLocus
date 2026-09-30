@@ -225,74 +225,67 @@ pub fn estimate_agent_turn_request(
     tools: &[AgentToolSpec],
     limits: RequestBudgetLimits,
 ) -> RequestBudgetBreakdown {
+    let mut system_messages = 0usize;
+    let mut user_messages = 0usize;
+    let mut assistant_messages = 0usize;
+    let mut tool_inputs = 0usize;
+    let mut tool_messages = 0usize;
+    for message in messages {
+        match message {
+            AgentMessage::System { .. } => {
+                system_messages =
+                    system_messages.saturating_add(estimate_agent_message_tokens(message));
+            }
+            AgentMessage::User { .. } => {
+                user_messages = user_messages.saturating_add(estimate_agent_message_tokens(message));
+            }
+            AgentMessage::Assistant { .. } => {
+                assistant_messages =
+                    assistant_messages.saturating_add(estimate_agent_message_tokens(message));
+            }
+            AgentMessage::AssistantToolCallProtocol {
+                content,
+                reasoning_content,
+                calls,
+                ..
+            } => {
+                assistant_messages = assistant_messages.saturating_add(
+                    content
+                        .as_deref()
+                        .map_or(0, |content| message_token_cost("assistant", content))
+                        .saturating_add(reasoning_content.as_deref().map_or(0, approx_token_count)),
+                );
+                tool_inputs = tool_inputs.saturating_add(estimate_assistant_tool_call_protocol_tokens(
+                    calls,
+                    estimate_json_value_tokens,
+                    approx_token_count,
+                ));
+            }
+            AgentMessage::Tool { .. } => {
+                tool_messages = tool_messages.saturating_add(estimate_agent_message_tokens(message));
+            }
+        }
+    }
     let sections = vec![
         BudgetSection {
             name: "system_messages",
-            tokens: messages
-                .iter()
-                .filter_map(|message| match message {
-                    AgentMessage::System { .. } => Some(estimate_agent_message_tokens(message)),
-                    _ => None,
-                })
-                .sum(),
+            tokens: system_messages,
         },
         BudgetSection {
             name: "user_messages",
-            tokens: messages
-                .iter()
-                .filter_map(|message| match message {
-                    AgentMessage::User { .. } => Some(estimate_agent_message_tokens(message)),
-                    _ => None,
-                })
-                .sum(),
+            tokens: user_messages,
         },
         BudgetSection {
             name: "assistant_messages",
-            tokens: messages
-                .iter()
-                .filter_map(|message| match message {
-                    AgentMessage::Assistant { .. } => Some(estimate_agent_message_tokens(message)),
-                    AgentMessage::AssistantToolCallProtocol {
-                        content,
-                        reasoning_content,
-                        ..
-                    } => Some(
-                        content
-                            .as_deref()
-                            .map_or(0, |content| message_token_cost("assistant", content))
-                            .saturating_add(
-                                reasoning_content.as_deref().map_or(0, approx_token_count),
-                            ),
-                    ),
-                    _ => None,
-                })
-                .sum(),
+            tokens: assistant_messages,
         },
         BudgetSection {
             name: "tool_inputs",
-            tokens: messages
-                .iter()
-                .filter_map(|message| match message {
-                    AgentMessage::AssistantToolCallProtocol { calls, .. } => {
-                        Some(estimate_assistant_tool_call_protocol_tokens(
-                            calls,
-                            estimate_json_value_tokens,
-                            approx_token_count,
-                        ))
-                    }
-                    _ => None,
-                })
-                .sum(),
+            tokens: tool_inputs,
         },
         BudgetSection {
             name: "tool_messages",
-            tokens: messages
-                .iter()
-                .filter_map(|message| match message {
-                    AgentMessage::Tool { .. } => Some(estimate_agent_message_tokens(message)),
-                    _ => None,
-                })
-                .sum(),
+            tokens: tool_messages,
         },
         BudgetSection {
             name: "tool_specs",
@@ -443,10 +436,7 @@ pub fn estimate_tool_spec_tokens(tool: &AgentToolSpec) -> usize {
 }
 
 fn estimate_json_value_tokens(value: &Value) -> usize {
-    serde_json::to_string(value)
-        .ok()
-        .map(|text| approx_token_count(&text))
-        .unwrap_or_default()
+    approx_token_count(&value.to_string())
 }
 
 const fn message_token_cost(role: &str, content: &str) -> usize {

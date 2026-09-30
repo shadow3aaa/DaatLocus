@@ -36,7 +36,7 @@ use crate::{
         DashboardPendingUserInputMoveDirection, DashboardRuntimeActivity,
         DashboardRuntimeActivityStatus, DashboardRuntimeStatusLevel, DashboardState, ReducedMotion,
         activity_events_from_history_items, dashboard_action_is_manager_owned,
-        dashboard_agent_name, dashboard_command_is_manager_owned, execute_control_command,
+        dashboard_agent_name, execute_control_command,
         execute_dashboard_action, sync_dashboard_runtime_status_live_cell,
     },
     events::{
@@ -584,9 +584,7 @@ async fn handle_ipc_connection(
         }
         SessionIpcRequest::DashboardCommand { command } => {
             let command = command.trim();
-            let output = if dashboard_command_is_manager_owned(command) {
-                "telegram commands are handled by the manager daemon".to_string()
-            } else if state.study_store.is_some() && !study_mode_allows_dashboard_command(command) {
+            let output = if state.study_store.is_some() && !study_mode_allows_dashboard_command(command) {
                 study_mode_command_rejection(command)
             } else {
                 let snapshot = state.dashboard_rx.borrow().clone();

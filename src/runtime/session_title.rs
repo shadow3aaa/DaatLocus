@@ -41,6 +41,7 @@ pub struct SessionTitleState {
     last_activity_signature: Option<String>,
     last_generated_at_ms: Option<i64>,
     last_generated_signature: Option<String>,
+    last_activity_event_ids: Vec<uuid::Uuid>,
 }
 
 impl SessionTitleState {
@@ -64,6 +65,12 @@ impl SessionTitleState {
         });
         true
     }
+
+    fn should_generate_activity(&self, event_ids: &[uuid::Uuid]) -> bool {
+        self.last_generated_signature.is_none()
+            || self.last_activity_event_ids.as_slice() != event_ids
+    }
+
     fn should_generate(&self, signature: &str) -> bool {
         self.last_generated_signature.as_deref() != Some(signature)
     }
@@ -154,23 +161,36 @@ pub fn spawn_session_title_generation(
     context: &mut Context,
     results_tx: &tokio::sync::mpsc::UnboundedSender<SessionTitleGenerationResult>,
 ) {
-    let events = context.events.views();
-    let messages = context.memory.runtime_conversation_messages();
-    let signature = activity_signature(&events, &messages);
-    if !context.session_title.should_generate(&signature) {
+    let event_ids = context
+        .events
+        .driver_event_statuses()
+        .into_iter()
+        .map(|(event_id, _)| event_id)
+        .collect::<Vec<_>>();
+    if !context.session_title.should_generate_activity(&event_ids) {
         return;
     }
-    let excerpt = conversation_excerpt(&events, &messages);
-    if excerpt.trim().is_empty() {
+
+    let events = context.events.views();
+    let messages = context.memory.runtime_conversation_messages();
+    let prepared = prepare_session_title_activity(&events, &messages);
+    if !context
+        .session_title
+        .should_generate(&prepared.activity_signature)
+    {
+        return;
+    }
+    if prepared.excerpt.trim().is_empty() {
         return;
     }
 
     // Eagerly mark as generated to prevent duplicate spawns.
     let now_ms = Utc::now().timestamp_millis();
-    context.session_title.last_generated_signature = Some(signature.clone());
+    context.session_title.last_generated_signature = Some(prepared.activity_signature.clone());
     context.session_title.last_generated_at_ms = Some(now_ms);
+    context.session_title.last_activity_event_ids = event_ids;
 
-    let request = build_session_title_request(&excerpt);
+    let request = build_session_title_request(&prepared.excerpt);
 
     let model_provider = context.efficient_model_provider.clone();
     let options = match ModelRequestOptions::for_agent_turn(
@@ -185,6 +205,7 @@ pub fn spawn_session_title_generation(
         }
     };
     let results_tx = results_tx.clone();
+    let signature = prepared.activity_signature;
     tokio::spawn(async move {
         match model_provider.complete_agent_turn(request, options).await {
             Ok(response) => {
@@ -214,85 +235,44 @@ impl SessionTitleInput {
     fn from_context(context: &Context) -> Option<Self> {
         let events = context.events.views();
         let messages = context.memory.runtime_conversation_messages();
-        let placeholder_title =
-            first_event_title(&events).or_else(|| first_visible_history_title(&messages))?;
-        let excerpt = conversation_excerpt(&events, &messages);
-        if excerpt.trim().is_empty() {
+        let prepared = prepare_session_title_activity(&events, &messages);
+        let placeholder_title = prepared.placeholder_title?;
+        if prepared.excerpt.trim().is_empty() {
             return None;
         }
+
         Some(Self {
             placeholder_title,
-            activity_signature: activity_signature(&events, &messages),
+            activity_signature: prepared.activity_signature,
         })
     }
 }
 
-fn first_event_title(events: &[EventView]) -> Option<String> {
-    events
-        .iter()
-        .filter_map(event_text)
-        .find_map(first_sentence_title)
+struct PreparedSessionTitleActivity {
+    placeholder_title: Option<String>,
+    excerpt: String,
+    activity_signature: String,
 }
 
-fn first_visible_history_title(messages: &[HistoryMessage]) -> Option<String> {
-    messages
-        .iter()
-        .filter(|message| !message.is_system() && !message.is_tool())
-        .filter_map(|message| message.text_content())
-        .filter(|content| !is_runtime_context_text(content))
-        .find_map(first_sentence_title)
-}
-
-fn conversation_excerpt(events: &[EventView], messages: &[HistoryMessage]) -> String {
-    let mut lines = Vec::new();
-    for event in events {
-        if lines.len() >= MAX_EXCERPT_ITEMS {
-            break;
-        }
-        if let Some(text) = event_text(event) {
-            push_excerpt_line(&mut lines, "User", &text);
-        }
-    }
-    for message in messages {
-        if lines.len() >= MAX_EXCERPT_ITEMS {
-            break;
-        }
-        if message.is_system() || message.is_tool() {
-            continue;
-        }
-        let Some(text) = message.text_content() else {
-            continue;
-        };
-        if is_runtime_context_text(text) {
-            continue;
-        }
-        let role = if message.is_user() {
-            "User"
-        } else {
-            "Assistant"
-        };
-        push_excerpt_line(&mut lines, role, text);
-    }
-    lines.join("\n")
-}
-
-fn push_excerpt_line(lines: &mut Vec<String>, role: &str, text: &str) {
-    let compact = compact_inline(text);
-    if compact.is_empty() {
-        return;
-    }
-    lines.push(format!(
-        "{role}: {}",
-        truncate_chars(&compact, MAX_EXCERPT_ITEM_CHARS)
-    ));
-}
-
-fn activity_signature(events: &[EventView], messages: &[HistoryMessage]) -> String {
+fn prepare_session_title_activity(
+    events: &[EventView],
+    messages: &[HistoryMessage],
+) -> PreparedSessionTitleActivity {
     let mut hasher = Sha256::new();
+    let mut lines = Vec::new();
+    let mut placeholder_title = None;
+
     for event in events {
         hasher.update(event.event_id.as_bytes());
-        if let Some(text) = event_text(event) {
-            hasher.update(text.as_bytes());
+        let Some(text) = event_text(event) else {
+            continue;
+        };
+        hasher.update(text.as_bytes());
+        if placeholder_title.is_none() {
+            placeholder_title = first_sentence_title(&text);
+        }
+        if lines.len() < MAX_EXCERPT_ITEMS {
+            push_excerpt_line(&mut lines, "User", &text);
         }
     }
     for message in messages {
@@ -307,8 +287,35 @@ fn activity_signature(events: &[EventView], messages: &[HistoryMessage]) -> Stri
         }
         hasher.update(message.role_name().as_bytes());
         hasher.update(text.as_bytes());
+        if placeholder_title.is_none() {
+            placeholder_title = first_sentence_title(text);
+        }
+        if lines.len() < MAX_EXCERPT_ITEMS {
+            let role = if message.is_user() {
+                "User"
+            } else {
+                "Assistant"
+            };
+            push_excerpt_line(&mut lines, role, text);
+        }
     }
-    hex::encode(hasher.finalize())
+
+    PreparedSessionTitleActivity {
+        placeholder_title,
+        excerpt: lines.join("\n"),
+        activity_signature: hex::encode(hasher.finalize()),
+    }
+}
+
+fn push_excerpt_line(lines: &mut Vec<String>, role: &str, text: &str) {
+    let compact = compact_inline(text);
+    if compact.is_empty() {
+        return;
+    }
+    lines.push(format!(
+        "{role}: {}",
+        truncate_chars(&compact, MAX_EXCERPT_ITEM_CHARS)
+    ));
 }
 
 fn event_text(event: &EventView) -> Option<String> {
@@ -399,7 +406,9 @@ mod tests {
         )];
 
         assert_eq!(
-            first_event_title(&events).as_deref(),
+            prepare_session_title_activity(&events, &[])
+                .placeholder_title
+                .as_deref(),
             Some("Please inspect the repository")
         );
     }
@@ -412,7 +421,9 @@ mod tests {
         ];
 
         assert_eq!(
-            first_visible_history_title(&messages).as_deref(),
+            prepare_session_title_activity(&[], &messages)
+                .placeholder_title
+                .as_deref(),
             Some("Fix the Telegram session routing")
         );
     }

@@ -114,11 +114,13 @@ pub async fn maybe_reset_agent_history(
             baseline,
             reset_for_overflow,
             runtime_step_reset_policy(),
-            |messages| async move {
-                match build_mid_turn_reset_outcome(&messages, reset_for_overflow).await {
-                    Ok(outcome) => Ok(outcome),
-                    Err(err) => Err(err.to_string()),
-                }
+            |messages| {
+                Box::pin(async move {
+                    match build_mid_turn_reset_outcome(messages, reset_for_overflow).await {
+                        Ok(outcome) => Ok(outcome),
+                        Err(err) => Err(err.to_string()),
+                    }
+                })
             },
         )
         .await;

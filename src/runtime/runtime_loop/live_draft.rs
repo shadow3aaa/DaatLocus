@@ -1,13 +1,12 @@
 use std::time::{Duration, Instant};
 
-use super::{Context, EventPayload, EventView, Result};
+use super::{Context, EventPayload, EventView};
 use crate::{
     dashboard::{
         DashboardActivityEvent, DashboardState, apply_activity_event, assistant_activity_cell,
         thinking_activity_cell,
     },
     live_progress::{LiveProgressEvent, TelegramLiveStatus},
-    telegram_transport::state::TelegramTransportStateHandle,
 };
 use tokio::{
     sync::{mpsc, watch},
@@ -36,8 +35,6 @@ impl LiveProgressSession {
 }
 
 struct TelegramDraftTarget {
-    chat_id: i64,
-    draft_id: i64,
     event_id: String,
     previous_sent_text: Option<String>,
 }
@@ -71,7 +68,9 @@ pub(super) fn maybe_start_live_progress_session(
                         Some(event) => {
                             dashboard.apply(&event, dashboard_tx.as_ref());
                             if let Some(processor) = telegram.as_mut() {
-                                processor.apply(event);
+                                if telegram_consumes_live_progress(&event) {
+                                    processor.apply(event);
+                                }
                             }
                         }
                         None => break,
@@ -110,24 +109,21 @@ fn telegram_draft_target(
     if !context.config.telegram.enabled || !context.config.telegram.has_real_credentials() {
         return None;
     }
-    let chat_id = payload.chat_id.parse::<i64>().ok()?;
+    if payload.chat_id.parse::<i64>().is_err() {
+        return None;
+    }
     let event_id = event.event_id.to_string();
-    let (draft_id, previous_sent_text) = context
+    let (_draft_id, previous_sent_text) = context
         .get_or_create_telegram_live_draft(event_id.clone(), stable_live_draft_id(event.event_id));
     Some(TelegramDraftTarget {
-        chat_id,
-        draft_id,
         event_id,
         previous_sent_text,
     })
 }
 
 struct TelegramDraftProcessor {
-    telegram: TelegramTransportStateHandle,
     live_drafts: crate::context::TelegramLiveDraftRegistry,
     event_id: String,
-    chat_id: i64,
-    draft_id: i64,
     last_sent: String,
     state: TelegramLiveDraftState,
     dirty: bool,
@@ -136,11 +132,8 @@ struct TelegramDraftProcessor {
 impl TelegramDraftProcessor {
     fn start(context: &Context, target: TelegramDraftTarget) -> Self {
         let mut processor = Self {
-            telegram: context.telegram.clone(),
             live_drafts: context.telegram_live_drafts.clone(),
             event_id: target.event_id,
-            chat_id: target.chat_id,
-            draft_id: target.draft_id,
             last_sent: target.previous_sent_text.clone().unwrap_or_default(),
             state: TelegramLiveDraftState::from_previous_sent(
                 target.previous_sent_text.as_deref().unwrap_or_default(),
@@ -149,21 +142,12 @@ impl TelegramDraftProcessor {
         };
         let initial_draft_text = processor.state.render_markdown_v2();
         if should_send_initial_live_draft(&processor.last_sent) {
-            if let Err(err) = enqueue_live_draft(
-                &processor.telegram,
-                processor.chat_id,
-                processor.draft_id,
+            record_live_draft_sent(
+                &processor.live_drafts,
+                &processor.event_id,
                 &initial_draft_text,
-            ) {
-                tracing::warn!("telegram initial live draft enqueue failed: {err:?}");
-            } else {
-                record_live_draft_sent(
-                    &processor.live_drafts,
-                    &processor.event_id,
-                    &initial_draft_text,
-                );
-                processor.last_sent = initial_draft_text;
-            }
+            );
+            processor.last_sent = initial_draft_text;
         }
         processor
     }
@@ -177,17 +161,12 @@ impl TelegramDraftProcessor {
             return;
         }
         let draft_text = self.state.render_markdown_v2();
-        if draft_text != self.last_sent {
-            if let Err(err) =
-                enqueue_live_draft(&self.telegram, self.chat_id, self.draft_id, &draft_text)
-            {
-                tracing::warn!("telegram live draft enqueue failed: {err:?}");
-            } else {
-                record_live_draft_sent(&self.live_drafts, &self.event_id, &draft_text);
-                self.last_sent = draft_text;
-            }
-        }
         self.dirty = false;
+        if draft_text == self.last_sent {
+            return;
+        }
+        record_live_draft_sent(&self.live_drafts, &self.event_id, &draft_text);
+        self.last_sent = draft_text;
     }
 }
 
@@ -296,15 +275,6 @@ impl DashboardLiveDraftState {
     }
 }
 
-fn enqueue_live_draft(
-    telegram: &TelegramTransportStateHandle,
-    chat_id: i64,
-    draft_id: i64,
-    text: &str,
-) -> Result<()> {
-    telegram.enqueue_outgoing_draft(chat_id.to_string(), draft_id, text.to_string())
-}
-
 fn stable_live_draft_id(event_id: uuid::Uuid) -> i64 {
     let bounded = event_id.as_u128() % (i64::MAX as u128);
     i64::try_from(bounded).expect("live-draft ID is reduced below i64::MAX") + 1
@@ -322,6 +292,13 @@ fn record_live_draft_sent(
     if let Some(record) = live_drafts.lock().get_mut(event_id) {
         record.last_sent_text = Some(text.to_string());
     }
+}
+
+fn telegram_consumes_live_progress(event: &LiveProgressEvent) -> bool {
+    !matches!(
+        event,
+        LiveProgressEvent::AssistantContent { .. } | LiveProgressEvent::ReasoningContent { .. }
+    )
 }
 
 fn apply_live_progress_event(

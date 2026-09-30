@@ -57,13 +57,6 @@ impl PartialEq for PendingWork {
 
 impl Eq for PendingWork {}
 
-impl PendingWork {
-    const fn priority(&self) -> u8 {
-        match self {
-            Self::Event { .. } => 0,
-        }
-    }
-}
 
 impl PendingWorkQueue {
     pub async fn new() -> Self {
@@ -105,11 +98,7 @@ impl PendingWorkQueue {
             .iter_mut()
             .find(|entry| entry.work == work)
         {
-            let changed = !same_work_payload(&existing.work, &work);
             existing.work = work;
-            if changed {
-                persist_locked(&inner)?;
-            }
             return Ok(false);
         }
         inner.state.queue.push_back(PendingWorkEntry {
@@ -339,17 +328,9 @@ fn pending_event_indices(queue: &VecDeque<PendingWorkEntry>) -> Vec<usize> {
 fn select_next_pending_index(queue: &VecDeque<PendingWorkEntry>) -> Option<usize> {
     queue
         .iter()
-        .enumerate()
-        .filter(|(_, entry)| matches!(entry.state, PendingWorkEntryState::Pending))
-        .min_by_key(|(index, entry)| (entry.work.priority(), *index))
-        .map(|(index, _)| index)
+        .position(|entry| matches!(entry.state, PendingWorkEntryState::Pending))
 }
 
-fn same_work_payload(left: &PendingWork, right: &PendingWork) -> bool {
-    match (left, right) {
-        (PendingWork::Event { event_id: a }, PendingWork::Event { event_id: b }) => a == b,
-    }
-}
 
 fn persist_locked(inner: &PendingWorkQueueInner) -> Result<()> {
     crate::persistence::write_postcard_atomic_sync(

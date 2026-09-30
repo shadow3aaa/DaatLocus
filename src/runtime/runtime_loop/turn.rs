@@ -534,9 +534,24 @@ pub async fn execute_agent_loop_step(
     let mut actions = Vec::new();
     let mut budget_recoveries = 0usize;
     let mut consecutive_empty_reasoning_loops = 0usize;
+    let mut loop_tools = initial_tools.clone();
+    let mut loop_tool_fingerprint = context.catalog_hot_reload_fingerprint.clone();
+    let mut loop_tool_availability = runtime_tool_availability_key(context);
 
     let output = 'agent_loop: loop {
-        let tools = build_runtime_tool_specs(context);
+        let tools = if loop_tools_need_rebuild(
+            context,
+            &loop_tool_fingerprint,
+            &loop_tool_availability,
+        ) {
+            let tools = build_runtime_tool_specs(context);
+            loop_tool_fingerprint = context.catalog_hot_reload_fingerprint.clone();
+            loop_tool_availability = runtime_tool_availability_key(context);
+            tools
+        } else {
+            loop_tools.clone()
+        };
+        loop_tools.clone_from(&tools);
         match maybe_reset_runtime_history(context, &mut runtime_step, &tools, false).await {
             Ok(true) => {
                 clear_runtime_overflow_failure_after_history_reset(
@@ -939,13 +954,14 @@ pub async fn execute_agent_loop_step(
                         );
                     });
                 }
+                let payload_content = tool_result_payload_content(&result);
                 let rendered_model_content = if result.skip_source_elision {
-                    result.model_content()
+                    payload_content.clone()
                 } else {
                     super::coding_source_elision::elide_tool_model_content(
                         &mut context.visible_source_lines,
                         call,
-                        &result.model_content(),
+                        &payload_content,
                     )
                 };
                 let model_content = crate::tool_output_spill::bound_tool_model_content(
@@ -962,9 +978,10 @@ pub async fn execute_agent_loop_step(
                     )),
                 );
                 let activity_event = result.activity_event.clone();
-                let history_content = result.history_content_with_budget(
+                let history_content = history_content_from_payload(
                     &call.id,
                     &call.name,
+                    &payload_content,
                     context
                         .config
                         .main_model_config()
@@ -1586,8 +1603,8 @@ fn persist_dashboard_activity_items(
     history: &DashboardActivityHistoryStore,
     items: &[crate::dashboard::DashboardActivityHistoryItem],
 ) -> miette::Result<DashboardActivityHistoryWindow> {
-    history.append_items(items)?;
-    Ok(history.load_initial_window())
+    let before_seq = history.append_items(items)?;
+    Ok(history.load_window_after(before_seq))
 }
 
 #[cfg(test)]
@@ -1789,4 +1806,59 @@ mod tests {
         assert!(!rendered_state.contains("<root_project_instructions>"));
         assert!(!rendered_state.contains("Root instruction marker"));
     }
+}
+
+fn loop_tools_need_rebuild(
+    context: &Context,
+    fingerprint: &Option<Vec<crate::catalog_hot_reload::CatalogFileEntry>>,
+    availability: &RuntimeToolAvailabilityKey,
+) -> bool {
+    context.catalog_hot_reload_fingerprint.as_ref() != fingerprint.as_ref()
+        || runtime_tool_availability_key(context) != *availability
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RuntimeToolAvailabilityKey {
+    study_mode: bool,
+    dashboard_history: bool,
+    supports_vision: bool,
+}
+
+fn runtime_tool_availability_key(context: &Context) -> RuntimeToolAvailabilityKey {
+    let model = context.config.main_model_config();
+    let supports_vision = model.supports_vision.unwrap_or_else(|| {
+        crate::model_catalog::catalog_model_capacity(&model.model_id)
+            .is_none_or(|capacity| capacity.supports_vision)
+    });
+    RuntimeToolAvailabilityKey {
+        study_mode: context.study_mode(),
+        dashboard_history: context.dashboard_history.is_some(),
+        supports_vision,
+    }
+}
+
+fn tool_result_payload_content(result: &ToolExecutionResult) -> String {
+    if let Some(model_content) = &result.model_content_override {
+        return model_content.clone();
+    }
+    if result.payload.is_null() {
+        format!("summary={}", result.summary)
+    } else {
+        let payload = serde_json::to_string_pretty(&result.payload)
+            .unwrap_or_else(|_| result.payload.to_string());
+        format!("summary={}\npayload=\n{payload}", result.summary)
+    }
+}
+
+fn history_content_from_payload(
+    tool_call_id: &str,
+    tool_name: &str,
+    payload_content: &str,
+    max_tokens: usize,
+) -> String {
+    crate::context_budget::truncate_text_to_token_budget_with_notice(
+        &format!("tool_call_id={tool_call_id}\nname={tool_name}\n{payload_content}"),
+        max_tokens.max(1),
+        "... [tool output too long; history content truncated]",
+    )
 }
