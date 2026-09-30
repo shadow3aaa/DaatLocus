@@ -74,13 +74,11 @@ pub fn scavenge_dsml_tool_calls(
     }
 
     let non_dsml = strip_dsml_blocks(text);
-    for candidate_json in iterate_json_objects(&non_dsml) {
+    for candidate in iterate_json_objects(&non_dsml) {
         if out.len() >= max_calls {
             break;
         }
-        if let Some(call) =
-            coerce_to_tool_call(&candidate_json, allowed_tool_names, &mut call_index)
-        {
+        if let Some(call) = coerce_to_tool_call(&candidate, allowed_tool_names, &mut call_index) {
             out.push(call);
         }
     }
@@ -118,19 +116,18 @@ fn strip_dsml_blocks(text: &str) -> String {
 }
 
 fn coerce_to_tool_call(
-    candidate_json: &str,
+    candidate: &Value,
     allowed_names: &HashSet<String>,
     call_index: &mut usize,
 ) -> Option<AgentToolCall> {
-    let parsed: Value = serde_json::from_str(candidate_json).ok()?;
-    if !parsed.is_object() {
+    if !candidate.is_object() {
         return None;
     }
 
-    if let Some(name) = parsed.get("name").and_then(Value::as_str)
+    if let Some(name) = candidate.get("name").and_then(Value::as_str)
         && allowed_names.contains(name)
     {
-        let arguments = match parsed.get("arguments") {
+        let arguments = match candidate.get("arguments") {
             Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
             Some(v) => v.clone(),
             None => json!({}),
@@ -144,8 +141,8 @@ fn coerce_to_tool_call(
         });
     }
 
-    if parsed.get("type").and_then(Value::as_str) == Some("function")
-        && let Some(func) = parsed.get("function")
+    if candidate.get("type").and_then(Value::as_str) == Some("function")
+        && let Some(func) = candidate.get("function")
         && let Some(name) = func.get("name").and_then(Value::as_str)
         && allowed_names.contains(name)
     {
@@ -166,7 +163,7 @@ fn coerce_to_tool_call(
     None
 }
 
-fn iterate_json_objects(text: &str) -> impl Iterator<Item = String> + '_ {
+fn iterate_json_objects(text: &str) -> impl Iterator<Item = Value> + '_ {
     JsonObjectIter { text, pos: 0 }
 }
 
@@ -176,11 +173,11 @@ struct JsonObjectIter<'a> {
 }
 
 impl Iterator for JsonObjectIter<'_> {
-    type Item = String;
+    type Item = Value;
 
     fn next(&mut self) -> Option<Self::Item> {
         let bytes = self.text.as_bytes();
-        while self.pos < self.text.len() {
+        while self.pos < bytes.len() {
             if bytes[self.pos] != b'{' {
                 self.pos += 1;
                 continue;
@@ -189,19 +186,22 @@ impl Iterator for JsonObjectIter<'_> {
             let mut depth = 0i32;
             let mut in_string = false;
             let mut escaped = false;
-            for (j, &c) in bytes.iter().enumerate().skip(start) {
+            let mut index = start;
+            let mut closed = false;
+            while index < bytes.len() {
+                let c = bytes[index];
                 if escaped {
                     escaped = false;
+                    index += 1;
                     continue;
                 }
                 if in_string {
                     if c == b'\\' {
                         escaped = true;
-                        continue;
-                    }
-                    if c == b'"' {
+                    } else if c == b'"' {
                         in_string = false;
                     }
+                    index += 1;
                     continue;
                 }
                 if c == b'"' {
@@ -211,13 +211,22 @@ impl Iterator for JsonObjectIter<'_> {
                 } else if c == b'}' {
                     depth -= 1;
                     if depth == 0 {
-                        let result = self.text[start..=j].to_string();
-                        self.pos = j + 1;
-                        return Some(result);
+                        let end = index + 1;
+                        let slice = &self.text[start..end];
+                        self.pos = end;
+                        closed = true;
+                        if let Ok(value) = serde_json::from_str(slice) {
+                            return Some(value);
+                        }
+                        break;
                     }
                 }
+                index += 1;
             }
-            self.pos = self.text.len();
+            if closed {
+                continue;
+            }
+            self.pos = bytes.len();
             return None;
         }
         None
@@ -560,5 +569,16 @@ Now I will proceed."#;
         let calls = scavenge_dsml_tool_calls(text, &allowed, 4);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn scavenge_json_after_unbalanced_note_braces() {
+        let text = "note {a, b} then {\"name\":\"read_file\",\"arguments\":{\"path\":\"/tmp/x\"}}";
+        let mut allowed = HashSet::new();
+        allowed.insert("read_file".to_string());
+        let calls = scavenge_dsml_tool_calls(text, &allowed, 4);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments["path"], "/tmp/x");
     }
 }

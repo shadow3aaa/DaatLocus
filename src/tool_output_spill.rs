@@ -125,40 +125,70 @@ fn bound_tool_model_content_in(
     dir: Option<&Path>,
 ) -> String {
     let max_chars = max_tokens.max(1).saturating_mul(APPROX_BYTES_PER_TOKEN);
-    let total_chars = text.chars().count();
-    if total_chars <= max_chars {
-        return text.to_string();
+    let prefix = take_chars_bounded(text, max_chars);
+    if prefix.exhausted {
+        return prefix.text;
     }
 
     match target {
-        None => plain_truncation(text, max_chars, total_chars),
+        None => append_plain_truncation(prefix.text, max_chars, prefix.total_chars),
         Some(OverflowTarget::Continue { instruction }) => {
             let marker = format!(
-                "[tool output truncated: showing part of {total_chars} chars]\n{instruction}"
+                "[tool output truncated: showing part of {} chars]\n{instruction}",
+                prefix.total_chars
             );
-            let kept = keep_head(text, max_chars, &marker);
+            let kept = keep_head_from_prefix(&prefix, max_chars, &marker);
             format!("{kept}\n{marker}")
         }
         Some(OverflowTarget::Spill(ctx)) => match write_spill(text, &ctx, dir) {
             Some(written) => {
-                let marker = spill_marker(&written.path, total_chars, written.line_count);
-                let kept = keep_head(text, max_chars, &marker);
+                let marker = spill_marker(&written.path, prefix.total_chars, written.line_count);
+                let kept = keep_head_from_prefix(&prefix, max_chars, &marker);
                 format!("{kept}\n{marker}")
             }
-            None => plain_truncation(text, max_chars, total_chars),
+            None => append_plain_truncation(prefix.text, max_chars, prefix.total_chars),
         },
     }
 }
 
-/// Keep as much of the head as fits once the marker has been accounted for, so
-/// the result stays inside the budget instead of overshooting it.
-fn keep_head(text: &str, max_chars: usize, marker: &str) -> String {
-    let head_chars = max_chars.saturating_sub(marker.chars().count()).max(1);
-    text.chars().take(head_chars).collect()
+struct CharPrefix {
+    text: String,
+    kept_chars: usize,
+    total_chars: usize,
+    /// True when `text` already contains every char of the source.
+    exhausted: bool,
 }
 
-fn plain_truncation(text: &str, max_chars: usize, total_chars: usize) -> String {
-    let kept: String = text.chars().take(max_chars).collect();
+/// One forward scan. Stops copying once `limit` chars are kept, but keeps
+/// counting so callers still know the full length.
+fn take_chars_bounded(text: &str, limit: usize) -> CharPrefix {
+    let mut out = String::new();
+    let mut total = 0usize;
+    for ch in text.chars() {
+        if total < limit {
+            out.push(ch);
+        }
+        total += 1;
+    }
+    CharPrefix {
+        kept_chars: total.min(limit),
+        text: out,
+        total_chars: total,
+        exhausted: total <= limit,
+    }
+}
+
+/// Keep as much of the already-scanned head as fits once the marker has been
+/// accounted for, so the result stays inside the budget instead of overshooting it.
+fn keep_head_from_prefix(prefix: &CharPrefix, max_chars: usize, marker: &str) -> String {
+    let head_chars = max_chars.saturating_sub(marker.chars().count()).max(1);
+    if head_chars >= prefix.kept_chars {
+        return prefix.text.clone();
+    }
+    prefix.text.chars().take(head_chars).collect()
+}
+
+fn append_plain_truncation(kept: String, max_chars: usize, total_chars: usize) -> String {
     format!(
         "{kept}\n{PLAIN_TRUNCATION_NOTICE} ({} chars omitted)",
         total_chars.saturating_sub(max_chars)

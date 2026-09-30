@@ -21,12 +21,27 @@ struct TrackedAnchor {
     hash: String,
     text: String,
     last_used: u64,
+    /// Index into `FileAnchorTable::nodes`.
+    order: u32,
+}
+
+#[derive(Debug, Clone)]
+struct OrderNode {
+    key: (PathBuf, String),
+    prev: Option<u32>,
+    next: Option<u32>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct FileAnchorTable {
     next_use: u64,
     entries: HashMap<(PathBuf, String), TrackedAnchor>,
+    nodes: Vec<OrderNode>,
+    free: Vec<u32>,
+    /// Oldest entry.
+    head: Option<u32>,
+    /// Newest entry.
+    tail: Option<u32>,
 }
 
 pub struct AnchorMutation {
@@ -40,6 +55,76 @@ pub struct AnchorMutation {
 impl FileAnchorTable {
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.nodes.clear();
+        self.free.clear();
+        self.head = None;
+        self.tail = None;
+    }
+
+    fn alloc_node(&mut self, key: (PathBuf, String)) -> u32 {
+        if let Some(index) = self.free.pop() {
+            self.nodes[index as usize] = OrderNode {
+                key,
+                prev: None,
+                next: None,
+            };
+            index
+        } else {
+            let index = u32::try_from(self.nodes.len()).expect("anchor order index");
+            self.nodes.push(OrderNode {
+                key,
+                prev: None,
+                next: None,
+            });
+            index
+        }
+    }
+
+    fn detach(&mut self, index: u32) {
+        let (prev, next) = {
+            let node = &self.nodes[index as usize];
+            (node.prev, node.next)
+        };
+        match prev {
+            Some(prev) => self.nodes[prev as usize].next = next,
+            None => self.head = next,
+        }
+        match next {
+            Some(next) => self.nodes[next as usize].prev = prev,
+            None => self.tail = prev,
+        }
+        let node = &mut self.nodes[index as usize];
+        node.prev = None;
+        node.next = None;
+    }
+
+    fn push_newest(&mut self, index: u32) {
+        self.nodes[index as usize].prev = self.tail;
+        self.nodes[index as usize].next = None;
+        if let Some(tail) = self.tail {
+            self.nodes[tail as usize].next = Some(index);
+        } else {
+            self.head = Some(index);
+        }
+        self.tail = Some(index);
+    }
+
+    fn touch(&mut self, index: u32) {
+        if self.tail == Some(index) {
+            return;
+        }
+        self.detach(index);
+        self.push_newest(index);
+    }
+
+    fn pop_oldest(&mut self) -> Option<(PathBuf, String)> {
+        let index = self.head?;
+        self.detach(index);
+        self.free.push(index);
+        Some(std::mem::replace(
+            &mut self.nodes[index as usize].key,
+            (PathBuf::new(), String::new()),
+        ))
     }
 
     /// Record every `line#hash|text` (and `path|line#hash|text`) record that a
@@ -58,23 +143,31 @@ impl FileAnchorTable {
             }
             self.next_use = self.next_use.wrapping_add(1);
             let last_used = self.next_use;
-            self.entries.insert(
-                (PathBuf::from(path), anchor.to_string()),
-                TrackedAnchor {
-                    line: parsed.line,
-                    hash: parsed.hash.to_string(),
-                    text: text.to_string(),
-                    last_used,
-                },
-            );
+            let key = (PathBuf::from(path), anchor.to_string());
+            if let Some(existing) = self.entries.get_mut(&key) {
+                existing.line = parsed.line;
+                existing.hash = parsed.hash.to_string();
+                existing.text = text.to_string();
+                existing.last_used = last_used;
+                let order = existing.order;
+                self.touch(order);
+            } else {
+                let order = self.alloc_node(key.clone());
+                self.push_newest(order);
+                self.entries.insert(
+                    key,
+                    TrackedAnchor {
+                        line: parsed.line,
+                        hash: parsed.hash.to_string(),
+                        text: text.to_string(),
+                        last_used,
+                        order,
+                    },
+                );
+            }
         }
         while self.entries.len() > MAX_TRACKED_ANCHORS {
-            let Some(key) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, anchor)| anchor.last_used)
-                .map(|(key, _)| key.clone())
-            else {
+            let Some(key) = self.pop_oldest() else {
                 break;
             };
             self.entries.remove(&key);
@@ -109,8 +202,10 @@ impl FileAnchorTable {
             };
             self.next_use = self.next_use.wrapping_add(1);
             anchor.last_used = self.next_use;
-            self.entries
-                .insert((path.clone(), start.clone()), anchor.clone());
+            let order = anchor.order;
+            let used_key = (path.clone(), start.clone());
+            self.entries.insert(used_key, anchor.clone());
+            self.touch(order);
             *start = format!("{}#{}", current_line, anchor.hash);
             if let Some(end) = edit.end.as_mut()
                 && let Some(end_anchor) = self.entries.get(&(path.clone(), end.clone())).cloned()
@@ -147,7 +242,9 @@ impl FileAnchorTable {
     /// numbers, so multi-edit calls cannot shift an anchor twice. Anchors the
     /// edit range itself changed are dropped.
     pub fn apply_anchor_mutations(&mut self, mutations: &[AnchorMutation]) {
-        self.entries.retain(|(path, _), anchor| {
+        let mut dropped = Vec::new();
+        self.entries.retain(|key, anchor| {
+            let path = &key.0;
             let original = anchor.line;
             let mut delta = 0isize;
             for mutation in mutations {
@@ -157,6 +254,7 @@ impl FileAnchorTable {
                 match mutation.operation {
                     EditOp::Replace => {
                         if original >= mutation.start_line && original <= mutation.end_line {
+                            dropped.push(anchor.order);
                             return false;
                         }
                         if original > mutation.end_line {
@@ -180,6 +278,11 @@ impl FileAnchorTable {
                 .max(1);
             true
         });
+        for index in dropped {
+            self.detach(index);
+            self.nodes[index as usize].key = (PathBuf::new(), String::new());
+            self.free.push(index);
+        }
     }
 }
 

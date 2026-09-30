@@ -1013,6 +1013,15 @@ enum SessionTreeRow {
     },
 }
 
+impl SessionTreeRow {
+    fn indent_depth(&self) -> usize {
+        match self {
+            Self::Create { depth, .. } | Self::Session { depth, .. } => *depth,
+            Self::Section { .. } | Self::Project { .. } => 0,
+        }
+    }
+}
+
 fn build_session_tree_rows(
     sessions: &[crate::daemon::session::SessionSummary],
     project_dir_filter: Option<&std::path::Path>,
@@ -1098,6 +1107,12 @@ fn session_tree_list_items(
     sessions: &[crate::daemon::session::SessionSummary],
     rows: &[SessionTreeRow],
 ) -> Vec<ListItem<'static>> {
+    let max_depth = rows.iter().map(SessionTreeRow::indent_depth).max().unwrap_or(0);
+    let mut indents = Vec::with_capacity(max_depth.saturating_add(1));
+    indents.push(String::new());
+    for depth in 1..=max_depth {
+        indents.push("  ".repeat(depth));
+    }
     rows.iter()
         .map(|row| match row {
             SessionTreeRow::Section { label, count } => ListItem::new(Line::from(vec![
@@ -1121,7 +1136,7 @@ fn session_tree_list_items(
                 Span::styled(format!("  {path}"), Style::default().fg(Color::DarkGray)),
             ])),
             SessionTreeRow::Create { label, depth, .. } => {
-                let indent = "  ".repeat(*depth);
+                let indent = indents.get(*depth).cloned().unwrap_or_default();
                 ListItem::new(Line::from(vec![
                     Span::raw(indent),
                     Span::styled("+ ", Style::default().fg(Color::DarkGray)),
@@ -1133,7 +1148,7 @@ fn session_tree_list_items(
                 depth,
             } => {
                 let session = &sessions[*session_index];
-                let indent = "  ".repeat(*depth);
+                let indent = indents.get(*depth).cloned().unwrap_or_default();
                 ListItem::new(Line::from(vec![
                     Span::raw(indent),
                     Span::styled("- ", Style::default().fg(Color::DarkGray)),

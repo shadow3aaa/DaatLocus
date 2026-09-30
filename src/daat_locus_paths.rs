@@ -1,6 +1,7 @@
 use std::{
     env,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 
 use crate::persistence::{PersistenceFileMode, write_bytes_atomic_sync};
@@ -374,20 +375,25 @@ fn migrate_legacy_layout_sync(paths: &DaatLocusPaths) {
     }
 }
 
+fn prepared_paths(root: PathBuf) -> DaatLocusPaths {
+    static PREPARED: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    let slot = PREPARED.get_or_init(|| Mutex::new(None));
+    let mut prepared = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if prepared.as_ref() != Some(&root) {
+        let paths = DaatLocusPaths::from_root(root.clone());
+        ensure_layout_sync(&paths);
+        migrate_legacy_layout_sync(&paths);
+        *prepared = Some(root.clone());
+    }
+    DaatLocusPaths::from_root(root)
+}
+
 pub fn daat_locus_paths_sync() -> DaatLocusPaths {
-    let root = resolve_daat_locus_home_root();
-    let paths = DaatLocusPaths::from_root(root);
-    ensure_layout_sync(&paths);
-    migrate_legacy_layout_sync(&paths);
-    paths
+    prepared_paths(resolve_daat_locus_home_root())
 }
 
 pub async fn daat_locus_paths() -> DaatLocusPaths {
-    let root = resolve_daat_locus_home_root();
-    let paths = DaatLocusPaths::from_root(root);
-    ensure_layout_sync(&paths);
-    migrate_legacy_layout_sync(&paths);
-    paths
+    prepared_paths(resolve_daat_locus_home_root())
 }
 
 #[cfg(test)]

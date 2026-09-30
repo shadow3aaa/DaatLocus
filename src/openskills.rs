@@ -752,15 +752,16 @@ impl SkillPathAliasPlan {
             .iter()
             .map(|skill| skill.path.clone())
             .collect::<HashSet<_>>();
+        let mut roots_for_skills: HashMap<&PathBuf, Vec<&PathBuf>> = HashMap::new();
+        for (path, root) in &catalog.root_by_skill_path {
+            if skill_paths.contains(path) {
+                roots_for_skills.entry(root).or_default().push(path);
+            }
+        }
         let mut roots = catalog
             .roots
             .iter()
-            .filter(|root| {
-                catalog
-                    .root_by_skill_path
-                    .iter()
-                    .any(|(path, skill_root)| skill_paths.contains(path) && skill_root == *root)
-            })
+            .filter(|root| roots_for_skills.contains_key(*root))
             .cloned()
             .collect::<Vec<_>>();
         roots.sort();
