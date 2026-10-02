@@ -39,6 +39,8 @@ use super::{
     truncate_for_error, truncate_for_json_error,
 };
 
+use super::io::responses_safe_call_id;
+
 const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_OAUTH_REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_OAUTH_REFRESH_URL_OVERRIDE_ENV: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
@@ -1048,7 +1050,7 @@ fn agent_messages_to_responses_parts(
                     valid_tool_call_ids.insert(call.id.clone());
                     input.push(json!({
                         "type": "function_call",
-                        "call_id": call.id,
+                        "call_id": responses_safe_call_id(&call.id),
                         "name": call.name,
                         "arguments": call.arguments.to_string(),
                     }));
@@ -1062,7 +1064,7 @@ fn agent_messages_to_responses_parts(
                 if valid_tool_call_ids.contains(tool_call_id) {
                     input.push(json!({
                         "type": "function_call_output",
-                        "call_id": tool_call_id,
+                        "call_id": responses_safe_call_id(tool_call_id),
                         "output": content,
                     }));
                 } else {

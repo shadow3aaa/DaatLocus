@@ -14,7 +14,7 @@ use super::io::{
     default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
     non_empty_string, parse_retry_after_seconds,
     read_response_text_with_timeout, send_request_for_streaming_response,
-    truncate_for_error, truncate_for_json_error,
+    responses_safe_call_id, truncate_for_error, truncate_for_json_error,
 };
 use super::payload::{flatten_tool_result_as_assistant_text, image_part_data_url};
 use super::{extract_json_value_from_content, shared_request_rate_limiter};
@@ -717,7 +717,7 @@ fn agent_messages_to_responses_parts(
                     valid_tool_call_ids.insert(call.id.clone());
                     input.push(json!({
                         "type": "function_call",
-                        "call_id": call.id,
+                        "call_id": responses_safe_call_id(&call.id),
                         "name": call.name,
                         "arguments": call.arguments.to_string(),
                     }));
@@ -731,7 +731,7 @@ fn agent_messages_to_responses_parts(
                 if valid_tool_call_ids.contains(tool_call_id) {
                     input.push(json!({
                         "type": "function_call_output",
-                        "call_id": tool_call_id,
+                        "call_id": responses_safe_call_id(tool_call_id),
                         "output": content,
                     }));
                 } else {
@@ -1144,5 +1144,30 @@ mod tests {
         assert_eq!(payload["input"][1]["call_id"], "call-image");
         assert_eq!(payload["input"][2]["role"], "user");
         assert_eq!(payload["input"][2]["content"][1]["type"], "input_image");
+    }
+    #[test]
+    fn responses_payload_folds_overlong_tool_call_ids() {
+        let long_id = "terminal__terminal_write_stdin:0#5488624ad8e84b8482d6f631d3313011";
+        assert!(long_id.len() > 64);
+        let messages = vec![
+            AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                None,
+                None,
+                vec![AgentToolCall {
+                    id: long_id.to_string(),
+                    name: "terminal__terminal_write_stdin".to_string(),
+                    arguments: json!({"text": ""}),
+                }],
+            ),
+            AgentMessage::tool(long_id, "terminal__terminal_write_stdin", "ok"),
+        ];
+
+        let (_, input) = agent_messages_to_responses_parts(&messages, false);
+
+        let call_id = input[0]["call_id"].as_str().expect("call id");
+        assert!(call_id.len() <= 64, "folded call id too long: {call_id}");
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["call_id"], input[0]["call_id"]);
     }
 }

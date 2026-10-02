@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+
 use crate::context_budget::RequestBudgetBreakdown;
 
 use super::*;
@@ -641,6 +643,29 @@ pub fn looks_like_context_window_error(body: &str) -> bool {
 
 pub fn truncate_for_json_error(value: &serde_json::Value) -> String {
     truncate_for_error(&value.to_string())
+}
+
+/// OpenAI's Responses API rejects `call_id` values longer than 64 characters.
+/// Tool-call ids inherited from other providers can exceed that, so fold long
+/// ids into a deterministic, collision-resistant form that stays within the
+/// limit; the same id is then used for both `function_call` and
+/// `function_call_output` items.
+pub fn responses_safe_call_id(call_id: &str) -> String {
+    const MAX_CALL_ID_LEN: usize = 64;
+    const DIGEST_LEN: usize = 32;
+    if call_id.len() <= MAX_CALL_ID_LEN {
+        return call_id.to_string();
+    }
+    let digest = hex::encode(Sha256::digest(call_id.as_bytes()));
+    let prefix_budget = MAX_CALL_ID_LEN - DIGEST_LEN - 1;
+    let mut prefix = String::new();
+    for ch in call_id.chars() {
+        if prefix.len() + ch.len_utf8() > prefix_budget {
+            break;
+        }
+        prefix.push(ch);
+    }
+    format!("{prefix}#{}", &digest[..DIGEST_LEN])
 }
 
 pub fn parse_retry_after_seconds(value: &str) -> Option<u64> {
