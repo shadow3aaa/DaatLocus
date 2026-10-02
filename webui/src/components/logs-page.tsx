@@ -9,7 +9,6 @@ import {
   SearchIcon,
 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -402,12 +401,6 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
                         {source.description}
                       </span>
                     </span>
-                    <Badge
-                      variant={source.exists ? "secondary" : "outline"}
-                      className="font-mono"
-                    >
-                      {source.exists ? t("logs.live") : t("logs.missing")}
-                    </Badge>
                   </DropdownMenuRadioItem>
                 ))}
               </DropdownMenuRadioGroup>

@@ -512,9 +512,6 @@ function StudySidePanel({
   return (
     <>
       <div className="flex items-center gap-1 border-b px-2 py-2">
-        <span className="px-2 font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-          {t("navigation.study")}
-        </span>
         <Button
           type="button"
           size="sm"

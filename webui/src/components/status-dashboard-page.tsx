@@ -300,13 +300,10 @@ export function StatusPage({ mockSummary }: StatusPageProps = {}) {
       aria-label={t("status.pageAria")}
       className="min-h-screen w-full px-6 pb-10 pt-20 md:pb-12 md:pt-8"
     >
-      <header className="mb-8 flex items-end justify-between gap-6 md:mb-10">
+      <header className="mb-8 md:mb-10">
         <h1 className="text-4xl font-medium leading-none tracking-tight md:text-5xl">
           {t("status.pageAria")}
         </h1>
-        <span className="hidden font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground sm:block">
-          {t("status.cards.contextComposition")} · {t("status.cards.tokenUsage")}
-        </span>
       </header>
       {loadError ? (
         <Alert variant="destructive" className="mb-4">
