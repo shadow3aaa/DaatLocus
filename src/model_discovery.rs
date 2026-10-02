@@ -125,6 +125,7 @@ fn catalog_provider_id_for_model(provider: &ProviderConfig, model_id: &str) -> O
         // line up with OpenAI entries for capacity metadata; Codex-specific
         // reasoning defaults are handled separately below.
         ProviderConfig::OpenaiCodexOauth { .. } => Some("openai".to_string()),
+        ProviderConfig::OpenCodeConsoleOauth { .. } => None,
         ProviderConfig::OpenaiCompatible { base_url, .. } => {
             catalog_provider_id_for_base_url_and_model(base_url, model_id)
         }
@@ -196,6 +197,19 @@ pub async fn discover_model_ids(
                 .as_deref()
                 .unwrap_or(codex_oauth_default_base_url());
             fetch_codex_oauth_models(auth_file, base).await
+        }
+        ProviderConfig::OpenCodeConsoleOauth {
+            base_url,
+            auth_file,
+        } => {
+            let base = base_url
+                .as_deref()
+                .unwrap_or(crate::providers::OPENCODE_ZEN_BASE_URL);
+            let access =
+                crate::providers::opencode_oauth_access_from_file(std::path::Path::new(auth_file))
+                    .await
+                    .map_err(|err| miette!("OpenCode model discovery auth failed: {err}"))?;
+            fetch_openai_models(base, &access.access_token).await
         }
         ProviderConfig::OpenaiCompatible {
             base_url, api_key, ..

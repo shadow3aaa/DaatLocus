@@ -873,7 +873,8 @@ export type SetupProviderKind =
   | "openai_codex_oauth"
   | "github_copilot"
   | "ollama"
-  | "ollama_cloud";
+  | "ollama_cloud"
+  | "open_code_console";
 
 export type SetupProviderRequest = {
   kind: SetupProviderKind;
@@ -884,6 +885,7 @@ export type SetupProviderRequest = {
   codex_auth_method?: string | null;
   codex_auth_file?: string | null;
   github_auth_method?: string | null;
+  opencode_auth_method?: string | null;
 };
 
 export type SetupDiscoveredModel = {

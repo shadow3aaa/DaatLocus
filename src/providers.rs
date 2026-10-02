@@ -37,6 +37,12 @@ pub use codex_oauth::{
     codex_oauth_client_version, codex_oauth_default_base_url, import_codex_cli_oauth_file,
     imported_codex_oauth_auth_file, write_codex_oauth_tokens,
 };
+mod opencode_oauth;
+pub use opencode_oauth::{
+    OPENCODE_OAUTH_DEFAULT_SERVER, OPENCODE_ZEN_BASE_URL, OpenCodeDevicePoll, OpenCodeOAuthClient,
+    opencode_auth_file_path, opencode_oauth_access_from_file, opencode_poll_device_token,
+    opencode_start_device_code, write_opencode_oauth_tokens,
+};
 mod ollama;
 pub use ollama::OllamaClient;
 
@@ -180,6 +186,11 @@ enum ActiveChatCompletionsAdapter {
 }
 
 impl OpenAIClient {
+    /// Replace the bearer credential used for subsequent requests.
+    pub(crate) fn set_api_key(&mut self, api_key: String) {
+        self.api_key = api_key;
+    }
+
     /// Build from standalone credentials and `ModelConfig`.
     pub fn from_parts(api_key: &str, base_url: &str, model_config: &ModelConfig) -> Self {
         let base_url = normalize_provider_base_url(base_url);
@@ -1445,6 +1456,14 @@ pub fn build_model_provider(
             base_url,
             auth_file,
         } => Box::new(CodexOAuthClient::new(
+            auth_file.into(),
+            base_url.as_deref(),
+            model_config,
+        )),
+        ProviderConfig::OpenCodeConsoleOauth {
+            base_url,
+            auth_file,
+        } => Box::new(OpenCodeOAuthClient::new(
             auth_file.into(),
             base_url.as_deref(),
             model_config,

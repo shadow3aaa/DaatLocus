@@ -524,6 +524,40 @@ fn fill_uuid_random_bytes(bytes: &mut [u8]) {
     }
 }
 
+async fn run_opencode_device_flow<F>(locale: Locale, mut status: F) -> Result<()>
+where
+    F: FnMut(String, Vec<String>) -> Result<()>,
+{
+    use crate::providers::{OPENCODE_OAUTH_DEFAULT_SERVER, OpenCodeDevicePoll};
+
+    let server = OPENCODE_OAUTH_DEFAULT_SERVER;
+    let device = crate::providers::opencode_start_device_code(server).await?;
+    let _ = crate::open_url::open_url(&device.verification_url);
+    status(
+        crate::tr!(locale, "config.opencode_device_login"),
+        vec![
+            format!("URL: {}", device.verification_url),
+            format!("Code: {}", device.user_code),
+        ],
+    )?;
+
+    let mut interval = Duration::from_secs(device.interval_secs.max(1));
+    loop {
+        tokio::time::sleep(interval).await;
+        match crate::providers::opencode_poll_device_token(server, &device.device_code).await? {
+            OpenCodeDevicePoll::Pending => {}
+            OpenCodeDevicePoll::SlowDown => {
+                interval += Duration::from_secs(5);
+            }
+            OpenCodeDevicePoll::Ready(tokens) => {
+                let auth_file = crate::providers::opencode_auth_file_path();
+                crate::providers::write_opencode_oauth_tokens(&auth_file, &tokens).await?;
+                return Ok(());
+            }
+        }
+    }
+}
+
 async fn run_codex_oauth_device_flow<F>(locale: Locale, mut status: F) -> Result<CodexOAuthTokens>
 where
     F: FnMut(String, Vec<String>) -> Result<()>,
@@ -1651,6 +1685,7 @@ enum ProviderKind {
     AnthropicCompatible,
     Ollama,
     OllamaCloud,
+    OpenCodeConsole,
 }
 
 impl ProviderKind {
@@ -1663,6 +1698,7 @@ impl ProviderKind {
             crate::tr!(locale, "config.provider_anthropic_compatible"),
             crate::tr!(locale, "config.provider_ollama_local"),
             crate::tr!(locale, "config.provider_ollama_cloud"),
+            crate::tr!(locale, "config.provider_opencode_console"),
         ]
     }
 
@@ -1674,7 +1710,8 @@ impl ProviderKind {
             3 => Self::OpenAICompatible,
             4 => Self::AnthropicCompatible,
             5 => Self::Ollama,
-            _ => Self::OllamaCloud,
+            6 => Self::OllamaCloud,
+            _ => Self::OpenCodeConsole,
         }
     }
 }
@@ -1696,6 +1733,7 @@ async fn prompt_provider(
         ProviderKind::AnthropicCompatible => "anthropic",
         ProviderKind::Ollama => "ollama",
         ProviderKind::OllamaCloud => "ollama-cloud",
+        ProviderKind::OpenCodeConsole => "opencode-console",
     };
     // Suffix duplicate defaults to avoid a collision.
     let default_name = if existing_names.contains(&default_name.to_string()) {
@@ -1801,6 +1839,25 @@ async fn prompt_provider(
                 _ => "${GITHUB_TOKEN}".to_string(),
             };
             ProviderConfig::GithubCopilot { github_token }
+        }
+        ProviderKind::OpenCodeConsole => {
+            let result =
+                run_opencode_device_flow(locale, |prompt, lines| ui.status(&prompt, &lines)).await;
+            result?;
+            let use_custom_url =
+                ui.confirm(&crate::tr!(locale, "config.custom_base_url"), false)?;
+            let base_url = if use_custom_url {
+                let url = ui.text(&crate::tr!(locale, "config.base_url_openai"), None)?;
+                Some(normalize_provider_base_url(&url))
+            } else {
+                None
+            };
+            ProviderConfig::OpenCodeConsoleOauth {
+                base_url,
+                auth_file: crate::providers::opencode_auth_file_path()
+                    .display()
+                    .to_string(),
+            }
         }
         ProviderKind::OpenAICompatible => {
             let base_url = ui.text(
@@ -2423,6 +2480,21 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
                     .unwrap_or(codex_oauth_default_base_url());
                 (
                     "openai-codex-oauth",
+                    vec![
+                        ("base_url", url.to_string()),
+                        ("auth_file", auth_file.clone()),
+                    ],
+                )
+            }
+            ProviderConfig::OpenCodeConsoleOauth {
+                base_url,
+                auth_file,
+            } => {
+                let url = base_url
+                    .as_deref()
+                    .unwrap_or(crate::providers::OPENCODE_ZEN_BASE_URL);
+                (
+                    "open-code-console-oauth",
                     vec![
                         ("base_url", url.to_string()),
                         ("auth_file", auth_file.clone()),

@@ -3903,6 +3903,32 @@ fn settings_provider_summary(name: &str, provider: &ProviderConfig) -> SettingsP
                 auth_file: Some(auth_file),
             }
         }
+        ProviderConfig::OpenCodeConsoleOauth {
+            base_url,
+            auth_file,
+        } => {
+            let auth_file = if auth_file.trim().is_empty() {
+                crate::providers::opencode_auth_file_path()
+                    .display()
+                    .to_string()
+            } else {
+                auth_file.trim().to_string()
+            };
+            SettingsProviderSummary {
+                name: name.to_string(),
+                provider_type: "open-code-console-oauth",
+                base_url: Some(
+                    base_url
+                        .clone()
+                        .unwrap_or_else(|| crate::providers::OPENCODE_ZEN_BASE_URL.to_string()),
+                ),
+                credential: SettingsCredentialSummary {
+                    status: SettingsCredentialStatus::OauthFile,
+                    source: Some(auth_file.clone()),
+                },
+                auth_file: Some(auth_file),
+            }
+        }
         ProviderConfig::OpenaiCompatible {
             base_url, api_key, ..
         } => SettingsProviderSummary {

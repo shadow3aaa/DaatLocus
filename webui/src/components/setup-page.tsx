@@ -176,6 +176,7 @@ const PROVIDER_KIND_ORDER: SetupProviderKind[] = [
   "anthropic_compatible",
   "ollama",
   "ollama_cloud",
+  "open_code_console",
 ];
 
 const CODEX_AUTH_METHOD_ORDER: CodexAuthMethod[] = [
@@ -1205,12 +1206,14 @@ function ProviderDialog({
     (draft.kind === "openai_codex_oauth" &&
       draft.codexAuthMethod === "device_login") ||
     (draft.kind === "github_copilot" &&
-      draft.githubAuthMethod === "device_login");
+      draft.githubAuthMethod === "device_login") ||
+    draft.kind === "open_code_console";
   const usesProviderAuthAction =
     (draft.kind === "openai_codex_oauth" &&
       draft.codexAuthMethod !== "import_auth_file") ||
     (draft.kind === "github_copilot" &&
-      draft.githubAuthMethod === "device_login");
+      draft.githubAuthMethod === "device_login") ||
+    draft.kind === "open_code_console";
   const providerAuthButtonLabel = providerAuthActionLabel(draft, t);
   const requiresCompletedProviderAuth =
     providerRequiresCompletedAuthBeforeSave(draft);
@@ -2559,6 +2562,8 @@ function providerToRequest(provider: SetupProviderDraft): SetupProviderRequest {
         : null,
     github_auth_method:
       provider.kind === "github_copilot" ? provider.githubAuthMethod : null,
+    opencode_auth_method:
+      provider.kind === "open_code_console" ? "device_login" : null,
   };
 }
 
@@ -2666,6 +2671,8 @@ function defaultProviderName(kind: SetupProviderKind) {
       return "ollama";
     case "ollama_cloud":
       return "ollama-cloud";
+    case "open_code_console":
+      return "opencode-console";
   }
 }
 
@@ -2733,6 +2740,9 @@ function providerAuthActionLabel(provider: SetupProviderDraft, t: TFunction) {
   if (provider.kind === "github_copilot") {
     return t("setup.modelAccess.providerDialog.authAction.github");
   }
+  if (provider.kind === "open_code_console") {
+    return t("setup.modelAccess.providerDialog.authAction.opencode");
+  }
   return t(
     `setup.modelAccess.providerDialog.authAction.${provider.codexAuthMethod}`,
   );
@@ -2742,6 +2752,9 @@ function providerAuthDescription(provider: SetupProviderDraft, t: TFunction) {
   if (provider.kind === "github_copilot") {
     return t("setup.modelAccess.providerDialog.authDescription.github");
   }
+  if (provider.kind === "open_code_console") {
+    return t("setup.modelAccess.providerDialog.authDescription.opencode");
+  }
   return t(
     `setup.modelAccess.providerDialog.authDescription.${provider.codexAuthMethod}`,
   );
@@ -2750,6 +2763,7 @@ function providerAuthDescription(provider: SetupProviderDraft, t: TFunction) {
 function providerRequiresCompletedAuthBeforeSave(provider: SetupProviderDraft) {
   return (
     provider.kind === "openai_codex_oauth" ||
+    provider.kind === "open_code_console" ||
     (provider.kind === "github_copilot" &&
       provider.githubAuthMethod === "device_login")
   );
@@ -2761,6 +2775,9 @@ function providerAuthSaveBlockMessage(
 ) {
   if (provider.kind === "github_copilot") {
     return t("setup.modelAccess.providerDialog.authSaveBlock.github");
+  }
+  if (provider.kind === "open_code_console") {
+    return t("setup.modelAccess.providerDialog.authSaveBlock.opencode");
   }
   return t(
     `setup.modelAccess.providerDialog.authSaveBlock.${provider.codexAuthMethod}`,

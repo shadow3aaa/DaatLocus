@@ -50,6 +50,11 @@ pub struct ResponsesCompatibleClient {
 }
 
 impl ResponsesCompatibleClient {
+    /// Replace the bearer credential used for subsequent requests.
+    pub(crate) fn set_api_key(&mut self, api_key: String) {
+        self.api_key = api_key;
+    }
+
     pub(crate) fn new(
         api_key: &str,
         base_url: &str,

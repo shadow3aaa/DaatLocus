@@ -62,6 +62,15 @@ pub enum ProviderConfig {
         #[serde(default)]
         auth_file: String,
     },
+    /// OpenCode Console OAuth: an OpenAI-compatible gateway (default
+    /// `https://opencode.ai/zen/v1`) authenticated with a device-code OAuth
+    /// access token stored in `auth_file`.
+    OpenCodeConsoleOauth {
+        #[serde(default)]
+        base_url: Option<String>,
+        #[serde(default)]
+        auth_file: String,
+    },
     AnthropicCompatible {
         base_url: String,
         api_key: String,
@@ -365,6 +374,7 @@ impl Config {
                     push_secret_env_ref(&mut vars, github_token);
                 }
                 ProviderConfig::OpenaiCodexOauth { .. } => {}
+                ProviderConfig::OpenCodeConsoleOauth { .. } => {}
                 ProviderConfig::Ollama { api_key, .. } => {
                     if let Some(key) = api_key {
                         push_secret_env_ref(&mut vars, key);

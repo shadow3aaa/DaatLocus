@@ -301,6 +301,11 @@ const resources = {
               label: "Ollama Cloud",
               description: "Use an Ollama Cloud API key.",
             },
+            open_code_console: {
+              label: "OpenCode Console",
+              description:
+                "Log in to OpenCode Console with a device code to reach the /zen/v1 free tier.",
+            },
           },
           codexAuthMethods: {
             browser_login: {
@@ -375,6 +380,7 @@ const resources = {
               import_local_codex: "Import local Codex",
               import_auth_file: "Import auth.json",
               existing_auth_file: "Check OAuth file",
+              opencode: "Start OpenCode Console login",
             },
             authDescription: {
               github: "Writes the GitHub token into this provider.",
@@ -386,6 +392,7 @@ const resources = {
                 "Imports the specified auth.json into this provider.",
               existing_auth_file:
                 "Checks whether this provider's Codex OAuth file exists.",
+              opencode: "Authorize in the browser, then return here.",
             },
             authSaveBlock: {
               github: "Complete GitHub device code login first.",
@@ -396,6 +403,7 @@ const resources = {
               import_auth_file:
                 "Import auth.json and wait for it to finish first.",
               existing_auth_file: "Check the existing OAuth file first.",
+              opencode: "Complete OpenCode Console device login first.",
             },
             summary: {
               codexDefaultEndpoint: "Codex OAuth · default endpoint",
@@ -973,6 +981,10 @@ const resources = {
               label: "Ollama Cloud",
               description: "使用 Ollama Cloud API 密钥。",
             },
+            open_code_console: {
+              label: "OpenCode Console",
+              description: "用设备码登录 OpenCode Console，以访问 /zen/v1 免费层。",
+            },
           },
           codexAuthMethods: {
             browser_login: {
@@ -1045,6 +1057,7 @@ const resources = {
               import_local_codex: "导入本地 Codex",
               import_auth_file: "导入 auth.json",
               existing_auth_file: "检查 OAuth 文件",
+              opencode: "开始 OpenCode Console 登录",
             },
             authDescription: {
               github: "将 GitHub 令牌写入该供应商。",
@@ -1053,6 +1066,7 @@ const resources = {
               import_local_codex: "从本地 Codex CLI 的 auth.json 导入到该供应商。",
               import_auth_file: "从指定的 auth.json 导入到该供应商。",
               existing_auth_file: "检查该供应商的 Codex OAuth 文件是否存在。",
+              opencode: "在浏览器完成授权后返回此处。",
             },
             authSaveBlock: {
               github: "请先完成 GitHub 设备码登录。",
@@ -1061,6 +1075,7 @@ const resources = {
               import_local_codex: "请先导入本地 Codex 并等待完成。",
               import_auth_file: "请先导入 auth.json 并等待完成。",
               existing_auth_file: "请先检查现有的 OAuth 文件。",
+              opencode: "请先完成 OpenCode Console 设备码登录。",
             },
             summary: {
               codexDefaultEndpoint: "Codex OAuth · 默认端点",

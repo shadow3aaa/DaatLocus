@@ -18,6 +18,7 @@ const RAW_DIR_NAME: &str = "raw";
 const RUNTIME_DIR_NAME: &str = "runtime";
 const SESSIONS_DIR_NAME: &str = "sessions";
 const CODEX_AUTH_DIR_NAME: &str = "codex-auth";
+const OPENCODE_AUTH_DIR_NAME: &str = "opencode-auth";
 
 #[derive(Clone, Debug)]
 pub struct DaatLocusPaths {
@@ -72,6 +73,15 @@ impl DaatLocusPaths {
 
     pub fn codex_auth_file(&self, file_name: &str) -> PathBuf {
         self.codex_auth_dir().join(file_name)
+    }
+
+    /// Private, Daat-owned OpenCode Console OAuth token storage.
+    pub fn opencode_auth_dir(&self) -> PathBuf {
+        self.root.join(OPENCODE_AUTH_DIR_NAME)
+    }
+
+    pub fn opencode_auth_file(&self, file_name: &str) -> PathBuf {
+        self.opencode_auth_dir().join(file_name)
     }
 
     pub fn state_file(&self, file_name: &str) -> PathBuf {
@@ -214,6 +224,7 @@ pub fn resolve_runtime_workspace_dir() -> miette::Result<PathBuf> {
 fn ensure_layout_sync(paths: &DaatLocusPaths) {
     let _ = std::fs::create_dir_all(paths.config_dir());
     let _ = std::fs::create_dir_all(paths.codex_auth_dir());
+    let _ = std::fs::create_dir_all(paths.opencode_auth_dir());
     let _ = std::fs::create_dir_all(paths.state_dir());
     let _ = std::fs::create_dir_all(paths.workflows_dir());
     let _ = std::fs::create_dir_all(paths.memory_dir());

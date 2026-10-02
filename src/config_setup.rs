@@ -42,6 +42,7 @@ const CODEX_OAUTH_ISSUER: &str = "https://auth.openai.com";
 const CODEX_DEVICE_USER_CODE_PATH: &str = "/api/accounts/deviceauth/usercode";
 const CODEX_DEVICE_TOKEN_PATH: &str = "/api/accounts/deviceauth/token";
 const CODEX_OAUTH_TOKEN_PATH: &str = "/oauth/token";
+const OPENCODE_OAUTH_DEFAULT_SERVER: &str = crate::providers::OPENCODE_OAUTH_DEFAULT_SERVER;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,6 +138,8 @@ pub struct SetupProviderRequest {
     #[serde(default)]
     pub codex_auth_file: Option<String>,
     #[serde(default)]
+    pub opencode_auth_method: Option<SetupOpencodeAuthMethod>,
+    #[serde(default)]
     pub github_auth_method: Option<SetupGithubAuthMethod>,
 }
 
@@ -178,6 +181,7 @@ pub enum SetupProviderKind {
     AnthropicCompatible,
     OpenaiCompatible,
     OpenaiCodexOauth,
+    OpenCodeConsole,
     GithubCopilot,
     Ollama,
     OllamaCloud,
@@ -199,6 +203,13 @@ pub enum SetupGithubAuthMethod {
     DeviceLogin,
     ManualToken,
     EnvToken,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupOpencodeAuthMethod {
+    DeviceLogin,
+    ExistingAuthFile,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,20 +270,28 @@ pub enum PendingSetupProviderAuthFlow {
         user_code: String,
         expires_at_ms: i64,
     },
+    OpenCodeDevice {
+        flow_id: String,
+        device_code: String,
+        server: String,
+        expires_at_ms: i64,
+    },
 }
 
 impl PendingSetupProviderAuthFlow {
     pub fn flow_id(&self) -> &str {
         match self {
-            Self::GithubDevice { flow_id, .. } | Self::CodexDevice { flow_id, .. } => flow_id,
+            Self::GithubDevice { flow_id, .. }
+            | Self::CodexDevice { flow_id, .. }
+            | Self::OpenCodeDevice { flow_id, .. } => flow_id,
         }
     }
 
     pub const fn expires_at_ms(&self) -> i64 {
         match self {
-            Self::GithubDevice { expires_at_ms, .. } | Self::CodexDevice { expires_at_ms, .. } => {
-                *expires_at_ms
-            }
+            Self::GithubDevice { expires_at_ms, .. }
+            | Self::CodexDevice { expires_at_ms, .. }
+            | Self::OpenCodeDevice { expires_at_ms, .. } => *expires_at_ms,
         }
     }
 
@@ -465,6 +484,9 @@ pub async fn run_setup_provider_auth(
         SetupProviderKind::GithubCopilot => Err(miette!(
             "GitHub Copilot device login must be started before it can be completed"
         )),
+        SetupProviderKind::OpenCodeConsole => {
+            run_opencode_setup_provider_auth(&request.provider).await
+        }
         SetupProviderKind::Openai
         | SetupProviderKind::AnthropicCompatible
         | SetupProviderKind::OpenaiCompatible
@@ -500,6 +522,7 @@ pub async fn start_setup_provider_auth(
     match request.provider.kind {
         SetupProviderKind::OpenaiCodexOauth => start_codex_device_auth().await,
         SetupProviderKind::GithubCopilot => start_github_device_auth().await,
+        SetupProviderKind::OpenCodeConsole => start_opencode_device_auth().await,
         _ => Err(miette!(
             "selected provider type does not support device authentication"
         )),
@@ -530,6 +553,14 @@ pub async fn complete_setup_provider_auth(
                 ..
             },
         ) => complete_codex_device_auth(&request.provider, device_auth_id, user_code).await,
+        (
+            SetupProviderKind::OpenCodeConsole,
+            PendingSetupProviderAuthFlow::OpenCodeDevice {
+                device_code,
+                server,
+                ..
+            },
+        ) => complete_opencode_device_auth(&request.provider, &server, device_code).await,
         _ => Err(miette!(
             "setup authentication flow does not match the selected provider"
         )),
@@ -580,6 +611,7 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
             keep_alive: None,
             codex_auth_method: None,
             codex_auth_file: None,
+            opencode_auth_method: None,
             github_auth_method: None,
         },
         ProviderConfig::GithubCopilot { github_token } => SetupProviderRequest {
@@ -590,6 +622,7 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
             keep_alive: None,
             codex_auth_method: None,
             codex_auth_file: None,
+            opencode_auth_method: None,
             github_auth_method: Some(if looks_like_env_reference(github_token) {
                 SetupGithubAuthMethod::EnvToken
             } else {
@@ -607,6 +640,18 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
             keep_alive: None,
             codex_auth_method: Some(SetupCodexAuthMethod::ExistingAuthFile),
             codex_auth_file: Some(auth_file.clone()),
+            opencode_auth_method: None,
+            github_auth_method: None,
+        },
+        ProviderConfig::OpenCodeConsoleOauth { base_url, .. } => SetupProviderRequest {
+            kind: SetupProviderKind::OpenCodeConsole,
+            name: name.to_string(),
+            api_key: None,
+            base_url: base_url.clone(),
+            keep_alive: None,
+            codex_auth_method: None,
+            codex_auth_file: None,
+            opencode_auth_method: Some(SetupOpencodeAuthMethod::ExistingAuthFile),
             github_auth_method: None,
         },
         ProviderConfig::OpenaiCompatible {
@@ -619,6 +664,7 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
             keep_alive: None,
             codex_auth_method: None,
             codex_auth_file: None,
+            opencode_auth_method: None,
             github_auth_method: None,
         },
         ProviderConfig::AnthropicCompatible {
@@ -631,6 +677,7 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
             keep_alive: None,
             codex_auth_method: None,
             codex_auth_file: None,
+            opencode_auth_method: None,
             github_auth_method: None,
         },
         ProviderConfig::Ollama {
@@ -655,6 +702,7 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
                 keep_alive: keep_alive.clone(),
                 codex_auth_method: None,
                 codex_auth_file: None,
+                opencode_auth_method: None,
                 github_auth_method: None,
             }
         }
@@ -918,6 +966,9 @@ fn provider_from_setup_legacy(
         SetupProviderKind::OpenaiCodexOauth => Err(miette!(
             "legacy Codex OAuth setup requires an imported Daat auth file"
         )),
+        SetupProviderKind::OpenCodeConsole => Err(miette!(
+            "OpenCode Console OAuth setup requires a completed device login"
+        )),
         SetupProviderKind::GithubCopilot => Ok(ProviderConfig::GithubCopilot {
             github_token: api_key,
         }),
@@ -953,6 +1004,12 @@ fn provider_from_setup_provider(provider: &SetupProviderRequest) -> Result<Provi
         SetupProviderKind::OpenaiCodexOauth => Ok(ProviderConfig::OpenaiCodexOauth {
             base_url: optional_normalized_url(base_url),
             auth_file: required_codex_auth_file(provider)?,
+        }),
+        SetupProviderKind::OpenCodeConsole => Ok(ProviderConfig::OpenCodeConsoleOauth {
+            base_url: optional_normalized_url(base_url),
+            auth_file: crate::providers::opencode_auth_file_path()
+                .display()
+                .to_string(),
         }),
         SetupProviderKind::GithubCopilot => Ok(ProviderConfig::GithubCopilot {
             github_token: required_string(&api_key, "provider.github_token")?,
@@ -1302,6 +1359,82 @@ async fn complete_codex_device_auth(
         auth_file: Some(auth_file.display().to_string()),
         message: "OpenAI Codex device login completed".to_string(),
     })
+}
+
+async fn run_opencode_setup_provider_auth(
+    provider: &SetupProviderRequest,
+) -> Result<SetupProviderAuthResponse> {
+    match provider
+        .opencode_auth_method
+        .unwrap_or(SetupOpencodeAuthMethod::DeviceLogin)
+    {
+        SetupOpencodeAuthMethod::ExistingAuthFile => {
+            let auth_file = crate::providers::opencode_auth_file_path();
+            if auth_file.exists() {
+                Ok(SetupProviderAuthResponse {
+                    api_key: None,
+                    auth_file: Some(auth_file.display().to_string()),
+                    message: "Existing OpenCode Console login is ready".to_string(),
+                })
+            } else {
+                Err(miette!(
+                    "OpenCode Console login is not set up yet; run the device login first"
+                ))
+            }
+        }
+        SetupOpencodeAuthMethod::DeviceLogin => Err(miette!(
+            "OpenCode Console device login must be started before it can be completed"
+        )),
+    }
+}
+
+async fn start_opencode_device_auth()
+-> Result<(SetupProviderAuthStartResponse, PendingSetupProviderAuthFlow)> {
+    let server = OPENCODE_OAUTH_DEFAULT_SERVER;
+    let device = crate::providers::opencode_start_device_code(server).await?;
+    let expires_at_ms = chrono::Utc::now().timestamp_millis()
+        + i64::try_from(device.expires_in_secs)
+            .unwrap_or(600)
+            .saturating_mul(1000);
+    let flow_id = Uuid::new_v4().to_string();
+    let _ = open_url(&device.verification_url);
+    Ok((
+        SetupProviderAuthStartResponse {
+            flow_id: flow_id.clone(),
+            provider_kind: SetupProviderKind::OpenCodeConsole,
+            verification_url: device.verification_url,
+            user_code: device.user_code,
+            expires_at_ms,
+            interval_secs: device.interval_secs,
+        },
+        PendingSetupProviderAuthFlow::OpenCodeDevice {
+            flow_id,
+            device_code: device.device_code,
+            server: server.to_string(),
+            expires_at_ms,
+        },
+    ))
+}
+
+async fn complete_opencode_device_auth(
+    _provider: &SetupProviderRequest,
+    server: &str,
+    device_code: String,
+) -> Result<SetupProviderAuthResponse> {
+    use crate::providers::OpenCodeDevicePoll;
+    match crate::providers::opencode_poll_device_token(server, &device_code).await? {
+        OpenCodeDevicePoll::Pending => Err(miette!("OpenCode authorization is still pending")),
+        OpenCodeDevicePoll::SlowDown => Err(miette!("OpenCode authorization is still pending")),
+        OpenCodeDevicePoll::Ready(tokens) => {
+            let auth_file = crate::providers::opencode_auth_file_path();
+            crate::providers::write_opencode_oauth_tokens(&auth_file, &tokens).await?;
+            Ok(SetupProviderAuthResponse {
+                api_key: None,
+                auth_file: Some(auth_file.display().to_string()),
+                message: "OpenCode Console device login completed".to_string(),
+            })
+        }
+    }
 }
 
 async fn import_codex_auth_for_provider(source_auth_file: PathBuf) -> Result<PathBuf> {
@@ -1837,6 +1970,21 @@ fn provider_error(name: &str, provider: &ProviderConfig) -> Option<String> {
                 ))
             }
         }
+        ProviderConfig::OpenCodeConsoleOauth { auth_file, .. } => {
+            let auth_file = if auth_file.trim().is_empty() {
+                crate::providers::opencode_auth_file_path()
+            } else {
+                PathBuf::from(auth_file)
+            };
+            if auth_file.exists() {
+                None
+            } else {
+                Some(format!(
+                    "provider '{name}' is missing OpenCode Console OAuth auth file {}; log in with the device flow",
+                    auth_file.display()
+                ))
+            }
+        }
         ProviderConfig::OpenaiCompatible {
             base_url, api_key, ..
         } => {
@@ -2185,6 +2333,7 @@ model_id = "gpt-4.1-mini"
             keep_alive: None,
             codex_auth_method: Some(SetupCodexAuthMethod::ImportAuthFile),
             codex_auth_file: Some(source_auth_file.display().to_string()),
+            opencode_auth_method: None,
             github_auth_method: None,
         };
         prepare_setup_provider_credential(&provider)
