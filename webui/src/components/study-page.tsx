@@ -7,6 +7,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Spinner } from "@/components/ui/spinner";
 import {
   ensureStudySession,
@@ -98,6 +99,7 @@ export function StudyPage({
   const [transferMode, setTransferMode] = useState<"import" | "export" | null>(
     null,
   );
+  const isBelowLg = useIsBelowLg();
 
   const mockGraphRef = useRef(mockGraph);
   mockGraphRef.current = mockGraph;
@@ -407,52 +409,47 @@ export function StudyPage({
       </div>
 
       <aside className="hidden w-[420px] shrink-0 flex-col border-l bg-background lg:flex">
-        <div className="flex items-center gap-1 border-b px-2 py-2">
-          <Button
-            type="button"
-            size="sm"
-            variant={activeTab === "overview" ? "secondary" : "ghost"}
-            onClick={() => setActiveTab("overview")}
-          >
-            {t("study.overviewTab")}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant={activeTab === "chat" ? "secondary" : "ghost"}
-            onClick={() => setActiveTab("chat")}
-          >
-            {t("study.chatTab")}
-          </Button>
-          {error ? (
-            <span
-              className="ml-auto truncate text-xs text-destructive"
-              title={error}
-            >
-              {error}
-            </span>
-          ) : null}
-        </div>
+        <StudySidePanel
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          error={error}
+          detail={detail}
+          selectedSummary={selectedSummary}
+          detailLoading={detailLoading}
+          onSelectNode={handleSelectNode}
+          sessionId={sessionId}
+          mockSnapshot={mockSnapshot}
+          onImportGraph={() => setTransferMode("import")}
+          onExportGraph={() => setTransferMode("export")}
+        />
+      </aside>
 
-        <div className="min-h-0 flex-1">
-          {activeTab === "overview" ? (
-            <StudyOverviewPanel
+      <Sheet
+        open={isBelowLg && selectedNodeId !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            handleSelectNode(null);
+          }
+        }}
+      >
+        <SheetContent side="bottom" className="max-h-[85svh] p-0">
+          <div className="flex h-[70svh] min-h-0 flex-col">
+            <StudySidePanel
+              activeTab={activeTab}
+              onTabChange={setActiveTab}
+              error={error}
               detail={detail}
-              summary={selectedSummary}
-              loading={detailLoading}
+              selectedSummary={selectedSummary}
+              detailLoading={detailLoading}
               onSelectNode={handleSelectNode}
-              onClearFocus={() => handleSelectNode(null)}
-            />
-          ) : (
-            <StudyChatPanel
               sessionId={sessionId}
               mockSnapshot={mockSnapshot}
               onImportGraph={() => setTransferMode("import")}
               onExportGraph={() => setTransferMode("export")}
             />
-          )}
-        </div>
-      </aside>
+          </div>
+        </SheetContent>
+      </Sheet>
 
       {transferMode ? (
         <StudyTransferDialog
@@ -486,6 +483,98 @@ function StudyCenteredState({ children }: { children: ReactNode }) {
   );
 }
 
+function StudySidePanel({
+  activeTab,
+  onTabChange,
+  error,
+  detail,
+  selectedSummary,
+  detailLoading,
+  onSelectNode,
+  sessionId,
+  mockSnapshot,
+  onImportGraph,
+  onExportGraph,
+}: {
+  activeTab: "overview" | "chat";
+  onTabChange: (tab: "overview" | "chat") => void;
+  error: string | null;
+  detail: StudyNodeDetail | null;
+  selectedSummary: StudyNodeSummary | null;
+  detailLoading: boolean;
+  onSelectNode: (nodeId: string | null) => void;
+  sessionId: string | null;
+  mockSnapshot?: DashboardSnapshot;
+  onImportGraph: () => void;
+  onExportGraph: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <div className="flex items-center gap-1 border-b px-2 py-2">
+        <span className="px-2 font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+          {t("navigation.study")}
+        </span>
+        <Button
+          type="button"
+          size="sm"
+          variant={activeTab === "overview" ? "secondary" : "ghost"}
+          onClick={() => onTabChange("overview")}
+        >
+          {t("study.overviewTab")}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={activeTab === "chat" ? "secondary" : "ghost"}
+          onClick={() => onTabChange("chat")}
+        >
+          {t("study.chatTab")}
+        </Button>
+        {error ? (
+          <span className="ml-auto truncate text-xs text-destructive" title={error}>
+            {error}
+          </span>
+        ) : null}
+      </div>
+
+      <div className="min-h-0 flex-1">
+        {activeTab === "overview" ? (
+          <StudyOverviewPanel
+            detail={detail}
+            summary={selectedSummary}
+            loading={detailLoading}
+            onSelectNode={onSelectNode}
+            onClearFocus={() => onSelectNode(null)}
+          />
+        ) : (
+          <StudyChatPanel
+            sessionId={sessionId}
+            mockSnapshot={mockSnapshot}
+            onImportGraph={onImportGraph}
+            onExportGraph={onExportGraph}
+          />
+        )}
+      </div>
+    </>
+  );
+}
+
+function useIsBelowLg() {
+  const [below, setBelow] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 1023px)").matches,
+  );
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 1023px)");
+    const onChange = () => setBelow(mediaQuery.matches);
+    mediaQuery.addEventListener("change", onChange);
+    setBelow(mediaQuery.matches);
+    return () => mediaQuery.removeEventListener("change", onChange);
+  }, []);
+  return below;
+}
 function StudyChatPanel({
   sessionId,
   mockSnapshot,

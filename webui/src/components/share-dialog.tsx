@@ -13,7 +13,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Spinner } from "@/components/ui/spinner";
 import {
@@ -92,6 +91,116 @@ export function ShareDialogHost({
   );
 }
 
+const PIN_LENGTH = 4;
+
+function emptyPin(): string[] {
+  return Array.from({ length: PIN_LENGTH }, () => "");
+}
+
+function PinInput({
+  digits,
+  onChange,
+  disabled,
+  invalid,
+  label,
+}: {
+  digits: string[];
+  onChange: (digits: string[]) => void;
+  disabled?: boolean;
+  invalid?: boolean;
+  label: string;
+}) {
+  const inputsRef = useRef<Array<HTMLInputElement | null>>([]);
+
+  function focusInput(index: number) {
+    inputsRef.current[Math.max(0, Math.min(index, PIN_LENGTH - 1))]?.focus();
+  }
+
+  function setDigit(index: number, raw: string) {
+    const digit = raw.replace(/\D/g, "").slice(-1);
+    const next = digits.slice();
+    next[index] = digit;
+    onChange(next);
+    if (digit) {
+      focusInput(index + 1);
+    }
+  }
+
+  function handlePaste(event: React.ClipboardEvent<HTMLInputElement>) {
+    const pasted = event.clipboardData
+      .getData("text")
+      .replace(/\D/g, "")
+      .slice(0, PIN_LENGTH);
+    if (!pasted) {
+      return;
+    }
+    event.preventDefault();
+    const next = emptyPin();
+    for (let index = 0; index < pasted.length; index += 1) {
+      next[index] = pasted[index];
+    }
+    onChange(next);
+    focusInput(pasted.length);
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>, index: number) {
+    if (event.key === "Backspace") {
+      if (digits[index]) {
+        return;
+      }
+      if (index > 0) {
+        event.preventDefault();
+        const next = digits.slice();
+        next[index - 1] = "";
+        onChange(next);
+        focusInput(index - 1);
+      }
+      return;
+    }
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      focusInput(index - 1);
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      focusInput(index + 1);
+    }
+  }
+
+  return (
+    <div role="group" aria-label={label} className="flex gap-2.5">
+      {digits.map((digit, index) => (
+        <input
+          // eslint-disable-next-line react/no-array-index-key
+          key={index}
+          ref={(node) => {
+            inputsRef.current[index] = node;
+          }}
+          type="text"
+          inputMode="numeric"
+          autoComplete={index === 0 ? "one-time-code" : "off"}
+          maxLength={1}
+          value={digit}
+          disabled={disabled}
+          aria-label={`${label} ${index + 1}`}
+          aria-invalid={invalid}
+          autoFocus={index === 0}
+          onChange={(event) => setDigit(index, event.target.value)}
+          onKeyDown={(event) => handleKeyDown(event, index)}
+          onPaste={handlePaste}
+          onFocus={(event) => event.target.select()}
+          className={cn(
+            "h-16 min-w-0 flex-1 rounded-sm border border-input bg-background text-center font-mono text-3xl tabular-nums text-foreground outline-none transition-colors",
+            "focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
+            "disabled:pointer-events-none disabled:opacity-50",
+            invalid && "border-destructive aria-invalid:ring-destructive/20",
+          )}
+        />
+      ))}
+    </div>
+  );
+}
+
 function ShareModeGate({
   shareId,
   onUnlocked,
@@ -100,12 +209,14 @@ function ShareModeGate({
   onUnlocked: () => void;
 }) {
   const { t } = useTranslation();
-  const [pin, setPin] = useState("");
+  const [digits, setDigits] = useState<string[]>(emptyPin);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const pin = digits.join("");
+  const pinComplete = pin.length === PIN_LENGTH;
 
   async function submit() {
-    if (isSubmitting) {
+    if (isSubmitting || !pinComplete) {
       return;
     }
     setIsSubmitting(true);
@@ -124,48 +235,70 @@ function ShareModeGate({
       setError(
         submitError instanceof Error ? submitError.message : String(submitError),
       );
+      setDigits(emptyPin());
     } finally {
       setIsSubmitting(false);
     }
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-background p-6 text-foreground">
-      <form
-        className="w-full max-w-sm space-y-4 rounded-lg border border-border p-6"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void submit();
-        }}
-      >
-        <h1 className="text-lg font-semibold">{t("share.gateTitle")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("share.gateDescription")}
-        </p>
-        <div className="space-y-2">
-          <Label htmlFor="share-pin">{t("share.pinLabel")}</Label>
-          <Input
-            id="share-pin"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            maxLength={4}
-            value={pin}
-            onChange={(event) =>
-              setPin(event.target.value.replace(/\D/g, "").slice(0, 4))
-            }
-            className="text-center text-2xl tracking-[0.5em]"
-          />
+    <main className="flex min-h-screen w-full flex-col bg-background text-foreground lg:flex-row">
+      <div className="flex flex-col justify-start gap-10 p-8 md:p-12 lg:flex-1 lg:justify-between lg:p-16">
+        <span className="text-sm font-semibold tracking-tight">Daat Locus</span>
+        <div className="flex flex-col gap-5">
+          <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+            Shared session
+          </span>
+          <h1 className="text-4xl font-medium leading-tight tracking-tight md:text-5xl">
+            {t("share.gateTitle")}
+          </h1>
+          <p className="max-w-md text-lg leading-relaxed text-muted-foreground">
+            {t("share.gateDescription")}
+          </p>
         </div>
-        {error ? (
-          <Alert variant="destructive">
-            <AlertDescription className="text-xs">{error}</AlertDescription>
-          </Alert>
-        ) : null}
-        <Button type="submit" className="w-full" disabled={pin.length !== 4 || isSubmitting}>
-          {isSubmitting ? <Spinner /> : null}
-          {t("share.unlock")}
-        </Button>
-      </form>
+        <span className="hidden font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground lg:block">
+          {t("share.pinLabel")}
+        </span>
+      </div>
+
+      <div className="flex items-center bg-muted/40 p-8 md:p-12 lg:flex-1 lg:p-16">
+        <form
+          className="w-full max-w-sm space-y-6"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
+          }}
+        >
+          <div className="space-y-3">
+            <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+              {t("share.pinLabel")}
+            </span>
+            <PinInput
+              digits={digits}
+              onChange={(next) => {
+                setDigits(next);
+                setError(null);
+              }}
+              disabled={isSubmitting}
+              invalid={Boolean(error)}
+              label={t("share.pinLabel")}
+            />
+          </div>
+          {error ? (
+            <Alert variant="destructive">
+              <AlertDescription className="text-xs">{error}</AlertDescription>
+            </Alert>
+          ) : null}
+          <Button
+            type="submit"
+            className="w-full"
+            disabled={!pinComplete || isSubmitting}
+          >
+            {isSubmitting ? <Spinner data-icon="inline-start" /> : null}
+            {t("share.unlock")}
+          </Button>
+        </form>
+      </div>
     </main>
   );
 }
@@ -326,10 +459,8 @@ function ShareDialog({
 
         {stage === "select" ? (
           <div className="space-y-3">
-            <div className="flex items-center justify-between rounded-md border border-border p-3">
-              <div>
-                <p className="text-sm font-medium">{t("share.unrestrictedLabel")}</p>
-              </div>
+            <div className="flex items-center justify-between gap-4 rounded-sm border border-border p-3">
+              <p className="text-sm font-medium">{t("share.unrestrictedLabel")}</p>
               <Switch checked={unrestricted} onCheckedChange={setUnrestricted} />
             </div>
             {!unrestricted ? (
@@ -355,8 +486,8 @@ function ShareDialog({
                       : t("share.selectAll")}
                   </Button>
                 </div>
-                <div className="max-h-64 space-y-1 overflow-y-auto">
-                  {eligibleSessions.map((session) => {
+                <div className="max-h-64 divide-y divide-border/60 overflow-y-auto rounded-sm border border-border">
+                  {eligibleSessions.map((session, index) => {
                     const checked = selected.includes(session.session_id);
                     return (
                       <button
@@ -370,16 +501,22 @@ function ShareDialog({
                           )
                         }
                         className={cn(
-                          "flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-sm",
-                          checked
-                            ? "border-primary/60 bg-primary/5"
-                            : "border-border",
+                          "flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition-colors",
+                          checked ? "bg-primary/5" : "hover:bg-muted/50",
                         )}
                       >
-                        <span className="truncate">
+                        <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                          {String(index + 1).padStart(2, "0")}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">
                           {session.title ?? t("share.untitledSession")}
                         </span>
-                        {checked ? <CheckIcon className="h-4 w-4" /> : null}
+                        {checked ? (
+                          <CheckIcon
+                            className="h-4 w-4 shrink-0 text-foreground"
+                            aria-hidden="true"
+                          />
+                        ) : null}
                       </button>
                     );
                   })}
@@ -546,39 +683,57 @@ function ShareDetails({
   const seconds = Math.floor((remainingMs % 60_000) / 1000);
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-col items-center gap-2">
-        <p className="text-xs uppercase tracking-wide text-muted-foreground">
-          {t("share.pinHeading")}
-        </p>
-        <p className="font-mono text-5xl font-semibold tracking-[0.3em]">
-          {share.pin}
-        </p>
-      </div>
-      {qrDataUrl ? (
-        <div className="flex justify-center">
-          <img
-            src={qrDataUrl}
-            alt={t("share.qrAlt")}
-            className="h-48 w-48 rounded-md border border-border bg-white p-2"
-          />
+    <div className="space-y-5">
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-[auto_1fr]">
+        <div className="flex flex-row items-center gap-5 sm:flex-col sm:items-start">
+          <div className="flex flex-col gap-2">
+            <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+              {t("share.pinHeading")}
+            </span>
+            <span className="font-mono text-4xl font-medium leading-none tracking-[0.3em] tabular-nums">
+              {share.pin}
+            </span>
+          </div>
+          {qrDataUrl ? (
+            <img
+              src={qrDataUrl}
+              alt={t("share.qrAlt")}
+              className="h-32 w-32 shrink-0 rounded-sm border border-border bg-white p-2"
+            />
+          ) : null}
         </div>
-      ) : null}
-      <div className="flex items-center gap-2">
-        <Input readOnly value={url ?? ""} className="font-mono text-xs" />
-        <Button type="button" size="icon" variant="outline" onClick={() => void copyLink()}>
-          {copied ? <CheckIcon className="h-4 w-4" /> : <CopyIcon className="h-4 w-4" />}
-        </Button>
+
+        <div className="flex flex-col justify-center gap-3">
+          <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+            link
+          </span>
+          <div className="flex items-center gap-2">
+            <Input readOnly value={url ?? ""} className="font-mono text-xs" />
+            <Button
+              type="button"
+              variant="outline"
+              className="shrink-0 gap-1.5"
+              onClick={() => void copyLink()}
+            >
+              {copied ? (
+                <CheckIcon className="h-4 w-4" />
+              ) : (
+                <CopyIcon className="h-4 w-4" />
+              )}
+              {copied ? "Copied" : "Copy"}
+            </Button>
+          </div>
+          <p className="font-mono text-[11px] uppercase tracking-[0.18em] tabular-nums text-muted-foreground">
+            {t("share.countdown", {
+              minutes,
+              seconds: String(seconds).padStart(2, "0"),
+            })}
+          </p>
+        </div>
       </div>
-      <p className="text-center text-xs text-muted-foreground">
-        {t("share.countdown", {
-          minutes,
-          seconds: String(seconds).padStart(2, "0"),
-        })}
-      </p>
       <DialogFooter>
         <Button type="button" variant="ghost" onClick={onRetry}>
-          <RefreshCwIcon className="mr-1 h-4 w-4" />
+          <RefreshCwIcon className="h-4 w-4" />
           {t("share.regenerate")}
         </Button>
       </DialogFooter>
@@ -615,7 +770,7 @@ export function ShareEntryButton({
     <button
       type="button"
       className={cn(
-        "inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground",
+        "relative inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors after:absolute after:-inset-x-1 after:-inset-y-2 hover:bg-muted/60 hover:text-foreground",
         className,
       )}
       aria-label={label ?? t("share.open")}

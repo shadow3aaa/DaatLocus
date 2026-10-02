@@ -56,7 +56,7 @@ describe("ArtifactCard loopback handling", () => {
       }),
     );
 
-    expect(html).toContain("loopback address (localhost)");
+    expect(html).toContain("Loopback address (localhost)");
     expect(html).toContain("http://localhost:5173/");
     expect(html).not.toContain("<iframe");
   });

@@ -29,7 +29,8 @@ import {
 } from "@/lib/study-circle-layout";
 import { cn } from "@/lib/utils";
 
-const LABEL_ZOOM_THRESHOLD = 1.12;
+const LABEL_ZOOM_THRESHOLD = 0.4;
+const MOBILE_LABEL_ZOOM_THRESHOLD = 0.2;
 const FOCUS_TRANSITION_MS = 650;
 const ROTATION_APPROACH_PER_SECOND = 6;
 const ROTATION_ANGLE_EPSILON = 0.004;
@@ -45,6 +46,33 @@ type StudyPointNodeData = {
 
 type StudyPointFlowNode = FlowNode<StudyPointNodeData>;
 
+/**
+ * Touch/small-viewport detection for graph labels.
+ *
+ * The circle layout scales the whole graph down to fit the viewport, so on
+ * phones the zoom can drop below the label threshold and every label vanishes.
+ * On those viewports labels stay visible and keep a constant screen size
+ * instead of being counter-scaled (which used to push them off-screen).
+ */
+function useIsTouchViewport() {
+  const [isTouch, setIsTouch] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    return window.matchMedia("(max-width: 767px), (pointer: coarse)").matches;
+  });
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 767px), (pointer: coarse)");
+    const onChange = () => setIsTouch(query.matches);
+    query.addEventListener("change", onChange);
+    setIsTouch(query.matches);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+
+  return isTouch;
+}
+
 type LayoutTransition = {
   from: StudyCircleLayout;
   to: StudyCircleLayout;
@@ -56,10 +84,15 @@ const StudyPointNode = memo(function StudyPointNode({
 }: NodeProps<StudyPointFlowNode>) {
   const { zoom } = useViewport();
   const [hovered, setHovered] = useState(false);
+  const isTouchViewport = useIsTouchViewport();
   const showLabel =
-    hovered || data.selected || data.matched || zoom >= LABEL_ZOOM_THRESHOLD;
+    hovered ||
+    data.selected ||
+    data.matched ||
+    zoom >= (isTouchViewport ? MOBILE_LABEL_ZOOM_THRESHOLD : LABEL_ZOOM_THRESHOLD);
   const diameter = data.radius * 2;
   const glow = `color-mix(in oklab, ${data.color} 32%, transparent)`;
+  const labelScale = isTouchViewport ? 1 : 1 / zoom;
 
   return (
     <div
@@ -85,9 +118,13 @@ const StudyPointNode = memo(function StudyPointNode({
       {showLabel ? (
         <span
           className={cn(
-            "pointer-events-none absolute top-full mt-1 max-w-40 truncate whitespace-nowrap text-[11px] leading-4",
+            "pointer-events-none absolute top-full left-1/2 mt-1 max-w-[6rem] -translate-x-1/2 truncate whitespace-nowrap text-[11px] leading-4 md:max-w-52",
             data.selected ? "text-foreground" : "text-muted-foreground",
           )}
+          style={{
+            transform: `translateX(-50%) scale(${labelScale})`,
+            transformOrigin: "top center",
+          }}
         >
           {data.title}
         </span>
@@ -497,7 +534,7 @@ function StudyEdgeLayer({
                 understandingById.get(edge.to),
               )}
               strokeWidth={1}
-              opacity={dimmed ? 0.06 : 0.5}
+              opacity={dimmed ? 0.08 : 0.65}
             />
           );
         })}

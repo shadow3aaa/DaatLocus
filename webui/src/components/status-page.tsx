@@ -1804,7 +1804,6 @@ function AgentChatModelBar({ snapshot }: { snapshot: DashboardSnapshot | null })
 
   const modelEntries = (setupConfig?.models ?? []).map((model) => ({
     name: model.name,
-    modelId: model.model_id,
   }));
 
   return (
@@ -1853,12 +1852,8 @@ function AgentChatModelBar({ snapshot }: { snapshot: DashboardSnapshot | null })
                   <DropdownMenuRadioItem
                     key={model.name}
                     value={model.name}
-                    className="gap-2"
                   >
                     <span className="min-w-0 flex-1 truncate">{model.name}</span>
-                    <span className="truncate text-muted-foreground">
-                      {model.modelId}
-                    </span>
                   </DropdownMenuRadioItem>
                 ))}
               </DropdownMenuRadioGroup>
@@ -8531,7 +8526,7 @@ function AgentChatReplyActivityLine({
           <button
             type="button"
             onClick={handleCopyReply}
-            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[0.7rem] text-muted-foreground/60 transition-colors hover:bg-muted/50 hover:text-muted-foreground"
+            className="relative inline-flex items-center gap-1 rounded-md px-2 py-1 text-[0.7rem] text-muted-foreground/60 transition-colors after:absolute after:-inset-x-1 after:-inset-y-2 hover:bg-muted/50 hover:text-muted-foreground"
             aria-label={t("chat.copy")}
           >
             {hasCopiedReply ? (
@@ -8545,7 +8540,7 @@ function AgentChatReplyActivityLine({
             label={t("share.thisSession")}
             iconOnly
             iconClassName="h-3 w-3"
-            className="text-[0.7rem] text-muted-foreground/60 hover:bg-muted/50 hover:text-muted-foreground"
+            className="relative text-[0.7rem] text-muted-foreground/60 after:absolute after:-inset-x-1 after:-inset-y-2 hover:bg-muted/50 hover:text-muted-foreground"
           />
         </div>
       </>

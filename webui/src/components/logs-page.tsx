@@ -1,15 +1,13 @@
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import CodeMirror from "@uiw/react-codemirror";
-import type { Range } from "@codemirror/state";
-import { Decoration, EditorView } from "@codemirror/view";
-import { FileTextIcon, ListFilterIcon, SearchIcon } from "lucide-react";
+  ArrowDownToLineIcon,
+  FileTextIcon,
+  ListFilterIcon,
+  SearchIcon,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -39,122 +37,12 @@ import {
   type LogReadResponse,
   type LogSource,
 } from "@/lib/daemon-api";
+import { cn } from "@/lib/utils";
 
 const LOG_READ_LIMIT = 1_000;
 const FOLLOW_POLL_MS = 1_500;
 const MAX_RENDERED_LINES = 5_000;
 const LEVEL_FILTER_STORAGE_KEY = "daat-locus.logs.level-filter";
-
-const logEditorTheme = EditorView.theme({
-  "&": {
-    height: "100%",
-    backgroundColor: "transparent",
-    color: "var(--foreground)",
-    fontSize: "12px",
-  },
-  "&.cm-focused": {
-    outline: "none",
-  },
-  ".cm-editor": {
-    height: "100%",
-  },
-  ".cm-scroller": {
-    overflow: "auto",
-    scrollbarWidth: "thin",
-    scrollbarColor: "var(--border) transparent",
-  },
-  ".cm-scroller::-webkit-scrollbar": {
-    width: "10px",
-    height: "10px",
-  },
-  ".cm-scroller::-webkit-scrollbar-track": {
-    backgroundColor: "transparent",
-  },
-  ".cm-scroller::-webkit-scrollbar-thumb": {
-    backgroundColor: "var(--border)",
-    borderRadius: "5px",
-  },
-  ".cm-scroller::-webkit-scrollbar-thumb:hover": {
-    backgroundColor: "var(--muted-foreground)",
-  },
-  ".cm-content": {
-    fontFamily:
-      "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-    caretColor: "var(--foreground)",
-  },
-  ".cm-line": {
-    padding: "0 0.5rem",
-  },
-  ".cm-gutters": {
-    backgroundColor: "transparent",
-    color: "var(--muted-foreground)",
-    borderRight: "1px solid var(--border)",
-  },
-  ".cm-activeLine": {
-    backgroundColor: "var(--muted)",
-  },
-  ".cm-activeLineGutter": {
-    backgroundColor: "transparent",
-  },
-  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
-    backgroundColor: "var(--primary)",
-    opacity: "0.25",
-  },
-  ".cm-searchMatch": {
-    backgroundColor: "var(--primary)",
-    opacity: "0.3",
-  },
-  ".cm-searchMatch.cm-searchMatch-selected": {
-    backgroundColor: "var(--primary)",
-    opacity: "0.5",
-  },
-  ".log-ts": {
-    color: "var(--muted-foreground)",
-  },
-  ".log-target": {
-    color: "var(--primary)",
-  },
-  ".log-level-error": {
-    color: "var(--destructive)",
-    fontWeight: "600",
-  },
-  ".log-level-warn": {
-    color: "#f59e0b",
-  },
-  ".log-level-info": {
-    color: "#3b82f6",
-  },
-  ".log-level-debug": {
-    color: "var(--muted-foreground)",
-  },
-  ".log-level-trace": {
-    color: "var(--muted-foreground)",
-    opacity: "0.75",
-  },
-});
-
-const logEditorBasicSetup = {
-  lineNumbers: true,
-  highlightActiveLine: false,
-  highlightActiveLineGutter: false,
-  foldGutter: false,
-  dropCursor: false,
-  allowMultipleSelections: false,
-  indentOnInput: false,
-  bracketMatching: false,
-  closeBrackets: false,
-  autocompletion: false,
-  rectangularSelection: false,
-  crosshairCursor: false,
-  highlightSelectionMatches: false,
-  closeBracketsKeymap: false,
-  defaultKeymap: true,
-  searchKeymap: true,
-  historyKeymap: false,
-  foldKeymap: false,
-  completionKeymap: false,
-  lintKeymap: false,
-} as const;
 
 const LOG_LEVEL_FILTERS = [
   { value: "trace", label: "TRACE" },
@@ -200,7 +88,6 @@ type LogsPageProps = {
 };
 
 export function LogsPage({ mockData }: LogsPageProps = {}) {
-
   const { t } = useTranslation();
   const [sources, setSources] = useState<LogSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
@@ -216,11 +103,12 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
   const [levelFilter, setLevelFilter] = useState<LogLevelFilter>(
     readStoredLevelFilter,
   );
-  const editorViewRef = useRef<EditorView | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const selectedSource =
     sources.find((source) => source.id === selectedSourceId) ?? null;
   const isSearchVisible = isSearchOpen || query.trim().length > 0;
+  const normalizedQuery = query.trim().toLowerCase();
 
   const entries = useMemo(
     () => lines.map((line) => parseLogEntry(line, t("logs.blank"))),
@@ -228,8 +116,6 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
   );
 
   const filteredEntries = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-
     return entries.filter((entry) =>
       entryMatchesLevelFilter(entry, levelFilter) &&
       (!normalizedQuery ||
@@ -245,32 +131,15 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
           .toLowerCase()
           .includes(normalizedQuery)),
     );
-  }, [entries, levelFilter, query]);
+  }, [entries, levelFilter, normalizedQuery]);
 
-  const editorValue = useMemo(
-    () => filteredEntries.map((entry) => entry.raw).join("\n"),
-    [filteredEntries],
-  );
-
-  const logHighlightDecorations = useMemo(() => {
-    const ranges: Array<Range<Decoration>> = [];
-    let lineStart = 0;
-    for (const entry of filteredEntries) {
-      for (const span of logEntryHighlightSpans(entry)) {
-        if (span.to <= span.from) {
-          continue;
-        }
-        ranges.push(
-          Decoration.mark({ class: span.className }).range(
-            lineStart + span.from,
-            lineStart + span.to,
-          ),
-        );
-      }
-      lineStart += entry.raw.length + 1;
-    }
-    return Decoration.set(ranges, true);
-  }, [filteredEntries]);
+  const virtualizer = useVirtualizer({
+    count: filteredEntries.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 24,
+    overscan: 16,
+    getItemKey: (index) => filteredEntries[index]?.id ?? index,
+  });
 
   useEffect(() => {
     if (!isSearchVisible) {
@@ -367,24 +236,20 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
     return () => window.clearInterval(intervalId);
   }, [cursor, mockData, readLoadState, selectedSourceId]);
 
+  const scrollToLatest = useCallback(() => {
+    const lastIndex = filteredEntries.length - 1;
+    if (lastIndex >= 0) {
+      virtualizer.scrollToIndex(lastIndex, { align: "end" });
+    }
+  }, [filteredEntries.length, virtualizer]);
+
   useEffect(() => {
-    if (query.trim() || filteredEntries.length === 0) {
+    if (normalizedQuery || filteredEntries.length === 0) {
       return;
     }
-
-    const view = editorViewRef.current;
-    if (!view) {
-      return;
-    }
-
-    requestAnimationFrame(() => {
-      const lastLine = view.state.doc.line(view.state.doc.lines);
-      view.dispatch({
-        effects: EditorView.scrollIntoView(lastLine.from, { y: "end" }),
-        selection: { anchor: lastLine.from },
-      });
-    });
-  }, [filteredEntries.length, query]);
+    const frameId = window.requestAnimationFrame(scrollToLatest);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [filteredEntries.length, normalizedQuery, scrollToLatest]);
 
   useEffect(() => {
     try {
@@ -466,7 +331,6 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
     setCursor(response.next_cursor);
   }
 
-  // Log rows are rendered by the read-only CodeMirror viewer below.
   const emptyMessage = emptyStateMessage({
     sourceLoadState,
     sourceError,
@@ -486,163 +350,352 @@ export function LogsPage({ mockData }: LogsPageProps = {}) {
       aria-label={t("logs.pageAria")}
       className="flex h-screen flex-col overflow-hidden bg-background"
     >
-      <div className="fixed top-4 right-4 z-50 flex max-w-[calc(100vw-5rem)] items-center justify-end gap-2 md:top-6 md:right-6">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              disabled={sourceLoadState === "loading" && sources.length === 0}
-              aria-label={selectedSource?.label ?? t("logs.title")}
-              title={selectedSource?.label ?? t("logs.title")}
-              className="size-10 rounded-full border-border/60 bg-background/70 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
-            >
-              <FileTextIcon data-icon="inline-start" aria-hidden="true" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent className="w-72 max-w-[calc(100vw-2rem)]">
-            {sourceLoadState === "error" ? (
-              <>
-                <DropdownMenuLabel className="text-destructive">
-                  {sourceError ?? t("logs.sourceLoadFailed")}
-                </DropdownMenuLabel>
-                <DropdownMenuSeparator />
-              </>
-            ) : null}
-            <DropdownMenuRadioGroup
-              value={selectedSourceId ?? ""}
-              onValueChange={setSelectedSourceId}
-            >
-              {sources.map((source) => (
-                <DropdownMenuRadioItem
-                  key={source.id}
-                  value={source.id}
-                  className="items-start gap-3 py-2 pr-8"
-                >
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate font-medium">
-                      {source.label}
-                    </span>
-                    <span className="block truncate text-xs text-muted-foreground">
-                      {source.description}
-                    </span>
-                  </span>
-                  <Badge
-                    variant={source.exists ? "secondary" : "outline"}
-                    className="font-mono"
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pb-2 pl-14 pr-4 pt-3 md:px-6">
+        <div className="flex min-w-0 items-baseline gap-3">
+          <h1 className="text-base font-semibold tracking-tight">
+            {t("logs.title")}
+          </h1>
+          <span className="hidden truncate font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground sm:inline">
+            {selectedSource ? selectedSource.label : t("logs.noSourceSelected")}
+          </span>
+        </div>
+        <div className="flex shrink-0 items-center justify-end gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={sourceLoadState === "loading" && sources.length === 0}
+                aria-label={selectedSource?.label ?? t("logs.title")}
+                className="h-9 gap-2 border-border bg-background"
+              >
+                <FileTextIcon aria-hidden="true" />
+                <span className="hidden max-w-40 truncate md:inline">
+                  {selectedSource?.label ?? t("logs.title")}
+                </span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-72 max-w-[calc(100vw-2rem)]">
+              {sourceLoadState === "error" ? (
+                <>
+                  <DropdownMenuLabel className="text-destructive">
+                    {sourceError ?? t("logs.sourceLoadFailed")}
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                </>
+              ) : null}
+              <DropdownMenuRadioGroup
+                value={selectedSourceId ?? ""}
+                onValueChange={setSelectedSourceId}
+              >
+                {sources.map((source) => (
+                  <DropdownMenuRadioItem
+                    key={source.id}
+                    value={source.id}
+                    className="items-start gap-3 py-2 pr-8"
                   >
-                    {source.exists ? t("logs.live") : t("logs.missing")}
-                  </Badge>
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-medium">
+                        {source.label}
+                      </span>
+                      <span className="block truncate text-xs text-muted-foreground">
+                        {source.description}
+                      </span>
+                    </span>
+                    <Badge
+                      variant={source.exists ? "secondary" : "outline"}
+                      className="font-mono"
+                    >
+                      {source.exists ? t("logs.live") : t("logs.missing")}
+                    </Badge>
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
 
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                aria-label={t("logs.levelFilterAria", {
+                  level: displayLevel(levelFilter),
+                })}
+                className="h-9 gap-2 border-border bg-background"
+              >
+                <ListFilterIcon aria-hidden="true" />
+                <span className="hidden font-mono text-[11px] tracking-[0.18em] md:inline">
+                  {displayLevel(levelFilter)}
+                </span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-40">
+              <DropdownMenuRadioGroup
+                value={levelFilter}
+                onValueChange={(value) => {
+                  const nextLevel = logLevelFilterFromValue(value);
+                  if (nextLevel) {
+                    setLevelFilter(nextLevel);
+                  }
+                }}
+              >
+                {LOG_LEVEL_FILTERS.map((level) => (
+                  <DropdownMenuRadioItem key={level.value} value={level.value}>
+                    {level.label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {isSearchVisible ? (
+            <InputGroup className="h-9 w-40 min-w-0 overflow-hidden border-border bg-background sm:w-56 lg:w-72">
+              <InputGroupAddon align="inline-start">
+                <SearchIcon aria-hidden="true" />
+              </InputGroupAddon>
+              <InputGroupInput
+                ref={searchInputRef}
+                id="logs-search-input"
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onBlur={() => {
+                  if (!query.trim()) {
+                    setIsSearchOpen(false);
+                  }
+                }}
+                placeholder={t("logs.search")}
+                aria-label={t("logs.search")}
+              />
+            </InputGroup>
+          ) : (
             <Button
               type="button"
               variant="outline"
-              size="icon"
-              aria-label={displayLevel(levelFilter)}
-              title={displayLevel(levelFilter)}
-              className="size-10 rounded-full border-border/60 bg-background/70 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
-            >
-              <ListFilterIcon data-icon="inline-start" aria-hidden="true" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent className="w-40">
-            <DropdownMenuRadioGroup
-              value={levelFilter}
-              onValueChange={(value) => {
-                const nextLevel = logLevelFilterFromValue(value);
-                if (nextLevel) {
-                  setLevelFilter(nextLevel);
-                }
-              }}
-            >
-              {LOG_LEVEL_FILTERS.map((level) => (
-                <DropdownMenuRadioItem key={level.value} value={level.value}>
-                  {level.label}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
-
-        {isSearchVisible ? (
-          <InputGroup className="h-10 w-44 min-w-0 overflow-hidden rounded-full border-border/60 bg-background/70 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55 sm:w-56 lg:w-72">
-            <InputGroupAddon align="inline-start">
-              <SearchIcon aria-hidden="true" />
-            </InputGroupAddon>
-            <InputGroupInput
-              ref={searchInputRef}
-              id="logs-search-input"
-              type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              onBlur={() => {
-                if (!query.trim()) {
-                  setIsSearchOpen(false);
-                }
-              }}
-              placeholder={t("logs.search")}
               aria-label={t("logs.search")}
-            />
-          </InputGroup>
-        ) : null}
+              aria-controls="logs-search-input"
+              aria-expanded={isSearchVisible}
+              onClick={() => {
+                setIsSearchOpen(true);
+                window.requestAnimationFrame(() => {
+                  searchInputRef.current?.focus();
+                });
+              }}
+              className="size-9 border-border bg-background"
+            >
+              <SearchIcon aria-hidden="true" />
+            </Button>
+          )}
 
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          aria-label={t("logs.search")}
-          aria-controls="logs-search-input"
-          aria-expanded={isSearchVisible}
-          onClick={() => {
-            setIsSearchOpen(true);
-            window.requestAnimationFrame(() => {
-              searchInputRef.current?.focus();
-            });
-          }}
-          className="size-10 rounded-full border-border/60 bg-background/70 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
-        >
-          <SearchIcon data-icon="inline-start" aria-hidden="true" />
-        </Button>
-      </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label={t("logs.jumpToLatest")}
+            onClick={scrollToLatest}
+            className="size-9 border-border bg-background"
+          >
+            <ArrowDownToLineIcon aria-hidden="true" />
+          </Button>
+        </div>
+      </header>
 
-      <div className="relative min-h-0 flex-1 overflow-hidden px-3 pb-6 pt-20 md:px-6">
+      <div
+        ref={scrollRef}
+        className="min-h-0 flex-1 overflow-y-auto scrollbar-thin"
+      >
         {emptyMessage ? (
           <EmptyLogState title={t("logs.title")} message={emptyMessage} />
         ) : (
-          <CodeMirror
-            className="h-full"
-            value={editorValue}
-            readOnly
-            height="100%"
-            theme={logEditorTheme}
-            basicSetup={logEditorBasicSetup}
-            extensions={[
-              EditorView.decorations.of(logHighlightDecorations),
-            ]}
+          <div
+            role="list"
             aria-label={t("logs.pageAria")}
-            onCreateEditor={(view) => {
-              editorViewRef.current = view;
-            }}
-          />
+            className="relative w-full"
+            style={{ height: virtualizer.getTotalSize() }}
+          >
+            {virtualizer.getVirtualItems().map((virtualRow) => {
+              const entry = filteredEntries[virtualRow.index];
+              return (
+                <div
+                  key={virtualRow.key}
+                  ref={virtualizer.measureElement}
+                  data-index={virtualRow.index}
+                  className="absolute inset-x-0 top-0"
+                  style={{ transform: `translateY(${virtualRow.start}px)` }}
+                >
+                  <LogRow
+                    entry={entry}
+                    lineNumber={virtualRow.index + 1}
+                    query={normalizedQuery}
+                  />
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
+
+      <footer className="flex items-center justify-between gap-4 border-t border-border/70 px-4 py-2 md:px-6">
+        <span className="shrink-0 whitespace-nowrap font-mono text-[11px] uppercase tracking-[0.18em] tabular-nums text-muted-foreground">
+          {filteredEntries.length} / {entries.length}
+        </span>
+        <span className="min-w-0 truncate font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+          {selectedSource?.description ?? ""}
+        </span>
+      </footer>
     </section>
   );
 }
 
-// LogEntryRow was replaced by the read-only CodeMirror viewer.
+function LogRow({
+  entry,
+  lineNumber,
+  query,
+}: {
+  entry: LogEntry;
+  lineNumber: number;
+  query: string;
+}) {
+  const segments = logEntrySegments(entry);
+  const level = normalizeLevel(entry.level);
+
+  return (
+    <div
+      role="listitem"
+      className={cn(
+        "flex items-start gap-3 border-b border-border/40 px-3 py-1 font-mono text-xs leading-5 md:px-4",
+        "hover:bg-muted/40",
+        level === "error" && "bg-destructive/5",
+      )}
+    >
+      <span className="w-10 shrink-0 select-none pt-px text-right tabular-nums text-muted-foreground/50">
+        {lineNumber}
+      </span>
+      {segments.map((segment) =>
+        segment.kind === "timestamp" ? (
+          <span
+            key="timestamp"
+            className="hidden shrink-0 whitespace-nowrap text-muted-foreground/80 lg:inline"
+          >
+            {segment.text}
+          </span>
+        ) : segment.kind === "level" ? (
+          <span
+            key="level"
+            className={cn(
+              "w-[4.5rem] shrink-0 font-semibold tracking-wide",
+              logLevelTextClass(level),
+            )}
+          >
+            {segment.text}
+          </span>
+        ) : segment.kind === "target" ? (
+          <span
+            key="target"
+            className="hidden max-w-[14rem] shrink-0 truncate text-foreground/60 md:inline"
+            title={segment.text}
+          >
+            {segment.text}
+          </span>
+        ) : (
+          <span
+            key="message"
+            className="min-w-0 flex-1 whitespace-pre-wrap break-words text-foreground"
+          >
+            {highlightText(segment.text, query)}
+          </span>
+        ),
+      )}
+    </div>
+  );
+}
+
+/**
+ * Ordered render segments for one log entry. Structured fields are preferred;
+ * a line that was not parsed still exposes its raw text as a single message.
+ */
+export type LogSegment = {
+  kind: "timestamp" | "level" | "target" | "message";
+  text: string;
+};
+
+export function logEntrySegments(entry: LogEntry): LogSegment[] {
+  if (entry.timestamp || entry.level || entry.target) {
+    const segments: LogSegment[] = [];
+    if (entry.timestamp) {
+      segments.push({ kind: "timestamp", text: entry.timestamp });
+    }
+    if (entry.level) {
+      segments.push({ kind: "level", text: displayLevel(entry.level) });
+    }
+    if (entry.target) {
+      segments.push({ kind: "target", text: entry.target });
+    }
+    segments.push({ kind: "message", text: entry.message });
+    return segments;
+  }
+
+  const parsed = entry.raw ? parseStructuredLogLine(entry.raw) : null;
+  if (!parsed) {
+    return [{ kind: "message", text: entry.message }];
+  }
+
+  const segments: LogSegment[] = [
+    { kind: "timestamp", text: parsed.timestamp },
+    { kind: "level", text: displayLevel(parsed.level) },
+  ];
+  if (parsed.target) {
+    segments.push({ kind: "target", text: parsed.target });
+  }
+  segments.push({ kind: "message", text: parsed.message || entry.raw });
+  return segments;
+}
+
+function highlightText(text: string, query: string) {
+  if (!query) {
+    return text;
+  }
+
+  const lowerText = text.toLowerCase();
+  const parts: Array<string | React.ReactNode> = [];
+  let cursor = 0;
+  let matchIndex = lowerText.indexOf(query, cursor);
+  while (matchIndex !== -1) {
+    if (matchIndex > cursor) {
+      parts.push(text.slice(cursor, matchIndex));
+    }
+    parts.push(
+      <mark
+        key={`${matchIndex}-${parts.length}`}
+        className="rounded-sm bg-primary/25 text-foreground"
+      >
+        {text.slice(matchIndex, matchIndex + query.length)}
+      </mark>,
+    );
+    cursor = matchIndex + query.length;
+    matchIndex = lowerText.indexOf(query, cursor);
+  }
+  parts.push(text.slice(cursor));
+  return parts;
+}
+
+function logLevelTextClass(level: string | null | undefined): string {
+  switch (normalizeLevel(level)) {
+    case "error":
+      return "text-destructive";
+    case "warn":
+      return "text-amber-600 dark:text-amber-500";
+    case "info":
+      return "text-foreground/80";
+    default:
+      return "text-muted-foreground";
+  }
+}
 
 function EmptyLogState({ message, title }: { message: string; title: string }) {
   return (
-    <div className="absolute inset-0 flex items-center justify-center px-4">
+    <div className="flex h-full items-center justify-center px-4">
       <Empty className="max-w-md border border-dashed bg-card/60">
         <EmptyHeader>
           <EmptyTitle>{title}</EmptyTitle>
@@ -842,77 +895,6 @@ function parseLogEntry(line: LogLine, blankMessage: string): LogEntry {
   };
 }
 
-type LogHighlightSpan = {
-  from: number;
-  to: number;
-  className: string;
-};
-
-function logLevelHighlightClass(level: string | null | undefined): string | null {
-  switch (normalizeLevel(level)) {
-    case "error":
-      return "log-level-error";
-    case "warn":
-      return "log-level-warn";
-    case "info":
-      return "log-level-info";
-    case "debug":
-      return "log-level-debug";
-    case "trace":
-      return "log-level-trace";
-    default:
-      return null;
-  }
-}
-
-export function logEntryHighlightSpans(entry: LogEntry): LogHighlightSpan[] {
-  const raw = entry.raw;
-  if (!raw) {
-    return [];
-  }
-
-  const spans: LogHighlightSpan[] = [];
-  const pushSpan = (needle: string | null, className: string, searchFrom = 0) => {
-    if (!needle) {
-      return searchFrom;
-    }
-    const index = raw.indexOf(needle, searchFrom);
-    if (index !== -1) {
-      spans.push({ from: index, to: index + needle.length, className });
-    }
-    return index === -1 ? searchFrom : index + needle.length;
-  };
-
-  if (entry.timestamp || entry.level || entry.target) {
-    let searchFrom = pushSpan(entry.timestamp, "log-ts");
-    const levelClass = logLevelHighlightClass(entry.level);
-    const levelText = entry.level ? displayLevel(entry.level) : null;
-    searchFrom = levelClass
-      ? pushSpan(levelText, levelClass, searchFrom)
-      : pushSpan(levelText, "log-ts", searchFrom);
-    if (entry.target) {
-      pushSpan(entry.target, "log-target", searchFrom);
-    }
-    return spans;
-  }
-
-  const level = inferLevel(raw);
-  const inferred = logLevelHighlightClass(level);
-  if (inferred && level) {
-    pushSpan(displayLevel(level), inferred);
-  }
-  return spans;
-}
-
-function inferLevel(text: string): string | null {
-  const parsed = parseStructuredLogLine(text);
-  if (parsed) {
-    return normalizeLevel(parsed.level);
-  }
-  const match = text.match(/\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR)\b/);
-  return match ? normalizeLevel(match[1]) : null;
-}
-
 function normalizeLevel(level: string | null | undefined): string | null {
   if (!level) {
     return null;
@@ -994,8 +976,6 @@ function logLevelFilterFromValue(
       return null;
   }
 }
-
-// levelBadgeVariant and highlightText were removed with LogEntryRow.
 
 function readMockLogSource({
   mockData,

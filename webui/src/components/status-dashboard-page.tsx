@@ -7,6 +7,7 @@ import {
   useState,
   type DragEvent,
   type KeyboardEvent,
+  type PointerEvent,
   type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
@@ -224,6 +225,58 @@ export function StatusPage({ mockSummary }: StatusPageProps = {}) {
     setDropIntent(null);
   }
 
+  // Touch devices cannot fire HTML5 drag-and-drop, so a pointer drag on the
+  // handle reorders cards as well: start, track the card under the pointer,
+  // then commit on release.
+  function beginPointerReorder(
+    event: PointerEvent<HTMLButtonElement>,
+    cardId: StatusCardId,
+  ) {
+    if (event.pointerType === "mouse") {
+      return;
+    }
+    event.preventDefault();
+    setDraggedCardId(cardId);
+
+    const cardAtPoint = (x: number, y: number): StatusCardId | null => {
+      const element = document.elementFromPoint(x, y);
+      const cardElement = element?.closest<HTMLElement>("[data-status-card]");
+      return statusCardIdFromValue(cardElement?.dataset.statusCard);
+    };
+
+    const onMove = (moveEvent: globalThis.PointerEvent) => {
+      const target = cardAtPoint(moveEvent.clientX, moveEvent.clientY);
+      if (!target || target === cardId) {
+        setDropIntent(null);
+        return;
+      }
+      setDropIntent({
+        targetId: target,
+        placement: dropPlacementFromPoint(target, moveEvent.clientY),
+      });
+    };
+
+    const onUp = (upEvent: globalThis.PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+
+      const target = cardAtPoint(upEvent.clientX, upEvent.clientY);
+      if (target && target !== cardId) {
+        const placement = dropPlacementFromPoint(target, upEvent.clientY);
+        setCardOrder((current) =>
+          reorderStatusCards(current, cardId, target, placement),
+        );
+      }
+      setDraggedCardId(null);
+      setDropIntent(null);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }
+
   function handleKeyboardMove(
     event: KeyboardEvent<HTMLButtonElement>,
     cardId: StatusCardId,
@@ -247,6 +300,14 @@ export function StatusPage({ mockSummary }: StatusPageProps = {}) {
       aria-label={t("status.pageAria")}
       className="min-h-screen w-full px-6 pb-10 pt-20 md:pb-12 md:pt-8"
     >
+      <header className="mb-8 flex items-end justify-between gap-6 md:mb-10">
+        <h1 className="text-4xl font-medium leading-none tracking-tight md:text-5xl">
+          {t("status.pageAria")}
+        </h1>
+        <span className="hidden font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground sm:block">
+          {t("status.cards.contextComposition")} · {t("status.cards.tokenUsage")}
+        </span>
+      </header>
       {loadError ? (
         <Alert variant="destructive" className="mb-4">
           <TriangleAlertIcon aria-hidden="true" />
@@ -263,6 +324,7 @@ export function StatusPage({ mockSummary }: StatusPageProps = {}) {
               return (
                 <div
                   key={cardId}
+                  data-status-card={cardId}
                   onDragOver={(event) => handleDragOver(event, cardId)}
                   onDragLeave={handleDragLeave}
                   onDrop={(event) => handleDrop(event, cardId)}
@@ -286,6 +348,7 @@ export function StatusPage({ mockSummary }: StatusPageProps = {}) {
                         label={label}
                         onDragStart={handleDragStart}
                         onDragEnd={handleDragEnd}
+                        onPointerDown={beginPointerReorder}
                         onKeyboardMove={handleKeyboardMove}
                       />
                     ),
@@ -350,6 +413,7 @@ function StatusCardDragHandle({
   label,
   onDragStart,
   onDragEnd,
+  onPointerDown,
   onKeyboardMove,
 }: {
   cardId: StatusCardId;
@@ -359,6 +423,10 @@ function StatusCardDragHandle({
     cardId: StatusCardId,
   ) => void;
   onDragEnd: () => void;
+  onPointerDown: (
+    event: PointerEvent<HTMLButtonElement>,
+    cardId: StatusCardId,
+  ) => void;
   onKeyboardMove: (
     event: KeyboardEvent<HTMLButtonElement>,
     cardId: StatusCardId,
@@ -376,8 +444,9 @@ function StatusCardDragHandle({
       title={t("status.dragToReorder", { label })}
       onDragStart={(event) => onDragStart(event, cardId)}
       onDragEnd={onDragEnd}
+      onPointerDown={(event) => onPointerDown(event, cardId)}
       onKeyDown={(event) => onKeyboardMove(event, cardId)}
-      className="cursor-grab text-muted-foreground hover:text-foreground active:cursor-grabbing"
+      className="cursor-grab touch-none text-muted-foreground hover:text-foreground active:cursor-grabbing"
     >
       <GripVerticalIcon data-icon="inline-start" aria-hidden="true" />
     </Button>
@@ -987,6 +1056,21 @@ function dropPlacementFromEvent(
   const bounds = event.currentTarget.getBoundingClientRect();
   const midpoint = bounds.top + bounds.height / 2;
   return event.clientY > midpoint ? "after" : "before";
+}
+
+/** Same before/after decision as {@link dropPlacementFromEvent}, for pointer drags. */
+function dropPlacementFromPoint(
+  targetId: StatusCardId,
+  clientY: number,
+): StatusCardPlacement {
+  const element = document.querySelector<HTMLElement>(
+    `[data-status-card="${targetId}"]`,
+  );
+  if (!element) {
+    return "after";
+  }
+  const bounds = element.getBoundingClientRect();
+  return clientY > bounds.top + bounds.height / 2 ? "after" : "before";
 }
 
 function readStoredStatusCardOrder(): StatusCardId[] {

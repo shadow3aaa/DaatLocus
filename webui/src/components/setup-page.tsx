@@ -146,6 +146,8 @@ type ModelAccessEditorProps = {
   modelDescription?: string;
   selectionDescription?: string;
   fieldGroupClassName?: string;
+  /** Show validation errors and the invalid ring on untouched empty selects. */
+  showValidation?: boolean;
 };
 
 type AgentPersonalizationEditorProps = {
@@ -241,6 +243,61 @@ const DEFAULT_CONTEXT_WINDOW_TOKENS = "200000";
 const DEFAULT_MAX_COMPLETION_TOKENS = "32768";
 const THINKING_UNSET_VALUE = "__unset__";
 const THINKING_CUSTOM_VALUE = "__custom__";
+
+const SETUP_STEP_COUNT = 3;
+
+type SetupShellProps = {
+  stepIndex: number;
+  stepLabel: string;
+  ariaLabel: string;
+  action: ReactNode;
+  onSubmit?: (event: FormEvent<HTMLFormElement>) => void;
+  children: ReactNode;
+};
+
+function SetupShell({
+  stepIndex,
+  stepLabel,
+  ariaLabel,
+  action,
+  onSubmit,
+  children,
+}: SetupShellProps) {
+  const { t } = useTranslation();
+  const body = (
+    <>
+      <div className="flex flex-1 flex-col px-6 pb-12 pt-8 md:px-12 md:pt-12">
+        <div className="mb-10 text-sm font-semibold tracking-tight">
+          {t("common.appName")}
+        </div>
+        {children}
+      </div>
+      <footer className="flex items-center justify-between gap-6 border-t border-border/70 px-6 py-4 md:px-12">
+        <span className="shrink-0 font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+          {`${String(stepIndex + 1).padStart(2, "0")} / ${String(SETUP_STEP_COUNT).padStart(2, "0")}`}
+          <span className="hidden sm:inline">{` · ${stepLabel}`}</span>
+        </span>
+        {action}
+      </footer>
+    </>
+  );
+
+  return (
+    <section
+      id="setup"
+      aria-label={ariaLabel}
+      className="flex min-h-screen w-full flex-col bg-background"
+    >
+      {onSubmit ? (
+        <form onSubmit={onSubmit} className="flex flex-1 flex-col">
+          {body}
+        </form>
+      ) : (
+        <div className="flex flex-1 flex-col">{body}</div>
+      )}
+    </section>
+  );
+}
 
 export function SetupPage({
   readiness,
@@ -344,20 +401,44 @@ export function SetupPage({
 
   if (step === "intro") {
     return (
-      <section
-        id="setup"
-        aria-label={t("setup.intro.pageAria")}
-        className="flex min-h-screen w-full bg-background px-6 py-10"
+      <SetupShell
+        stepIndex={0}
+        stepLabel={t("setup.intro.pageAria")}
+        ariaLabel={t("setup.intro.pageAria")}
+        action={
+          <Button
+            type="button"
+            aria-label={t("setup.intro.next")}
+            onClick={() => setStep("personalization")}
+          >
+            {t("setup.intro.next")}
+            <ArrowRightIcon data-icon="inline-end" aria-hidden="true" />
+          </Button>
+        }
       >
-        <div className="flex w-full flex-col justify-between px-[8vw] py-[8vh]">
-          <div className="flex flex-col gap-24">
-            <div className="flex flex-col gap-10">
-              <h1 className="text-7xl font-medium tracking-normal">
-                {t("setup.intro.greeting")}
-              </h1>
-              <FieldGroup className="max-w-xs">
+        <div className="grid flex-1 grid-cols-1 gap-x-10 gap-y-16 lg:grid-cols-12">
+          <div className="flex flex-col justify-between gap-16 lg:col-span-7">
+            <h1 className="text-7xl font-medium leading-none tracking-tight md:text-8xl">
+              {t("setup.intro.greeting")}
+            </h1>
+            <div className="grid grid-cols-1 gap-10 border-t border-border/70 pt-10 sm:grid-cols-2">
+              <p className="max-w-md text-lg leading-relaxed text-muted-foreground">
+                {t("setup.intro.notConfigured")}
+              </p>
+              <p className="max-w-md text-lg leading-relaxed text-muted-foreground">
+                {t("setup.intro.wizardGuide")}
+              </p>
+            </div>
+          </div>
+
+          <div className="lg:col-span-4 lg:col-start-9">
+            <div className="border-t border-foreground/60 pt-6">
+              <FieldGroup>
                 <Field>
-                  <FieldLabel htmlFor="setup-webui-language">
+                  <FieldLabel
+                    htmlFor="setup-webui-language"
+                    className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground"
+                  >
                     {t("setup.intro.languageLabel")}
                   </FieldLabel>
                   <Select
@@ -385,107 +466,103 @@ export function SetupPage({
                 </Field>
               </FieldGroup>
             </div>
-            <div className="flex max-w-2xl flex-col gap-3">
-              <p className="text-3xl leading-relaxed text-foreground">
-                {t("setup.intro.notConfigured")}
-              </p>
-              <p className="text-3xl leading-relaxed text-foreground">
-                {t("setup.intro.wizardGuide")}
-              </p>
-            </div>
-          </div>
-          <div>
-            <Button
-              type="button"
-              size="icon"
-              className="size-12 rounded-full"
-              aria-label={t("setup.intro.next")}
-              onClick={() => setStep("personalization")}
-            >
-              <ArrowRightIcon data-icon="inline-end" aria-hidden="true" />
-            </Button>
           </div>
         </div>
-      </section>
+      </SetupShell>
     );
   }
 
   if (step === "personalization") {
     return (
-      <section
-        id="setup"
-        aria-label={t("setup.personalization.pageAria")}
-        className="flex min-h-screen w-full bg-background px-6 py-10"
+      <SetupShell
+        stepIndex={1}
+        stepLabel={t("setup.personalization.pageAria")}
+        ariaLabel={t("setup.personalization.pageAria")}
+        action={
+          <Button
+            type="button"
+            aria-label={t("setup.personalization.next")}
+            onClick={() => setStep("configuration")}
+          >
+            {t("setup.personalization.next")}
+            <ArrowRightIcon data-icon="inline-end" aria-hidden="true" />
+          </Button>
+        }
       >
-        <div className="flex w-full flex-col justify-between px-[8vw] py-[8vh]">
-          <div className="grid flex-1 grid-cols-1 gap-16 lg:grid-cols-12">
-            <div className="flex flex-col gap-24 lg:col-span-6">
-              <h1 className="text-7xl font-medium tracking-normal">
+        <div className="grid flex-1 grid-cols-1 gap-x-10 gap-y-16 lg:grid-cols-12">
+          <div className="flex flex-col gap-12 lg:col-span-7">
+            <div className="border-b border-border/70 pb-8">
+              <h1 className="text-6xl font-medium leading-none tracking-tight md:text-7xl">
                 {t("setup.personalization.title")}
               </h1>
-              <AgentPersonalizationEditor
-                value={agentPersonalization}
-                onChange={(nextValue) => {
-                  setAgentPersonalization(nextValue);
-                }}
-                showHeader={false}
-                className="max-w-xl"
-              />
             </div>
-
-            <div className="flex items-start justify-center pt-6 lg:col-span-4 lg:col-start-8 lg:justify-center lg:pt-36">
-              <div className="flex flex-col items-center gap-10">
-                <AgentExpression
-                  status="idle"
-                  className="w-44 p-0 sm:w-52"
-                />
-                <p
-                  className={cn(
-                    "text-7xl font-medium leading-none tracking-normal text-foreground transition-opacity duration-200",
-                    personalizationPreviewVisible ? "opacity-100" : "opacity-0",
-                  )}
-                >
-                  {personalizationPreview}
-                </p>
-              </div>
-            </div>
+            <AgentPersonalizationEditor
+              value={agentPersonalization}
+              onChange={(nextValue) => {
+                setAgentPersonalization(nextValue);
+              }}
+              showHeader={false}
+              className="max-w-xl"
+            />
           </div>
-          <div>
-            <Button
-              type="button"
-              size="icon"
-              className="size-14 rounded-full"
-              aria-label={t("setup.personalization.next")}
-              onClick={() => setStep("configuration")}
-            >
-              <ArrowRightIcon data-icon="inline-end" aria-hidden="true" />
-            </Button>
+
+          <div className="lg:col-span-4 lg:col-start-9">
+            <div className="flex flex-col items-center gap-12 border-t border-foreground/60 pt-10">
+              <AgentExpression
+                status="idle"
+                className="w-40 p-0 sm:w-48"
+              />
+              <p
+                className={cn(
+                  "text-5xl font-medium leading-none tracking-tight text-foreground transition-opacity duration-200 md:text-6xl",
+                  personalizationPreviewVisible ? "opacity-100" : "opacity-0",
+                )}
+              >
+                {personalizationPreview}
+              </p>
+            </div>
           </div>
         </div>
-      </section>
+      </SetupShell>
     );
   }
 
   return (
-    <section
-      id="setup"
-      aria-label={t("setup.configuration.pageAria")}
-      className="flex min-h-screen w-full bg-background px-6 py-10"
+    <SetupShell
+      stepIndex={2}
+      stepLabel={t("setup.configuration.pageAria")}
+      ariaLabel={t("setup.configuration.pageAria")}
+      onSubmit={handleSubmit}
+      action={
+        <Button
+          type="submit"
+          disabled={!canCompleteSetup || isSaving}
+          aria-label={
+            isSaving
+              ? t("setup.configuration.completingSetup")
+              : t("setup.configuration.completeSetup")
+          }
+        >
+          {isSaving ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <CheckIcon data-icon="inline-start" aria-hidden="true" />
+          )}
+          {isSaving
+            ? t("setup.configuration.completingSetup")
+            : t("setup.configuration.completeSetup")}
+        </Button>
+      }
     >
-      <form
-        onSubmit={handleSubmit}
-        className="mx-auto flex w-full max-w-5xl flex-col px-[6vw] py-[7vh]"
-      >
-        <div className="flex flex-col gap-14">
-          <div className="flex flex-col gap-16">
-            <h1 className="text-7xl font-medium tracking-normal">
+      <div className="grid w-full flex-1 grid-cols-1 gap-12 lg:grid-cols-12">
+        <div className="flex flex-col gap-12 lg:col-span-10 xl:col-span-9">
+          <div className="flex flex-col gap-5 border-b border-border/70 pb-10">
+            <h1 className="text-6xl font-medium leading-none tracking-tight md:text-7xl">
               {t("setup.configuration.title")}
             </h1>
-            <div className="flex max-w-3xl flex-col gap-3">
-              <p className="text-3xl leading-relaxed text-foreground">
-                {t("setup.configuration.description")}
-              </p>
-            </div>
+            <p className="max-w-2xl text-xl leading-relaxed text-muted-foreground">
+              {t("setup.configuration.description")}
+            </p>
           </div>
 
           <div className="flex flex-col gap-4">
@@ -513,34 +590,10 @@ export function SetupPage({
               setSaveState("idle");
               setSaveError(null);
             }}
-            submitSlot={
-              canCompleteSetup ? (
-                <div className="flex justify-start pt-4">
-                  <Button
-                    type="submit"
-                    size="icon"
-                    className="size-14 rounded-full"
-                    disabled={isSaving}
-                    aria-label={
-                      isSaving
-                        ? t("setup.configuration.completingSetup")
-                        : t("setup.configuration.completeSetup")
-                    }
-                  >
-                    {isSaving ? (
-                      <Spinner data-icon="inline-start" />
-                    ) : (
-                      <CheckIcon data-icon="inline-start" aria-hidden="true" />
-                    )}
-                  </Button>
-                </div>
-              ) : null
-            }
           />
         </div>
-      </form>
-
-    </section>
+      </div>
+    </SetupShell>
   );
 }
 
@@ -652,6 +705,7 @@ export function ModelAccessEditor({
   modelDescription,
   selectionDescription,
   fieldGroupClassName,
+  showValidation = true,
 }: ModelAccessEditorProps) {
   const { t } = useTranslation();
   const providerSectionDescription =
@@ -669,6 +723,13 @@ export function ModelAccessEditor({
   const efficientModelMissing = !models.some(
     (model) => model.name === efficientModel,
   );
+  // The missing-model error is only meaningful once the section can actually
+  // be satisfied, or after the user has interacted with the selects.
+  const [selectionTouched, setSelectionTouched] = useState(false);
+  const showSelectionError =
+    selectionTouched || (showValidation && models.length > 0);
+  const mainModelInvalid = mainModelMissing && showSelectionError;
+  const efficientModelInvalid = efficientModelMissing && showSelectionError;
 
   function updateValue(nextValue: ModelAccessEditorValue) {
     onChange(nextValue);
@@ -798,15 +859,16 @@ export function ModelAccessEditor({
         </div>
         <FieldGroup className={cn("max-w-2xl", fieldGroupClassName)}>
           <div className="flex flex-col gap-4">
-            <Field data-invalid={mainModelMissing}>
+            <Field data-invalid={mainModelInvalid}>
               <FieldLabel htmlFor="model-access-main-model">
                 {t("setup.modelAccess.mainModel")}
               </FieldLabel>
               <Select
                 value={mainModel}
-                onValueChange={(selected) =>
-                  updateValue({ ...value, mainModel: selected })
-                }
+                onValueChange={(selected) => {
+                  setSelectionTouched(true);
+                  updateValue({ ...value, mainModel: selected });
+                }}
               >
                 <SelectTrigger id="model-access-main-model" className="w-full">
                   <SelectValue placeholder={t("setup.modelAccess.selectMainModel")} />
@@ -822,18 +884,19 @@ export function ModelAccessEditor({
                 </SelectContent>
               </Select>
               <FieldError>
-                {mainModelMissing ? t("setup.modelAccess.selectModelError") : null}
+                {mainModelInvalid ? t("setup.modelAccess.selectModelError") : null}
               </FieldError>
             </Field>
-            <Field data-invalid={efficientModelMissing}>
+            <Field data-invalid={efficientModelInvalid}>
               <FieldLabel htmlFor="model-access-efficient-model">
                 {t("setup.modelAccess.efficientModel")}
               </FieldLabel>
               <Select
                 value={efficientModel}
-                onValueChange={(selected) =>
-                  updateValue({ ...value, efficientModel: selected })
-                }
+                onValueChange={(selected) => {
+                  setSelectionTouched(true);
+                  updateValue({ ...value, efficientModel: selected });
+                }}
               >
                 <SelectTrigger
                   id="model-access-efficient-model"
@@ -854,7 +917,7 @@ export function ModelAccessEditor({
                 </SelectContent>
               </Select>
               <FieldError>
-                {efficientModelMissing
+                {efficientModelInvalid
                   ? t("setup.modelAccess.selectModelError")
                   : null}
               </FieldError>
@@ -1043,7 +1106,11 @@ function ModelList({
                 <span className="truncate text-lg font-medium">
                   {model.name}
                 </span>
-                <Badge variant="secondary">{model.modelId}</Badge>
+                {model.modelId && model.modelId !== model.name ? (
+                  <Badge variant="secondary" className="font-mono">
+                    {model.modelId}
+                  </Badge>
+                ) : null}
                 <Badge variant="outline">
                   {provider?.name ?? model.providerName}
                 </Badge>

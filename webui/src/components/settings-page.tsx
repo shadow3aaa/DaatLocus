@@ -352,9 +352,8 @@ export function SettingsPage({
                 markDirty();
               }}
               fieldGroupClassName="max-w-none"
+              showValidation={false}
               providerDescription={t("settings.modelAccess.providerDescription")}
-              modelDescription={t("settings.modelAccess.modelDescription")}
-              selectionDescription={t("settings.modelAccess.selectionDescription")}
             />
 
             <TelegramSettingsEditor

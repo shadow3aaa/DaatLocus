@@ -1,71 +1,59 @@
 import { describe, expect, test } from "bun:test";
 
-import {
-  logEntryHighlightSpans,
-  type LogHighlightSpan,
-} from "../src/components/logs-page";
+import { logEntrySegments, type LogSegment } from "../src/components/logs-page";
 
-function entry(raw: string) {
+function entry(raw: string, structured: Partial<Record<string, string>> = {}) {
   return {
     id: "mock",
     raw,
-    timestamp: null,
-    level: null,
-    target: null,
+    timestamp: structured.timestamp ?? null,
+    level: structured.level ?? null,
+    target: structured.target ?? null,
     message: raw,
   };
 }
 
-function spanTexts(raw: string, spans: LogHighlightSpan[]) {
-  return spans.map((span) => ({
-    text: raw.slice(span.from, span.to),
-    className: span.className,
-  }));
+function texts(segments: LogSegment[]) {
+  return segments.map((segment) => [segment.kind, segment.text]);
 }
 
-describe("logEntryHighlightSpans", () => {
-  test("highlights python-style timestamp, level and target", () => {
+describe("logEntrySegments", () => {
+  test("splits python-style lines into timestamp, level, target and message", () => {
     const raw =
       "2026-08-09 17:26:03 - INFO - daat_locus.daemon - daemon booted";
-    const spans = logEntryHighlightSpans(entry(raw));
-
-    expect(spanTexts(raw, spans)).toEqual([
-      { text: "2026-08-09 17:26:03", className: "log-ts" },
-      { text: "INFO", className: "log-level-info" },
-      { text: "daat_locus.daemon", className: "log-target" },
+    expect(texts(logEntrySegments(entry(raw)))).toEqual([
+      ["timestamp", "2026-08-09 17:26:03"],
+      ["level", "INFO"],
+      ["target", "daat_locus.daemon"],
+      ["message", "daemon booted"],
     ]);
   });
 
-  test("highlights tracing-style timestamp, level and target", () => {
+  test("splits tracing-style lines into timestamp, level, target and message", () => {
     const raw = "2026-08-09T17:26:03.123Z  ERROR daat_locus.logs: boom";
-    const spans = logEntryHighlightSpans(entry(raw));
-
-    expect(spanTexts(raw, spans)).toEqual([
-      { text: "2026-08-09T17:26:03.123Z", className: "log-ts" },
-      { text: "ERROR", className: "log-level-error" },
-      { text: "daat_locus.logs", className: "log-target" },
+    expect(texts(logEntrySegments(entry(raw)))).toEqual([
+      ["timestamp", "2026-08-09T17:26:03.123Z"],
+      ["level", "ERROR"],
+      ["target", "daat_locus.logs"],
+      ["message", "boom"],
     ]);
   });
 
-  test("highlights warn and debug levels with dedicated classes", () => {
-    const warnRaw = "2026-08-09 17:26:03 - WARN - session - slow poll";
-    const warnSpans = logEntryHighlightSpans(entry(warnRaw));
-    expect(spanTexts(warnRaw, warnSpans)).toContainEqual({
-      text: "WARN",
-      className: "log-level-warn",
-    });
+  test("normalizes warn and debug levels", () => {
+    const warn = logEntrySegments(
+      entry("2026-08-09 17:26:03 - WARN - session - slow poll"),
+    );
+    expect(warn).toContainEqual({ kind: "level", text: "WARNING" });
 
-    const debugRaw = "2026-08-09 17:26:03 - DEBUG - webui - rerender";
-    const debugSpans = logEntryHighlightSpans(entry(debugRaw));
-    expect(spanTexts(debugRaw, debugSpans)).toContainEqual({
-      text: "DEBUG",
-      className: "log-level-debug",
-    });
+    const debug = logEntrySegments(
+      entry("2026-08-09 17:26:03 - DEBUG - webui - rerender"),
+    );
+    expect(debug).toContainEqual({ kind: "level", text: "DEBUG" });
   });
 
-  test("returns no spans for unstructured lines", () => {
-    expect(logEntryHighlightSpans(entry("random unstructured text"))).toEqual(
-      [],
-    );
+  test("keeps unstructured lines as a single message segment", () => {
+    expect(texts(logEntrySegments(entry("random unstructured text")))).toEqual([
+      ["message", "random unstructured text"],
+    ]);
   });
 });

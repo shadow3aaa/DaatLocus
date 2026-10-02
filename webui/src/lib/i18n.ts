@@ -151,11 +151,9 @@ const resources = {
           menuImport: "Import Obsidian vault…",
           menuExport: "Export graph…",
           importTitle: "Import Obsidian vault",
-          importDescription:
-            "Notes become nodes, folders are ignored, and wikilinks import as related relations.",
+          importDescription: "Notes become nodes; wikilinks become relations.",
           exportTitle: "Export graph",
-          exportDescription:
-            "Download the knowledge graph as an Obsidian vault or a JSON backup.",
+          exportDescription: "Obsidian vault or JSON backup.",
           vaultDirLabel: "Vault directory",
           vaultDirPlaceholder: "C:\\Users\\you\\MyVault",
           vaultDirRequired: "Choose a vault directory first.",
@@ -236,8 +234,7 @@ const resources = {
           languagePlaceholder: "Select language",
           agentName: "{{agent}} name",
           personaContent: "Persona content",
-          personaContentDescription:
-            "Supports {{token}}; this content is written into the persona prompt.",
+          personaContentDescription: "Supports {{token}}.",
         },
         configuration: {
           pageAria: "Provider and model setup",
@@ -249,12 +246,9 @@ const resources = {
           completeSetup: "Complete setup",
         },
         modelAccess: {
-          providerDescription:
-            "Connect the capability sources the agent can draw from.",
-          modelDescription:
-            "Shape the model catalog into dependable reasoning capacity.",
-          selectionDescription:
-            "Set the operating balance between deep focus and lightweight work.",
+          providerDescription: "Providers supply credentials and endpoints.",
+          modelDescription: "Models available to the agent.",
+          selectionDescription: "Which model the agent uses by default.",
           providers: "Providers",
           addProvider: "Add provider",
           models: "Models",
@@ -266,8 +260,7 @@ const resources = {
           selectEfficientModel: "Select efficient model",
           selectModelError: "Select a model.",
           noProviders: "No providers yet. Use the plus button to add one.",
-          noModels:
-            "No models yet. Add a provider, then use the plus button to add a model.",
+          noModels: "No models yet. Use the plus button to add one.",
           editProviderAria: "Edit {{name}}",
           deleteProviderAria: "Delete {{name}}",
           editModelAria: "Edit {{name}}",
@@ -312,13 +305,11 @@ const resources = {
           codexAuthMethods: {
             browser_login: {
               label: "Browser login",
-              description:
-                "Open the OpenAI authorization page and write this provider's OAuth file.",
+              description: "Sign in to OpenAI in the browser.",
             },
             device_login: {
               label: "Device code login",
-              description:
-                "Show a device code and complete authorization in the browser.",
+              description: "Authorize with a device code.",
             },
             import_local_codex: {
               label: "Import local Codex",
@@ -353,7 +344,7 @@ const resources = {
             editTitle: "Edit provider",
             addTitle: "Add provider",
             description:
-              "Providers define credentials and API endpoints. Models are bound to providers in the next section.",
+              "Credentials and API endpoint for one provider.",
             name: "Name",
             type: "Type",
             selectProviderType: "Select provider type",
@@ -376,8 +367,7 @@ const resources = {
             keepAlive: "keep_alive",
             cancel: "Cancel",
             saveProvider: "Save provider",
-            deviceAuthOpened:
-              "Authorization page opened. Enter the device code in the browser to finish authorization.",
+            deviceAuthOpened: "Authorization page opened; enter the device code there.",
             authAction: {
               github: "Start device code login",
               browser_login: "Open browser login",
@@ -387,18 +377,15 @@ const resources = {
               existing_auth_file: "Check OAuth file",
             },
             authDescription: {
-              github:
-                "Authorization writes the GitHub token into the current provider draft.",
-              browser_login:
-                "After login, Daat Locus writes the fixed Codex OAuth file for this provider.",
-              device_login:
-                "Start the flow, enter the device code, then return here to complete authorization.",
+              github: "Writes the GitHub token into this provider.",
+              browser_login: "Writes the Codex OAuth file for this provider.",
+              device_login: "Authorize in the browser, then return here.",
               import_local_codex:
-                "Import from the local Codex CLI auth.json into this provider.",
+                "Imports the local Codex CLI auth.json into this provider.",
               import_auth_file:
-                "Import from the specified auth.json into this provider.",
+                "Imports the specified auth.json into this provider.",
               existing_auth_file:
-                "Check whether this provider's fixed Codex OAuth file exists.",
+                "Checks whether this provider's Codex OAuth file exists.",
             },
             authSaveBlock: {
               github: "Complete GitHub device code login first.",
@@ -434,7 +421,7 @@ const resources = {
             editTitle: "Edit model",
             addTitle: "Add model",
             description:
-              "Model definitions are bound to providers and can be selected as the main or efficient model.",
+              "Model settings, bound to a provider.",
             provider: "Provider",
             selectProvider: "Select provider",
             discoveredModels: "Discovered models",
@@ -452,8 +439,7 @@ const resources = {
             apiStyle: "API style",
             apiStyleChatCompletions: "Chat completions (default)",
             apiStyleResponses: "Responses",
-            apiStyleDescription:
-              "Selects the endpoint protocol for this openai-compatible model: chat completions or the responses API.",
+            apiStyleDescription: "Endpoint protocol for this model.",
             reasoning: "Reasoning / thinking",
             notConfigured: "Not configured",
             custom: "Custom",
@@ -464,11 +450,9 @@ const resources = {
             discovery: {
               selectProviderFirst: "Select a provider first.",
               loading: "Discovering models from this provider.",
-              loadedSome:
-                "Discovered {{count}} models. You can also enter a model ID manually.",
-              loadedNone:
-                "No models discovered. You can enter a model ID manually.",
-              idle: "Models are discovered automatically after a provider is selected.",
+              loadedSome: "Discovered {{count}} models.",
+              loadedNone: "No models discovered.",
+              idle: "Models are discovered after a provider is selected.",
             },
             errors: {
               providerRequired: "Select a provider.",
@@ -546,8 +530,7 @@ const resources = {
       },
       settings: {
         pageAria: "Settings",
-        hotReloadNote:
-          "Model, provider, sandbox, telegram, judge, sleep, and SCOPE settings apply immediately. The daemon port change applies after a daemon restart.",
+        hotReloadNote: "Changes save automatically.",
         unableToLoad: "Unable to load settings",
         configRestored: "Configuration file restored",
         unableToSave: "Unable to save settings",
@@ -556,21 +539,19 @@ const resources = {
           description:
             "Choose how WebUI labels, navigation, and controls are displayed.",
           languageLabel: "WebUI language",
-          languageDescription:
-            "This setting is saved to the shared Daat Locus locale configuration.",
+          languageDescription: "Shared across Daat Locus.",
           languagePlaceholder: "Select language",
           showThinkingLabel: "Show thinking",
           showThinkingDescription:
-            "Show the model's reasoning in the WebUI immediately. This preference is kept only in this browser session and is not saved to configuration.",
+            "Show the model's reasoning. This preference applies to this browser only.",
           showThinkingAria: "Show model thinking",
         },
         telegram: {
           title: "Telegram",
-          description:
-            "Enable Telegram transport and provide the bot token used for incoming messages and event replies.",
+          description: "Forward incoming messages to a Telegram bot.",
           enableLabel: "Enable Telegram",
           enableDescription:
-            "The transport starts only when this switch is on and the token is a real Bot API token.",
+            "Requires a valid Bot API token.",
           enableAria: "Enable Telegram transport",
           botToken: "Bot token",
           botTokenDescription:
@@ -579,28 +560,24 @@ const resources = {
         sleep: {
           title: "Sleep self-improvement",
           description:
-            "During idle time the agent reviews its own history and proposes prompt and skill corrections. This costs tokens, so it can be turned off.",
+            "Let the agent review its own history and refine prompts and skills while idle. Consumes tokens.",
           enableLabel: "Enable automatic sleep",
-          enableDescription:
-            "When enabled, background self-improvement runs automatically while idle or when the error backlog grows. Manual runs from the status page stay available either way.",
+          enableDescription: "Can also be run manually from the status page.",
           enableAria: "Enable automatic sleep self-improvement",
         },
         scope: {
           title: "SCOPE",
           description:
-            "Control whether opened coding projects start a language server. Tree-sitter search and edits stay available either way.",
+            "Start a language server for opened coding projects.",
           lspLabel: "Enable language servers",
           lspDescription:
-            "Language servers improve cross-file reference review, but each process can use a large amount of memory. Turn this off before launching many subagents. The next coding operation starts or stops the server for an already open project.",
+            "Improves cross-file reference review at the cost of memory. Restart applies to the next coding operation.",
           lspAria: "Enable SCOPE language servers",
         },
         modelAccess: {
-          providerDescription:
-            "Tune the secure access layer behind the agent's model capability.",
-          modelDescription:
-            "Shape available model capacity into a dependable runtime catalog.",
-          selectionDescription:
-            "Set the operating balance between depth, speed, and everyday work.",
+          providerDescription: "Providers supply credentials and endpoints.",
+          modelDescription: "Models available to the agent.",
+          selectionDescription: "Which model the agent uses by default.",
         },
         validation: {
           providerRequired: "Add at least one provider.",
@@ -627,12 +604,10 @@ const resources = {
           "This session has not assembled a model request context yet.",
         contextNoSessionsDescription:
           "Context composition appears after a session publishes status data.",
-        contextHeatmapLabel:
-          "Context composition heatmap. The current adaptive layout is {{columns}} by {{rows}}.",
-        contextCellLabel:
-          "Each cell represents up to {{tokens}} estimated tokens.",
+        contextHeatmapLabel: "Context heatmap, {{columns}} by {{rows}}.",
+        contextCellLabel: "Each cell is up to {{tokens}} tokens.",
         contextDisplayAria:
-          "{{gridLabel}} Showing {{occupied}} occupied units on a {{displayScale}} rectangular display for {{session}}.",
+          "{{gridLabel}} {{occupied}} occupied units for {{session}}.",
         tokenCount: "{{count}} tokens",
         total: "Total",
         cached: "Cached",
@@ -660,8 +635,7 @@ const resources = {
         noAgentActivityYet: "No agent activity yet",
         used: "Used",
         lastTurn: "Last turn: {{parts}}",
-        noActivityDescription:
-          "Messages and tool activity will appear here as the session starts working.",
+        noActivityDescription: "Messages and tool activity appear here.",
         totalLabel: "Total: {{text}}",
       },
       chat: {
@@ -688,7 +662,7 @@ const resources = {
         editQueuedMessage: "Edit queued message",
         editQueuedMessageDescription: "Update this pending input before the agent handles it.",
         commandSuggestions: "Command suggestions",
-        queueLimit: "You can queue up to {{count}} inputs. Wait for the agent to handle one or clear the queue.",
+        queueLimit: "Queue is full ({{count}} inputs).",
         imageLimit: "You can attach up to {{count}} images.",
         userMessageQuickNav: "User message quick navigation",
         closeQuickNav: "Close quick navigation",
@@ -738,7 +712,7 @@ const resources = {
         artifactCollapse: "Collapse",
         artifactIframeTitle: "{{title}} preview",
         artifactLoopbackNotice:
-          "This link points to a loopback address ({{host}}) that only resolves on the daemon's own machine, so it cannot be embedded here. Open it directly instead.",
+          "Loopback address ({{host}}) — open it directly.",
         artifactUnavailable: "This artifact has no preview available.",
         artifactKindImage: "Image",
         artifactKindSvg: "SVG",
@@ -769,6 +743,8 @@ const resources = {
         noLevelEntries: "No {{level}} or higher log entries.",
         noMatchingEntries: "No matching log entries.",
         blank: "(blank)",
+        levelFilterAria: "Minimum level: {{level}}. Click to change.",
+        jumpToLatest: "Jump to latest",
       },
     },
   },
@@ -855,10 +831,9 @@ const resources = {
           menuImport: "导入 Obsidian 仓库…",
           menuExport: "导出知识图谱…",
           importTitle: "导入 Obsidian 仓库",
-          importDescription:
-            "笔记成为节点，文件夹不参与映射，双链一律导入为「相关」关系。",
+          importDescription: "笔记会成为节点，双链会成为关系。",
           exportTitle: "导出知识图谱",
-          exportDescription: "将知识图谱下载为 Obsidian 仓库或 JSON 备份。",
+          exportDescription: "Obsidian 仓库或 JSON 备份。",
           vaultDirLabel: "仓库目录",
           vaultDirPlaceholder: "C:\\Users\\you\\MyVault",
           vaultDirRequired: "请先选择仓库目录。",
@@ -934,7 +909,7 @@ const resources = {
           languagePlaceholder: "选择语言",
           agentName: "{{agent}} 名称",
           personaContent: "人格内容",
-          personaContentDescription: "支持 {{token}}；此内容会写入人格提示词。",
+          personaContentDescription: "支持 {{token}}。",
         },
         configuration: {
           pageAria: "供应商和模型设置",
@@ -946,9 +921,9 @@ const resources = {
           completeSetup: "完成设置",
         },
         modelAccess: {
-          providerDescription: "连接代理可使用的能力来源。",
-          modelDescription: "将模型目录整理成可靠的推理能力。",
-          selectionDescription: "设置深度专注与轻量工作的运行平衡。",
+          providerDescription: "供应商提供凭证与接口地址。",
+          modelDescription: "Agent 可用的模型。",
+          selectionDescription: "Agent 默认使用的模型。",
           providers: "供应商",
           addProvider: "添加供应商",
           models: "模型",
@@ -960,7 +935,7 @@ const resources = {
           selectEfficientModel: "选择高效模型",
           selectModelError: "请选择一个模型。",
           noProviders: "暂无供应商。使用加号按钮添加一个。",
-          noModels: "暂无模型。先添加供应商，然后使用加号按钮添加模型。",
+          noModels: "暂无模型。使用加号按钮添加。",
           editProviderAria: "编辑 {{name}}",
           deleteProviderAria: "删除 {{name}}",
           editModelAria: "编辑 {{name}}",
@@ -1064,8 +1039,7 @@ const resources = {
             keepAlive: "keep_alive",
             cancel: "取消",
             saveProvider: "保存供应商",
-            deviceAuthOpened:
-              "授权页面已打开。在浏览器中输入设备码以完成授权。",
+            deviceAuthOpened: "授权页面已打开，请在浏览器中输入设备码。",
             authAction: {
               github: "开始设备码登录",
               browser_login: "打开浏览器登录",
@@ -1075,15 +1049,12 @@ const resources = {
               existing_auth_file: "检查 OAuth 文件",
             },
             authDescription: {
-              github: "授权会将 GitHub 令牌写入当前供应商草稿。",
-              browser_login:
-                "登录后，Daat Locus 会为该供应商写入固定的 Codex OAuth 文件。",
-              device_login: "开始流程，输入设备码，然后返回此处完成授权。",
-              import_local_codex:
-                "从本地 Codex CLI 的 auth.json 导入到该供应商。",
+              github: "将 GitHub 令牌写入该供应商。",
+              browser_login: "写入该供应商的 Codex OAuth 文件。",
+              device_login: "在浏览器完成授权后返回此处。",
+              import_local_codex: "从本地 Codex CLI 的 auth.json 导入到该供应商。",
               import_auth_file: "从指定的 auth.json 导入到该供应商。",
-              existing_auth_file:
-                "检查该供应商的固定 Codex OAuth 文件是否存在。",
+              existing_auth_file: "检查该供应商的 Codex OAuth 文件是否存在。",
             },
             authSaveBlock: {
               github: "请先完成 GitHub 设备码登录。",
@@ -1113,7 +1084,7 @@ const resources = {
           modelDialog: {
             editTitle: "编辑模型",
             addTitle: "添加模型",
-            description: "模型定义绑定到供应商，可被选为主模型或高效模型。",
+            description: "模型设置，需绑定到某个供应商。",
             provider: "供应商",
             selectProvider: "选择供应商",
             discoveredModels: "发现的模型",
@@ -1131,8 +1102,7 @@ const resources = {
             apiStyle: "API 风格",
             apiStyleChatCompletions: "Chat completions（默认）",
             apiStyleResponses: "Responses",
-            apiStyleDescription:
-              "为该 openai-compatible 模型选择端点协议：chat completions 或 responses API。",
+            apiStyleDescription: "该模型的端点协议。",
             reasoning: "推理 / 思考",
             notConfigured: "未配置",
             custom: "自定义",
@@ -1142,8 +1112,8 @@ const resources = {
             discovery: {
               selectProviderFirst: "请先选择一个供应商。",
               loading: "正在从该供应商发现模型。",
-              loadedSome: "发现了 {{count}} 个模型。也可以手动输入模型 ID。",
-              loadedNone: "未发现模型。可以手动输入模型 ID。",
+              loadedSome: "发现了 {{count}} 个模型。",
+              loadedNone: "未发现模型，可手动输入。",
               idle: "选择供应商后会自动发现模型。",
             },
             errors: {
@@ -1219,8 +1189,7 @@ const resources = {
       },
       settings: {
         pageAria: "设置",
-        hotReloadNote:
-          "模型、提供商、沙箱、Telegram、judge、sleep 与 SCOPE 设置保存后即时生效；daemon 端口变更需重启 daemon 后生效。",
+        hotReloadNote: "改动会自动保存。",
         unableToLoad: "无法加载设置",
         configRestored: "配置文件已恢复",
         unableToSave: "无法保存设置",
@@ -1228,20 +1197,17 @@ const resources = {
           title: "界面",
           description: "选择 WebUI 标签、导航和控件的显示语言。",
           languageLabel: "WebUI 语言",
-          languageDescription: "此设置会保存到共享的 Daat Locus 语言配置。",
+          languageDescription: "在 Daat Locus 中共享。",
           languagePlaceholder: "选择语言",
           showThinkingLabel: "显示思考",
-          showThinkingDescription:
-            "立即在 WebUI 中显示模型的思考过程。此偏好仅保留在当前浏览器会话中，不会写入配置。",
+          showThinkingDescription: "显示模型的思考过程。此偏好仅作用于当前浏览器。",
           showThinkingAria: "显示模型思考过程",
         },
         telegram: {
           title: "Telegram",
-          description:
-            "启用 Telegram 传输，并提供用于接收消息和发送事件回复的机器人令牌。",
+          description: "将收到的消息转发到 Telegram 机器人。",
           enableLabel: "启用 Telegram",
-          enableDescription:
-            "只有打开此开关且令牌是真实的 Bot API 令牌时，传输才会启动。",
+          enableDescription: "需要有效的 Bot API 令牌。",
           enableAria: "启用 Telegram 传输",
           botToken: "机器人令牌",
           botTokenDescription:
@@ -1250,25 +1216,23 @@ const resources = {
         sleep: {
           title: "休眠自我改进",
           description:
-            "空闲时 Agent 会重温自己的历史并提出 prompt 与技能修正建议，这会消耗 token，因此可以关闭。",
+            "空闲时让 Agent 重温自身历史，优化 prompt 与技能。会消耗 token。",
           enableLabel: "启用自动休眠",
-          enableDescription:
-            "开启后，后台自我改进会在空闲或错误积压增长时自动运行；无论开关状态，状态页的手动运行始终可用。",
+          enableDescription: "也可在状态页手动运行。",
           enableAria: "启用自动休眠自我改进",
         },
         scope: {
           title: "SCOPE",
-          description:
-            "控制已打开的编程项目是否启动语言服务器。无论开关状态，tree-sitter 搜索和编辑都仍可用。",
+          description: "为已打开的编程项目启动语言服务器。",
           lspLabel: "启用语言服务器",
           lspDescription:
-            "语言服务器能改善跨文件引用审查，但每个进程都可能占用大量内存。启动大量子代理前可以关闭。下一次编程操作会为已打开的项目启动或停止语言服务器。",
+            "改善跨文件引用审查，代价是内存占用。重启后于下一次编程操作生效。",
           lspAria: "启用 SCOPE 语言服务器",
         },
         modelAccess: {
-          providerDescription: "调校代理模型能力背后的安全访问层。",
-          modelDescription: "将可用模型容量整理成可靠的运行时目录。",
-          selectionDescription: "设置深度、速度与日常工作之间的运行平衡。",
+          providerDescription: "供应商提供凭证与接口地址。",
+          modelDescription: "Agent 可用的模型。",
+          selectionDescription: "Agent 默认使用的模型。",
         },
         validation: {
           providerRequired: "请至少添加一个供应商。",
@@ -1293,11 +1257,9 @@ const resources = {
         noSessionsFound: "未找到会话",
         contextNoSnapshotDescription: "此会话尚未组装模型请求上下文。",
         contextNoSessionsDescription: "会话发布状态数据后会显示上下文组成。",
-        contextHeatmapLabel:
-          "上下文组成热力图。当前自适应布局为 {{columns}} × {{rows}}。",
-        contextCellLabel: "每个单元最多代表 {{tokens}} 个预估 token。",
-        contextDisplayAria:
-          "{{gridLabel}} 正在为 {{session}} 显示 {{occupied}} 个占用单元，矩形显示范围为 {{displayScale}}。",
+        contextHeatmapLabel: "上下文热力图，{{columns}} × {{rows}}。",
+        contextCellLabel: "每个单元最多 {{tokens}} 个 token。",
+        contextDisplayAria: "{{gridLabel}} {{session}} 占用 {{occupied}} 个单元。",
         tokenCount: "{{count}} tokens",
         total: "总计",
         cached: "缓存",
@@ -1324,7 +1286,7 @@ const resources = {
         noAgentActivityYet: "暂无 Agent 活动",
         used: "已用",
         lastTurn: "上次轮次：{{parts}}",
-        noActivityDescription: "会话开始工作后，此处会显示消息与工具活动。",
+        noActivityDescription: "这里会显示消息与工具活动。",
         totalLabel: "总计：{{text}}",
       },
       chat: {
@@ -1351,7 +1313,7 @@ const resources = {
         editQueuedMessage: "编辑排队消息",
         editQueuedMessageDescription: "在 Agent 处理前更新此待处理输入。",
         commandSuggestions: "命令建议",
-        queueLimit: "最多可排队 {{count}} 条输入。等待 Agent 处理其中一条，或清空队列。",
+        queueLimit: "队列已满（{{count}} 条输入）。",
         imageLimit: "最多可附加 {{count}} 张图片。",
         userMessageQuickNav: "用户消息快速导航",
         closeQuickNav: "关闭快速导航",
@@ -1400,8 +1362,7 @@ const resources = {
         artifactExpand: "展开",
         artifactCollapse: "收起",
         artifactIframeTitle: "{{title}} 预览",
-        artifactLoopbackNotice:
-          "此链接指向回环地址（{{host}}），仅在守护进程所在机器上可解析，因此无法在此嵌入。请直接打开。",
+        artifactLoopbackNotice: "回环地址（{{host}}），请直接打开。",
         artifactUnavailable: "此产物暂无可用预览。",
         artifactKindImage: "图片",
         artifactKindSvg: "SVG",
@@ -1432,6 +1393,8 @@ const resources = {
         noLevelEntries: "没有 {{level}} 或更高级别的日志条目。",
         noMatchingEntries: "没有匹配的日志条目。",
         blank: "（空白）",
+        levelFilterAria: "最低级别：{{level}}，点击修改。",
+        jumpToLatest: "跳到最新",
       },
     },
   },
