@@ -1415,6 +1415,7 @@ fn validate_pending_terminal_event(events: &EventStore, event_id: uuid::Uuid) ->
 }
 fn next_runtime_idle_sleep_delay(context: &Context, sleep_running: bool) -> Option<Duration> {
     next_runtime_idle_sleep_delay_from_instants(
+        context.config.sleep.enabled,
         context.idle_since,
         context.last_idle_sleep_at,
         sleep_running,
@@ -1422,11 +1423,12 @@ fn next_runtime_idle_sleep_delay(context: &Context, sleep_running: bool) -> Opti
 }
 
 fn next_runtime_idle_sleep_delay_from_instants(
+    sleep_enabled: bool,
     idle_since: Option<Instant>,
     last_idle_sleep_at: Option<Instant>,
     sleep_running: bool,
 ) -> Option<Duration> {
-    if sleep_running {
+    if !sleep_enabled || sleep_running {
         return None;
     }
 
@@ -1924,21 +1926,27 @@ mod tests {
 
     #[test]
     fn idle_sleep_delay_requires_idle_and_no_running_sleep() {
-        assert!(next_runtime_idle_sleep_delay_from_instants(None, None, false).is_none());
+        assert!(next_runtime_idle_sleep_delay_from_instants(true, None, None, false).is_none());
 
         let idle_since = Some(
             Instant::now()
                 .checked_sub(AUTO_SLEEP_IDLE_THRESHOLD)
                 .unwrap(),
         );
-        assert!(next_runtime_idle_sleep_delay_from_instants(idle_since, None, true).is_none());
+        assert!(
+            next_runtime_idle_sleep_delay_from_instants(true, idle_since, None, true).is_none()
+        );
+
+        assert!(
+            next_runtime_idle_sleep_delay_from_instants(false, idle_since, None, false).is_none()
+        );
     }
 
     #[test]
     fn idle_sleep_delay_tracks_idle_and_min_interval_deadlines() {
         let fresh_idle_since = Some(Instant::now());
         let fresh_delay =
-            next_runtime_idle_sleep_delay_from_instants(fresh_idle_since, None, false)
+            next_runtime_idle_sleep_delay_from_instants(true, fresh_idle_since, None, false)
                 .expect("idle sleep should be scheduled");
         assert!(fresh_delay <= AUTO_SLEEP_IDLE_THRESHOLD);
         assert!(
@@ -1956,12 +1964,13 @@ mod tests {
                 .unwrap(),
         );
         let overdue_delay =
-            next_runtime_idle_sleep_delay_from_instants(overdue_idle_since, None, false)
+            next_runtime_idle_sleep_delay_from_instants(true, overdue_idle_since, None, false)
                 .expect("overdue idle sleep should be ready");
         assert!(overdue_delay <= Duration::from_millis(10));
 
         let last_idle_sleep_at = Some(Instant::now());
         let throttled_delay = next_runtime_idle_sleep_delay_from_instants(
+            true,
             overdue_idle_since,
             last_idle_sleep_at,
             false,
