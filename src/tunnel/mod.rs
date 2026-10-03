@@ -95,10 +95,7 @@ impl Drop for TunnelHandle {
     }
 }
 
-async fn graceful_stop(
-    shutdown_tx: Option<oneshot::Sender<()>>,
-    task: Option<JoinHandle<()>>,
-) {
+async fn graceful_stop(shutdown_tx: Option<oneshot::Sender<()>>, task: Option<JoinHandle<()>>) {
     if let Some(tx) = shutdown_tx {
         let _ = tx.send(());
     }
@@ -255,10 +252,10 @@ async fn run_reactor(
 fn normalize_hostname(raw: &str) -> String {
     let raw = raw.trim();
     if raw.contains("://") {
-        if let Ok(url) = url::Url::parse(raw) {
-            if let Some(host) = url.host_str() {
-                return host.to_string();
-            }
+        if let Ok(url) = url::Url::parse(raw)
+            && let Some(host) = url.host_str()
+        {
+            return host.to_string();
         }
         return String::new();
     }

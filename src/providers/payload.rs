@@ -254,16 +254,8 @@ pub(super) fn image_part_data_url(part: &AgentContentPart) -> Option<String> {
         return None;
     };
     let path_buf = std::path::PathBuf::from(path);
-    let bytes = match tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(tokio::task::spawn_blocking(move || {
-            std::fs::read(&path_buf)
-        }))
-    }) {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(err)) => {
-            warn!("failed to read multimodal image attachment {path}: {err}");
-            return None;
-        }
+    let bytes = match std::fs::read(&path_buf) {
+        Ok(bytes) => bytes,
         Err(err) => {
             warn!("failed to read multimodal image attachment {path}: {err}");
             return None;

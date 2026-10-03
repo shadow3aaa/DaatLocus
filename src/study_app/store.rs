@@ -565,6 +565,7 @@ impl StudyStore {
             )
             .into_diagnostic()?;
         transaction.commit().into_diagnostic()?;
+        drop(connection);
 
         let similar = self.find_similar(title, 5)?;
         let similar = similar
@@ -1547,7 +1548,8 @@ fn load_node_summaries(connection: &Connection) -> Result<Vec<StudyNodeSummary>>
     Ok(nodes)
 }
 
-const NODE_SUMMARY_SELECT: &str = "SELECT n.id, n.module_id, n.title, n.summary, n.aliases, n.tags, n.content_version,
+const NODE_SUMMARY_SELECT: &str =
+    "SELECT n.id, n.module_id, n.title, n.summary, n.aliases, n.tags, n.content_version,
         COALESCE(p.understanding, 0), COALESCE(p.evidence, ''), COALESCE(p.updated_by, 'code'),
         COALESCE(p.updated_at_ms, 0),
         (SELECT COUNT(*) FROM study_questions q WHERE q.node_id = n.id),
@@ -1636,21 +1638,29 @@ fn search_nodes_on(
     if let Some(module_id) = module_id {
         nodes.retain(|node| node.module_id == module_id);
     }
-    nodes.retain(|node| matched.contains(&node.id) || node.title.to_lowercase().contains(&query_lower));
+    nodes.retain(|node| {
+        matched.contains(&node.id) || node.title.to_lowercase().contains(&query_lower)
+    });
     nodes.truncate(limit);
     Ok(nodes)
 }
 
 fn sql_normalized_identity(column: &str) -> String {
     let mut expr = format!("lower(trim({column}))");
-    for token in [" ", "\t", "\n", "\r", "-", "_", "·", "/", "(", ")", "（", "）"] {
+    for token in [
+        " ", "\t", "\n", "\r", "-", "_", "·", "/", "(", ")", "（", "）",
+    ] {
         let escaped = token.replace('\\', "\\\\").replace('\"', "\\\"");
         expr = format!("replace({expr}, '{escaped}', '')");
     }
     expr
 }
 
-fn similar_node_ids(connection: &Connection, normalized: &str, limit: usize) -> Result<Vec<String>> {
+fn similar_node_ids(
+    connection: &Connection,
+    normalized: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
     let title = sql_normalized_identity("title");
     let alias = sql_normalized_identity("value");
     let sql = format!(
@@ -1666,7 +1676,9 @@ fn similar_node_ids(connection: &Connection, normalized: &str, limit: usize) -> 
     );
     let mut statement = connection.prepare(&sql).into_diagnostic()?;
     let rows = statement
-        .query_map(params![normalized, limit as i64], |row| row.get::<_, String>(0))
+        .query_map(params![normalized, limit as i64], |row| {
+            row.get::<_, String>(0)
+        })
         .into_diagnostic()?;
     let mut ids = Vec::new();
     for row in rows {
@@ -2165,9 +2177,7 @@ mod tests {
     }
 
     fn create_module(store: &StudyStore, title: &str) -> StudyModule {
-        store
-            .create_module(title, "")
-            .expect("create module")
+        store.create_module(title, "").expect("create module")
     }
 
     fn source() -> StudySource {
@@ -2485,7 +2495,10 @@ mod tests {
     #[test]
     fn fts_query_quotes_tokens_and_doubles_embedded_quotes() {
         assert_eq!(build_fts_query(""), "");
-        assert_eq!(build_fts_query("  group   theory "), "\"group\"* AND \"theory\"*");
+        assert_eq!(
+            build_fts_query("  group   theory "),
+            "\"group\"* AND \"theory\"*"
+        );
         assert_eq!(quote_fts5_prefix_token("say \"hi\""), "\"say \"\"hi\"\"\"*");
     }
 }

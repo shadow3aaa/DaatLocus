@@ -320,15 +320,15 @@ impl RuntimeTool for StaticRuntimeTool {
 
 fn unreachable_static_tool_summary(call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
     Err(miette!(
-        "runtime tool `{}` has no summarize callback", call.name
+        "runtime tool `{}` has no summarize callback",
+        call.name
     ))
 }
 
-fn unreachable_static_tool_activity(
-    call: &AgentToolCall,
-) -> miette::Result<ToolCallActivityEvent> {
+fn unreachable_static_tool_activity(call: &AgentToolCall) -> miette::Result<ToolCallActivityEvent> {
     Err(miette!(
-        "runtime tool `{}` has no activity callback", call.name
+        "runtime tool `{}` has no activity callback",
+        call.name
     ))
 }
 
@@ -1132,9 +1132,10 @@ async fn execute_worker_runtime_tool(
     }
     if let Some(app_tool_name) = tool.app_tool_name() {
         let app_call = call.with_name(app_tool_name.to_string());
-        let app_id = tool.owner_app_id().cloned().ok_or_else(|| {
-            miette!("worker app tool owner missing for `{}`", tool.name())
-        })?;
+        let app_id = tool
+            .owner_app_id()
+            .cloned()
+            .ok_or_else(|| miette!("worker app tool owner missing for `{}`", tool.name()))?;
         if app_tool_name == APP_GET_STATE_TOOL_NAME {
             let args: AppGetStateArgs = parse_tool_args(call)?;
             let state = apps
@@ -1281,17 +1282,16 @@ fn runtime_tools_for_context(context: &Context) -> std::sync::Arc<Vec<Box<dyn Ru
     let study_mode = context.study_mode();
     let dashboard_history = context.dashboard_history.is_some();
     let ask_mode = context.current_turn_input_mode.is_ask();
-    if let Ok(slot) = cache.lock() {
-        if let Some(cached) = slot.as_ref()
-            && cached.key == key
-            && cached.epoch == context.runtime_turn_epoch
-            && cached.catalog == catalog
-            && cached.study_mode == study_mode
-            && cached.dashboard_history == dashboard_history
-            && cached.ask_mode == ask_mode
-        {
-            return Arc::clone(&cached.tools);
-        }
+    if let Ok(slot) = cache.lock()
+        && let Some(cached) = slot.as_ref()
+        && cached.key == key
+        && cached.epoch == context.runtime_turn_epoch
+        && cached.catalog == catalog
+        && cached.study_mode == study_mode
+        && cached.dashboard_history == dashboard_history
+        && cached.ask_mode == ask_mode
+    {
+        return Arc::clone(&cached.tools);
     }
     let tools = Arc::new(build_runtime_tools(context));
     if let Ok(mut slot) = cache.lock() {

@@ -140,13 +140,16 @@ fn derive_copilot_base_url(session_token: &str) -> String {
 /// (`proxy.example.com` is rewritten to `api.example.com`) or an absolute URL.
 pub(crate) fn copilot_base_url_from_session_token(session_token: &str) -> Option<String> {
     let endpoint = semicolon_field(session_token, "proxy-ep")?;
-    copilot_proxy_endpoint_to_base_url(&endpoint)
+    copilot_proxy_endpoint_to_base_url(endpoint)
 }
 
 fn semicolon_field<'a>(token: &'a str, key: &str) -> Option<&'a str> {
     token.split(';').find_map(|part| {
         let (field, value) = part.trim().split_once('=')?;
-        field.trim().eq_ignore_ascii_case(key).then_some(value.trim())
+        field
+            .trim()
+            .eq_ignore_ascii_case(key)
+            .then_some(value.trim())
     })
 }
 
@@ -214,42 +217,6 @@ fn rewrite_copilot_proxy_host(host: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn proxy_ep_parses_without_magic_offset() {
-        // "proxy-ep=" is 9 bytes; a shorter or longer key must not use that offset.
-        let token = "tid=abc; Proxy-EP=proxy.individual.githubcopilot.com;exp=1";
-        assert_eq!(
-            derive_copilot_base_url(token),
-            "https://api.individual.githubcopilot.com"
-        );
-
-        let short_key = "ep=proxy.individual.githubcopilot.com";
-        assert_eq!(derive_copilot_base_url(short_key), COPILOT_INTERNAL_BASE_URL);
-
-        let with_port_and_path = "proxy-ep=proxy.individual.githubcopilot.com:8443/v1";
-        assert_eq!(
-            derive_copilot_base_url(with_port_and_path),
-            "https://api.individual.githubcopilot.com:8443/v1"
-        );
-
-        let absolute = "proxy-ep=https://user:secret@proxy.individual.githubcopilot.com:8443/v1?q=1";
-        assert_eq!(
-            derive_copilot_base_url(absolute),
-            "https://api.individual.githubcopilot.com:8443/v1?q=1"
-        );
-
-        let ipv6 = "proxy-ep=[2001:db8::1]:8443/v1";
-        assert_eq!(
-            derive_copilot_base_url(ipv6),
-            "https://[2001:db8::1]:8443/v1"
-        );
-    }
-}
-
 #[async_trait]
 impl ModelProvider for CopilotClient {
     async fn complete_json(
@@ -301,5 +268,45 @@ impl ModelProvider for CopilotClient {
             .try_lock()
             .map(|inner| inner.model_name())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_ep_parses_without_magic_offset() {
+        // "proxy-ep=" is 9 bytes; a shorter or longer key must not use that offset.
+        let token = "tid=abc; Proxy-EP=proxy.individual.githubcopilot.com;exp=1";
+        assert_eq!(
+            derive_copilot_base_url(token),
+            "https://api.individual.githubcopilot.com"
+        );
+
+        let short_key = "ep=proxy.individual.githubcopilot.com";
+        assert_eq!(
+            derive_copilot_base_url(short_key),
+            COPILOT_INTERNAL_BASE_URL
+        );
+
+        let with_port_and_path = "proxy-ep=proxy.individual.githubcopilot.com:8443/v1";
+        assert_eq!(
+            derive_copilot_base_url(with_port_and_path),
+            "https://api.individual.githubcopilot.com:8443/v1"
+        );
+
+        let absolute =
+            "proxy-ep=https://user:secret@proxy.individual.githubcopilot.com:8443/v1?q=1";
+        assert_eq!(
+            derive_copilot_base_url(absolute),
+            "https://api.individual.githubcopilot.com:8443/v1?q=1"
+        );
+
+        let ipv6 = "proxy-ep=[2001:db8::1]:8443/v1";
+        assert_eq!(
+            derive_copilot_base_url(ipv6),
+            "https://[2001:db8::1]:8443/v1"
+        );
     }
 }

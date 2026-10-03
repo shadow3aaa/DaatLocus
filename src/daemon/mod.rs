@@ -1205,7 +1205,8 @@ fn sanitize_attachment_extension(extension: &str) -> String {
 }
 
 fn decode_attachment_data_url(data_url: &str) -> std::result::Result<Vec<u8>, String> {
-    let parsed = parse_data_url(data_url).ok_or_else(|| "invalid attachment data URL".to_string())?;
+    let parsed =
+        parse_data_url(data_url).ok_or_else(|| "invalid attachment data URL".to_string())?;
     decode_parsed_data_url_payload(&parsed, "invalid base64 attachment", false)
 }
 
@@ -1220,9 +1221,7 @@ fn decode_image_data_url(
     let data_media_type = normalize_dashboard_image_media_type(parsed.media_type)
         .ok_or_else(|| "unsupported image data URL media type".to_string())?;
     if data_media_type != expected_media_type {
-        return Err(
-            "image data URL media type does not match attachment media type".to_string(),
-        );
+        return Err("image data URL media type does not match attachment media type".to_string());
     }
     decode_parsed_data_url_payload(&parsed, "invalid base64 image attachment", false)
 }
@@ -1285,7 +1284,10 @@ fn decode_parsed_data_url_payload(
     }
     percent_decode_data_url_payload(parsed.payload)
 }
-fn decode_base64_payload(payload: &str, error_prefix: &str) -> std::result::Result<Vec<u8>, String> {
+fn decode_base64_payload(
+    payload: &str,
+    error_prefix: &str,
+) -> std::result::Result<Vec<u8>, String> {
     base64::engine::general_purpose::STANDARD
         .decode(payload)
         .map_err(|err| format!("{error_prefix}: {err}"))
@@ -2701,13 +2703,14 @@ fn percent_decode_file_url_path(path: &str) -> String {
     let input = path.as_bytes();
     let mut index = 0;
     while index < input.len() {
-        if input[index] == b'%' && index + 2 < input.len() {
-            if let (Some(hi), Some(lo)) = (hex_nibble(input[index + 1]), hex_nibble(input[index + 2]))
-            {
-                bytes.push((hi << 4) | lo);
-                index += 3;
-                continue;
-            }
+        if input[index] == b'%'
+            && index + 2 < input.len()
+            && let (Some(hi), Some(lo)) =
+                (hex_nibble(input[index + 1]), hex_nibble(input[index + 2]))
+        {
+            bytes.push((hi << 4) | lo);
+            index += 3;
+            continue;
         }
         bytes.push(input[index]);
         index += 1;
@@ -5542,16 +5545,21 @@ mod tests {
 
     #[test]
     fn data_url_parser_splits_media_type_parameters_base64_and_payload() {
-        let parsed = parse_data_url("data:text/plain;charset=utf-8;base64,aGVsbG8=").expect("data url");
+        let parsed =
+            parse_data_url("data:text/plain;charset=utf-8;base64,aGVsbG8=").expect("data url");
         assert_eq!(parsed.media_type, "text/plain");
         assert!(parsed.base64);
         assert_eq!(parsed.payload, "aGVsbG8=");
         assert!(!parsed.is_bare_payload);
         assert_eq!(
-            decode_attachment_data_url("data:application/octet-stream;base64,aGVsbG8=").expect("bytes"),
+            decode_attachment_data_url("data:application/octet-stream;base64,aGVsbG8=")
+                .expect("bytes"),
             b"hello"
         );
-        assert_eq!(decode_attachment_data_url("aGVsbG8=").expect("bare"), b"hello");
+        assert_eq!(
+            decode_attachment_data_url("aGVsbG8=").expect("bare"),
+            b"hello"
+        );
         assert!(decode_attachment_data_url("data:text/plain,hello").is_err());
 
         let image = parse_data_url("data:image/png;base64,aGVsbG8=").expect("image");

@@ -691,7 +691,11 @@ fn yaml_scalar_string(value: &serde_yaml::Value) -> Option<String> {
     match value {
         serde_yaml::Value::String(text) => {
             let text = text.trim();
-            if text.is_empty() { None } else { Some(text.to_string()) }
+            if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            }
         }
         serde_yaml::Value::Number(number) => Some(number.to_string()),
         serde_yaml::Value::Bool(flag) => Some(flag.to_string()),
@@ -723,15 +727,17 @@ fn extract_wikilinks(text: &str) -> Vec<String> {
                 continue;
             }
         }
-        if bytes[index] == b'[' && index + 1 < bytes.len() && bytes[index + 1] == b'[' {
-            if let Some(end) = find_wikilink_close(bytes, index + 2) {
-                let inner = &text[index + 2..end];
-                if let Some(target) = wikilink_target(inner) {
-                    links.push(target);
-                }
-                index = end + 2;
-                continue;
+        if bytes[index] == b'['
+            && index + 1 < bytes.len()
+            && bytes[index + 1] == b'['
+            && let Some(end) = find_wikilink_close(bytes, index + 2)
+        {
+            let inner = &text[index + 2..end];
+            if let Some(target) = wikilink_target(inner) {
+                links.push(target);
             }
+            index = end + 2;
+            continue;
         }
         index += 1;
     }
@@ -947,9 +953,7 @@ mod tests {
         let vault = dir.path().join("Vault");
         write(&vault.join("Group.md"), "# Group\n\nImported body.");
 
-        let module = store
-            .create_module("Algebra", "")
-            .expect("module");
+        let module = store.create_module("Algebra", "").expect("module");
         store
             .create_node(
                 &CreateNodeInput {

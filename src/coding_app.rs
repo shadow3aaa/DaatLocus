@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -398,7 +398,6 @@ pub struct CodingApp {
     root_instructions: Vec<ProjectInstructionDocument>,
     root_instruction_fingerprint: Option<String>,
     delivered_scoped_instructions: HashSet<DeliveredProjectInstructionKey>,
-    scoped_instruction_cache: HashMap<(u64, String), Vec<ProjectInstructionDocument>>,
     last_action: Option<String>,
 }
 
@@ -413,7 +412,6 @@ impl CodingApp {
             root_instructions: Vec::new(),
             root_instruction_fingerprint: None,
             delivered_scoped_instructions: HashSet::new(),
-            scoped_instruction_cache: HashMap::new(),
             last_action: None,
         }
     }
@@ -516,7 +514,6 @@ impl CodingApp {
         self.root_instructions.clone_from(&root_instructions);
         self.root_instruction_fingerprint = Some(root_instruction_fingerprint.clone());
         self.delivered_scoped_instructions.clear();
-        self.scoped_instruction_cache.clear();
         self.last_action = Some("opened project".to_string());
 
         let model_parts = [
@@ -589,10 +586,6 @@ impl CodingApp {
             current_dir = parent;
         }
         scope_dirs.reverse();
-        let cache_key = (turn_epoch, relative_or_absolute_path.to_string());
-        if let Some(cached) = self.scoped_instruction_cache.get(&cache_key) {
-            return Ok(cached.clone());
-        }
         let mut scoped = Vec::new();
         for scope_dir in scope_dirs {
             scoped.extend(load_instruction_documents_in_dir(&scope_dir)?);
@@ -608,8 +601,6 @@ impl CodingApp {
                 newly_delivered.push(instruction);
             }
         }
-        self.scoped_instruction_cache
-            .insert(cache_key, newly_delivered.clone());
         Ok(newly_delivered)
     }
 

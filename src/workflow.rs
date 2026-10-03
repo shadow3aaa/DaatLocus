@@ -33,9 +33,7 @@ use crate::{
         AgentMessage, AgentToolCall, AgentToolInputSpec, AgentToolSpec, AgentTurnRequest,
     },
     runtime::bootstrap::build_runtime_apps,
-    runtime_context::{
-        MID_TURN_RESET_MAX_RECOVERIES, maybe_reset_agent_history,
-    },
+    runtime_context::{MID_TURN_RESET_MAX_RECOVERIES, maybe_reset_agent_history},
     runtime_tools::{
         ToolExecutionResult, WorkerRuntimeToolCallContext,
         build_worker_runtime_tool_specs_for_apps, execute_worker_runtime_tool_call_for_apps,
@@ -50,9 +48,9 @@ mod builtin_workflow_bindings {
 
 mod group;
 mod runs;
-pub use group::{WorkflowGroupNodeSnapshot, WorkflowGroupSnapshot};
 #[cfg(test)]
 pub use group::WorkflowGroupEdgeSnapshot;
+pub use group::{WorkflowGroupNodeSnapshot, WorkflowGroupSnapshot};
 pub use runs::WorkflowRunRegistry;
 
 const WORKFLOW_TOOL_PREFIX: &str = "workflow__";
@@ -1379,7 +1377,9 @@ pub(crate) fn workflow_tool_input_schema(input_schema: &Value) -> Value {
         .entry("required")
         .or_insert_with(|| json!([]))
         .as_array_mut()
-        && !required.iter().any(|item| item.as_str() == Some("waits_for"))
+        && !required
+            .iter()
+            .any(|item| item.as_str() == Some("waits_for"))
     {
         required.push(json!("waits_for"));
     }
@@ -2857,19 +2857,9 @@ mod tests {
         );
         let dashboard_state = dashboard_rx.borrow().clone();
         let live_snapshot = dashboard_state
-            .live_activity_events
+            .active_workflow_runs
             .iter()
-            .find_map(|live| match &live.event {
-                crate::dashboard::SessionActivityEvent::Workflow(workflow)
-                    if workflow
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|snapshot| snapshot.run_id == transport.run_id) =>
-                {
-                    workflow.snapshot.as_ref()
-                }
-                _ => None,
-            })
+            .find(|run| run.run_id == transport.run_id)
             .expect("workflow live event");
         assert_eq!(
             live_snapshot.workers[0].activity.len(),

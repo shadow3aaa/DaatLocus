@@ -409,8 +409,8 @@ impl TreeSitterAnalyzer {
         let adapter = self.registry.get(ext)?;
         let mut parser = adapter.parser();
         let tree = parser.parse(source, None)?;
-        let query = tree_sitter::Query::new(&adapter.language(), adapter.queries().definitions)
-            .ok()?;
+        let query =
+            tree_sitter::Query::new(&adapter.language(), adapter.queries().definitions).ok()?;
         let name_idx = query.capture_index_for_name("name")?;
         let mut cursor = tree_sitter::QueryCursor::new();
         let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
@@ -480,15 +480,17 @@ fn captured_definition_name(
             // capture whose parent is this node, but accept a capture inside
             // the node when the pattern's `@def` node is an ancestor.
             let captured = capture.node;
-            let belongs = captured.parent().is_some_and(|parent| parent.id() == node.id())
+            let belongs = captured
+                .parent()
+                .is_some_and(|parent| parent.id() == node.id())
                 || node_contains(node, captured);
             if !belongs {
                 continue;
             }
-            if let Ok(text) = captured.utf8_text(source.as_bytes()) {
-                if !text.is_empty() {
-                    return Some(text.to_string());
-                }
+            if let Ok(text) = captured.utf8_text(source.as_bytes())
+                && !text.is_empty()
+            {
+                return Some(text.to_string());
             }
         }
     }
@@ -638,7 +640,9 @@ mod tests {
             "definition query should capture the function name, not the pointer type; got {names:?}"
         );
         assert!(
-            !names.iter().any(|name| *name == "const" || *name == "u8" || *name == "mut"),
+            !names
+                .iter()
+                .any(|name| *name == "const" || *name == "u8" || *name == "mut"),
             "pointer type tokens must not be treated as definition names; got {names:?}"
         );
         assert!(
@@ -646,7 +650,7 @@ mod tests {
             "method name should come from the @name capture; got {names:?}"
         );
         assert!(
-            !names.iter().any(|name| *name == "crate"),
+            !names.contains(&"crate"),
             "qualified impl path must not be the impl name; got {names:?}"
         );
 
@@ -657,13 +661,16 @@ mod tests {
         let impl_code = "impl Hints for Alpha {\n    fn setup_hints(&self) {}\n}\n";
         let impl_path = write_temp_rust_file(dir.path(), "impls.rs", impl_code);
         let impl_symbols = analyzer.symbols_in_file(&impl_path).unwrap();
-        let impl_names: Vec<&str> = impl_symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+        let impl_names: Vec<&str> = impl_symbols
+            .iter()
+            .map(|symbol| symbol.name.as_str())
+            .collect();
         assert!(
             impl_names.contains(&"Alpha"),
             "impl name is the adapter query's type: capture, not the first type_identifier child; got {impl_names:?}"
         );
         assert!(
-            !impl_names.iter().any(|name| *name == "Hints"),
+            !impl_names.contains(&"Hints"),
             "the implemented trait is not the impl_item type: capture; got {impl_names:?}"
         );
         let impl_position = analyzer
@@ -683,7 +690,11 @@ mod tests {
             !qualified_names.iter().any(|name| name == "crate"),
             "when the impl query does not match a scoped type, the child-walk fallback must not invent the path qualifier; got {qualified_names:?}"
         );
-        assert!(analyzer.definition_name_position(&path, code, "u8").is_none());
+        assert!(
+            analyzer
+                .definition_name_position(&path, code, "u8")
+                .is_none()
+        );
     }
 
     const RUST_CODE: &str = "// line 1\n                 fn startup() {\n                    inner_call();\n                }\n            }\n            ";

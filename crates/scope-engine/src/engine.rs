@@ -269,7 +269,6 @@ impl Analyzer for DisabledLsp {
     fn scope_lsp_enabled(&self) -> bool {
         false
     }
-
 }
 
 struct UnsupportedLsp;
@@ -290,7 +289,6 @@ impl Analyzer for UnsupportedLsp {
     fn notify_did_change(&self, _file_path: &Path, _version: i32, _text: &str) {}
 
     fn notify_did_close(&self, _file_path: &Path) {}
-
 }
 
 /// Start or stop the language server for an already chosen project root.
@@ -338,12 +336,7 @@ fn sync_project_lsp(
             .lock()
             .map_err(|_| "lock poisoned".to_string())?;
         if let (Some(lsp), Some(lsp_lang)) = (&*lsp_guard, detected_lsp_language) {
-            open_existing_source_files_for_lsp(
-                lsp.as_ref(),
-                project_root,
-                lsp_lang,
-                &opened_files,
-            );
+            open_existing_source_files_for_lsp(lsp.as_ref(), project_root, lsp_lang, &opened_files);
         }
     }
 
@@ -799,7 +792,9 @@ fn read_range_for_mode(
         }
         ReadCodeMode::Full => {
             let analyzer = TreeSitterAnalyzer::new();
-            if let Some(symbol) = analyzer.find_containing_symbol_match(full_path, anchor_line, None) {
+            if let Some(symbol) =
+                analyzer.find_containing_symbol_match(full_path, anchor_line, None)
+            {
                 return clamp_range(symbol.start_line, symbol.end_line, line_count);
             }
             read_range_for_mode(ReadCodeMode::Around, full_path, anchor_line, line_count)
@@ -977,12 +972,9 @@ pub fn ack_next_events(
     let mut state = propagation_state
         .lock()
         .map_err(|_| "lock poisoned".to_string())?;
-    let (review, reviews) = if limit == 1 {
-        (state.next_review(), Vec::new())
-    } else {
-        (None, state.next_reviews(limit))
-    };
-    let returned = usize::from(review.is_some()) + reviews.len();
+    let reviews = state.next_reviews(limit);
+    let review = reviews.first().cloned();
+    let returned = reviews.len();
     let remaining = state.pending_count();
     drop(state);
     Ok(ReviewBatch {

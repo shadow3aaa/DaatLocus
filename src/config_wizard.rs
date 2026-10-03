@@ -234,16 +234,12 @@ struct CodexDeviceUserCodeResponse {
 /// Codex returns the poll interval as either a JSON number or a numeric string.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
+#[derive(Default)]
 enum CodexDeviceInterval {
     Number(u64),
     String(String),
+    #[default]
     Missing,
-}
-
-impl Default for CodexDeviceInterval {
-    fn default() -> Self {
-        Self::Missing
-    }
 }
 
 #[derive(serde::Deserialize)]
@@ -3465,10 +3461,9 @@ mod tests {
                 .expect("number interval");
         assert_eq!(parse_codex_device_interval(&number.interval), 8);
 
-        let string: CodexDeviceUserCodeResponse = serde_json::from_str(
-            r#"{"device_auth_id":"id","user_code":"code","interval":"12"}"#,
-        )
-        .expect("string interval");
+        let string: CodexDeviceUserCodeResponse =
+            serde_json::from_str(r#"{"device_auth_id":"id","user_code":"code","interval":"12"}"#)
+                .expect("string interval");
         assert_eq!(parse_codex_device_interval(&string.interval), 12);
 
         let missing: CodexDeviceUserCodeResponse =

@@ -151,9 +151,7 @@ impl TerminalApp {
         let head = argv.iter().map(String::as_str).collect::<Vec<_>>();
         forbidden
             .iter()
-            .find(|prefix| {
-                head.len() >= prefix.len() && head[..prefix.len()] == prefix[..]
-            })
+            .find(|prefix| head.len() >= prefix.len() && head[..prefix.len()] == prefix[..])
             .map(|_| LOGIN_COMMAND_REJECTION)
     }
 
@@ -711,9 +709,9 @@ fn tokenize_powershell_words(input: &str) -> Option<Vec<String>> {
         }
         if in_double {
             if ch == '`' {
-                match chars.next() {
-                    Some(escaped) => current.push(escaped),
-                    None => return None,
+                {
+                    let escaped = chars.next()?;
+                    current.push(escaped)
                 }
             } else if ch == '"' {
                 in_double = false;
@@ -732,13 +730,11 @@ fn tokenize_powershell_words(input: &str) -> Option<Vec<String>> {
                 in_double = true;
                 in_word = true;
             }
-            '`' => match chars.next() {
-                Some(escaped) => {
-                    current.push(escaped);
-                    in_word = true;
-                }
-                None => return None,
-            },
+            '`' => {
+                let escaped = chars.next()?;
+                current.push(escaped);
+                in_word = true;
+            }
             ch if ch.is_whitespace() => {
                 if in_word {
                     words.push(std::mem::take(&mut current));
@@ -790,9 +786,8 @@ fn command_mentions_protected_paths_fallback(
 
 fn shell_word_mentions_protected_path(word: &str, roots: &[std::path::PathBuf]) -> bool {
     path_candidate_mentions_protected_path(word, roots)
-        || option_attached_path(word).is_some_and(|path| {
-            path_candidate_mentions_protected_path(path, roots)
-        })
+        || option_attached_path(word)
+            .is_some_and(|path| path_candidate_mentions_protected_path(path, roots))
 }
 
 fn path_candidate_mentions_protected_path(word: &str, roots: &[std::path::PathBuf]) -> bool {
@@ -2292,7 +2287,8 @@ mod tests {
         );
         if cfg!(windows) {
             assert_eq!(
-                TerminalApp::cwd_from_shell_input("Set-Location -LiteralPath 'C:\\tmp\\a''b'").as_deref(),
+                TerminalApp::cwd_from_shell_input("Set-Location -LiteralPath 'C:\\tmp\\a''b'")
+                    .as_deref(),
                 Some("C:\\tmp\\a'b")
             );
         } else {

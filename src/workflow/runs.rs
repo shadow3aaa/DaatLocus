@@ -13,13 +13,13 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::watch;
 
+use super::group::WorkflowGroup;
 use super::{
     WorkflowCancellation, WorkflowExecutionContext, WorkflowInspectorPublisher, WorkflowInvocation,
     WorkflowInvocationResult, WorkflowInvocationStatus, WorkflowNodeStatus, WorkflowRunSnapshot,
     execute_run, invocation_status_from_node_status, publish_workflow_group,
     workflow_snapshot_message,
 };
-use super::group::WorkflowGroup;
 use crate::context::Context;
 use crate::schema_utils::validate_value_against_schema;
 
@@ -256,13 +256,7 @@ impl WorkflowRunRegistry {
         };
 
         if launch_now {
-            self.spawn_registered(
-                context,
-                definition,
-                invocation.input,
-                run_id,
-                started_at_ms,
-            )
+            self.spawn_registered(context, definition, invocation.input, run_id, started_at_ms)
         } else {
             self.install_pending(context, definition, invocation.input, run_id, started_at_ms)
         }
@@ -289,7 +283,7 @@ impl WorkflowRunRegistry {
         let launch = PendingLaunch {
             definition,
             input,
-            execution: WorkflowExecutionContext::from(&*context),
+            execution: WorkflowExecutionContext::from(context),
             dashboard_tx: context.dashboard_tx.clone(),
             dashboard_history: context.dashboard_history.clone(),
             cancellation_registry: context.workflow_cancellation.clone(),
@@ -329,7 +323,7 @@ impl WorkflowRunRegistry {
         let launch = PreparedLaunch {
             definition,
             input,
-            execution: WorkflowExecutionContext::from(&*context),
+            execution: WorkflowExecutionContext::from(context),
             dashboard_tx: context.dashboard_tx.clone(),
             dashboard_history: context.dashboard_history.clone(),
             cancellation_registry: context.workflow_cancellation.clone(),
@@ -420,7 +414,11 @@ impl WorkflowRunRegistry {
         Ok(())
     }
 
-    fn launch_run(&self, run_id: String, launch: PreparedLaunch) -> Result<WorkflowInvocationResult> {
+    fn launch_run(
+        &self,
+        run_id: String,
+        launch: PreparedLaunch,
+    ) -> Result<WorkflowInvocationResult> {
         let PreparedLaunch {
             definition,
             input,
@@ -461,7 +459,8 @@ impl WorkflowRunRegistry {
             (tx, Some(rx))
         } else {
             (
-                result_tx.ok_or_else(|| miette!("workflow run `{run_id}` cannot publish a result"))?,
+                result_tx
+                    .ok_or_else(|| miette!("workflow run `{run_id}` cannot publish a result"))?,
                 None,
             )
         };

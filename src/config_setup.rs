@@ -11,8 +11,9 @@ use uuid::Uuid;
 
 use crate::{
     config::{
-        Config, DaemonConfig, ModelConfig, ProviderConfig, ScopeConfig, SleepConfig, TelegramConfig,
-        ThinkingBudget, load_config, normalize_provider_base_url, parse_env_ref, write_config,
+        Config, DaemonConfig, ModelConfig, ProviderConfig, ScopeConfig, SleepConfig,
+        TelegramConfig, ThinkingBudget, load_config, normalize_provider_base_url, parse_env_ref,
+        write_config,
     },
     daat_locus_paths::daat_locus_paths,
     i18n::Locale,
@@ -258,6 +259,9 @@ pub struct SetupProviderAuthResponse {
 }
 
 #[derive(Debug, Clone)]
+// Every variant is an OAuth device-authorization flow, so the shared `Device`
+// suffix is intentional.
+#[allow(clippy::enum_variant_names)]
 pub enum PendingSetupProviderAuthFlow {
     GithubDevice {
         flow_id: String,
@@ -779,9 +783,7 @@ fn config_from_setup_request_with_base(
             enabled: request.sleep_enabled.unwrap_or(base.sleep.enabled),
         },
         scope: ScopeConfig {
-            lsp_enabled: request
-                .scope_lsp_enabled
-                .unwrap_or(base.scope.lsp_enabled),
+            lsp_enabled: request.scope_lsp_enabled.unwrap_or(base.scope.lsp_enabled),
         },
         ..base
     })
@@ -1745,7 +1747,7 @@ fn home_relative_suffix(trimmed: &str) -> Option<&str> {
         return Some(rest);
     }
     let mut chars = rest.chars();
-    if chars.next().is_some_and(std::path::is_separator) {
+    if chars.next().is_some_and(|ch| ch == '/' || ch == '\\') {
         Some(chars.as_str())
     } else {
         None

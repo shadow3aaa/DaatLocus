@@ -61,9 +61,15 @@ impl DashboardActivityHistoryWindow {
             self.items.drain(0..drop_count);
             self.has_more_before = true;
         }
-        self.newest_cursor = self.items.last().and_then(|item| history_seq_from_item_id(&item.id));
+        self.newest_cursor = self
+            .items
+            .last()
+            .and_then(|item| history_seq_from_item_id(&item.id));
         if self.oldest_cursor.is_none() {
-            self.oldest_cursor = self.items.first().and_then(|item| history_seq_from_item_id(&item.id));
+            self.oldest_cursor = self
+                .items
+                .first()
+                .and_then(|item| history_seq_from_item_id(&item.id));
         }
     }
 }
@@ -605,20 +611,18 @@ impl DashboardActivityHistoryStore {
     }
 
     pub fn query_recent_user_inputs(&self, limit: usize) -> Result<DashboardInputHistory> {
-        let limit = i64::try_from(clamp_history_limit(limit))
-            .expect("history query limit is clamped below i64::MAX");
+        let limit = clamp_history_limit(limit);
         let conn = self.open_connection()?;
         let mut statement = conn
             .prepare(
                 "SELECT item_json FROM dashboard_activity
                  WHERE item_json LIKE '%\"User\":%'
-                 ORDER BY seq DESC
-                 LIMIT ?1",
+                 ORDER BY seq DESC",
             )
             .into_diagnostic()
             .wrap_err("prepare dashboard input history query failed")?;
         let rows = statement
-            .query_map(params![limit], |row| row.get::<_, String>(0))
+            .query_map([], |row| row.get::<_, String>(0))
             .into_diagnostic()
             .wrap_err("query dashboard input history failed")?;
         let mut entries = Vec::new();
@@ -636,6 +640,9 @@ impl DashboardActivityHistoryStore {
                 continue;
             }
             entries.push(text);
+            if entries.len() >= limit {
+                break;
+            }
         }
         entries.reverse();
         Ok(DashboardInputHistory { entries })
@@ -759,7 +766,6 @@ impl DashboardActivityHistoryStore {
                 )
             })
     }
-
 }
 
 fn page_from_rows(
@@ -1238,9 +1244,9 @@ fn normalize_window_explored_item_indexed(
     }
     let latest_id = item.id.clone();
     for (stable_id, state) in index.iter_mut() {
-        if stable_id.as_str() != explored_stable_id(item).unwrap_or_default() {
-            state.is_tail = false;
-        } else if state.latest_item_id != latest_id {
+        if stable_id.as_str() != explored_stable_id(item).unwrap_or_default()
+            || state.latest_item_id != latest_id
+        {
             state.is_tail = false;
         }
     }
@@ -1254,7 +1260,7 @@ fn item_needs_legacy_workflow_migration(item: &DashboardActivityHistoryItem) -> 
         snapshot
             .workers
             .iter()
-            .any(|worker| !worker.activity.is_empty() && worker.activity_count == 0)
+            .any(|worker| !worker.activity.is_empty())
     })
 }
 
@@ -1298,7 +1304,6 @@ fn normalize_window_explored_item(
         + 1;
     item.id = format!("{}-segment-{segment}", item.id);
 }
-
 
 const fn explored_stable_id(item: &DashboardActivityHistoryItem) -> Option<&str> {
     match &item.event {

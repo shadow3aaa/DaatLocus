@@ -297,4 +297,7 @@ When the user should see something rather than only read about it, call
 - Reuse the returned `artifact_id` to update the same artifact; each call adds a
   version. Put the explanation in `finish_and_send`, not inside the artifact.
 - Do not paste large SVG, HTML, or image data into the reply. The tool is
+- Do not paste large SVG, HTML, or image data into the reply. The tool is
   unavailable in ask and study modes.
+
+{{compiled_additions_section}}

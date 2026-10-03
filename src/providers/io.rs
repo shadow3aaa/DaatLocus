@@ -324,8 +324,7 @@ const SSE_CURSOR_HEADER: usize = 8;
 const SSE_CURSOR_MAGIC: u32 = 0x444c_5343;
 
 fn framed(buffer: &[u8]) -> bool {
-    buffer.len() >= SSE_CURSOR_HEADER
-        && buffer[..4] == SSE_CURSOR_MAGIC.to_le_bytes()
+    buffer.len() >= SSE_CURSOR_HEADER && buffer[..4] == SSE_CURSOR_MAGIC.to_le_bytes()
 }
 
 fn sse_cursor(buffer: &[u8]) -> usize {
@@ -353,7 +352,7 @@ fn write_sse_cursor(buffer: &mut Vec<u8>, cursor: usize) {
     *buffer = framed_buffer;
 }
 
-fn sse_bytes(buffer: &mut Vec<u8>) -> &mut [u8] {
+fn sse_bytes(buffer: &mut [u8]) -> &mut [u8] {
     if framed(buffer) {
         &mut buffer[SSE_CURSOR_HEADER..]
     } else {
@@ -767,19 +766,31 @@ mod tests {
         let mut buffer = Vec::new();
         buffer.extend_from_slice(b"data: one\n\ndata: tw");
         normalize_sse_buffer(&mut buffer);
-        assert_eq!(take_next_sse_event(&mut buffer).as_deref(), Some("data: one"));
+        assert_eq!(
+            take_next_sse_event(&mut buffer).as_deref(),
+            Some("data: one")
+        );
         assert!(take_next_sse_event(&mut buffer).is_none());
 
         buffer.extend_from_slice(b"o\n\n");
         normalize_sse_buffer(&mut buffer);
-        assert_eq!(take_next_sse_event(&mut buffer).as_deref(), Some("data: two"));
+        assert_eq!(
+            take_next_sse_event(&mut buffer).as_deref(),
+            Some("data: two")
+        );
         assert!(take_next_sse_event(&mut buffer).is_none());
 
         let mut tight = Vec::new();
         tight.extend_from_slice(b"data: one\n\ndata: tw");
         normalize_sse_buffer(&mut tight);
-        assert_eq!(take_next_sse_event(&mut tight).as_deref(), Some("data: one"));
-        let fill = tight.capacity().saturating_sub(tight.len()).saturating_sub(1);
+        assert_eq!(
+            take_next_sse_event(&mut tight).as_deref(),
+            Some("data: one")
+        );
+        let fill = tight
+            .capacity()
+            .saturating_sub(tight.len())
+            .saturating_sub(1);
         tight.extend(std::iter::repeat_n(b'x', fill));
         assert!(tight.capacity() - tight.len() < 4);
         tight.extend_from_slice(b"\n\n");
@@ -796,7 +807,10 @@ mod tests {
         let mut growing = Vec::with_capacity(b"data: one\n\ndata: tw".len());
         growing.extend_from_slice(b"data: one\n\ndata: tw");
         normalize_sse_buffer(&mut growing);
-        assert_eq!(take_next_sse_event(&mut growing).as_deref(), Some("data: one"));
+        assert_eq!(
+            take_next_sse_event(&mut growing).as_deref(),
+            Some("data: one")
+        );
         growing.extend(std::iter::repeat_n(b'y', growing.capacity()));
         growing.extend_from_slice(b"\n\n");
         normalize_sse_buffer(&mut growing);

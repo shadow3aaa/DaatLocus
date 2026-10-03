@@ -273,9 +273,7 @@ pub(crate) fn split_url_query(uri: &str) -> Option<(String, Vec<(String, String)
     let parsed = url::Url::parse(uri)
         .or_else(|_| url::Url::parse(&format!("http://artifact.invalid{uri}")))
         .ok()?;
-    if parsed.query().is_none() {
-        return None;
-    }
+    parsed.query()?;
     let pairs = parsed
         .query_pairs()
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
@@ -821,12 +819,7 @@ mod tests {
     fn wrapped_artifact_signature_matches_named_query_parameter() {
         let area = Rect::new(0, 0, 36, 2);
         let mut buffer = Buffer::empty(area);
-        buffer.set_string(
-            0,
-            0,
-            "http://127.0.0.1:9/artifacts/a.png",
-            Style::default(),
-        );
+        buffer.set_string(0, 0, "http://127.0.0.1:9/artifacts/a.png", Style::default());
         buffer.set_string(0, 1, "?token=no&sig=abc", Style::default());
 
         let overlays = collect_terminal_hyperlink_overlays(&buffer, &[area]);
@@ -837,13 +830,19 @@ mod tests {
 
         assert_eq!(signature.text, "?token=no&sig=abc");
         assert!(
-            signature.target.ends_with("/artifacts/a.png?token=no&sig=abc"),
+            signature
+                .target
+                .ends_with("/artifacts/a.png?token=no&sig=abc"),
             "sig must be matched by parameter name: {}",
             signature.target
         );
         let (path, pairs) = split_url_query(&signature.target).expect("completed url");
         assert!(path.contains("/artifacts/a.png"));
-        assert!(pairs.iter().any(|(key, value)| key == "sig" && value == "abc"));
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, value)| key == "sig" && value == "abc")
+        );
     }
 
     #[test]

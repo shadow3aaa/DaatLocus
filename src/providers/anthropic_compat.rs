@@ -25,10 +25,10 @@ use tracing::warn;
 
 use super::io::{
     default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
-    looks_like_vision_unsupported_error, non_empty_string,
-    parse_retry_after_seconds, read_response_text_with_timeout,
-    send_request_for_streaming_response, summarize_agent_turn_request, summarize_prompt_request,
-    truncate_for_error, truncate_for_json_error,
+    looks_like_vision_unsupported_error, non_empty_string, parse_retry_after_seconds,
+    read_response_text_with_timeout, send_request_for_streaming_response,
+    summarize_agent_turn_request, summarize_prompt_request, truncate_for_error,
+    truncate_for_json_error,
 };
 use super::payload::{flatten_tool_result_as_assistant_text, image_part_data_url};
 use super::{extract_json_value_from_content, shared_request_rate_limiter};
@@ -589,11 +589,8 @@ fn build_agent_payload(
     strip_images: bool,
 ) -> Value {
     let include_reasoning_blocks = thinking_enabled_for_request(client);
-    let (system, messages) = agent_messages_to_anthropic(
-        &request.messages,
-        strip_images,
-        include_reasoning_blocks,
-    );
+    let (system, messages) =
+        agent_messages_to_anthropic(&request.messages, strip_images, include_reasoning_blocks);
     let mut payload = json!({
         "model": client.model,
         "max_tokens": client.max_output_tokens(),
@@ -1094,7 +1091,10 @@ fn parse_data_url(data_url: &str) -> Option<DataUrl<'_>> {
         if param.is_empty() {
             continue;
         }
-        let name = param.split_once('=').map(|(name, _)| name.trim()).unwrap_or(param);
+        let name = param
+            .split_once('=')
+            .map(|(name, _)| name.trim())
+            .unwrap_or(param);
         if name.eq_ignore_ascii_case("base64") {
             base64 = true;
         }
@@ -1166,8 +1166,7 @@ fn drop_incomplete_tool_turns(messages: &mut Vec<Value>) {
     let mut index = 0;
 
     while index < original.len() {
-        let is_assistant =
-            original[index].get("role").and_then(Value::as_str) == Some("assistant");
+        let is_assistant = original[index].get("role").and_then(Value::as_str) == Some("assistant");
         let tool_use_ids = if is_assistant {
             message_block_ids(&original[index], "tool_use", "id")
         } else {
@@ -1357,16 +1356,14 @@ impl AnthropicStreamState {
                             }
                         }
                         "input_json_delta" => {
-                            if let Some(partial) =
-                                delta.get("partial_json").and_then(Value::as_str)
+                            if let Some(partial) = delta.get("partial_json").and_then(Value::as_str)
                             {
                                 let entry = self.blocks.entry(index).or_default();
                                 entry.partial_json.push_str(partial);
                             }
                         }
                         "signature_delta" => {
-                            if let Some(signature) =
-                                delta.get("signature").and_then(Value::as_str)
+                            if let Some(signature) = delta.get("signature").and_then(Value::as_str)
                             {
                                 let entry = self.blocks.entry(index).or_default();
                                 entry.signature.push_str(signature);
@@ -1537,10 +1534,9 @@ mod tests {
 
     #[test]
     fn data_url_parser_keeps_image_blocks_and_structured_parts() {
-        let block = anthropic_image_block_from_data_url(
-            "data:image/png;charset=utf-8;base64,aGVsbG8=",
-        )
-        .expect("png data url");
+        let block =
+            anthropic_image_block_from_data_url("data:image/png;charset=utf-8;base64,aGVsbG8=")
+                .expect("png data url");
         assert_eq!(block["type"], "image");
         assert_eq!(block["source"]["type"], "base64");
         assert_eq!(block["source"]["media_type"], "image/png");
@@ -1559,7 +1555,8 @@ mod tests {
 
     #[test]
     fn sse_data_join_strips_one_space_and_keeps_colons() {
-        let event = "event: content_block_delta\ndata: {\"type\":\"x\",\"text\":\"a:b\"}\ndata:  spaced";
+        let event =
+            "event: content_block_delta\ndata: {\"type\":\"x\",\"text\":\"a:b\"}\ndata:  spaced";
         assert_eq!(
             sse_event_data(event),
             "{\"type\":\"x\",\"text\":\"a:b\"}\n spaced"
@@ -1644,7 +1641,7 @@ mod tests {
     #[test]
     fn agent_payload_merges_consecutive_user_messages() {
         let (_, messages) = agent_messages_to_anthropic(
-            &vec![
+            &[
                 AgentMessage::user("one"),
                 AgentMessage::assistant("ack"),
                 AgentMessage::user("two"),
@@ -1660,7 +1657,7 @@ mod tests {
     #[test]
     fn orphan_tool_result_is_flattened_instead_of_rejected() {
         let (_, messages) = agent_messages_to_anthropic(
-            &vec![
+            &[
                 AgentMessage::user("hi"),
                 AgentMessage::tool("missing", "read", "orphan"),
             ],
@@ -1890,7 +1887,7 @@ mod tests {
     #[test]
     fn signed_thinking_block_is_replayed_without_visible_text() {
         let (_, messages) = agent_messages_to_anthropic(
-            &vec![
+            &[
                 AgentMessage::user("hi"),
                 AgentMessage::assistant_tool_call_protocol_with_signed_reasoning(
                     None,

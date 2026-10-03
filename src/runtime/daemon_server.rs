@@ -6,9 +6,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::{
     daemon::{
         DAEMON_HOST_DISPLAY, DaemonControlCommand, DaemonLifecycleHandle, DaemonLifecycleState,
-        DaemonLock, DaemonServerStartParams, SessionTokenStore, delete_session_by_id,
-        session, session_client_for_id, session_ipc,
-        spawn_detached_daemon_process, start_server, terminate_process_backed_sessions,
+        DaemonLock, DaemonServerStartParams, SessionTokenStore, delete_session_by_id, session,
+        session_client_for_id, session_ipc, spawn_detached_daemon_process, start_server,
+        terminate_process_backed_sessions,
     },
     daemon_tray::{DaemonTrayHandle, DaemonTrayStartup},
     dashboard::{
@@ -100,10 +100,9 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
         match parsed {
             TelegramSessionCommand::SessionList => Ok(Some(self.telegram_session_list(chat_id))),
             TelegramSessionCommand::SessionNew { title } => {
-                let title = title.filter(|title| !title.trim().is_empty()).map_or_else(
-                    || default_telegram_session_title(chat_id, chat_title),
-                    |title| title,
-                );
+                let title = title
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| default_telegram_session_title(chat_id, chat_title));
                 let info = self
                     .sessions
                     .create(session::SessionScope::General, Some(title))
@@ -185,11 +184,9 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
                 "ask mode is only available from the dashboard composer or `daat-locus send`."
                     .to_string(),
             )),
-            TelegramSessionCommand::AttachRejected | TelegramSessionCommand::DeleteRejected => {
-                Ok(Some(
-                    "usage: pass exactly one session id or unique prefix".to_string(),
-                ))
-            }
+            TelegramSessionCommand::AttachRejected | TelegramSessionCommand::DeleteRejected => Ok(
+                Some("usage: pass exactly one session id or unique prefix".to_string()),
+            ),
         }
     }
 
@@ -239,7 +236,8 @@ impl ManagerTelegramInputRouter {
         sessions.sort_by_key(|info| info.started_at_ms);
         if sessions.is_empty() {
             return "no sessions
-/session_new [title] creates and attaches one".to_string();
+/session_new [title] creates and attaches one"
+                .to_string();
         }
 
         let mut lines = Vec::with_capacity(sessions.len() + 2);
@@ -263,8 +261,10 @@ impl ManagerTelegramInputRouter {
                 session_scope_label(&info.scope)
             )
         }));
-        lines.join("
-")
+        lines.join(
+            "
+",
+        )
     }
 }
 
@@ -646,12 +646,9 @@ async fn run_session_health_checks(
                 let _ = sessions.mark_dead(&target.session_id).await;
                 continue;
             };
-            let client = session_ipc::SessionIpcClient::new(
-                target.session_id.clone(),
-                ipc_name,
-                ipc_token,
-            )
-            .with_timeout(Duration::from_secs(2));
+            let client =
+                session_ipc::SessionIpcClient::new(target.session_id.clone(), ipc_name, ipc_token)
+                    .with_timeout(Duration::from_secs(2));
             match client.request(session_ipc::SessionIpcRequest::Status).await {
                 Ok(session_ipc::SessionIpcResponse::Status { runtime_status })
                     if runtime_status.ready =>
@@ -685,10 +682,7 @@ async fn run_session_health_checks(
                         );
                         continue;
                     }
-                    tracing::warn!(
-                        "session {} health check failed: {err:?}",
-                        target.session_id
-                    );
+                    tracing::warn!("session {} health check failed: {err:?}", target.session_id);
                     if probe_persisted_session_ipc_token_fields(
                         &session_tokens,
                         &target.session_id,
@@ -715,7 +709,6 @@ async fn run_session_health_checks(
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
-
 
 fn session_is_within_starting_health_grace_fields(
     status: session::SessionStatus,
@@ -753,12 +746,9 @@ async fn probe_persisted_session_ipc_token_fields(
     let Some(ipc_name) = ipc_name else {
         return false;
     };
-    let probe = session_ipc::SessionIpcClient::new(
-        session_id.clone(),
-        ipc_name.to_string(),
-        token.clone(),
-    )
-    .with_timeout(Duration::from_secs(2));
+    let probe =
+        session_ipc::SessionIpcClient::new(session_id.clone(), ipc_name.to_string(), token.clone())
+            .with_timeout(Duration::from_secs(2));
     match probe.request(session_ipc::SessionIpcRequest::Status).await {
         Ok(session_ipc::SessionIpcResponse::Status { .. }) => {
             session_tokens.write().insert(session_id.clone(), token);
@@ -778,22 +768,19 @@ async fn run_session_telegram_outbox_delivery(
             if !session_tokens.read().contains_key(&target.session_id) {
                 continue;
             }
-            let client = match session_client_for_id(
-                &sessions,
-                &session_tokens,
-                target.session_id.as_str(),
-            )
-            .await
-            {
-                Ok(client) => client,
-                Err(err) => {
-                    tracing::debug!(
-                        "skip telegram outbox drain for session {}: {err:?}",
-                        target.session_id
-                    );
-                    continue;
-                }
-            };
+            let client =
+                match session_client_for_id(&sessions, &session_tokens, target.session_id.as_str())
+                    .await
+                {
+                    Ok(client) => client,
+                    Err(err) => {
+                        tracing::debug!(
+                            "skip telegram outbox drain for session {}: {err:?}",
+                            target.session_id
+                        );
+                        continue;
+                    }
+                };
             let messages = match client
                 .request(session_ipc::SessionIpcRequest::DrainTelegramOutbox)
                 .await
@@ -954,10 +941,9 @@ async fn hydrate_session_tokens(
 fn manager_dashboard_state(telegram_acl: &TelegramAclHandle) -> DashboardState {
     DashboardState {
         agent_name: dashboard_agent_name(),
-        status_output:
-            "Manager daemon is running.
+        status_output: "Manager daemon is running.
 Select or create a session to view runtime state."
-                .to_string(),
+            .to_string(),
         inspect_telegram_output: manager_telegram_status_output(telegram_acl),
         pending_access_requests: telegram_acl.pending_requests(),
         runtime_status: Some("Manager ready".to_string()),
@@ -987,8 +973,10 @@ fn manager_telegram_status_output(telegram_acl: &TelegramAclHandle) -> String {
             request.chat_id, request.title, request.sender, request.last_message_preview
         )
     }));
-    lines.join("
-")
+    lines.join(
+        "
+",
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1209,5 +1197,4 @@ mod tests {
         ));
         assert!(parse_telegram_session_command("status").is_none());
     }
-
 }

@@ -499,7 +499,8 @@ fn skill_detail_panel(state: &DashboardState, target: &str) -> Option<CommandPan
 }
 
 pub(super) fn is_clear_command_input(input: &str) -> bool {
-    dashboard_command_parts(input).is_some_and(|parts| parts.first().is_some_and(|verb| verb == "clear"))
+    dashboard_command_parts(input)
+        .is_some_and(|parts| parts.first().is_some_and(|verb| verb == "clear"))
 }
 
 fn debug_subcommand_is_read_only(subcommand: &str) -> bool {
@@ -553,16 +554,14 @@ pub(crate) fn tokenize_shell_words(input: &str) -> Option<Vec<String>> {
                     in_word = true;
                 }
             }
-            None if ch == '\\' => {
-                match chars.next() {
-                    Some('\n') => {}
-                    Some(escaped) => {
-                        current.push(escaped);
-                        in_word = true;
-                    }
-                    None => return None,
+            None if ch == '\\' => match chars.next() {
+                Some('\n') => {}
+                Some(escaped) => {
+                    current.push(escaped);
+                    in_word = true;
                 }
-            }
+                None => return None,
+            },
             None if ch == '\'' || ch == '"' => {
                 quote = Some(ch);
                 in_word = true;
@@ -611,9 +610,7 @@ pub(super) fn command_live_feedback(
     if trimmed.is_empty() {
         return None;
     }
-    let Some(owned_parts) = tokenize_shell_words(trimmed) else {
-        return None;
-    };
+    let owned_parts = tokenize_shell_words(trimmed)?;
     let parts = command_parts_ref(&owned_parts);
     let verb = parts.first().copied().unwrap_or_default();
     let command = dashboard_commands()
@@ -623,9 +620,9 @@ pub(super) fn command_live_feedback(
     let Some(_command) = command else {
         let completing = owned_parts.len() == 1
             && !command_input.ends_with(|ch: char| ch.is_whitespace())
-            && dashboard_commands().iter().any(|command| {
-                command.primary_verb.starts_with(owned_parts[0].as_str())
-            });
+            && dashboard_commands()
+                .iter()
+                .any(|command| command.primary_verb.starts_with(owned_parts[0].as_str()));
         if !completing {
             return Some(CommandFeedback {
                 title: "UNKNOWN COMMAND".to_string(),
@@ -934,7 +931,6 @@ pub(super) fn matching_commands(
     prepare_command_input(input, context).matches
 }
 
-
 fn all_slash_suggestions() -> Vec<CommandSuggestion> {
     dashboard_commands()
         .iter()
@@ -946,10 +942,7 @@ fn all_slash_suggestions() -> Vec<CommandSuggestion> {
         .collect()
 }
 
-fn slash_suggestions_from_parts(
-    command_input: &str,
-    parts: &[String],
-) -> Vec<CommandSuggestion> {
+fn slash_suggestions_from_parts(command_input: &str, parts: &[String]) -> Vec<CommandSuggestion> {
     if command_input.trim().is_empty() {
         return all_slash_suggestions();
     }
@@ -978,7 +971,10 @@ pub(super) fn slash_parts_match_literal_words(input: &str, parts: &[String]) -> 
     let raw: Vec<&str> = body.split_whitespace().collect();
     !parts.is_empty()
         && raw.len() == parts.len()
-        && raw.iter().zip(parts).all(|(raw, word)| *raw == word.as_str())
+        && raw
+            .iter()
+            .zip(parts)
+            .all(|(raw, word)| *raw == word.as_str())
 }
 
 fn matching_skill_mentions(
@@ -1111,7 +1107,14 @@ mod tests {
     fn dashboard_command_parts_keep_quotes() {
         assert_eq!(
             super::dashboard_command_parts("/skills show 'my skill'").as_deref(),
-            Some(["skills".to_string(), "show".to_string(), "my skill".to_string()].as_slice())
+            Some(
+                [
+                    "skills".to_string(),
+                    "show".to_string(),
+                    "my skill".to_string()
+                ]
+                .as_slice()
+            )
         );
         assert_eq!(
             super::dashboard_command_parts("/skills enable \"quoted name\"").as_deref(),
@@ -1143,5 +1146,4 @@ mod tests {
         );
         assert!(super::tokenize_shell_words("echo 'unterminated").is_none());
     }
-
 }

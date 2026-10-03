@@ -67,11 +67,10 @@ pub(super) fn maybe_start_live_progress_session(
                     match maybe_event {
                         Some(event) => {
                             dashboard.apply(&event, dashboard_tx.as_ref());
-                            if let Some(processor) = telegram.as_mut() {
-                                if telegram_consumes_live_progress(&event) {
+                            if let Some(processor) = telegram.as_mut()
+                                && telegram_consumes_live_progress(&event) {
                                     processor.apply(event);
                                 }
-                            }
                         }
                         None => break,
                     }
