@@ -142,9 +142,12 @@ impl WorkflowGroup {
     /// cascade into a failure of the waiter.
     pub(super) fn is_ready(&self, run_id: &str) -> bool {
         self.status(run_id) == Some(WorkflowNodeStatus::Pending)
-            && self.incoming.get(run_id).into_iter().flatten().all(|source| {
-                self.status(source) == Some(WorkflowNodeStatus::Completed)
-            })
+            && self
+                .incoming
+                .get(run_id)
+                .into_iter()
+                .flatten()
+                .all(|source| self.status(source) == Some(WorkflowNodeStatus::Completed))
     }
 
     /// Pending runs whose dependencies are all completed, in stable order.
@@ -461,7 +464,13 @@ mod tests {
         finish(&mut group, "a", WorkflowNodeStatus::Completed);
         assert!(group.is_ready("b"));
         assert_eq!(group.ready_pending_run_ids(), vec!["b".to_string()]);
-        assert!(group.nodes.get("b").and_then(|node| node.output.as_ref()).is_none());
+        assert!(
+            group
+                .nodes
+                .get("b")
+                .and_then(|node| node.output.as_ref())
+                .is_none()
+        );
     }
 
     #[test]
@@ -470,9 +479,7 @@ mod tests {
         pending(&mut group, "a");
         pending(&mut group, "b");
         group.add_waits("b", &["a".to_string()]).unwrap();
-        let err = group
-            .add_waits("a", &["b".to_string()])
-            .expect_err("cycle");
+        let err = group.add_waits("a", &["b".to_string()]).expect_err("cycle");
         assert!(err.contains("cycle"), "{err}");
         assert_eq!(group.edges.len(), 1);
 

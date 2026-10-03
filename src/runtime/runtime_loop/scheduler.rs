@@ -227,7 +227,8 @@ struct SleepQueueCountCache {
 }
 
 fn sleep_queue_count_cache() -> &'static std::sync::Mutex<SleepQueueCountCache> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<SleepQueueCountCache>> = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<SleepQueueCountCache>> =
+        std::sync::OnceLock::new();
     CACHE.get_or_init(|| {
         std::sync::Mutex::new(SleepQueueCountCache {
             runtime_error_cases: None,
@@ -239,10 +240,7 @@ fn sleep_queue_count_cache() -> &'static std::sync::Mutex<SleepQueueCountCache> 
 async fn refresh_cached_sleep_status_queues(status: &mut SleepStatusSnapshot) {
     let paths = crate::daat_locus_paths::daat_locus_paths().await;
     let error_cases = paths.journal_file("runtime_error_cases.jsonl");
-    let skill_runs = paths
-        .runtime_dir()
-        .join("skills")
-        .join("run_records.jsonl");
+    let skill_runs = paths.runtime_dir().join("skills").join("run_records.jsonl");
     if let Some(count) =
         cached_nonempty_line_count(error_cases, QueueCacheSlot::RuntimeErrorCases).await
     {
@@ -273,12 +271,9 @@ async fn cached_nonempty_line_count(
             return None;
         }
     };
-    let stamp = metadata.as_ref().map(|metadata| {
-        (
-            metadata.modified().ok(),
-            metadata.len(),
-        )
-    });
+    let stamp = metadata
+        .as_ref()
+        .map(|metadata| (metadata.modified().ok(), metadata.len()));
     if let Ok(cache) = sleep_queue_count_cache().lock()
         && let Some(cached) = cache_slot(&cache, slot)
         && cached.present == metadata.is_some()
@@ -297,10 +292,7 @@ async fn cached_nonempty_line_count(
                 .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
                 .count(),
             Err(err) => {
-                tracing::warn!(
-                    "failed to read sleep queue file {}: {err}",
-                    path.display()
-                );
+                tracing::warn!("failed to read sleep queue file {}: {err}", path.display());
                 return None;
             }
         },

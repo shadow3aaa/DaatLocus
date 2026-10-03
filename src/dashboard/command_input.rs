@@ -94,7 +94,6 @@ impl PastePlaceholder {
     }
 }
 
-
 /// Threshold above which pasted text gets a placeholder block instead of being inserted inline.
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 500;
 
@@ -114,7 +113,11 @@ pub(super) fn handle_paste_placeholder(
         .iter()
         .enumerate()
         .map(|(index, (display, body))| {
-            PastePlaceholder::new(format!("paste-{}", index + 1), display.clone(), body.clone())
+            PastePlaceholder::new(
+                format!("paste-{}", index + 1),
+                display.clone(),
+                body.clone(),
+            )
         })
         .collect::<Vec<_>>();
     handle_paste_placeholder_tokens(text, input, &mut placeholders);
@@ -174,7 +177,11 @@ pub(super) fn expand_paste_placeholders(text: &str, pending: &[(String, String)]
         .iter()
         .enumerate()
         .map(|(index, (display, body))| {
-            PastePlaceholder::new(format!("paste-{}", index + 1), display.clone(), body.clone())
+            PastePlaceholder::new(
+                format!("paste-{}", index + 1),
+                display.clone(),
+                body.clone(),
+            )
         })
         .collect::<Vec<_>>();
     expand_paste_placeholder_tokens(text, &placeholders)
@@ -216,7 +223,6 @@ fn expand_paste_placeholder_tokens(text: &str, pending: &[PastePlaceholder]) -> 
     }
     result
 }
-
 
 /// Compute the visual row for a byte cursor position within the input text.
 /// Accounts for prompt/continuation prefixes and terminal wrapping.
@@ -477,9 +483,7 @@ fn split_display_prefix(text: &str, max_width: usize) -> (&str, &str) {
 
 #[cfg(test)]
 mod paste_placeholder_tests {
-    use super::{
-        expand_paste_placeholder_tokens, handle_paste_placeholder_tokens,
-    };
+    use super::{expand_paste_placeholder_tokens, handle_paste_placeholder_tokens};
 
     #[test]
     fn paste_placeholders_render_display_text_and_expand_by_id() {

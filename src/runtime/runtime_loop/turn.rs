@@ -17,14 +17,13 @@ use super::{
     claim_pending_runtime_inputs, claimed_events_are_terminal,
     claimed_events_require_explicit_completion, claimed_input_mode,
     claimed_runtime_input_fingerprint, compact_preserved_body_lines, execute_agent_tool_call,
-    execute_pre_turn_history_reset, finalize_claimed_runtime_events,
-    handle_model_request_failure, handle_runtime_overflow, is_context_budget_exceeded, json,
-    maybe_reset_runtime_history, maybe_record_skill_read, maybe_start_live_progress_session,
-    miette, record_runtime_history_messages, record_skill_run_evidence,
-    render_activity_from_messages, render_telegram_tool_result_status,
-    runtime_request_budget_limits, runtime_work_origin, set_runtime_status,
-    set_runtime_status_only, summarize_action_from_tool_call, thinking_activity_cell,
-    user_activity_cell_from_event,
+    execute_pre_turn_history_reset, finalize_claimed_runtime_events, handle_model_request_failure,
+    handle_runtime_overflow, is_context_budget_exceeded, json, maybe_record_skill_read,
+    maybe_reset_runtime_history, maybe_start_live_progress_session, miette,
+    record_runtime_history_messages, record_skill_run_evidence, render_activity_from_messages,
+    render_telegram_tool_result_status, runtime_request_budget_limits, runtime_work_origin,
+    set_runtime_status, set_runtime_status_only, summarize_action_from_tool_call,
+    thinking_activity_cell, user_activity_cell_from_event,
 };
 use crate::memory::RuntimeStepConversation;
 use crate::reasoning::prompt_parts::compact_horizontal_whitespace;
@@ -437,18 +436,16 @@ pub async fn execute_agent_loop_step(
     if !preturn_context_text.trim().is_empty() {
         initial_injected_context_messages.push(HistoryMessage::user(preturn_context_text.clone()));
     }
-    let pre_turn_reset = if let Some(plan) =
-        context
-            .memory
-            .plan_runtime_history_reset_for_request(crate::memory::PlanHistoryResetInput {
-                envelope: &request_envelope,
-                injected_messages: &initial_injected_context_messages,
-                tools: &initial_tools,
-                limits: request_budget_limits,
-                baseline: &context.token_estimate_baseline,
-                min_messages: RUNTIME_HISTORY_MIN_MESSAGES,
-            })
-    {
+    let pre_turn_reset = if let Some(plan) = context.memory.plan_runtime_history_reset_for_request(
+        crate::memory::PlanHistoryResetInput {
+            envelope: &request_envelope,
+            injected_messages: &initial_injected_context_messages,
+            tools: &initial_tools,
+            limits: request_budget_limits,
+            baseline: &context.token_estimate_baseline,
+            min_messages: RUNTIME_HISTORY_MIN_MESSAGES,
+        },
+    ) {
         enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightHistoryReset);
         let reset_started_at = std::time::Instant::now();
         let outcome = match tokio::time::timeout(
@@ -539,18 +536,15 @@ pub async fn execute_agent_loop_step(
     let mut loop_tool_availability = runtime_tool_availability_key(context);
 
     let output = 'agent_loop: loop {
-        let tools = if loop_tools_need_rebuild(
-            context,
-            &loop_tool_fingerprint,
-            &loop_tool_availability,
-        ) {
-            let tools = build_runtime_tool_specs(context);
-            loop_tool_fingerprint = context.catalog_hot_reload_fingerprint.clone();
-            loop_tool_availability = runtime_tool_availability_key(context);
-            tools
-        } else {
-            loop_tools.clone()
-        };
+        let tools =
+            if loop_tools_need_rebuild(context, &loop_tool_fingerprint, &loop_tool_availability) {
+                let tools = build_runtime_tool_specs(context);
+                loop_tool_fingerprint = context.catalog_hot_reload_fingerprint.clone();
+                loop_tool_availability = runtime_tool_availability_key(context);
+                tools
+            } else {
+                loop_tools.clone()
+            };
         loop_tools.clone_from(&tools);
         match maybe_reset_runtime_history(context, &mut runtime_step, &tools, false).await {
             Ok(true) => {

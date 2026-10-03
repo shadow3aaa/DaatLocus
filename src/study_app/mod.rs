@@ -833,10 +833,7 @@ mod tests {
     #[tokio::test]
     async fn node_writes_publish_a_focus_hint() {
         let (_dir, mut app) = test_app();
-        let module = app
-            .store()
-            .create_module("Algebra", "")
-            .expect("module");
+        let module = app.store().create_module("Algebra", "").expect("module");
         let (tx, rx) = tokio::sync::watch::channel(crate::dashboard::DashboardState::default());
         let context = AppToolExecutionContext {
             dashboard_tx: Some(tx),
@@ -888,10 +885,7 @@ mod tests {
     #[tokio::test]
     async fn create_node_tool_requires_sources() {
         let (_dir, mut app) = test_app();
-        let module = app
-            .store()
-            .create_module("Algebra", "")
-            .expect("module");
+        let module = app.store().create_module("Algebra", "").expect("module");
         let error = app
             .execute_tool(
                 &call(
@@ -919,10 +913,7 @@ mod tests {
     #[tokio::test]
     async fn progress_tool_updates_state_render() {
         let (_dir, mut app) = test_app();
-        let module = app
-            .store()
-            .create_module("Algebra", "")
-            .expect("module");
+        let module = app.store().create_module("Algebra", "").expect("module");
         let node = app
             .store()
             .create_node(

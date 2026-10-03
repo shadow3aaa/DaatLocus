@@ -160,31 +160,21 @@ pub fn parse_selector(input: &str) -> Result<ParsedSelector, String> {
         }),
     })
 }
-fn parse_line_range_suffix(
-    symbol_part: &str,
-) -> Result<OptionalLineRangeSuffix<'_>, String> {
+fn parse_line_range_suffix(symbol_part: &str) -> Result<OptionalLineRangeSuffix<'_>, String> {
     let Some((head, suffix)) = symbol_part.rsplit_once("#L") else {
         return Ok((symbol_part, None));
     };
     let Some((start_text, end_text)) = suffix.split_once("-L") else {
-        return Err(format!(
-            "invalid line range disambiguator: '{symbol_part}'"
-        ));
+        return Err(format!("invalid line range disambiguator: '{symbol_part}'"));
     };
     let Ok(start) = start_text.trim().parse::<usize>() else {
-        return Err(format!(
-            "invalid line range disambiguator: '{symbol_part}'"
-        ));
+        return Err(format!("invalid line range disambiguator: '{symbol_part}'"));
     };
     let Ok(end) = end_text.trim().parse::<usize>() else {
-        return Err(format!(
-            "invalid line range disambiguator: '{symbol_part}'"
-        ));
+        return Err(format!("invalid line range disambiguator: '{symbol_part}'"));
     };
     if start == 0 || end == 0 || start > end {
-        return Err(format!(
-            "invalid line range disambiguator: '{symbol_part}'"
-        ));
+        return Err(format!("invalid line range disambiguator: '{symbol_part}'"));
     }
     Ok((head.trim_end(), Some((start, end))))
 }
@@ -196,7 +186,6 @@ fn parse_file_path(file_part: &str) -> Result<PathBuf, String> {
     }
     Ok(file_path)
 }
-
 
 /// Parse the symbol expression (everything after `::`).
 ///
@@ -237,7 +226,6 @@ fn parse_symbol_expr(expr: &str) -> (SymbolKind, String) {
     (SymbolKind::Unknown, expr.to_string())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,7 +251,10 @@ mod tests {
     fn parse_line_range_disambiguator() {
         let sel = parse_selector("src/foo.rs::fn authenticate #L10-L20").unwrap();
         assert_eq!(sel.name(), Some("authenticate"));
-        assert_eq!(sel.as_symbol().and_then(|symbol| symbol.line_range), Some((10, 20)));
+        assert_eq!(
+            sel.as_symbol().and_then(|symbol| symbol.line_range),
+            Some((10, 20))
+        );
     }
 
     #[test]

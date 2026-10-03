@@ -204,9 +204,9 @@ impl BrowserApp {
             });
         }
         let mut indexed = self.refresh_pages().await?;
-        let page = indexed.remove(page_id).ok_or_else(|| {
-            miette!("unknown browser page `{page_id}`")
-        })?;
+        let page = indexed
+            .remove(page_id)
+            .ok_or_else(|| miette!("unknown browser page `{page_id}`"))?;
         self.live_pages = indexed;
         Ok(page)
     }
@@ -559,7 +559,8 @@ fn collect_snapshot_ref_duplicate_counts(
     prepared: &PreparedSnapshotNode,
     counts: &mut HashMap<String, usize>,
 ) {
-    if node.node_ref.is_some() && should_create_snapshot_ref(&prepared.role, prepared.name.as_deref())
+    if node.node_ref.is_some()
+        && should_create_snapshot_ref(&prepared.role, prepared.name.as_deref())
     {
         let key = format!(
             "{}:{}",
@@ -700,8 +701,8 @@ fn render_compact_snapshot_lines(
             .as_deref()
             .is_some_and(|description| !description.trim().is_empty());
     let include_node = should_include_snapshot_node(role, name);
-    let include_line =
-        include_node && (!is_structural_role(role) || has_ref || has_meaningful_text || child_relevant);
+    let include_line = include_node
+        && (!is_structural_role(role) || has_ref || has_meaningful_text || child_relevant);
 
     let mut lines = Vec::new();
     if include_line {
@@ -754,12 +755,7 @@ fn preferred_snapshot_root<'a>(
 ) -> Option<(&'a AriaSnapshot, &'a PreparedSnapshotNode)> {
     let mut best_main = None;
     let mut best_article = None;
-    collect_preferred_snapshot_root(
-        snapshot,
-        prepared,
-        &mut best_main,
-        &mut best_article,
-    );
+    collect_preferred_snapshot_root(snapshot, prepared, &mut best_main, &mut best_article);
     best_main.or(best_article)
 }
 

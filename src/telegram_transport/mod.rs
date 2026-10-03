@@ -708,7 +708,6 @@ impl TelegramTransport {
         }
     }
 
-
     async fn send_text(&self, chat_id: i64, text: &str) -> Result<()> {
         for chunk in split_telegram_message_text(text) {
             self.send_message(chat_id, &chunk).await?;

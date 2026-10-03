@@ -1,9 +1,4 @@
 //! Runtime conversation state.
-use std::{
-    collections::VecDeque,
-    future::Future,
-    pin::Pin,
-};
 use crate::{
     context_budget::{
         RequestBudgetBreakdown, RequestBudgetLimits, TokenEstimateBaseline,
@@ -16,6 +11,7 @@ use crate::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::{collections::VecDeque, future::Future, pin::Pin};
 
 const RUNTIME_CONVERSATION_FILE_NAME: &str = "runtime_conversation.json";
 const RUNTIME_CONVERSATION_LEGACY_FILE_NAME: &str = "runtime_conversation";
@@ -408,8 +404,9 @@ impl RuntimeStepConversation {
     where
         F: for<'a> FnMut(
                 &'a [AgentMessage],
-            ) -> Pin<Box<dyn Future<Output = Result<RuntimeHistoryResetOutcome, String>> + Send + 'a>>
-            + Send,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<RuntimeHistoryResetOutcome, String>> + Send + 'a>,
+            > + Send,
     {
         if reset_for_overflow {
             self.reset_once(&mut build_reset_outcome).await?;
@@ -433,8 +430,9 @@ impl RuntimeStepConversation {
     where
         F: for<'a> FnMut(
                 &'a [AgentMessage],
-            ) -> Pin<Box<dyn Future<Output = Result<RuntimeHistoryResetOutcome, String>> + Send + 'a>>
-            + Send,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<RuntimeHistoryResetOutcome, String>> + Send + 'a>,
+            > + Send,
     {
         if self.agent_messages.is_empty() {
             return Err("runtime history reset has no messages to clear".to_string());
@@ -594,10 +592,9 @@ impl RuntimeConversation {
         input: PlanHistoryResetInput<'_>,
     ) -> Option<RuntimeHistoryResetPlan> {
         let _ = input.min_messages;
-        let agent_messages =
-            input
-                .envelope
-                .agent_messages_with_history_and_injected(&self.messages, input.injected_messages);
+        let agent_messages = input
+            .envelope
+            .agent_messages_with_history_and_injected(&self.messages, input.injected_messages);
         let breakdown = estimate_agent_turn_request(&agent_messages, input.tools, input.limits)
             .with_conservative_calibrated_input_tokens(input.baseline);
         if !breakdown.above_auto_compact_threshold() {
@@ -942,19 +939,19 @@ mod tests {
                 |_messages| {
                     Box::pin(async {
                         Ok(RuntimeHistoryResetOutcome {
-                        recovery_prompt: "recovery prompt".to_string(),
-                        record: RuntimeHistoryResetRecord {
-                            timestamp_ms: 0,
-                            phase: RuntimeHistoryResetPhase::MidTurn,
-                            reason: RuntimeHistoryResetReason::OverflowRecovery,
-                            reinjection_strategy:
-                                RuntimeHistoryResetReinjectionStrategy::PreserveSystemOnly,
-                            source_item_count: 1,
-                            source_message_count: 2,
-                            trimmed_item_count: 0,
-                            retained_user_message_count: 0,
                             recovery_prompt: "recovery prompt".to_string(),
-                        },
+                            record: RuntimeHistoryResetRecord {
+                                timestamp_ms: 0,
+                                phase: RuntimeHistoryResetPhase::MidTurn,
+                                reason: RuntimeHistoryResetReason::OverflowRecovery,
+                                reinjection_strategy:
+                                    RuntimeHistoryResetReinjectionStrategy::PreserveSystemOnly,
+                                source_item_count: 1,
+                                source_message_count: 2,
+                                trimmed_item_count: 0,
+                                retained_user_message_count: 0,
+                                recovery_prompt: "recovery prompt".to_string(),
+                            },
                         })
                     })
                 },

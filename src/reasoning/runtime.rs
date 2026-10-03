@@ -727,19 +727,13 @@ where
     let mut last_error = None;
 
     for attempt in 0..=max_retry_count {
-        let options = ModelRequestOptions::for_prompt(
-            model_provider,
-            &request,
-            context.session_id.clone(),
-        )?;
+        let options =
+            ModelRequestOptions::for_prompt(model_provider, &request, context.session_id.clone())?;
         let may_retry = attempt < max_retry_count;
         // complete_json takes ownership. Clone only so a later retry can keep
         // the original, or so the final attempt can still move that original
         // into the trace. The success path does not clone again.
-        let value = match model_provider
-            .complete_json(request.clone(), options)
-            .await
-        {
+        let value = match model_provider.complete_json(request.clone(), options).await {
             Ok(value) => value,
             Err(err) => {
                 let error_text = err.to_string();

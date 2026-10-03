@@ -364,7 +364,6 @@ impl HeadTailOutputBuffer {
         parts.concat()
     }
 
-
     fn stats(&self) -> TerminalOutputStats {
         TerminalOutputStats {
             buffer_capacity: self.capacity,

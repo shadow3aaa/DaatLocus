@@ -389,7 +389,9 @@ fn migrate_legacy_layout_sync(paths: &DaatLocusPaths) {
 fn prepared_paths(root: PathBuf) -> DaatLocusPaths {
     static PREPARED: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
     let slot = PREPARED.get_or_init(|| Mutex::new(None));
-    let mut prepared = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut prepared = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if prepared.as_ref() != Some(&root) {
         let paths = DaatLocusPaths::from_root(root.clone());
         ensure_layout_sync(&paths);

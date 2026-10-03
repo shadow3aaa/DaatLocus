@@ -76,7 +76,9 @@ pub fn runtime_system_prompt_text(ctx: &Context) -> String {
     let persona_path = prompt_persona_path_sync();
     let persona_metadata = std::fs::metadata(&persona_path).ok();
     let persona_exists = persona_metadata.is_some();
-    let persona_modified = persona_metadata.as_ref().and_then(|metadata| metadata.modified().ok());
+    let persona_modified = persona_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.modified().ok());
 
     if let Ok(cache) = runtime_system_prompt_cache().lock()
         && let Some(cached) = cache.as_ref()

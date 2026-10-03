@@ -360,9 +360,9 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
         Some(prepared) => command_hint(input, &prepared.matches, prepared.slash_parts.as_deref()),
         None => String::new(),
     };
-    let popup_rows = prepared
-        .as_ref()
-        .map_or(0, |prepared| popup_row_count_from_matches(&prepared.matches));
+    let popup_rows = prepared.as_ref().map_or(0, |prepared| {
+        popup_row_count_from_matches(&prepared.matches)
+    });
     let feedback_rows = if panel.is_some() {
         0
     } else {
@@ -1304,7 +1304,8 @@ fn command_hint(
         .unwrap_or_default()
         .is_empty()
     {
-        return "Up/Down select. Tab accept. Enter run. Shift+Enter newline. Esc clear.".to_string();
+        return "Up/Down select. Tab accept. Enter run. Shift+Enter newline. Esc clear."
+            .to_string();
     }
     if matches.len() == 1 {
         let suggestion = &matches[0];
@@ -1318,8 +1319,7 @@ fn command_hint(
             .collect::<Vec<_>>()
             .join(" | ");
     }
-    if let Some(parts) = slash_parts.filter(|parts| slash_parts_match_literal_words(input, parts))
-    {
+    if let Some(parts) = slash_parts.filter(|parts| slash_parts_match_literal_words(input, parts)) {
         if dashboard_parts_open_panel(parts) {
             return "Enter open panel. Shift+Enter newline. Esc clear.".to_string();
         }

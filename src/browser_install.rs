@@ -440,10 +440,7 @@ mod tests {
     #[test]
     fn etag_parses_one_quoted_string_and_rejects_loose_quotes() {
         assert_eq!(parse_etag("\"etag-value\"").as_deref(), Some("etag-value"));
-        assert_eq!(
-            parse_etag("W/\"weak-tag\"").as_deref(),
-            Some("weak-tag")
-        );
+        assert_eq!(parse_etag("W/\"weak-tag\"").as_deref(), Some("weak-tag"));
         assert_eq!(
             parse_etag("\"quote\\\"inside\"").as_deref(),
             Some("quote\"inside")

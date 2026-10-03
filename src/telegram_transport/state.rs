@@ -216,7 +216,6 @@ impl TelegramTransportStateHandle {
         result
     }
 
-
     pub fn requeue_outbound_front(&self, message: PendingOutboundMessage) -> Result<()> {
         let mut state = self.inner.state.lock();
         state.outbox.push_front(message);
@@ -713,7 +712,6 @@ mod tests {
             }
         }
     }
-
 
     #[test]
     fn clear_outbox_removes_pending_messages() {

@@ -7,11 +7,11 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
+use super::super::renderable::Renderable;
 use super::artifact_preview::{ArtifactPreviewRequest, ArtifactPreviewState};
 use super::markdown::render_markdown_with_width;
-use super::super::renderable::Renderable;
 use super::{
-    LiveActivityEvent, SessionActivityEvent,
+    LiveActivityEvent, SessionActivityEvent, WorkflowActivityData,
     apps::{BrowserActivityData, LiveBrowserActivityData, WebSearchActivityData},
     common::{
         AssistantActivityData, CodingEditActivityData, CodingOpenProjectActivityData,
@@ -21,13 +21,9 @@ use super::{
         UserActivityData,
     },
     exec::{ExecResultActivityData, LiveExecActivityData, TerminalExecutionMeta},
-    highlight::{
-        highlight_patch_lines,
-        highlight_shell_command,
-    },
+    highlight::{highlight_patch_lines, highlight_shell_command},
     messages::{PatchActivityData, ReplyActivityData, TelegramActivityData},
     plan::{PlanActivityData, PlanStepDisplayStatus},
-    WorkflowActivityData,
 };
 use crate::activity_event::{
     ExploredCallActivityAction, PatchDiffLineActivityDescriptor, PatchDiffLineKind,
@@ -1918,7 +1914,11 @@ fn prefixed_wrapped_line(
     let mut current_width = 0usize;
     let mut has_content = false;
     let mut prefix_width = spans_display_width(&current_prefix);
-    let mut content_width = usize::from(max_width.saturating_sub(u16::try_from(prefix_width).unwrap_or(u16::MAX)).max(1));
+    let mut content_width = usize::from(
+        max_width
+            .saturating_sub(u16::try_from(prefix_width).unwrap_or(u16::MAX))
+            .max(1),
+    );
 
     for span in content.spans {
         let style = span.style;
@@ -2185,7 +2185,11 @@ fn render_artifact_cell_lines(
 
     let content_width = artifact_content_width(max_width);
     let mut detail = vec![Line::from(Span::styled(
-        format!("{} \u{00b7} v{}", artifact_kind_label(cell.kind), cell.version),
+        format!(
+            "{} \u{00b7} v{}",
+            artifact_kind_label(cell.kind),
+            cell.version
+        ),
         dim_style(),
     ))];
     if let Some(description) = cell
@@ -2280,7 +2284,10 @@ fn artifact_wrapped_text(text: &str, width: u16, style: Style) -> Vec<Line<'stat
     for ch in text.chars() {
         let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
         if current_width > 0 && current_width + ch_width > width {
-            lines.push(Line::from(Span::styled(std::mem::take(&mut current), style)));
+            lines.push(Line::from(Span::styled(
+                std::mem::take(&mut current),
+                style,
+            )));
             current_width = 0;
         }
         current.push(ch);
@@ -2549,10 +2556,7 @@ fn coding_edit_title(cell: &CodingEditActivityData) -> String {
     )
 }
 
-
-fn workflow_group_cache_key(
-    group: Option<&crate::workflow::WorkflowGroupSnapshot>,
-) -> u64 {
+fn workflow_group_cache_key(group: Option<&crate::workflow::WorkflowGroupSnapshot>) -> u64 {
     use std::hash::{Hash, Hasher};
     let Some(group) = group else {
         return 0;

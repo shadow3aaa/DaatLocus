@@ -1859,7 +1859,8 @@ mod tests {
         let started = Instant::now() - WORKFLOW_GROUP_CHORD_TIMEOUT - Duration::from_millis(1);
         begin_workflow_group_chord(&mut view, started);
 
-        let consumed = handle_workflow_group_chord(plain_char('x'), &mut view, &state, Instant::now());
+        let consumed =
+            handle_workflow_group_chord(plain_char('x'), &mut view, &state, Instant::now());
 
         assert!(!consumed);
         assert_eq!(view.command_input.as_str(), "w");

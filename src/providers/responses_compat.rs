@@ -12,9 +12,9 @@ use tracing::warn;
 
 use super::io::{
     default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
-    non_empty_string, parse_retry_after_seconds,
-    read_response_text_with_timeout, send_request_for_streaming_response,
-    responses_safe_call_id, truncate_for_error, truncate_for_json_error,
+    non_empty_string, parse_retry_after_seconds, read_response_text_with_timeout,
+    responses_safe_call_id, send_request_for_streaming_response, truncate_for_error,
+    truncate_for_json_error,
 };
 use super::payload::{flatten_tool_result_as_assistant_text, image_part_data_url};
 use super::{extract_json_value_from_content, shared_request_rate_limiter};
@@ -666,8 +666,7 @@ fn build_agent_payload(
     request: &AgentTurnRequest,
     strip_images: bool,
 ) -> Value {
-    let (instructions, input) =
-        agent_messages_to_responses_parts(&request.messages, strip_images);
+    let (instructions, input) = agent_messages_to_responses_parts(&request.messages, strip_images);
     let tools = request
         .tools
         .iter()

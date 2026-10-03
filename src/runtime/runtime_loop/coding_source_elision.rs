@@ -235,7 +235,9 @@ pub(crate) fn parse_coding_anchor(anchor: &str) -> Option<CodingAnchor<'_>> {
     if line.is_empty()
         || hash.is_empty()
         || !line.bytes().all(|byte| byte.is_ascii_digit())
-        || !hash.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
         return None;
     }
@@ -275,7 +277,11 @@ pub(crate) fn split_anchored_record(line: &str) -> Option<(&str, &str, &str)> {
 /// Longest `line#hash` or `line#hash~` prefix, stopping before `|` or source text.
 fn anchored_prefix(value: &str) -> Option<&str> {
     let hash_start = value.find('#')?;
-    if hash_start == 0 || !value[..hash_start].bytes().all(|byte| byte.is_ascii_digit()) {
+    if hash_start == 0
+        || !value[..hash_start]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+    {
         return None;
     }
     let mut end = hash_start + 1;

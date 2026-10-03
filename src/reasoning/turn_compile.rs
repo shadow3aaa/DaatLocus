@@ -315,8 +315,9 @@ Use the configured locale by default.
 
     #[test]
     fn parse_prompt_persona_markdown_rejects_frontmatter_without_closing_fence() {
-        let error = parse_prompt_persona_markdown("---\nname: Test Persona\nlanguage: en-US\n\nBody.\n")
-            .expect_err("unclosed frontmatter should fail");
+        let error =
+            parse_prompt_persona_markdown("---\nname: Test Persona\nlanguage: en-US\n\nBody.\n")
+                .expect_err("unclosed frontmatter should fail");
         let message = format!("{error:?}");
         assert!(message.contains("frontmatter"), "{message}");
     }

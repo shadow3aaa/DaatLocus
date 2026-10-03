@@ -1107,7 +1107,11 @@ fn session_tree_list_items(
     sessions: &[crate::daemon::session::SessionSummary],
     rows: &[SessionTreeRow],
 ) -> Vec<ListItem<'static>> {
-    let max_depth = rows.iter().map(SessionTreeRow::indent_depth).max().unwrap_or(0);
+    let max_depth = rows
+        .iter()
+        .map(SessionTreeRow::indent_depth)
+        .max()
+        .unwrap_or(0);
     let mut indents = Vec::with_capacity(max_depth.saturating_add(1));
     indents.push(String::new());
     for depth in 1..=max_depth {

@@ -56,10 +56,15 @@ fn catalog_scan_cache() -> &'static Mutex<Option<CatalogScanCache>> {
 }
 
 fn root_mtime(path: &Path) -> Option<SystemTime> {
-    fs::metadata(path).and_then(|metadata| metadata.modified()).ok()
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
 }
 
-fn watched_root_mtimes(skill_roots: &[PathBuf], workflows_dir: &Path) -> Vec<(PathBuf, Option<SystemTime>)> {
+fn watched_root_mtimes(
+    skill_roots: &[PathBuf],
+    workflows_dir: &Path,
+) -> Vec<(PathBuf, Option<SystemTime>)> {
     let mut roots = skill_roots.to_vec();
     roots.push(workflows_dir.to_path_buf());
     roots

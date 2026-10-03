@@ -290,11 +290,25 @@ fn apply_policy_acl_rules(
     add_program_read_ace(program, psid, acl_guards, guarded_paths)?;
 
     for root in policy_paths_with_resolved(&policy.filesystem.readable_roots) {
-        add_guarded_ace(&root, psid, WORKER_READ_ALLOW_MASK, SET_ACCESS, acl_guards, guarded_paths)?;
+        add_guarded_ace(
+            &root,
+            psid,
+            WORKER_READ_ALLOW_MASK,
+            SET_ACCESS,
+            acl_guards,
+            guarded_paths,
+        )?;
     }
     for writable_root in &policy.filesystem.writable_roots {
         for root in policy_paths_with_resolved(std::slice::from_ref(&writable_root.root)) {
-            add_guarded_ace(&root, psid, WORKER_WRITE_ALLOW_MASK, SET_ACCESS, acl_guards, guarded_paths)?;
+            add_guarded_ace(
+                &root,
+                psid,
+                WORKER_WRITE_ALLOW_MASK,
+                SET_ACCESS,
+                acl_guards,
+                guarded_paths,
+            )?;
         }
         for subpath in policy_paths_with_resolved(&writable_root.read_only_subpaths) {
             add_guarded_ace_recursive(
@@ -308,7 +322,14 @@ fn apply_policy_acl_rules(
         }
     }
     for path in policy_paths_with_resolved(&policy.filesystem.deny_write_paths) {
-        add_guarded_ace_recursive(&path, psid, WORKER_DENY_WRITE_MASK, DENY_ACCESS, acl_guards, guarded_paths)?;
+        add_guarded_ace_recursive(
+            &path,
+            psid,
+            WORKER_DENY_WRITE_MASK,
+            DENY_ACCESS,
+            acl_guards,
+            guarded_paths,
+        )?;
     }
     // File reads can be satisfied through the broader restricted SIDs, so
     // file-level deny-read guards must cover them as well as the capability SID.
@@ -1062,7 +1083,12 @@ impl StartupHandles {
                 parent.stdin = Some(parent_write);
                 child_handle
             }
-            mode => stdio_handle(matches!(mode, SandboxStdio::Inherit), STD_INPUT_HANDLE, true, &mut owned)?,
+            mode => stdio_handle(
+                matches!(mode, SandboxStdio::Inherit),
+                STD_INPUT_HANDLE,
+                true,
+                &mut owned,
+            )?,
         };
         let stdout = match options.stdout {
             SandboxStdio::Piped => {
@@ -1074,7 +1100,12 @@ impl StartupHandles {
                 parent.stdout = Some(parent_read);
                 child_handle
             }
-            mode => stdio_handle(matches!(mode, SandboxStdio::Inherit), STD_OUTPUT_HANDLE, false, &mut owned)?,
+            mode => stdio_handle(
+                matches!(mode, SandboxStdio::Inherit),
+                STD_OUTPUT_HANDLE,
+                false,
+                &mut owned,
+            )?,
         };
         let stderr = match options.stderr {
             SandboxStdio::Piped => {
@@ -1086,7 +1117,12 @@ impl StartupHandles {
                 parent.stderr = Some(parent_read);
                 child_handle
             }
-            mode => stdio_handle(matches!(mode, SandboxStdio::Inherit), STD_ERROR_HANDLE, false, &mut owned)?,
+            mode => stdio_handle(
+                matches!(mode, SandboxStdio::Inherit),
+                STD_ERROR_HANDLE,
+                false,
+                &mut owned,
+            )?,
         };
         Ok((
             Self {

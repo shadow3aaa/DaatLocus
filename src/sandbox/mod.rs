@@ -30,9 +30,10 @@ impl WritableRoot {
     pub fn is_path_writable(&self, path: &Path) -> bool {
         with_path_resolution_cache(|| {
             path_is_or_descends_resolved(path, &self.root)
-                && !self.read_only_subpaths.iter().any(|subpath| {
-                    path_is_or_descends_logical_or_resolved(path, subpath)
-                })
+                && !self
+                    .read_only_subpaths
+                    .iter()
+                    .any(|subpath| path_is_or_descends_logical_or_resolved(path, subpath))
         })
     }
 }

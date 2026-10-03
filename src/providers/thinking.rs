@@ -188,6 +188,8 @@ mod tests {
         assert!(!is_deepseek_api_base_url(
             "https://api.deepseek.com.evil.test/v1"
         ));
-        assert!(!is_deepseek_api_base_url("https://[2001:db8::1]/api.deepseek.com"));
+        assert!(!is_deepseek_api_base_url(
+            "https://[2001:db8::1]/api.deepseek.com"
+        ));
     }
 }

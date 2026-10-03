@@ -12,8 +12,7 @@ use tracing::warn;
 
 use super::payload::image_part_data_url;
 use super::{
-    extract_json_value_from_content, shared_request_rate_limiter,
-    thinking::thinking_budget_is_none,
+    extract_json_value_from_content, shared_request_rate_limiter, thinking::thinking_budget_is_none,
 };
 use crate::{
     config::ModelConfig,
@@ -102,7 +101,8 @@ pub struct OllamaClient {
     thinking_mode: Mutex<OllamaThinkingMode>,
     vision_mode: Mutex<OllamaVisionMode>,
     rpm: Option<usize>,
-    request_rate_limiter: Option<std::sync::Arc<tokio::sync::Mutex<std::collections::VecDeque<Instant>>>>,
+    request_rate_limiter:
+        Option<std::sync::Arc<tokio::sync::Mutex<std::collections::VecDeque<Instant>>>>,
     keep_alive: Option<String>,
     request_timeout: Duration,
     stream_idle_timeout: Duration,
@@ -744,7 +744,9 @@ impl OllamaClient {
                 if let Some(delta_content) = message["content"].as_str() {
                     content.push_str(delta_content);
                     assistant_char_len += delta_content.chars().count();
-                    let should_emit = assistant_char_len.saturating_sub(last_assistant_progress_char_len) >= 64
+                    let should_emit = assistant_char_len
+                        .saturating_sub(last_assistant_progress_char_len)
+                        >= 64
                         || last_assistant_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !content.trim().is_empty() {
                         if let Some(progress) = progress {
@@ -758,7 +760,9 @@ impl OllamaClient {
                 if let Some(delta_thinking) = message["thinking"].as_str() {
                     thinking.push_str(delta_thinking);
                     reasoning_char_len += delta_thinking.chars().count();
-                    let should_emit = reasoning_char_len.saturating_sub(last_reasoning_progress_char_len) >= 64
+                    let should_emit = reasoning_char_len
+                        .saturating_sub(last_reasoning_progress_char_len)
+                        >= 64
                         || last_reasoning_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !thinking.trim().is_empty() {
                         if let Some(progress) = progress {
@@ -1111,7 +1115,6 @@ fn extract_ollama_multimodal_content(content: &AgentContent) -> (String, Vec<Str
     (text, images)
 }
 
-
 fn prompt_request_to_ollama_messages(request: &PromptRequest) -> Vec<Value> {
     let mut valid_tool_call_ids = HashSet::new();
     for message in request
@@ -1130,19 +1133,9 @@ fn prompt_request_to_ollama_messages(request: &PromptRequest) -> Vec<Value> {
         .system_messages
         .iter()
         .map(|message| json!({"role": "system", "content": message}))
-        .chain(
-            request
-                .long_term_memory_messages
-                .iter()
-                .map(|message| {
-                    agent_message_to_ollama_content(
-                        &message.message,
-                        true,
-                        &valid_tool_call_ids,
-                        false,
-                    )
-                }),
-        )
+        .chain(request.long_term_memory_messages.iter().map(|message| {
+            agent_message_to_ollama_content(&message.message, true, &valid_tool_call_ids, false)
+        }))
         .chain(request.history_messages.iter().map(|message| {
             agent_message_to_ollama_content(&message.message, true, &valid_tool_call_ids, false)
         }))
@@ -1211,4 +1204,3 @@ fn parse_usage_from_ollama_response(response: &Value) -> Option<TokenUsage> {
         total_tokens: total,
     })
 }
-

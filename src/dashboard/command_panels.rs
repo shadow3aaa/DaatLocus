@@ -277,7 +277,6 @@ impl SkillsListPanel {
         panel
     }
 
-
     pub(super) fn sync_state(&mut self, state: &DashboardState) {
         let selected_path = self
             .selected_actual_index()
@@ -551,7 +550,9 @@ fn coerce_typed_text(
             .parse::<bool>()
             .map(serde_json::Value::from)
             .map_err(|_| format!("{field_name} must be true or false")),
-        "array" => parse_schema_json_kind(field_name, trimmed, serde_json::Value::is_array, "array"),
+        "array" => {
+            parse_schema_json_kind(field_name, trimmed, serde_json::Value::is_array, "array")
+        }
         "object" => {
             parse_schema_json_kind(field_name, trimmed, serde_json::Value::is_object, "object")
         }
@@ -666,7 +667,6 @@ impl SkillsTogglePanel {
         panel.rebuild_visible();
         panel
     }
-
 
     pub(super) fn sync_state(&mut self, state: &DashboardState) {
         let selected_path = self

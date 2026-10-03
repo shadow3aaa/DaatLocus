@@ -36,8 +36,8 @@ use crate::{
         DashboardPendingUserInputMoveDirection, DashboardRuntimeActivity,
         DashboardRuntimeActivityStatus, DashboardRuntimeStatusLevel, DashboardState, ReducedMotion,
         activity_events_from_history_items, dashboard_action_is_manager_owned,
-        dashboard_agent_name, execute_control_command,
-        execute_dashboard_action, sync_dashboard_runtime_status_live_cell,
+        dashboard_agent_name, execute_control_command, execute_dashboard_action,
+        sync_dashboard_runtime_status_live_cell,
     },
     events::{
         EventPayload, EventStatus, EventStore, TelegramIncomingEvent, TerminalIncomingAttachment,
@@ -584,12 +584,13 @@ async fn handle_ipc_connection(
         }
         SessionIpcRequest::DashboardCommand { command } => {
             let command = command.trim();
-            let output = if state.study_store.is_some() && !study_mode_allows_dashboard_command(command) {
-                study_mode_command_rejection(command)
-            } else {
-                let snapshot = state.dashboard_rx.borrow().clone();
-                execute_control_command(command, &snapshot, &state.dashboard_control_tx)
-            };
+            let output =
+                if state.study_store.is_some() && !study_mode_allows_dashboard_command(command) {
+                    study_mode_command_rejection(command)
+                } else {
+                    let snapshot = state.dashboard_rx.borrow().clone();
+                    execute_control_command(command, &snapshot, &state.dashboard_control_tx)
+                };
             IpcResponseEnvelope::ok(
                 request_id,
                 SessionIpcResponse::DashboardCommandResult { output },

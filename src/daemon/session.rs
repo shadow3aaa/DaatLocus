@@ -43,7 +43,6 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionScope {

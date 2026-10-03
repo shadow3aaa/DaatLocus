@@ -6,13 +6,7 @@
 //! surface from the failure counter. State lives in [`ShareRegistry`], which is
 //! cheap to clone because every field is an `Arc`.
 
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 
 use axum::{
     Json,
@@ -1254,8 +1248,11 @@ mod tests {
             Some("v1.share.1.ab")
         );
         assert_eq!(
-            cookie_pair_value(" not_daat_share=nope ; daat_share = kept ", SHARE_COOKIE_NAME)
-                .as_deref(),
+            cookie_pair_value(
+                " not_daat_share=nope ; daat_share = kept ",
+                SHARE_COOKIE_NAME
+            )
+            .as_deref(),
             Some("kept")
         );
         assert_eq!(

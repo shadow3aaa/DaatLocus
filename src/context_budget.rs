@@ -237,7 +237,8 @@ pub fn estimate_agent_turn_request(
                     system_messages.saturating_add(estimate_agent_message_tokens(message));
             }
             AgentMessage::User { .. } => {
-                user_messages = user_messages.saturating_add(estimate_agent_message_tokens(message));
+                user_messages =
+                    user_messages.saturating_add(estimate_agent_message_tokens(message));
             }
             AgentMessage::Assistant { .. } => {
                 assistant_messages =
@@ -255,14 +256,16 @@ pub fn estimate_agent_turn_request(
                         .map_or(0, |content| message_token_cost("assistant", content))
                         .saturating_add(reasoning_content.as_deref().map_or(0, approx_token_count)),
                 );
-                tool_inputs = tool_inputs.saturating_add(estimate_assistant_tool_call_protocol_tokens(
-                    calls,
-                    estimate_json_value_tokens,
-                    approx_token_count,
-                ));
+                tool_inputs =
+                    tool_inputs.saturating_add(estimate_assistant_tool_call_protocol_tokens(
+                        calls,
+                        estimate_json_value_tokens,
+                        approx_token_count,
+                    ));
             }
             AgentMessage::Tool { .. } => {
-                tool_messages = tool_messages.saturating_add(estimate_agent_message_tokens(message));
+                tool_messages =
+                    tool_messages.saturating_add(estimate_agent_message_tokens(message));
             }
         }
     }

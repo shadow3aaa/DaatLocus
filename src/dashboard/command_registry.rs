@@ -12,7 +12,6 @@ impl DashboardCommandSpec {
     pub(super) fn accepts(self, verb: &str) -> bool {
         self.primary_verb == verb || self.aliases.contains(&verb)
     }
-
 }
 
 const NO_ALIASES: &[&str] = &[];

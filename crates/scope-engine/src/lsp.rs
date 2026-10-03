@@ -304,7 +304,11 @@ impl LspStream {
     fn read_message(&mut self) -> Result<serde_json::Value, String> {
         let mut chunk = [0u8; 1024];
         let header_end = loop {
-            if let Some(end) = self.pending.windows(4).position(|window| window == b"\r\n\r\n") {
+            if let Some(end) = self
+                .pending
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+            {
                 break end;
             }
             if self.pending.len() > 4096 {
@@ -597,7 +601,6 @@ impl LspClient {
         let stdin = child.stdin.take().ok_or("cannot take stdin")?;
         let stdout = child.stdout.take().ok_or("cannot take stdout")?;
         let mut writer = BufWriter(stdin);
-
 
         let mut reader = LspStream::new(std::io::BufReader::new(stdout));
         let (response_sender, response_receiver) = mpsc::channel();
@@ -897,7 +900,6 @@ impl LspClient {
         Ok(())
     }
 
-
     fn wait_for_response(
         response_receiver: &Receiver<LspResponse>,
         expected_id: u64,
@@ -1114,7 +1116,6 @@ impl Analyzer for LspClient {
     fn notify_did_close(&self, file_path: &Path) {
         Self::notify_did_close(self, file_path);
     }
-
 
     fn scope_lsp_enabled(&self) -> bool {
         true

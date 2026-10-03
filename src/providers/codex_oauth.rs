@@ -923,8 +923,7 @@ fn build_agent_responses_payload(
     strip_images: bool,
     request_identity: Option<&CodexRequestIdentity>,
 ) -> Value {
-    let (instructions, input) =
-        agent_messages_to_responses_parts(&request.messages, strip_images);
+    let (instructions, input) = agent_messages_to_responses_parts(&request.messages, strip_images);
     let tools = request
         .tools
         .iter()
@@ -1756,7 +1755,8 @@ mod tests {
             "exp": 4_102_444_800_i64
         }));
 
-        let payload = decode_jwt_payload::<serde_json::Value>(&token).expect("unsigned JWT payload");
+        let payload =
+            decode_jwt_payload::<serde_json::Value>(&token).expect("unsigned JWT payload");
 
         assert_eq!(payload["sub"], "user-1");
         assert_eq!(payload["exp"], 4_102_444_800_i64);

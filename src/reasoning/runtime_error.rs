@@ -233,10 +233,7 @@ pub async fn unread_runtime_error_case_count() -> miette::Result<usize> {
     Ok(count)
 }
 
-fn cached_unread_runtime_error_case_count(
-    modified: Option<SystemTime>,
-    len: u64,
-) -> Option<usize> {
+fn cached_unread_runtime_error_case_count(modified: Option<SystemTime>, len: u64) -> Option<usize> {
     unread_runtime_error_case_count_cache()
         .lock()
         .ok()
@@ -268,8 +265,8 @@ fn invalidate_unread_runtime_error_case_count_cache() {
     }
 }
 
-fn unread_runtime_error_case_count_cache(
-) -> &'static Mutex<Option<UnreadRuntimeErrorCaseCountCache>> {
+fn unread_runtime_error_case_count_cache()
+-> &'static Mutex<Option<UnreadRuntimeErrorCaseCountCache>> {
     UNREAD_RUNTIME_ERROR_CASE_COUNT_CACHE.get_or_init(|| Mutex::new(None))
 }
 

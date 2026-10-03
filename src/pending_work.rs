@@ -57,7 +57,6 @@ impl PartialEq for PendingWork {
 
 impl Eq for PendingWork {}
 
-
 impl PendingWorkQueue {
     pub async fn new() -> Self {
         let persistence = PersistenceStore::runtime().await;
@@ -330,7 +329,6 @@ fn select_next_pending_index(queue: &VecDeque<PendingWorkEntry>) -> Option<usize
         .iter()
         .position(|entry| matches!(entry.state, PendingWorkEntryState::Pending))
 }
-
 
 fn persist_locked(inner: &PendingWorkQueueInner) -> Result<()> {
     crate::persistence::write_postcard_atomic_sync(

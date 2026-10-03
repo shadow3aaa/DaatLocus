@@ -412,9 +412,7 @@ impl WorkflowGroupViewState {
         self.selected = if offset.is_negative() {
             current.saturating_sub(offset.unsigned_abs())
         } else {
-            current
-                .saturating_add(offset as usize)
-                .min(node_count - 1)
+            current.saturating_add(offset as usize).min(node_count - 1)
         };
     }
 
@@ -455,12 +453,18 @@ impl WorkflowGroupViewState {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, group: &crate::workflow::WorkflowGroupSnapshot) -> bool {
+    fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        group: &crate::workflow::WorkflowGroupSnapshot,
+    ) -> bool {
         if self.page == WorkflowGroupPage::Run {
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
-                if self.inspector.as_ref().is_some_and(|inspector| {
-                    inspector.page == WorkflowInspectorPage::Activity
-                }) {
+                if self
+                    .inspector
+                    .as_ref()
+                    .is_some_and(|inspector| inspector.page == WorkflowInspectorPage::Activity)
+                {
                     if let Some(inspector) = self.inspector.as_mut() {
                         inspector.page = WorkflowInspectorPage::Outline;
                         inspector.activity_scroll.reset_to_bottom();

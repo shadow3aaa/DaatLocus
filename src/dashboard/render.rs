@@ -35,8 +35,7 @@ pub fn sync_dashboard_state(
     tx.send_modify(|state| {
         state.agent_name = dashboard_agent_name();
         state.session_title = context.session_title.snapshot();
-        state.status_output =
-            render_status_command_output_from_snapshot(context, &status_command);
+        state.status_output = render_status_command_output_from_snapshot(context, &status_command);
         state.status_command = status_command;
         state.sleep_status_output = render_sleep_status_output_for_dashboard(context, sleep_status);
         state.inspect_telegram_output = render_telegram_status_for_dashboard(context);

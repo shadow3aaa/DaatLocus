@@ -39,5 +39,4 @@ pub trait Analyzer: Send {
     fn scope_lsp_enabled(&self) -> bool {
         true
     }
-
 }

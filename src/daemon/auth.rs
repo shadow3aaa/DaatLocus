@@ -122,7 +122,10 @@ impl Drop for TokenCache {
 }
 
 enum AuthFlush {
-    Flush { index: usize, records: Vec<DaemonTokenRecord> },
+    Flush {
+        index: usize,
+        records: Vec<DaemonTokenRecord>,
+    },
 }
 
 impl DaemonTokenRegistryHandle {
@@ -224,17 +227,15 @@ impl DaemonTokenRegistryHandle {
         let now = now_ms();
         let decision = {
             let mut state = self.cache.inner.write();
-            let Some(index) = state.records.iter().position(|record| {
-                constant_time_eq(&record.token_hash, &token_hash)
-            }) else {
+            let Some(index) = state
+                .records
+                .iter()
+                .position(|record| constant_time_eq(&record.token_hash, &token_hash))
+            else {
                 return Ok(false);
             };
             state.records[index].last_used_at_ms = Some(now);
-            let persisted = state
-                .persisted_last_used
-                .get(index)
-                .copied()
-                .flatten();
+            let persisted = state.persisted_last_used.get(index).copied().flatten();
             let due = match persisted {
                 Some(previous) => now.saturating_sub(previous) >= LAST_USED_FLUSH_INTERVAL_MS,
                 None => true,
@@ -249,11 +250,7 @@ impl DaemonTokenRegistryHandle {
             }
         };
         let AuthFlush::Flush { index, records } = decision;
-        write_registry(
-            &self.path,
-            &DaemonTokenRegistry { tokens: records },
-        )
-        .await?;
+        write_registry(&self.path, &DaemonTokenRegistry { tokens: records }).await?;
         let mut state = self.cache.inner.write();
         if let Some(slot) = state.persisted_last_used.get_mut(index) {
             *slot = Some(now);
@@ -271,8 +268,7 @@ impl DaemonTokenRegistryHandle {
     async fn ensure_registry(&self) -> Result<()> {
         self.ensure_loaded().await?;
         let _guard = self.write_lock.lock().await;
-        let local_token =
-            load_or_create_local_daemon_auth_token_at(&self.local_token_path).await?;
+        let local_token = load_or_create_local_daemon_auth_token_at(&self.local_token_path).await?;
         let mut registry = DaemonTokenRegistry {
             tokens: self.cache.inner.read().records.clone(),
         };

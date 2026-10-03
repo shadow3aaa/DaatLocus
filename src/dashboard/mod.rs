@@ -36,8 +36,8 @@ pub use cells::{
     terminal_activity_event_from_terminal_data, thinking_activity_cell, user_activity_cell,
     user_activity_cell_from_event,
 };
-pub(crate) use command_flow::{ask_message_text, dashboard_command_parts, tokenize_shell_words};
 pub use command_flow::execute_control_command;
+pub(crate) use command_flow::{ask_message_text, dashboard_command_parts, tokenize_shell_words};
 pub use commands::{
     DashboardAction, DashboardActionResult, DashboardCommandAttachment, DashboardCommandRunner,
     DashboardControlCommand, DashboardPendingUserInputMoveDirection,
@@ -837,9 +837,7 @@ fn render_workflow_group_graph(
         rows[0],
     );
 
-    let selected = group
-        .selected
-        .min(snapshot.nodes.len().saturating_sub(1));
+    let selected = group.selected.min(snapshot.nodes.len().saturating_sub(1));
     let mut lines = Vec::new();
     if snapshot.nodes.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -873,7 +871,10 @@ fn render_workflow_group_graph(
                     Style::default().fg(Color::Gray)
                 },
             ),
-            Span::styled(short_run_id(&node.run_id), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                short_run_id(&node.run_id),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(message, Style::default().fg(Color::DarkGray)),
         ]));
     }
@@ -920,7 +921,8 @@ fn render_workflow_group_not_started(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(
-        Paragraph::new("\u{5c1a}\u{672a}\u{542f}\u{52a8}").style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new("\u{5c1a}\u{672a}\u{542f}\u{52a8}")
+            .style(Style::default().fg(Color::DarkGray)),
         inner,
     );
 }
@@ -1475,8 +1477,8 @@ fn render_tui_dashboard_frame<B: Backend>(
 mod tests {
     use super::command_flow::{
         command_blocks_submission, command_live_feedback, command_panel_for_input,
-        dashboard_action_for_input, dashboard_command_body,
-        is_clear_command_input, matching_commands,
+        dashboard_action_for_input, dashboard_command_body, is_clear_command_input,
+        matching_commands,
     };
     use super::selection::{SelectableId, SelectableRegion};
     use super::*;
@@ -1514,26 +1516,26 @@ mod tests {
             .join("\n")
     }
 
-fn workflow_group_state(snapshot: crate::workflow::WorkflowRunSnapshot) -> DashboardState {
-    DashboardState {
-        workflow_group: crate::workflow::WorkflowGroupSnapshot {
-            nodes: vec![crate::workflow::WorkflowGroupNodeSnapshot {
-                run_id: snapshot.run_id.clone(),
-                workflow_id: snapshot.workflow_id.clone(),
-                status: snapshot.status,
-                started_at_ms: snapshot.started_at_ms,
-                completed_at_ms: snapshot.completed_at_ms,
-                input: snapshot.input.clone(),
-                output: snapshot.output.clone(),
-                error: snapshot.error.clone(),
-                message: String::new(),
-                snapshot: Some(snapshot),
-            }],
-            edges: Vec::new(),
-        },
-        ..DashboardState::default()
+    fn workflow_group_state(snapshot: crate::workflow::WorkflowRunSnapshot) -> DashboardState {
+        DashboardState {
+            workflow_group: crate::workflow::WorkflowGroupSnapshot {
+                nodes: vec![crate::workflow::WorkflowGroupNodeSnapshot {
+                    run_id: snapshot.run_id.clone(),
+                    workflow_id: snapshot.workflow_id.clone(),
+                    status: snapshot.status,
+                    started_at_ms: snapshot.started_at_ms,
+                    completed_at_ms: snapshot.completed_at_ms,
+                    input: snapshot.input.clone(),
+                    output: snapshot.output.clone(),
+                    error: snapshot.error.clone(),
+                    message: String::new(),
+                    snapshot: Some(snapshot),
+                }],
+                edges: Vec::new(),
+            },
+            ..DashboardState::default()
+        }
     }
-}
 
     #[test]
     fn workflow_inspector_wide_view_reuses_canonical_activity_renderer() {
@@ -1706,7 +1708,8 @@ fn workflow_group_state(snapshot: crate::workflow::WorkflowRunSnapshot) -> Dashb
             &state,
         ));
         assert_eq!(
-            view.workflow_inspector_mut().map(|inspector| inspector.page),
+            view.workflow_inspector_mut()
+                .map(|inspector| inspector.page),
             Some(WorkflowInspectorPage::Activity)
         );
         assert!(view.handle_workflow_group_key(
@@ -1717,7 +1720,8 @@ fn workflow_group_state(snapshot: crate::workflow::WorkflowRunSnapshot) -> Dashb
             &state,
         ));
         assert_eq!(
-            view.workflow_inspector_mut().map(|inspector| inspector.page),
+            view.workflow_inspector_mut()
+                .map(|inspector| inspector.page),
             Some(WorkflowInspectorPage::Outline)
         );
     }
@@ -1809,7 +1813,10 @@ fn workflow_group_state(snapshot: crate::workflow::WorkflowRunSnapshot) -> Dashb
         assert!(output.contains("research"), "{output}");
         assert!(output.contains("abcdef1\u{2026}"), "{output}");
         assert!(!output.contains("running 1 worker"), "{output}");
-        assert!(output.contains("pending\u{2026} -> abcdef1\u{2026}"), "{output}");
+        assert!(
+            output.contains("pending\u{2026} -> abcdef1\u{2026}"),
+            "{output}"
+        );
         assert!(!output.contains("researcher"), "{output}");
 
         assert!(view.handle_workflow_group_key(
@@ -1821,10 +1828,12 @@ fn workflow_group_state(snapshot: crate::workflow::WorkflowRunSnapshot) -> Dashb
         ));
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        render_tui_dashboard_frame(&mut terminal, &mut view, &state)
-            .expect("render not started");
+        render_tui_dashboard_frame(&mut terminal, &mut view, &state).expect("render not started");
         let output = trimmed_buffer_text(terminal.backend().buffer());
-        assert!(output.contains("\u{5c1a} \u{672a} \u{542f} \u{52a8}"), "{output}");
+        assert!(
+            output.contains("\u{5c1a} \u{672a} \u{542f} \u{52a8}"),
+            "{output}"
+        );
 
         assert!(view.handle_workflow_group_key(
             crossterm::event::KeyEvent::new(
@@ -1849,8 +1858,7 @@ fn workflow_group_state(snapshot: crate::workflow::WorkflowRunSnapshot) -> Dashb
         ));
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        render_tui_dashboard_frame(&mut terminal, &mut view, &state)
-            .expect("render actor outline");
+        render_tui_dashboard_frame(&mut terminal, &mut view, &state).expect("render actor outline");
         let output = trimmed_buffer_text(terminal.backend().buffer());
         assert!(output.contains("researcher \u{00b7} main \u{00b7} 1 attempt"));
         assert!(!output.contains("worker-1"));
@@ -2402,7 +2410,6 @@ fn workflow_group_state(snapshot: crate::workflow::WorkflowRunSnapshot) -> Dashb
 
     #[test]
     fn dashboard_commands_route_session_work_and_manager_restart() {
-
         assert!(!dashboard_action_is_manager_owned(
             &DashboardAction::InterruptRuntime
         ));

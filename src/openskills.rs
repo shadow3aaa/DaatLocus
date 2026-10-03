@@ -702,12 +702,13 @@ fn split_yaml_frontmatter(contents: &str) -> Option<&str> {
     }
     let close_index = close_index?;
     let body = &lines[1..close_index];
-    let start = body.iter().find_map(|&(start, end)| {
-        (!contents[start..end].trim().is_empty()).then_some(start)
-    })?;
-    let end = body.iter().rev().find_map(|&(start, end)| {
-        (!contents[start..end].trim().is_empty()).then_some(end)
-    })?;
+    let start = body
+        .iter()
+        .find_map(|&(start, end)| (!contents[start..end].trim().is_empty()).then_some(start))?;
+    let end = body
+        .iter()
+        .rev()
+        .find_map(|&(start, end)| (!contents[start..end].trim().is_empty()).then_some(end))?;
     Some(&contents[start..end])
 }
 
