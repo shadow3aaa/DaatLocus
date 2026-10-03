@@ -17,7 +17,6 @@ import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 
 const SIDEBAR_WIDTH = "18rem";
-const SIDEBAR_WIDTH_MOBILE = "100vw";
 const SIDEBAR_KEYBOARD_SHORTCUT = "b";
 
 type SidebarContextProps = {
@@ -83,7 +82,6 @@ function SidebarProvider({
         style={
           {
             "--sidebar-width": SIDEBAR_WIDTH,
-            "--sidebar-width-mobile": SIDEBAR_WIDTH_MOBILE,
             ...style,
           } as React.CSSProperties
         }
@@ -116,7 +114,7 @@ function Sidebar({
           data-mobile="true"
           side={side}
           className={cn(
-            "min-w-0 w-(--sidebar-width-mobile) max-w-none gap-0 overflow-hidden border-sidebar-border bg-sidebar p-0 text-sidebar-foreground sm:max-w-none [&>button]:hidden",
+            "min-w-0 w-full max-w-none gap-0 overflow-hidden border-sidebar-border bg-sidebar p-0 text-sidebar-foreground sm:max-w-none [&>button]:hidden",
             className,
           )}
         >
