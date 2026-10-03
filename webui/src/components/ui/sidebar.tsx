@@ -114,7 +114,7 @@ function Sidebar({
           data-mobile="true"
           side={side}
           className={cn(
-            "min-w-0 w-full max-w-none gap-0 overflow-hidden border-sidebar-border bg-sidebar p-0 text-sidebar-foreground sm:max-w-none [&>button]:hidden",
+            "min-w-0 w-4/5 max-w-none gap-0 overflow-hidden border-sidebar-border bg-sidebar p-0 text-sidebar-foreground sm:max-w-none [&>button]:hidden",
             className,
           )}
         >
