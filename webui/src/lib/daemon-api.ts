@@ -396,6 +396,37 @@ export type SessionActivityCodingReview = {
   review_pending: boolean;
 };
 
+export type SessionActivityReadHistoryEntry = {
+  seq: number;
+  role: string;
+  preview: string;
+};
+
+export type SessionActivityReadHistory = {
+  mode: string;
+  query?: string | null;
+  limit: number;
+  returned: number;
+  total: number;
+  next_seq?: number | null;
+  truncated: boolean;
+  loading?: boolean;
+  items?: SessionActivityReadHistoryEntry[];
+};
+
+export type SessionActivityAppStateLine = {
+  key: string;
+  value: string;
+};
+
+export type SessionActivityAppState = {
+  app: string;
+  title: string;
+  detail: string;
+  loading?: boolean;
+  lines?: SessionActivityAppStateLine[];
+};
+
 export type SessionActivityTelegram = {
   title: string;
   detail_lines?: string[];
@@ -565,6 +596,8 @@ export type SessionActivityEvent =
   | { LiveExec: SessionActivityLiveExec }
   | { CodingEdit: SessionActivityCodingEdit }
   | { CodingReview: SessionActivityCodingReview }
+  | { ReadHistory: SessionActivityReadHistory }
+  | { AppState: SessionActivityAppState }
   | { Patch: SessionActivityPatch }
   | { Telegram: SessionActivityTelegram }
   | { Reply: SessionActivityReply }

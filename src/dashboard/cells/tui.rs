@@ -14,10 +14,11 @@ use super::{
     LiveActivityEvent, SessionActivityEvent, WorkflowActivityData,
     apps::{BrowserActivityData, LiveBrowserActivityData, WebSearchActivityData},
     common::{
-        AssistantActivityData, CodingEditActivityData, CodingOpenProjectActivityData,
-        CodingReviewActivityData, ErrorActivityData, ExploredActivityData,
-        ExploredCallActivityData, GenericAppActivityData, MessageImageAttachment, ReducedMotion,
-        RuntimeStatusActivityData, TerminalWaitActivityData, ThinkingActivityData,
+        AppStateActivityData, AssistantActivityData, CodingEditActivityData,
+        CodingOpenProjectActivityData, CodingReviewActivityData, ErrorActivityData,
+        ExploredActivityData, ExploredCallActivityData, GenericAppActivityData,
+        MessageImageAttachment, ReadHistoryActivityData, ReadHistoryEntryActivityData,
+        ReducedMotion, RuntimeStatusActivityData, TerminalWaitActivityData, ThinkingActivityData,
         UserActivityData,
     },
     exec::{ExecResultActivityData, LiveExecActivityData, TerminalExecutionMeta},
@@ -800,6 +801,8 @@ fn render_activity_cell_lines_with_options(
         SessionActivityEvent::Artifact(cell) => {
             render_artifact_cell_lines(cell, max_width, preview)
         }
+        SessionActivityEvent::ReadHistory(cell) => render_read_history_cell_lines(cell, max_width),
+        SessionActivityEvent::AppState(cell) => render_app_state_cell_lines(cell, max_width),
     }
 }
 
@@ -1436,6 +1439,12 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
         }
         SessionActivityEvent::Artifact(cell) => {
             transcript_section("ARTIFACT", &artifact_transcript_text(cell))
+        }
+        SessionActivityEvent::ReadHistory(cell) => {
+            transcript_section("READ HISTORY", &read_history_transcript_text(cell))
+        }
+        SessionActivityEvent::AppState(cell) => {
+            transcript_section("APP STATE", &app_state_transcript_text(cell))
         }
     }
 }
@@ -3204,6 +3213,346 @@ fn render_coding_review_cell_lines(cell: &CodingReviewActivityData) -> Vec<Line<
         cell.title.clone()
     };
     vec![activity_header(title)]
+}
+
+fn render_read_history_cell_lines(
+    cell: &ReadHistoryActivityData,
+    max_width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![activity_header("Read History")];
+
+    let mut detail = vec![read_history_summary_line(cell)];
+    if let Some(query) = cell
+        .query
+        .as_deref()
+        .filter(|query| !query.trim().is_empty())
+    {
+        detail.push(coding_action_line("query", query.trim().to_string()));
+    }
+    detail.extend(cell.items.iter().map(read_history_entry_line));
+    let hidden = cell.returned.saturating_sub(cell.items.len());
+    if hidden > 0 {
+        detail.push(Line::from(Span::styled(
+            format!("+{hidden} more"),
+            dim_style(),
+        )));
+    }
+
+    lines.extend(prefixed_detail_lines(detail, max_width));
+    lines
+}
+
+fn read_history_summary_line(cell: &ReadHistoryActivityData) -> Line<'static> {
+    if cell.loading {
+        return Line::from(Span::styled(
+            format!("{} \u{00b7} limit {}", cell.mode, cell.limit),
+            dim_style(),
+        ));
+    }
+
+    let mut spans = vec![Span::styled(
+        cell.mode.clone(),
+        Style::default().fg(Color::Cyan),
+    )];
+    spans.push(Span::styled(
+        format!(" \u{00b7} {} of {} returned", cell.returned, cell.total),
+        dim_style(),
+    ));
+    if let Some(next_seq) = cell.next_seq {
+        spans.push(Span::styled(
+            format!(" \u{00b7} next {next_seq}"),
+            dim_style(),
+        ));
+    }
+    if cell.truncated {
+        spans.push(Span::styled(
+            " \u{00b7} truncated",
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn read_history_entry_line(item: &ReadHistoryEntryActivityData) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("seq={} ", item.seq), dim_style()),
+        Span::styled(
+            format!("[{}]", item.role),
+            read_history_role_style(&item.role),
+        ),
+        Span::raw(" "),
+        Span::raw(item.preview.clone()),
+    ])
+}
+
+fn read_history_role_style(role: &str) -> Style {
+    match role {
+        "user" => Style::default().fg(Color::Green),
+        "assistant" => Style::default().fg(Color::Cyan),
+        "thinking" => Style::default().fg(Color::Magenta),
+        _ => Style::default().fg(Color::Gray),
+    }
+}
+
+fn read_history_transcript_text(cell: &ReadHistoryActivityData) -> String {
+    let mut lines = Vec::new();
+    if cell.loading {
+        lines.push(format!("mode={} limit={}", cell.mode, cell.limit));
+    } else {
+        lines.push(format!(
+            "mode={} returned={} total={} next_seq={} truncated={}",
+            cell.mode,
+            cell.returned,
+            cell.total,
+            cell.next_seq
+                .map_or_else(|| "none".to_string(), |seq| seq.to_string()),
+            cell.truncated,
+        ));
+    }
+    if let Some(query) = cell
+        .query
+        .as_deref()
+        .filter(|query| !query.trim().is_empty())
+    {
+        lines.push(format!("query={}", query.trim()));
+    }
+    for item in &cell.items {
+        lines.push(format!("seq={} [{}] {}", item.seq, item.role, item.preview));
+    }
+    lines.join("\n")
+}
+
+/// State lines that are verbose plumbing rather than something a card should show.
+fn app_state_line_is_noise(key: &str) -> bool {
+    key == "kind" || key.starts_with("lsp_setup_hint")
+}
+
+fn render_app_state_cell_lines(cell: &AppStateActivityData, max_width: u16) -> Vec<Line<'static>> {
+    let title = if cell.title.trim().is_empty() {
+        cell.app.clone()
+    } else {
+        cell.title.clone()
+    };
+    let mut lines = vec![activity_header(format!("State: {title}"))];
+
+    let detail = if cell.loading {
+        vec![Line::from(Span::styled(
+            format!("detail={}", cell.detail),
+            dim_style(),
+        ))]
+    } else {
+        app_state_detail_lines(cell)
+    };
+
+    lines.extend(prefixed_detail_lines(detail, max_width));
+    lines
+}
+
+fn app_state_detail_lines(cell: &AppStateActivityData) -> Vec<Line<'static>> {
+    match cell.app.as_str() {
+        "coding" => render_coding_state_detail(cell),
+        "terminal" => render_terminal_state_detail(cell),
+        "browser" => render_browser_state_detail(cell),
+        _ => render_generic_state_detail(&cell.lines),
+    }
+}
+
+fn app_state_value<'a>(cell: &'a AppStateActivityData, key: &str) -> Option<&'a str> {
+    cell.lines
+        .iter()
+        .find(|line| line.key == key)
+        .map(|line| line.value.as_str())
+}
+
+fn render_coding_state_detail(cell: &AppStateActivityData) -> Vec<Line<'static>> {
+    let mut detail = vec![
+        app_state_fact_line(
+            "Project",
+            app_state_value(cell, "project_root").unwrap_or("no project open"),
+        ),
+        app_state_fact_line(
+            "Pending reviews",
+            app_state_value(cell, "pending_review_events").unwrap_or("0"),
+        ),
+    ];
+    if let Some(hints) = app_state_value(cell, "scope_config_hints") {
+        detail.push(app_state_fact_line("Scope", hints));
+    }
+    if let Some(last_action) = app_state_value(cell, "last_action") {
+        detail.push(app_state_fact_line("Last action", last_action));
+    }
+    detail.extend(app_state_extra_lines(
+        &cell.lines,
+        &[
+            "project_root",
+            "pending_review_events",
+            "scope_config_hints",
+            "last_action",
+        ],
+    ));
+    detail
+}
+
+fn render_terminal_state_detail(cell: &AppStateActivityData) -> Vec<Line<'static>> {
+    let mut detail = vec![
+        app_state_fact_line(
+            "Running",
+            app_state_value(cell, "active_sessions").unwrap_or("0"),
+        ),
+        app_state_fact_line(
+            "Unread",
+            app_state_value(cell, "unread_sessions").unwrap_or("none"),
+        ),
+    ];
+    let sessions: Vec<_> = cell
+        .lines
+        .iter()
+        .filter(|line| line.key == "session")
+        .collect();
+    if sessions.is_empty() {
+        detail.push(Line::from(Span::styled("No sessions", dim_style())));
+    } else {
+        for (index, session) in sessions.iter().enumerate() {
+            let prefix = if sessions.len() > 1 {
+                format!("Session {} ", index + 1)
+            } else {
+                String::new()
+            };
+            let fields = labeled_state_fields(&session.value);
+            if fields.is_empty() {
+                detail.push(app_state_fact_line(
+                    &format!("{prefix}Session"),
+                    &session.value,
+                ));
+            } else {
+                detail.extend(fields.into_iter().map(|(label, value)| {
+                    app_state_fact_line(&format!("{prefix}{label}"), &value)
+                }));
+            }
+        }
+    }
+    detail.extend(app_state_extra_lines(
+        &cell.lines,
+        &["unread_sessions", "active_sessions", "session"],
+    ));
+    detail
+}
+
+fn render_browser_state_detail(cell: &AppStateActivityData) -> Vec<Line<'static>> {
+    let mut detail = vec![app_state_fact_line(
+        "Pages",
+        app_state_value(cell, "pages").unwrap_or("none"),
+    )];
+    let pages: Vec<_> = cell
+        .lines
+        .iter()
+        .filter(|line| line.key == "page")
+        .collect();
+    if pages.is_empty() {
+        detail.push(Line::from(Span::styled("No pages open", dim_style())));
+    } else {
+        for (index, page) in pages.iter().enumerate() {
+            let prefix = if pages.len() > 1 {
+                format!("Page {} ", index + 1)
+            } else {
+                String::new()
+            };
+            let mut parts = page.value.splitn(2, " \u{00b7} ");
+            let title = parts.next().unwrap_or_default();
+            detail.push(app_state_fact_line(&format!("{prefix}Title"), title));
+            if let Some(url) = parts.next() {
+                detail.push(app_state_fact_line(&format!("{prefix}URL"), url));
+            }
+        }
+    }
+    if let Some(last_error) = app_state_value(cell, "last_error") {
+        detail.push(Line::from(Span::styled(
+            format!("Last error      {last_error}"),
+            Style::default().fg(Color::LightRed),
+        )));
+    }
+    detail.extend(app_state_extra_lines(
+        &cell.lines,
+        &["pages", "page", "last_error"],
+    ));
+    detail
+}
+
+fn app_state_fact_line(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label:<16}"), dim_style()),
+        Span::raw(value.to_string()),
+    ])
+}
+
+fn labeled_state_fields(value: &str) -> Vec<(String, String)> {
+    let (head, command) = value
+        .split_once(" command=")
+        .map_or((value, None), |(head, command)| (head, Some(command)));
+    let mut fields = head
+        .split_whitespace()
+        .filter_map(|part| {
+            let Some((label, field_value)) = part.split_once('=') else {
+                return Some(("Session".to_string(), part.to_string()));
+            };
+            if label.is_empty() {
+                return None;
+            }
+            Some((sentence_state_label(label), field_value.to_string()))
+        })
+        .collect::<Vec<_>>();
+    if let Some(command) = command {
+        fields.push(("Command".to_string(), command.trim().to_string()));
+    }
+    fields
+}
+
+fn sentence_state_label(value: &str) -> String {
+    let mut label = value.replace('_', " ");
+    if let Some(first) = label.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    label
+}
+
+fn render_generic_state_detail(
+    lines: &[super::common::AppStateLineActivityData],
+) -> Vec<Line<'static>> {
+    let visible: Vec<_> = lines
+        .iter()
+        .filter(|line| !app_state_line_is_noise(&line.key))
+        .collect();
+    if visible.is_empty() {
+        return vec![Line::from(Span::styled("no visible state", dim_style()))];
+    }
+    visible
+        .iter()
+        .map(|line| coding_action_line(&line.key, line.value.clone()))
+        .collect()
+}
+
+fn app_state_extra_lines(
+    lines: &[super::common::AppStateLineActivityData],
+    consumed_keys: &[&str],
+) -> Vec<Line<'static>> {
+    lines
+        .iter()
+        .filter(|line| !consumed_keys.contains(&line.key.as_str()))
+        .filter(|line| !app_state_line_is_noise(&line.key))
+        .map(|line| coding_action_line(&line.key, line.value.clone()))
+        .collect()
+}
+
+fn app_state_transcript_text(cell: &AppStateActivityData) -> String {
+    let mut lines = vec![format!("app={} detail={}", cell.app, cell.detail)];
+    for line in cell
+        .lines
+        .iter()
+        .filter(|line| !app_state_line_is_noise(&line.key))
+    {
+        lines.push(format!("{}={}", line.key, line.value));
+    }
+    lines.join("\n")
 }
 
 fn render_patch_file_header(file: &PatchFileActivityDescriptor) -> Line<'static> {
@@ -5261,5 +5610,113 @@ That's it.";
                 .any(|line| line.contains("Search needle in mod.rs")),
             "legacy search prose should still drop the count: {rendered:?}"
         );
+    }
+
+    fn read_history_cell() -> ReadHistoryActivityData {
+        ReadHistoryActivityData {
+            mode: "recent".to_string(),
+            query: Some("context overflow".to_string()),
+            limit: 40,
+            returned: 3,
+            total: 128,
+            next_seq: Some(423),
+            truncated: true,
+            loading: false,
+            items: vec![
+                ReadHistoryEntryActivityData {
+                    seq: 428,
+                    role: "user".to_string(),
+                    preview: "recover the task state".to_string(),
+                },
+                ReadHistoryEntryActivityData {
+                    seq: 427,
+                    role: "assistant".to_string(),
+                    preview: "archived the earlier context".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn read_history_card_renders_summary_query_and_entries() {
+        let rendered = render_read_history_cell_lines(&read_history_cell(), 120)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Read History"), "{rendered}");
+        assert!(rendered.contains("recent"), "{rendered}");
+        assert!(rendered.contains("3 of 128 returned"), "{rendered}");
+        assert!(rendered.contains("next 423"), "{rendered}");
+        assert!(rendered.contains("truncated"), "{rendered}");
+        assert!(rendered.contains("context overflow"), "{rendered}");
+        assert!(rendered.contains("seq=428"), "{rendered}");
+        assert!(rendered.contains("[user]"), "{rendered}");
+        assert!(rendered.contains("recover the task state"), "{rendered}");
+    }
+
+    #[test]
+    fn read_history_transcript_text_lists_entries() {
+        let text =
+            activity_cell_transcript_text(&SessionActivityEvent::ReadHistory(read_history_cell()));
+
+        assert!(text.contains("mode=recent"), "{text}");
+        assert!(text.contains("returned=3"), "{text}");
+        assert!(text.contains("truncated=true"), "{text}");
+        assert!(
+            text.contains("seq=428 [user] recover the task state"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn app_state_card_renders_title_and_key_value_lines() {
+        let cell = AppStateActivityData {
+            app: "coding".to_string(),
+            title: "Coding".to_string(),
+            detail: "summary".to_string(),
+            loading: false,
+            lines: vec![
+                super::super::common::AppStateLineActivityData {
+                    key: "kind".to_string(),
+                    value: "coding".to_string(),
+                },
+                super::super::common::AppStateLineActivityData {
+                    key: "project_root".to_string(),
+                    value: "C:/Users/13940/DaatLocus".to_string(),
+                },
+                super::super::common::AppStateLineActivityData {
+                    key: "lsp_setup_hint".to_string(),
+                    value: "rust-analyzer".to_string(),
+                },
+                super::super::common::AppStateLineActivityData {
+                    key: "last_action".to_string(),
+                    value: "edited code".to_string(),
+                },
+            ],
+        };
+
+        let rendered = render_app_state_cell_lines(&cell, 120)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("State: Coding"), "{rendered}");
+        assert!(rendered.contains("Project"), "{rendered}");
+        assert!(rendered.contains("DaatLocus"), "{rendered}");
+        assert!(rendered.contains("Pending reviews"), "{rendered}");
+        assert!(rendered.contains("Last action"), "{rendered}");
+        assert!(rendered.contains("edited code"), "{rendered}");
+        assert!(
+            !rendered.contains("rust-analyzer"),
+            "noise lines must stay out of the card: {rendered}"
+        );
+
+        let text = activity_cell_transcript_text(&SessionActivityEvent::AppState(cell));
+        assert!(text.contains("app=coding detail=summary"), "{text}");
+        assert!(text.contains("last_action=edited code"), "{text}");
+        assert!(!text.contains("kind=coding"), "{text}");
     }
 }

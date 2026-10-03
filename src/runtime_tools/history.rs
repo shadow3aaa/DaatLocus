@@ -5,7 +5,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    activity_event::{TextActivityDescriptor, ToolCallActivityEvent},
+    activity_event::{
+        ReadHistoryActivityDescriptor, ReadHistoryEntryActivityDescriptor, ToolCallActivityEvent,
+    },
     context::Context,
     context_budget::APPROX_BYTES_PER_TOKEN,
     dashboard::SessionActivityEvent,
@@ -19,6 +21,10 @@ use crate::{
 
 const DEFAULT_HISTORY_QUERY_LIMIT: usize = 40;
 const HISTORY_QUERY_LIMIT_MAX: usize = 200;
+/// The activity card previews only the head of a page; the full page still
+/// reaches the model through the tool output.
+const READ_HISTORY_UI_ITEM_LIMIT: usize = 12;
+const READ_HISTORY_PREVIEW_MAX_CHARS: usize = 160;
 
 #[model_schema]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -81,14 +87,18 @@ fn summarize_read_history_tool(call: &AgentToolCall) -> Result<EpisodeActionReco
 fn render_read_history_call_ui(call: &AgentToolCall) -> Result<ToolCallActivityEvent> {
     let args: ReadHistoryArgs = parse_tool_args(call)?;
     let mode = args.mode.unwrap_or(HistoryQueryMode::Recent);
-    Ok(ToolCallActivityEvent::app(
-        "Read History",
-        vec![format!(
-            "mode={} limit={} query={}",
-            history_mode_str(mode),
-            args.limit.unwrap_or(DEFAULT_HISTORY_QUERY_LIMIT),
-            args.query.as_deref().unwrap_or("")
-        )],
+    Ok(ToolCallActivityEvent::read_history(
+        ReadHistoryActivityDescriptor {
+            mode: history_mode_str(mode).to_string(),
+            query: args.query.clone(),
+            limit: args.limit.unwrap_or(DEFAULT_HISTORY_QUERY_LIMIT),
+            returned: 0,
+            total: 0,
+            next_seq: None,
+            truncated: false,
+            loading: true,
+            items: Vec::new(),
+        },
     ))
 }
 
@@ -175,16 +185,50 @@ async fn execute_read_history_with_store(
         "truncated": truncated,
         "items": rendered,
     });
+    let items = rendered
+        .iter()
+        .take(READ_HISTORY_UI_ITEM_LIMIT)
+        .map(|item| ReadHistoryEntryActivityDescriptor {
+            seq: item.seq,
+            role: item.role.clone(),
+            preview: history_entry_preview(&item.content),
+        })
+        .collect();
     Ok(ToolExecutionResult::from_activity_event(
         format!("read history ({mode_str}, {} of {total})", rendered.len()),
         payload,
-        Some(SessionActivityEvent::GenericApp(
-            TextActivityDescriptor {
-                title: "Read History".to_string(),
-                body_lines: vec![header],
+        Some(SessionActivityEvent::ReadHistory(
+            ReadHistoryActivityDescriptor {
+                mode: mode_str.to_string(),
+                query: (!query.trim().is_empty()).then(|| query.clone()),
+                limit,
+                returned: rendered.len(),
+                total,
+                next_seq,
+                truncated,
+                loading: false,
+                items,
             }
             .into(),
         )),
     )
     .with_model_content(model_content))
+}
+
+/// Compact one-line preview of a history entry for the activity card; the full
+/// entry text stays in the model-facing output.
+fn history_entry_preview(content: &str) -> String {
+    let first_line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let mut preview: String = first_line
+        .chars()
+        .take(READ_HISTORY_PREVIEW_MAX_CHARS)
+        .collect();
+    if first_line.chars().count() > READ_HISTORY_PREVIEW_MAX_CHARS {
+        preview.push('\u{2026}');
+    }
+    preview
 }

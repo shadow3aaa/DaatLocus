@@ -73,6 +73,14 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
   CollapsibleTrigger,
   useCollapsibleState,
 } from "@/components/ui/collapsible";
@@ -604,6 +612,29 @@ type AgentChatSessionActivityRender =
       calls: AgentChatExploredCall[];
     }
   | {
+      kind: "readHistory";
+      icon: AgentChatActivityMarkerKind;
+      title: string;
+      mode: string;
+      query: string | null;
+      limit: number;
+      returned: number;
+      total: number;
+      nextSeq: number | null;
+      truncated: boolean;
+      loading: boolean;
+      entries: AgentChatReadHistoryEntry[];
+    }
+  | {
+      kind: "appState";
+      icon: AgentChatActivityMarkerKind;
+      title: string;
+      app: string;
+      detail: string;
+      loading: boolean;
+      lines: AgentChatAppStateLine[];
+    }
+  | {
       kind: "patch";
       icon: AgentChatActivityMarkerKind;
       title: string;
@@ -663,6 +694,17 @@ type AgentChatExploredCall = {
   summary: string;
   detailLines: string[];
   detailTitle: string | null;
+};
+
+type AgentChatReadHistoryEntry = {
+  seq: number;
+  role: string;
+  preview: string;
+};
+
+type AgentChatAppStateLine = {
+  key: string;
+  value: string;
 };
 
 type AgentChatSessionActivityViewProps = {
@@ -6104,6 +6146,37 @@ function AgentChatSessionActivityView({
     );
   }
 
+  if (render.kind === "readHistory") {
+    return (
+      <AgentChatReadHistoryActivityPanel
+        icon={render.icon}
+        title={render.title}
+        mode={render.mode}
+        query={render.query}
+        limit={render.limit}
+        returned={render.returned}
+        total={render.total}
+        nextSeq={render.nextSeq}
+        truncated={render.truncated}
+        loading={render.loading}
+        entries={render.entries}
+      />
+    );
+  }
+
+  if (render.kind === "appState") {
+    return (
+      <AgentChatAppStateActivityPanel
+        icon={render.icon}
+        title={render.title}
+        app={render.app}
+        detail={render.detail}
+        loading={render.loading}
+        lines={render.lines}
+      />
+    );
+  }
+
   if (render.kind === "patch") {
     return (
       <AgentChatPatchActivityPanel
@@ -8172,6 +8245,321 @@ function AgentChatExploredActivityPanel({
   );
 }
 
+function AgentChatReadHistoryActivityPanel({
+  icon,
+  title,
+  mode,
+  query,
+  limit,
+  returned,
+  total,
+  nextSeq,
+  truncated,
+  loading,
+  entries,
+}: {
+  icon: AgentChatActivityMarkerKind;
+  title: string;
+  mode: string;
+  query: string | null;
+  limit: number;
+  returned: number;
+  total: number;
+  nextSeq: number | null;
+  truncated: boolean;
+  loading: boolean;
+  entries: AgentChatReadHistoryEntry[];
+}) {
+  const hidden = Math.max(0, returned - entries.length);
+  const normalizedQuery = query?.trim();
+  const description = loading
+    ? `Reading the latest ${limit}`
+    : `${returned} of ${total} shown`;
+  const footer = [
+    normalizedQuery ? `Query \u201c${normalizedQuery}\u201d` : null,
+    typeof nextSeq === "number" ? `Continue from ${nextSeq}` : null,
+    truncated ? "Page was truncated" : null,
+    hidden > 0 ? `${hidden} more not shown` : null,
+  ].filter((item): item is string => Boolean(item));
+
+  return (
+    <div className="flex min-w-0 max-w-full flex-col gap-2 text-sm [overflow-wrap:anywhere]">
+      <div className={cn(AGENT_CHAT_ACTIVITY_ROW_CLASS, "leading-6")}>
+        <AgentChatActivityMarker icon={icon} />
+        <p className="min-w-0 break-words font-semibold text-foreground">
+          {title}
+        </p>
+      </div>
+      <Card size="sm" className="ml-7 mr-2 sm:ml-8 sm:mr-3">
+        <CardHeader>
+          <CardTitle className="capitalize">{mode}</CardTitle>
+          <CardDescription>{description}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {entries.length > 0 ? (
+            <div className="flex min-w-0 flex-col divide-y divide-border/60">
+              {entries.map((entry, index) => (
+                <div
+                  key={`read-history-entry-${index}`}
+                  className="grid min-w-0 grid-cols-[4.5rem_minmax(0,1fr)] gap-3 py-2 first:pt-0 last:pb-0"
+                >
+                  <div className="flex min-w-0 flex-col">
+                    <span className="font-mono text-xs tabular-nums text-muted-foreground">
+                      {entry.seq}
+                    </span>
+                    <span className="capitalize text-xs text-foreground">
+                      {entry.role}
+                    </span>
+                  </div>
+                  <p className="min-w-0 break-words text-sm leading-5">
+                    {entry.preview || "\u2014"}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {loading ? "Loading history\u2026" : "No history entries"}
+            </p>
+          )}
+        </CardContent>
+        {footer.length > 0 ? (
+          <CardFooter className="flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            {footer.map((item) => (
+              <span key={item}>{item}</span>
+            ))}
+          </CardFooter>
+        ) : null}
+      </Card>
+    </div>
+  );
+}
+
+function agentChatReadHistoryEntries(value: unknown): AgentChatReadHistoryEntry[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((raw) => {
+    const record = asRecord(raw);
+    if (!record) {
+      return [];
+    }
+    return [
+      {
+        seq: numberValue(record.seq, 0),
+        role: stringValue(record.role, "activity"),
+        preview: stringValue(record.preview, ""),
+      },
+    ];
+  });
+}
+
+function AgentChatAppStateActivityPanel({
+  icon,
+  title,
+  app,
+  detail,
+  loading,
+  lines,
+}: {
+  icon: AgentChatActivityMarkerKind;
+  title: string;
+  app: string;
+  detail: string;
+  loading: boolean;
+  lines: AgentChatAppStateLine[];
+}) {
+  const valueOf = (key: string) => lines.find((line) => line.key === key)?.value;
+
+  return (
+    <div className="flex min-w-0 max-w-full flex-col gap-2 text-sm [overflow-wrap:anywhere]">
+      <div className={cn(AGENT_CHAT_ACTIVITY_ROW_CLASS, "leading-6")}>
+        <AgentChatActivityMarker icon={icon} />
+        <p className="min-w-0 break-words font-semibold text-foreground">
+          State: {title}
+        </p>
+      </div>
+      <Card size="sm" className="ml-7 mr-2 sm:ml-8 sm:mr-3">
+        <CardHeader>
+          <CardTitle>{title}</CardTitle>
+          <CardDescription className="capitalize">{detail}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <p className="text-xs text-muted-foreground">Reading state\u2026</p>
+          ) : (
+            agentChatAppStateCardBody(app, lines, valueOf)
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function agentChatAppStateCardBody(
+  app: string,
+  lines: AgentChatAppStateLine[],
+  valueOf: (key: string) => string | undefined,
+) {
+  switch (app) {
+    case "coding":
+      return (
+        <AgentChatStateFacts
+          facts={[
+            { label: "Project", value: valueOf("project_root") || "No project open" },
+            {
+              label: "Pending reviews",
+              value: valueOf("pending_review_events") ?? "0",
+            },
+            { label: "Scope", value: valueOf("scope_config_hints") },
+            { label: "Last action", value: valueOf("last_action") },
+          ]}
+          extras={agentChatAppStateExtras(lines, [
+            "project_root",
+            "pending_review_events",
+            "scope_config_hints",
+            "last_action",
+          ])}
+        />
+      );
+    case "terminal": {
+      const sessions = lines
+        .filter((line) => line.key === "session")
+        .map((line) => line.value);
+      const sessionFacts = sessions.flatMap((session, index) => {
+        const fields = agentChatLabeledFields(session);
+        const prefix = sessions.length > 1 ? `Session ${index + 1} ` : "";
+        return fields.length > 0
+          ? fields.map((field) => ({
+              label: `${prefix}${agentChatSentenceLabel(field.label)}`,
+              value: field.value,
+            }))
+          : [{ label: sessions.length > 1 ? `Session ${index + 1}` : "Session", value: session }];
+      });
+      return (
+        <AgentChatStateFacts
+          facts={[
+            { label: "Running", value: valueOf("active_sessions") ?? "0" },
+            { label: "Unread", value: valueOf("unread_sessions") ?? "none" },
+            ...sessionFacts,
+          ]}
+          extras={agentChatAppStateExtras(lines, [
+            "unread_sessions",
+            "active_sessions",
+            "session",
+          ])}
+          emptyLabel={sessions.length === 0 ? "No sessions" : null}
+        />
+      );
+    }
+    case "browser": {
+      const pages = lines.filter((line) => line.key === "page").map((line) => line.value);
+      const pageFacts = pages.flatMap((page, index) => {
+        const [title, url] = page.split(/\s+\u00b7\s+/, 2);
+        const prefix = pages.length > 1 ? `Page ${index + 1} ` : "";
+        return [
+          { label: `${prefix}Title`, value: title },
+          ...(url ? [{ label: `${prefix}URL`, value: url }] : []),
+        ];
+      });
+      return (
+        <AgentChatStateFacts
+          facts={[
+            { label: "Pages", value: valueOf("pages") ?? "none" },
+            ...pageFacts,
+            { label: "Last error", value: valueOf("last_error") },
+          ]}
+          extras={agentChatAppStateExtras(lines, ["pages", "page", "last_error"])}
+          emptyLabel={pages.length === 0 ? "No pages open" : null}
+        />
+      );
+    }
+    default:
+      return (
+        <AgentChatStateFacts
+          facts={lines.map((line) => ({ label: line.key, value: line.value }))}
+          extras={[]}
+          emptyLabel="No visible state"
+        />
+      );
+  }
+}
+
+function agentChatLabeledFields(value: string) {
+  const commandMatch = value.match(/\bcommand=(.*)$/);
+  const head = commandMatch ? value.slice(0, commandMatch.index).trim() : value;
+  const fields = head.split(/\s+/).flatMap((part) => {
+    const separator = part.indexOf("=");
+    if (separator <= 0) {
+      return part ? [{ label: "Session", value: part }] : [];
+    }
+    return [{ label: part.slice(0, separator), value: part.slice(separator + 1) }];
+  });
+  if (commandMatch) {
+    fields.push({ label: "command", value: commandMatch[1].trim() });
+  }
+  return fields;
+}
+
+function agentChatSentenceLabel(value: string) {
+  const normalized = value.replaceAll("_", " ").trim();
+  return normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : value;
+}
+
+function AgentChatStateFacts({
+  facts,
+  extras,
+  emptyLabel = null,
+}: {
+  facts: Array<{ label: string; value?: string | null }>;
+  extras: Array<{ label: string; value: string }>;
+  emptyLabel?: string | null;
+}) {
+  const visibleFacts = facts.filter((fact) => fact.value && fact.value.trim());
+  const rows = [...visibleFacts, ...extras].filter(
+    (row): row is { label: string; value: string } => Boolean(row.value?.trim()),
+  );
+  if (rows.length === 0) {
+    return <p className="text-xs text-muted-foreground">{emptyLabel ?? "No visible state"}</p>;
+  }
+  return (
+    <dl className="grid min-w-0 grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-2">
+      {rows.map((row, index) => (
+        <div key={`${row.label}-${index}`} className="contents">
+          <dt className="text-xs text-muted-foreground">{row.label}</dt>
+          <dd className="min-w-0 break-all text-sm leading-5">{row.value}</dd>
+        </div>
+      ))}
+      {emptyLabel && extras.length === 0 ? (
+        <dd className="col-span-2 text-xs text-muted-foreground">{emptyLabel}</dd>
+      ) : null}
+    </dl>
+  );
+}
+
+function agentChatAppStateExtras(lines: AgentChatAppStateLine[], consumedKeys: string[]) {
+  return lines
+    .filter((line) => !consumedKeys.includes(line.key))
+    .map((line) => ({ label: line.key, value: line.value }));
+}
+
+function agentChatAppStateLines(value: unknown): AgentChatAppStateLine[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((raw) => {
+    const record = asRecord(raw);
+    if (!record) {
+      return [];
+    }
+    const key = stringValue(record.key, "").trim();
+    if (!key) {
+      return [];
+    }
+    return [{ key, value: stringValue(record.value, "") }];
+  });
+}
+
 function AgentChatPatchActivityPanel({
   icon,
   title,
@@ -9705,6 +10093,19 @@ function agentChatActivityMetaFromEvent(event: SessionActivityEvent): {
     };
   }
 
+  if (matched?.variant === "ReadHistory") {
+    return { kind: "tool", actor: "tool", title: "Read History" };
+  }
+
+  if (matched?.variant === "AppState") {
+    const title = stringValue(matched.payload.title, "").trim();
+    return {
+      kind: "tool",
+      actor: "tool",
+      title: `State: ${title || stringValue(matched.payload.app, "App")}`,
+    };
+  }
+
 
   const title =
     (matched &&
@@ -10202,6 +10603,38 @@ function agentChatSessionActivityRenderForBubble(
       icon: "activity",
       title: title || "Review",
       bodyLines: [],
+    };
+  }
+
+  const readHistory = payloadOf("ReadHistory");
+  if (readHistory) {
+    return {
+      kind: "readHistory",
+      icon: "activity",
+      title: "Read History",
+      mode: stringValue(readHistory.mode, "recent"),
+      query: nullableStringValue(readHistory.query),
+      limit: numberValue(readHistory.limit, 0),
+      returned: numberValue(readHistory.returned, 0),
+      total: numberValue(readHistory.total, 0),
+      nextSeq: typeof readHistory.next_seq === "number" ? readHistory.next_seq : null,
+      truncated: readHistory.truncated === true,
+      loading: readHistory.loading === true,
+      entries: agentChatReadHistoryEntries(readHistory.items),
+    };
+  }
+
+  const appState = payloadOf("AppState");
+  if (appState) {
+    const title = stringValue(appState.title, "").trim();
+    return {
+      kind: "appState",
+      icon: "activity",
+      title: title || stringValue(appState.app, "App"),
+      app: stringValue(appState.app, ""),
+      detail: stringValue(appState.detail, "summary"),
+      loading: appState.loading === true,
+      lines: agentChatAppStateLines(appState.lines),
     };
   }
 

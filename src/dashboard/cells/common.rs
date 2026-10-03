@@ -127,6 +127,47 @@ pub struct CodingReviewActivityData {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadHistoryActivityData {
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    pub limit: usize,
+    pub returned: usize,
+    pub total: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_seq: Option<i64>,
+    pub truncated: bool,
+    #[serde(default)]
+    pub loading: bool,
+    #[serde(default)]
+    pub items: Vec<ReadHistoryEntryActivityData>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadHistoryEntryActivityData {
+    pub seq: i64,
+    pub role: String,
+    pub preview: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppStateActivityData {
+    pub app: String,
+    pub title: String,
+    pub detail: String,
+    #[serde(default)]
+    pub loading: bool,
+    #[serde(default)]
+    pub lines: Vec<AppStateLineActivityData>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppStateLineActivityData {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExploredCallActivityData {
     pub tool_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -427,6 +468,49 @@ impl From<CodingReviewActivityDescriptor> for CodingReviewActivityData {
             title: data.title,
             summary: data.summary,
             review_pending: data.review_pending,
+        }
+    }
+}
+
+impl From<crate::activity_event::ReadHistoryActivityDescriptor> for ReadHistoryActivityData {
+    fn from(data: crate::activity_event::ReadHistoryActivityDescriptor) -> Self {
+        Self {
+            mode: data.mode,
+            query: data.query,
+            limit: data.limit,
+            returned: data.returned,
+            total: data.total,
+            next_seq: data.next_seq,
+            truncated: data.truncated,
+            loading: data.loading,
+            items: data
+                .items
+                .into_iter()
+                .map(|item| ReadHistoryEntryActivityData {
+                    seq: item.seq,
+                    role: item.role,
+                    preview: item.preview,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<crate::activity_event::AppStateActivityDescriptor> for AppStateActivityData {
+    fn from(data: crate::activity_event::AppStateActivityDescriptor) -> Self {
+        Self {
+            app: data.app,
+            title: data.title,
+            detail: data.detail,
+            loading: data.loading,
+            lines: data
+                .lines
+                .into_iter()
+                .map(|line| AppStateLineActivityData {
+                    key: line.key,
+                    value: line.value,
+                })
+                .collect(),
         }
     }
 }

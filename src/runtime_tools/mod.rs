@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    activity_event::{TextActivityDescriptor, ToolCallActivityEvent, glyph},
+    activity_event::{
+        AppStateActivityDescriptor, AppStateLineActivityDescriptor, TextActivityDescriptor,
+        ToolCallActivityEvent, glyph,
+    },
     app::{AppId, AppManager, AppStateRender, AppToolExecutionContext},
     context::Context,
     context_budget::truncate_text_to_token_budget_with_notice,
@@ -349,6 +352,18 @@ struct AppRuntimeTool {
 
 const APP_GET_STATE_TOOL_NAME: &str = "get_state";
 
+/// How many rendered state lines the activity card shows; the full state still
+/// reaches the model through the tool output.
+const APP_STATE_UI_LINE_LIMIT: usize = 12;
+
+/// Split one `key=value` state line into its two halves, keeping the first `=`.
+fn parse_app_state_line(line: &str) -> (String, String) {
+    line.split_once('=').map_or_else(
+        || (line.trim().to_string(), String::new()),
+        |(key, value)| (key.trim().to_string(), value.trim().to_string()),
+    )
+}
+
 #[model_schema]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -412,6 +427,13 @@ fn render_app_get_state_model_content(app_id: &AppId, state: &AppStateRender) ->
     out.trim_end().to_string()
 }
 
+fn app_state_detail_label(detail: AppStateDetail) -> &'static str {
+    match detail {
+        AppStateDetail::Summary => "summary",
+        AppStateDetail::Full => "full",
+    }
+}
+
 #[async_trait]
 impl RuntimeTool for AppGetStateRuntimeTool {
     fn name(&self) -> &str {
@@ -456,16 +478,14 @@ impl RuntimeTool for AppGetStateRuntimeTool {
             return Ok(None);
         }
         let args: AppGetStateArgs = parse_tool_args(call)?;
-        let lines = vec![format!(
-            "detail={}",
-            match args.detail.unwrap_or_default() {
-                AppStateDetail::Summary => "summary",
-                AppStateDetail::Full => "full",
-            }
-        )];
-        Ok(Some(ToolCallActivityEvent::app(
-            AppId::render_exposed_tool_name(&self.exposed_name),
-            lines,
+        Ok(Some(ToolCallActivityEvent::app_state(
+            AppStateActivityDescriptor {
+                app: self.owner_app_id.to_string(),
+                title: String::new(),
+                detail: app_state_detail_label(args.detail.unwrap_or_default()).to_string(),
+                loading: true,
+                lines: Vec::new(),
+            },
         )))
     }
 
@@ -485,10 +505,21 @@ impl RuntimeTool for AppGetStateRuntimeTool {
         let activity_event = if self.owner_app_id.as_str() == "study" {
             None
         } else {
-            Some(SessionActivityEvent::GenericApp(
-                TextActivityDescriptor {
-                    title: AppId::render_exposed_tool_name(&self.exposed_name),
-                    body_lines: state.lines,
+            Some(SessionActivityEvent::AppState(
+                AppStateActivityDescriptor {
+                    app: self.owner_app_id.to_string(),
+                    title: state.title.clone(),
+                    detail: app_state_detail_label(args.detail.unwrap_or_default()).to_string(),
+                    loading: false,
+                    lines: state
+                        .lines
+                        .iter()
+                        .take(APP_STATE_UI_LINE_LIMIT)
+                        .map(|line| {
+                            let (key, value) = parse_app_state_line(line);
+                            AppStateLineActivityDescriptor { key, value }
+                        })
+                        .collect(),
                 }
                 .into(),
             ))
@@ -1143,10 +1174,32 @@ async fn execute_worker_runtime_tool(
                 .ok_or_else(|| miette!("worker app state missing for {app_id}"))?;
             let payload = app_state_payload(&app_id, &state, args.detail.unwrap_or_default());
             let model_content = render_app_get_state_model_content(&app_id, &state);
+            let activity_event = if app_id.as_str() == "study" {
+                None
+            } else {
+                Some(SessionActivityEvent::AppState(
+                    AppStateActivityDescriptor {
+                        app: app_id.to_string(),
+                        title: state.title.clone(),
+                        detail: app_state_detail_label(args.detail.unwrap_or_default()).to_string(),
+                        loading: false,
+                        lines: state
+                            .lines
+                            .iter()
+                            .take(APP_STATE_UI_LINE_LIMIT)
+                            .map(|line| {
+                                let (key, value) = parse_app_state_line(line);
+                                AppStateLineActivityDescriptor { key, value }
+                            })
+                            .collect(),
+                    }
+                    .into(),
+                ))
+            };
             return Ok(ToolExecutionResult::from_activity_event(
                 format!("read {app_id} state"),
                 payload,
-                None,
+                activity_event,
             )
             .with_model_content(model_content));
         }
@@ -2979,10 +3032,16 @@ mod tests {
         assert_eq!(result.payload["app"], "terminal");
         assert!(result.payload.get("usage").is_none());
         assert!(result.payload.get("docs").is_none());
-        assert!(matches!(
-            result.activity_event,
-            Some(SessionActivityEvent::GenericApp(_))
-        ));
+        let Some(SessionActivityEvent::AppState(state)) = result.activity_event else {
+            panic!("get_state should render a dedicated app state card");
+        };
+        assert_eq!(state.app, "terminal");
+        assert_eq!(state.title, "Terminal");
+        assert!(!state.loading);
+        assert!(
+            state.lines.iter().any(|line| line.key == "unread_sessions"),
+            "terminal state lines should be parsed into key/value pairs"
+        );
     }
 
     #[tokio::test]

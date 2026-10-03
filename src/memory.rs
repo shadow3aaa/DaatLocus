@@ -835,6 +835,30 @@ fn summarize_activity_event(event: &SessionActivityEvent) -> String {
             "presented artifact {}",
             summarize_runtime_inline_text(&data.title)
         ),
+        SessionActivityEvent::ReadHistory(data) => {
+            if data.loading {
+                format!("read history {}", summarize_runtime_inline_text(&data.mode))
+            } else {
+                format!(
+                    "read history {} ({} of {})",
+                    summarize_runtime_inline_text(&data.mode),
+                    data.returned,
+                    data.total
+                )
+            }
+        }
+        SessionActivityEvent::AppState(data) => {
+            let name = if data.title.trim().is_empty() {
+                data.app.as_str()
+            } else {
+                data.title.as_str()
+            };
+            if data.loading {
+                format!("read {name} state")
+            } else {
+                format!("read {name} state ({} lines)", data.lines.len())
+            }
+        }
     }
 }
 

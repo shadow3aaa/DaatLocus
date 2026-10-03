@@ -1891,6 +1891,88 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
       },
     },
     {
+      ReadHistory: {
+        mode: "recent",
+        query: null,
+        limit: 40,
+        returned: 5,
+        total: 128,
+        next_seq: 423,
+        truncated: false,
+        loading: false,
+        items: [
+          {
+            seq: 428,
+            role: "user",
+            preview:
+              "Scan the TUI and WebUI surface for tool calls that still lack a dedicated render.",
+          },
+          {
+            seq: 427,
+            role: "assistant",
+            preview: "read_history still falls back to the generic App card.",
+          },
+          {
+            seq: 426,
+            role: "activity",
+            preview: "Explored 3 calls in src/dashboard/cells/tui.rs",
+          },
+          {
+            seq: 425,
+            role: "thinking",
+            preview: "Give the history page a dedicated card before the mock pass.",
+          },
+          {
+            seq: 424,
+            role: "assistant",
+            preview: "Verified the WebUI activity workbench renders the mock snapshot.",
+          },
+        ],
+      },
+    },
+    {
+      AppState: {
+        app: "coding",
+        title: "Coding",
+        detail: "summary",
+        loading: false,
+        lines: [
+          { key: "project_root", value: "C:/Users/13940/DaatLocus" },
+          { key: "pending_review_events", value: "0" },
+          { key: "scope_config_hints", value: "tree_sitter_languages:11 lsp_languages:5" },
+          { key: "last_action", value: "edited code" },
+        ],
+      },
+    },
+    {
+      AppState: {
+        app: "terminal",
+        title: "Terminal",
+        detail: "full",
+        loading: false,
+        lines: [
+          { key: "unread_sessions", value: "none" },
+          { key: "active_sessions", value: "1" },
+          {
+            key: "session",
+            value: "ts1 status=exited exit=0 command=cargo check",
+          },
+        ],
+      },
+    },
+    {
+      AppState: {
+        app: "browser",
+        title: "Browser",
+        detail: "summary",
+        loading: false,
+        lines: [
+          { key: "pages", value: "1 open" },
+          { key: "page", value: "shadcn/ui docs \u00b7 ui.shadcn.com" },
+        ],
+      },
+    },
+    {
       ExecResult: {
         title: "bun run typecheck",
         meta: "exit=0",

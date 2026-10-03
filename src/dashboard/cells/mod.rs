@@ -20,13 +20,15 @@ use super::{DashboardActivityHistoryItem, DashboardState};
 use apps::{BrowserActivityData, LiveBrowserActivityData, WebSearchActivityData};
 #[cfg(test)]
 pub use common::ExploredCallActivityData;
+pub use common::{
+    AppStateActivityData, ExploredActivityData, ReadHistoryActivityData, ThinkingActivityData,
+};
 use common::{
     AssistantActivityData, ErrorActivityData, GenericAppActivityData, MessageImageAttachment,
     RuntimeStatusActivityData, TerminalWaitActivityData, UserActivityData, assistant_message_data,
     error_cell, terminal_wait_cell, user_message_data,
 };
 use common::{CodingEditActivityData, CodingOpenProjectActivityData, CodingReviewActivityData};
-pub use common::{ExploredActivityData, ThinkingActivityData};
 use common::{render_exposed_tool_names, render_exposed_tool_names_in_lines, thinking_cell};
 use exec::{ExecResultActivityData, LiveExecActivityData, is_output_metadata_line, live_exec_cell};
 use messages::{PatchActivityData, ReplyActivityData, TelegramActivityData};
@@ -82,6 +84,8 @@ pub enum SessionActivityEvent {
     RuntimeStatus(RuntimeStatusActivityData),
     Workflow(WorkflowActivityData),
     Artifact(ArtifactActivityData),
+    ReadHistory(ReadHistoryActivityData),
+    AppState(AppStateActivityData),
 }
 
 const RUNTIME_STATUS_LIVE_CELL_KEY: &str = "runtime-status";
@@ -396,6 +400,12 @@ pub fn activity_event_from_tool_call_activity_event(
         }
         ToolCallActivityEvent::Plan(event) if event.steps.is_empty() => None,
         ToolCallActivityEvent::Plan(event) => Some(SessionActivityEvent::PlanResult(event.into())),
+        ToolCallActivityEvent::ReadHistory(event) => {
+            Some(SessionActivityEvent::ReadHistory(event.into()))
+        }
+        ToolCallActivityEvent::AppState(event) => {
+            Some(SessionActivityEvent::AppState(event.into()))
+        }
         ToolCallActivityEvent::App(event) => Some(SessionActivityEvent::GenericApp(event.into())),
         ToolCallActivityEvent::Error(event) => Some(SessionActivityEvent::Error(event.into())),
     }

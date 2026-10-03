@@ -992,8 +992,9 @@ impl App for BrowserApp {
         if self.pages.is_empty() {
             lines.push("pages=none".to_string());
         } else {
+            lines.push(format!("pages={} open", self.pages.len()));
             for page in self.pages.values() {
-                lines.push(format!("title={} url={}", page.title, page.url));
+                lines.push(format!("page={} \u{00b7} {}", page.title, page.url));
             }
         }
         if let Some(err) = self.init_error.as_deref() {

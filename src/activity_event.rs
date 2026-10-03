@@ -21,6 +21,8 @@ pub enum ToolCallActivityEvent {
     CodingEdit(CodingEditActivityDescriptor),
     Telegram(TelegramActivityDescriptor),
     Plan(PlanActivityDescriptor),
+    ReadHistory(ReadHistoryActivityDescriptor),
+    AppState(AppStateActivityDescriptor),
     #[serde(alias = "Finish", alias = "Work")]
     App(TextActivityDescriptor),
     Error(TextActivityDescriptor),
@@ -135,6 +137,53 @@ pub struct CodingReviewActivityDescriptor {
     pub title: String,
     pub summary: String,
     pub review_pending: bool,
+}
+
+/// One page of session history surfaced by the `read_history` tool. The call-time
+/// card carries `loading = true` with no items; the result-time card fills in the
+/// returned page and a compact preview of each entry.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadHistoryActivityDescriptor {
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    pub limit: usize,
+    pub returned: usize,
+    pub total: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_seq: Option<i64>,
+    pub truncated: bool,
+    #[serde(default)]
+    pub loading: bool,
+    #[serde(default)]
+    pub items: Vec<ReadHistoryEntryActivityDescriptor>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadHistoryEntryActivityDescriptor {
+    pub seq: i64,
+    pub role: String,
+    pub preview: String,
+}
+
+/// One app's state as read by its generated `get_state` tool. The call-time card
+/// carries `loading = true` and only the requested detail level; the result-time
+/// card fills in the app title and the rendered state lines.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppStateActivityDescriptor {
+    pub app: String,
+    pub title: String,
+    pub detail: String,
+    #[serde(default)]
+    pub loading: bool,
+    #[serde(default)]
+    pub lines: Vec<AppStateLineActivityDescriptor>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppStateLineActivityDescriptor {
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -306,6 +355,14 @@ impl ToolCallActivityEvent {
 
     pub const fn plan(data: PlanActivityDescriptor) -> Self {
         Self::Plan(data)
+    }
+
+    pub fn read_history(data: ReadHistoryActivityDescriptor) -> Self {
+        Self::ReadHistory(data)
+    }
+
+    pub fn app_state(data: AppStateActivityDescriptor) -> Self {
+        Self::AppState(data)
     }
 
     pub fn app(title: impl Into<String>, body_lines: Vec<String>) -> Self {
