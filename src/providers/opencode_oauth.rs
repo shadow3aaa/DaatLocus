@@ -26,8 +26,11 @@ use crate::reasoning::runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptR
 
 /// Default OpenCode Console origin used for the device-code OAuth flow.
 pub const OPENCODE_OAUTH_DEFAULT_SERVER: &str = "https://opencode.ai/console";
-/// Default OpenAI-compatible gateway base URL for OpenCode models.
-pub const OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen/v1";
+/// Default OpenAI-compatible gateway base URL for OpenCode Console OAuth
+/// models: the Console-issued inference endpoint from `GET /api/config`.
+/// OAuth access tokens are only accepted here; the public `/zen/v1` gateway
+/// only accepts `oc_sk_`/`sk-` service-account API keys.
+pub const OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/inference/openai/v1";
 
 const OPENCODE_OAUTH_CLIENT_ID: &str = "opencode-cli";
 const OPENCODE_DEVICE_CODE_PATH: &str = "/auth/device/code";
@@ -59,13 +62,24 @@ pub struct OpenCodeOAuthTokens {
     pub expires_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
+    /// Console org picked at login (`GET /api/orgs`), sent back as the
+    /// `x-opencode-org-id` header the Console-issued inference endpoint
+    /// requires. OAuth tokens stay valid across orgs; this only selects
+    /// which workspace the usage is billed to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
 }
 
-/// A resolved access token plus its expiry.
+/// A resolved access token plus the Console org it was issued against.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenCodeOAuthAccess {
     pub access_token: String,
     pub expires_at_ms: Option<i64>,
+    /// Console org id (`wrk_...`) picked at login, sent back as the
+    /// `x-opencode-org-id` header the inference endpoint requires.
+    pub org_id: Option<String>,
+    /// Console origin the token and org were issued against.
+    pub server: Option<String>,
 }
 
 impl OpenCodeOAuthAccess {
@@ -130,6 +144,38 @@ struct TokenResponse {
 /// The Daat-owned token file shared by every OpenCode Console OAuth provider.
 pub fn opencode_auth_file_path() -> PathBuf {
     daat_locus_paths_sync().opencode_auth_file("oauth.json")
+}
+
+/// Resolve the Console billing org (`GET /api/orgs`) for an access token. The
+/// Console-issued inference endpoint rejects requests without the matching
+/// `x-opencode-org-id` header.
+async fn opencode_fetch_org_id(
+    client: &reqwest::Client,
+    server: &str,
+    access_token: &str,
+) -> Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct Org {
+        id: String,
+    }
+
+    let endpoint = format!("{}/api/orgs", server.trim_end_matches('/'));
+    let response = client
+        .get(&endpoint)
+        .header("Accept", "application/json")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|err| miette!("OpenCode org lookup failed: {err}"))?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|err| miette!("OpenCode org lookup body read failed: {err}"))?;
+    let orgs: Vec<Org> = serde_json::from_str(&body).unwrap_or_default();
+    Ok(orgs.into_iter().next().map(|org| org.id))
 }
 
 fn auth_http_client() -> Result<reqwest::Client> {
@@ -237,6 +283,7 @@ pub async fn opencode_poll_device_token(
             refresh_token: token.refresh_token.unwrap_or_default(),
             expires_at_ms: expiry_from_secs(token.expires_in),
             server: Some(server.to_string()),
+            org_id: None,
         }));
     }
     match token.error.as_deref() {
@@ -287,6 +334,8 @@ fn access_from_tokens(tokens: &OpenCodeOAuthTokens) -> OpenCodeOAuthAccess {
     OpenCodeOAuthAccess {
         access_token: tokens.access_token.clone(),
         expires_at_ms: (tokens.expires_at_ms > 0).then_some(tokens.expires_at_ms),
+        org_id: tokens.org_id.clone(),
+        server: tokens.server.clone(),
     }
 }
 
@@ -384,6 +433,7 @@ async fn refresh_opencode_oauth_tokens(
             .unwrap_or_else(|| tokens.refresh_token.clone()),
         expires_at_ms: expiry_from_secs(refreshed.expires_in),
         server: Some(server.to_string()),
+        org_id: tokens.org_id.clone(),
     })
 }
 
@@ -397,6 +447,16 @@ impl OpenCodeInner {
         match self {
             Self::Chat(client) => client.set_api_key(api_key),
             Self::Responses(client) => client.set_api_key(api_key),
+        }
+    }
+
+    /// Attach the Console billing org header the inference endpoint requires.
+    fn set_org_header(&mut self, org_id: &str) {
+        match self {
+            Self::Chat(client) => client.set_extra_header("x-opencode-org-id", org_id.to_string()),
+            Self::Responses(client) => {
+                client.set_extra_header("x-opencode-org-id", org_id.to_string());
+            }
         }
     }
 
@@ -477,7 +537,7 @@ impl OpenCodeOAuthClient {
                 return Ok(());
             }
         }
-        let access =
+        let mut access =
             opencode_oauth_access_from_file_with_client(&self.auth_file, &self.auth_client)
                 .await
                 .map_err(|err| {
@@ -486,8 +546,23 @@ impl OpenCodeOAuthClient {
                         self.auth_file.display()
                     )
                 })?;
+        // The Console-issued inference endpoint needs the billing org header.
+        // Older token files predate that field, so resolve it on demand.
+        if access.org_id.is_none() {
+            let server = access
+                .server
+                .clone()
+                .unwrap_or_else(|| OPENCODE_OAUTH_DEFAULT_SERVER.to_string());
+            access.org_id = opencode_fetch_org_id(&self.auth_client, &server, &access.access_token)
+                .await
+                .ok()
+                .flatten();
+        }
         let mut inner = self.inner.lock().await;
         inner.set_api_key(access.access_token.clone());
+        if let Some(org_id) = access.org_id.as_deref() {
+            inner.set_org_header(org_id);
+        }
         drop(inner);
         *self.cached.lock().await = Some(access);
         Ok(())

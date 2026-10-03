@@ -31,6 +31,8 @@ use crate::reasoning::runtime::{
 pub struct ResponsesCompatibleClient {
     client: reqwest::Client,
     api_key: String,
+    /// Extra headers attached to each request (e.g. the OpenCode org id).
+    extra_headers: reqwest::header::HeaderMap,
     base_url: String,
     model: String,
     thinking_budget: Option<String>,
@@ -55,6 +57,13 @@ impl ResponsesCompatibleClient {
         self.api_key = api_key;
     }
 
+    /// Install (or replace) one extra header sent with every request.
+    pub(crate) fn set_extra_header(&mut self, name: &'static str, value: String) {
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(&value) {
+            self.extra_headers.insert(name, value);
+        }
+    }
+
     pub(crate) fn new(
         api_key: &str,
         base_url: &str,
@@ -77,6 +86,7 @@ impl ResponsesCompatibleClient {
         Self {
             client,
             api_key: api_key.to_string(),
+            extra_headers: reqwest::header::HeaderMap::new(),
             base_url: base_url.clone(),
             model: model_config.model_id.clone(),
             thinking_budget: model_config
@@ -154,11 +164,13 @@ impl ResponsesCompatibleClient {
         let mut transient_attempt = 0usize;
         loop {
             self.wait_for_request_slot(request_context).await;
+            let mut request_headers = self.extra_headers.clone();
+            request_headers.extend(session_headers.clone());
             let request = self
                 .client
                 .post(&url)
                 .bearer_auth(&self.api_key)
-                .headers(session_headers.clone())
+                .headers(request_headers)
                 .json(payload);
             let response = send_request_for_streaming_response(
                 request,

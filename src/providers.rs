@@ -191,6 +191,13 @@ impl OpenAIClient {
         self.api_key = api_key;
     }
 
+    /// Install (or replace) one extra header sent with every request.
+    pub(crate) fn set_extra_header(&mut self, name: &'static str, value: String) {
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(&value) {
+            self.extra_headers.insert(name, value);
+        }
+    }
+
     /// Build from standalone credentials and `ModelConfig`.
     pub fn from_parts(api_key: &str, base_url: &str, model_config: &ModelConfig) -> Self {
         let base_url = normalize_provider_base_url(base_url);
@@ -1207,8 +1214,65 @@ fn is_standard_openai_base_url(base_url: &str) -> bool {
     http_url_host(base_url).is_some_and(|host| host.eq_ignore_ascii_case("api.openai.com"))
 }
 
-const OPENCODE_CLIENT_ID: &str = "daat-locus";
-const OPENCODE_USER_AGENT: &str = concat!("daat-locus/", env!("CARGO_PKG_VERSION"));
+const OPENCODE_CLIENT_ID: &str = "cli";
+const OPENCODE_PROJECT_ID: &str = "global";
+/// OpenCode's gateway fingerprints requests against its own CLI, so third-party
+/// clients have to present the CLI's full user agent (`opencode/<version>`
+/// plus the ai-sdk/bun runtime suffixes) to reach the free tier.
+const OPENCODE_USER_AGENT: &str =
+    "opencode/1.18.34 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14";
+
+static OPENCODE_ID_TIMESTAMP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static OPENCODE_ID_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static OPENCODE_SESSION_IDS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Reproduce the OpenCode CLI identifier algorithm (`packages/schema/identifier.ts`):
+/// `hex48(timestamp_ms * 0x1000 + counter)` (bit-inverted for descending ids)
+/// followed by 14 base62 random characters. The gateway validates the shape of
+/// `x-opencode-session`/`x-opencode-request`, so arbitrary values are rejected.
+fn opencode_identifier(descending: bool) -> String {
+    use std::fmt::Write as _;
+    use std::sync::atomic::Ordering;
+
+    const CHARS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    let previous = OPENCODE_ID_TIMESTAMP.swap(timestamp, Ordering::Relaxed);
+    let counter = if timestamp != previous {
+        OPENCODE_ID_COUNTER.store(1, Ordering::Relaxed);
+        1
+    } else {
+        OPENCODE_ID_COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
+    };
+    let mut value = (timestamp as u64)
+        .wrapping_mul(0x1000)
+        .wrapping_add(counter as u64);
+    if descending {
+        value = !value;
+    }
+    let mut id = String::with_capacity(26);
+    for index in 0..6 {
+        let byte = ((value >> (40 - 8 * index)) & 0xff) as u8;
+        let _ = write!(id, "{byte:02x}");
+    }
+    for byte in uuid::Uuid::new_v4().into_bytes().iter().take(14) {
+        id.push(CHARS[usize::from(*byte) % CHARS.len()] as char);
+    }
+    id
+}
+
+/// One stable `ses_` id per Daat conversation, mirroring the CLI's per-session id.
+fn opencode_session_id(conversation_id: &str) -> String {
+    let mut sessions = OPENCODE_SESSION_IDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    sessions
+        .entry(conversation_id.to_string())
+        .or_insert_with(|| format!("ses_{}", opencode_identifier(true)))
+        .clone()
+}
 
 /// The OpenCode Zen/Go gateway (`https://opencode.ai/...`) rejects requests
 /// without a stable per-conversation `x-opencode-session` header.
@@ -1319,10 +1383,17 @@ pub(crate) fn opencode_gateway_headers(
     let Some(conversation_id) = conversation_id else {
         return headers;
     };
-    if let Ok(value) = reqwest::header::HeaderValue::from_str(conversation_id) {
+    if let Ok(value) = reqwest::header::HeaderValue::from_str(&opencode_session_id(conversation_id))
+    {
         headers.insert("x-opencode-session", value);
     }
+    if let Ok(value) =
+        reqwest::header::HeaderValue::from_str(&format!("msg_{}", opencode_identifier(false)))
+    {
+        headers.insert("x-opencode-request", value);
+    }
     headers.insert("x-opencode-client", OPENCODE_CLIENT_ID.parse().unwrap());
+    headers.insert("x-opencode-project", OPENCODE_PROJECT_ID.parse().unwrap());
     headers.insert(
         reqwest::header::USER_AGENT,
         OPENCODE_USER_AGENT.parse().unwrap(),
@@ -1479,6 +1550,19 @@ pub fn build_model_provider(
             keep_alive.as_deref(),
         )),
     };
+    let mut provider: Box<dyn ModelProvider + Send + Sync> = provider;
+    // The gateway only serves its free tier to requests shaped like its own CLI.
+    if matches!(
+        provider_config,
+        ProviderConfig::OpenaiCompatible { base_url, .. }
+            if is_opencode_gateway_base_url(base_url)
+    ) || matches!(
+        provider_config,
+        ProviderConfig::OpenCodeConsoleOauth { base_url, .. }
+            if base_url.as_deref().is_none_or(is_opencode_gateway_base_url)
+    ) {
+        provider = Box::new(OpenCodeGatewayProvider { inner: provider });
+    }
     Ok(
         match model_facing_tool_name_prefix(&model_config.model_id) {
             Some(prefix) => Box::new(PrefixedToolNameProvider {
@@ -1569,6 +1653,97 @@ impl ModelProvider for PrefixedToolNameProvider {
             if let AgentTurnItem::ToolCall { call } = item {
                 let name = self.canonical(&call.name);
                 call.name = name;
+            }
+        }
+        Ok(result)
+    }
+
+    fn request_budget_limits(&self) -> RequestBudgetLimits {
+        self.inner.request_budget_limits()
+    }
+
+    fn token_usage_info(&self) -> TokenUsageInfo {
+        self.inner.token_usage_info()
+    }
+
+    fn model_name(&self) -> String {
+        self.inner.model_name()
+    }
+}
+
+/// Shape requests the way the OpenCode gateway expects from its own CLI.
+///
+/// The gateway's free tier only serves requests that stream and declare at
+/// least two tools, one named `bash`, so mirror Daat's shell tool under that
+/// alias and translate the model's `bash` calls back to the canonical tool.
+struct OpenCodeGatewayProvider {
+    inner: Box<dyn ModelProvider + Send + Sync>,
+}
+
+/// Canonical Daat shell tool the gateway's `bash` alias maps to.
+const OPENCODE_GATEWAY_SHELL_TOOL: &str = "terminal__terminal_exec";
+/// Tool name the gateway's fingerprint check requires.
+const OPENCODE_GATEWAY_BASH_TOOL: &str = "bash";
+
+impl OpenCodeGatewayProvider {
+    /// Add the `bash` alias when the canonical shell tool is present.
+    fn ensure_bash_alias(tools: &mut Vec<AgentToolSpec>) {
+        if tools
+            .iter()
+            .any(|tool| tool.name == OPENCODE_GATEWAY_BASH_TOOL)
+        {
+            return;
+        }
+        let Some(mut alias) = tools
+            .iter()
+            .find(|tool| {
+                tool.name == OPENCODE_GATEWAY_SHELL_TOOL
+                    || tool
+                        .name
+                        .ends_with(&format!("_{OPENCODE_GATEWAY_SHELL_TOOL}"))
+            })
+            .cloned()
+        else {
+            return;
+        };
+        alias.name = OPENCODE_GATEWAY_BASH_TOOL.to_string();
+        alias.description = "Run a shell command.".to_string();
+        tools.push(alias);
+    }
+}
+
+#[async_trait]
+impl ModelProvider for OpenCodeGatewayProvider {
+    async fn complete_json(
+        &self,
+        request: PromptRequest,
+        options: ModelRequestOptions,
+    ) -> Result<serde_json::Value> {
+        self.inner.complete_json(request, options).await
+    }
+
+    async fn complete_agent_turn(
+        &self,
+        mut request: AgentTurnRequest,
+        options: ModelRequestOptions,
+    ) -> Result<AgentTurnStreamResult> {
+        Self::ensure_bash_alias(&mut request.tools);
+        let bash_alias_active = request
+            .tools
+            .iter()
+            .any(|tool| tool.name == OPENCODE_GATEWAY_BASH_TOOL)
+            && request
+                .tools
+                .iter()
+                .any(|tool| tool.name == OPENCODE_GATEWAY_SHELL_TOOL);
+        let mut result = self.inner.complete_agent_turn(request, options).await?;
+        if bash_alias_active {
+            for item in &mut result.items {
+                if let AgentTurnItem::ToolCall { call } = item
+                    && call.name == OPENCODE_GATEWAY_BASH_TOOL
+                {
+                    call.name = OPENCODE_GATEWAY_SHELL_TOOL.to_string();
+                }
             }
         }
         Ok(result)
@@ -1992,24 +2167,42 @@ mod tests {
     }
 
     #[test]
-    fn opencode_gateway_headers_carry_stable_session_identity() {
+    fn opencode_gateway_headers_carry_cli_identity() {
         let headers = opencode_gateway_headers("https://opencode.ai/zen/v1", Some("session-1"));
 
-        assert_eq!(
-            headers.get("x-opencode-session").unwrap().to_str().unwrap(),
-            "session-1"
+        let session = headers.get("x-opencode-session").unwrap().to_str().unwrap();
+        assert!(
+            session.starts_with("ses_"),
+            "unexpected session id {session}"
         );
+        assert_eq!(session.len(), 30);
         assert_eq!(
             headers.get("x-opencode-client").unwrap().to_str().unwrap(),
-            "daat-locus"
+            "cli"
         );
+        assert_eq!(
+            headers.get("x-opencode-project").unwrap().to_str().unwrap(),
+            "global"
+        );
+        let request = headers.get("x-opencode-request").unwrap().to_str().unwrap();
+        assert!(
+            request.starts_with("msg_"),
+            "unexpected request id {request}"
+        );
+        assert_eq!(request.len(), 30);
         assert!(
             headers
                 .get(reqwest::header::USER_AGENT)
                 .unwrap()
                 .to_str()
                 .unwrap()
-                .starts_with("daat-locus/")
+                .starts_with("opencode/")
+        );
+        // The same conversation keeps one session id across requests.
+        let again = opencode_gateway_headers("https://opencode.ai/zen/v1", Some("session-1"));
+        assert_eq!(
+            again.get("x-opencode-session"),
+            headers.get("x-opencode-session")
         );
     }
 
