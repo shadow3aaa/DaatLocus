@@ -201,16 +201,7 @@ pub async fn discover_model_ids(
         ProviderConfig::OpenCodeConsoleOauth {
             base_url,
             auth_file,
-        } => {
-            let base = base_url
-                .as_deref()
-                .unwrap_or(crate::providers::OPENCODE_ZEN_BASE_URL);
-            let access =
-                crate::providers::opencode_oauth_access_from_file(std::path::Path::new(auth_file))
-                    .await
-                    .map_err(|err| miette!("OpenCode model discovery auth failed: {err}"))?;
-            fetch_openai_models(base, &access.access_token).await
-        }
+        } => fetch_opencode_console_models(base_url.as_deref(), auth_file).await,
         ProviderConfig::OpenaiCompatible {
             base_url, api_key, ..
         } => {
@@ -329,6 +320,97 @@ async fn fetch_openai_models_path(url: &str, api_key: &str) -> Result<Vec<Discov
         .await
         .map_err(|err| miette!("fetch_openai_models: response parse failed: {err}"))?;
     Ok(parse_models_response(Some(json)))
+}
+
+/// Discover OpenCode Console model IDs.
+///
+/// The Console-issued inference endpoint (`/inference/openai/v1`) exposes no
+/// `/models` route, so the catalog comes from the Console config endpoint
+/// (`GET {server}/api/config`), which the official client also consults.
+async fn fetch_opencode_console_models(
+    base_url: Option<&str>,
+    auth_file: &str,
+) -> Result<Vec<DiscoveredModel>> {
+    let access = crate::providers::opencode_console_access(std::path::Path::new(auth_file)).await?;
+    let server = access
+        .server
+        .as_deref()
+        .unwrap_or(crate::providers::OPENCODE_OAUTH_DEFAULT_SERVER);
+    let base =
+        normalize_provider_base_url(base_url.unwrap_or(crate::providers::OPENCODE_ZEN_BASE_URL));
+    let url = format!("{}/api/config", server.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| {
+            miette!("fetch_opencode_console_models: failed to build http client: {err}")
+        })?;
+    let mut request = client.get(&url).bearer_auth(&access.access_token);
+    if let Some(org_id) = access.org_id.as_deref() {
+        request = request.header("x-org-id", org_id);
+    }
+    let resp = request
+        .send()
+        .await
+        .map_err(|err| miette!("fetch_opencode_console_models: request to {url} failed: {err}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let body = redact_secret_text(&body, &access.access_token);
+        return Err(miette!(
+            "fetch_opencode_console_models: request to {url} returned HTTP {status}: {body}"
+        ));
+    }
+    let json = resp
+        .json()
+        .await
+        .map_err(|err| miette!("fetch_opencode_console_models: response parse failed: {err}"))?;
+    Ok(parse_opencode_console_models(&json, &base))
+}
+
+/// Parse the `config.provider.*.models` catalog returned by `GET /api/config`,
+/// preferring the provider whose `api` matches the configured inference base.
+fn parse_opencode_console_models(json: &serde_json::Value, base_url: &str) -> Vec<DiscoveredModel> {
+    let Some(providers) = json["config"]["provider"].as_object() else {
+        return Vec::new();
+    };
+    let matches_base = |value: &serde_json::Value| {
+        value["api"]
+            .as_str()
+            .is_some_and(|api| normalize_provider_base_url(api) == base_url)
+    };
+    let provider = providers
+        .values()
+        .find(|value| matches_base(value))
+        .or_else(|| providers.get("opencode"));
+    let Some(provider) = provider else {
+        return Vec::new();
+    };
+    let Some(models) = provider["models"].as_object() else {
+        return Vec::new();
+    };
+    let mut discovered: Vec<DiscoveredModel> = models
+        .iter()
+        .filter(|(_, model)| model["disabled"].as_bool() != Some(true))
+        .map(|(id, model)| {
+            let limit = &model["limit"];
+            DiscoveredModel {
+                id: id.clone(),
+                context_window: limit["context"]
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok()),
+                max_output_tokens: limit["output"]
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok()),
+                supports_vision: model["modalities"]["input"]
+                    .as_array()
+                    .map(|inputs| inputs.iter().any(|input| input.as_str() == Some("image"))),
+                reasoning_options: None,
+            }
+        })
+        .collect();
+    discovered.sort_by(|a, b| a.id.cmp(&b.id));
+    discovered
 }
 
 /// Discover Anthropic-compatible model IDs via `GET /v1/models`, which
@@ -723,5 +805,74 @@ mod tests {
             Some("https://api.individual.githubcopilot.com")
         );
         assert!(crate::providers::copilot_base_url_from_session_token("proxy-ep=").is_none());
+    }
+
+    #[test]
+    fn opencode_console_config_parses_models_and_skips_disabled() {
+        let json = serde_json::json!({
+            "config": { "provider": {
+                "opencode": {
+                    "api": "https://opencode.ai/inference/openai/v1",
+                    "models": {
+                        "gpt-5.1": {
+                            "limit": { "context": 400000, "output": 128000 },
+                            "modalities": { "input": ["text", "image"] }
+                        },
+                        "deepseek-v4-pro": {
+                            "limit": { "context": 200000, "output": 64000 },
+                            "modalities": { "input": ["text"] }
+                        },
+                        "retired-model": {
+                            "disabled": true,
+                            "limit": { "context": 1, "output": 1 }
+                        }
+                    },
+                },
+                "opencode-go": {
+                    "api": "https://opencode.ai/inference/go/openai/v1",
+                    "models": { "glm-5.3": { "limit": { "context": 200000, "output": 64000 } } }
+                }
+            }}
+        });
+
+        let models =
+            parse_opencode_console_models(&json, "https://opencode.ai/inference/openai/v1");
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, vec!["deepseek-v4-pro", "gpt-5.1"]);
+
+        let gpt = models.iter().find(|model| model.id == "gpt-5.1").unwrap();
+        assert_eq!(gpt.context_window, Some(400000));
+        assert_eq!(gpt.max_output_tokens, Some(128000));
+        assert_eq!(gpt.supports_vision, Some(true));
+
+        let deepseek = models
+            .iter()
+            .find(|model| model.id == "deepseek-v4-pro")
+            .unwrap();
+        assert_eq!(deepseek.supports_vision, Some(false));
+    }
+
+    #[test]
+    fn opencode_console_config_selects_provider_by_api_base() {
+        let json = serde_json::json!({
+            "config": { "provider": {
+                "opencode": { "api": "https://opencode.ai/inference/openai/v1", "models": { "a": {} } },
+                "opencode-go": { "api": "https://opencode.ai/inference/go/openai/v1", "models": { "b": {} } }
+            }}
+        });
+
+        let models =
+            parse_opencode_console_models(&json, "https://opencode.ai/inference/go/openai/v1");
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, vec!["b"]);
+    }
+
+    #[test]
+    fn opencode_console_config_without_providers_is_empty() {
+        let json = serde_json::json!({ "config": {} });
+        assert!(
+            parse_opencode_console_models(&json, "https://opencode.ai/inference/openai/v1")
+                .is_empty()
+        );
     }
 }

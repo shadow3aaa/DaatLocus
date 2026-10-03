@@ -40,7 +40,7 @@ pub use codex_oauth::{
 mod opencode_oauth;
 pub use opencode_oauth::{
     OPENCODE_OAUTH_DEFAULT_SERVER, OPENCODE_ZEN_BASE_URL, OpenCodeDevicePoll, OpenCodeOAuthClient,
-    opencode_auth_file_path, opencode_oauth_access_from_file, opencode_poll_device_token,
+    opencode_auth_file_path, opencode_console_access, opencode_poll_device_token,
     opencode_start_device_code, write_opencode_oauth_tokens,
 };
 mod ollama;

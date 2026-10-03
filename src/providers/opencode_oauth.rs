@@ -339,10 +339,23 @@ fn access_from_tokens(tokens: &OpenCodeOAuthTokens) -> OpenCodeOAuthAccess {
     }
 }
 
-/// Resolve a usable access token from the auth file, refreshing if needed.
-pub async fn opencode_oauth_access_from_file(auth_file: &Path) -> Result<OpenCodeOAuthAccess> {
+/// Resolve the access token, Console origin, and billing org needed to read the
+/// Console model catalog (`GET {server}/api/config`). Older token files predate
+/// the org field, so resolve it on demand, mirroring `ensure_auth`.
+pub async fn opencode_console_access(auth_file: &Path) -> Result<OpenCodeOAuthAccess> {
     let client = auth_http_client()?;
-    opencode_oauth_access_from_file_with_client(auth_file, &client).await
+    let mut access = opencode_oauth_access_from_file_with_client(auth_file, &client).await?;
+    if access.org_id.is_none() {
+        let server = access
+            .server
+            .clone()
+            .unwrap_or_else(|| OPENCODE_OAUTH_DEFAULT_SERVER.to_string());
+        access.org_id = opencode_fetch_org_id(&client, &server, &access.access_token)
+            .await
+            .ok()
+            .flatten();
+    }
+    Ok(access)
 }
 
 async fn opencode_oauth_access_from_file_with_client(
