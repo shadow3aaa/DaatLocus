@@ -1394,6 +1394,7 @@ pub(crate) fn opencode_gateway_headers(
     }
     headers.insert("x-opencode-client", OPENCODE_CLIENT_ID.parse().unwrap());
     headers.insert("x-opencode-project", OPENCODE_PROJECT_ID.parse().unwrap());
+    headers.insert("x-opencode-project", OPENCODE_PROJECT_ID.parse().unwrap());
     headers.insert(
         reqwest::header::USER_AGENT,
         OPENCODE_USER_AGENT.parse().unwrap(),
@@ -1682,33 +1683,49 @@ struct OpenCodeGatewayProvider {
 
 /// Canonical Daat shell tool the gateway's `bash` alias maps to.
 const OPENCODE_GATEWAY_SHELL_TOOL: &str = "terminal__terminal_exec";
-/// Tool name the gateway's fingerprint check requires.
+/// Canonical Daat file-read tool the gateway's `read` alias maps to.
+const OPENCODE_GATEWAY_READ_FILE_TOOL: &str = "read_file";
+/// Tool names the gateway's fingerprint check requires.
 const OPENCODE_GATEWAY_BASH_TOOL: &str = "bash";
+const OPENCODE_GATEWAY_READ_TOOL: &str = "read";
 
 impl OpenCodeGatewayProvider {
-    /// Add the `bash` alias when the canonical shell tool is present.
-    fn ensure_bash_alias(tools: &mut Vec<AgentToolSpec>) {
-        if tools
-            .iter()
-            .any(|tool| tool.name == OPENCODE_GATEWAY_BASH_TOOL)
-        {
-            return;
+    /// Add the CLI tool aliases the gateway's fingerprint check requires.
+    ///
+    /// The free tier is only served when the request declares both `bash` and
+    /// `read` tools (schema contents are not validated). Mirror Daat's shell
+    /// and file-read tools under those names.
+    fn ensure_cli_tool_aliases(tools: &mut Vec<AgentToolSpec>) {
+        let aliases = [
+            (
+                OPENCODE_GATEWAY_BASH_TOOL,
+                OPENCODE_GATEWAY_SHELL_TOOL,
+                "Run a shell command.",
+            ),
+            (
+                OPENCODE_GATEWAY_READ_TOOL,
+                OPENCODE_GATEWAY_READ_FILE_TOOL,
+                "Read a file.",
+            ),
+        ];
+        for (alias_name, canonical_name, description) in aliases {
+            if tools.iter().any(|tool| tool.name == alias_name) {
+                continue;
+            }
+            let Some(mut alias) = tools
+                .iter()
+                .find(|tool| {
+                    tool.name == canonical_name
+                        || tool.name.ends_with(&format!("_{canonical_name}"))
+                })
+                .cloned()
+            else {
+                continue;
+            };
+            alias.name = alias_name.to_string();
+            alias.description = description.to_string();
+            tools.push(alias);
         }
-        let Some(mut alias) = tools
-            .iter()
-            .find(|tool| {
-                tool.name == OPENCODE_GATEWAY_SHELL_TOOL
-                    || tool
-                        .name
-                        .ends_with(&format!("_{OPENCODE_GATEWAY_SHELL_TOOL}"))
-            })
-            .cloned()
-        else {
-            return;
-        };
-        alias.name = OPENCODE_GATEWAY_BASH_TOOL.to_string();
-        alias.description = "Run a shell command.".to_string();
-        tools.push(alias);
     }
 }
 
@@ -1727,22 +1744,14 @@ impl ModelProvider for OpenCodeGatewayProvider {
         mut request: AgentTurnRequest,
         options: ModelRequestOptions,
     ) -> Result<AgentTurnStreamResult> {
-        Self::ensure_bash_alias(&mut request.tools);
-        let bash_alias_active = request
-            .tools
-            .iter()
-            .any(|tool| tool.name == OPENCODE_GATEWAY_BASH_TOOL)
-            && request
-                .tools
-                .iter()
-                .any(|tool| tool.name == OPENCODE_GATEWAY_SHELL_TOOL);
+        Self::ensure_cli_tool_aliases(&mut request.tools);
         let mut result = self.inner.complete_agent_turn(request, options).await?;
-        if bash_alias_active {
-            for item in &mut result.items {
-                if let AgentTurnItem::ToolCall { call } = item
-                    && call.name == OPENCODE_GATEWAY_BASH_TOOL
-                {
+        for item in &mut result.items {
+            if let AgentTurnItem::ToolCall { call } = item {
+                if call.name == OPENCODE_GATEWAY_BASH_TOOL {
                     call.name = OPENCODE_GATEWAY_SHELL_TOOL.to_string();
+                } else if call.name == OPENCODE_GATEWAY_READ_TOOL {
+                    call.name = OPENCODE_GATEWAY_READ_FILE_TOOL.to_string();
                 }
             }
         }
@@ -2543,5 +2552,54 @@ mod tests {
         assert!(should_retry_request_without_thinking_budget(
             "Unknown parameter: 'reasoning'."
         ));
+    }
+    #[tokio::test]
+    #[ignore = "live OpenCode gateway smoke test; needs the local config and login"]
+    async fn live_opencode_console_smoke() {
+        let model =
+            std::env::var("DL_SMOKE_MODEL").unwrap_or_else(|_| "fledge-alpha-free".to_string());
+        let config = crate::config::load_config().await.expect("load config");
+        let provider = build_model_provider(&model, &config).expect("build provider");
+        let request = AgentTurnRequest {
+            messages: vec![AgentMessage::user(
+                "Reply with exactly the word PONG and nothing else.",
+            )],
+            tools: vec![
+                AgentToolSpec {
+                    name: "terminal__terminal_exec".to_string(),
+                    description: "Run a shell command.".to_string(),
+                    input_spec: AgentToolInputSpec::JsonSchema {
+                        schema: json!({"type": "object"}),
+                    },
+                },
+                AgentToolSpec {
+                    name: "read_file".to_string(),
+                    description: "Read a file.".to_string(),
+                    input_spec: AgentToolInputSpec::JsonSchema {
+                        schema: json!({"type": "object"}),
+                    },
+                },
+            ],
+        };
+        let options = ModelRequestOptions::for_agent_turn(
+            provider.as_ref(),
+            &request,
+            Some("smoke-session".to_string()),
+        )
+        .expect("budget options");
+        let result = provider
+            .complete_agent_turn(request, options)
+            .await
+            .expect("agent turn");
+        eprintln!("model={model} items={}", result.items.len());
+        for item in &result.items {
+            match item {
+                AgentTurnItem::AssistantMessage { content } => eprintln!("assistant: {content}"),
+                AgentTurnItem::ToolCall { call } => {
+                    eprintln!("tool_call: {} {}", call.name, call.arguments);
+                }
+            }
+        }
+        assert!(!result.items.is_empty(), "expected a non-empty turn");
     }
 }
