@@ -6994,54 +6994,11 @@ function workflowGroupGraph(group: WorkflowGroupSnapshot): WorkflowGroupGraphCom
       nodeIds.has(edge.source_run_id) &&
       nodeIds.has(edge.target_run_id),
   );
-  const components = workflowGroupComponents(nodes, edges);
-
-  return components.map((component, index) => {
-    const componentIds = new Set(component.map((node) => node.run_id));
-    const componentEdges = edges.filter(
-      (edge) => componentIds.has(edge.source_run_id) && componentIds.has(edge.target_run_id),
-    );
-    return layoutWorkflowGroupComponent(component, componentEdges, index);
-  });
-}
-
-function workflowGroupComponents(
-  nodes: WorkflowGroupNodeSnapshot[],
-  edges: WorkflowGroupEdgeSnapshot[],
-) {
-  const adjacent = new Map<string, string[]>(nodes.map((node) => [node.run_id, []]));
-  for (const edge of edges) {
-    adjacent.get(edge.source_run_id)?.push(edge.target_run_id);
-    adjacent.get(edge.target_run_id)?.push(edge.source_run_id);
-  }
-  const unseen = new Set(nodes.map((node) => node.run_id));
-  const nodesById = new Map(nodes.map((node) => [node.run_id, node]));
-  const components: WorkflowGroupNodeSnapshot[][] = [];
-
-  for (const node of nodes) {
-    if (!unseen.has(node.run_id)) {
-      continue;
-    }
-    const component: WorkflowGroupNodeSnapshot[] = [];
-    const queue = [node.run_id];
-    unseen.delete(node.run_id);
-    while (queue.length > 0) {
-      const runId = queue.shift();
-      const current = runId ? nodesById.get(runId) : undefined;
-      if (!runId || !current) {
-        continue;
-      }
-      component.push(current);
-      for (const peer of adjacent.get(runId) ?? []) {
-        if (unseen.delete(peer)) {
-          queue.push(peer);
-        }
-      }
-    }
-    components.push(component);
-  }
-
-  return components;
+  // Layout all runs in one dagre canvas. Previously each weakly-connected
+  // component got its own ReactFlow canvas, so a group with N isolated runs
+  // rendered N bordered boxes stacked on one another (wall-of-boxes). A
+  // single graph lets dagre place every run side by side in one bordered box.
+  return [layoutWorkflowGroupComponent(nodes, edges, 0)];
 }
 
 function layoutWorkflowGroupComponent(
