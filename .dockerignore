@@ -1,0 +1,14 @@
+# Context for the static benchmark builder (see benchmark/DeepSWE/static/Dockerfile).
+# Keep the build context small: only source needed to build the `daat-locus` crate.
+/target
+/.git
+/.git-split
+/.githooks
+/.github
+/.vscode
+/benchmark
+/webui/node_modules
+/webui/dist
+**/node_modules
+**/target
+*.log
