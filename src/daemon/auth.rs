@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use axum::http::{HeaderMap, header::AUTHORIZATION};
 use miette::{Result, miette};
@@ -54,11 +55,26 @@ impl DaemonAuthToken {
 
 const LAST_USED_FLUSH_INTERVAL_MS: i64 = 30_000;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RegistryFileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+fn registry_file_stamp(path: &Path) -> Option<RegistryFileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(RegistryFileStamp {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    })
+}
+
 struct TokenCacheState {
     loaded: bool,
     records: Vec<DaemonTokenRecord>,
     persisted_last_used: Vec<Option<i64>>,
     dirty: bool,
+    file_stamp: Option<RegistryFileStamp>,
 }
 
 struct TokenCache {
@@ -107,25 +123,23 @@ struct DaemonTokenRecord {
 
 impl Drop for TokenCache {
     fn drop(&mut self) {
-        let state = self.inner.write();
+        let state = self.inner.read();
         if !state.loaded || !state.dirty {
             return;
         }
-        let registry = DaemonTokenRegistry {
-            tokens: state.records.clone(),
+        let tokens = match std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<DaemonTokenRegistry>(&raw).ok())
+        {
+            Some(disk) => merge_disk_records(disk.tokens, &state.records),
+            None => state.records.clone(),
         };
+        let registry = DaemonTokenRegistry { tokens };
         let Ok(bytes) = serde_json::to_vec_pretty(&registry) else {
             return;
         };
         let _ = write_bytes_atomic_sync(&self.path, &bytes, PersistenceFileMode::Private);
     }
-}
-
-enum AuthFlush {
-    Flush {
-        index: usize,
-        records: Vec<DaemonTokenRecord>,
-    },
 }
 
 impl DaemonTokenRegistryHandle {
@@ -136,6 +150,7 @@ impl DaemonTokenRegistryHandle {
                 records: Vec::new(),
                 persisted_last_used: Vec::new(),
                 dirty: false,
+                file_stamp: None,
             }),
             path: path.clone(),
         });
@@ -157,15 +172,47 @@ impl DaemonTokenRegistryHandle {
         Ok(handle)
     }
 
+    fn cache_is_current(&self) -> bool {
+        let state = self.cache.inner.read();
+        state.loaded && state.file_stamp == registry_file_stamp(&self.path)
+    }
+
     async fn ensure_loaded(&self) -> Result<()> {
-        if self.cache.inner.read().loaded {
+        if self.cache_is_current() {
             return Ok(());
         }
         let registry = read_registry(&self.path).await?;
+        let stamp = registry_file_stamp(&self.path);
+        let persisted_last_used = registry
+            .tokens
+            .iter()
+            .map(|record| record.last_used_at_ms)
+            .collect::<Vec<_>>();
         let mut state = self.cache.inner.write();
-        if state.loaded {
-            return Ok(());
-        }
+        state.records = merge_disk_records(registry.tokens, &state.records);
+        state.dirty = state
+            .records
+            .iter()
+            .zip(persisted_last_used.iter())
+            .any(|(record, persisted)| record.last_used_at_ms != *persisted);
+        state.persisted_last_used = persisted_last_used;
+        state.loaded = true;
+        state.file_stamp = stamp;
+        Ok(())
+    }
+
+    async fn read_merged_registry(&self) -> Result<DaemonTokenRegistry> {
+        let disk = read_registry(&self.path).await?;
+        let memory = self.cache.inner.read().records.clone();
+        Ok(DaemonTokenRegistry {
+            tokens: merge_disk_records(disk.tokens, &memory),
+        })
+    }
+
+    async fn persist_and_install(&self, registry: DaemonTokenRegistry) -> Result<()> {
+        write_registry(&self.path, &registry).await?;
+        let stamp = registry_file_stamp(&self.path);
+        let mut state = self.cache.inner.write();
         state.persisted_last_used = registry
             .tokens
             .iter()
@@ -174,27 +221,8 @@ impl DaemonTokenRegistryHandle {
         state.records = registry.tokens;
         state.loaded = true;
         state.dirty = false;
+        state.file_stamp = stamp;
         Ok(())
-    }
-
-    fn install_records(&self, mut records: Vec<DaemonTokenRecord>) {
-        let mut state = self.cache.inner.write();
-        let mut persisted_last_used = Vec::with_capacity(records.len());
-        let mut dirty = false;
-        for record in &mut records {
-            let persisted = record.last_used_at_ms;
-            if let Some(previous) = state.records.iter().find(|item| item.id == record.id)
-                && previous.last_used_at_ms > record.last_used_at_ms
-            {
-                record.last_used_at_ms = previous.last_used_at_ms;
-                dirty = true;
-            }
-            persisted_last_used.push(persisted);
-        }
-        state.records = records;
-        state.persisted_last_used = persisted_last_used;
-        state.loaded = true;
-        state.dirty = dirty;
     }
 
     pub async fn authorize_headers(&self, headers: &HeaderMap) -> bool {
@@ -225,7 +253,7 @@ impl DaemonTokenRegistryHandle {
         self.ensure_loaded().await?;
         let token_hash = hash_token(token);
         let now = now_ms();
-        let decision = {
+        let due = {
             let mut state = self.cache.inner.write();
             let Some(index) = state
                 .records
@@ -235,50 +263,36 @@ impl DaemonTokenRegistryHandle {
                 return Ok(false);
             };
             state.records[index].last_used_at_ms = Some(now);
+            state.dirty = true;
             let persisted = state.persisted_last_used.get(index).copied().flatten();
-            let due = match persisted {
+            match persisted {
                 Some(previous) => now.saturating_sub(previous) >= LAST_USED_FLUSH_INTERVAL_MS,
                 None => true,
-            };
-            if !due {
-                state.dirty = true;
-                return Ok(true);
-            }
-            AuthFlush::Flush {
-                index,
-                records: state.records.clone(),
             }
         };
-        let AuthFlush::Flush { index, records } = decision;
-        write_registry(&self.path, &DaemonTokenRegistry { tokens: records }).await?;
-        let mut state = self.cache.inner.write();
-        if let Some(slot) = state.persisted_last_used.get_mut(index) {
-            *slot = Some(now);
-        }
-        let current = state
-            .records
-            .get(index)
-            .and_then(|record| record.last_used_at_ms);
-        if current == Some(now) {
-            state.dirty = false;
+        if due && let Err(err) = self.flush_last_used().await {
+            tracing::warn!("daemon token last-used flush failed: {err}");
         }
         Ok(true)
+    }
+
+    async fn flush_last_used(&self) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
+        let registry = self.read_merged_registry().await?;
+        self.persist_and_install(registry).await
     }
 
     async fn ensure_registry(&self) -> Result<()> {
         self.ensure_loaded().await?;
         let _guard = self.write_lock.lock().await;
         let local_token = load_or_create_local_daemon_auth_token_at(&self.local_token_path).await?;
-        let mut registry = DaemonTokenRegistry {
-            tokens: self.cache.inner.read().records.clone(),
-        };
+        let mut registry = self.read_merged_registry().await?;
         let changed = ensure_local_cli_record(&mut registry, &local_token);
         if changed || !self.path.exists() {
-            write_registry(&self.path, &registry).await?;
+            self.persist_and_install(registry).await?;
         } else {
             harden_private_file_permissions(&self.path)?;
         }
-        self.install_records(registry.tokens);
         Ok(())
     }
 
@@ -290,9 +304,7 @@ impl DaemonTokenRegistryHandle {
 
         self.ensure_loaded().await?;
         let _guard = self.write_lock.lock().await;
-        let mut registry = DaemonTokenRegistry {
-            tokens: self.cache.inner.read().records.clone(),
-        };
+        let mut registry = self.read_merged_registry().await?;
         reject_duplicate_name(&registry, &name)?;
 
         let token = DaemonAuthToken::generate();
@@ -310,8 +322,7 @@ impl DaemonTokenRegistryHandle {
         };
         registry.tokens.push(record);
         sort_registry(&mut registry);
-        write_registry(&self.path, &registry).await?;
-        self.install_records(registry.tokens);
+        self.persist_and_install(registry).await?;
         Ok(created)
     }
 
@@ -324,9 +335,7 @@ impl DaemonTokenRegistryHandle {
     pub async fn revoke_token(&self, selector: &str) -> Result<DaemonTokenListEntry> {
         self.ensure_loaded().await?;
         let _guard = self.write_lock.lock().await;
-        let mut registry = DaemonTokenRegistry {
-            tokens: self.cache.inner.read().records.clone(),
-        };
+        let mut registry = self.read_merged_registry().await?;
         let index = find_token_index(&registry, selector)?;
         if registry.tokens[index].id == LOCAL_CLI_TOKEN_ID {
             return Err(miette!(
@@ -334,17 +343,14 @@ impl DaemonTokenRegistryHandle {
             ));
         }
         let removed = registry.tokens.remove(index);
-        write_registry(&self.path, &registry).await?;
-        self.install_records(registry.tokens);
+        self.persist_and_install(registry).await?;
         Ok(removed.into())
     }
 
     pub async fn rotate_token(&self, selector: &str) -> Result<CreatedDaemonToken> {
         self.ensure_loaded().await?;
         let _guard = self.write_lock.lock().await;
-        let mut registry = DaemonTokenRegistry {
-            tokens: self.cache.inner.read().records.clone(),
-        };
+        let mut registry = self.read_merged_registry().await?;
         let index = find_token_index(&registry, selector)?;
         let token = DaemonAuthToken::generate();
         registry.tokens[index].token_hash = hash_token(token.as_str());
@@ -357,8 +363,7 @@ impl DaemonTokenRegistryHandle {
         if registry.tokens[index].id == LOCAL_CLI_TOKEN_ID {
             write_local_daemon_auth_token_at(&self.local_token_path, &token).await?;
         }
-        write_registry(&self.path, &registry).await?;
-        self.install_records(registry.tokens);
+        self.persist_and_install(registry).await?;
         Ok(rotated)
     }
 }
@@ -582,6 +587,20 @@ fn sort_registry(registry: &mut DaemonTokenRegistry) {
     });
 }
 
+fn merge_disk_records(
+    mut disk: Vec<DaemonTokenRecord>,
+    memory: &[DaemonTokenRecord],
+) -> Vec<DaemonTokenRecord> {
+    for record in &mut disk {
+        if let Some(previous) = memory.iter().find(|item| item.id == record.id)
+            && previous.last_used_at_ms > record.last_used_at_ms
+        {
+            record.last_used_at_ms = previous.last_used_at_ms;
+        }
+    }
+    disk
+}
+
 fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
@@ -703,5 +722,80 @@ mod tests {
         let revoked = handle.revoke_token("web").await.unwrap();
         assert_eq!(revoked.id, created.id);
         assert!(handle.revoke_token(LOCAL_CLI_TOKEN_ID).await.is_err());
+    }
+
+    async fn append_external_token(path: &Path, id: &str, token: &DaemonAuthToken) {
+        let mut registry = read_registry(path).await.unwrap();
+        registry.tokens.push(DaemonTokenRecord {
+            id: id.to_string(),
+            name: id.to_string(),
+            created_at_ms: now_ms(),
+            last_used_at_ms: None,
+            token_hash: hash_token(token.as_str()),
+        });
+        sort_registry(&mut registry);
+        write_registry(path, &registry).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn registry_authorizes_external_token_created_while_running() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime").join("daemon_tokens.json");
+        let handle = DaemonTokenRegistryHandle::open(
+            path.clone(),
+            temp.path().join("runtime").join("daemon.token"),
+        );
+        handle.ensure_registry().await.unwrap();
+
+        let external = DaemonAuthToken::generate();
+        append_external_token(&path, "external", &external).await;
+
+        assert!(handle.authorize_token(external.as_str()).await);
+    }
+
+    #[tokio::test]
+    async fn registry_observes_external_revocation_while_running() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime").join("daemon_tokens.json");
+        let handle = DaemonTokenRegistryHandle::open(
+            path.clone(),
+            temp.path().join("runtime").join("daemon.token"),
+        );
+        handle.ensure_registry().await.unwrap();
+
+        let created = handle.create_token("web").await.unwrap();
+        assert!(handle.authorize_token(&created.token).await);
+
+        let mut registry = read_registry(&path).await.unwrap();
+        registry.tokens.retain(|record| record.id != created.id);
+        write_registry(&path, &registry).await.unwrap();
+
+        assert!(!handle.authorize_token(&created.token).await);
+    }
+
+    #[tokio::test]
+    async fn registry_last_used_flush_preserves_external_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime").join("daemon_tokens.json");
+        let handle = DaemonTokenRegistryHandle::open(
+            path.clone(),
+            temp.path().join("runtime").join("daemon.token"),
+        );
+        handle.ensure_registry().await.unwrap();
+
+        let created = handle.create_token("web").await.unwrap();
+        let external = DaemonAuthToken::generate();
+        append_external_token(&path, "external", &external).await;
+
+        assert!(handle.authorize_token(&created.token).await);
+
+        let registry = read_registry(&path).await.unwrap();
+        let web = registry
+            .tokens
+            .iter()
+            .find(|record| record.id == created.id)
+            .unwrap();
+        assert!(web.last_used_at_ms.is_some());
+        assert!(registry.tokens.iter().any(|record| record.id == "external"));
     }
 }
