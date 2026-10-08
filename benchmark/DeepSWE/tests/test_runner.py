@@ -8,6 +8,7 @@ from benchmark_deepswe.runner import (
     find_daat_locus_source_root,
     patch_pier_proxy_keeps_allowlist_without_auth,
     patch_pier_proxy_script_newlines,
+    prune_leftover_docker_state,
     resolve_benchmark_path,
     restore_pier_docker_cleanup_removes_images,
 )
@@ -51,6 +52,7 @@ class RunnerTests(unittest.TestCase):
                 source_build_timeout_sec=3600.0,
                 agent_setup_timeout_multiplier=10.0,
                 agent_timeout_multiplier=2.0,
+                resume=None,
             )
             command = build_pier_command(args, ["--n-tasks", "1"])
             self.assertIn(str(repo / "tasks"), command)
@@ -79,6 +81,7 @@ class RunnerTests(unittest.TestCase):
                 source_build_timeout_sec=3600.0,
                 agent_setup_timeout_multiplier=10.0,
                 agent_timeout_multiplier=2.0,
+                resume=None,
             )
 
             command = build_pier_command(
@@ -108,6 +111,7 @@ class RunnerTests(unittest.TestCase):
                 source_build_timeout_sec=3600.0,
                 agent_setup_timeout_multiplier=10.0,
                 agent_timeout_multiplier=2.0,
+                resume=None,
             )
 
             command = build_pier_command(
@@ -137,6 +141,7 @@ class RunnerTests(unittest.TestCase):
                 source_build_timeout_sec=3600.0,
                 agent_setup_timeout_multiplier=10.0,
                 agent_timeout_multiplier=2.0,
+                resume=None,
             )
 
             command = build_pier_command(
@@ -166,10 +171,26 @@ class RunnerTests(unittest.TestCase):
                 source_build_timeout_sec=3600.0,
                 agent_setup_timeout_multiplier=10.0,
                 agent_timeout_multiplier=2.0,
+                resume=None,
             )
             command = build_pier_command(args, [])
             self.assertIn("daat_locus_bin=/host/daat-locus", command)
             self.assertNotIn("daat_locus_source=C:/src/DaatLocus", command)
+
+    def test_resume_targets_existing_job_directory(self):
+        args = argparse.Namespace(resume="jobs/2026-10-05__00-00-00")
+        command = build_pier_command(args, ["--n-tasks", "1"])
+        self.assertEqual(command[:4], ["pier", "job", "resume", "-p"])
+        self.assertEqual(command[4], "jobs/2026-10-05__00-00-00")
+        self.assertEqual(command[-2:], ["--n-tasks", "1"])
+
+    def test_prune_skips_when_docker_is_missing(self):
+        import unittest.mock as mock
+
+        from benchmark_deepswe import runner as runner_module
+
+        with mock.patch.object(runner_module.shutil, "which", return_value=None):
+            prune_leftover_docker_state(build_cache=False)
 
     def test_finds_source_root_by_cargo_manifest_and_git_dir(self):
         with tempfile.TemporaryDirectory() as temp_dir:

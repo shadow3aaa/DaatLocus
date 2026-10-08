@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -87,6 +88,8 @@ def resolve_benchmark_path(args: argparse.Namespace, *, prepare: bool) -> str:
 
 
 def build_pier_command(args: argparse.Namespace, pier_args: list[str]) -> list[str]:
+    if args.resume:
+        return ["pier", "job", "resume", "-p", str(args.resume), *pier_args]
     command = [
         "pier",
         "run",
@@ -216,6 +219,34 @@ def patch_installed_pier_for_runner() -> None:
     )
 
 
+def prune_leftover_docker_state(*, build_cache: bool) -> None:
+    """Drop bench-only Docker leftovers so long batches do not fill the disk.
+
+    Pier tears down each trial's task image via `docker compose down --rmi all`,
+    but the per-job egress-proxy images are not always removed (~300 MB each),
+    and the BuildKit cache grows monotonically. Both are safe to prune between
+    batches because they are rebuilt on demand.
+    """
+
+    docker = shutil.which("docker")
+    if docker is None:
+        print("docker not found on PATH; skipping prune", file=sys.stderr)
+        return
+    listed = subprocess.run(
+        [docker, "images", "--filter", "reference=*pier-egress-proxy*", "-q"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    image_ids = listed.stdout.split()
+    if image_ids:
+        subprocess.run([docker, "rmi", "-f", *image_ids], check=False)
+        print(f"pruned {len(image_ids)} leftover egress-proxy image(s)")
+    if build_cache:
+        subprocess.run([docker, "builder", "prune", "-f"], check=False)
+
+
 def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(
         description="Run DeepSWE/Pier with the Daat Locus custom agent."
@@ -272,6 +303,21 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         help="Default Pier agent execution timeout multiplier. Use the Pier argument after -- to override.",
     )
     parser.add_argument(
+        "--resume",
+        default=None,
+        help="Resume an existing Pier job directory instead of starting a new run.",
+    )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="Remove leftover egress-proxy images before and after the run.",
+    )
+    parser.add_argument(
+        "--prune-build-cache",
+        action="store_true",
+        help="Also prune the Docker build cache after the run (implies --prune).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the pier command instead of running it.",
@@ -289,7 +335,20 @@ def main(argv: list[str] | None = None) -> int:
         print(" ".join(command))
         return 0
     patch_installed_pier_for_runner()
-    return subprocess.run(command, check=False).returncode
+    # Pier persists trial results with the platform text encoding. On a CP936
+    # host an agent reply containing characters outside GBK (for example "↔")
+    # makes `Path.write_text` raise `UnicodeEncodeError` inside trial cleanup,
+    # which aborts the whole job. Force UTF-8 for the pier subprocess so these
+    # files are written (and read back) as UTF-8.
+    os.environ["PYTHONUTF8"] = "1"
+    do_prune = args.prune or args.prune_build_cache
+    if do_prune:
+        prune_leftover_docker_state(build_cache=False)
+    try:
+        return subprocess.run(command, check=False).returncode
+    finally:
+        if do_prune:
+            prune_leftover_docker_state(build_cache=args.prune_build_cache)
 
 
 if __name__ == "__main__":
