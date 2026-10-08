@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DeepSWE · Daat Locus</title>
+    <style>
+      :root {
+        --background: 0 0% 100%;
+        --foreground: 240 10% 3.9%;
+        --card: 0 0% 100%;
+        --card-foreground: 240 10% 3.9%;
+        --muted: 240 4.8% 95.9%;
+        --muted-foreground: 240 3.8% 46.1%;
+        --border: 240 5.9% 90%;
+        --input: 240 5.9% 90%;
+        --primary: 240 5.9% 10%;
+        --primary-foreground: 0 0% 98%;
+        --accent: 240 4.8% 95.9%;
+        --ring: 240 5% 64.9%;
+        --success: 152 60% 34%;
+        --success-bg: 152 55% 94%;
+        --warning: 32 90% 40%;
+        --warning-bg: 40 90% 94%;
+        --info: 221 70% 45%;
+        --info-bg: 214 90% 95%;
+        --destructive: 0 72% 51%;
+        --destructive-bg: 0 86% 96%;
+        --radius: 0.625rem;
+      }
+      html.dark {
+        --background: 240 10% 3.9%;
+        --foreground: 0 0% 98%;
+        --card: 240 8% 6.5%;
+        --card-foreground: 0 0% 98%;
+        --muted: 240 3.7% 15.9%;
+        --muted-foreground: 240 5% 64.9%;
+        --border: 240 3.7% 15.9%;
+        --input: 240 3.7% 15.9%;
+        --primary: 0 0% 98%;
+        --primary-foreground: 240 5.9% 10%;
+        --accent: 240 3.7% 15.9%;
+        --ring: 240 4.9% 83.9%;
+        --success: 152 55% 60%;
+        --success-bg: 152 60% 14%;
+        --warning: 40 90% 65%;
+        --warning-bg: 36 80% 16%;
+        --info: 217 80% 70%;
+        --info-bg: 221 60% 18%;
+        --destructive: 0 74% 65%;
+        --destructive-bg: 0 60% 17%;
+      }
+
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        background: hsl(var(--background));
+        color: hsl(var(--foreground));
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+      }
+      .container {
+        max-width: 80rem;
+        margin: 0 auto;
+        padding: 2rem 1.5rem 4rem;
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+      }
+      .row { display: flex; align-items: center; gap: 0.75rem; }
+      .between { justify-content: space-between; }
+      .wrap { flex-wrap: wrap; }
+      .muted { color: hsl(var(--muted-foreground)); }
+      .small { font-size: 0.8125rem; }
+      .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+      h1 { font-size: 1.5rem; font-weight: 650; letter-spacing: -0.02em; margin: 0; }
+      h2 { font-size: 0.875rem; font-weight: 600; margin: 0; }
+
+      .card {
+        background: hsl(var(--card));
+        color: hsl(var(--card-foreground));
+        border: 1px solid hsl(var(--border));
+        border-radius: var(--radius);
+        box-shadow: 0 1px 2px 0 hsl(0 0% 0% / 0.04);
+      }
+      .card-header { padding: 1.25rem 1.25rem 0; display: flex; flex-direction: column; gap: 0.25rem; }
+      .card-content { padding: 1.25rem; }
+
+      .kpis {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+        gap: 1rem;
+      }
+      .kpi-value { font-size: 1.875rem; font-weight: 650; letter-spacing: -0.03em; line-height: 1.1; }
+      .kpi-label { font-size: 0.8125rem; color: hsl(var(--muted-foreground)); }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.375rem;
+        border-radius: 999px;
+        border: 1px solid transparent;
+        padding: 0.1rem 0.55rem;
+        font-size: 0.75rem;
+        font-weight: 550;
+        white-space: nowrap;
+      }
+      .badge.passed { color: hsl(var(--success)); background: hsl(var(--success-bg)); }
+      .badge.failed { color: hsl(var(--warning)); background: hsl(var(--warning-bg)); }
+      .badge.error { color: hsl(var(--destructive)); background: hsl(var(--destructive-bg)); }
+      .badge.running { color: hsl(var(--info)); background: hsl(var(--info-bg)); }
+      .badge.pending { color: hsl(var(--muted-foreground)); background: hsl(var(--muted)); }
+      .badge.outline { border-color: hsl(var(--border)); background: transparent; color: hsl(var(--foreground)); }
+
+      .dot { width: 0.5rem; height: 0.5rem; border-radius: 999px; background: currentColor; }
+      .pulse { animation: pulse 1.6s ease-in-out infinite; }
+      @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+      .progress { height: 0.6rem; border-radius: 999px; background: hsl(var(--muted)); overflow: hidden; display: flex; }
+      .progress > span { display: block; height: 100%; }
+      .seg-passed { background: hsl(var(--success)); }
+      .seg-failed { background: hsl(var(--warning)); }
+      .seg-error { background: hsl(var(--destructive)); }
+      .seg-running { background: hsl(var(--info)); }
+
+      select, button {
+        font: inherit;
+        color: hsl(var(--foreground));
+        background: hsl(var(--background));
+        border: 1px solid hsl(var(--input));
+        border-radius: calc(var(--radius) - 2px);
+        padding: 0.35rem 0.6rem;
+      }
+      button { cursor: pointer; }
+      button:hover, select:hover { background: hsl(var(--accent)); }
+
+      table { width: 100%; border-collapse: collapse; }
+      thead th {
+        text-align: left;
+        font-weight: 550;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: hsl(var(--muted-foreground));
+        padding: 0.6rem 1.25rem;
+        border-bottom: 1px solid hsl(var(--border));
+        position: sticky; top: 0; background: hsl(var(--card));
+      }
+      tbody td { padding: 0.6rem 1.25rem; border-bottom: 1px solid hsl(var(--border)); vertical-align: middle; }
+      tbody tr:last-child td { border-bottom: 0; }
+      tbody tr:hover { background: hsl(var(--muted) / 0.5); }
+      .truncate { max-width: 26rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .table-scroll { max-height: 30rem; overflow: auto; }
+      .sep { height: 1px; background: hsl(var(--border)); }
+      .err { color: hsl(var(--destructive)); }
+      .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; }
+      .stat-row { display: flex; flex-direction: column; gap: 0.35rem; }
+      .stat-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; }
+      .stat-name { font-weight: 550; }
+      .stat-bar { height: 0.45rem; border-radius: 999px; background: hsl(var(--muted)); overflow: hidden; display: flex; }
+      #lang-body, #cat-body, #err-body { display: flex; flex-direction: column; gap: 0.85rem; }
+      #live-body { display: flex; flex-direction: column; gap: 1rem; }
+      .live-item { display: flex; flex-direction: column; gap: 0.4rem; border: 1px solid hsl(var(--border)); border-radius: calc(var(--radius) - 2px); padding: 0.75rem 0.9rem; }
+      .live-step { display: flex; align-items: center; gap: 0.5rem; font-weight: 550; }
+      .plan-list { display: flex; flex-direction: column; gap: 0.2rem; border-left: 2px solid hsl(var(--border)); padding-left: 0.6rem; }
+      .plan-step { display: flex; gap: 0.45rem; font-size: 0.8125rem; color: hsl(var(--muted-foreground)); }
+      .plan-step.done { color: hsl(var(--muted-foreground)); text-decoration: line-through; opacity: 0.75; }
+      .plan-step.active { color: hsl(var(--foreground)); font-weight: 550; }
+      .plan-mark { width: 0.9rem; display: inline-block; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header class="row between wrap">
+        <div>
+          <h1>DeepSWE · Daat Locus</h1>
+          <div class="row small muted" style="margin-top: 0.25rem">
+            <span id="job-name" class="mono">—</span>
+            <span>·</span>
+            <span id="live" class="badge running"><span class="dot pulse"></span><span id="live-text">live</span></span>
+          </div>
+        </div>
+        <div class="row wrap">
+          <select id="job-select" title="选择 job"></select>
+          <button id="toggle">暂停刷新</button>
+          <button id="theme">深色</button>
+        </div>
+      </header>
+
+      <section class="kpis">
+        <div class="card"><div class="card-content">
+          <div class="kpi-value mono" id="k-total">—</div><div class="kpi-label">Total</div>
+        </div></div>
+        <div class="card"><div class="card-content">
+          <div class="kpi-value mono" id="k-passed">—</div><div class="kpi-label">Passed</div>
+        </div></div>
+        <div class="card"><div class="card-content">
+          <div class="kpi-value mono" id="k-failed">—</div><div class="kpi-label">Failed (tests)</div>
+        </div></div>
+        <div class="card"><div class="card-content">
+          <div class="kpi-value mono" id="k-error">—</div><div class="kpi-label">Errored</div>
+        </div></div>
+        <div class="card"><div class="card-content">
+          <div class="kpi-value mono" id="k-running">—</div><div class="kpi-label">Running</div>
+        </div></div>
+        <div class="card"><div class="card-content">
+          <div class="kpi-value mono" id="k-pending">—</div><div class="kpi-label">Pending</div>
+        </div></div>
+        <div class="card"><div class="card-content">
+          <div class="kpi-value mono" id="k-reward">—</div><div class="kpi-label">Mean reward</div>
+        </div></div>
+        <div class="card"><div class="card-content">
+          <div class="kpi-value mono" id="k-passrate">—</div><div class="kpi-label">Pass rate</div>
+        </div></div>
+        <div class="card"><div class="card-content">
+          <div class="kpi-value mono" id="k-throughput">—</div><div class="kpi-label">Done / hour</div>
+        </div></div>
+        <div class="card"><div class="card-content">
+          <div class="kpi-value mono" id="k-eta">—</div><div class="kpi-label">ETA (elapsed)</div>
+        </div></div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>进度</h2>
+          <div class="small muted" id="progress-text">—</div>
+        </div>
+        <div class="card-content" style="display:flex; flex-direction:column; gap:0.75rem">
+          <div class="progress" id="progress"></div>
+          <div class="row wrap small muted" id="legend"></div>
+        </div>
+      </section>
+
+      <section class="card" id="live-card" style="display:none">
+        <div class="card-header"><h2>运行中（实时）</h2><div class="small muted" id="live-sub">—</div></div>
+        <div class="card-content" id="live-body"></div>
+      </section>
+
+      <section class="grid2">
+        <div class="card">
+          <div class="card-header"><h2>按语言</h2><div class="small muted" id="lang-sub">—</div></div>
+          <div class="card-content" id="lang-body"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h2>按分类</h2><div class="small muted" id="cat-sub">—</div></div>
+          <div class="card-content" id="cat-body"></div>
+        </div>
+      </section>
+
+      <section class="card" id="errors-card" style="display:none">
+        <div class="card-header"><h2>错误分布</h2><div class="small muted" id="err-sub">—</div></div>
+        <div class="card-content" id="err-body"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-header" style="padding-bottom:1rem">
+          <h2>Trials</h2>
+          <div class="small muted" id="trials-sub">—</div>
+        </div>
+        <div class="sep"></div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>任务</th><th>状态</th><th>语言</th><th>当前步骤</th><th>Reward</th><th>F2P</th><th>P2P</th><th>耗时</th><th>完成时间</th>
+              </tr>
+            </thead>
+            <tbody id="trials"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <footer class="small muted row between wrap">
+        <span id="server-time">—</span>
+        <span id="errors"></span>
+      </footer>
+    </div>
+
+    <script>
+      const state = { job: null, paused: false, timer: null };
+
+      function el(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text != null) node.textContent = text;
+        return node;
+      }
+
+      function fmtDuration(seconds) {
+        if (seconds == null) return '—';
+        const s = Math.max(0, Math.round(seconds));
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        const sec = s % 60;
+        if (h > 0) return `${h}h ${m}m`;
+        if (m > 0) return `${m}m ${sec}s`;
+        return `${sec}s`;
+      }
+
+      function fmtTime(iso) {
+        if (!iso) return '—';
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return '—';
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      }
+
+      function fmtRatio(passed, total) {
+        if (total == null || passed == null) return '—';
+        return `${passed}/${total}`;
+      }
+
+      async function load() {
+        const params = state.job ? `?job=${encodeURIComponent(state.job)}` : '';
+        let data;
+        try {
+          const res = await fetch(`/api/progress${params}`, { cache: 'no-store' });
+          data = await res.json();
+        } catch (err) {
+          document.getElementById('errors').textContent = `读取失败: ${err}`;
+          return;
+        }
+        render(data);
+      }
+
+      function renderBuckets(targetId, subId, items) {
+        const body = document.getElementById(targetId);
+        body.textContent = '';
+        const sub = document.getElementById(subId);
+        if (!items.length) {
+          sub.textContent = '暂无数据';
+          return;
+        }
+        sub.textContent = `${items.length} 组 · 按已评分数量排序`;
+        for (const item of items) {
+          const row = el('div', 'stat-row');
+          const head = el('div', 'stat-head');
+          head.appendChild(el('span', 'stat-name', item.key));
+          const rate = item.pass_rate == null ? '—' : `${(item.pass_rate * 100).toFixed(0)}%`;
+          const right = el('span', 'small muted mono');
+          right.textContent = `${item.passed}/${item.evaluated} · ${rate} · 余 ${(item.pending || 0) + (item.running || 0)}`;
+          right.title = `passed ${item.passed} · failed ${item.failed} · error ${item.error} · running ${item.running} · pending ${item.pending}`;
+          head.appendChild(right);
+          row.appendChild(head);
+          const bar = el('div', 'stat-bar');
+          const barTotal = Math.max(item.total || 0, 1);
+          for (const key of ['passed', 'failed', 'error', 'running']) {
+            const value = item[key] || 0;
+            if (!value) continue;
+            const seg = el('span', `seg-${key}`);
+            seg.style.width = `${(value / barTotal) * 100}%`;
+            seg.title = `${key}: ${value}`;
+            bar.appendChild(seg);
+          }
+          row.appendChild(bar);
+          body.appendChild(row);
+        }
+      }
+
+      function renderErrors(items) {
+        const card = document.getElementById('errors-card');
+        const body = document.getElementById('err-body');
+        body.textContent = '';
+        if (!items.length) {
+          card.style.display = 'none';
+          return;
+        }
+        card.style.display = '';
+        const total = items.reduce((acc, item) => acc + item.count, 0);
+        document.getElementById('err-sub').textContent = `${total} 个 error · 按类型聚合`;
+        for (const item of items) {
+          const row = el('div', 'row wrap');
+          row.appendChild(el('span', 'badge error', `${item.type} × ${item.count}`));
+          const names = el('span', 'small muted truncate', item.tasks.join(', '));
+          names.title = item.tasks.join(', ');
+          row.appendChild(names);
+          body.appendChild(row);
+        }
+      }
+
+      function renderLive(trials) {
+        const card = document.getElementById('live-card');
+        const body = document.getElementById('live-body');
+        body.textContent = '';
+        const running = trials.filter((t) => t.status === 'running');
+        if (!running.length) {
+          card.style.display = 'none';
+          return;
+        }
+        card.style.display = '';
+        document.getElementById('live-sub').textContent =
+          `${running.length} 个正在跑 · 数据取自容器内 daemon（约 6s 缓存）`;
+        for (const t of running) {
+          const wrap = el('div', 'live-item');
+          const head = el('div', 'row between wrap');
+          head.appendChild(el('span', 'stat-name', t.task));
+          const live = t.live;
+          head.appendChild(
+            el(
+              'span',
+              `badge ${live ? 'running' : 'pending'}`,
+              live ? (live.runtime_status || 'working') : '等待 daemon 数据'
+            )
+          );
+          wrap.appendChild(head);
+
+          const step = live && live.plan_step ? live.plan_step.step : '';
+          if (step) {
+            const current = el('div', 'live-step');
+            current.appendChild(el('span', 'badge running', live.plan_step.status || 'in_progress'));
+            current.appendChild(el('span', null, step));
+            wrap.appendChild(current);
+          }
+
+          const steps = (live && live.steps) || [];
+          if (steps.length) {
+            const list = el('div', 'plan-list');
+            for (const text of steps) {
+              const done = text.includes('[completed]');
+              const active = text.includes('[in_progress]');
+              const row = el('div', `plan-step ${done ? 'done' : active ? 'active' : ''}`);
+              row.appendChild(el('span', 'plan-mark', done ? '\u2713' : active ? '\u25b6' : '\u25cb'));
+              row.appendChild(el('span', null, text.replace(/\s*\[[a-z_]+\]\s*$/, '')));
+              list.appendChild(row);
+            }
+            wrap.appendChild(list);
+          }
+
+          const activity = (live && live.activity) || [];
+          if (activity.length) {
+            const first = activity[0];
+            const detail = (first.detail || '').replace(/\s+/g, ' ');
+            const line = el('div', 'small muted truncate', `${first.kind}${detail ? ': ' + detail : ''}`);
+            line.title = first.detail || '';
+            wrap.appendChild(line);
+          }
+          body.appendChild(wrap);
+        }
+      }
+
+      function render(data) {
+        const counts = data.counts || {};
+        const total = data.total || 0;
+        document.getElementById('job-name').textContent = data.job || '—';
+        document.getElementById('k-total').textContent = total || '—';
+        document.getElementById('k-passed').textContent = counts.passed ?? '—';
+        document.getElementById('k-failed').textContent = counts.failed ?? '—';
+        document.getElementById('k-error').textContent = counts.error ?? '—';
+        document.getElementById('k-running').textContent = counts.running ?? '—';
+        document.getElementById('k-pending').textContent = counts.pending ?? '—';
+        document.getElementById('k-reward').textContent = data.mean_reward ?? '—';
+        document.getElementById('k-passrate').textContent =
+          data.pass_rate != null ? `${(data.pass_rate * 100).toFixed(1)}%` : '—';
+        document.getElementById('k-throughput').textContent =
+          data.throughput_per_hour != null ? String(data.throughput_per_hour) : '—';
+        document.getElementById('k-eta').textContent = data.complete
+          ? 'done'
+          : fmtDuration(data.eta_s);
+        document.getElementById('k-eta').title = `elapsed ${fmtDuration(data.elapsed_s)}`;
+
+        const finished = (counts.passed || 0) + (counts.failed || 0) + (counts.error || 0);
+        document.getElementById('progress-text').textContent =
+          `${finished}/${total} 完成 · 通过率 ${data.pass_rate != null ? (data.pass_rate * 100).toFixed(1) + '%' : '—'} · 并发 ${data.concurrency ?? 1}`;
+
+        const bar = document.getElementById('progress');
+        bar.textContent = '';
+        const order = ['passed', 'failed', 'error', 'running'];
+        for (const key of order) {
+          const value = counts[key] || 0;
+          if (!value || !total) continue;
+          const seg = el('span', `seg-${key}`);
+          seg.style.width = `${(value / total) * 100}%`;
+          seg.title = `${key}: ${value}`;
+          bar.appendChild(seg);
+        }
+
+        const legend = document.getElementById('legend');
+        legend.textContent = '';
+        for (const key of ['passed', 'failed', 'error', 'running', 'pending']) {
+          const item = el('span', 'row');
+          item.appendChild(el('span', `badge ${key}`, `${key} ${counts[key] || 0}`));
+          legend.appendChild(item);
+        }
+
+        const tbody = document.getElementById('trials');
+        tbody.textContent = '';
+        const trials = data.trials || [];
+        document.getElementById('trials-sub').textContent =
+          `${trials.length} 个 trial 目录 · 运行中优先`;
+        for (const t of trials.slice(0, 400)) {
+          const tr = document.createElement('tr');
+          tr.appendChild(el('td', 'truncate', t.task));
+          const statusCell = el('td');
+          const badge = el('span', `badge ${t.status}`);
+          badge.appendChild(el('span', 'dot'));
+          badge.appendChild(el('span', null, t.status));
+          statusCell.appendChild(badge);
+          tr.appendChild(statusCell);
+          tr.appendChild(el('td', 'mono', t.language || '—'));
+          const stepCell = el('td', 'truncate');
+          const currentStep = t.live && t.live.plan_step ? t.live.plan_step.step : '';
+          stepCell.textContent = currentStep || '—';
+          if (currentStep) stepCell.title = currentStep;
+          tr.appendChild(stepCell);
+          tr.appendChild(el('td', 'mono', t.reward == null ? '—' : String(t.reward)));
+          tr.appendChild(el('td', 'mono', fmtRatio(t.f2p_passed, t.f2p_total)));
+          tr.appendChild(el('td', 'mono', fmtRatio(t.p2p_passed, t.p2p_total)));
+          tr.appendChild(el('td', 'mono', fmtDuration(t.duration_s)));
+          tr.appendChild(el('td', 'mono', fmtTime(t.finished_at)));
+          if (t.exception_message) tr.title = `${t.exception_type}: ${t.exception_message}`;
+          tbody.appendChild(tr);
+        }
+
+        document.getElementById('server-time').textContent =
+          `服务器时间 ${fmtTime(data.server_time)} · 更新于 ${new Date().toLocaleTimeString()}`;
+        renderBuckets('lang-body', 'lang-sub', data.by_language || []);
+        renderBuckets('cat-body', 'cat-sub', data.by_category || []);
+        renderErrors(data.errors || []);
+        renderLive(trials);
+        const errored = trials.filter((t) => t.status === 'error');
+        document.getElementById('errors').textContent = errored.length
+          ? `${errored.length} 个 error（多为拉镜像网络抖动）`
+          : '';
+
+        const live = document.getElementById('live');
+        live.className = `badge ${data.complete ? 'pending' : 'running'}`;
+        document.getElementById('live-text').textContent = data.complete ? 'finished' : 'live';
+        document.querySelector('#live .dot').classList.toggle('pulse', !data.complete);
+
+        const select = document.getElementById('job-select');
+        const jobs = data.available_jobs || [];
+        if (select.dataset.filled !== String(jobs.length)) {
+          select.textContent = '';
+          for (const job of jobs) {
+            const option = el('option', null, job);
+            option.value = job;
+            select.appendChild(option);
+          }
+          select.dataset.filled = String(jobs.length);
+        }
+        if (data.job) select.value = data.job;
+      }
+
+      document.getElementById('job-select').addEventListener('change', (event) => {
+        state.job = event.target.value;
+        load();
+      });
+      document.getElementById('toggle').addEventListener('click', (event) => {
+        state.paused = !state.paused;
+        event.target.textContent = state.paused ? '继续刷新' : '暂停刷新';
+        if (!state.paused) load();
+      });
+      document.getElementById('theme').addEventListener('click', (event) => {
+        const dark = document.documentElement.classList.toggle('dark');
+        event.target.textContent = dark ? '浅色' : '深色';
+        try { localStorage.setItem('dl-theme', dark ? 'dark' : 'light'); } catch (e) {}
+      });
+      try {
+        if (localStorage.getItem('dl-theme') === 'dark') {
+          document.documentElement.classList.add('dark');
+          document.getElementById('theme').textContent = '浅色';
+        }
+      } catch (e) {}
+
+      load();
+      state.timer = setInterval(() => { if (!state.paused) load(); }, 3000);
+    </script>
+  </body>
+</html>
