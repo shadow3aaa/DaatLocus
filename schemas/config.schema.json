@@ -78,16 +78,16 @@
         "strong_filesystem": "off"
       }
     },
-    "sleep": {
-      "$ref": "#/$defs/SleepConfig",
-      "default": {
-        "enabled": true
-      }
-    },
     "scope": {
       "$ref": "#/$defs/ScopeConfig",
       "default": {
         "lsp_enabled": true
+      }
+    },
+    "sleep": {
+      "$ref": "#/$defs/SleepConfig",
+      "default": {
+        "enabled": true
       }
     },
     "telegram": {
@@ -302,6 +302,30 @@
             "type": {
               "type": "string",
               "const": "openai-codex-oauth"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "OpenCode Console OAuth: an OpenAI-compatible gateway (default\n`https://opencode.ai/zen/v1`) authenticated with a device-code OAuth\naccess token stored in `auth_file`.",
+          "type": "object",
+          "properties": {
+            "auth_file": {
+              "type": "string",
+              "default": ""
+            },
+            "base_url": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "open-code-console-oauth"
             }
           },
           "required": [
