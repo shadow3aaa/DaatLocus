@@ -367,7 +367,7 @@ def start_daemon(args: argparse.Namespace) -> subprocess.Popen[bytes]:
     env["DAAT_LOCUS_HOME"] = str(args.home)
     log = open(args.daemon_log, "ab", buffering=0)
     process = subprocess.Popen(
-        [str(args.daemon_bin), "daemon", "serve"],
+        [str(args.daemon_bin), "serve"],
         stdin=subprocess.DEVNULL,
         stdout=log,
         stderr=subprocess.STDOUT,
