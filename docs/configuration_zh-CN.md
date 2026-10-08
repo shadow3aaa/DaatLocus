@@ -63,7 +63,7 @@ tool_output_max_tokens = 2000
 [daemon]
 # Daat Locus 会监听 0.0.0.0:<port>，LAN 客户端可打开
 # http://<本机-LAN-IP>:<port>/ 并用 daemon token 认证。
-port = 53825
+port = 45825
 
 [sandbox]
 enabled = true

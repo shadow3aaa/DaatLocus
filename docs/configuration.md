@@ -69,7 +69,7 @@ tool_output_max_tokens = 2000
 [daemon]
 # Daat Locus listens on 0.0.0.0:<port>, so LAN clients can open
 # http://<this-machine-lan-ip>:<port>/ and authenticate with a daemon token.
-port = 53825
+port = 45825
 
 [sandbox]
 enabled = true

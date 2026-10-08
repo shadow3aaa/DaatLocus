@@ -692,7 +692,7 @@ through a lightweight boot reader, not full agent config validation:
 read_manager_boot_config()
   -> read daemon.port from config.toml if possible
   -> if current config is damaged, try config.toml.bak
-  -> if both are unavailable or damaged, use default port 53825
+  -> if both are unavailable or damaged, use default port 45825
 ```
 
 Do not call full `load_config()` to decide whether the Manager can start. The

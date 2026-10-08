@@ -6,7 +6,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, type Plugin } from "vite";
 
 const devServerHost = process.env.DAAT_LOCUS_WEBUI_HOST ?? "0.0.0.0";
-const daemonTarget = process.env.DAAT_LOCUS_DAEMON_URL ?? "http://0.0.0.0:53825";
+const daemonTarget = process.env.DAAT_LOCUS_DAEMON_URL ?? "http://0.0.0.0:45825";
 
 const repositoryAssetsDir =
   process.env.DAAT_LOCUS_ASSETS_DIR ?? path.resolve(__dirname, "../assets");

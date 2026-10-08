@@ -6,7 +6,7 @@
     "daemon": {
       "$ref": "#/$defs/DaemonConfig",
       "default": {
-        "port": 53825
+        "port": 45825
       }
     },
     "efficient_model": {
@@ -106,7 +106,7 @@
         "port": {
           "type": "integer",
           "format": "uint16",
-          "default": 53825,
+          "default": 45825,
           "maximum": 65535,
           "minimum": 0
         }

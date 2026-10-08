@@ -518,7 +518,7 @@ pub struct DaemonConfig {
 
 impl Default for DaemonConfig {
     fn default() -> Self {
-        Self { port: 53825 }
+        Self { port: 45825 }
     }
 }
 

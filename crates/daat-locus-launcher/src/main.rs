@@ -12,7 +12,7 @@ use std::{
 
 use serde::Deserialize;
 const CONFIG_FILE_NAME: &str = "config.toml";
-const DEFAULT_DAEMON_PORT: u16 = 53825;
+const DEFAULT_DAEMON_PORT: u16 = 45825;
 const ENABLE_TRAY_ENV: &str = "DAAT_LOCUS_ENABLE_TRAY";
 const NO_TRAY_ENV: &str = "DAAT_LOCUS_NO_TRAY";
 const LAUNCHER_LOG_FILE_NAME: &str = "launcher.log";
