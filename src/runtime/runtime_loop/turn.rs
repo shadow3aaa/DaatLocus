@@ -1597,8 +1597,8 @@ fn persist_dashboard_activity_items(
     history: &DashboardActivityHistoryStore,
     items: &[crate::dashboard::DashboardActivityHistoryItem],
 ) -> miette::Result<DashboardActivityHistoryWindow> {
-    let before_seq = history.append_items(items)?;
-    Ok(history.load_window_after(before_seq))
+    history.append_items(items)?;
+    Ok(history.load_initial_window())
 }
 
 #[cfg(test)]
@@ -1692,6 +1692,44 @@ mod tests {
             items[0].event,
             crate::dashboard::SessionActivityEvent::User(_)
         ));
+    }
+
+    #[test]
+    fn persisted_activity_window_keeps_recent_items_across_appends() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = DashboardActivityHistoryStore::open_at_path_for_test(
+            temp.path().join("history.sqlite3"),
+        )
+        .expect("history store");
+
+        for index in 0..3 {
+            let cells = vec![assistant_activity_cell(&format!("message-{index}")).expect("cell")];
+            let items = dashboard_activity_items_from_cells_with_ids(
+                &cells,
+                vec![format!("activity-{index}")],
+            );
+            let window = persist_dashboard_activity_items(&store, &items).expect("persist");
+            assert_eq!(window.items.len(), index + 1, "append {index} window size");
+        }
+
+        // Updating an existing item must not shrink the window or hide the rest.
+        let cells = vec![assistant_activity_cell("message-2 updated").expect("cell")];
+        let items =
+            dashboard_activity_items_from_cells_with_ids(&cells, vec!["activity-2".to_string()]);
+        let window = persist_dashboard_activity_items(&store, &items).expect("persist update");
+        assert_eq!(window.items.len(), 3, "update window size");
+        let contents = window
+            .items
+            .iter()
+            .map(|item| match &item.event {
+                SessionActivityEvent::Assistant(data) => data.content.clone(),
+                other => panic!("unexpected activity event {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents,
+            vec!["message-0", "message-1", "message-2 updated"]
+        );
     }
 
     #[test]

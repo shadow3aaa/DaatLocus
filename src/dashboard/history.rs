@@ -180,25 +180,6 @@ impl DashboardActivityHistoryStore {
         }
     }
 
-    /// Reload only rows newer than `after_seq`.
-    ///
-    /// Callers that must refresh a window after an append use this instead of
-    /// re-reading the whole initial page in the same write.
-    pub fn load_window_after(&self, after_seq: i64) -> DashboardActivityHistoryWindow {
-        match self.query_after(Some(after_seq), DASHBOARD_ACTIVITY_HISTORY_INITIAL_LIMIT) {
-            Ok(page) => DashboardActivityHistoryWindow {
-                items: page.items,
-                oldest_cursor: page.oldest_cursor,
-                newest_cursor: page.newest_cursor,
-                has_more_before: page.has_more_before,
-            },
-            Err(err) => {
-                tracing::warn!("load dashboard activity history delta window failed: {err:?}");
-                Self::empty_window()
-            }
-        }
-    }
-
     pub fn append_items(&self, items: &[DashboardActivityHistoryItem]) -> Result<i64> {
         if items.is_empty() {
             return self.max_seq();
