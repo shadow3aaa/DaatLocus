@@ -113,6 +113,34 @@ def create_source_archive(source_root: Path, archive_path: Path) -> int:
     return len(files)
 
 
+def _replace_section_auth_file(text: str, provider: str, new_path: str) -> str:
+    """Repoint a provider's ``auth_file`` at ``new_path`` inside its TOML section."""
+    headers = {
+        f"providers.{provider}",
+        f'providers."{provider}"',
+        f"providers.'{provider}'",
+    }
+    inside = False
+    result: list[str] = []
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            inside = stripped[1:-1].strip() in headers
+            result.append(line)
+            continue
+        if (
+            inside
+            and "=" in stripped
+            and stripped.split("=", 1)[0].strip() == "auth_file"
+        ):
+            indent = line[: len(line) - len(line.lstrip())]
+            newline = "\n" if line.endswith("\n") else ""
+            result.append(f'{indent}auth_file = "{new_path}"{newline}')
+            continue
+        result.append(line)
+    return "".join(result)
+
+
 class DaatLocusAgent(BaseAgent):
     SUPPORTS_WINDOWS = False
 
@@ -493,7 +521,47 @@ fi
         if models_cache.exists():
             (target / "cache").mkdir(parents=True, exist_ok=True)
             shutil.copy2(models_cache, target / "cache" / "models-dev-api.json")
+        self._rewrite_provider_auth_files(host_home, target)
         return target
+
+    def _rewrite_provider_auth_files(self, host_home: Path, target: Path) -> None:
+        """Copy provider credential files into the sandbox and repoint ``auth_file``.
+
+        Sandboxes run on Linux with a slim home, so a host credential path (for
+        example one under the Windows user profile) is unreachable. Without this,
+        the daemon rejects the whole config because a configured-but-unusable
+        provider makes readiness incomplete, even when the run never uses it.
+        """
+        config_path = target / "config" / "config.toml"
+        if not config_path.is_file():
+            return
+        text = config_path.read_text(encoding="utf-8")
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            return
+        providers = data.get("providers")
+        if not isinstance(providers, dict):
+            return
+        for name, provider in providers.items():
+            if not isinstance(provider, dict):
+                continue
+            auth_file = provider.get("auth_file")
+            if not isinstance(auth_file, str) or not auth_file.strip():
+                continue
+            host_path = Path(auth_file.strip()).expanduser()
+            if not host_path.is_absolute():
+                host_path = host_home / host_path
+            if not host_path.is_file():
+                continue
+            destination = target / "auth" / name / host_path.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(host_path, destination)
+            container_path = (
+                f"{self._container_home.rstrip('/')}/auth/{name}/{host_path.name}"
+            )
+            text = _replace_section_auth_file(text, name, container_path)
+        config_path.write_text(text, encoding="utf-8")
 
     def _run_env(self) -> dict[str, str]:
         env = dict(self._extra_env)
