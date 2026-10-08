@@ -54,8 +54,12 @@ default-members = ["."]
 resolver = "3"
 
 [features]
-default = []
+default = ["desktop-tray"]
 tui-perf-cmd = []
+# The desktop tray needs GTK/AppIndicator on Linux, which prevents building a
+# self-contained binary. Keep it on by default, but allow a headless build
+# (e.g. the static benchmark binary) via `--no-default-features`.
+desktop-tray = ["dep:tao", "dep:tray-icon"]
 
 [dependencies]
 hex = "0.4.3"
@@ -128,12 +132,12 @@ daat-locus-macros = { version = "0.2.1", path = "crates/daat-locus-macros" }
 daat-locus-md = { version = "0.3.6", path = "crates/daat-locus-md", default-features = false, features = ["markdown"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
-tao = "0.35.3"
-tray-icon = { version = "0.24.1", default-features = false }
+tao = { version = "0.35.3", optional = true }
+tray-icon = { version = "0.24.1", default-features = false, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-tao = "0.35.3"
-tray-icon = { version = "0.24.1", default-features = false, features = ["gtk"] }
+tao = { version = "0.35.3", optional = true }
+tray-icon = { version = "0.24.1", default-features = false, features = ["gtk"], optional = true }
 
 [dev-dependencies]
 tempfile = "3.23.0"

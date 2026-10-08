@@ -2,16 +2,33 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[cfg(all(
+    feature = "desktop-tray",
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
 use std::time::{Duration, Instant};
 
 use miette::Result;
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[cfg(all(
+    feature = "desktop-tray",
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
 use miette::miette;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+#[cfg(all(
+    feature = "desktop-tray",
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
+use tokio::sync::oneshot;
 
-use crate::{daemon::DaemonControlCommand, open_url::open_url};
+use crate::daemon::DaemonControlCommand;
+#[cfg(all(
+    feature = "desktop-tray",
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
+use crate::open_url::open_url;
 
+#[cfg_attr(not(feature = "desktop-tray"), allow(dead_code))]
 pub const NO_TRAY_ENV: &str = "DAAT_LOCUS_NO_TRAY";
 pub const ENABLE_TRAY_ENV: &str = "DAAT_LOCUS_ENABLE_TRAY";
 
@@ -32,23 +49,42 @@ impl DaemonTrayHandle {
     }
 }
 
+#[cfg_attr(not(feature = "desktop-tray"), allow(dead_code))]
 pub struct DaemonTrayStartup {
     pub(crate) port: u16,
     pub(crate) control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
 }
 
 pub fn should_attempt_daemon_tray() -> bool {
-    if std::env::var_os(NO_TRAY_ENV).is_some() {
+    #[cfg(not(feature = "desktop-tray"))]
+    {
         return false;
     }
-    std::env::var_os(ENABLE_TRAY_ENV).is_some() || platform_tray::gui_session_available()
+    #[cfg(feature = "desktop-tray")]
+    {
+        if std::env::var_os(NO_TRAY_ENV).is_some() {
+            return false;
+        }
+        std::env::var_os(ENABLE_TRAY_ENV).is_some() || platform_tray::gui_session_available()
+    }
 }
 
 pub fn run_daemon_tray(startup: &DaemonTrayStartup, handle: &DaemonTrayHandle) -> Result<()> {
-    platform_tray::run_tray_loop(startup.port, &startup.control_tx, &handle.shutdown)
+    #[cfg(not(feature = "desktop-tray"))]
+    {
+        let _ = (startup, handle);
+        Ok(())
+    }
+    #[cfg(feature = "desktop-tray")]
+    {
+        platform_tray::run_tray_loop(startup.port, &startup.control_tx, &handle.shutdown)
+    }
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[cfg(all(
+    feature = "desktop-tray",
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
 mod platform_tray {
     use super::{
         Arc, AtomicBool, DaemonControlCommand, Duration, Instant, Ordering, Result, miette, mpsc,
