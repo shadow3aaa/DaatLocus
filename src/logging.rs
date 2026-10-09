@@ -327,7 +327,7 @@ fn render_agent_message_dump(message: &AgentMessage) -> Vec<String> {
             }
             lines
         }
-        AgentMessage::Assistant { content } => {
+        AgentMessage::Assistant { content, .. } => {
             vec![
                 "role=assistant".to_string(),
                 "content:".to_string(),

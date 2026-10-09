@@ -665,10 +665,13 @@ fn trim_history_message_content(mut message: HistoryMessage) -> HistoryMessage {
     message.message = match message.message {
         AgentMessage::System { .. } => AgentMessage::system(trimmed),
         AgentMessage::User { content } => AgentMessage::user_content(content.with_text(trimmed)),
-        AgentMessage::Assistant { .. } => AgentMessage::assistant(trimmed),
+        AgentMessage::Assistant {
+            responses_output, ..
+        } => AgentMessage::assistant(trimmed).with_responses_output(responses_output),
         AgentMessage::AssistantToolCallProtocol {
             reasoning_content,
             reasoning_signature,
+            responses_output,
             calls,
             ..
         } => AgentMessage::assistant_tool_call_protocol_with_signed_reasoning(
@@ -676,7 +679,8 @@ fn trim_history_message_content(mut message: HistoryMessage) -> HistoryMessage {
             reasoning_content,
             reasoning_signature,
             calls,
-        ),
+        )
+        .with_responses_output(responses_output),
         AgentMessage::Tool {
             tool_call_id, name, ..
         } => AgentMessage::tool(tool_call_id, name, trimmed),
@@ -1092,6 +1096,24 @@ mod tests {
             }
             _ => panic!("expected assistant tool-call protocol"),
         }
+    }
+
+    #[test]
+    fn normalizing_history_keeps_responses_phase_and_encrypted_reasoning() {
+        let output = vec![
+            serde_json::json!({"type": "reasoning", "encrypted_content": "opaque", "summary": []}),
+            serde_json::json!({"type": "message", "role": "assistant", "phase": "commentary", "content": [{"type": "output_text", "text": "  Checking  "}]}),
+        ];
+        let message =
+            HistoryMessage::assistant("  Checking  ").with_responses_output(Some(output.clone()));
+        let persisted = serde_json::to_string(&message).unwrap();
+        let restored = serde_json::from_str(&persisted).unwrap();
+        let normalized = normalize_runtime_prompt_message(restored).unwrap();
+        assert_eq!(normalized.text_content(), Some("Checking"));
+        assert_eq!(
+            normalized.message.responses_output(),
+            Some(output.as_slice())
+        );
     }
 
     #[test]

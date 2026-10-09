@@ -517,7 +517,7 @@ fn user_agent_content_from_event(event: &EventView) -> Option<AgentContent> {
 
 fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<SessionActivityEvent> {
     match &message.message {
-        AgentMessage::Assistant { content } => {
+        AgentMessage::Assistant { content, .. } => {
             let mut cells = Vec::new();
             let is_tool_protocol_placeholder =
                 content.trim().starts_with("assistant tool-call protocol:");

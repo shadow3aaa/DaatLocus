@@ -16,6 +16,7 @@ use crate::{
     },
     providers::{
         codex_oauth_access_from_file, codex_oauth_client_version, codex_oauth_default_base_url,
+        codex_oauth_headers,
     },
 };
 
@@ -33,16 +34,8 @@ const COPILOT_DEFAULT_MODELS: &[&str] = &[
     "o1-mini",
 ];
 
-/// Static fallback for `OpenAI` Codex. The `ChatGPT` Codex backend may return an
-/// empty `/models` list while still accepting current Codex model slugs.
-const CODEX_OAUTH_DEFAULT_MODELS: &[&str] = &[
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-];
+/// Narrow snapshot of the official Codex catalog, used only for empty catalogs.
+const CODEX_OAUTH_MODEL_CATALOG: &str = include_str!("providers/codex_model_catalog.json");
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// Model metadata returned by the provider API.
@@ -56,19 +49,10 @@ pub struct DiscoveredModel {
 }
 
 fn codex_oauth_fallback_models() -> Vec<DiscoveredModel> {
-    CODEX_OAUTH_DEFAULT_MODELS
-        .iter()
-        .map(|id| {
-            let capacity = catalog_model_capacity_for_provider("openai", id);
-            DiscoveredModel {
-                id: (*id).to_string(),
-                context_window: capacity.map(|capacity| capacity.context_window_tokens),
-                max_output_tokens: capacity.map(|capacity| capacity.max_completion_tokens),
-                supports_vision: capacity.map(|c| c.supports_vision),
-                reasoning_options: Some(codex_oauth_reasoning_options()),
-            }
-        })
-        .collect()
+    parse_models_response_for_auth(
+        Some(serde_json::from_str(CODEX_OAUTH_MODEL_CATALOG).expect("valid bundled Codex catalog")),
+        true,
+    )
 }
 
 fn copilot_fallback_models() -> Vec<DiscoveredModel> {
@@ -594,11 +578,8 @@ async fn fetch_codex_oauth_models(auth_file: &str, base_url: &str) -> Result<Vec
                 auth_file.display()
             )
         })?;
-    let url = format!(
-        "{}/models?client_version={}",
-        normalize_provider_base_url(base_url),
-        codex_oauth_client_version()
-    );
+    let client_version = codex_oauth_client_version();
+    let url = format!("{}/models", normalize_provider_base_url(base_url));
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -607,9 +588,9 @@ async fn fetch_codex_oauth_models(auth_file: &str, base_url: &str) -> Result<Vec
         })?;
     let mut request = client
         .get(&url)
+        .query(&[("client_version", &client_version)])
         .header("Authorization", format!("Bearer {}", access.access_token))
-        .header("version", codex_oauth_client_version())
-        .header("originator", "codex_cli_rs");
+        .headers(codex_oauth_headers(&client_version));
     if let Some(account_id) = access.account_id.as_deref() {
         request = request.header("ChatGPT-Account-ID", account_id);
     }
@@ -632,7 +613,7 @@ async fn fetch_codex_oauth_models(auth_file: &str, base_url: &str) -> Result<Vec
         .json()
         .await
         .map_err(|err| miette!("OpenAI Codex model discovery response parse failed: {err}"))?;
-    let models = parse_models_response(Some(json));
+    let models = parse_models_response_for_auth(Some(json), true);
     if models.is_empty() {
         Ok(codex_oauth_fallback_models())
     } else {
@@ -670,6 +651,13 @@ async fn fetch_copilot_internal_models(
 }
 
 pub fn parse_models_response(json: Option<serde_json::Value>) -> Vec<DiscoveredModel> {
+    parse_models_response_for_auth(json, false)
+}
+
+fn parse_models_response_for_auth(
+    json: Option<serde_json::Value>,
+    chatgpt_mode: bool,
+) -> Vec<DiscoveredModel> {
     let Some(json) = json else { return vec![] };
     let items = json
         .get("data")
@@ -680,8 +668,14 @@ pub fn parse_models_response(json: Option<serde_json::Value>) -> Vec<DiscoveredM
     let mut models: Vec<DiscoveredModel> = items
         .iter()
         .filter_map(|m| {
-            if m["supported_in_api"].as_bool() == Some(false)
-                || m["visibility"].as_str() == Some("hide")
+            if (!chatgpt_mode && m["supported_in_api"].as_bool() == Some(false))
+                || m["visibility"].as_str().is_some_and(|visibility| {
+                    if chatgpt_mode {
+                        visibility != "list"
+                    } else {
+                        visibility == "hide"
+                    }
+                })
             {
                 return None;
             }
@@ -701,7 +695,11 @@ pub fn parse_models_response(json: Option<serde_json::Value>) -> Vec<DiscoveredM
                 id,
                 context_window,
                 max_output_tokens,
-                supports_vision: None,
+                supports_vision: m["input_modalities"].as_array().map(|modalities| {
+                    modalities
+                        .iter()
+                        .any(|modality| modality.as_str() == Some("image"))
+                }),
                 reasoning_options,
             })
         })
@@ -717,6 +715,7 @@ fn discovered_reasoning_options(model: &serde_json::Value) -> Option<Vec<Reasoni
     }
 
     [
+        &model["supported_reasoning_levels"],
         &model["supported_reasoning_efforts"],
         &model["reasoning_efforts"],
         &model["reasoning"]["efforts"],
@@ -728,7 +727,11 @@ fn discovered_reasoning_options(model: &serde_json::Value) -> Option<Vec<Reasoni
         let values: Vec<String> = raw
             .as_array()
             .into_iter()
-            .flat_map(|items| items.iter().filter_map(|item| item.as_str()))
+            .flat_map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().or_else(|| item["effort"].as_str()))
+            })
             .map(str::to_string)
             .collect();
         (!values.is_empty()).then_some(vec![ReasoningOption::Effort { values }])
@@ -747,7 +750,7 @@ pub fn reasoning_options_for_prompt(
     }
 
     let provider_defaults = match provider {
-        ProviderConfig::OpenaiCodexOauth { .. } => codex_oauth_reasoning_options(),
+        ProviderConfig::OpenaiCodexOauth { .. } => codex_oauth_reasoning_options(model_id),
         _ => Vec::new(),
     };
     if !provider_defaults.is_empty() {
@@ -762,9 +765,21 @@ pub fn reasoning_options_for_prompt(
     crate::model_catalog::catalog_model_reasoning_options(model_id)
 }
 
-fn codex_oauth_reasoning_options() -> Vec<ReasoningOption> {
+fn codex_oauth_reasoning_options(model_id: &str) -> Vec<ReasoningOption> {
+    if let Some(options) = codex_oauth_fallback_models()
+        .into_iter()
+        .find(|model| model.id == model_id)
+        .and_then(|model| model.reasoning_options)
+    {
+        return options;
+    }
+    if let Some(options) = catalog_model_reasoning_options_for_provider("openai", model_id)
+        && !options.is_empty()
+    {
+        return options;
+    }
     vec![ReasoningOption::Effort {
-        values: ["none", "minimal", "low", "medium", "high", "xhigh"]
+        values: ["low", "medium", "high", "xhigh"]
             .into_iter()
             .map(str::to_string)
             .collect(),
@@ -775,8 +790,52 @@ fn codex_oauth_reasoning_options() -> Vec<ReasoningOption> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn codex_discovery_sends_current_identity_and_preserves_login_only_models() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let temp = tempfile::tempdir().unwrap();
+        let auth_file = temp.path().join("auth.json");
+        tokio::fs::write(&auth_file, serde_json::to_vec(&serde_json::json!({
+            "id_token": "test-id", "access_token": "test-access", "refresh_token": "test-refresh", "account_id": "test-account"
+        })).unwrap()).await.unwrap();
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let mut chunk = [0; 4096];
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(request.contains(&format!(
+                "/models?client_version={}",
+                codex_oauth_client_version().to_ascii_lowercase()
+            )));
+            assert!(request.contains("originator: codex_cli_rs"));
+            assert!(request.contains("user-agent: codex_cli_rs/"));
+            assert!(request.contains("authorization: bearer test-access"));
+            assert!(request.contains("chatgpt-account-id: test-account"));
+            let body = serde_json::json!({"models": [{"slug": "gpt-6.1-sol", "visibility": "list", "supported_in_api": false,
+                "supported_reasoning_levels": [{"effort": "max"}, {"effort": "ultra"}], "input_modalities": ["text", "image"]}]}).to_string();
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let models =
+            fetch_codex_oauth_models(auth_file.to_str().unwrap(), &format!("http://{address}"))
+                .await
+                .unwrap();
+        server.await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-6.1-sol");
+        assert_eq!(models[0].supports_vision, Some(true));
+    }
+
     #[test]
-    fn codex_oauth_fallback_models_include_current_gpt_5_6_variants() {
+    fn codex_oauth_fallback_models_include_current_gpt_6_and_5_6_variants() {
         let ids = codex_oauth_fallback_models()
             .into_iter()
             .map(|model| model.id)
@@ -785,16 +844,91 @@ mod tests {
         assert!(ids.contains(&"gpt-5.6-sol".to_string()));
         assert!(ids.contains(&"gpt-5.6-terra".to_string()));
         assert!(ids.contains(&"gpt-5.6-luna".to_string()));
+        for id in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"] {
+            assert!(ids.contains(&id.to_string()));
+        }
     }
 
     #[test]
     fn codex_oauth_reasoning_defaults_include_xhigh() {
-        let options = codex_oauth_reasoning_options();
+        let options = codex_oauth_reasoning_options("gpt-6.1-sol");
         let ReasoningOption::Effort { values } = &options[0] else {
             panic!("expected Codex reasoning effort options");
         };
 
         assert!(values.contains(&"xhigh".to_string()));
+        assert!(values.contains(&"max".to_string()));
+        assert!(values.contains(&"ultra".to_string()));
+        assert!(!values.contains(&"none".to_string()));
+        assert!(!values.contains(&"minimal".to_string()));
+    }
+
+    #[test]
+    fn codex_catalog_uses_login_visibility_and_native_capability_fields() {
+        let catalog = serde_json::json!({ "models": [
+            { "slug": "gpt-6.1-sol", "visibility": "list", "supported_in_api": false,
+              "context_window": 272000, "max_context_window": 872000,
+              "input_modalities": ["text", "image"],
+              "supported_reasoning_levels": [{"effort": "low"}, {"effort": "max"}, {"effort": "ultra"}] },
+            { "slug": "text-only", "visibility": "list", "supported_in_api": true,
+              "input_modalities": ["text"] },
+            { "slug": "hidden", "visibility": "hide", "supported_in_api": true },
+            { "slug": "internal", "visibility": "unlisted", "supported_in_api": true }
+        ] });
+        let models = parse_models_response_for_auth(Some(catalog.clone()), true);
+        assert_eq!(models.len(), 2);
+        let sol = models
+            .iter()
+            .find(|model| model.id == "gpt-6.1-sol")
+            .unwrap();
+        assert_eq!(sol.context_window, Some(272000));
+        assert_eq!(sol.supports_vision, Some(true));
+        let Some(options) = &sol.reasoning_options else {
+            panic!("missing efforts")
+        };
+        let ReasoningOption::Effort { values } = &options[0] else {
+            panic!("missing efforts")
+        };
+        assert_eq!(values, &["low", "max", "ultra"]);
+        assert_eq!(
+            models
+                .iter()
+                .find(|model| model.id == "text-only")
+                .unwrap()
+                .supports_vision,
+            Some(false)
+        );
+        assert!(
+            !parse_models_response(Some(catalog))
+                .iter()
+                .any(|model| model.id == "gpt-6.1-sol")
+        );
+    }
+
+    #[test]
+    fn codex_reasoning_fallback_is_model_specific_and_live_catalog_wins() {
+        let sol = codex_oauth_reasoning_options("gpt-6.1-sol");
+        let luna = codex_oauth_reasoning_options("gpt-6-luna");
+        let ReasoningOption::Effort { values: sol } = &sol[0] else {
+            panic!("efforts")
+        };
+        let ReasoningOption::Effort { values: luna } = &luna[0] else {
+            panic!("efforts")
+        };
+        assert!(sol.iter().any(|value| value == "ultra"));
+        assert!(!luna.iter().any(|value| value == "ultra"));
+        let provider = ProviderConfig::OpenaiCodexOauth {
+            base_url: None,
+            auth_file: "unused".into(),
+        };
+        let live = vec![ReasoningOption::Effort {
+            values: vec!["new-effort".into()],
+        }];
+        let result = reasoning_options_for_prompt(&provider, "gpt-6.1-sol", Some(&live));
+        let ReasoningOption::Effort { values } = &result[0] else {
+            panic!("efforts")
+        };
+        assert_eq!(values, &["new-effort"]);
     }
 
     #[test]

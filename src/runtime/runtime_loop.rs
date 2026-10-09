@@ -185,6 +185,7 @@ mod tests {
                 last_assistant_message: Some("recovered".to_string()),
                 last_reasoning_content: None,
                 last_reasoning_signature: None,
+                responses_output: None,
             })
         }
 
@@ -240,6 +241,7 @@ mod tests {
                     last_assistant_message: None,
                     last_reasoning_content: None,
                     last_reasoning_signature: None,
+                    responses_output: None,
                 });
             }
 
@@ -360,6 +362,7 @@ mod tests {
                 last_assistant_message: None,
                 last_reasoning_content: None,
                 last_reasoning_signature: None,
+                responses_output: None,
             })
         }
 
@@ -439,6 +442,7 @@ mod tests {
                 last_assistant_message: None,
                 last_reasoning_content: None,
                 last_reasoning_signature: None,
+                responses_output: None,
             })
         }
 

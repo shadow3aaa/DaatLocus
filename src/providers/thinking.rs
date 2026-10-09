@@ -130,15 +130,6 @@ pub(super) fn chat_reasoning_effort(budget: &str) -> Option<&str> {
     }
 }
 
-pub(super) fn responses_reasoning_effort(budget: &str) -> &str {
-    match normalized_thinking_budget(budget).as_str() {
-        "none" => "none",
-        // This Responses endpoint names the largest OpenAI effort xhigh.
-        "max" => "xhigh",
-        _ => budget,
-    }
-}
-
 pub(super) fn deepseek_thinking_type(budget: &str) -> &'static str {
     if thinking_budget_is_none(budget) {
         "disabled"

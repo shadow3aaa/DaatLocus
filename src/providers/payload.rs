@@ -129,7 +129,7 @@ pub(super) fn agent_message_to_openai_message(
             "role": "user",
             "content": openai_user_content(&content, strip_images),
         }),
-        AgentMessage::Assistant { content } => json!({
+        AgentMessage::Assistant { content, .. } => json!({
             "role": "assistant",
             "content": content,
         }),
@@ -210,6 +210,7 @@ pub(super) fn agent_turn_request_to_openai_messages(
                 content,
                 reasoning_content,
                 reasoning_signature,
+                responses_output,
                 calls,
             } => {
                 if flatten_orphan_tool_messages {
@@ -220,6 +221,7 @@ pub(super) fn agent_turn_request_to_openai_messages(
                         content,
                         reasoning_content,
                         reasoning_signature,
+                        responses_output,
                         calls,
                     },
                     include_reasoning_content,

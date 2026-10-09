@@ -2158,9 +2158,10 @@ async fn run_worker_turn(
                 if let Some(event) = crate::dashboard::assistant_activity_cell(&final_message) {
                     inspector.append_worker_activity(worker_id, event);
                 }
-                actor
-                    .conversation
-                    .push_agent_message(AgentMessage::assistant(&final_message));
+                actor.conversation.push_agent_message(
+                    AgentMessage::assistant(&final_message)
+                        .with_responses_output(protocol.responses_output.clone()),
+                );
             }
             actor.conversation.push_agent_message(AgentMessage::user(
                 follow_up_message.expect("workers always require explicit completion"),
@@ -2180,7 +2181,8 @@ async fn run_worker_turn(
                     protocol.reasoning_content.clone(),
                     protocol.reasoning_signature.clone(),
                     protocol.tool_calls.clone(),
-                ),
+                )
+                .with_responses_output(protocol.responses_output.clone()),
             );
             // OpenAI-compatible providers require every tool message for an
             // assistant tool_calls message to come first. Tool-attached image
@@ -3374,6 +3376,7 @@ mod tests {
                     last_assistant_message: Some(summary),
                     last_reasoning_content: None,
                     last_reasoning_signature: None,
+                    responses_output: None,
                 });
             }
 
@@ -3443,6 +3446,7 @@ mod tests {
                 last_assistant_message: None,
                 last_reasoning_content: reasoning,
                 last_reasoning_signature: None,
+                responses_output: None,
             })
         }
 
@@ -3612,6 +3616,7 @@ mod tests {
                 last_assistant_message: None,
                 last_reasoning_content: None,
                 last_reasoning_signature: None,
+                responses_output: None,
             })
         }
 
@@ -5455,6 +5460,7 @@ workflow.define({
                 last_assistant_message: None,
                 last_reasoning_content: None,
                 last_reasoning_signature: None,
+                responses_output: None,
             })
         }
 

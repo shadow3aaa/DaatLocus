@@ -32,6 +32,7 @@ mod copilot;
 pub use copilot::CopilotClient;
 pub(crate) use copilot::copilot_base_url_from_session_token;
 mod codex_oauth;
+pub(crate) use codex_oauth::codex_oauth_headers;
 pub use codex_oauth::{
     CodexOAuthClient, CodexOAuthTokens, codex_cli_auth_file, codex_oauth_access_from_file,
     codex_oauth_client_version, codex_oauth_default_base_url, import_codex_cli_oauth_file,
@@ -48,6 +49,7 @@ pub use ollama::OllamaClient;
 
 mod anthropic_compat;
 pub mod responses_compat;
+mod responses_protocol;
 
 mod io;
 use io::{
@@ -988,6 +990,7 @@ impl OpenAIClient {
                 last_assistant_message: assistant_message,
                 last_reasoning_content: non_empty_string(cleaned_reasoning),
                 last_reasoning_signature: None,
+                responses_output: None,
             });
         }
 
@@ -1024,6 +1027,7 @@ impl OpenAIClient {
                 last_assistant_message: assistant_message,
                 last_reasoning_content: non_empty_string(cleaned_reasoning),
                 last_reasoning_signature: None,
+                responses_output: None,
             });
         }
 
@@ -1042,6 +1046,7 @@ impl OpenAIClient {
             last_assistant_message,
             last_reasoning_content: non_empty_string(cleaned_reasoning),
             last_reasoning_signature: None,
+            responses_output: None,
         })
     }
 
@@ -1885,6 +1890,7 @@ mod tests {
                 last_assistant_message: None,
                 last_reasoning_content: None,
                 last_reasoning_signature: None,
+                responses_output: None,
             })
         }
 

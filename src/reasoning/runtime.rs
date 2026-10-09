@@ -211,6 +211,10 @@ pub enum AgentMessage {
     },
     Assistant {
         content: String,
+        /// Original Responses output items, including message phase and encrypted
+        /// reasoning. Other providers use the visible content instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        responses_output: Option<Vec<Value>>,
     },
     AssistantToolCallProtocol {
         content: Option<String>,
@@ -220,6 +224,8 @@ pub enum AgentMessage {
         /// in later turns, such as the Anthropic extended-thinking signature.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_signature: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        responses_output: Option<Vec<Value>>,
         calls: Vec<AgentToolCall>,
     },
     Tool {
@@ -252,6 +258,8 @@ pub struct AgentTurnStreamResult {
     pub last_reasoning_content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reasoning_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responses_output: Option<Vec<Value>>,
 }
 
 impl AgentTurnStreamResult {
@@ -279,6 +287,7 @@ impl AgentTurnStreamResult {
             final_assistant_message,
             reasoning_content: self.last_reasoning_content,
             reasoning_signature: self.last_reasoning_signature,
+            responses_output: self.responses_output,
             raw_stream_follow_up: self.raw_stream_follow_up,
         }
     }
@@ -290,10 +299,33 @@ pub struct AgentTurnResponse {
     pub final_assistant_message: Option<String>,
     pub reasoning_content: Option<String>,
     pub reasoning_signature: Option<String>,
+    pub responses_output: Option<Vec<Value>>,
     pub raw_stream_follow_up: bool,
 }
 
 impl AgentTurnResponse {
+    /// Persistent history stores each executed call separately. Keep reasoning
+    /// with the first call and retain only the matching wire call on each row.
+    pub fn responses_output_for_tool_call(
+        &self,
+        call_id: &str,
+        include_reasoning: bool,
+    ) -> Option<Vec<Value>> {
+        self.responses_output.as_ref().map(|output| {
+            output
+                .iter()
+                .filter(|item| match item["type"].as_str() {
+                    Some("reasoning") => include_reasoning,
+                    Some("function_call" | "custom_tool_call") => {
+                        item["call_id"].as_str() == Some(call_id)
+                    }
+                    _ => false,
+                })
+                .cloned()
+                .collect()
+        })
+    }
+
     pub fn follow_up_message(
         &self,
         explicit_completion_required: bool,
@@ -315,6 +347,11 @@ pub struct HistoryMessage {
 }
 
 impl HistoryMessage {
+    pub fn with_responses_output(mut self, output: Option<Vec<Value>>) -> Self {
+        self.message = self.message.with_responses_output(output);
+        self
+    }
+
     pub fn system(content: impl Into<String>) -> Self {
         let content = content.into();
         Self {
@@ -383,7 +420,7 @@ impl HistoryMessage {
 
     pub fn text_content(&self) -> Option<&str> {
         match &self.message {
-            AgentMessage::System { content } | AgentMessage::Assistant { content } => {
+            AgentMessage::System { content } | AgentMessage::Assistant { content, .. } => {
                 Some(content.as_str())
             }
             AgentMessage::User { content } => Some(content.as_text()),
@@ -464,6 +501,7 @@ impl AgentMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::Assistant {
             content: content.into(),
+            responses_output: None,
         }
     }
 
@@ -479,6 +517,7 @@ impl AgentMessage {
             content,
             reasoning_content,
             reasoning_signature: None,
+            responses_output: None,
             calls,
         }
     }
@@ -496,7 +535,35 @@ impl AgentMessage {
             content,
             reasoning_content,
             reasoning_signature,
+            responses_output: None,
             calls,
+        }
+    }
+
+    pub fn with_responses_output(mut self, output: Option<Vec<Value>>) -> Self {
+        match &mut self {
+            Self::Assistant {
+                responses_output, ..
+            }
+            | Self::AssistantToolCallProtocol {
+                responses_output, ..
+            } => {
+                *responses_output = output.filter(|items| !items.is_empty());
+            }
+            _ => {}
+        }
+        self
+    }
+
+    pub fn responses_output(&self) -> Option<&[Value]> {
+        match self {
+            Self::Assistant {
+                responses_output, ..
+            }
+            | Self::AssistantToolCallProtocol {
+                responses_output, ..
+            } => responses_output.as_deref(),
+            _ => None,
         }
     }
 
@@ -898,6 +965,7 @@ mod tests {
             last_assistant_message: Some("final".to_string()),
             last_reasoning_content: None,
             last_reasoning_signature: None,
+            responses_output: None,
         }
         .protocol();
 
@@ -925,6 +993,7 @@ mod tests {
             last_assistant_message: Some(" ".to_string()),
             last_reasoning_content: None,
             last_reasoning_signature: None,
+            responses_output: None,
         }
         .protocol();
 

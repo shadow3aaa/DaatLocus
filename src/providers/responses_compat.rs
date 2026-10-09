@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -13,10 +13,9 @@ use tracing::warn;
 use super::io::{
     default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
     non_empty_string, parse_retry_after_seconds, read_response_text_with_timeout,
-    responses_safe_call_id, send_request_for_streaming_response, truncate_for_error,
-    truncate_for_json_error,
+    send_request_for_streaming_response, truncate_for_error, truncate_for_json_error,
 };
-use super::payload::{flatten_tool_result_as_assistant_text, image_part_data_url};
+use super::payload::image_part_data_url;
 use super::{extract_json_value_from_content, shared_request_rate_limiter};
 use crate::context_budget::{ContextBudgetExceededError, RequestBudgetLimits};
 use crate::core::{
@@ -24,8 +23,8 @@ use crate::core::{
 };
 use crate::model_catalog::catalog_model_capacity;
 use crate::reasoning::runtime::{
-    AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec, AgentToolSpec,
-    AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage, PromptRequest,
+    AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentTurnItem, AgentTurnRequest,
+    AgentTurnStreamResult, HistoryMessage, PromptRequest,
 };
 
 pub struct ResponsesCompatibleClient {
@@ -278,7 +277,9 @@ impl ResponsesCompatibleClient {
         let mut reasoning_content = String::new();
         let mut reasoning_item_content = String::new();
         let mut tool_calls = Vec::new();
+        let mut responses_output = Vec::new();
         let mut completed = false;
+        let mut response_end_turn = None;
         let mut last_assistant_progress_emit_at = Instant::now();
         let mut assistant_char_len = 0usize;
         let mut last_assistant_progress_char_len = 0usize;
@@ -327,7 +328,6 @@ impl ResponsesCompatibleClient {
                     continue;
                 }
                 if data == "[DONE]" {
-                    completed = true;
                     break;
                 }
                 let value: Value = serde_json::from_str(&data).map_err(|err| {
@@ -381,6 +381,9 @@ impl ResponsesCompatibleClient {
                     }
                     Some("response.output_item.done") => {
                         if let Some(item) = value.get("item") {
+                            if super::responses_protocol::replayable_output_item(item) {
+                                responses_output.push(item.clone());
+                            }
                             if let Some(message) = response_item_message_text(item) {
                                 output_messages.push(message);
                             }
@@ -394,6 +397,29 @@ impl ResponsesCompatibleClient {
                     }
                     Some("response.completed") => {
                         completed = true;
+                        response_end_turn = value["response"]["end_turn"].as_bool();
+                        if let Some(output) = value["response"]["output"].as_array()
+                            && !output.is_empty()
+                        {
+                            responses_output.clear();
+                            output_messages.clear();
+                            reasoning_item_content.clear();
+                            tool_calls.clear();
+                            for item in output {
+                                if super::responses_protocol::replayable_output_item(item) {
+                                    responses_output.push(item.clone());
+                                }
+                                if let Some(message) = response_item_message_text(item) {
+                                    output_messages.push(message);
+                                }
+                                if let Some(reasoning) = response_item_reasoning_text(item) {
+                                    reasoning_item_content.push_str(&reasoning);
+                                }
+                                if let Some(call) = response_item_tool_call(item)? {
+                                    tool_calls.push(call);
+                                }
+                            }
+                        }
                         if let Some(usage) = value
                             .get("response")
                             .and_then(|response| response.get("usage"))
@@ -402,7 +428,7 @@ impl ResponsesCompatibleClient {
                             self.record_last_usage(usage);
                         }
                     }
-                    Some("response.failed" | "response.incomplete") => {
+                    Some("error" | "response.failed" | "response.incomplete") => {
                         return Err(miette!(
                             "responses-compatible stream failed: {}",
                             truncate_for_json_error(&value)
@@ -411,6 +437,14 @@ impl ResponsesCompatibleClient {
                     _ => {}
                 }
             }
+        }
+
+        if !completed {
+            return Err(miette!(
+                "Responses stream closed before response.completed (model={}, url={})",
+                self.model,
+                url
+            ));
         }
 
         if reasoning_content.trim().is_empty() {
@@ -453,10 +487,15 @@ impl ResponsesCompatibleClient {
 
         Ok(AgentTurnStreamResult {
             items,
-            raw_stream_follow_up: !tool_calls.is_empty(),
+            raw_stream_follow_up: !tool_calls.is_empty()
+                || super::responses_protocol::output_needs_follow_up(
+                    &responses_output,
+                    response_end_turn,
+                ),
             last_assistant_message: assistant_message,
             last_reasoning_content: non_empty_string(reasoning_content),
             last_reasoning_signature: None,
+            responses_output: (!responses_output.is_empty()).then_some(responses_output),
         })
     }
 }
@@ -655,10 +694,7 @@ fn responses_reasoning_payload(
             .thinking_budget
             .as_deref()
             .is_some_and(super::thinking::thinking_budget_is_none);
-    let effort = client
-        .thinking_budget
-        .as_deref()
-        .filter(|budget| !super::thinking::thinking_budget_is_none(budget));
+    let effort = client.thinking_budget.as_deref();
     if effort.is_none() && !summary {
         return None;
     }
@@ -709,59 +745,11 @@ fn agent_messages_to_responses_parts(
     messages: &[AgentMessage],
     strip_images: bool,
 ) -> (String, Vec<Value>) {
-    let mut instructions = Vec::new();
-    let mut input = Vec::new();
-    let mut valid_tool_call_ids = HashSet::new();
-
-    for message in messages {
-        match message {
-            AgentMessage::System { content } => instructions.push(content.clone()),
-            AgentMessage::User { content } => {
-                input.push(responses_user_message(content, strip_images));
-            }
-            AgentMessage::Assistant { content } => {
-                input.push(responses_message("assistant", "output_text", content));
-            }
-            AgentMessage::AssistantToolCallProtocol { content, calls, .. } => {
-                if let Some(content) = content
-                    .as_deref()
-                    .filter(|content| !content.trim().is_empty())
-                {
-                    input.push(responses_message("assistant", "output_text", content));
-                }
-                for call in calls {
-                    valid_tool_call_ids.insert(call.id.clone());
-                    input.push(json!({
-                        "type": "function_call",
-                        "call_id": responses_safe_call_id(&call.id),
-                        "name": call.name,
-                        "arguments": call.arguments.to_string(),
-                    }));
-                }
-            }
-            AgentMessage::Tool {
-                tool_call_id,
-                name,
-                content,
-            } => {
-                if valid_tool_call_ids.contains(tool_call_id) {
-                    input.push(json!({
-                        "type": "function_call_output",
-                        "call_id": responses_safe_call_id(tool_call_id),
-                        "output": content,
-                    }));
-                } else {
-                    input.push(responses_message(
-                        "assistant",
-                        "output_text",
-                        &flatten_tool_result_as_assistant_text(name, content),
-                    ));
-                }
-            }
-        }
-    }
-
-    (instructions.join("\n\n"), input)
+    super::responses_protocol::messages_to_responses_parts(
+        messages,
+        strip_images,
+        responses_user_message,
+    )
 }
 
 fn responses_message(role: &str, content_type: &str, text: &str) -> Value {
@@ -832,36 +820,9 @@ fn responses_user_message(content: &AgentContent, strip_images: bool) -> Value {
     })
 }
 
-fn agent_tool_to_responses_tool(tool: AgentToolSpec) -> Value {
-    match tool.input_spec {
-        AgentToolInputSpec::JsonSchema { schema } => json!({
-            "type": "function",
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": schema,
-        }),
-        AgentToolInputSpec::FreeformGrammar {
-            syntax,
-            definition,
-            fallback_schema,
-        } => {
-            // Responses API may support custom grammars; try function fallback for compat.
-            json!({
-                "type": "function",
-                "name": tool.name,
-                "description": format!(
-                    "{}\n\nThis is a FREEFORM grammar tool. Put the complete tool input in the `input` field.\nsyntax={syntax}\ndefinition=\n{definition}",
-                    tool.description
-                ),
-                "parameters": fallback_schema,
-            })
-        }
-    }
+fn agent_tool_to_responses_tool(tool: crate::reasoning::runtime::AgentToolSpec) -> Value {
+    super::responses_protocol::tool_to_responses_tool(tool)
 }
-
-// ---------------------------------------------------------------------------
-// Stream event helpers
-// ---------------------------------------------------------------------------
 
 fn responses_event_kind(value: &Value) -> Option<&str> {
     value.get("type").and_then(Value::as_str)
@@ -1185,5 +1146,107 @@ mod tests {
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[1]["type"], "function_call_output");
         assert_eq!(input[1]["call_id"], input[0]["call_id"]);
+    }
+    #[tokio::test]
+    async fn responses_stream_preserves_final_output_and_rejects_missing_completion() {
+        let client = ResponsesCompatibleClient::new(
+            "test-key",
+            "https://example.test/v1",
+            &ModelConfig {
+                model_id: "gpt-6.1-sol".into(),
+                provider: "responses-compatible".into(),
+                ..ModelConfig::default()
+            },
+        );
+        let output = json!([
+            {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "opaque"},
+            {"type": "message", "id": "msg_1", "role": "assistant", "phase": "commentary", "content": [{"type": "output_text", "text": "Checking"}]},
+            {"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_1", "name": "patch", "input": "raw patch"}
+        ]);
+        // A completion containing output must work even without output_item.done.
+        let response = super::super::responses_protocol::test_sse_response(
+            &[
+                json!({"type": "response.output_text.delta", "delta": "Checking"}),
+                json!({"type": "response.output_item.done", "item": output[0]}),
+                json!({"type": "response.completed", "response": {"output": output,
+                "usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110}}}),
+            ],
+            true,
+        )
+        .await;
+        let result = client
+            .parse_responses_stream(None, response, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.responses_output,
+            Some(output.as_array().unwrap().clone())
+        );
+        assert_eq!(result.last_assistant_message.as_deref(), Some("Checking"));
+        assert!(result.raw_stream_follow_up);
+        let protocol = result.protocol();
+        assert_eq!(protocol.tool_calls[0].arguments, json!("raw patch"));
+        assert_eq!(
+            protocol
+                .responses_output_for_tool_call("call_1", true)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            protocol
+                .responses_output_for_tool_call("call_1", false)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        for done in [false, true] {
+            let response = super::super::responses_protocol::test_sse_response(
+                &[json!({"type": "response.output_text.delta", "delta": "partial"})],
+                done,
+            )
+            .await;
+            let error = client
+                .parse_responses_stream(None, response, false)
+                .await
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("before response.completed"));
+        }
+        let response = super::super::responses_protocol::test_sse_response(
+            &[json!({"type": "error", "error": {"message": "backend failure"}})],
+            false,
+        )
+        .await;
+        let error = client
+            .parse_responses_stream(None, response, false)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("backend failure"));
+    }
+    #[test]
+    fn responses_reasoning_efforts_are_not_rewritten_or_dropped() {
+        for effort in ["none", "max", "ultra"] {
+            let config = ModelConfig {
+                model_id: "gpt-6.1-sol".into(),
+                provider: "test".into(),
+                thinking_budget: Some(crate::config::ThinkingBudget::new(effort)),
+                ..ModelConfig::default()
+            };
+            let client = ResponsesCompatibleClient::new("test", "https://example.test/v1", &config);
+            let payload = base_payload(
+                &client,
+                "base",
+                &[],
+                &[],
+                responses_reasoning_payload(&client, "agent"),
+            );
+            assert_eq!(payload["reasoning"]["effort"], effort);
+            if effort == "none" {
+                assert!(payload["reasoning"].get("summary").is_none());
+            }
+        }
     }
 }

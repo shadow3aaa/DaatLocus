@@ -389,11 +389,14 @@ fn estimate_history_message_tokens(message: &HistoryMessage) -> usize {
 }
 
 pub fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {
+    if let Some(output) = message.responses_output() {
+        return 4 + output.iter().map(estimate_json_value_tokens).sum::<usize>();
+    }
     match message {
         AgentMessage::System { content } => message_token_cost("system", content),
         AgentMessage::User { content } => message_token_cost("user", content.as_text())
             .saturating_add(content.parts().len() * 1024),
-        AgentMessage::Assistant { content } => message_token_cost("assistant", content),
+        AgentMessage::Assistant { content, .. } => message_token_cost("assistant", content),
         AgentMessage::AssistantToolCallProtocol {
             content,
             reasoning_content,

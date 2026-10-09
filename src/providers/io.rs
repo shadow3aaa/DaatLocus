@@ -153,7 +153,7 @@ pub fn summarize_prompt_request(
 
 fn agent_message_char_count(message: &AgentMessage) -> usize {
     match message {
-        AgentMessage::System { content } | AgentMessage::Assistant { content } => {
+        AgentMessage::System { content } | AgentMessage::Assistant { content, .. } => {
             content.chars().count()
         }
         AgentMessage::User { content } => {
@@ -263,6 +263,7 @@ pub(super) fn parse_agent_turn_stream_result_from_json(
             last_assistant_message: assistant_message,
             last_reasoning_content: reasoning_content,
             last_reasoning_signature: None,
+            responses_output: None,
         });
     }
 
@@ -281,6 +282,7 @@ pub(super) fn parse_agent_turn_stream_result_from_json(
         last_assistant_message,
         last_reasoning_content: reasoning_content,
         last_reasoning_signature: None,
+        responses_output: None,
     })
 }
 

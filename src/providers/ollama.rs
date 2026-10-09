@@ -851,6 +851,7 @@ impl OllamaClient {
                 last_assistant_message: assistant_message,
                 last_reasoning_content: non_empty_string(cleaned_thinking),
                 last_reasoning_signature: None,
+                responses_output: None,
             });
         }
 
@@ -869,6 +870,7 @@ impl OllamaClient {
             last_assistant_message,
             last_reasoning_content: non_empty_string(cleaned_thinking),
             last_reasoning_signature: None,
+            responses_output: None,
         })
     }
 }
@@ -1042,7 +1044,7 @@ fn agent_message_to_ollama_content(
             }
             msg
         }
-        AgentMessage::Assistant { content } => json!({
+        AgentMessage::Assistant { content, .. } => json!({
             "role": "assistant",
             "content": content,
         }),

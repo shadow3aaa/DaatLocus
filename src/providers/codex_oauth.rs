@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     env,
     path::{Path, PathBuf},
     sync::{
@@ -25,10 +25,10 @@ use crate::{
     core::{ModelProgressSink, ModelProvider, ModelRequestOptions, TokenUsage, TokenUsageInfo},
     daat_locus_paths::daat_locus_paths_sync,
     persistence::{PersistenceFileMode, write_bytes_atomic},
-    providers::thinking::{responses_reasoning_effort, thinking_budget_is_none},
+    providers::thinking::thinking_budget_is_none,
     reasoning::runtime::{
-        AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec,
-        AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage, PromptRequest,
+        AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentTurnItem,
+        AgentTurnRequest, AgentTurnStreamResult, HistoryMessage, PromptRequest,
     },
 };
 
@@ -39,13 +39,11 @@ use super::{
     truncate_for_error, truncate_for_json_error,
 };
 
-use super::io::responses_safe_call_id;
-
 const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_OAUTH_REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_OAUTH_REFRESH_URL_OVERRIDE_ENV: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
 const CODEX_RESPONSES_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-const CODEX_CLIENT_VERSION: &str = "0.156.1";
+const CODEX_CLIENT_VERSION: &str = "0.162.0";
 const CODEX_CLIENT_VERSION_OVERRIDE_ENV: &str = "CODEX_CLIENT_VERSION_OVERRIDE";
 const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const CODEX_SESSION_ID_HEADER: &str = "session-id";
@@ -306,12 +304,7 @@ impl CodexResponsesClient {
                 .post(&url)
                 .bearer_auth(&self.api_key)
                 .headers(self.extra_headers.clone())
-                .header("version", &self.client_version)
-                .header("originator", CODEX_ORIGINATOR)
-                .header(
-                    reqwest::header::USER_AGENT,
-                    codex_user_agent(&self.client_version),
-                );
+                .headers(codex_oauth_headers(&self.client_version));
             if let Some(identity) = request_identity {
                 request = request
                     .header(CODEX_SESSION_ID_HEADER, &identity.session_id)
@@ -554,7 +547,9 @@ impl CodexResponsesClient {
         let mut reasoning_content = String::new();
         let mut reasoning_item_content = String::new();
         let mut tool_calls = Vec::new();
+        let mut responses_output = Vec::new();
         let mut completed = false;
+        let mut response_end_turn = None;
         let mut last_assistant_progress_emit_at = Instant::now();
         let mut assistant_char_len = 0usize;
         let mut last_assistant_progress_char_len = 0usize;
@@ -603,7 +598,6 @@ impl CodexResponsesClient {
                     continue;
                 }
                 if data == "[DONE]" {
-                    completed = true;
                     break;
                 }
                 let value: Value = serde_json::from_str(&data).map_err(|err| {
@@ -657,6 +651,9 @@ impl CodexResponsesClient {
                     }
                     Some("response.output_item.done") => {
                         if let Some(item) = value.get("item") {
+                            if super::responses_protocol::replayable_output_item(item) {
+                                responses_output.push(item.clone());
+                            }
                             if let Some(message) = response_item_message_text(item) {
                                 output_messages.push(message);
                             }
@@ -670,6 +667,29 @@ impl CodexResponsesClient {
                     }
                     Some("response.completed") => {
                         completed = true;
+                        response_end_turn = value["response"]["end_turn"].as_bool();
+                        if let Some(output) = value["response"]["output"].as_array()
+                            && !output.is_empty()
+                        {
+                            responses_output.clear();
+                            output_messages.clear();
+                            reasoning_item_content.clear();
+                            tool_calls.clear();
+                            for item in output {
+                                if super::responses_protocol::replayable_output_item(item) {
+                                    responses_output.push(item.clone());
+                                }
+                                if let Some(message) = response_item_message_text(item) {
+                                    output_messages.push(message);
+                                }
+                                if let Some(reasoning) = response_item_reasoning_text(item) {
+                                    reasoning_item_content.push_str(&reasoning);
+                                }
+                                if let Some(call) = response_item_tool_call(item)? {
+                                    tool_calls.push(call);
+                                }
+                            }
+                        }
                         if let Some(usage) = value
                             .get("response")
                             .and_then(|response| response.get("usage"))
@@ -678,7 +698,7 @@ impl CodexResponsesClient {
                             self.record_last_usage(usage);
                         }
                     }
-                    Some("response.failed" | "response.incomplete") => {
+                    Some("error" | "response.failed" | "response.incomplete") => {
                         return Err(miette!(
                             "Codex Responses stream failed: {}",
                             truncate_for_json_error(&value)
@@ -687,6 +707,14 @@ impl CodexResponsesClient {
                     _ => {}
                 }
             }
+        }
+
+        if !completed {
+            return Err(miette!(
+                "Responses stream closed before response.completed (model={}, url={})",
+                self.model,
+                url
+            ));
         }
 
         if reasoning_content.trim().is_empty() {
@@ -729,10 +757,15 @@ impl CodexResponsesClient {
 
         Ok(AgentTurnStreamResult {
             items,
-            raw_stream_follow_up: !tool_calls.is_empty(),
+            raw_stream_follow_up: !tool_calls.is_empty()
+                || super::responses_protocol::output_needs_follow_up(
+                    &responses_output,
+                    response_end_turn,
+                ),
             last_assistant_message: assistant_message,
             last_reasoning_content: non_empty_string(reasoning_content),
             last_reasoning_signature: None,
+            responses_output: (!responses_output.is_empty()).then_some(responses_output),
         })
     }
 
@@ -979,10 +1012,7 @@ fn codex_reasoning_payload(client: &CodexResponsesClient, request_kind: &str) ->
             .thinking_budget
             .as_deref()
             .is_some_and(thinking_budget_is_none);
-    let effort = client
-        .thinking_budget
-        .as_deref()
-        .map(responses_reasoning_effort);
+    let effort = client.thinking_budget.as_deref();
     if effort.is_none() && !reasoning_summary {
         return None;
     }
@@ -1025,59 +1055,11 @@ fn agent_messages_to_responses_parts(
     messages: &[AgentMessage],
     strip_images: bool,
 ) -> (String, Vec<Value>) {
-    let mut instructions = Vec::new();
-    let mut input = Vec::new();
-    let mut valid_tool_call_ids = HashSet::new();
-
-    for message in messages {
-        match message {
-            AgentMessage::System { content } => instructions.push(content.clone()),
-            AgentMessage::User { content } => {
-                input.push(responses_user_message(content, strip_images));
-            }
-            AgentMessage::Assistant { content } => {
-                input.push(responses_message("assistant", "output_text", content));
-            }
-            AgentMessage::AssistantToolCallProtocol { content, calls, .. } => {
-                if let Some(content) = content
-                    .as_deref()
-                    .filter(|content| !content.trim().is_empty())
-                {
-                    input.push(responses_message("assistant", "output_text", content));
-                }
-                for call in calls {
-                    valid_tool_call_ids.insert(call.id.clone());
-                    input.push(json!({
-                        "type": "function_call",
-                        "call_id": responses_safe_call_id(&call.id),
-                        "name": call.name,
-                        "arguments": call.arguments.to_string(),
-                    }));
-                }
-            }
-            AgentMessage::Tool {
-                tool_call_id,
-                name,
-                content,
-            } => {
-                if valid_tool_call_ids.contains(tool_call_id) {
-                    input.push(json!({
-                        "type": "function_call_output",
-                        "call_id": responses_safe_call_id(tool_call_id),
-                        "output": content,
-                    }));
-                } else {
-                    input.push(responses_message(
-                        "assistant",
-                        "output_text",
-                        &super::flatten_tool_result_as_assistant_text(name, content),
-                    ));
-                }
-            }
-        }
-    }
-
-    (instructions.join("\n\n"), input)
+    super::responses_protocol::messages_to_responses_parts(
+        messages,
+        strip_images,
+        responses_user_message,
+    )
 }
 
 fn responses_message(role: &str, content_type: &str, text: &str) -> Value {
@@ -1149,48 +1131,7 @@ fn responses_user_message(content: &AgentContent, strip_images: bool) -> Value {
 }
 
 fn agent_tool_to_responses_tool(tool: crate::reasoning::runtime::AgentToolSpec) -> Value {
-    match tool.input_spec {
-        AgentToolInputSpec::JsonSchema { schema } => json!({
-            "type": "function",
-            "name": tool.name,
-            "description": tool.description,
-            "strict": true,
-            "parameters": schema,
-        }),
-        AgentToolInputSpec::FreeformGrammar {
-            syntax,
-            definition,
-            fallback_schema,
-        } => {
-            if codex_responses_supports_custom_tool_grammar(&syntax) {
-                json!({
-                    "type": "custom",
-                    "name": tool.name,
-                    "description": tool.description,
-                    "format": {
-                        "type": "grammar",
-                        "syntax": syntax,
-                        "definition": definition,
-                    },
-                })
-            } else {
-                json!({
-                    "type": "function",
-                    "name": tool.name,
-                    "description": format!(
-                        "{}\n\nThis is a FREEFORM grammar tool. Codex Responses only accepts `lark` or `regex` custom tool grammars, so this provider falls back to single-string input: put the complete tool input in the `input` field.\nsyntax={syntax}\ndefinition=\n{definition}",
-                        tool.description
-                    ),
-                    "strict": false,
-                    "parameters": fallback_schema,
-                })
-            }
-        }
-    }
-}
-
-fn codex_responses_supports_custom_tool_grammar(syntax: &str) -> bool {
-    matches!(syntax, "lark" | "regex")
+    super::responses_protocol::tool_to_responses_tool(tool)
 }
 
 fn sanitize_text_format_name(name: &str) -> String {
@@ -1384,6 +1325,19 @@ pub fn codex_oauth_client_version() -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| CODEX_CLIENT_VERSION.to_string())
+}
+
+pub(crate) fn codex_oauth_headers(client_version: &str) -> reqwest::header::HeaderMap {
+    use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+    let mut headers = HeaderMap::new();
+    headers.insert("originator", HeaderValue::from_static(CODEX_ORIGINATOR));
+    if let Ok(version) = HeaderValue::from_str(client_version) {
+        headers.insert("version", version);
+    }
+    if let Ok(user_agent) = HeaderValue::from_str(&codex_user_agent(client_version)) {
+        headers.insert(USER_AGENT, user_agent);
+    }
+    headers
 }
 
 /// Builds the Codex CLI compatible `User-Agent` header value.
@@ -1639,6 +1593,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reasoning::runtime::AgentToolInputSpec;
 
     fn json_contains_key(value: &Value, needle: &str) -> bool {
         match value {
@@ -1812,7 +1767,7 @@ mod tests {
 
     #[test]
     fn codex_oauth_client_version_defaults_to_latest_supported_cli() {
-        assert_eq!(codex_oauth_client_version(), "0.156.1");
+        assert_eq!(codex_oauth_client_version(), "0.162.0");
     }
 
     #[test]
@@ -2117,7 +2072,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_thinking_budget_max_maps_to_xhigh() {
+    fn codex_thinking_budget_preserves_max() {
         let client = CodexResponsesClient::new(
             CODEX_RESPONSES_BASE_URL,
             &ModelConfig {
@@ -2130,7 +2085,7 @@ mod tests {
 
         let payload = base_responses_payload(&client, "instructions", &[], &[], None, "agent");
 
-        assert_eq!(payload["reasoning"]["effort"], "xhigh");
+        assert_eq!(payload["reasoning"]["effort"], "max");
         assert_eq!(payload["reasoning"]["summary"], "auto");
     }
 
@@ -2151,7 +2106,7 @@ mod tests {
 
         let payload = base_responses_payload(&client, "instructions", &[], &[], None, "agent");
 
-        assert_eq!(payload["reasoning"]["effort"], "xhigh");
+        assert_eq!(payload["reasoning"]["effort"], "max");
         assert!(payload["reasoning"].get("summary").is_none(), "{payload:#}");
     }
 
@@ -2256,7 +2211,7 @@ mod tests {
         assert_eq!(payload["tools"][0]["name"], "update_plan");
         assert_eq!(payload["tools"][1]["type"], "function");
         assert_eq!(payload["tools"][1]["name"], "custom_patch");
-        assert_eq!(payload["tools"][1]["strict"], false);
+        assert_eq!(payload["tools"][1]["strict"], true);
         assert_eq!(
             payload["tools"][1]["parameters"]["properties"]["input"]["type"],
             "string"
@@ -2522,5 +2477,93 @@ mod tests {
         assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.reasoning_output_tokens, 2);
         assert_eq!(usage.total_tokens, 15);
+    }
+    #[tokio::test]
+    async fn responses_stream_preserves_final_output_and_rejects_missing_completion() {
+        let client = test_client();
+        let output = json!([
+            {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "opaque"},
+            {"type": "message", "id": "msg_1", "role": "assistant", "phase": "commentary", "content": [{"type": "output_text", "text": "Checking"}]},
+            {"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_1", "name": "patch", "input": "raw patch"}
+        ]);
+        // A completion containing output must work even without output_item.done.
+        let response = super::super::responses_protocol::test_sse_response(
+            &[
+                json!({"type": "response.output_text.delta", "delta": "Checking"}),
+                json!({"type": "response.output_item.done", "item": output[0]}),
+                json!({"type": "response.completed", "response": {"output": output,
+                "usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110}}}),
+            ],
+            true,
+        )
+        .await;
+        let result = client
+            .parse_responses_stream(None, response, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.responses_output,
+            Some(output.as_array().unwrap().clone())
+        );
+        assert_eq!(result.last_assistant_message.as_deref(), Some("Checking"));
+        assert!(result.raw_stream_follow_up);
+        let protocol = result.protocol();
+        assert_eq!(protocol.tool_calls[0].arguments, json!("raw patch"));
+        assert_eq!(
+            protocol
+                .responses_output_for_tool_call("call_1", true)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            protocol
+                .responses_output_for_tool_call("call_1", false)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        for done in [false, true] {
+            let response = super::super::responses_protocol::test_sse_response(
+                &[json!({"type": "response.output_text.delta", "delta": "partial"})],
+                done,
+            )
+            .await;
+            let error = client
+                .parse_responses_stream(None, response, false)
+                .await
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("before response.completed"));
+        }
+        let response = super::super::responses_protocol::test_sse_response(
+            &[json!({"type": "error", "error": {"message": "backend failure"}})],
+            false,
+        )
+        .await;
+        let error = client
+            .parse_responses_stream(None, response, false)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("backend failure"));
+    }
+    #[test]
+    fn responses_reasoning_efforts_are_not_rewritten_or_dropped() {
+        for effort in ["none", "max", "ultra"] {
+            let config = ModelConfig {
+                model_id: "gpt-6.1-sol".into(),
+                provider: "test".into(),
+                thinking_budget: Some(crate::config::ThinkingBudget::new(effort)),
+                ..ModelConfig::default()
+            };
+            let client = CodexResponsesClient::new(CODEX_RESPONSES_BASE_URL, &config);
+            let payload = base_responses_payload(&client, "base", &[], &[], None, "agent");
+            assert_eq!(payload["reasoning"]["effort"], effort);
+            if effort == "none" {
+                assert!(payload["reasoning"].get("summary").is_none());
+            }
+        }
     }
 }

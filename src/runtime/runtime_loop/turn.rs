@@ -748,6 +748,21 @@ pub async fn execute_agent_loop_step(
             }
         };
         let response_protocol = response.protocol();
+        let response_call_outputs = response_protocol
+            .tool_calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| {
+                response_protocol.responses_output_for_tool_call(
+                    &call.id,
+                    index == 0
+                        && response_protocol
+                            .assistant_text
+                            .as_deref()
+                            .is_none_or(|text| text.trim().is_empty()),
+                )
+            })
+            .collect::<Vec<_>>();
         let follow_up_message = response_protocol.follow_up_message(
             claimed_events_require_explicit_completion(context, &claimed_event_ids),
             MAIN_EXPLICIT_COMPLETION_MESSAGE,
@@ -756,6 +771,7 @@ pub async fn execute_agent_loop_step(
         let response_assistant_text = response_protocol.assistant_text;
         let response_reasoning_content = response_protocol.reasoning_content;
         let response_reasoning_signature = response_protocol.reasoning_signature;
+        let response_responses_output = response_protocol.responses_output;
         let response_assistant_content = response_protocol.final_assistant_message;
         if let Some(reasoning_content) = response_reasoning_content.as_deref() {
             context.emit_live_reasoning_progress(reasoning_content);
@@ -787,12 +803,25 @@ pub async fn execute_agent_loop_step(
                     response_reasoning_content.clone(),
                     response_reasoning_signature.clone(),
                     calls.clone(),
-                ),
+                )
+                .with_responses_output(response_responses_output.clone()),
             );
             if let Some(content) = assistant_text.clone()
                 && !content.trim().is_empty()
             {
-                runtime_step.push_history_message(HistoryMessage::assistant(content));
+                runtime_step.push_history_message(
+                    HistoryMessage::assistant(content).with_responses_output(
+                        response_responses_output.as_ref().map(|output| {
+                            output
+                                .iter()
+                                .filter(|item| {
+                                    item["type"] == "message" || item["type"] == "reasoning"
+                                })
+                                .cloned()
+                                .collect()
+                        }),
+                    ),
+                );
                 checkpoint_runtime_step_history(context, &mut runtime_step);
             }
             let mut committed_cells = Vec::new();
@@ -1014,7 +1043,8 @@ pub async fn execute_agent_loop_step(
                             .then(|| response_reasoning_signature.clone())
                             .flatten(),
                         vec![call.clone()],
-                    ),
+                    )
+                    .with_responses_output(response_call_outputs[call_index].clone()),
                     activity_event: None,
                     tool_call_activity_events,
                 });
@@ -1138,9 +1168,14 @@ pub async fn execute_agent_loop_step(
                 .await;
             }
             if !assistant_text.trim().is_empty() {
-                runtime_step.push_agent_message(AgentMessage::assistant(&assistant_text));
-                runtime_step
-                    .push_history_message(HistoryMessage::assistant(assistant_text.clone()));
+                runtime_step.push_agent_message(
+                    AgentMessage::assistant(&assistant_text)
+                        .with_responses_output(response_responses_output.clone()),
+                );
+                runtime_step.push_history_message(
+                    HistoryMessage::assistant(assistant_text.clone())
+                        .with_responses_output(response_responses_output.clone()),
+                );
                 checkpoint_runtime_step_history(context, &mut runtime_step);
             }
             runtime_step.push_agent_message(AgentMessage::user(expected_behavior));
@@ -1159,7 +1194,10 @@ pub async fn execute_agent_loop_step(
         };
         actions.push(assistant_action);
         runtime_step.set_current_doing(current_doing.clone());
-        runtime_step.push_history_message(HistoryMessage::assistant(assistant_text.clone()));
+        runtime_step.push_history_message(
+            HistoryMessage::assistant(assistant_text.clone())
+                .with_responses_output(response_responses_output),
+        );
         checkpoint_runtime_step_history(context, &mut runtime_step);
         if let Some(cell) = assistant_activity_cell(&assistant_text) {
             append_committed_activity_cells(context, tx, vec![cell]);

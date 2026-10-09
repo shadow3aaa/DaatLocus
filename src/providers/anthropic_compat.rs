@@ -908,7 +908,7 @@ fn agent_messages_to_anthropic(
                     anthropic_user_blocks(content, strip_images),
                 );
             }
-            AgentMessage::Assistant { content } => {
+            AgentMessage::Assistant { content, .. } => {
                 if !content.trim().is_empty() {
                     push_message_blocks(
                         &mut anthropic_messages,
@@ -922,6 +922,7 @@ fn agent_messages_to_anthropic(
                 reasoning_content,
                 reasoning_signature,
                 calls,
+                ..
             } => {
                 let mut blocks = Vec::new();
                 // Replay the signed thinking block first: Anthropic requires the
@@ -1511,6 +1512,7 @@ impl AnthropicStreamState {
             last_assistant_message: assistant_message,
             last_reasoning_content: non_empty_string(self.reasoning_text()),
             last_reasoning_signature: self.reasoning_signature(),
+            responses_output: None,
         }
     }
 }
