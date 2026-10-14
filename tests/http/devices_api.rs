@@ -254,29 +254,22 @@ async fn a_paired_device_without_enrollment_authority_cannot_import_login_creden
 
 #[tokio::test]
 async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_account_grants() {
-    use daat_locus::stage::{
-        ledger::{ActorGrant, StageLedger},
-        shared_store,
-    };
+    use daat_locus::stage::ledger::StageLedger;
     let a = Fixture::new().await;
     let b = Fixture::with_config_and_account(a.system.config(), false).await;
     a.stage.host.initialize(true).unwrap();
     let request = b.stage.host.initialize(false).unwrap();
     let target = a.child("remote-source").await;
     let secret = a.child("private-source").await;
-    let enrollment = fixture_enrollment(
-        &a.stage.host,
-        &request,
-        true,
-        vec![ActorGrant {
-            actor_id: target.clone(),
-            read: true,
-            converse: true,
-            delegate: false,
-            read_only: true,
-        }],
-    )
-    .unwrap();
+    // A recorded foreign account is never adopted during legacy-tree migration.
+    rusqlite::Connection::open(a._temp.path().join("actors/actors.sqlite3"))
+        .unwrap()
+        .execute(
+            "INSERT INTO stage_account_actors VALUES(?1,'another-account')",
+            [&secret],
+        )
+        .unwrap();
+    let enrollment = fixture_enrollment(&a.stage.host, &request, true, vec![]).unwrap();
     b.stage
         .host
         .join(enrollment, &a.stage.host.account_id().unwrap())
@@ -309,6 +302,35 @@ async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_ac
     .unwrap();
     b.login_cookie().await;
     let path = format!("/v1/stages/{}/actors/{target}", a.stage.host.local);
+    let detail = b.owner(reqwest::Method::GET, &path).send().await.unwrap();
+    assert_eq!(detail.status(), StatusCode::OK);
+    let detail: Value = detail.json().await.unwrap();
+    assert_eq!(detail["access"]["manage"], true);
+    assert_eq!(detail["model_ready"], true);
+    assert_eq!(
+        detail["conversation_url"],
+        format!("/stages/{}/actors/{target}", a.stage.host.local)
+    );
+    // Actors created through the Core hierarchy need no per-device grants either.
+    let hosted = a
+        .system
+        .create_owned("core", a.system.actor(&target).unwrap().config)
+        .unwrap();
+    let nested = a
+        .system
+        .create_owned(&hosted.id, hosted.config.clone())
+        .unwrap();
+    for id in [&hosted.id, &nested.id] {
+        let response = b
+            .owner(
+                reqwest::Method::GET,
+                &format!("/v1/stages/{}/actors/{id}/messages", a.stage.host.local),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
     let denied = format!("/v1/stages/{}/actors/{secret}", a.stage.host.local);
     assert_eq!(
         b.owner(reqwest::Method::GET, &denied)
@@ -325,7 +347,7 @@ async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_ac
             .await
             .unwrap()
             .status(),
-        StatusCode::FORBIDDEN
+        StatusCode::OK
     );
     assert_eq!(
         b.owner(reqwest::Method::PUT, &path)
@@ -398,10 +420,6 @@ async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_ac
         .unwrap();
     assert_eq!(download.status(), StatusCode::OK);
     assert_eq!(download.text().await.unwrap(), "remote attachment");
-    // Promotion to account ownership is explicit source bookkeeping in this fixture.
-    shared_store::initialize(a.system.store(), &a.stage.host.account_id().unwrap()).unwrap();
-    daat_locus::stage::ledger::inherit_account_ownership(a.system.store(), "core", &target)
-        .unwrap();
     let changed = b
         .owner(reqwest::Method::PATCH, &path)
         .json(&json!({"model":null}))

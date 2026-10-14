@@ -209,6 +209,33 @@ pub fn inherit_account_ownership(store: &ActorStore, parent: &str, actor: &str) 
         if let Some(account)=account{tx.execute("INSERT INTO stage_account_actors VALUES(?1,?2)",params![actor,account])?;}Ok(())
     })
 }
+/// Bind the device's existing Actor tree when its verified account core starts.
+/// Never overwrite a recorded account or traverse through another account's Actor.
+pub(crate) fn initialize_account_ownership(store: &ActorStore, account: &str) -> Result<()> {
+    store.stage_transaction(|tx| {
+        let trusted: TrustRoot = decode(tx.query_row(
+            "SELECT value FROM stage_meta WHERE key='root'", [], |r| r.get(0),
+        )?)?;
+        let core: String = tx.query_row(
+            "SELECT value FROM core_meta WHERE key='account'", [], |r| r.get(0),
+        )?;
+        if trusted.group_id != account || core != account {
+            return Err(StageError::Forbidden("Actor account does not match device trust"));
+        }
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
+        tx.execute(
+            "WITH RECURSIVE owned(actor) AS (
+                SELECT id FROM actors WHERE id IN ('root','core')
+                  AND NOT EXISTS(SELECT 1 FROM stage_account_actors WHERE actor=id AND account!=?1)
+                UNION
+                SELECT a.id FROM actors a JOIN owned o ON a.parent_id=o.actor
+                  WHERE NOT EXISTS(SELECT 1 FROM stage_account_actors WHERE actor=a.id AND account!=?1)
+             ) INSERT OR IGNORE INTO stage_account_actors SELECT actor,?1 FROM owned",
+            [account],
+        )?;
+        Ok(())
+    })
+}
 pub(crate) fn core_read(tx: &Transaction<'_>, actor: &str) -> Result<bool> {
     if actor != super::shared::ACTOR_ID {
         return Ok(false);
@@ -1890,6 +1917,43 @@ mod tests {
             })
             .unwrap();
         assert!(fixture.ledger().accept(frame.source, &frame, 2001).is_err());
+    }
+    #[test]
+    fn account_tree_migration_preserves_foreign_ownership_and_device_revocation() {
+        let fixture = Fixture::new();
+        let account = fixture.enrollment.root.group_id.clone();
+        super::super::shared_store::initialize(&fixture.store, &account).unwrap();
+        let root = fixture.store.actor("root").unwrap();
+        for (id, parent) in [
+            ("legacy", "root"),
+            ("nested", "legacy"),
+            ("foreign", "root"),
+            ("foreign-child", "foreign"),
+        ] {
+            let mut actor = root.clone();
+            actor.id = id.into();
+            actor.parent_id = Some(parent.into());
+            actor.depth = 1;
+            fixture.store.save_actor(&actor).unwrap();
+        }
+        fixture.store.stage_transaction(|tx| {
+            tx.execute_batch("CREATE TABLE stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL); INSERT INTO stage_account_actors VALUES('foreign','another-account');")?;
+            Ok(())
+        }).unwrap();
+        initialize_account_ownership(&fixture.store, &account).unwrap();
+        initialize_account_ownership(&fixture.store, &account).unwrap();
+        let peer = fixture.remote.profile().stage_id;
+        for id in ["legacy", "nested"] {
+            assert!(fixture.ledger().actor_grant(peer, id, 2001).unwrap().read);
+            assert!(fixture.ledger().manages_actor(peer, id, 2001).unwrap());
+        }
+        for id in ["foreign", "foreign-child"] {
+            assert!(fixture.ledger().actor_grant(peer, id, 2001).is_err());
+            assert!(!fixture.ledger().manages_actor(peer, id, 2001).unwrap());
+        }
+        assert!(initialize_account_ownership(&fixture.store, "another-account").is_err());
+        fixture.ledger().revoke(peer).unwrap();
+        assert!(fixture.ledger().actor_grant(peer, "legacy", 2001).is_err());
     }
     #[test]
     fn old_retry_cannot_reexecute_after_confirmed_dedup_cleanup() {

@@ -243,6 +243,10 @@ WebUI 根据中英文目录显示简短提示和可反馈的错误码，不显�
 配置和账号查询；`/v1/stages/{stage}/actors/{actor}` 经认证设备通道访问宿主。
 对话链接只是定位符，Owner 可以直接访问任意 Actor。Cookie 写操作要求受信
 Origin 和 `X-Daat-Request: 1`，不信任 Host/Forwarded，不使用宽泛 CORS。
+账号 Core 启动时，将本机 root/Core 的既有 Actor 树补齐到已验证账号；已记录的
+其他账号归属及其子树不被覆盖。新 Actor 继承父级归属，同账号设备无需逐个授权
+即可访问。派遣结果的对话链接携带宿主设备 ID，旧 Core 结果通过原始设备参数
+恢复定位。远端对话的模型就绪状态由宿主提供，客户端本机配置不阻止远端输入。
 
 `/v1/stage/status` 仅返回当前 Core 同步、执行就绪与公网登录发布状态，每次查询重新认证。
 WebUI 串行查询该小型状态；同步完成且存在有效 worker 时才开放 Core 输入，

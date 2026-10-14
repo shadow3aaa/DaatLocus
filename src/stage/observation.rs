@@ -117,6 +117,7 @@ pub fn read(
         Query::Actor => {
             let manages=StageLedger::attach(system.store(),local).manages_actor(peer,&actor.actor_id,now)?;
             let mut value=json!({"id":source.id,"name":source.config.name,"conversation_url":actor.conversation_url(),"status":source.status,"created_at_ms":source.created_at_ms,"updated_at_ms":source.updated_at_ms,"access":{"view":true,"converse":grant.converse,"manage":manages},"remote":true});
+            value["model_ready"] = crate::config_setup::readiness_for_config(&system.config()).is_complete().into();
             if manages{value["config"]=serde_json::to_value(&source.config).map_err(|_|StageError::Invalid("Invalid Actor config"))?;}Ok(value)
         },
         Query::Messages {before,limit} => serde_json::to_value(system.store().messages(&actor.actor_id,*before,*limit as usize).map_err(fail)?),

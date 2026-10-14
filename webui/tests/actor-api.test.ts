@@ -1,7 +1,14 @@
 import { SseParser } from "../src/lib/event-stream";
 import { afterEach, describe, expect, test } from "bun:test";
-import { ActorApiError, listToolSummaries, logoutSession, patchActorPreferences, saveConfig, subscribeActorEvents, uploadAttachment, type EventRecord } from "../src/lib/actor-api";
+import { ActorApiError, actorModelReady, listToolSummaries, logoutSession, patchActorPreferences, saveConfig, subscribeActorEvents, uploadAttachment, type ActorDetail, type EventRecord } from "../src/lib/actor-api";
 const originalFetch = globalThis.fetch;
+test("remote conversations use host readiness even when this phone has no usable model", () => {
+  const actor: ActorDetail = {id:"host~task",remote:true,model_ready:true,conversation_url:"/stages/host/actors/task",status:"idle",created_at_ms:1,updated_at_ms:1};
+  expect(actorModelReady(actor, false)).toBe(true);
+  expect(actorModelReady({...actor, model_ready:false}, true)).toBe(false);
+  expect(actorModelReady({...actor, remote:false}, false)).toBe(false);
+  expect(actorModelReady({...actor, model_ready:undefined}, false)).toBe(true);
+});
 afterEach(() => { globalThis.fetch = originalFetch; });
 test("renaming a provider carries its credential reference without exposing a stored key", async () => {
   let sent: Record<string, unknown> = {};
