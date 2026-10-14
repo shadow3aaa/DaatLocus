@@ -366,12 +366,12 @@ impl OpenAIClient {
                 self.current_adapter()
                     .build_prompt_payload(self, &request, output_schema.clone());
             let response = backend_request
-                .post(&payload, &request_context, self.stream_idle_timeout)
+                .post(&payload, &request_context, self.request_timeout)
                 .await?;
             let status = response.status();
             let body = read_response_text_with_timeout(
                 response,
-                self.stream_idle_timeout,
+                self.request_timeout,
                 "llm response body read failed",
                 &url,
                 &request_context,
@@ -676,11 +676,14 @@ impl OpenAIClient {
             let next_chunk = tokio::time::timeout(self.stream_idle_timeout, stream.next())
                 .await
                 .map_err(|_| {
-                    miette!(
-                        "llm streaming response stalled for over {}s (model={}, url={})",
-                        self.stream_idle_timeout.as_secs(),
-                        self.model,
-                        url
+                    ModelRequestFailure::report(
+                        ModelFailureKind::Timeout,
+                        format!(
+                            "llm streaming response stalled for over {}s (model={}, url={})",
+                            self.stream_idle_timeout.as_secs(),
+                            self.model,
+                            url
+                        ),
                     )
                 })?;
             let Some(chunk) = next_chunk else {

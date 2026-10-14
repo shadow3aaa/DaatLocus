@@ -177,8 +177,7 @@ impl ModelConfig {
     }
 
     pub fn stream_idle_timeout_secs(&self) -> u64 {
-        self.stream_idle_timeout_secs
-            .max(DEFAULT_STREAM_IDLE_TIMEOUT_SECS)
+        self.stream_idle_timeout_secs.max(1)
     }
 
     pub fn context_window_tokens(&self) -> usize {
@@ -715,15 +714,24 @@ thinking_budget = "xhigh"
     }
 
     #[test]
-    fn stream_idle_timeout_has_long_reasoning_floor() {
+    fn stream_idle_timeout_honors_configuration_with_a_positive_minimum() {
         let model = ModelConfig {
             stream_idle_timeout_secs: 45,
             ..Default::default()
         };
 
+        assert_eq!(model.stream_idle_timeout_secs(), 45);
         assert_eq!(
-            model.stream_idle_timeout_secs(),
+            ModelConfig::default().stream_idle_timeout_secs(),
             DEFAULT_STREAM_IDLE_TIMEOUT_SECS
+        );
+        assert_eq!(
+            ModelConfig {
+                stream_idle_timeout_secs: 0,
+                ..Default::default()
+            }
+            .stream_idle_timeout_secs(),
+            1
         );
     }
 

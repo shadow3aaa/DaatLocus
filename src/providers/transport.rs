@@ -307,6 +307,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_timeouts_remain_typed_for_main_and_independent_requests() {
+        use crate::providers::{ModelFailureKind, ModelRequestFailure};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().fallback(post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                axum::body::Body::from_stream(futures_util::stream::pending::<
+                    Result<axum::body::Bytes, std::convert::Infallible>,
+                >()),
+            )
+        }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base = format!("http://{address}/v1");
+        let model = ModelConfig {
+            request_timeout_secs: 1,
+            stream_idle_timeout_secs: 1,
+            ..Default::default()
+        };
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut chat = super::super::OpenAIClient::from_parts("fixture-key", &base, &model);
+        chat.transport.client = client.clone();
+        let mut responses = super::super::responses_compat::ResponsesCompatibleClient::new(
+            "fixture-key",
+            &base,
+            &model,
+        );
+        responses.set_test_client(client.clone());
+        let mut anthropic = super::super::anthropic_compat::AnthropicCompatibleClient::new(
+            "fixture-key",
+            &base,
+            &model,
+        );
+        anthropic.set_test_client(client);
+        let providers: Vec<Box<dyn ModelProvider>> =
+            vec![Box::new(chat), Box::new(responses), Box::new(anthropic)];
+        for provider in providers {
+            let request = AgentTurnRequest {
+                messages: vec![AgentMessage::user("Test")],
+                tools: vec![],
+            };
+            let options =
+                ModelRequestOptions::for_agent_turn(provider.as_ref(), &request, None).unwrap();
+            let error = provider
+                .complete_agent_turn(request, options)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.downcast_ref::<ModelRequestFailure>().unwrap().kind,
+                ModelFailureKind::Timeout
+            );
+            let request = PromptRequest {
+                tool_name: "review_app_call".into(),
+                tool_description: "Review".into(),
+                output_schema: crate::schema_utils::model_schema_for::<Verdict>(),
+                system_messages: vec![],
+                history_messages: vec![],
+                retry_messages: vec![],
+                current_user_message: "Review".into(),
+            };
+            let options =
+                ModelRequestOptions::for_prompt(provider.as_ref(), &request, None).unwrap();
+            let error = provider.complete_json(request, options).await.unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<ModelRequestFailure>().unwrap().kind,
+                ModelFailureKind::Timeout
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn opencode_direct_urls_classify_failures_across_all_protocols() {
         use crate::providers::{ModelFailureKind, ModelRequestFailure};
         for (status, error_type, message, expected) in [

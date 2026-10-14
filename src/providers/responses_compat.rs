@@ -155,11 +155,14 @@ impl ResponsesCompatibleClient {
             let next_chunk = tokio::time::timeout(self.stream_idle_timeout, stream.next())
                 .await
                 .map_err(|_| {
-                    miette!(
-                        "responses-compatible stream stalled for over {}s (model={}, url={})",
-                        self.stream_idle_timeout.as_secs(),
-                        self.model,
-                        url
+                    super::ModelRequestFailure::report(
+                        super::ModelFailureKind::Timeout,
+                        format!(
+                            "responses-compatible stream stalled for over {}s (model={}, url={})",
+                            self.stream_idle_timeout.as_secs(),
+                            self.model,
+                            url
+                        ),
                     )
                 })?;
             let Some(chunk) = next_chunk else {
