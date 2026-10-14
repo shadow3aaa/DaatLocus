@@ -58,8 +58,9 @@ export function activityIcon(names: string[]) {
   return toolIcon(domains.find(name => /files__(write|edit|copy)_/.test(name)) || domains.find(name => name.startsWith("terminal__")) || domains[0] || "");
 }
 
-export function activityLabel(tool: ToolSummary & { status?: "running" | "completed" }) {
+export function activityLabel(tool: ToolSummary & { status?: "running" | "completed" | "unknown" }) {
   const name = domainToolName(tool.name);
+  if (tool.status === "unknown") return { label: toolLabel(tool.name), detail: "" };
   const active = tool.status === "running";
   const outcome = asObject(tool.outcome ?? undefined);
   const summary = readableSummary(tool.summary);

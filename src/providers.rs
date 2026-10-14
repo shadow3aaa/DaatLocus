@@ -672,10 +672,21 @@ impl OpenAIClient {
             "phase=chat_completions_stream".to_string(),
         ];
         let mut stream_done = false;
+        let mut finished_at: Option<Instant> = None;
         while !stream_done {
-            let next_chunk = tokio::time::timeout(self.stream_idle_timeout, stream.next())
-                .await
-                .map_err(|_| {
+            // A finish_reason ends the generation even if a gateway keeps its SSE
+            // connection alive. Briefly drain the optional trailing usage frame.
+            let timeout = finished_at.map_or(self.stream_idle_timeout, |finished| {
+                Duration::from_secs(1)
+                    .saturating_sub(finished.elapsed())
+                    .min(self.stream_idle_timeout)
+            });
+            if timeout.is_zero() {
+                break;
+            }
+            let next_chunk = match tokio::time::timeout(timeout, stream.next()).await {
+                Err(_) if finished_at.is_some() => break,
+                value => value.map_err(|_| {
                     ModelRequestFailure::report(
                         ModelFailureKind::Timeout,
                         format!(
@@ -685,18 +696,22 @@ impl OpenAIClient {
                             url
                         ),
                     )
-                })?;
+                })?,
+            };
             let Some(chunk) = next_chunk else {
                 break;
             };
-            let chunk = chunk.map_err(|err| {
-                format_request_error(
-                    "llm streaming chunk read failed",
-                    &url,
-                    &stream_request_context,
-                    &err,
-                )
-            })?;
+            let chunk = match chunk {
+                Err(_) if finished_at.is_some() => break,
+                value => value.map_err(|err| {
+                    format_request_error(
+                        "llm streaming chunk read failed",
+                        &url,
+                        &stream_request_context,
+                        &err,
+                    )
+                })?,
+            };
             buffer.extend_from_slice(&chunk);
             normalize_sse_buffer(&mut buffer);
             while let Some(event) = take_next_sse_event(&mut buffer) {
@@ -721,6 +736,14 @@ impl OpenAIClient {
                     last_usage = Some(usage);
                 }
                 let choice = &response_json["choices"][0];
+                if let Some(reason) = choice["finish_reason"]
+                    .as_str()
+                    .filter(|reason| !reason.is_empty())
+                    && finished_at.is_none()
+                {
+                    tracing::debug!(model=%self.model, finish_reason=reason, "Chat stream generation finished");
+                    finished_at = Some(Instant::now());
+                }
                 let delta = &choice["delta"];
                 if let Some(delta_content) = delta["content"].as_str() {
                     content.push_str(delta_content);

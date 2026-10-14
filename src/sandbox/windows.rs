@@ -289,18 +289,21 @@ struct RestrictedSpawnInput<'a> {
 fn spawn_restricted_async_inner(
     input: RestrictedSpawnInput<'_>,
 ) -> io::Result<WindowsSandboxAsyncChild> {
-    let acl_lock = ACL_UPDATES
-        .lock()
-        .map_err(|_| io::Error::other("ACL update lock is unavailable"))?;
+    check_spawn_cancelled(&input.options)?;
+    let policy = bounded_acl_policy(input.policy, input.program, &input.options)?;
+    let acl_lock = ACL_UPDATES.try_lock().map_err(|_| io::Error::new(
+        io::ErrorKind::WouldBlock, "Windows sandbox permissions are being prepared by another process; retry after it settles",
+    ))?;
     // Protect exact credential files as well as framework directories so an
     // ancestor grant cannot be inherited, while keeping broker access.
-    for root in policy_paths_with_resolved(&input.policy.filesystem.deny_read_paths) {
+    for root in policy_paths_with_resolved(&policy.filesystem.deny_read_paths) {
         if root.try_exists()? {
             protect_private_namespace(&root)?;
         }
     }
+    check_spawn_cancelled(&input.options)?;
     apply_policy_acl_rules(
-        input.policy,
+        &policy,
         input.program,
         input.psid_capability,
         input.acl_guards,
@@ -366,6 +369,7 @@ fn spawn_restricted_async_inner(
     startup_info.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
     let mut process_info = PROCESS_INFORMATION::default();
 
+    check_spawn_cancelled(&input.options)?;
     let created = unsafe {
         CreateProcessAsUserW(
             input.token,
@@ -429,6 +433,110 @@ fn spawn_restricted_async_inner(
         stdout: child_stdout,
         stderr: child_stderr,
     })
+}
+
+fn check_spawn_cancelled(options: &SandboxProcessOptions) -> io::Result<()> {
+    if options
+        .spawn_cancelled
+        .as_ref()
+        .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "Process startup cancelled",
+        ));
+    }
+    Ok(())
+}
+
+fn bounded_acl_policy(
+    policy: &RuntimeSandboxPolicy,
+    program: &Path,
+    options: &SandboxProcessOptions,
+) -> io::Result<RuntimeSandboxPolicy> {
+    bounded_acl_policy_with_budget(
+        policy,
+        program,
+        options,
+        32 * 1024,
+        std::time::Duration::from_secs(5),
+    )
+}
+
+fn bounded_acl_policy_with_budget(
+    policy: &RuntimeSandboxPolicy,
+    program: &Path,
+    options: &SandboxProcessOptions,
+    max_entries: usize,
+    max_scan: std::time::Duration,
+) -> io::Result<RuntimeSandboxPolicy> {
+    use std::os::windows::fs::MetadataExt;
+    if !program.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows sandbox requires a resolved absolute executable path",
+        ));
+    }
+    let mut candidate = policy.clone();
+    let mut grants = policy_paths_with_resolved(&policy.filesystem.readable_roots);
+    grants.extend(policy_paths_with_resolved(&[
+        program.to_owned(),
+        program.parent().unwrap_or(program).to_owned(),
+    ]));
+    for root in &policy.filesystem.writable_roots {
+        grants.extend(policy_paths_with_resolved(std::slice::from_ref(&root.root)));
+    }
+    // Keep every explicit private boundary: Windows can grant ambient access
+    // through ALL APPLICATION PACKAGES even outside our added read roots.
+    candidate.filesystem.deny_read_paths =
+        policy_paths_with_resolved(&policy.filesystem.deny_read_paths);
+    candidate.filesystem.deny_write_paths =
+        policy_paths_with_resolved(&policy.filesystem.deny_write_paths);
+    let mut roots = grants;
+    roots.extend(candidate.filesystem.deny_read_paths.iter().cloned());
+    roots.extend(candidate.filesystem.deny_write_paths.iter().cloned());
+    roots.sort();
+    roots.dedup();
+    let mut minimal = Vec::<PathBuf>::new();
+    for root in roots {
+        if !minimal.iter().any(|parent| root.starts_with(parent)) {
+            minimal.push(root);
+        }
+    }
+    let began = std::time::Instant::now();
+    let mut count = 0;
+    let mut pending = minimal;
+    while let Some(path) = pending.pop() {
+        check_spawn_cancelled(options)?;
+        count += 1;
+        if count > max_entries || began.elapsed() >= max_scan {
+            return Err(io::Error::other(
+                "Windows sandbox scope is too large to prepare promptly. Use Files for bounded reads or request a narrower Terminal directory; no command was started",
+            ));
+        }
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(io::Error::other(
+                "Windows sandbox scope contains a reparse point. Use Files or request its specific resolved directory; no command was started",
+            ));
+        }
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(&path)? {
+                check_spawn_cancelled(options)?;
+                if count + pending.len() >= max_entries || began.elapsed() >= max_scan {
+                    return Err(io::Error::other(
+                        "Windows sandbox scope is too large to prepare promptly. Use Files for bounded reads or request a narrower Terminal directory; no command was started",
+                    ));
+                }
+                pending.push(entry?.path());
+            }
+        }
+    }
+    Ok(candidate)
 }
 
 fn apply_policy_acl_rules(
@@ -587,6 +695,36 @@ fn add_guarded_ace_recursive(
     Ok(())
 }
 
+fn remove_public_app_grants_from_private_path(path: &Path) -> io::Result<()> {
+    let Some(current) = capture_dacl(path)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Private path has no access boundary",
+        ));
+    };
+    let acl = current.as_ptr().cast::<ACL>();
+    for index in 0..unsafe { (*acl).AceCount } {
+        let mut ace = ptr::null_mut();
+        if unsafe { GetAce(acl, index as u32, &mut ace) } == 0 {
+            return Err(last_os_error("GetAce failed"));
+        }
+        let bytes = ace.cast::<u8>();
+        let kind = unsafe { *bytes };
+        if kind == 0 {
+            let sid = sid_text(unsafe { bytes.add(8) }.cast())?;
+            if matches!(sid.as_str(), "S-1-15-2-1" | "S-1-15-2-2") {
+                return protect_private_namespace(path);
+            }
+        } else if kind != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Private path has unsupported conditional/object ACL",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn add_guarded_read_denies_recursive(
     path: &Path,
     file_entries: &[(PSID, u32, i32)],
@@ -597,6 +735,7 @@ fn add_guarded_read_denies_recursive(
     if !path.exists() {
         return Ok(());
     }
+    remove_public_app_grants_from_private_path(path)?;
     if path.is_dir() {
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
@@ -610,6 +749,7 @@ fn add_guarded_read_denies_recursive(
                     guarded_paths,
                 )?;
             } else {
+                remove_public_app_grants_from_private_path(&child)?;
                 add_guarded_aces(&child, file_entries, acl_guards, guarded_paths)?;
             }
         }
@@ -1610,6 +1750,107 @@ mod tests {
         assert!(!acl_has_sid(temp.path(), &second_id));
         assert!(acl_has_sid(temp.path(), "S-1-1-0"));
     }
+    #[tokio::test]
+    async fn oversized_scope_fails_before_mutation_and_narrow_scope_preserves_private_denials() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let private = temp.path().join("private");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private).unwrap();
+        let oversized = temp.path().join("oversized");
+        std::fs::create_dir(&oversized).unwrap();
+        for index in 0..4097 {
+            std::fs::write(oversized.join(index.to_string()), "fixture").unwrap();
+        }
+        let private_file = private.join("private.txt");
+        std::fs::write(&private_file, "private").unwrap();
+        let all_apps = LocalSid::from_string("S-1-15-2-1").unwrap();
+        add_explicit_aces(
+            &private_file,
+            &[(all_apps.as_ptr(), FILE_GENERIC_READ, SET_ACCESS)],
+        )
+        .unwrap();
+        let mut policy = RuntimeSandboxPolicy::disabled();
+        policy.strong_filesystem = StrongFilesystemSandboxMode::Required;
+        policy.filesystem.full_disk_read = false;
+        policy.filesystem.full_disk_write = false;
+        policy.filesystem.readable_roots = vec![temp.path().to_owned()];
+        policy.filesystem.writable_roots = vec![];
+        policy.filesystem.deny_read_paths = vec![private.clone()];
+        policy.filesystem.deny_write_paths = vec![private.clone()];
+        let before = capture_dacl(temp.path()).unwrap();
+        let options = SandboxProcessOptions::default();
+        let began = std::time::Instant::now();
+        assert!(
+            bounded_acl_policy_with_budget(
+                &policy,
+                &workspace.join("nonexistent.exe"),
+                &options,
+                4096,
+                std::time::Duration::from_secs(2)
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("too large")
+        );
+        assert!(began.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(capture_dacl(temp.path()).unwrap(), before);
+        policy.filesystem.readable_roots = vec![workspace.clone()];
+        let candidate =
+            bounded_acl_policy(&policy, &workspace.join("nonexistent.exe"), &options).unwrap();
+        assert!(!candidate.filesystem.deny_read_paths.is_empty());
+        assert!(!candidate.filesystem.deny_write_paths.is_empty());
+        let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let spawn = policy.shell_spawn_spec(
+            powershell.to_str().unwrap(),
+            vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                format!("$allowed=$false;try{{$null=[IO.File]::ReadAllText({});$allowed=$true}}catch{{}};if($allowed){{exit 61}};Write-Output 'bounded-native-ok'",quote(&private_file)),
+            ],
+        );
+        let child = spawn_restricted_async(
+            &policy,
+            &spawn.program,
+            spawn.args,
+            SandboxProcessOptions {
+                current_dir: Some(workspace),
+                stdin: SandboxStdio::Null,
+                stdout: SandboxStdio::Piped,
+                stderr: SandboxStdio::Piped,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (status, out, err) = collect(child).await;
+        assert!(
+            status.success(),
+            "status={status}; stdout={out:?}; stderr={err:?}"
+        );
+        assert!(out.contains("bounded-native-ok"));
+    }
+
+    #[test]
+    fn cancelled_startup_never_creates_a_process_or_changes_acl() {
+        let temp = tempfile::tempdir().unwrap();
+        let before = capture_dacl(temp.path()).unwrap();
+        let mut policy = RuntimeSandboxPolicy::disabled();
+        policy.filesystem.readable_roots = vec![temp.path().to_owned()];
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let result = spawn_restricted_async(
+            &policy,
+            &PathBuf::from("nonexistent.exe"),
+            vec![],
+            SandboxProcessOptions {
+                spawn_cancelled: Some(flag),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(result, Err(ref error) if error.kind() == io::ErrorKind::Interrupted));
+        assert_eq!(capture_dacl(temp.path()).unwrap(), before);
+    }
     async fn collect(mut child: WindowsSandboxAsyncChild) -> (ExitStatus, String, String) {
         let mut stdout = child.take_stdout();
         let mut stderr = child.take_stderr();
@@ -1700,6 +1941,7 @@ mod tests {
                 stdin: SandboxStdio::Null,
                 stdout: SandboxStdio::Piped,
                 stderr: SandboxStdio::Piped,
+                spawn_cancelled: None,
             },
         )
         .unwrap();
@@ -1745,6 +1987,7 @@ mod tests {
                 stdin: SandboxStdio::Piped,
                 stdout: SandboxStdio::Piped,
                 stderr: SandboxStdio::Piped,
+                spawn_cancelled: None,
             },
         )
         .unwrap();

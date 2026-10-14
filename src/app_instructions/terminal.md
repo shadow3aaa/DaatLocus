@@ -1,5 +1,6 @@
 # Terminal
 
+- Prefer Files for path existence checks, directory listings, searches and file reads. Do not start a shell just to locate a project. If native sandbox preparation rejects an oversized scope, use bounded Files operations or narrow the Terminal roots; never repeat the same oversized request.
 - Operate Terminal only through terminal tools; do not assume that plain assistant text is terminal input.
 - Use the namespaced Terminal tool names for terminal operations: `terminal__terminal_exec`, `terminal__terminal_write_stdin`, and `terminal__terminal_terminate`.
 - `terminal_exec` creates a new session when `session_id` is null and reuses an existing session only when `session_id` is a valid id returned by a prior `terminal_exec`. Never fabricate a session id such as `ts1`, `terminal-session-1`, or an empty string; send `null` when you want a new session.

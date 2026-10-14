@@ -307,6 +307,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_finish_reason_completes_without_done_or_connection_close_and_retains_usage() {
+        use crate::model_protocol::{AgentToolInputSpec, AgentToolSpec};
+        use futures_util::StreamExt;
+        for tool_call in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = Router::new().fallback(post(move || async move {
+                let delta = if tool_call {
+                    serde_json::json!({"tool_calls":[{"index":0,"id":"call_done","type":"function","function":{"name":"review","arguments":"{\"decision\":\"approve\",\"reason\":\"ok\"}"}}]})
+                } else { serde_json::json!({"content":"OK"}) };
+                let first = format!("data: {}\n\n", serde_json::json!({"choices":[{"delta":delta,"finish_reason":if tool_call {"tool_calls"} else {"stop"}}]}));
+                let usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n";
+                let body = futures_util::stream::once(async move { Ok::<_,std::io::Error>(axum::body::Bytes::from(first)) })
+                    .chain(futures_util::stream::once(async move { tokio::time::sleep(Duration::from_millis(40)).await; Ok(axum::body::Bytes::from_static(usage.as_bytes())) }))
+                    .chain(futures_util::stream::unfold((), |()| async { tokio::time::sleep(Duration::from_millis(20)).await; Some((Ok(axum::body::Bytes::from_static(b": heartbeat\n\n")),())) }));
+                ([("content-type","text/event-stream")], axum::body::Body::from_stream(body))
+            }));
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let mut provider = super::super::OpenAIClient::from_parts(
+                "fixture-key",
+                &format!("http://{address}/v1"),
+                &ModelConfig::default(),
+            );
+            provider.transport.client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let request = AgentTurnRequest {
+                messages: vec![AgentMessage::user("Test completion")],
+                tools: if tool_call {
+                    vec![AgentToolSpec {
+                        name: "review".into(),
+                        description: "Review".into(),
+                        input_spec: AgentToolInputSpec::JsonSchema {
+                            schema: crate::schema_utils::model_schema_for::<Verdict>(),
+                        },
+                    }]
+                } else {
+                    vec![]
+                },
+            };
+            let options = ModelRequestOptions::for_agent_turn(&provider, &request, None).unwrap();
+            let response = tokio::time::timeout(
+                Duration::from_secs(3),
+                provider.complete_agent_turn(request, options),
+            )
+            .await
+            .expect("finished generation must not await connection close")
+            .unwrap();
+            let response = response.protocol();
+            if tool_call {
+                assert_eq!(response.tool_calls.len(), 1);
+                assert_eq!(response.tool_calls[0].arguments["decision"], "approve");
+            } else {
+                assert_eq!(response.final_assistant_message.as_deref(), Some("OK"));
+            }
+            assert_eq!(provider.token_usage_info().last_token_usage.input_tokens, 7);
+            assert_eq!(
+                provider.token_usage_info().last_token_usage.output_tokens,
+                3
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn configured_timeouts_remain_typed_for_main_and_independent_requests() {
         use crate::providers::{ModelFailureKind, ModelRequestFailure};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

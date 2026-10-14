@@ -216,6 +216,7 @@ impl TerminalApp {
                 sandbox_policy,
                 output_buffer_capacity,
             )
+            .await
             .map_err(|err| miette!("failed to spawn terminal process: {err}"))?,
         );
         session.approved_roots = ToolPermissionRequest {
@@ -610,22 +611,38 @@ fn resolve_terminal_path(
     context.resolve_tool_path(Path::new(raw), base)
 }
 
-fn spawn_terminal_process(
+async fn spawn_terminal_process(
     command: &str,
     workdir: Option<&str>,
     sandbox_policy: &RuntimeSandboxPolicy,
     output_buffer_capacity: usize,
 ) -> std::io::Result<TerminalProcess> {
-    if output_buffer_capacity == DEFAULT_OUTPUT_BUFFER_CAPACITY_BYTES {
-        TerminalProcess::spawn(command, workdir, sandbox_policy)
-    } else {
-        TerminalProcess::spawn_with_output_capacity(
-            command,
-            workdir,
-            sandbox_policy,
-            output_buffer_capacity,
-        )
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    struct CancelStartup(Arc<AtomicBool>);
+    impl Drop for CancelStartup {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
     }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = CancelStartup(cancelled.clone());
+    let command = command.to_owned();
+    let workdir = workdir.map(str::to_owned);
+    let policy = sandbox_policy.clone();
+    tokio::task::spawn_blocking(move || {
+        TerminalProcess::spawn_cancellable(
+            &command,
+            workdir.as_deref(),
+            &policy,
+            output_buffer_capacity,
+            Some(cancelled),
+        )
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 const LOGIN_COMMAND_REJECTION: &str = "interactive authentication/login commands are not allowed in Terminal; abort and use a non-interactive alternative";

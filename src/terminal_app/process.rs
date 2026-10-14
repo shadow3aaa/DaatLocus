@@ -80,6 +80,22 @@ impl TerminalProcess {
         sandbox_policy: &RuntimeSandboxPolicy,
         output_buffer_capacity: usize,
     ) -> std::io::Result<Self> {
+        Self::spawn_cancellable(
+            command,
+            workdir,
+            sandbox_policy,
+            output_buffer_capacity,
+            None,
+        )
+    }
+
+    pub(super) fn spawn_cancellable(
+        command: &str,
+        workdir: Option<&str>,
+        sandbox_policy: &RuntimeSandboxPolicy,
+        output_buffer_capacity: usize,
+        spawn_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> std::io::Result<Self> {
         let (shell_program, shell_args) = shell_invocation(command);
         let mut child = SandboxAsyncChild::spawn_shell(
             sandbox_policy,
@@ -90,6 +106,7 @@ impl TerminalProcess {
                 stdin: SandboxStdio::Piped,
                 stdout: SandboxStdio::Piped,
                 stderr: SandboxStdio::Piped,
+                spawn_cancelled,
             },
         )?;
         let stdin = child.take_stdin();

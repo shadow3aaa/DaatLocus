@@ -9,7 +9,7 @@ import { Composer } from "../src/components/composer";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import { FileChangeView } from "../src/components/file-change";
 import { ProvidersSettings } from "../src/components/settings/providers-settings";
-import { elapsedLabel, isPrimaryActor, mergeActivity, workTimeline } from "../src/lib/work-timeline";
+import { activityTools, elapsedLabel, isLiveReasoning, isPrimaryActor, mergeActivity, workTimeline } from "../src/lib/work-timeline";
 import { clearStoredDrafts, loadDraft, saveDraft } from "../src/lib/conversation-drafts";
 import type { EventRecord, MessageRecord } from "../src/lib/actor-api";
 const message: MessageRecord = { seq: 1,id:"m",actor_id:"root",source:{kind:"user",},reply_to:{kind:"user",},kind:"request",in_reply_to:null,content:"整理报告",attachments:[],status:"running",cancel_requested:false,reply:null,error:null,created_at_ms:1,updated_at_ms:1 };
@@ -54,6 +54,20 @@ describe("fixed presentation and chronological source", () => {
     expect(workTimeline(records,{...message,status:"completed",reply:"结果",final_generation:2}).map(item=>item.kind)).toEqual(["text","tools"]);
     expect(mergeActivity(records,[records[2]],"root","m")).toHaveLength(5);
     expect(workTimeline(records.slice(0,3),{...message,status:"completed",reply:"结果",final_generation:2},false)[0]).toMatchObject({content:"先检查"});
+  });
+  test("reopening an active tool restores its row and ends the preceding thinking state", () => {
+    const records = [event(1,{type:"generation_delta",message_id:"m",generation:1,channel:"reasoning",text:"THOUGHT"}),event(2,{type:"tool_started",message_id:"m",call_id:"terminal",name:"terminal__terminal_exec"})];
+    const segments=workTimeline(records,message);
+    expect(activityTools(records,message,[])).toMatchObject([{call_id:"terminal",status:"running"}]);
+    expect(activityTools(records,message,[],false)).toMatchObject([{call_id:"terminal",status:"unknown"}]);
+    expect(isLiveReasoning(segments[0],0,segments,true)).toBe(false);
+    const html=renderToStaticMarkup(<WorkRound message={message} events={records} tools={activityTools(records,message,[])} onMoreTools={async()=>{}} onActor={()=>{}}/>);
+    expect(html).toContain("正在运行");
+    expect(html).not.toContain("正在思考");
+    expect(isLiveReasoning(segments[0],0,segments.slice(0,1),true)).toBe(true);
+    const finished=event(3,{type:"tool_finished",message_id:"m",call_id:"terminal",name:"terminal__terminal_exec",result_id:"result",summary:"Done",error:null});
+    expect(activityTools([...records,finished],message,[])).toMatchObject([{id:"result",status:"completed"}]);
+    expect(activityTools(records,{...message,status:"interrupted"},[])).toMatchObject([{status:"completed",error:i18n.t("conversation_content.interrupted")}]);
   });
   test("duration uses execution start, not queue creation; absent time stays absent", () => { expect(elapsedLabel(10_000,72_000)).toBe("1分钟 2秒"); expect(elapsedLabel(null,100)).toBeNull(); });
   test("completed activity begins collapsed under elapsed time without repeating intermediate text", () => {

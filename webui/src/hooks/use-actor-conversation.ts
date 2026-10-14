@@ -8,7 +8,7 @@ export type GenerationDraft = {
   reasoning: string;
 };
 export type ToolRef = api.ToolSummary & {
-  status: "running" | "completed";
+  status: "running" | "completed" | "unknown";
 };
 export type ConversationState = {
   actorId: string | null;

@@ -79,13 +79,27 @@ pub enum SandboxStdio {
     Piped,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct SandboxProcessOptions {
     pub current_dir: Option<PathBuf>,
     pub stdin: SandboxStdio,
     pub stdout: SandboxStdio,
     pub stderr: SandboxStdio,
+    /// A cancelled startup must never launch a process after slow native preparation.
+    pub spawn_cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
+
+impl PartialEq for SandboxProcessOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.current_dir == other.current_dir
+            && self.stdin == other.stdin
+            && self.stdout == other.stdout
+            && self.stderr == other.stderr
+            && self.spawn_cancelled.as_ref().map(std::sync::Arc::as_ptr)
+                == other.spawn_cancelled.as_ref().map(std::sync::Arc::as_ptr)
+    }
+}
+impl Eq for SandboxProcessOptions {}
 
 pub struct SandboxAsyncChild {
     inner: SandboxAsyncChildInner,
@@ -205,9 +219,19 @@ impl SandboxAsyncChild {
             .map_err(std::io::Error::other)?;
         let mut command = tokio::process::Command::new(spawn_spec.program);
         command.args(spawn_spec.args);
+        let spawn_cancelled = options.spawn_cancelled.clone();
         apply_tokio_command_options(policy, &mut command, options);
         #[cfg(windows)]
         let _creation = crate::process_spawn::creation_lock()?;
+        if spawn_cancelled
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Process startup cancelled",
+            ));
+        }
         let inner = command.spawn()?;
         Ok(Self {
             inner: SandboxAsyncChildInner::Tokio(inner),
@@ -1110,6 +1134,7 @@ mod tests {
             stdin: SandboxStdio::Null,
             stdout: SandboxStdio::Piped,
             stderr: SandboxStdio::Piped,
+            spawn_cancelled: None,
         };
 
         let mut child = match SandboxAsyncChild::spawn_shell(&policy, &program, args, options) {

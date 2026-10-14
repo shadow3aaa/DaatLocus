@@ -1,4 +1,5 @@
 import { t } from "@/lib/i18n";
+import type { ToolRef } from "@/hooks/use-actor-conversation";
 import type { EventRecord, MessageRecord } from "./actor-api";
 export type WorkSegment = { kind: "text"; seq: number; generation: number; channel: "assistant" | "reasoning"; content: string } | { kind: "tools"; seq: number; callIds: string[] };
 export function mergeActivity(current: EventRecord[], incoming: EventRecord[], actorId: string, messageId: string): EventRecord[] {
@@ -27,6 +28,24 @@ export function workTimeline(events: EventRecord[], message: MessageRecord, comp
     }
   }
   return output;
+}
+// Tool-start facts also restore unfinished work after reconnect; summary pages
+// intentionally contain completed observations only.
+export function activityTools(events: EventRecord[], message: MessageRecord, summaries: ToolRef[], complete = true): ToolRef[] {
+  const tools = new Map<string, ToolRef>();
+  for (const record of mergeActivity([], events, message.actor_id, message.id)) {
+    const event = record.event;
+    if (event.type === "tool_started") tools.set(event.call_id, { seq: record.seq, id: `live:${event.call_id}`, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: "", error: !complete || ["queued", "running"].includes(message.status) ? null : t("conversation_content.interrupted"), status: !complete ? "unknown" : ["queued", "running"].includes(message.status) ? "running" : "completed", started_at_ms: record.created_at_ms });
+    if (event.type === "tool_finished") tools.set(event.call_id, { seq: record.seq, id: event.result_id, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: event.summary, error: event.error, status: "completed", started_at_ms: event.started_at_ms, finished_at_ms: event.finished_at_ms, outcome: event.outcome });
+  }
+  for (const tool of summaries) {
+    const existing = tools.get(tool.call_id);
+    if (!existing || existing.status !== "completed" || tool.status === "completed") tools.set(tool.call_id, tool);
+  }
+  return [...tools.values()];
+}
+export function isLiveReasoning(segment: WorkSegment, index: number, segments: WorkSegment[], running: boolean): boolean {
+  return running && index === segments.length - 1 && segment.kind === "text" && segment.channel === "reasoning";
 }
 export function elapsedLabel(start?: number | null, end?: number | null, now = Date.now()): string | null {
   if (start == null) return null;
