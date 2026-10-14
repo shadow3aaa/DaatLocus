@@ -15,7 +15,7 @@ import type { Preferences } from "@/lib/preferences";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { modeLabel } from "@/components/composer";
 import { ProvidersSettings } from "@/components/settings/providers-settings";
-import { errorText, StatusNote } from "@/components/settings/controls";
+import { errorText, Picker, StatusNote } from "@/components/settings/controls";
 
 export type SettingsTab = "personal" | "account" | "permissions" | "models";
 
@@ -106,13 +106,10 @@ export function SettingsDialog({ open, onOpenChange, actorId, onActorChanged, pr
       <div ref={scroll} className="dl-settings-scroll">
         <StatusNote text={error} error /><StatusNote text={notice} />
         {error && !loading && (tab === "models" && !config || tab === "permissions" && !actor) && <Button variant="outline" onClick={() => { setError(null); setRetry(value => value + 1); }}>{t("app.retry")}</Button>}
-        <TabsContent value="personal"><SettingsSection title={t("settings_dialog.appearance")}><SettingsGroup><SettingsRow id="dl-client-theme" label={t("settings_dialog.theme")}>
-          <select id="dl-client-theme" className="dl-setting-native-select" value={preferences.theme} onChange={event=>onPreferencesChanged({...preferences,theme:event.target.value as Preferences["theme"]})}><option value="system">{t("settings_dialog.system")}</option><option value="light">{t("settings_dialog.light")}</option><option value="dark">{t("settings_dialog.dark")}</option></select>
-        </SettingsRow><SettingsRow id="dl-client-language" label={t("common.language")}>
-          <select id="dl-client-language" className="dl-setting-native-select" value={preferences.language} onChange={event=>onPreferencesChanged({...preferences,language:event.target.value as Preferences["language"]})}>
-            <option value="system">{t("common.browser_language")}</option><option value="zh-CN">{t("common.chinese")}</option><option value="en-US">{t("common.english")}</option>
-          </select>
-        </SettingsRow></SettingsGroup></SettingsSection></TabsContent>
+        <TabsContent value="personal"><SettingsSection title={t("settings_dialog.appearance")}><SettingsGroup>
+          <Picker id="dl-client-theme" label={t("settings_dialog.theme")} value={preferences.theme} options={[{value: "system", label: t("settings_dialog.system")}, {value: "light", label: t("settings_dialog.light")}, {value: "dark", label: t("settings_dialog.dark")}]} onChange={value=>onPreferencesChanged({...preferences,theme:value as Preferences["theme"]})} />
+          <Picker id="dl-client-language" label={t("common.language")} value={preferences.language} options={[{value: "system", label: t("common.browser_language")}, {value: "zh-CN", label: t("common.chinese")}, {value: "en-US", label: t("common.english")}]} onChange={value=>onPreferencesChanged({...preferences,language:value as Preferences["language"]})} />
+        </SettingsGroup></SettingsSection></TabsContent>
         {canManage&&<TabsContent value="account" forceMount hidden={tab !== "account"}><AccountEditor onChanged={()=>onActorChanged()}/></TabsContent>}
         {canManage&&<TabsContent value="permissions"><SettingsSection title={t("settings_dialog.action_approval")}><SettingsGroup><SettingsRow label={t("settings_dialog.approval_mode")} stacked>
           <ToggleGroup type="single" aria-label={t("settings_dialog.approval_mode")} value={actor?.config?.permissions.approval_mode||"auto"} disabled={locked||loading||!actor} className="dl-settings-options" onValueChange={mode=>{if(mode)void changeMode(mode as ApprovalMode);}}>

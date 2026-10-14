@@ -298,7 +298,7 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
 .dl-upload-indicator { display: flex; align-items: center; gap: 7px; margin-top: 30px; color: var(--muted-foreground); font-size: 13px; }
 .dl-mic-active { color: var(--destructive); }
 .dl-composer-dragging { outline: 2px solid var(--ring); outline-offset: 3px; }
-.dl-history-rail { position: absolute; left: 10px; top: 35%; display: flex; flex-direction: column; gap: 5px; padding: 6px; max-height: 40%; }
+.dl-history-rail { position: absolute; left: max(12px, calc(50% - 520px)); top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 5px; padding: 6px; max-height: 40%; }
 .dl-history-rail button { background: transparent; border: 0; width: 16px; height: 9px; display: flex; align-items: center; padding: 0; }
 .dl-history-rail button::after { content: ''; width: 8px; height: 2px; border-radius: 2px; background: var(--muted-foreground); opacity: .3; transition: width .15s,opacity .15s; }
 .dl-history-rail button:hover::after, .dl-history-rail button:focus-visible::after { width: 16px; opacity: .8; }
@@ -314,7 +314,9 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
 .dl-actor-dialog-title [data-slot=dialog-title] { font-size: 16px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dl-actor-dialog-title [data-slot=dialog-description] { font-size: 13px; margin-top: 3px; }
 .dl-actor-dialog-actions { flex-shrink: 0; display: flex; gap: 3px; }
-.dl-actor-dialog>[data-slot=dialog-close] { top: 22px; right: 14px; z-index: 4; background: var(--popover); }
+.dl-actor-dialog>[data-slot=dialog-close] { top: 22px; right: 14px; z-index: 4; background: transparent; box-shadow: none; }
+.dl-actor-dialog>[data-slot=dialog-close]:hover { background: var(--muted); }
+.dark .dl-actor-dialog>[data-slot=dialog-close]:hover { background: color-mix(in oklab, var(--muted) 50%, transparent); }
 .dl-conversation-compact { --dl-header-space: 74px; min-height: 0; }
 .dl-conversation-compact .dl-message-list { padding: calc(var(--dl-header-space) + 22px) 26px calc(var(--dl-footer-space) + 20px); }
 .dl-conversation-compact .dl-bubble { font-size: 14px; padding: 12px 17px; }
@@ -344,7 +346,7 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
 .dl-approval-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 10px; }
 .dl-approval-notice { border-radius: 20px; margin: 0 0 8px 3px; font-size: 13px; }
 .dl-approval-notice-menu { min-width: 270px; max-height: min(45dvh,var(--radix-dropdown-menu-content-available-height,100dvh)); overflow-y: auto; border-radius: 15px; }
-.dl-approval-details { padding: 12px 0 6px; }
+.dl-approval-details { padding: 12px 0 6px; max-height: min(320px, 40dvh); overflow-y: auto; overscroll-behavior: contain; }
 .dl-artifact { margin: 12px 0; max-width: 100%; border: 1px solid var(--border); border-radius: 13px; overflow: hidden; background: var(--background); }
 .dl-artifact-header { display: flex; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
 .dl-artifact-header a { margin-left: auto; }
@@ -428,11 +430,12 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
 .dl-work-conversation .dl-conversation-footer { max-width: 800px; }
 .dl-work-input { margin-bottom: 24px; }
 .dl-work-user-input { display: flex; flex-direction: column; align-items: flex-end; }
-.dl-work-prompt { background: var(--foreground); color: var(--background); border-radius: 16px; padding: 10px 16px; max-width: 82%; font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+.dl-work-prompt { background: var(--chat-user); color: var(--chat-user-foreground); border-radius: 16px; padding: 10px 16px; max-width: 82%; font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
 .dl-work-delegated-input { font-size: 14px; color: var(--muted-foreground); display: flex; flex-direction: column; gap: 12px; }
 .dl-work-final,.dl-work-progress { font-size: 15px; line-height: 1.75; background: transparent; padding: 0; overflow-wrap: anywhere; }
 .dl-work-final { position: relative; margin: 23px 0 12px; }
-.dl-work-final .dl-copy-message { position: static; margin-top: 6px; opacity: 1; }
+.dl-work-final .dl-copy-message { position: static; margin-top: 6px; }
+.dl-work-final:hover .dl-copy-message, .dl-work-final:focus-within .dl-copy-message { opacity: 1; }
 .dl-work-round { margin: 18px 0 20px; }
 .dl-round-heading { display: flex; align-items: center; gap: 7px; width: 100%; color: var(--muted-foreground); border: 0; border-bottom: 1px solid var(--border); background: transparent; font-size: 14px; line-height: 1.6; padding: 0 0 10px; text-align: left; }
 .dl-round-heading:hover { color: var(--foreground); }
@@ -524,7 +527,7 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
 [data-slot=select-viewport][data-radix-select-viewport]::-webkit-scrollbar { display: block; }
 .dl-history-rail button::after { width: var(--dl-tick-width, 8px); }
 .dl-history-rail button[aria-current="location"]::after { width: 20px; opacity: .85; }
-.dl-conversation-compact .dl-history-rail { left: 1px; }
+.dl-conversation-compact .dl-history-rail { left: max(4px, calc(50% - 430px)); }
 
 /* Settings share the same composable row/group grammar in every tab. */
 .dl-settings-dialog { width: min(800px,calc(100vw - 40px)); max-width: min(800px,calc(100vw - 40px)); height: min(600px,90dvh); padding: 24px; border-radius: 16px; gap: 24px; }
@@ -573,7 +576,6 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
   .dl-settings-scroll { padding-right: 3px; }
 }
 
-.dl-setting-native-select { height: 36px; border: 1px solid var(--border); background: var(--background); color: var(--foreground); border-radius: 10px; padding: 0 32px 0 12px; font-size: 13px; max-width: 100%; }
 .dl-settings-discovery ul { display: flex; flex-direction: column; gap: 3px; }.dl-settings-discovery li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 8px; border-radius: 8px; font-size: 13px; }.dl-settings-discovery li:hover { background: var(--muted); }
 
 .dl-settings-subpage-heading { display: flex; align-items: center; gap: 10px; }

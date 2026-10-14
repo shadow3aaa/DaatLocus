@@ -24,7 +24,7 @@ function OutcomeStatus({ message }: { message: MessageRecord }) {
   if (message.status === "cancelled" || message.status === "interrupted") return <p role="status" className="dl-operation-note">{message.started_at_ms == null ? t("conversation_turns.queued_message_withdrawn") : t("conversation_turns.task_stopped_completed_actions_are_retained")}</p>;
   return null;
 }
-export function PrimaryTurn({ message, chat, access, onActor }: Props) {
+export function PrimaryTurn({ message, chat, access, onActor, typing }: Props & { typing?: boolean }) {
   const user = isUserSource(message);
   const tools = chat.tools.filter(tool => tool.message_id === message.id);
   const tasks = tools.filter(tool => !tool.error && ["actors__create", "actors__send"].includes(domainToolName(tool.name)) && tool.outcome);
@@ -40,7 +40,7 @@ export function PrimaryTurn({ message, chat, access, onActor }: Props) {
     <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />
     <Decisions message={message} chat={chat} access={access} />
     {user && <OutcomeStatus message={message} />}
-    {message.status === "running" && <div className="dl-primary-typing" role="status" aria-label={t("conversation_turns.working")}><i /><i /><i /></div>}
+    {(typing ?? (message.status === "running")) && <div className="dl-primary-typing" role="status" aria-label={t("conversation_turns.working")}><i /><i /><i /></div>}
   </article>;
 }
 export function WorkTurn({ message, chat, access, onActor }: Props) {
@@ -49,7 +49,7 @@ export function WorkTurn({ message, chat, access, onActor }: Props) {
   return <article className="dl-message-turn dl-work-turn" id={`message-${message.actor_id}-${message.id}`}>
     {(message.content || message.attachments.length > 0) && <div className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}>{!user && message.source.kind === "actor" && <ActorReference actorId={message.source.actor_id} onOpen={onActor} detail={["result", "progress"].includes(message.kind) ? t("conversation_turns.collaboration_reply") : t("conversation_turns.delegate_task")} />}<div className={cn(user && "dl-work-prompt")}>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</div></div>}
     <Guidance message={message} chat={chat} />
-    {message.kind !== "delivery" && <WorkRound message={message} events={chat.events} tools={tools} nextToolCursor={chat.toolNext[message.id]} onMoreTools={() => chat.loadMoreTools(message.id)} onActor={onActor} />}
+    {message.kind !== "delivery" && !chat.messages.some(item => item.in_reply_to === message.id && item.id !== message.id) && <WorkRound message={message} events={chat.events} tools={tools} nextToolCursor={chat.toolNext[message.id]} onMoreTools={() => chat.loadMoreTools(message.id)} onActor={onActor} />}
     <Decisions message={message} chat={chat} access={access} />
     {message.reply && <div className="dl-work-final"><Markdown content={message.reply} onActor={onActor} /><CopyMessage content={message.reply} /></div>}
     <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />

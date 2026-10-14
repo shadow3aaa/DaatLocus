@@ -200,7 +200,6 @@
     "no_results": "No results",
     "search_this_conversation": "Search this conversation",
     "try_another_search": "Try another search.",
-    "search_messages_and_replies": "Search messages and replies.",
     "messages_and_replies": "Messages and replies",
     "collaboration_messages": "Collaboration messages",
     "more_results": "More results"
@@ -228,7 +227,7 @@
     "remove_ssh": "Remove SSH",
     "host": "Host",
     "ssh_port": "SSH port",
-    "dl_port": "DL port",
+    "dl_port": "Daat Locus port",
     "devices": "Devices",
     "status_unknown": "Unknown",
     "more_devices": "More devices",

@@ -200,7 +200,6 @@
     "no_results": "没有找到相关记录",
     "search_this_conversation": "想找哪句话？",
     "try_another_search": "换一个关键词再试试。",
-    "search_messages_and_replies": "输入关键词即可搜索整个对话。",
     "messages_and_replies": "消息与回复",
     "collaboration_messages": "协作消息",
     "more_results": "更多结果"
@@ -228,7 +227,7 @@
     "remove_ssh": "移除 SSH",
     "host": "主机",
     "ssh_port": "SSH 端口",
-    "dl_port": "DL 端口",
+    "dl_port": "Daat Locus 端口",
     "devices": "设备",
     "status_unknown": "状态未知",
     "more_devices": "更多设备",
