@@ -10,7 +10,9 @@
     "build": "bun run build:auth && tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
     "test": "bun test",
-    "typecheck": "bun run build:auth && tsc -p tsconfig.json --noEmit"
+    "typecheck": "bun run build:auth && tsc -p tsconfig.json --noEmit",
+    "mock": "bun mock/server.ts",
+    "dev:mock": "DAAT_LOCUS_DAEMON_URL=http://127.0.0.1:45826 bun run dev"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",
