@@ -153,7 +153,7 @@ async fn opencode_fetch_org_id(
     client: &reqwest::Client,
     server: &str,
     access_token: &str,
-) -> Result<Option<String>> {
+) -> Result<String> {
     #[derive(Deserialize)]
     struct Org {
         id: String,
@@ -166,16 +166,56 @@ async fn opencode_fetch_org_id(
         .bearer_auth(access_token)
         .send()
         .await
-        .map_err(|err| miette!("OpenCode org lookup failed: {err}"))?;
+        .map_err(|err| {
+            super::ModelRequestFailure::report(
+                super::ModelRequestFailure::request_kind(&err),
+                format!("OpenCode workspace lookup failed: {err}"),
+            )
+        })?;
     if !response.status().is_success() {
-        return Ok(None);
+        let status = response.status();
+        let kind = match status {
+            reqwest::StatusCode::UNAUTHORIZED => super::ModelFailureKind::Authentication,
+            reqwest::StatusCode::FORBIDDEN => super::ModelFailureKind::Forbidden,
+            reqwest::StatusCode::TOO_MANY_REQUESTS => super::ModelFailureKind::RateLimited,
+            _ if status.is_server_error() => super::ModelFailureKind::Unavailable,
+            _ => super::ModelFailureKind::Failed,
+        };
+        return Err(super::ModelRequestFailure::report(
+            kind,
+            format!("OpenCode workspace lookup returned HTTP {status}"),
+        ));
     }
-    let body = response
-        .text()
-        .await
-        .map_err(|err| miette!("OpenCode org lookup body read failed: {err}"))?;
-    let orgs: Vec<Org> = serde_json::from_str(&body).unwrap_or_default();
-    Ok(orgs.into_iter().next().map(|org| org.id))
+    let body = response.text().await.map_err(|err| {
+        super::ModelRequestFailure::report(
+            super::ModelRequestFailure::request_kind(&err),
+            format!("OpenCode workspace lookup body read failed: {err}"),
+        )
+    })?;
+    let orgs: Vec<Org> = serde_json::from_str(&body).map_err(|_| {
+        super::ModelRequestFailure::report(
+            super::ModelFailureKind::Failed,
+            "OpenCode workspace lookup returned an invalid list".into(),
+        )
+    })?;
+    let id = orgs
+        .into_iter()
+        .next()
+        .map(|org| org.id)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            super::ModelRequestFailure::report(
+                super::ModelFailureKind::Forbidden,
+                "OpenCode account has no available workspace".into(),
+            )
+        })?;
+    reqwest::header::HeaderValue::from_str(&id).map_err(|_| {
+        super::ModelRequestFailure::report(
+            super::ModelFailureKind::Failed,
+            "OpenCode workspace lookup returned an invalid identifier".into(),
+        )
+    })?;
+    Ok(id)
 }
 
 fn auth_http_client() -> Result<reqwest::Client> {
@@ -344,18 +384,7 @@ fn access_from_tokens(tokens: &OpenCodeOAuthTokens) -> OpenCodeOAuthAccess {
 /// the org field, so resolve it on demand, mirroring `ensure_auth`.
 pub async fn opencode_console_access(auth_file: &Path) -> Result<OpenCodeOAuthAccess> {
     let client = auth_http_client()?;
-    let mut access = opencode_oauth_access_from_file_with_client(auth_file, &client).await?;
-    if access.org_id.is_none() {
-        let server = access
-            .server
-            .clone()
-            .unwrap_or_else(|| OPENCODE_OAUTH_DEFAULT_SERVER.to_string());
-        access.org_id = opencode_fetch_org_id(&client, &server, &access.access_token)
-            .await
-            .ok()
-            .flatten();
-    }
-    Ok(access)
+    opencode_oauth_access_from_file_with_client(auth_file, &client).await
 }
 
 async fn opencode_oauth_access_from_file_with_client(
@@ -364,7 +393,12 @@ async fn opencode_oauth_access_from_file_with_client(
 ) -> Result<OpenCodeOAuthAccess> {
     let mut tokens = read_opencode_oauth_tokens(auth_file).await?;
     let mut access = access_from_tokens(&tokens);
-    if !access.needs_refresh() {
+    if !access.needs_refresh()
+        && access
+            .org_id
+            .as_ref()
+            .is_some_and(|id| !id.trim().is_empty())
+    {
         return Ok(access);
     }
 
@@ -372,23 +406,26 @@ async fn opencode_oauth_access_from_file_with_client(
     let _guard = refresh_lock.lock().await;
     tokens = read_opencode_oauth_tokens(auth_file).await?;
     access = access_from_tokens(&tokens);
-    if !access.needs_refresh() {
-        return Ok(access);
-    }
-    if tokens.refresh_token.trim().is_empty() {
-        return Err(miette!(
-            "OpenCode access token expired and {} has no refresh token; log in again",
-            auth_file.display()
-        ));
-    }
-
     let server = tokens
         .server
         .clone()
         .unwrap_or_else(|| OPENCODE_OAUTH_DEFAULT_SERVER.to_string());
-    let refreshed = refresh_opencode_oauth_tokens(client, &server, &tokens).await?;
-    write_opencode_oauth_tokens(auth_file, &refreshed).await?;
-    Ok(access_from_tokens(&refreshed))
+    if access.needs_refresh() {
+        if tokens.refresh_token.trim().is_empty() {
+            return Err(super::ModelRequestFailure::report(
+                super::ModelFailureKind::Authentication,
+                "OpenCode access token expired without a refresh token; log in again".into(),
+            ));
+        }
+        tokens = refresh_opencode_oauth_tokens(client, &server, &tokens).await?;
+        // Keep rotated credentials even if the subsequent workspace lookup fails.
+        write_opencode_oauth_tokens(auth_file, &tokens).await?;
+    }
+    if tokens.org_id.as_ref().is_none_or(|id| id.trim().is_empty()) {
+        tokens.org_id = Some(opencode_fetch_org_id(client, &server, &tokens.access_token).await?);
+        write_opencode_oauth_tokens(auth_file, &tokens).await?;
+    }
+    Ok(access_from_tokens(&tokens))
 }
 
 fn refresh_lock_for_auth_file(auth_file: &Path) -> Arc<tokio::sync::Mutex<()>> {
@@ -546,31 +583,23 @@ impl OpenCodeOAuthClient {
             let cached = self.cached.lock().await;
             if let Some(access) = cached.as_ref()
                 && !access.needs_refresh()
+                && access
+                    .org_id
+                    .as_ref()
+                    .is_some_and(|id| !id.trim().is_empty())
             {
                 return Ok(());
             }
         }
-        let mut access =
+        let access =
             opencode_oauth_access_from_file_with_client(&self.auth_file, &self.auth_client)
                 .await
                 .map_err(|err| {
-                    miette!(
-                        "OpenCode auth at {} is unavailable: {err}",
+                    err.wrap_err(format!(
+                        "OpenCode auth at {} is unavailable",
                         self.auth_file.display()
-                    )
+                    ))
                 })?;
-        // The Console-issued inference endpoint needs the billing org header.
-        // Older token files predate that field, so resolve it on demand.
-        if access.org_id.is_none() {
-            let server = access
-                .server
-                .clone()
-                .unwrap_or_else(|| OPENCODE_OAUTH_DEFAULT_SERVER.to_string());
-            access.org_id = opencode_fetch_org_id(&self.auth_client, &server, &access.access_token)
-                .await
-                .ok()
-                .flatten();
-        }
         let mut inner = self.inner.lock().await;
         inner.set_api_key(access.access_token.clone());
         if let Some(org_id) = access.org_id.as_deref() {
@@ -629,6 +658,257 @@ impl ModelProvider for OpenCodeOAuthClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ConsoleState {
+        lookups: AtomicUsize,
+        inference: AtomicUsize,
+        refreshes: AtomicUsize,
+        first_status: axum::http::StatusCode,
+        first_body: String,
+    }
+    struct Console {
+        _directory: tempfile::TempDir,
+        auth_file: PathBuf,
+        base_url: String,
+        state: Arc<ConsoleState>,
+        task: tokio::task::JoinHandle<()>,
+    }
+    impl Drop for Console {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+    impl Console {
+        async fn new(first_status: axum::http::StatusCode, first_body: &str) -> Self {
+            use axum::{
+                extract::State,
+                routing::{get, post},
+            };
+            async fn orgs(
+                State(state): State<Arc<ConsoleState>>,
+            ) -> (axum::http::StatusCode, String) {
+                if state.lookups.fetch_add(1, Ordering::SeqCst) == 0 {
+                    (state.first_status, state.first_body.clone())
+                } else {
+                    (axum::http::StatusCode::OK, r#"[{"id":"wrk_test"}]"#.into())
+                }
+            }
+            async fn inference(
+                State(state): State<Arc<ConsoleState>>,
+                headers: axum::http::HeaderMap,
+            ) -> axum::response::Response {
+                use axum::response::IntoResponse;
+                state.inference.fetch_add(1, Ordering::SeqCst);
+                if headers
+                    .get("x-opencode-org-id")
+                    .and_then(|value| value.to_str().ok())
+                    != Some("wrk_test")
+                {
+                    return (
+                        axum::http::StatusCode::FORBIDDEN,
+                        "Workspace selection is required",
+                    )
+                        .into_response();
+                }
+                axum::Json(serde_json::json!({"choices":[{"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]})).into_response()
+            }
+            async fn refresh(
+                State(state): State<Arc<ConsoleState>>,
+            ) -> axum::Json<serde_json::Value> {
+                state.refreshes.fetch_add(1, Ordering::SeqCst);
+                axum::Json(
+                    serde_json::json!({"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}),
+                )
+            }
+            let state = Arc::new(ConsoleState {
+                lookups: AtomicUsize::new(0),
+                inference: AtomicUsize::new(0),
+                refreshes: AtomicUsize::new(0),
+                first_status,
+                first_body: first_body.into(),
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let app = axum::Router::new()
+                .route("/console/api/orgs", get(orgs))
+                .route("/console/auth/device/token", post(refresh))
+                .route("/inference/openai/v1/chat/completions", post(inference))
+                .with_state(state.clone());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let directory = tempfile::tempdir().unwrap();
+            let auth_file = directory.path().join("oauth.json");
+            write_opencode_oauth_tokens(
+                &auth_file,
+                &OpenCodeOAuthTokens {
+                    access_token: "test-access".into(),
+                    refresh_token: "test-refresh".into(),
+                    expires_at_ms: now_ms() + 3_600_000,
+                    server: Some(format!("{base_url}/console")),
+                    org_id: None,
+                },
+            )
+            .await
+            .unwrap();
+            Self {
+                _directory: directory,
+                auth_file,
+                base_url,
+                state,
+                task,
+            }
+        }
+        fn provider(&self) -> OpenCodeOAuthClient {
+            OpenCodeOAuthClient::new(
+                self.auth_file.clone(),
+                Some(&format!("{}/inference/openai/v1", self.base_url)),
+                &ModelConfig {
+                    model_id: "test-model".into(),
+                    ..Default::default()
+                },
+            )
+        }
+        async fn infer(&self, provider: &OpenCodeOAuthClient) -> Result<AgentTurnStreamResult> {
+            let request = AgentTurnRequest {
+                messages: vec![crate::model_protocol::AgentMessage::user("Return OK")],
+                tools: vec![],
+            };
+            let options = ModelRequestOptions::for_agent_turn(provider, &request, None)?;
+            provider.complete_agent_turn(request, options).await
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_lookup_failure_cannot_send_inference_or_poison_the_auth_cache() {
+        let console = Console::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "test-access must remain private",
+        )
+        .await;
+        let provider = console.provider();
+        let error = console
+            .infer(&provider)
+            .await
+            .err()
+            .expect("workspace lookup must fail");
+        assert_eq!(
+            error
+                .downcast_ref::<super::super::ModelRequestFailure>()
+                .unwrap()
+                .code(),
+            "model_service_unavailable"
+        );
+        assert!(!error.to_string().contains("test-access"));
+        assert_eq!(console.state.inference.load(Ordering::SeqCst), 0);
+        assert!(provider.cached.lock().await.is_none());
+        assert!(!console.infer(&provider).await.unwrap().items.is_empty());
+        let tokens = read_opencode_oauth_tokens(&console.auth_file)
+            .await
+            .unwrap();
+        assert_eq!(tokens.org_id.as_deref(), Some("wrk_test"));
+        assert_eq!(tokens.access_token, "test-access");
+        // A newly activated Actor reuses the persisted selection without another lookup.
+        assert!(
+            !console
+                .infer(&console.provider())
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert_eq!(console.state.lookups.load(Ordering::SeqCst), 2);
+        assert_eq!(console.state.inference.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_catalog_and_inference_share_one_persisted_workspace_selection() {
+        let console = Console::new(axum::http::StatusCode::OK, r#"[{"id":"wrk_test"}]"#).await;
+        let provider = console.provider();
+        let (catalog, inference) = tokio::join!(
+            opencode_console_access(&console.auth_file),
+            console.infer(&provider)
+        );
+        assert_eq!(catalog.unwrap().org_id.as_deref(), Some("wrk_test"));
+        assert!(!inference.unwrap().items.is_empty());
+        assert_eq!(console.state.lookups.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_workspace_responses_remain_errors_instead_of_cached_missing_headers() {
+        for (status, body, code) in [
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "model_authentication_failed",
+            ),
+            (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "rate limit",
+                "model_rate_limited",
+            ),
+            (
+                axum::http::StatusCode::OK,
+                "not JSON",
+                "model_request_failed",
+            ),
+            (axum::http::StatusCode::OK, "[]", "model_access_denied"),
+        ] {
+            let console = Console::new(status, body).await;
+            let provider = console.provider();
+            let error = console
+                .infer(&provider)
+                .await
+                .err()
+                .expect("invalid workspace response must fail");
+            assert_eq!(
+                error
+                    .downcast_ref::<super::super::ModelRequestFailure>()
+                    .unwrap()
+                    .code(),
+                code
+            );
+            assert_eq!(console.state.inference.load(Ordering::SeqCst), 0);
+            assert!(provider.cached.lock().await.is_none());
+            assert!(
+                read_opencode_oauth_tokens(&console.auth_file)
+                    .await
+                    .unwrap()
+                    .org_id
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rotated_tokens_survive_a_failed_workspace_lookup() {
+        let console =
+            Console::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "unavailable").await;
+        let mut tokens = read_opencode_oauth_tokens(&console.auth_file)
+            .await
+            .unwrap();
+        tokens.expires_at_ms = now_ms() - 1;
+        write_opencode_oauth_tokens(&console.auth_file, &tokens)
+            .await
+            .unwrap();
+        assert!(opencode_console_access(&console.auth_file).await.is_err());
+        let tokens = read_opencode_oauth_tokens(&console.auth_file)
+            .await
+            .unwrap();
+        assert_eq!(tokens.access_token, "new-access");
+        assert_eq!(tokens.refresh_token, "new-refresh");
+        assert!(tokens.org_id.is_none());
+        assert_eq!(
+            opencode_console_access(&console.auth_file)
+                .await
+                .unwrap()
+                .org_id
+                .as_deref(),
+            Some("wrk_test")
+        );
+        assert_eq!(console.state.refreshes.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn absolute_verification_url_prefixes_relative_paths() {

@@ -121,6 +121,8 @@
     "model_request_timeout": "模型请求超时，请重试。",
     "model_rate_limited": "已达到提供商的请求限额，请稍后重试。",
     "model_service_unavailable": "模型服务暂时不可用，请稍后重试。",
+    "model_unavailable": "此模型当前不可用，请选择其他模型。",
+    "model_region_unavailable": "提供商不允许在当前地区使用此模型。",
     "model_request_failed": "模型请求失败，请检查提供商设置后重试。",
     "action_not_approved": "本次操作未获批准。",
     "guidance_for_the_current_task": "用于引导当前任务",

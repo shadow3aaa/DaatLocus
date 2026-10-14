@@ -75,6 +75,10 @@ pub struct AnthropicCompatibleClient {
 }
 
 impl AnthropicCompatibleClient {
+    #[cfg(test)]
+    pub(super) fn set_test_client(&mut self, client: reqwest::Client) {
+        self.transport.set_test_client(client);
+    }
     pub(crate) fn new(
         api_key: &str,
         base_url: &str,
@@ -260,14 +264,6 @@ impl ModelProvider for AnthropicCompatibleClient {
                 &request_context,
             )
             .await?;
-            if force_tool && looks_like_forced_tool_choice_error(&body) {
-                force_tool = false;
-                warn!(
-                    "anthropic-compatible rejected forced tool_choice; retrying with tool_choice=auto\n{}",
-                    request_context.join("\n")
-                );
-                continue;
-            }
             if looks_like_anthropic_context_error(&body) {
                 return Err(ContextBudgetExceededError::for_request(
                     "prompt request",
@@ -279,6 +275,19 @@ impl ModelProvider for AnthropicCompatibleClient {
                     )),
                 )
                 .into());
+            }
+            if let Some(error) =
+                super::ModelRequestFailure::opencode_response(&self.base_url, status, &body)
+            {
+                return Err(error);
+            }
+            if force_tool && looks_like_forced_tool_choice_error(&body) {
+                force_tool = false;
+                warn!(
+                    "anthropic-compatible rejected forced tool_choice; retrying with tool_choice=auto\n{}",
+                    request_context.join("\n")
+                );
+                continue;
             }
             return Err(miette!(
                 "anthropic-compatible returned HTTP {}: {}",
@@ -351,6 +360,11 @@ impl ModelProvider for AnthropicCompatibleClient {
                     )),
                 )
                 .into());
+            }
+            if let Some(error) =
+                super::ModelRequestFailure::opencode_response(&self.base_url, status, &body)
+            {
+                return Err(error);
             }
             let current_thinking_mode = self.thinking_mode.load(Ordering::Relaxed);
             let adaptive_available = self

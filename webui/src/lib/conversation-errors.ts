@@ -9,6 +9,8 @@ const labels: Record<string, string> = {
   model_request_timeout: "conversation_turns.model_request_timeout",
   model_rate_limited: "conversation_turns.model_rate_limited",
   model_service_unavailable: "conversation_turns.model_service_unavailable",
+  model_unavailable: "conversation_turns.model_unavailable",
+  model_region_unavailable: "conversation_turns.model_region_unavailable",
   model_request_failed: "conversation_turns.model_request_failed",
 };
 /** Render failure facts; private provider diagnostics are never conversation prose. */

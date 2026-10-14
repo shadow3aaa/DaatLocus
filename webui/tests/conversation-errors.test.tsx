@@ -5,6 +5,14 @@ import { PrimaryTurn } from "../src/components/conversation-turns";
 import i18n from "../src/lib/i18n";
 
 afterEach(async () => { await i18n.changeLanguage("zh-CN"); });
+test("gateway model and region restrictions have distinct localized reasons", async () => {
+  await i18n.changeLanguage("zh-CN");
+  expect(conversationFailureMessage("model_unavailable")).toContain("此模型当前不可用");
+  expect(conversationFailureMessage("model_region_unavailable")).toContain("当前地区");
+  await i18n.changeLanguage("en-US");
+  expect(conversationFailureMessage("model_unavailable")).toContain("currently unavailable");
+  expect(conversationFailureMessage("model_region_unavailable")).toContain("current region");
+});
 test("certificate rejection and expired credentials have distinct localized reasons", async () => {
   await i18n.changeLanguage("zh-CN");
   expect(conversationFailureMessage("model_certificate_revoked")).toContain("证书已被吊销");

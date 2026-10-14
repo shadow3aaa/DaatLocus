@@ -653,11 +653,13 @@ pub fn model_request_error_detail(err: &miette::Report) -> String {
 }
 
 pub fn should_retry_agent_turn_error(error: &miette::Report) -> bool {
-    !is_context_budget_error(error)
-        && error
-            .downcast_ref::<crate::providers::ModelRequestFailure>()
-            .is_none_or(|error| error.retryable())
-        && !is_permanent_model_request_error(&error.to_string())
+    if is_context_budget_error(error) {
+        return false;
+    }
+    if let Some(failure) = error.downcast_ref::<crate::providers::ModelRequestFailure>() {
+        return failure.retryable();
+    }
+    !is_permanent_model_request_error(&error.to_string())
 }
 
 fn is_context_budget_error(error: &miette::Report) -> bool {
@@ -762,28 +764,34 @@ mod tests {
 
     #[tokio::test]
     async fn retries_transient_agent_turn_failures() {
-        let provider = RetryTestProvider::new(vec![
-            Err(miette!("connection reset")),
-            Ok(retry_test_response()),
-        ]);
+        for error in [
+            miette!("connection reset"),
+            crate::providers::ModelRequestFailure::report(
+                crate::providers::ModelFailureKind::Unavailable,
+                "OpenCode API returned HTTP 400 Bad Request: upstream_error".into(),
+            ),
+        ] {
+            let provider = RetryTestProvider::new(vec![Err(error), Ok(retry_test_response())]);
 
-        let result = match complete_agent_turn_with_retry_using_policy_cancellable_with_observer(
-            &provider,
-            retry_test_request(),
-            ModelRequestOptions::for_agent_turn(&provider, &retry_test_request(), None)
-                .expect("retry test request options"),
-            retry_test_policy(),
-            || false,
-            AgentTurnRetryObserver::default(),
-        )
-        .await
-        {
-            Ok(success) => success,
-            Err(failure) => panic!("transient request should retry: {}", failure.error),
-        };
+            let result =
+                match complete_agent_turn_with_retry_using_policy_cancellable_with_observer(
+                    &provider,
+                    retry_test_request(),
+                    ModelRequestOptions::for_agent_turn(&provider, &retry_test_request(), None)
+                        .expect("retry test request options"),
+                    retry_test_policy(),
+                    || false,
+                    AgentTurnRetryObserver::default(),
+                )
+                .await
+                {
+                    Ok(success) => success,
+                    Err(failure) => panic!("transient request should retry: {}", failure.error),
+                };
 
-        assert_eq!(result.attempts, 2);
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+            assert_eq!(result.attempts, 2);
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        }
     }
     #[tokio::test]
     async fn does_not_retry_permanent_or_context_budget_agent_turn_failures() {
@@ -793,6 +801,8 @@ mod tests {
             ModelFailureKind::Forbidden,
             ModelFailureKind::CertificateRevoked,
             ModelFailureKind::CertificateInvalid,
+            ModelFailureKind::ModelUnavailable,
+            ModelFailureKind::RegionUnavailable,
         ] {
             assert_non_retryable_agent_turn_failure(ModelRequestFailure::report(
                 kind,
