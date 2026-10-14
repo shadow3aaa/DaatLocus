@@ -46,6 +46,10 @@ pub struct ResponsesCompatibleClient {
 }
 
 impl ResponsesCompatibleClient {
+    #[cfg(test)]
+    pub(super) fn set_test_client(&mut self, client: reqwest::Client) {
+        self.transport.set_test_client(client);
+    }
     /// Replace the bearer credential used for subsequent requests.
     pub(crate) fn set_api_key(&mut self, api_key: String) {
         self.api_key = api_key;
@@ -151,11 +155,14 @@ impl ResponsesCompatibleClient {
             let next_chunk = tokio::time::timeout(self.stream_idle_timeout, stream.next())
                 .await
                 .map_err(|_| {
-                    miette!(
-                        "responses-compatible stream stalled for over {}s (model={}, url={})",
-                        self.stream_idle_timeout.as_secs(),
-                        self.model,
-                        url
+                    super::ModelRequestFailure::report(
+                        super::ModelFailureKind::Timeout,
+                        format!(
+                            "responses-compatible stream stalled for over {}s (model={}, url={})",
+                            self.stream_idle_timeout.as_secs(),
+                            self.model,
+                            url
+                        ),
                     )
                 })?;
             let Some(chunk) = next_chunk else {
@@ -401,6 +408,11 @@ impl ModelProvider for ResponsesCompatibleClient {
                 &request_context,
             )
             .await?;
+            if let Some(error) =
+                super::ModelRequestFailure::opencode_response(&self.base_url, status, &body)
+            {
+                return Err(error);
+            }
             return Err(miette!(
                 "responses-compatible returned HTTP {}: {}",
                 status,
@@ -465,6 +477,11 @@ impl ModelProvider for ResponsesCompatibleClient {
                     )),
                 )
                 .into());
+            }
+            if let Some(error) =
+                super::ModelRequestFailure::opencode_response(&self.base_url, status, &body)
+            {
+                return Err(error);
             }
             if super::io::should_retry_request_without_reasoning_summary(&body)
                 && self.supports_reasoning_summary.load(Ordering::Relaxed)

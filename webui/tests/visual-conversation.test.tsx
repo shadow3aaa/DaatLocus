@@ -8,6 +8,7 @@ import { MessageQueue } from "../src/components/message-queue";
 import { Composer } from "../src/components/composer";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import { FileChangeView } from "../src/components/file-change";
+import { ProvidersSettings } from "../src/components/settings/providers-settings";
 import { elapsedLabel, isPrimaryActor, mergeActivity, workTimeline } from "../src/lib/work-timeline";
 import { clearStoredDrafts, loadDraft, saveDraft } from "../src/lib/conversation-drafts";
 import type { EventRecord, MessageRecord } from "../src/lib/actor-api";
@@ -61,6 +62,22 @@ describe("fixed presentation and chronological source", () => {
     expect(html).toContain("用时 1分钟 2秒");
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain("INTERMEDIATE_TEXT");
+  });
+  test("a related reply or steering input does not remove the original task activity", () => {
+    for (const kind of ["result", "steering"] as const) {
+      const chat = {messages:[{...message,id:"related",kind,in_reply_to:message.id}],tools:[],approvals:[],events:[],toolNext:{}} as unknown as Parameters<typeof WorkTurn>[0]["chat"];
+      const html = renderToStaticMarkup(<WorkTurn message={{...message,status:"completed",started_at_ms:10_000,finished_at_ms:72_000}} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
+      expect(html).toContain("dl-work-round");
+      expect(html).toContain("用时 1分钟 2秒");
+    }
+  });
+  test("removing the last provider keeps a save action; an unchanged empty setup has none", () => {
+    const props: Parameters<typeof ProvidersSettings>[0] = {config:{providers:[],models:[],main_model:null,approval_model:null},onChange:()=>{},onSave:async()=>true,pending:false};
+    const dirty = renderToStaticMarkup(<ProvidersSettings {...props} dirty />);
+    expect(dirty).toContain("dl-settings-footer");
+    expect(dirty.match(/<button[^>]*>保存<\/button>/)?.[0]).not.toContain('disabled=""');
+    expect(dirty).not.toContain(i18n.t("providers_settings.model_required"));
+    expect(renderToStaticMarkup(<ProvidersSettings {...props} />)).not.toContain("dl-settings-footer");
   });
   test("a working composer keeps stop alongside queue send, and root excludes execution selectors", () => {
     const props: Parameters<typeof Composer>[0] = {value:"queued draft",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,working:true,onStop:()=>{},canManage:true,mode:"ask",onModeChange:()=>{},models:[{name:"m",label:"fixture-model"}],modelName:"m",onModelChange:()=>{}};

@@ -12,7 +12,7 @@ import { MessageQueue, queuedUserInput } from "@/components/message-queue";
 import { isPrimaryActor, isUserDelivery } from "@/lib/work-timeline";
 import { OwnerApprovalNotice } from "@/components/owner-approval-notice";
 import { useActorConversation } from "@/hooks/use-actor-conversation";
-import { accessKey, patchActorPreferences, type Access, type ApprovalMode, type ActorDetail } from "@/lib/actor-api";
+import { accessKey, actorModelReady, patchActorPreferences, type Access, type ApprovalMode, type ActorDetail } from "@/lib/actor-api";
 import { cn } from "@/lib/utils";
 import type { ConversationConnectionMessage } from "@/lib/stage-api";
 import { connectionBlocks } from "@/lib/stage-api";
@@ -39,6 +39,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const [preparingFiles, setPreparingFiles] = useState(false);
   const filePreparation = useRef({ actorId, busy: false });
   const actor = chat.actor;
+  ready = actorModelReady(actor, ready);
   const canManage = access.kind === "owner" && (!actor?.remote || actor.access?.manage === true);
   const waitingMessage = connectionMessage || (chat.streamStatus === "reconnecting" ? "conversation_pane.reconnecting" : null);
   const connecting = connectionBlocks(waitingMessage);

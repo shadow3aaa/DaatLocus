@@ -1239,6 +1239,43 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
             .message(&input.id)
             .map(|message| (message.status, message.error))
     );
+    let hosted = b
+        .store()
+        .actors()
+        .unwrap()
+        .into_iter()
+        .find(|actor| actor.config.name == "Hosted project")
+        .unwrap();
+    let address = crate::stage::ActorAddress {
+        stage_id: host_b.local,
+        actor_id: hosted.id.clone(),
+    };
+    let detail = crate::stage::observation::read(
+        &b,
+        host_c.local,
+        &address,
+        &crate::stage::observation::Query::Actor,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .unwrap();
+    assert_eq!(
+        detail["access"]["manage"], true,
+        "a third account device can access the actual dispatched Actor"
+    );
+    assert_eq!(detail["conversation_url"], address.conversation_url());
+    let outcomes = a
+        .store()
+        .tool_summaries(shared::ACTOR_ID, &input.id, None, 30)
+        .unwrap();
+    let created = outcomes
+        .items
+        .iter()
+        .find(|tool| tool.name == "actors__create")
+        .unwrap();
+    assert_eq!(
+        created.outcome.as_ref().unwrap()["conversation_url"],
+        address.conversation_url()
+    );
     assert_eq!(
         b.store()
             .actors()

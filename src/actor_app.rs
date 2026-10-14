@@ -23,6 +23,17 @@ pub struct ActorApp {
 }
 
 impl ActorApp {
+    fn conversation_url(&self, actor: &str) -> Result<String> {
+        Ok(crate::stage::ActorAddress {
+            stage_id: self
+                .system
+                .store()
+                .public_stage_id()
+                .map_err(|error| miette!("{error}"))?,
+            actor_id: actor.into(),
+        }
+        .conversation_url())
+    }
     fn require_local_stage(&self, stage: Option<&str>) -> Result<()> {
         if let Some(stage) = stage {
             let local = self
@@ -547,7 +558,7 @@ impl App for ActorApp {
                 let start = args.cursor.unwrap_or(0);
                 let next = start.saturating_add(limit);
                 let next_cursor = (next < actors.len()).then_some(next);
-                let actors = actors.iter().skip(start).take(limit).map(|actor| json!({ "id": actor.id, "name": actor.config.name, "conversation_url": format!("/actors/{}",actor.id), "workspace": actor.config.workspace, "read_only": actor.config.permissions.read_only, "apps": actor.config.apps, "status": actor.status })).collect::<Vec<_>>();
+                let actors = actors.iter().skip(start).take(limit).map(|actor| Ok(json!({ "id": actor.id, "name": actor.config.name, "conversation_url": self.conversation_url(&actor.id)?, "workspace": actor.config.workspace, "read_only": actor.config.permissions.read_only, "apps": actor.config.apps, "status": actor.status }))).collect::<Result<Vec<_>>>()?;
                 let parent = self.system.record_for_tool(&self.actor_id, caller)?;
                 Ok(AppToolExecutionResult::new(
                     format!("listed {} Actors", actors.len()),
@@ -597,7 +608,7 @@ impl App for ActorApp {
                     .create_from_actor(&self.actor_id, config, context)?;
                 Ok(AppToolExecutionResult::new(
                     format!("created Actor {}", actor.id),
-                    json!({ "id": actor.id, "name": actor.config.name, "conversation_url": format!("/actors/{}",actor.id) }),
+                    json!({ "id": actor.id, "name": actor.config.name, "conversation_url": self.conversation_url(&actor.id)? }),
                     None,
                 ))
             }
@@ -643,7 +654,7 @@ impl App for ActorApp {
                 )?;
                 Ok(AppToolExecutionResult::new(
                     format!("queued request to {}", args.actor_id),
-                    json!({ "message_id": message.id, "actor_id": message.actor_id, "conversation_url":format!("/actors/{}",message.actor_id), "status": message.status }),
+                    json!({ "message_id": message.id, "actor_id": message.actor_id, "conversation_url":self.conversation_url(&message.actor_id)?, "status": message.status }),
                     None,
                 ))
             }

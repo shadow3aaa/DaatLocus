@@ -33,6 +33,10 @@ pub(super) struct BackendRequest<'a> {
 }
 
 impl BackendHttp {
+    #[cfg(test)]
+    pub(super) fn set_test_client(&mut self, client: reqwest::Client) {
+        self.client = client;
+    }
     pub(super) fn new(base_url: &str, model: &ModelConfig) -> Self {
         Self {
             client: reqwest::Client::builder()
@@ -145,6 +149,13 @@ impl BackendRequest<'_> {
                     diagnostics,
                 )
                 .await?;
+                if let Some(error) = super::ModelRequestFailure::opencode_response(
+                    &self.http.base_url,
+                    status,
+                    &body,
+                ) {
+                    return Err(error);
+                }
                 return Err(super::ModelRequestFailure::report(
                     if status == reqwest::StatusCode::UNAUTHORIZED {
                         super::ModelFailureKind::Authentication
@@ -173,6 +184,15 @@ impl BackendRequest<'_> {
                 diagnostics,
             )
             .await?;
+            if let Some(error) =
+                super::ModelRequestFailure::opencode_response(&self.http.base_url, status, &body)
+                && !error
+                    .downcast_ref::<super::ModelRequestFailure>()
+                    .unwrap()
+                    .retryable()
+            {
+                return Err(error);
+            }
             let delay = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 if rate_retries >= 4 {
                     return Err(super::ModelRequestFailure::report(
@@ -284,6 +304,209 @@ mod tests {
     struct Verdict {
         decision: String,
         reason: String,
+    }
+
+    #[tokio::test]
+    async fn configured_timeouts_remain_typed_for_main_and_independent_requests() {
+        use crate::providers::{ModelFailureKind, ModelRequestFailure};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().fallback(post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                axum::body::Body::from_stream(futures_util::stream::pending::<
+                    Result<axum::body::Bytes, std::convert::Infallible>,
+                >()),
+            )
+        }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base = format!("http://{address}/v1");
+        let model = ModelConfig {
+            request_timeout_secs: 1,
+            stream_idle_timeout_secs: 1,
+            ..Default::default()
+        };
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut chat = super::super::OpenAIClient::from_parts("fixture-key", &base, &model);
+        chat.transport.client = client.clone();
+        let mut responses = super::super::responses_compat::ResponsesCompatibleClient::new(
+            "fixture-key",
+            &base,
+            &model,
+        );
+        responses.set_test_client(client.clone());
+        let mut anthropic = super::super::anthropic_compat::AnthropicCompatibleClient::new(
+            "fixture-key",
+            &base,
+            &model,
+        );
+        anthropic.set_test_client(client);
+        let providers: Vec<Box<dyn ModelProvider>> =
+            vec![Box::new(chat), Box::new(responses), Box::new(anthropic)];
+        for provider in providers {
+            let request = AgentTurnRequest {
+                messages: vec![AgentMessage::user("Test")],
+                tools: vec![],
+            };
+            let options =
+                ModelRequestOptions::for_agent_turn(provider.as_ref(), &request, None).unwrap();
+            let error = provider
+                .complete_agent_turn(request, options)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.downcast_ref::<ModelRequestFailure>().unwrap().kind,
+                ModelFailureKind::Timeout
+            );
+            let request = PromptRequest {
+                tool_name: "review_app_call".into(),
+                tool_description: "Review".into(),
+                output_schema: crate::schema_utils::model_schema_for::<Verdict>(),
+                system_messages: vec![],
+                history_messages: vec![],
+                retry_messages: vec![],
+                current_user_message: "Review".into(),
+            };
+            let options =
+                ModelRequestOptions::for_prompt(provider.as_ref(), &request, None).unwrap();
+            let error = provider.complete_json(request, options).await.unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<ModelRequestFailure>().unwrap().kind,
+                ModelFailureKind::Timeout
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn opencode_direct_urls_classify_failures_across_all_protocols() {
+        use crate::providers::{ModelFailureKind, ModelRequestFailure};
+        for (status, error_type, message, expected) in [
+            (
+                400,
+                "server_error",
+                "Upstream request failed: Model is unavailable.",
+                ModelFailureKind::ModelUnavailable,
+            ),
+            (
+                403,
+                "RegionError",
+                "This model is not available in your country",
+                ModelFailureKind::RegionUnavailable,
+            ),
+            (
+                400,
+                "upstream_error",
+                "Temporary upstream failure",
+                ModelFailureKind::Unavailable,
+            ),
+            (
+                503,
+                "server_error",
+                "Model is unavailable.",
+                ModelFailureKind::ModelUnavailable,
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let requested = calls.clone();
+            let app = Router::new().fallback(post(move |headers: HeaderMap| {
+                let requested = requested.clone();
+                async move {
+                    requested.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(headers[AUTHORIZATION], "Bearer fixture-key");
+                    assert!(!headers.contains_key("x-opencode-org-id"));
+                    for name in [
+                        "x-opencode-session",
+                        "x-opencode-request",
+                        "x-opencode-client",
+                        "x-opencode-project",
+                    ] {
+                        assert!(headers.contains_key(name));
+                    }
+                    (
+                        reqwest::StatusCode::from_u16(status).unwrap(),
+                        Json(serde_json::json!({"error":{"type":error_type,"message":message}})),
+                    )
+                }
+            }));
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            for path in ["zen/v1", "go/v1"] {
+                let base = format!("http://opencode.ai:{}/{path}", address.port());
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .resolve("opencode.ai", address)
+                    .build()
+                    .unwrap();
+                let model = ModelConfig::default();
+                let mut chat = super::super::OpenAIClient::from_parts("fixture-key", &base, &model);
+                chat.transport.client = client.clone();
+                let mut responses = super::super::responses_compat::ResponsesCompatibleClient::new(
+                    "fixture-key",
+                    &base,
+                    &model,
+                );
+                responses.set_test_client(client.clone());
+                let mut anthropic = super::super::anthropic_compat::AnthropicCompatibleClient::new(
+                    "fixture-key",
+                    &base,
+                    &model,
+                );
+                anthropic.set_test_client(client);
+                let providers: Vec<Box<dyn ModelProvider>> =
+                    vec![Box::new(chat), Box::new(responses), Box::new(anthropic)];
+                for provider in providers {
+                    let agent = AgentTurnRequest {
+                        messages: vec![AgentMessage::user("Test")],
+                        tools: vec![],
+                    };
+                    let options =
+                        ModelRequestOptions::for_agent_turn(provider.as_ref(), &agent, None)
+                            .unwrap();
+                    let failure = provider
+                        .complete_agent_turn(agent, options)
+                        .await
+                        .err()
+                        .unwrap();
+                    assert_eq!(
+                        failure.downcast_ref::<ModelRequestFailure>().unwrap().kind,
+                        expected
+                    );
+                    assert_eq!(
+                        crate::core::should_retry_agent_turn_error(&failure),
+                        expected == ModelFailureKind::Unavailable
+                    );
+                    let review = PromptRequest {
+                        tool_name: "review_app_call".into(),
+                        tool_description: "Review".into(),
+                        output_schema: crate::schema_utils::model_schema_for::<Verdict>(),
+                        system_messages: vec![],
+                        history_messages: vec![],
+                        retry_messages: vec![],
+                        current_user_message: "Review".into(),
+                    };
+                    let options =
+                        ModelRequestOptions::for_prompt(provider.as_ref(), &review, None).unwrap();
+                    let failure = provider.complete_json(review, options).await.unwrap_err();
+                    assert_eq!(
+                        failure.downcast_ref::<ModelRequestFailure>().unwrap().kind,
+                        expected
+                    );
+                }
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                12,
+                "known errors must not trigger parameter fallback or repeated requests"
+            );
+            server.abort();
+        }
     }
 
     #[derive(Clone)]

@@ -185,7 +185,7 @@ impl ConfigurationStore {
             return Err(miette!("Configuration does not belong to this account"));
         }
         data.materialize(&host.system.config())
-            .validate()
+            .validate_settings()
             .map_err(|_| miette!("Account model definitions are incomplete"))?;
         Ok(data)
     }
@@ -308,6 +308,12 @@ pub fn persist_device_config(system: &ActorSystem, config: &Config) -> Result<()
     );
     crate::persistence::write_bytes_atomic_sync(
         &directory.join("config.toml"),
+        &bytes,
+        crate::persistence::PersistenceFileMode::Private,
+    )
+    .into_diagnostic()?;
+    crate::persistence::write_bytes_atomic_sync(
+        &directory.join("config.toml.bak"),
         &bytes,
         crate::persistence::PersistenceFileMode::Private,
     )

@@ -47,6 +47,7 @@ export type ActorSummary = {
 };
 export type ActorDetail = {
   remote?: boolean;
+  model_ready?: boolean;
   id: string;
   parent_id?: string | null;
   conversation_url: string;
@@ -61,6 +62,8 @@ export type ActorDetail = {
     manage?: boolean;
   };
 };
+export const actorModelReady = (actor: ActorDetail | null, localReady: boolean): boolean =>
+  actor?.remote ? actor.model_ready ?? true : localReady;
 export type Access = {
   kind: "owner";
   manage: true;

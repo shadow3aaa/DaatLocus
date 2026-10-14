@@ -6,7 +6,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { FieldGroup } from "@/components/ui/field";
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "@/components/ui/empty";
 import type { DiscoveredModel, ModelConfig, ProviderConfig, SetupConfigRequest } from "@/lib/actor-api";
-import { selectDiscoveredModel } from "@/lib/model-settings";
+import { removeProvider, removeConfiguredModel, selectDiscoveredModel } from "@/lib/model-settings";
 import { ModelEditor } from "./model-editor";
 import { ModelDiscovery, useModelDiscovery } from "./model-discovery";
 import { ProviderEditor, providerKindLabel } from "./provider-editor";
@@ -57,9 +57,7 @@ export function ProvidersSettings({config, onChange, onSave, pending, dirty = fa
     editModel(next); setPage({...page, choosing: false});
   }
   function removeModel(index: number) {
-    const models = config.models.filter((_, at) => at !== index);
-    onChange({...config, models, main_model: config.main_model === config.models[index].name ? models[0]?.name ?? null : config.main_model,
-      approval_model: config.approval_model === config.models[index].name ? null : config.approval_model});
+    onChange(removeConfiguredModel(config, index));
     setPage({type: "list"});
   }
   function back() {
@@ -70,12 +68,12 @@ export function ProvidersSettings({config, onChange, onSave, pending, dirty = fa
     setPage({type: "list"});
   }
   async function save() {if (await onSave()) {previous.current = [];setPage({type: "list"});}}
-  const ready = Boolean(config.providers.length && config.models.length && config.models.every(model => model.name.trim() && model.model_id.trim()));
+  const ready = config.models.every(model => model.name.trim() && model.model_id.trim() && config.providers.some(provider => provider.name === model.provider_name));
 
   return <div ref={root} className="dl-settings-models">
     {page.type !== "list" ? <div className="dl-settings-subpage-heading"><Button variant="ghost" size="icon-sm" disabled={pending} aria-label={t("providers_settings.back_to_providers")} onClick={back}><ArrowLeftIcon /></Button>
       <h3>{page.type === "provider" ? page.adding ? t("providers_settings.add_provider") : provider?.name || t("providers_settings.edit_provider") : page.adding ? t("providers_settings.add_model") : model?.name || t("providers_settings.edit_model")}</h3>
-      {page.adding ? null : page.type === "provider" ? <Button variant="ghost" size="icon-sm" disabled={pending || config.models.some(model => model.provider_name === provider?.name)} aria-label={t("providers_settings.remove_provider")} onClick={() => {onChange({...config, providers: config.providers.filter((_, index) => index !== page.index)});setPage({type: "list"});}}><Trash2Icon /></Button> : <Button variant="ghost" size="icon-sm" disabled={pending} aria-label={t("providers_settings.remove_model")} onClick={() => removeModel(page.index)}><Trash2Icon /></Button>}
+      {page.adding ? null : page.type === "provider" ? <Button variant="ghost" size="icon-sm" disabled={pending} aria-label={t("providers_settings.remove_provider")} onClick={() => {onChange(removeProvider(config, page.index));previous.current = [];setPage({type: "list"});}}><Trash2Icon /></Button> : <Button variant="ghost" size="icon-sm" disabled={pending} aria-label={t("providers_settings.remove_model")} onClick={() => removeModel(page.index)}><Trash2Icon /></Button>}
     </div> : null}
     {page.type === "list" && !config.providers.length ? <Empty className="dl-provider-empty"><EmptyHeader><EmptyTitle>{t("providers_settings.no_providers")}</EmptyTitle><EmptyDescription>{t("providers_settings.add_provider_to_start")}</EmptyDescription></EmptyHeader><Button disabled={pending} onClick={addProvider}><PlusIcon data-icon="inline-start" />{t("providers_settings.add_provider")}</Button></Empty> : page.type === "list" ? <>
       <SettingsSection title={t("providers_settings.providers")} action={<Button variant="ghost" size="sm" disabled={pending} onClick={addProvider}><PlusIcon data-icon="inline-start" />{t("composer.add")}</Button>}>
@@ -95,6 +93,6 @@ export function ProvidersSettings({config, onChange, onSave, pending, dirty = fa
       <FieldGroup><Picker id="dl-model-provider" label={t("providers_settings.providers")} value={model.provider_name} disabled={pending} options={config.providers.filter(provider => provider.name).map(provider => ({value: provider.name, label: provider.name}))} onChange={provider_name => {editModel({...model, name: model.name === model.model_id ? "" : model.name, provider_name, model_id: "", context_window_tokens: null, max_completion_tokens: null, supports_vision: null, thinking_budget: null});setPage({...page, choosing: true});}} /></FieldGroup>
       {page.choosing ? <ModelDiscovery key={model.provider_name} state={discovery} disabled={pending} onSelect={selectModel} onCustom={() => setPage({...page, choosing: false})} /> : <ModelEditor key={`${page.index}:${model.provider_name}`} model={model} metadata={discovery.models.find(found => found.id === model.model_id)} onChange={editModel} disabled={pending} onChoose={() => setPage({...page, choosing: true})} />}
     </> : null}
-    {(dirty || config.models.length > 0) && !(page.type === "list" && !config.providers.length) && <div className="dl-settings-footer"><span className="dl-settings-save-status" role="status">{dirty ? !config.models.length ? t("providers_settings.model_required") : t("settings_dialog.unsaved_changes") : null}</span><Button disabled={pending || !ready || !dirty} onClick={() => void save()}>{pending && <Spinner data-icon="inline-start" />}{t("message_queue.save")}</Button></div>}
+    {(dirty || config.models.length > 0) && <div className="dl-settings-footer"><span className="dl-settings-save-status" role="status">{dirty ? !ready ? t("providers_settings.model_required") : t("settings_dialog.unsaved_changes") : null}</span><Button disabled={pending || !ready || !dirty} onClick={() => void save()}>{pending && <Spinner data-icon="inline-start" />}{t("message_queue.save")}</Button></div>}
   </div>;
 }

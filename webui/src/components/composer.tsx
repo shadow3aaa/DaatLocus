@@ -32,7 +32,8 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
   const [listening, setListening] = useState(false);
   const [dragging, setDragging] = useState(false);
   const ModeIcon = ModeIcons[mode];
-  const selected = models.find(model => model.name === modelName) || (!modelName ? models.find(model => model.isDefault) : undefined);
+  const preference = models.some(model => model.name === modelName) ? modelName : "";
+  const selected = models.find(model => model.name === preference) || models.find(model => model.isDefault);
   const canSend = !disabled && !submissionDisabled && !busy && !uploading && (Boolean(value.trim()) || attachments.length > 0);
   const speech = typeof window !== "undefined" ? (window as SpeechWindow).SpeechRecognition ?? (window as SpeechWindow).webkitSpeechRecognition : undefined;
   currentValue.current = value;
@@ -85,7 +86,7 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
           </DropdownMenuRadioGroup></DropdownMenuContent></DropdownMenu>}
         <div className="dl-composer-toolbar-spacer" />
         {canManage && presentation === "work" && <DropdownMenu><DropdownMenuTrigger asChild><InputGroupButton disabled={disabled || busy || working} className="dl-model-trigger"><span className="dl-model-name">{selected?.label || t("composer.default_model")}</span>{selected?.effort && <span className="dl-model-effort">{effortLabel(selected.effort)}</span>}<ChevronDownIcon data-icon="inline-end" /></InputGroupButton></DropdownMenuTrigger>
-          <DropdownMenuContent align="end" side="top" className="dl-model-menu"><DropdownMenuLabel>{t("composer.models")}</DropdownMenuLabel><DropdownMenuRadioGroup value={modelName} onValueChange={onModelChange}>
+          <DropdownMenuContent align="end" side="top" className="dl-model-menu"><DropdownMenuLabel>{t("composer.models")}</DropdownMenuLabel><DropdownMenuRadioGroup value={preference} onValueChange={onModelChange}>
             <DropdownMenuRadioItem value="">{t("composer.use_default_model")}</DropdownMenuRadioItem>
             {models.map(model => <DropdownMenuRadioItem value={model.name} key={model.name}><span className="dl-menu-choice"><span>{model.label}</span>{(model.effort || model.name !== model.label) && <small>{effortLabel(model.effort) || model.name}</small>}</span></DropdownMenuRadioItem>)}
           </DropdownMenuRadioGroup></DropdownMenuContent>

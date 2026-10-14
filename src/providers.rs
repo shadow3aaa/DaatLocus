@@ -366,12 +366,12 @@ impl OpenAIClient {
                 self.current_adapter()
                     .build_prompt_payload(self, &request, output_schema.clone());
             let response = backend_request
-                .post(&payload, &request_context, self.stream_idle_timeout)
+                .post(&payload, &request_context, self.request_timeout)
                 .await?;
             let status = response.status();
             let body = read_response_text_with_timeout(
                 response,
-                self.stream_idle_timeout,
+                self.request_timeout,
                 "llm response body read failed",
                 &url,
                 &request_context,
@@ -395,6 +395,11 @@ impl OpenAIClient {
                 .into());
             }
 
+            if let Some(error) =
+                ModelRequestFailure::opencode_response(&self.base_url, status, &body)
+            {
+                return Err(error);
+            }
             // On 400, step through adapter compatibility modes in order:
             // Omit function strict first, then downgrade tool_choice and the thinking budget.
             // Providers may reject parameters with generic error messages
@@ -535,6 +540,11 @@ impl OpenAIClient {
                 .into());
             }
 
+            if let Some(error) =
+                ModelRequestFailure::opencode_response(&self.base_url, status, &body)
+            {
+                return Err(error);
+            }
             if request_has_reasoning_content
                 && adapter_state.reasoning_content_mode == ReasoningContentMode::Enabled
                 && should_retry_request_without_reasoning_content(&body)
@@ -666,11 +676,14 @@ impl OpenAIClient {
             let next_chunk = tokio::time::timeout(self.stream_idle_timeout, stream.next())
                 .await
                 .map_err(|_| {
-                    miette!(
-                        "llm streaming response stalled for over {}s (model={}, url={})",
-                        self.stream_idle_timeout.as_secs(),
-                        self.model,
-                        url
+                    ModelRequestFailure::report(
+                        ModelFailureKind::Timeout,
+                        format!(
+                            "llm streaming response stalled for over {}s (model={}, url={})",
+                            self.stream_idle_timeout.as_secs(),
+                            self.model,
+                            url
+                        ),
                     )
                 })?;
             let Some(chunk) = next_chunk else {
@@ -1382,15 +1395,19 @@ pub fn build_model_provider(
     };
     let mut provider: Box<dyn ModelProvider + Send + Sync> = provider;
     // The gateway only serves its free tier to requests shaped like its own CLI.
-    if matches!(
-        provider_config,
+    let is_gateway = match provider_config {
         ProviderConfig::OpenaiCompatible { base_url, .. }
-            if is_opencode_gateway_base_url(base_url)
-    ) || matches!(
-        provider_config,
-        ProviderConfig::OpenCodeConsoleOauth { base_url, .. }
-            if base_url.as_deref().is_none_or(is_opencode_gateway_base_url)
-    ) {
+        | ProviderConfig::AnthropicCompatible { base_url, .. }
+        | ProviderConfig::Openai {
+            base_url: Some(base_url),
+            ..
+        } => is_opencode_gateway_base_url(base_url),
+        ProviderConfig::OpenCodeConsoleOauth { base_url, .. } => {
+            base_url.as_deref().is_none_or(is_opencode_gateway_base_url)
+        }
+        _ => false,
+    };
+    if is_gateway {
         provider = Box::new(OpenCodeGatewayProvider { inner: provider });
     }
     Ok(
@@ -1513,7 +1530,7 @@ struct OpenCodeGatewayProvider {
 /// Canonical Daat shell tool the gateway's `bash` alias maps to.
 const OPENCODE_GATEWAY_SHELL_TOOL: &str = "terminal__terminal_exec";
 /// Canonical Daat file-read tool the gateway's `read` alias maps to.
-const OPENCODE_GATEWAY_READ_FILE_TOOL: &str = "read_file";
+const OPENCODE_GATEWAY_READ_FILE_TOOL: &str = "files__read_file";
 /// Tool names the gateway's fingerprint check requires.
 const OPENCODE_GATEWAY_BASH_TOOL: &str = "bash";
 const OPENCODE_GATEWAY_READ_TOOL: &str = "read";
@@ -1524,7 +1541,8 @@ impl OpenCodeGatewayProvider {
     /// The free tier is only served when the request declares both `bash` and
     /// `read` tools (schema contents are not validated). Mirror Daat's shell
     /// and file-read tools under those names.
-    fn ensure_cli_tool_aliases(tools: &mut Vec<AgentToolSpec>) {
+    fn ensure_cli_tool_aliases(tools: &mut Vec<AgentToolSpec>) -> HashMap<String, String> {
+        let mut mapping = HashMap::new();
         let aliases = [
             (
                 OPENCODE_GATEWAY_BASH_TOOL,
@@ -1541,20 +1559,23 @@ impl OpenCodeGatewayProvider {
             if tools.iter().any(|tool| tool.name == alias_name) {
                 continue;
             }
-            let Some(mut alias) = tools
-                .iter()
-                .find(|tool| {
-                    tool.name == canonical_name
-                        || tool.name.ends_with(&format!("_{canonical_name}"))
-                })
-                .cloned()
-            else {
+            let mut sources = tools.iter().filter(|tool| {
+                tool.name == canonical_name || tool.name.ends_with(&format!("_{canonical_name}"))
+            });
+            let Some(mut alias) = sources.next().cloned() else {
                 continue;
             };
+            // An alias must identify one actual operation, including its device scope.
+            if sources.next().is_some() {
+                continue;
+            }
+            let original_name = alias.name.clone();
             alias.name = alias_name.to_string();
             alias.description = description.to_string();
+            mapping.insert(alias_name.to_string(), original_name);
             tools.push(alias);
         }
+        mapping
     }
 }
 
@@ -1573,15 +1594,13 @@ impl ModelProvider for OpenCodeGatewayProvider {
         mut request: AgentTurnRequest,
         options: ModelRequestOptions,
     ) -> Result<AgentTurnStreamResult> {
-        Self::ensure_cli_tool_aliases(&mut request.tools);
+        let mapping = Self::ensure_cli_tool_aliases(&mut request.tools);
         let mut result = self.inner.complete_agent_turn(request, options).await?;
         for item in &mut result.items {
-            if let AgentTurnItem::ToolCall { call } = item {
-                if call.name == OPENCODE_GATEWAY_BASH_TOOL {
-                    call.name = OPENCODE_GATEWAY_SHELL_TOOL.to_string();
-                } else if call.name == OPENCODE_GATEWAY_READ_TOOL {
-                    call.name = OPENCODE_GATEWAY_READ_FILE_TOOL.to_string();
-                }
+            if let AgentTurnItem::ToolCall { call } = item
+                && let Some(original) = mapping.get(&call.name)
+            {
+                call.name = original.clone();
             }
         }
         Ok(result)
@@ -1659,6 +1678,46 @@ mod tests {
     use crate::config::ThinkingBudget;
     use crate::model_protocol::{AgentToolCall, HistoryMessage};
     use serde_json::json;
+
+    #[test]
+    fn opencode_aliases_preserve_available_tools_and_exact_device_names() {
+        let tool = |name: &str| AgentToolSpec {
+            name: name.into(),
+            description: "Scoped operation".into(),
+            input_spec: AgentToolInputSpec::JsonSchema {
+                schema: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
+            },
+        };
+        let mut tools = vec![tool("dl_device_a_files__read_file")];
+        let mapping = OpenCodeGatewayProvider::ensure_cli_tool_aliases(&mut tools);
+        assert_eq!(
+            mapping.get("read").map(String::as_str),
+            Some("dl_device_a_files__read_file")
+        );
+        assert!(!tools.iter().any(|tool| tool.name == "bash"));
+        assert_eq!(
+            serde_json::to_value(&tools[0].input_spec).unwrap(),
+            serde_json::to_value(&tools[1].input_spec).unwrap()
+        );
+        let mut tools = vec![tool("read"), tool("files__read_file")];
+        assert!(OpenCodeGatewayProvider::ensure_cli_tool_aliases(&mut tools).is_empty());
+        let mut tools = vec![
+            tool("device_a_files__read_file"),
+            tool("device_b_files__read_file"),
+        ];
+        assert!(OpenCodeGatewayProvider::ensure_cli_tool_aliases(&mut tools).is_empty());
+        assert_eq!(tools.len(), 2);
+        let mut tools = vec![tool("terminal__terminal_exec"), tool("files__read_file")];
+        let mapping = OpenCodeGatewayProvider::ensure_cli_tool_aliases(&mut tools);
+        assert_eq!(
+            mapping.get("bash").map(String::as_str),
+            Some("terminal__terminal_exec")
+        );
+        assert_eq!(
+            mapping.get("read").map(String::as_str),
+            Some("files__read_file")
+        );
+    }
 
     fn thinking_budget(value: &str) -> ThinkingBudget {
         serde_json::from_value(json!(value)).expect("thinking budget deserializes")

@@ -434,13 +434,16 @@ pub fn prepare_setup_config_with_base(
 ) -> Result<Config> {
     let config = config_from_setup_request_with_base(request, base)?;
     config
-        .validate()
+        .validate_settings()
         .map_err(|err| miette!("setup config is internally invalid: {err}"))?;
     validate_complete_candidate(&config)?;
     Ok(config)
 }
 
 fn validate_complete_candidate(config: &Config) -> Result<()> {
+    if config.models.is_empty() {
+        return Ok(());
+    }
     let text =
         toml::to_string_pretty(config).map_err(|_| miette!("Cannot encode setup configuration"))?;
     match read_config_readiness_from_str(&text) {
@@ -453,7 +456,7 @@ fn validate_complete_candidate(config: &Config) -> Result<()> {
 /// different base after another owner update wins the lifecycle lock.
 pub async fn write_prepared_setup_config(config: &Config) -> Result<ConfigReadinessReport> {
     config
-        .validate()
+        .validate_settings()
         .map_err(|_| miette!("Invalid setup configuration"))?;
     validate_complete_candidate(config)?;
     write_config(config)
@@ -800,7 +803,7 @@ fn config_from_setup_request_with_base(
         providers,
         models,
         main_model,
-    } = config_registries_from_setup_request(request)?;
+    } = config_registries_from_setup_request(request, &base)?;
     let daemon_port = request
         .daemon_port
         .filter(|port| *port > 0)
@@ -811,7 +814,8 @@ fn config_from_setup_request_with_base(
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(|name| required_name(name, "approval_model"))
-        .transpose()?;
+        .transpose()?
+        .filter(|name| models.contains_key(name) || !base.models.contains_key(name));
 
     Ok(Config {
         providers,
@@ -831,6 +835,7 @@ struct SetupConfigRegistryParts {
 
 fn config_registries_from_setup_request(
     request: &SetupConfigRequest,
+    base: &Config,
 ) -> Result<SetupConfigRegistryParts> {
     let mut providers = HashMap::new();
     for provider in &request.providers {
@@ -840,11 +845,8 @@ fn config_registries_from_setup_request(
         }
         providers.insert(name, provider_from_setup_provider(provider)?);
     }
-    if providers.is_empty() {
-        return Err(miette!("at least one provider is required"));
-    }
-
     let mut models = HashMap::new();
+    let mut first_model = None;
     for model in &request.models {
         let name = required_name(&model.name, "model.name")?;
         if models.contains_key(&name) {
@@ -852,6 +854,14 @@ fn config_registries_from_setup_request(
         }
         let provider_name = required_name(&model.provider_name, "model.provider_name")?;
         if !providers.contains_key(&provider_name) {
+            if base.providers.contains_key(&provider_name)
+                && base
+                    .models
+                    .get(&name)
+                    .is_some_and(|old| old.provider == provider_name)
+            {
+                continue;
+            }
             return Err(miette!(
                 "model '{name}' references missing provider '{provider_name}'"
             ));
@@ -859,16 +869,22 @@ fn config_registries_from_setup_request(
         let provider = providers
             .get(&provider_name)
             .expect("provider presence was checked above");
+        first_model.get_or_insert_with(|| name.clone());
         models.insert(
             name,
             model_from_setup_model(&provider_name, provider, model)?,
         );
     }
-    if models.is_empty() {
-        return Err(miette!("at least one model is required"));
-    }
-
-    let main_model = required_name(request.main_model.as_deref().unwrap_or(""), "main_model")?;
+    let selected = request.main_model.as_deref().unwrap_or("").trim();
+    let main_model = if models.is_empty() {
+        String::new()
+    } else if selected.is_empty()
+        || !models.contains_key(selected) && base.models.contains_key(selected)
+    {
+        first_model.expect("nonempty model registry has a first model")
+    } else {
+        required_name(selected, "main_model")?
+    };
     Ok(SetupConfigRegistryParts {
         providers,
         models,
@@ -2183,6 +2199,60 @@ fn fill_uuid_random_bytes(bytes: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_a_provider_cascades_models_and_falls_back_in_request_order() {
+        let mut base = Config {
+            main_model: "old-model".into(),
+            approval_model: Some("old-model".into()),
+            ..Default::default()
+        };
+        for name in ["old", "remaining"] {
+            base.providers.insert(
+                name.into(),
+                ProviderConfig::OpenaiCompatible {
+                    base_url: "http://model.invalid/v1".into(),
+                    api_key: "unused-test-key".into(),
+                },
+            );
+        }
+        for (name, provider) in [
+            ("old-model", "old"),
+            ("second", "remaining"),
+            ("third", "remaining"),
+        ] {
+            base.models.insert(
+                name.into(),
+                ModelConfig {
+                    provider: provider.into(),
+                    model_id: name.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut request = setup_config_from_config(&base);
+        request.providers.retain(|provider| provider.name != "old");
+        request
+            .models
+            .sort_by_key(|model| match model.name.as_str() {
+                "third" => 0,
+                "second" => 1,
+                _ => 2,
+            });
+        let next = prepare_setup_config_with_base(&request, base.clone()).unwrap();
+        assert_eq!(next.main_model, "third");
+        assert!(next.approval_model.is_none());
+        assert!(!next.models.contains_key("old-model"));
+        request.providers.clear();
+        let empty = prepare_setup_config_with_base(&request, base).unwrap();
+        assert!(empty.models.is_empty());
+        assert!(empty.main_model.is_empty());
+        assert!(empty.validate_settings().is_ok());
+        assert!(
+            empty.validate().is_err(),
+            "empty settings must never permit inference"
+        );
+    }
 
     #[test]
     fn approval_model_is_retained_by_setup_roundtrip_and_checked_by_readiness() {

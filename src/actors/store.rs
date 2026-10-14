@@ -62,6 +62,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
             "message_id",
             "name",
             "conversation_url",
+            "stage_id",
             "status",
         ],
         "files__write_file" | "files__edit_file" | "files__copy_file" => {
@@ -73,6 +74,32 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
     for key in keys {
         if let Some(value) = payload.get(*key) {
             output.insert((*key).into(), value.clone());
+        }
+    }
+    if matches!(domain_name, "actors__create" | "actors__send") {
+        // Older Core results retained a host-local URL, but their explicit
+        // device argument still identifies the original host after replication.
+        let stage = payload
+            .get("stage_id")
+            .or_else(|| result.arguments.get("stage_id"))
+            .and_then(Value::as_str)
+            .and_then(|id| uuid::Uuid::parse_str(id).ok());
+        let actor = payload
+            .get("actor_id")
+            .or_else(|| payload.get("id"))
+            .and_then(Value::as_str);
+        if let (Some(stage), Some(actor)) = (stage, actor) {
+            output.insert("stage_id".into(), stage.to_string().into());
+            if payload
+                .get("conversation_url")
+                .and_then(Value::as_str)
+                .is_none_or(|url| url == format!("/actors/{actor}"))
+            {
+                output.insert(
+                    "conversation_url".into(),
+                    format!("/stages/{stage}/actors/{actor}").into(),
+                );
+            }
         }
     }
     if let Some(change) = payload.get("change").and_then(Value::as_object) {
@@ -350,6 +377,32 @@ impl ActorStore {
         sql(stmt.query_map([], |r| r.get(0)))?
             .collect::<rusqlite::Result<_>>()
             .into_diagnostic()
+    }
+    /// Only removed model preferences change; identities, grants and history stay
+    /// intact. Null selects the account default, or waits for model setup.
+    pub(crate) fn reset_model_preferences(&self, removed: &[String]) -> Result<()> {
+        if removed.is_empty() {
+            return Ok(());
+        }
+        let mut db = self.db.lock();
+        let tx = sql(db.transaction())?;
+        for model in removed {
+            let ids = {
+                let mut query = sql(tx.prepare(
+                    "SELECT id FROM actors WHERE json_extract(record,'$.config.model')=?1",
+                ))?;
+                sql(query.query_map([model], |row| row.get::<_, String>(0)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .into_diagnostic()?
+            };
+            for id in ids {
+                let mut actor = actor_tx(&tx, &id)?;
+                actor.config.model = None;
+                actor.updated_at_ms = now();
+                save_actor(&tx, &actor)?;
+            }
+        }
+        self.commit(tx)
     }
     pub(crate) fn actor_ids(&self) -> Result<Vec<String>> {
         let db = self.db.lock();
@@ -1897,6 +1950,35 @@ impl ActorStore {
 #[cfg(test)]
 mod outcome_tests {
     use super::*;
+
+    #[test]
+    fn legacy_delegation_outcome_keeps_the_original_device_after_sync() {
+        let stage = Uuid::new_v4();
+        let mut result = ToolResultRecord {
+            id: "result".into(),
+            actor_id: "core".into(),
+            message_id: "message".into(),
+            call_id: "call".into(),
+            name: "actors__send".into(),
+            arguments: serde_json::json!({"stage_id":stage,"actor_id":"child","content":"private input"}),
+            payload: serde_json::json!({"actor_id":"child","conversation_url":"/actors/child"}),
+            model_content: "private model transcript".into(),
+            summary: "summary".into(),
+            error: None,
+            started_at_ms: None,
+            finished_at_ms: None,
+        };
+        let expected = format!("/stages/{stage}/actors/child");
+        assert_eq!(tool_outcome(&result).unwrap()["conversation_url"], expected);
+        result.payload["conversation_url"] = expected.clone().into();
+        assert_eq!(tool_outcome(&result).unwrap()["conversation_url"], expected);
+        result.arguments["stage_id"] = Value::Null;
+        result.payload["conversation_url"] = "/actors/child".into();
+        assert_eq!(
+            tool_outcome(&result).unwrap()["conversation_url"],
+            "/actors/child"
+        );
+    }
 
     #[test]
     fn command_activity_carries_only_a_bounded_source_fact() {

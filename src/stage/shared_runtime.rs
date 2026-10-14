@@ -70,6 +70,7 @@ impl Controller {
             .system
             .ensure_core_actor()
             .map_err(|_| StageError::Unavailable("Cannot initialize account Actor"))?;
+        super::ledger::initialize_account_ownership(runtime.host.system.store(), &account)?;
         runtime.host.system.store().stage_transaction(|tx|{
             tx.execute("INSERT INTO core_meta(key,value) VALUES('active','1') ON CONFLICT(key) DO UPDATE SET value='1'",[])?;
             tx.execute_batch("CREATE TABLE IF NOT EXISTS core_app_effects(message TEXT NOT NULL,call TEXT NOT NULL,digest TEXT NOT NULL,state TEXT NOT NULL,result BLOB,PRIMARY KEY(message,call));")?;Ok(())

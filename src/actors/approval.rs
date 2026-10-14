@@ -20,7 +20,6 @@ use crate::{
     schema_utils::{model_schema_for, validate_value_against_schema},
 };
 
-const REVIEW_TIMEOUT: Duration = Duration::from_secs(30);
 const REVIEW_ARGUMENT_BYTES: usize = 16 * 1024;
 const CANCEL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -313,7 +312,9 @@ async fn automatic_review(
         Ok(options) => options,
         Err(_) => return Ok(Err(ReviewFailure::Budget)),
     };
-    let future = tokio::time::timeout(REVIEW_TIMEOUT, provider.complete_json(request, options));
+    // Use the selected provider's configured header/body and stream-idle timeouts.
+    // A separate short deadline would reject healthy reasoning models before they finish.
+    let future = provider.complete_json(request, options);
     tokio::pin!(future);
     let changed = system.store().changed();
     let value = 'review: loop {
@@ -327,9 +328,12 @@ async fn automatic_review(
         loop {
             tokio::select! {
                 result = &mut future => break 'review match result {
-                    Ok(Ok(value)) => value,
-                    Ok(Err(_)) => return Ok(Err(ReviewFailure::Request)),
-                    Err(_) => return Ok(Err(ReviewFailure::Timeout)),
+                    Ok(value) => value,
+                    Err(error) => return Ok(Err(
+                        if error.downcast_ref::<crate::providers::ModelRequestFailure>()
+                            .is_some_and(|failure| failure.kind == crate::providers::ModelFailureKind::Timeout)
+                        { ReviewFailure::Timeout } else { ReviewFailure::Request }
+                    )),
                 },
                 () = &mut notified => break,
                 () = tokio::time::sleep(CANCEL_INTERVAL) => {
@@ -358,7 +362,9 @@ mod tests {
 
     enum ReviewReply {
         Json(serde_json::Value),
+        Delayed(Duration, serde_json::Value),
         Fail,
+        Timeout,
         Pending,
     }
     struct Reviewer {
@@ -399,7 +405,15 @@ mod tests {
             let reply = self.reply.lock().take().expect("one reviewer request");
             match reply {
                 ReviewReply::Json(value) => Ok(value),
+                ReviewReply::Delayed(delay, value) => {
+                    tokio::time::sleep(delay).await;
+                    Ok(value)
+                }
                 ReviewReply::Fail => Err(miette!("mock review unavailable")),
+                ReviewReply::Timeout => Err(crate::providers::ModelRequestFailure::report(
+                    crate::providers::ModelFailureKind::Timeout,
+                    "fixture provider reached its configured timeout".into(),
+                )),
                 ReviewReply::Pending => {
                     let _drop = DropMarker(self.dropped.clone());
                     std::future::pending().await
@@ -712,6 +726,45 @@ mod tests {
                     .is_empty()
             );
         }
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn healthy_auto_review_can_finish_after_thirty_seconds() {
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Delayed(
+            Duration::from_secs(31),
+            json!({"decision":"approve","reason":"User requested this read"}),
+        )));
+        let (_dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let pending = gate(
+            &system,
+            &actor,
+            &message,
+            Arc::new(ActorControl::default()),
+            call(),
+        );
+        reviewer.started.notified().await;
+        pending.await.unwrap().unwrap();
+        assert_eq!(
+            approval(&system, &message.id).await.decision,
+            ApprovalDecision::Approved
+        );
+        assert_eq!(reviewer.requests.lock().len(), 1);
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn provider_timeout_still_denies_without_owner_fallback() {
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Timeout));
+        let (_dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let error = authorize_simple(&system, &actor, &message, &call(), &ActorControl::default())
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<AutomaticReviewDenied>().is_some());
+        let record = approval(&system, &message.id).await;
+        assert_eq!(record.decision, ApprovalDecision::Denied);
+        assert_eq!(record.reason, ReviewFailure::Timeout.reason());
+        assert_eq!(reviewer.requests.lock().len(), 1);
         system.shutdown().await;
     }
 

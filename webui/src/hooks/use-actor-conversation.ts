@@ -234,15 +234,19 @@ export function useActorConversation(actorId: string | null, options: Conversati
   const persistDraft = useCallback(() => { if (actorId) saveDraft(draftKey, actorId, draftEntry()); }, [draftKey, actorId, draftEntry]);
   const setDraft = useCallback((text: string) => { draftEntry().text = text; persistDraft(); setDraftState(text); notifyDraft(draftKey); }, [draftEntry, draftKey, persistDraft]);
   const valid = useCallback((generation: number) => generation === epoch.current, []);
-  const accessFailure = useCallback(async (generation: number, signal: AbortSignal) => {
+  const accessFailure = useCallback(async (generation: number, signal: AbortSignal, failure?: unknown) => {
     try {
       const access = await api.getAccess({ signal });
       if (!valid(generation)) return;
       dispatch({ type: "reset", actorId });
-      setError("This Actor is unavailable with the current access");
+      setError(failure ? errorText(failure) : t("errors.forbidden"));
       if (!sameAccessSession(options.sessionKey, access)) onAccessRevoked.current?.();
-    } catch {
-      if (valid(generation) && !signal.aborted) { dispatch({ type: "reset", actorId: null }); onAccessRevoked.current?.(); }
+    } catch (failure) {
+      if (valid(generation) && !signal.aborted) {
+        if (failure instanceof api.ActorApiError && [401, 403, 410].includes(failure.status)) {
+          dispatch({ type: "reset", actorId: null }); onAccessRevoked.current?.();
+        } else setError(errorText(failure));
+      }
     }
   }, [actorId, options.sessionKey, valid]);
   const loadTools = useCallback(async (messageId: string, before?: number) => {
@@ -370,8 +374,8 @@ export function useActorConversation(actorId: string | null, options: Conversati
         if (valid(generation) && !abort.signal.aborted) {
           setError(errorText(failure));
           setLoading(false);
-          if (failure instanceof api.ActorApiError && [401, 403, 404].includes(failure.status))
-            void accessFailure(generation, abort.signal);
+          if (failure instanceof api.ActorApiError && [401, 403, 410].includes(failure.status))
+            void accessFailure(generation, abort.signal, failure);
         }
       }
     }

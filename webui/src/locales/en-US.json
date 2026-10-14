@@ -121,6 +121,8 @@
     "model_request_timeout": "The model request timed out. Try again.",
     "model_rate_limited": "The provider request limit was reached. Try again later.",
     "model_service_unavailable": "The model service is temporarily unavailable. Try again later.",
+    "model_unavailable": "This model is currently unavailable. Choose another model.",
+    "model_region_unavailable": "The provider does not allow this model in your current region.",
     "model_request_failed": "The model request failed. Check the provider settings and try again.",
     "action_not_approved": "This action was not approved.",
     "guidance_for_the_current_task": "Guidance for the current task",

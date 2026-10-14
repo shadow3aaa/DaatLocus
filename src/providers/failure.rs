@@ -12,6 +12,8 @@ pub(crate) enum ModelFailureKind {
     Timeout,
     RateLimited,
     Unavailable,
+    ModelUnavailable,
+    RegionUnavailable,
     Failed,
 }
 
@@ -35,6 +37,8 @@ impl ModelRequestFailure {
             ModelFailureKind::Timeout => "model_request_timeout",
             ModelFailureKind::RateLimited => "model_rate_limited",
             ModelFailureKind::Unavailable => "model_service_unavailable",
+            ModelFailureKind::ModelUnavailable => "model_unavailable",
+            ModelFailureKind::RegionUnavailable => "model_region_unavailable",
             ModelFailureKind::Failed => "model_request_failed",
         }
     }
@@ -45,6 +49,8 @@ impl ModelRequestFailure {
                 | ModelFailureKind::Forbidden
                 | ModelFailureKind::CertificateRevoked
                 | ModelFailureKind::CertificateInvalid
+                | ModelFailureKind::ModelUnavailable
+                | ModelFailureKind::RegionUnavailable
         )
     }
     pub(crate) fn request_kind(error: &reqwest::Error) -> ModelFailureKind {
@@ -58,6 +64,51 @@ impl ModelRequestFailure {
         } else {
             ModelFailureKind::Failed
         }
+    }
+    pub(crate) fn opencode_response(
+        base: &str,
+        status: reqwest::StatusCode,
+        body: &str,
+    ) -> Option<miette::Report> {
+        if status.is_success() || !super::is_opencode_gateway_base_url(base) {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(body).ok()?;
+        let error = value.get("error")?.as_object()?;
+        let kind = error.get("type")?.as_str()?;
+        let message = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let kind = match kind {
+            "RegionError" => ModelFailureKind::RegionUnavailable,
+            "server_error"
+                if matches!(
+                    message.trim().to_ascii_lowercase().as_str(),
+                    "upstream request failed: model is unavailable." | "model is unavailable."
+                ) =>
+            {
+                ModelFailureKind::ModelUnavailable
+            }
+            "server_error"
+                if status.is_server_error()
+                    || message
+                        .trim()
+                        .to_ascii_lowercase()
+                        .starts_with("upstream request failed:") =>
+            {
+                ModelFailureKind::Unavailable
+            }
+            "upstream_error" => ModelFailureKind::Unavailable,
+            _ => return None,
+        };
+        Some(Self::report(
+            kind,
+            format!(
+                "OpenCode API returned HTTP {status}: {}",
+                super::truncate_for_error(body)
+            ),
+        ))
     }
 }
 fn certificate_failure(error: &(dyn Error + 'static)) -> Option<ModelFailureKind> {
@@ -94,6 +145,41 @@ fn certificate_failure(error: &(dyn Error + 'static)) -> Option<ModelFailureKind
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn gateway_classification_preserves_unknown_errors_and_other_providers() {
+        for (base, status, body) in [
+            (
+                "https://notopencode.ai/go/v1",
+                400,
+                r#"{"error":{"type":"server_error","message":"Model is unavailable."}}"#,
+            ),
+            (
+                "https://opencode.ai/zen/v1",
+                400,
+                r#"{"error":{"type":"invalid_request_error","message":"unsupported parameter"}}"#,
+            ),
+            (
+                "https://opencode.ai/go/v1",
+                200,
+                r#"{"error":{"type":"RegionError"}}"#,
+            ),
+            ("https://opencode.ai/go/v1", 400, "invalid JSON"),
+            (
+                "https://opencode.ai/go/v1",
+                400,
+                r#"{"error":{"type":"server_error","message":"unsupported parameter"}}"#,
+            ),
+        ] {
+            assert!(
+                ModelRequestFailure::opencode_response(
+                    base,
+                    reqwest::StatusCode::from_u16(status).unwrap(),
+                    body
+                )
+                .is_none()
+            );
+        }
+    }
     #[test]
     fn revoked_certificate_is_not_an_expired_api_credential() {
         let certificate = rustls::Error::InvalidCertificate(rustls::CertificateError::Revoked);

@@ -11,6 +11,7 @@
     "preview": "vite preview",
     "test": "bun test",
     "typecheck": "bun run build:auth && tsc -p tsconfig.json --noEmit",
+    "typecheck:mock": "tsc -p tsconfig.mock.json --noEmit",
     "mock": "bun mock/server.ts",
     "dev:mock": "DAAT_LOCUS_DAEMON_URL=http://127.0.0.1:45826 bun run dev"
   },

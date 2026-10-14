@@ -235,7 +235,7 @@ async fn execute_message(
         message.id
     );
     let config = system.config();
-    let model_name = actor.config.model.as_ref().unwrap_or(&config.main_model);
+    let model_name = config.actor_model_name(actor.config.model.as_deref());
     let request_timeout = Duration::from_secs(
         config
             .models

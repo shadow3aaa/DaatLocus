@@ -49,7 +49,7 @@ export function WorkTurn({ message, chat, access, onActor }: Props) {
   return <article className="dl-message-turn dl-work-turn" id={`message-${message.actor_id}-${message.id}`}>
     {(message.content || message.attachments.length > 0) && <div className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}>{!user && message.source.kind === "actor" && <ActorReference actorId={message.source.actor_id} onOpen={onActor} detail={["result", "progress"].includes(message.kind) ? t("conversation_turns.collaboration_reply") : t("conversation_turns.delegate_task")} />}<div className={cn(user && "dl-work-prompt")}>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</div></div>}
     <Guidance message={message} chat={chat} />
-    {message.kind !== "delivery" && !chat.messages.some(item => item.in_reply_to === message.id && item.id !== message.id) && <WorkRound message={message} events={chat.events} tools={tools} nextToolCursor={chat.toolNext[message.id]} onMoreTools={() => chat.loadMoreTools(message.id)} onActor={onActor} />}
+    {message.kind !== "delivery" && <WorkRound message={message} events={chat.events} tools={tools} nextToolCursor={chat.toolNext[message.id]} onMoreTools={() => chat.loadMoreTools(message.id)} onActor={onActor} />}
     <Decisions message={message} chat={chat} access={access} />
     {message.reply && <div className="dl-work-final"><Markdown content={message.reply} onActor={onActor} /><CopyMessage content={message.reply} /></div>}
     <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />

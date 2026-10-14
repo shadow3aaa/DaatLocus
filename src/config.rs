@@ -177,8 +177,7 @@ impl ModelConfig {
     }
 
     pub fn stream_idle_timeout_secs(&self) -> u64 {
-        self.stream_idle_timeout_secs
-            .max(DEFAULT_STREAM_IDLE_TIMEOUT_SECS)
+        self.stream_idle_timeout_secs.max(1)
     }
 
     pub fn context_window_tokens(&self) -> usize {
@@ -237,6 +236,14 @@ pub struct Config {
 }
 
 impl Config {
+    /// Old checkpoints can still carry a removed preference. Resolve execution
+    /// and usage calibration through the same current account default.
+    pub fn actor_model_name<'a>(&'a self, preference: Option<&'a str>) -> &'a str {
+        preference
+            .filter(|name| self.models.contains_key(*name))
+            .unwrap_or(&self.main_model)
+    }
+
     /// Return the main model config. Missing keys panic because startup validation should catch them.
     pub fn main_model_config(&self) -> &ModelConfig {
         self.models
@@ -270,7 +277,20 @@ impl Config {
         vars
     }
 
-    /// Validate provider and model references.
+    /// Saved settings may intentionally contain no model; execution still
+    /// requires the complete configuration checked by `validate`.
+    pub fn validate_settings(&self) -> Result<(), String> {
+        if self.models.is_empty() && self.main_model.is_empty() && self.approval_model.is_none() {
+            return if self.daemon.port == 0 {
+                Err("daemon.port must be greater than 0".into())
+            } else {
+                Ok(())
+            };
+        }
+        self.validate()
+    }
+
+    /// Validate an executable configuration and its model references.
     pub fn validate(&self) -> Result<(), String> {
         if self.daemon.port == 0 {
             return Err("daemon.port must be greater than 0".to_string());
@@ -694,15 +714,24 @@ thinking_budget = "xhigh"
     }
 
     #[test]
-    fn stream_idle_timeout_has_long_reasoning_floor() {
+    fn stream_idle_timeout_honors_configuration_with_a_positive_minimum() {
         let model = ModelConfig {
             stream_idle_timeout_secs: 45,
             ..Default::default()
         };
 
+        assert_eq!(model.stream_idle_timeout_secs(), 45);
         assert_eq!(
-            model.stream_idle_timeout_secs(),
+            ModelConfig::default().stream_idle_timeout_secs(),
             DEFAULT_STREAM_IDLE_TIMEOUT_SECS
+        );
+        assert_eq!(
+            ModelConfig {
+                stream_idle_timeout_secs: 0,
+                ..Default::default()
+            }
+            .stream_idle_timeout_secs(),
+            1
         );
     }
 
