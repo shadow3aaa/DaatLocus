@@ -9,7 +9,9 @@ cd "$repo_root"
 export DAAT_LOCUS_BUILD_WEBUI=0
 cargo fmt --all -- --check
 cargo clippy --locked -p daat-locus -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-macros -p xtask --all-targets -- -D warnings
-cargo test --locked -p daat-locus --lib --bins --test http_api
+# Each device contract runs concurrent peers; bound unrelated fixtures so their
+# OS I/O and cryptographic setup do not starve real-time lease heartbeats.
+cargo test --locked -p daat-locus --lib --bins --test http_api -- --test-threads=4
 cargo test --locked -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-macros -p xtask
 
 if ! command -v bun >/dev/null 2>&1; then

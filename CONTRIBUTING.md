@@ -50,7 +50,7 @@ Relevant checks:
 ```sh
 cargo fmt --all -- --check
 # With DAAT_LOCUS_BUILD_WEBUI=0:
-cargo test --locked --workspace
+cargo test --locked --workspace -- --test-threads=4
 cargo clippy --locked --workspace --all-targets -- -D warnings
 # In webui:
 bun run typecheck
@@ -67,6 +67,10 @@ stream-reconnection coverage. Tests depending on external services stay opt-in;
 report prerequisites and failures explicitly. Do not weaken isolation or private
 ACL checks to accommodate a restricted environment. Library checks do not prove
 full product usability or cross-platform isolation.
+
+Limit independent Rust test fixtures to four concurrent cases. Device contract
+cases still run concurrent peer runtimes; this avoids OS I/O and cryptographic
+setup in unrelated fixtures starving the real lease and heartbeat deadlines.
 
 Public signaling and account-sync checks use disposable identities and mock models.
 Set `DAAT_LOCUS_TEST_STAGE_SIGNALING` to an explicitly chosen WSS origin, then run

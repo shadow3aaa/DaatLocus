@@ -26,7 +26,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked -p daat-locus -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-macros -p xtask --all-targets -- -D warnings
-      - run: cargo test --locked -p daat-locus --lib --bins --test http_api
+      - run: cargo test --locked -p daat-locus --lib --bins --test http_api -- --test-threads=4
       - run: cargo test --locked -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-macros -p xtask
   desktop:
     runs-on: ${{ matrix.os }}

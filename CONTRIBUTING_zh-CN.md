@@ -46,7 +46,7 @@ Cargo `--offline` 本身不会禁止构建脚本联网。详见[模型目录](do
 ```powershell
 cargo fmt --all -- --check
 $env:DAAT_LOCUS_BUILD_WEBUI='0'
-cargo test --locked --workspace
+cargo test --locked --workspace -- --test-threads=4
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cd webui
 bun run typecheck
