@@ -1,4 +1,19 @@
-import type { DiscoveredModel, ModelConfig } from "./actor-api";
+import type { DiscoveredModel, ModelConfig, SetupConfigRequest } from "./actor-api";
+
+function withRemainingModels(config: SetupConfigRequest, models: ModelConfig[]): SetupConfigRequest {
+  return {...config, models,
+    main_model: models.some(model => model.name === config.main_model) ? config.main_model : models[0]?.name ?? null,
+    approval_model: models.some(model => model.name === config.approval_model) ? config.approval_model : null,
+  };
+}
+export function removeProvider(config: SetupConfigRequest, index: number): SetupConfigRequest {
+  const name = config.providers[index]?.name;
+  return withRemainingModels({...config, providers: config.providers.filter((_, at) => at !== index)},
+    config.models.filter(model => model.provider_name !== name));
+}
+export function removeConfiguredModel(config: SetupConfigRequest, index: number): SetupConfigRequest {
+  return withRemainingModels(config, config.models.filter((_, at) => at !== index));
+}
 
 export function selectDiscoveredModel(model: ModelConfig, found: DiscoveredModel): ModelConfig {
   return {...model,

@@ -168,9 +168,11 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   cannot replace Actor access checks.
 - Private persistence must establish OS Owner permissions before writing secret
   bytes and propagate permission failures, including on Windows.
-- Configuration changes prepare a complete candidate, validate every existing
-  Actor model reference and hold the lifecycle lock over worker stop, persistence
-  and publication. Persist the exact candidate, not a request rebuilt later.
+- Configuration changes prepare a valid candidate and resolve removed Actor model
+  preferences to the account default only after persistence succeeds. Providers
+  and their models can always be removed; an empty model setup keeps input queued.
+  Hold the lifecycle lock over worker stop, persistence and publication. Persist
+  the exact candidate in the service profile, not a request rebuilt later.
 - Normal builds compile and embed the WebUI, including the shared authentication
   WASM. Explicit `DAAT_LOCUS_BUILD_WEBUI=0` supports backend-only development checks;
   distribution must reject binaries without the embedded WebUI.

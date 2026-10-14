@@ -169,7 +169,7 @@ async fn composer_preferences_patch_preserves_latest_grants_and_unspecified_mode
 }
 
 #[tokio::test]
-async fn configuration_preflight_preserves_actor_model_references_before_persistence() {
+async fn removing_a_model_resets_old_actor_preferences_and_persists_in_the_service_profile() {
     let fixture = Fixture::new().await;
     let mut current = fixture.system.config();
     current
@@ -180,8 +180,7 @@ async fn configuration_preflight_preserves_actor_model_references_before_persist
     let mut config = fixture.system.actor(&actor).unwrap().config;
     config.model = Some("specialized".into());
     fixture.system.update_owned(&actor, config).await.unwrap();
-    // All credentials are explicit, so preflight neither loads nor writes any
-    // real user's config. This valid candidate only lacks the Actor's model.
+    let permissions = fixture.system.actor(&actor).unwrap().config.permissions;
     let response = fixture.owner(reqwest::Method::PUT, "/v1/config").json(&json!({
         "providers": [{"kind": "openai_compatible", "name": "mock", "api_key": "fixture-secret-key", "base_url": "http://model.invalid/v1"}],
         "models": [{"name": "mock", "provider_name": "mock", "model_id": "mock"}],
@@ -189,11 +188,11 @@ async fn configuration_preflight_preserves_actor_model_references_before_persist
     })).send().await.unwrap();
     assert_eq!(
         response.status(),
-        StatusCode::UNPROCESSABLE_ENTITY,
+        StatusCode::OK,
         "{}",
         response.text().await.unwrap()
     );
-    assert!(fixture.system.config().models.contains_key("specialized"));
+    assert!(!fixture.system.config().models.contains_key("specialized"));
     assert_eq!(
         fixture
             .system
@@ -202,8 +201,102 @@ async fn configuration_preflight_preserves_actor_model_references_before_persist
             .config
             .model
             .as_deref(),
-        Some("specialized")
+        None
     );
+    assert_eq!(
+        fixture.system.actor(&actor).unwrap().config.permissions,
+        permissions
+    );
+    let directory = fixture
+        .system
+        .infrastructure_dir()
+        .parent()
+        .unwrap()
+        .join("config");
+    let saved: daat_locus::config::Config =
+        toml::from_str(&std::fs::read_to_string(directory.join("config.toml")).unwrap()).unwrap();
+    assert_eq!(saved.main_model, "mock");
+    assert!(!saved.models.contains_key("specialized"));
+    assert_eq!(
+        std::fs::read(directory.join("config.toml")).unwrap(),
+        std::fs::read(directory.join("config.toml.bak")).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn the_last_provider_can_be_removed_without_deleting_actors_or_queued_inputs() {
+    let fixture = Fixture::new().await;
+    let actor = fixture.child("kept-project").await;
+    let mut preference = fixture.system.actor(&actor).unwrap().config;
+    preference.model = Some("mock".into());
+    fixture
+        .system
+        .update_owned(&actor, preference)
+        .await
+        .unwrap();
+    let queued = fixture
+        .system
+        .send_user(&actor, "Keep this input".into(), vec![], None)
+        .unwrap();
+    let mut request: Value = fixture
+        .owner(reqwest::Method::GET, "/v1/config")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // A caller can remove the provider alone; the backend cascades its old models.
+    request["providers"] = json!([]);
+    let response = fixture
+        .owner(reqwest::Method::PUT, "/v1/config")
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await.unwrap()
+    );
+    assert!(fixture.system.config().models.is_empty());
+    assert!(fixture.system.config().main_model.is_empty());
+    assert!(fixture.system.actor(&actor).unwrap().config.model.is_none());
+    assert_eq!(
+        fixture.system.store().message(&queued.id).unwrap().status,
+        daat_locus::actors::MessageStatus::Queued
+    );
+    assert_eq!(
+        fixture.system.actor(&actor).unwrap().config.name,
+        "kept-project"
+    );
+    let readiness: Value = fixture
+        .owner(reqwest::Method::GET, "/v1/config/readiness")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(readiness["ready"], false);
+    let record = fixture
+        .stage
+        .host
+        .configurations
+        .current()
+        .unwrap()
+        .unwrap();
+    assert!(
+        daat_locus::accounts::configuration::ConfigurationStore::candidate(
+            &fixture.stage.host,
+            &record
+        )
+        .unwrap()
+        .models
+        .is_empty()
+    );
+    fixture.system.shutdown().await;
 }
 
 #[tokio::test]

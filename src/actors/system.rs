@@ -600,6 +600,7 @@ impl ActorSystem {
         if self.inner.paused.load(Ordering::Acquire)
             || self.inner.stopping.load(Ordering::Acquire)
             || self.inner.reconfiguring.load(Ordering::Acquire)
+            || self.inner.config.read().validate().is_err()
         {
             return Ok(());
         }
@@ -688,7 +689,7 @@ impl ActorSystem {
             return Err(ActorError::Unavailable("Agent configuration is not ready".into()).into());
         }
         self.inner.factory.build(
-            actor.config.model.as_deref().unwrap_or(&config.main_model),
+            config.actor_model_name(actor.config.model.as_deref()),
             &config,
         )
     }
@@ -1426,15 +1427,8 @@ impl ActorSystem {
     }
     pub fn validate_config_update(&self, config: &Config) -> Result<()> {
         config
-            .validate()
+            .validate_settings()
             .map_err(|_| invalid("Provider configuration is not ready"))?;
-        for model in self.store().actor_models()? {
-            if !config.models.contains_key(&model) {
-                return Err(invalid(
-                    "An Actor still uses a model removed by this configuration",
-                ));
-            }
-        }
         Ok(())
     }
     pub async fn update_config(&self, config: Config) -> Result<()> {
@@ -1452,6 +1446,12 @@ impl ActorSystem {
         let _lifecycle = self.inner.lifecycle.lock().await;
         let pause = Reconfiguration::begin(&self.inner.reconfiguring, &self.inner.metadata);
         self.validate_config_update(&config)?;
+        let removed_models = self
+            .store()
+            .actor_models()?
+            .into_iter()
+            .filter(|name| !config.models.contains_key(name))
+            .collect::<Vec<_>>();
         let workers: Vec<_> = self.inner.workers.lock().drain().collect();
         for (_, worker) in &workers {
             worker.control.stop.store(true, Ordering::Release);
@@ -1462,6 +1462,7 @@ impl ActorSystem {
         }
         let persisted = persist.await;
         if persisted.is_ok() {
+            self.store().reset_model_preferences(&removed_models)?;
             *self.inner.config.write() = config;
         }
         drop(pause);
@@ -1629,7 +1630,7 @@ impl ActorSystem {
         }));
         let tool_output_max_tokens = config
             .models
-            .get(actor.config.model.as_deref().unwrap_or(&config.main_model))
+            .get(config.actor_model_name(actor.config.model.as_deref()))
             .map_or(4096, |model| model.tool_output_max_tokens);
         let mut sandbox_policy = super::permissions::policy(
             &actor.config,
@@ -1958,7 +1959,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn removed_actor_model_is_rejected_before_persistence_or_runtime_change() {
+    async fn removed_actor_model_falls_back_after_successful_persistence() {
         let (_directory, system) = fixture().await;
         let mut config = system.config();
         config
@@ -1967,31 +1968,62 @@ mod tests {
         system.update_config(config).await.unwrap();
         let mut actor = system.actor(ROOT_ACTOR_ID).unwrap().config;
         actor.model = Some("custom".into());
-        system.create_owned(ROOT_ACTOR_ID, actor).unwrap();
+        let child = system.create_owned(ROOT_ACTOR_ID, actor).unwrap();
         let mut candidate = system.config();
         candidate.models.remove("custom");
         let persisted = AtomicBool::new(false);
-        assert!(
-            system
-                .update_config_with(candidate, async {
-                    persisted.store(true, Ordering::Release);
-                    Ok(())
-                })
-                .await
-                .is_err()
-        );
-        assert!(!persisted.load(Ordering::Acquire));
-        assert!(system.config().models.contains_key("custom"));
+        system
+            .update_config_with(candidate, async {
+                persisted.store(true, Ordering::Release);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(persisted.load(Ordering::Acquire));
+        assert!(!system.config().models.contains_key("custom"));
+        assert!(system.actor(&child.id).unwrap().config.model.is_none());
+        assert_eq!(system.config().main_model, "mock");
         assert!(!system.inner.reconfiguring.load(Ordering::Acquire));
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn removing_all_models_keeps_queued_input_without_starting_a_worker() {
+        let (_directory, system) = fixture().await;
+        let queued = system
+            .send_user(ROOT_ACTOR_ID, "Keep the queued input".into(), vec![], None)
+            .unwrap();
+        let mut empty = system.config();
+        empty.providers.clear();
+        empty.models.clear();
+        empty.main_model.clear();
+        empty.approval_model = None;
+        system.update_config(empty).await.unwrap();
+        system.resume_execution().await.unwrap();
+        assert!(system.inner.workers.lock().is_empty());
+        assert_eq!(
+            system.store().message(&queued.id).unwrap().status,
+            MessageStatus::Queued
+        );
+        system.shutdown().await;
     }
 
     #[tokio::test]
     async fn failed_config_write_preserves_configuration_and_queued_work() {
         let (_directory, system) = fixture().await;
+        let mut original = system.config();
+        original
+            .models
+            .insert("custom".into(), original.models["mock"].clone());
+        system.update_config(original).await.unwrap();
+        let mut actor = system.actor(ROOT_ACTOR_ID).unwrap().config;
+        actor.model = Some("custom".into());
+        let child = system.create_owned(ROOT_ACTOR_ID, actor).unwrap();
         let request = system
             .send_user(ROOT_ACTOR_ID, "queued work".into(), vec![], None)
             .unwrap();
         let mut candidate = system.config();
+        candidate.models.remove("custom");
         candidate.approval_model = Some("mock".into());
         assert!(
             system
@@ -2002,6 +2034,11 @@ mod tests {
                 .is_err()
         );
         assert!(system.config().approval_model.is_none());
+        assert!(system.config().models.contains_key("custom"));
+        assert_eq!(
+            system.actor(&child.id).unwrap().config.model.as_deref(),
+            Some("custom")
+        );
         assert_eq!(
             system.store().message(&request.id).unwrap().status,
             MessageStatus::Queued

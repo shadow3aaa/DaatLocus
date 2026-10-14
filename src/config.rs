@@ -237,6 +237,14 @@ pub struct Config {
 }
 
 impl Config {
+    /// Old checkpoints can still carry a removed preference. Resolve execution
+    /// and usage calibration through the same current account default.
+    pub fn actor_model_name<'a>(&'a self, preference: Option<&'a str>) -> &'a str {
+        preference
+            .filter(|name| self.models.contains_key(*name))
+            .unwrap_or(&self.main_model)
+    }
+
     /// Return the main model config. Missing keys panic because startup validation should catch them.
     pub fn main_model_config(&self) -> &ModelConfig {
         self.models
@@ -270,7 +278,20 @@ impl Config {
         vars
     }
 
-    /// Validate provider and model references.
+    /// Saved settings may intentionally contain no model; execution still
+    /// requires the complete configuration checked by `validate`.
+    pub fn validate_settings(&self) -> Result<(), String> {
+        if self.models.is_empty() && self.main_model.is_empty() && self.approval_model.is_none() {
+            return if self.daemon.port == 0 {
+                Err("daemon.port must be greater than 0".into())
+            } else {
+                Ok(())
+            };
+        }
+        self.validate()
+    }
+
+    /// Validate an executable configuration and its model references.
     pub fn validate(&self) -> Result<(), String> {
         if self.daemon.port == 0 {
             return Err("daemon.port must be greater than 0".to_string());

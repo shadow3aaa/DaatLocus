@@ -144,6 +144,34 @@ async fn account_model_definitions_sync_privately_without_replacing_device_prefe
             .needs_import(&foreign.stage.host, &record)
             .is_err()
     );
+    let child = b.child("kept-after-provider-removal").await;
+    let mut preference = b.system.actor(&child).unwrap().config;
+    preference.model = Some("account-model".into());
+    b.system.update_owned(&child, preference).await.unwrap();
+    let mut empty = a.system.config();
+    empty.providers.clear();
+    empty.models.clear();
+    empty.main_model.clear();
+    empty.approval_model = None;
+    let persistent = empty.clone();
+    let host = a.stage.host.clone();
+    a.system
+        .update_config_with(empty, async move {
+            host.configurations.publish(&host, &persistent)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !b.system.config().models.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("removing the last provider must synchronize too");
+    assert_eq!(b.system.config().daemon.port, 45990);
+    assert!(b.system.actor(&child).unwrap().config.model.is_none());
+    assert!(b.system.config().validate().is_err());
     a.stage.stop().await;
     b.stage.stop().await;
     a.system.shutdown().await;

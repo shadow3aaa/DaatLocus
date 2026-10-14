@@ -351,6 +351,32 @@ impl ActorStore {
             .collect::<rusqlite::Result<_>>()
             .into_diagnostic()
     }
+    /// Only removed model preferences change; identities, grants and history stay
+    /// intact. Null selects the account default, or waits for model setup.
+    pub(crate) fn reset_model_preferences(&self, removed: &[String]) -> Result<()> {
+        if removed.is_empty() {
+            return Ok(());
+        }
+        let mut db = self.db.lock();
+        let tx = sql(db.transaction())?;
+        for model in removed {
+            let ids = {
+                let mut query = sql(tx.prepare(
+                    "SELECT id FROM actors WHERE json_extract(record,'$.config.model')=?1",
+                ))?;
+                sql(query.query_map([model], |row| row.get::<_, String>(0)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .into_diagnostic()?
+            };
+            for id in ids {
+                let mut actor = actor_tx(&tx, &id)?;
+                actor.config.model = None;
+                actor.updated_at_ms = now();
+                save_actor(&tx, &actor)?;
+            }
+        }
+        self.commit(tx)
+    }
     pub(crate) fn actor_ids(&self) -> Result<Vec<String>> {
         let db = self.db.lock();
         let mut stmt = sql(db.prepare("SELECT id FROM actors ORDER BY id"))?;

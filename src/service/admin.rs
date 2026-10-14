@@ -96,11 +96,12 @@ async fn save_config(
         .validate_config_update(&candidate)
         .map_err(ApiError::from_report)?;
     let persistent = candidate.clone();
+    let system = state.system.clone();
     let account_host = state.stage.as_ref().map(|runtime| runtime.host.clone());
     state
         .system
         .update_config_with(candidate, async move {
-            config_setup::write_prepared_setup_config(&persistent).await?;
+            crate::accounts::configuration::persist_device_config(&system, &persistent)?;
             if let Some(host) = account_host {
                 host.configurations.publish(&host, &persistent)?;
             }
