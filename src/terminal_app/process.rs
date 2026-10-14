@@ -5,7 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use parking_lot::Mutex;
@@ -21,7 +21,6 @@ pub const DEFAULT_OUTPUT_BUFFER_CAPACITY_BYTES: usize = 4 * 1024 * 1024;
 pub struct TerminalProcess {
     child: SandboxAsyncChild,
     stdin: Option<SandboxChildStdin>,
-    last_update: Arc<Mutex<Instant>>,
     output: Arc<Mutex<HeadTailOutputBuffer>>,
     active_readers: Arc<AtomicUsize>,
     output_drained: Arc<Notify>,
@@ -84,7 +83,7 @@ impl TerminalProcess {
         let (shell_program, shell_args) = shell_invocation(command);
         let mut child = SandboxAsyncChild::spawn_shell(
             sandbox_policy,
-            shell_program,
+            &shell_program,
             shell_args,
             SandboxProcessOptions {
                 current_dir: workdir.map(PathBuf::from),
@@ -96,7 +95,6 @@ impl TerminalProcess {
         let stdin = child.take_stdin();
         let stdout = child.take_stdout();
         let stderr = child.take_stderr();
-        let last_update = Arc::new(Mutex::new(Instant::now()));
         let output = Arc::new(Mutex::new(HeadTailOutputBuffer::new(
             output_buffer_capacity,
         )));
@@ -108,7 +106,6 @@ impl TerminalProcess {
             spawn_reader(
                 stdout,
                 output.clone(),
-                last_update.clone(),
                 active_readers.clone(),
                 output_drained.clone(),
             );
@@ -117,7 +114,6 @@ impl TerminalProcess {
             spawn_reader(
                 stderr,
                 output.clone(),
-                last_update.clone(),
                 active_readers.clone(),
                 output_drained.clone(),
             );
@@ -126,7 +122,6 @@ impl TerminalProcess {
         Ok(Self {
             child,
             stdin,
-            last_update,
             output,
             active_readers,
             output_drained,
@@ -145,28 +140,20 @@ impl TerminalProcess {
         self.child.start_kill()
     }
 
-    pub async fn wait_until_silent(&self, silence_duration: Duration, timeout: Duration) -> bool {
-        let start = Instant::now();
-        loop {
-            let last = *self.last_update.lock();
-            if last.elapsed() >= silence_duration {
-                return true;
-            }
-            if start.elapsed() >= timeout {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-
     pub async fn wait_for_output_drained(&self, timeout: Duration) -> bool {
         if self.active_readers.load(Ordering::Acquire) == 0 {
             return true;
         }
 
         tokio::time::timeout(timeout, async {
-            while self.active_readers.load(Ordering::Acquire) > 0 {
-                self.output_drained.notified().await;
+            loop {
+                let drained = self.output_drained.notified();
+                tokio::pin!(drained);
+                drained.as_mut().enable();
+                if self.active_readers.load(Ordering::Acquire) == 0 {
+                    break;
+                }
+                drained.await;
             }
         })
         .await
@@ -381,7 +368,6 @@ impl HeadTailOutputBuffer {
 fn spawn_reader<R>(
     mut reader: R,
     output: Arc<Mutex<HeadTailOutputBuffer>>,
-    last_update: Arc<Mutex<Instant>>,
     active_readers: Arc<AtomicUsize>,
     output_drained: Arc<Notify>,
 ) where
@@ -397,14 +383,12 @@ fn spawn_reader<R>(
                     pending.extend_from_slice(&buffer[..n]);
                     while let Some(chunk) = take_valid_utf8_prefix(&mut pending) {
                         output.lock().append(&chunk);
-                        *last_update.lock() = Instant::now();
                     }
                 }
             }
         }
         if !pending.is_empty() {
             output.lock().append(&pending);
-            *last_update.lock() = Instant::now();
         }
         if active_readers.fetch_sub(1, Ordering::AcqRel) == 1 {
             output_drained.notify_waiters();
@@ -430,11 +414,14 @@ fn take_valid_utf8_prefix(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     }
 }
 
-fn shell_invocation(command: &str) -> (&'static str, Vec<String>) {
+fn shell_invocation(command: &str) -> (String, Vec<String>) {
     let shell_command = shell_command(command);
     if cfg!(windows) {
         (
-            "powershell.exe",
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+                .join("System32/WindowsPowerShell/v1.0/powershell.exe")
+                .to_string_lossy()
+                .into_owned(),
             vec![
                 "-NoLogo".to_string(),
                 "-NoProfile".to_string(),
@@ -443,7 +430,7 @@ fn shell_invocation(command: &str) -> (&'static str, Vec<String>) {
             ],
         )
     } else {
-        ("bash", vec!["-lc".to_string(), shell_command])
+        ("bash".into(), vec!["-lc".to_string(), shell_command])
     }
 }
 
@@ -496,6 +483,44 @@ fn powershell_single_quoted(value: &str) -> String {
 mod tests {
     use super::{HeadTailOutputBuffer, shell_command};
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn terminal_shell_runs_inside_required_native_isolation() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
+        policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
+        policy.filesystem.full_disk_read = false;
+        policy.filesystem.full_disk_write = false;
+        policy.filesystem.readable_roots = vec![workspace.path().to_path_buf()];
+        policy.filesystem.writable_roots = vec![crate::sandbox::WritableRoot {
+            root: workspace.path().to_path_buf(),
+            read_only_subpaths: vec![],
+        }];
+        let mut process = super::TerminalProcess::spawn(
+            "Write-Output 'native-terminal-ok'",
+            workspace.path().to_str(),
+            &policy,
+        )
+        .expect("absolute system shell must start with required AppContainer isolation");
+        let status = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                if let Some(status) = process.try_wait().unwrap() {
+                    break status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("terminal exited");
+        assert!(status.success());
+        assert!(
+            process
+                .wait_for_output_drained(std::time::Duration::from_secs(2))
+                .await
+        );
+        assert!(process.output_since(0).text.contains("native-terminal-ok"));
+    }
+
     #[test]
     fn shell_command_injects_stable_terminal_env() {
         let command = shell_command("pwd");
@@ -522,7 +547,11 @@ mod tests {
         // what happens for terminal sessions running without an attached console.
         crate::process_spawn::apply_no_window(&mut child);
 
-        let output = child.output().expect("powershell should run");
+        let child = {
+            let _creation = crate::process_spawn::creation_lock().unwrap();
+            child.spawn().expect("powershell should run")
+        };
+        let output = child.wait_with_output().expect("powershell should run");
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(
             text.contains("中文输出"),

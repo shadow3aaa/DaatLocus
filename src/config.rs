@@ -12,7 +12,6 @@ use crate::{
     },
     i18n::Locale,
     persistence::{PersistenceFileMode, PersistenceStore, write_bytes_atomic},
-    sandbox::StrongFilesystemSandboxMode,
 };
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -220,78 +219,9 @@ impl ModelConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Judge configuration
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct JudgeConfig {
-    pub enabled: bool,
-    /// None = use `main_model`.
-    pub model: Option<String>,
-    pub max_pairwise_candidates: usize,
-    pub max_pairwise_cases: usize,
-}
-
-impl Default for JudgeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            model: None,
-            max_pairwise_candidates: 4,
-            max_pairwise_cases: 4,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Sleep configuration
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct SleepConfig {
-    /// Whether the sleep self-improvement mechanism may run.
-    ///
-    /// When disabled, background automatic sleep (idle and forced backlog
-    /// triggers) is skipped. Manual sleep runs stay available through the
-    /// dashboard `/sleep run` command as an explicit user action.
-    pub enabled: bool,
-}
-
-impl Default for SleepConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SCOPE engine configuration
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct ScopeConfig {
-    /// Whether SCOPE may start a language server for an opened project.
-    ///
-    /// Language servers improve cross-file reference review, but each process
-    /// can use a large amount of memory. Disable this before launching many
-    /// subagents. Tree-sitter parsing, search, and hash-anchored edits stay
-    /// available. Changing this value in `config.toml` applies on the next
-    /// runtime turn and starts or stops the server for an already open project.
-    pub lsp_enabled: bool,
-}
-
-impl Default for ScopeConfig {
-    fn default() -> Self {
-        Self { lsp_enabled: true }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Top-level config
 // ---------------------------------------------------------------------------
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Config {
     pub locale: Locale,
@@ -301,46 +231,9 @@ pub struct Config {
     pub models: HashMap<String, ModelConfig>,
     /// Main model name; key reference into models.
     pub main_model: String,
-    /// Efficient model name; key reference into models.
-    /// Default for non-main-loop operations such as judge.
-    /// When not set explicitly, defaults to the same value as `main_model` for backward compatibility.
-    pub efficient_model: String,
+    /// Independent approval reviewer; null selects main_model in a fresh request.
+    pub approval_model: Option<String>,
     pub daemon: DaemonConfig,
-    pub judge: JudgeConfig,
-    pub sandbox: SandboxConfig,
-    pub telegram: TelegramConfig,
-    pub sleep: SleepConfig,
-    pub scope: ScopeConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        let mut providers = HashMap::new();
-        providers.insert(
-            "openai".to_string(),
-            ProviderConfig::Openai {
-                api_key: "your-api-key".to_string(),
-                base_url: None,
-            },
-        );
-
-        let mut models = HashMap::new();
-        models.insert("default".to_string(), ModelConfig::default());
-
-        Self {
-            providers,
-            models,
-            locale: Locale::default(),
-            main_model: "default".to_string(),
-            efficient_model: "default".to_string(),
-            daemon: DaemonConfig::default(),
-            judge: JudgeConfig::default(),
-            sandbox: SandboxConfig::default(),
-            telegram: TelegramConfig::default(),
-            sleep: SleepConfig::default(),
-            scope: ScopeConfig::default(),
-        }
-    }
 }
 
 impl Config {
@@ -349,16 +242,6 @@ impl Config {
         self.models
             .get(&self.main_model)
             .unwrap_or_else(|| panic!("main_model '{}' not found in models", self.main_model))
-    }
-
-    /// Return the efficient model config. Missing keys panic because startup validation should catch them.
-    pub fn efficient_model_config(&self) -> &ModelConfig {
-        self.models.get(&self.efficient_model).unwrap_or_else(|| {
-            panic!(
-                "efficient_model '{}' not found in models",
-                self.efficient_model
-            )
-        })
     }
 
     pub fn protected_secret_env_vars(&self) -> Vec<String> {
@@ -382,7 +265,6 @@ impl Config {
                 }
             }
         }
-        push_secret_env_ref(&mut vars, &self.telegram.bot_token);
         vars.sort_by_key(|name| name.to_ascii_uppercase());
         vars.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         vars
@@ -405,32 +287,15 @@ impl Config {
             )
         })?;
 
-        if let Some(judge_model_key) = &self.judge.model {
-            let judge = self
+        if let Some(name) = &self.approval_model {
+            let review = self
                 .models
-                .get(judge_model_key)
-                .ok_or_else(|| format!("judge.model '{judge_model_key}' not found in [models]"))?;
-            self.providers.get(&judge.provider).ok_or_else(|| {
-                format!(
-                    "judge.model '{}' references unknown provider '{}'",
-                    judge_model_key, judge.provider
-                )
-            })?;
+                .get(name)
+                .ok_or_else(|| format!("approval_model '{name}' not found in [models]"))?;
+            if !self.providers.contains_key(&review.provider) {
+                return Err("approval_model references an unknown provider".into());
+            }
         }
-
-        let efficient = self.models.get(&self.efficient_model).ok_or_else(|| {
-            format!(
-                "efficient_model '{}' not found in [models]",
-                self.efficient_model
-            )
-        })?;
-        self.providers.get(&efficient.provider).ok_or_else(|| {
-            format!(
-                "efficient_model '{}' references unknown provider '{}'",
-                self.efficient_model, efficient.provider
-            )
-        })?;
-
         Ok(())
     }
 }
@@ -519,46 +384,6 @@ pub struct DaemonConfig {
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self { port: 45825 }
-    }
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct SandboxConfig {
-    pub enabled: bool,
-    pub strong_filesystem: StrongFilesystemSandboxMode,
-}
-
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            strong_filesystem: StrongFilesystemSandboxMode::Off,
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct TelegramConfig {
-    pub enabled: bool,
-    pub bot_token: String,
-    pub poll_timeout_secs: u64,
-}
-
-impl Default for TelegramConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            bot_token: "your-telegram-bot-token".to_string(),
-            poll_timeout_secs: 30,
-        }
-    }
-}
-
-impl TelegramConfig {
-    pub fn has_real_credentials(&self) -> bool {
-        !self.bot_token.trim().is_empty() && self.bot_token != "your-telegram-bot-token"
     }
 }
 
@@ -652,7 +477,6 @@ mod tests {
         Config, DEFAULT_STREAM_IDLE_TIMEOUT_SECS, ModelConfig, ProviderConfig, ThinkingBudget,
         normalize_provider_base_url, resolve_env_reference,
     };
-    use crate::sandbox::StrongFilesystemSandboxMode;
 
     struct EnvOverride {
         key: &'static str,
@@ -721,16 +545,10 @@ mod tests {
                 github_token: "$GITHUB_TOKEN".to_string(),
             },
         );
-        config.telegram.bot_token = "$TELEGRAM_BOT_TOKEN".to_string();
 
         assert_eq!(
             config.protected_secret_env_vars(),
-            vec![
-                "COMPATIBLE_TOKEN",
-                "GITHUB_TOKEN",
-                "OPENAI_API_KEY",
-                "TELEGRAM_BOT_TOKEN",
-            ]
+            vec!["COMPATIBLE_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY",]
         );
     }
 
@@ -764,83 +582,6 @@ mod tests {
             "Bearer [redacted]"
         );
         assert_eq!(super::redact_secret_text("unchanged", ""), "unchanged");
-    }
-
-    #[test]
-    fn sandbox_config_defaults_to_no_strong_filesystem_backend() {
-        let config: Config = toml::from_str(
-            r#"
-main_model = "default"
-
-[providers.openai]
-type = "openai"
-api_key = "test"
-
-[models.default]
-provider = "openai"
-model_id = "gpt-4.1"
-"#,
-        )
-        .expect("parse config");
-
-        assert!(config.sandbox.enabled);
-        assert_eq!(
-            config.sandbox.strong_filesystem,
-            StrongFilesystemSandboxMode::Off
-        );
-    }
-
-    #[test]
-    fn sandbox_config_parses_strong_filesystem_mode() {
-        let config: Config = toml::from_str(
-            r#"
-main_model = "default"
-
-[providers.openai]
-type = "openai"
-api_key = "test"
-
-[models.default]
-provider = "openai"
-model_id = "gpt-4.1"
-
-[sandbox]
-strong_filesystem = "required"
-"#,
-        )
-        .expect("parse config");
-
-        assert_eq!(
-            config.sandbox.strong_filesystem,
-            StrongFilesystemSandboxMode::Required
-        );
-    }
-
-    #[test]
-    fn sandbox_config_parses_enabled_flag() {
-        let config: Config = toml::from_str(
-            r#"
-main_model = "default"
-
-[providers.openai]
-type = "openai"
-api_key = "test"
-
-[models.default]
-provider = "openai"
-model_id = "gpt-4.1"
-
-[sandbox]
-enabled = false
-"#,
-        )
-        .expect("parse config");
-
-        assert!(!config.sandbox.enabled);
-        assert_eq!(
-            config.sandbox.strong_filesystem,
-            StrongFilesystemSandboxMode::Off
-        );
     }
 
     #[test]

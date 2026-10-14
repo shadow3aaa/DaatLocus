@@ -20,16 +20,16 @@ use crate::{
     core::{ModelProvider, ModelRequestOptions, TokenUsage, TokenUsageInfo},
     dsml_repair,
     model_catalog::catalog_model_capacity,
+    model_protocol::{
+        AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec,
+        AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, PromptRequest,
+    },
     providers::io::{
         default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
         looks_like_vision_unsupported_error, non_empty_string, parse_retry_after_seconds,
         read_response_text_with_timeout, send_request_for_streaming_response,
         should_retry_request_without_thinking_budget, summarize_agent_turn_request,
         summarize_prompt_request, truncate_for_error,
-    },
-    reasoning::runtime::{
-        AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec,
-        AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, PromptRequest,
     },
 };
 
@@ -1105,7 +1105,9 @@ fn extract_ollama_multimodal_content(content: &AgentContent) -> (String, Vec<Str
     let mut images = Vec::new();
     for part in content.parts() {
         match part {
-            AgentContentPart::Image { .. } => {
+            AgentContentPart::Image { .. }
+            | AgentContentPart::ResourceImage { .. }
+            | AgentContentPart::ImageData { .. } => {
                 let data_url = image_part_data_url(part);
                 if let Some(url) = data_url {
                     images.push(url);
@@ -1120,9 +1122,8 @@ fn extract_ollama_multimodal_content(content: &AgentContent) -> (String, Vec<Str
 fn prompt_request_to_ollama_messages(request: &PromptRequest) -> Vec<Value> {
     let mut valid_tool_call_ids = HashSet::new();
     for message in request
-        .long_term_memory_messages
+        .history_messages
         .iter()
-        .chain(request.history_messages.iter())
         .chain(request.retry_messages.iter())
     {
         if let AgentMessage::AssistantToolCallProtocol { calls, .. } = &message.message {
@@ -1135,9 +1136,6 @@ fn prompt_request_to_ollama_messages(request: &PromptRequest) -> Vec<Value> {
         .system_messages
         .iter()
         .map(|message| json!({"role": "system", "content": message}))
-        .chain(request.long_term_memory_messages.iter().map(|message| {
-            agent_message_to_ollama_content(&message.message, true, &valid_tool_call_ids, false)
-        }))
         .chain(request.history_messages.iter().map(|message| {
             agent_message_to_ollama_content(&message.message, true, &valid_tool_call_ids, false)
         }))

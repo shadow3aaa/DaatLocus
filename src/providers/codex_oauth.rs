@@ -24,12 +24,12 @@ use crate::{
     context_budget::{ContextBudgetExceededError, RequestBudgetLimits},
     core::{ModelProgressSink, ModelProvider, ModelRequestOptions, TokenUsage, TokenUsageInfo},
     daat_locus_paths::daat_locus_paths_sync,
-    persistence::{PersistenceFileMode, write_bytes_atomic},
-    providers::thinking::thinking_budget_is_none,
-    reasoning::runtime::{
+    model_protocol::{
         AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentTurnItem,
         AgentTurnRequest, AgentTurnStreamResult, HistoryMessage, PromptRequest,
     },
+    persistence::{PersistenceFileMode, write_bytes_atomic},
+    providers::thinking::thinking_budget_is_none,
 };
 
 use super::{
@@ -1093,15 +1093,16 @@ fn responses_user_message(content: &AgentContent, strip_images: bool) -> Value {
                     "text": text,
                 }));
             }
-            AgentContentPart::Image {
-                path, description, ..
-            } => {
+            AgentContentPart::Image { .. }
+            | AgentContentPart::ResourceImage { .. }
+            | AgentContentPart::ImageData { .. } => {
+                let label = part.image_label().unwrap_or("image");
                 if strip_images {
                     parts.push(json!({
                         "type": "input_text",
                         "text": format!(
                             "[image: {}]",
-                            description.as_deref().unwrap_or(path)
+                            label
                         ),
                     }));
                     continue;
@@ -1111,7 +1112,7 @@ fn responses_user_message(content: &AgentContent, strip_images: bool) -> Value {
                         "type": "input_text",
                         "text": format!(
                             "[image attachment unavailable: {}]",
-                            description.as_deref().unwrap_or(path)
+                            label
                         ),
                     }));
                     continue;
@@ -1130,7 +1131,7 @@ fn responses_user_message(content: &AgentContent, strip_images: bool) -> Value {
     })
 }
 
-fn agent_tool_to_responses_tool(tool: crate::reasoning::runtime::AgentToolSpec) -> Value {
+fn agent_tool_to_responses_tool(tool: crate::model_protocol::AgentToolSpec) -> Value {
     super::responses_protocol::tool_to_responses_tool(tool)
 }
 
@@ -1593,7 +1594,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reasoning::runtime::AgentToolInputSpec;
+    use crate::model_protocol::AgentToolInputSpec;
 
     fn json_contains_key(value: &Value, needle: &str) -> bool {
         match value {
@@ -1817,7 +1818,7 @@ mod tests {
     async fn provider_import_remains_available_after_external_source_is_deleted() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _home_override =
-            crate::runtime::bootstrap::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
+            crate::daat_locus_paths::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
         let source = temp.path().join("external").join("auth.json");
         tokio::fs::create_dir_all(source.parent().expect("source parent"))
             .await
@@ -1856,7 +1857,7 @@ mod tests {
     async fn refresh_of_imported_provider_auth_does_not_modify_external_source() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _home_override =
-            crate::runtime::bootstrap::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
+            crate::daat_locus_paths::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
         let source = temp.path().join("external").join("auth.json");
         tokio::fs::create_dir_all(source.parent().expect("source parent"))
             .await
@@ -1916,7 +1917,8 @@ mod tests {
                 .expect("write refresh response");
         });
         let _refresh_endpoint = EnvOverride::set(CODEX_OAUTH_REFRESH_URL_OVERRIDE_ENV, &endpoint);
-        let client = reqwest::Client::new();
+        // The disposable loopback server must never inherit a machine proxy.
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let access = codex_oauth_access_from_file_with_client(&destination, &client)
             .await
             .expect("refresh imported provider auth");
@@ -1942,7 +1944,7 @@ mod tests {
     async fn import_codex_cli_auth_file_writes_only_flat_daat_tokens() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _home_override =
-            crate::runtime::bootstrap::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
+            crate::daat_locus_paths::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
         let source = temp.path().join("external").join("auth.json");
         tokio::fs::create_dir_all(source.parent().expect("source parent"))
             .await
@@ -2130,7 +2132,7 @@ mod tests {
 
     #[test]
     fn terminal_write_stdin_schema_sent_to_codex_has_no_one_of() {
-        let tool = crate::reasoning::runtime::AgentToolSpec {
+        let tool = crate::model_protocol::AgentToolSpec {
             name: "terminal__terminal_write_stdin".to_string(),
             description: "Continue terminal session".to_string(),
             input_spec: AgentToolInputSpec::JsonSchema {
@@ -2166,7 +2168,7 @@ mod tests {
                 AgentMessage::tool("call-1", "update_plan", "plan updated"),
             ],
             tools: vec![
-                crate::reasoning::runtime::AgentToolSpec {
+                crate::model_protocol::AgentToolSpec {
                     name: "update_plan".to_string(),
                     description: "Update plan".to_string(),
                     input_spec: AgentToolInputSpec::JsonSchema {
@@ -2178,7 +2180,7 @@ mod tests {
                         }),
                     },
                 },
-                crate::reasoning::runtime::AgentToolSpec {
+                crate::model_protocol::AgentToolSpec {
                     name: "custom_patch".to_string(),
                     description: "Apply custom patch".to_string(),
                     input_spec: AgentToolInputSpec::FreeformGrammar {
@@ -2266,7 +2268,7 @@ mod tests {
     fn agent_payload_keeps_previous_turn_input_as_next_prefix() {
         let client = test_client();
         let identity = test_identity();
-        let tools = vec![crate::reasoning::runtime::AgentToolSpec {
+        let tools = vec![crate::model_protocol::AgentToolSpec {
             name: "terminal_exec".to_string(),
             description: "Run a command".to_string(),
             input_spec: AgentToolInputSpec::JsonSchema {
@@ -2371,7 +2373,7 @@ mod tests {
         let client = test_client();
         let request = AgentTurnRequest {
             messages: vec![AgentMessage::user("do work")],
-            tools: vec![crate::reasoning::runtime::AgentToolSpec {
+            tools: vec![crate::model_protocol::AgentToolSpec {
                 name: "structured_patch".to_string(),
                 description: "Apply structured patch".to_string(),
                 input_spec: AgentToolInputSpec::FreeformGrammar {
@@ -2417,12 +2419,12 @@ mod tests {
         let call = json!({
             "type": "function_call",
             "call_id": "call-2",
-            "name": "finish_and_send",
+            "name": "send_message",
             "arguments": "{\"reply_message\":\"ok\"}"
         });
         let parsed = response_item_tool_call(&call).unwrap().unwrap();
         assert_eq!(parsed.id, "call-2");
-        assert_eq!(parsed.name, "finish_and_send");
+        assert_eq!(parsed.name, "send_message");
         assert_eq!(parsed.arguments["reply_message"], "ok");
 
         let custom = json!({

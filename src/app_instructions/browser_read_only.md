@@ -1,0 +1,1 @@
+Read-only browsing fetches public Internet UTF-8 source with HTTP GET. Private and local network targets are unavailable. Pages never execute JavaScript. refresh=false may reuse this Actor's cached page; refresh=true fetches current source. HTTP redirects and resolved addresses are checked individually.

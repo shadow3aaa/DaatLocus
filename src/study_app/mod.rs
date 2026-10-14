@@ -1,14 +1,9 @@
-//! Study Mode capability domain: knowledge graph, question bank, progress.
-//!
-//! The `Study` app is installed only in study sessions. It exposes the
-//! `study__*` tool surface and generated `study__get_state`, renders the graph
-//! state for dashboards, and carries the mode contract in its docs.
+//! Knowledge graph, question bank and learning progress tools.
 
 pub mod store;
 pub mod transfer;
 
 use std::borrow::Cow;
-use std::fmt::Write as _;
 
 use async_trait::async_trait;
 use daat_locus_macros::model_schema;
@@ -18,11 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    app::{
-        App, AppDocs, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
-        AppToolSpec,
-    },
-    reasoning::{episode::EpisodeActionRecord, prompts::APP_STUDY, runtime::AgentToolCall},
+    app::{App, AppDocs, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
+    model_protocol::AgentToolCall,
     schema_utils::{ModelSchema, model_schema_for},
 };
 
@@ -273,73 +265,24 @@ fn result_payload(
     lines: Vec<String>,
 ) -> AppToolExecutionResult {
     let summary = summary.into();
-    let mut result = AppToolExecutionResult::from_activity_event(summary, payload, None, None);
+    let mut result = AppToolExecutionResult::new(summary, payload, None);
     if !lines.is_empty() {
         result.summary = format!("{}: {}", result.summary, lines.join(", "));
     }
     result
 }
 
-impl StudyApp {
-    fn render_snapshot_lines(&self) -> Result<Vec<String>> {
-        let snapshot = self.store.graph_snapshot()?;
-        let stats = &snapshot.stats;
-        let mut lines = vec![
-            "kind=study".to_string(),
-            format!(
-                "modules={} nodes={} edges={}",
-                stats.module_count, stats.node_count, stats.edge_count
-            ),
-            format!(
-                "understanding avg={}% mastered={} in_progress={} unseen={}",
-                stats.average_understanding,
-                stats.mastered_count,
-                stats.in_progress_count,
-                stats.unseen_count
-            ),
-            format!(
-                "questions={} stale_questions={} attempts={}",
-                stats.question_count, stats.stale_question_count, stats.attempt_count
-            ),
-        ];
-        let maintenance = &snapshot.maintenance;
-        if !maintenance.orphan_node_ids.is_empty()
-            || !maintenance.empty_module_ids.is_empty()
-            || !maintenance.duplicate_candidate_groups.is_empty()
-        {
-            lines.push(format!(
-                "maintenance orphan_nodes={} empty_modules={} duplicate_groups={}",
-                maintenance.orphan_node_ids.len(),
-                maintenance.empty_module_ids.len(),
-                maintenance.duplicate_candidate_groups.len()
-            ));
-        }
-        Ok(lines)
-    }
-}
-
 #[async_trait]
 impl App for StudyApp {
+    fn can_passivate(&self) -> bool {
+        true
+    }
     fn id(&self) -> AppId {
         AppId::study()
     }
 
-    fn render_state(&self) -> AppStateRender {
-        let lines = self
-            .render_snapshot_lines()
-            .unwrap_or_else(|err| vec!["kind=study".to_string(), format!("error={err}")]);
-        AppStateRender {
-            title: "Study".to_string(),
-            lines,
-        }
-    }
-
     fn docs(&self) -> AppDocs {
-        APP_STUDY.app_docs()
-    }
-
-    fn state_revision(&self) -> Option<i64> {
-        Some(self.store.revision())
+        AppDocs::from_markdown(include_str!("../app_instructions/study.md"))
     }
 
     fn tool_specs(&self) -> Vec<AppToolSpec> {
@@ -405,77 +348,18 @@ impl App for StudyApp {
         ]
     }
 
-    fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-        Ok(EpisodeActionRecord {
-            kind: call.name.clone(),
-            summary: summarize_study_call(call),
-        })
-    }
-
-    /// Study graph changes are visualized in the Study tab's network and
-    /// sidebar, so study tool calls do not add conversation activity rows.
-    fn tool_call_activity_event(
-        &self,
-        _call: &AgentToolCall,
-    ) -> Result<Option<crate::activity_event::ToolCallActivityEvent>> {
-        Ok(None)
-    }
-
     async fn execute_tool(
         &mut self,
         call: &AgentToolCall,
-        context: &AppToolExecutionContext,
+        _context: &AppToolExecutionContext,
     ) -> Result<AppToolExecutionResult> {
         let result = self.run_tool(call).await?;
-        self.publish_state_revision(context);
-        if let Some(focus_node_id) = study_focus_node_id(call, &result) {
-            self.publish_focus(context, &focus_node_id);
-        }
+
         Ok(result)
     }
 }
 
-fn study_focus_node_id(call: &AgentToolCall, result: &AppToolExecutionResult) -> Option<String> {
-    match call.name.as_str() {
-        "create_node" | "update_node" => result
-            .payload
-            .get("node")
-            .and_then(|node| node.get("id"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        "merge_nodes" => result
-            .payload
-            .get("canonical_node_id")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        _ => None,
-    }
-}
-
 impl StudyApp {
-    /// Push the current graph revision to the dashboard so clients can refetch
-    /// the network while a turn is still running.
-    fn publish_state_revision(&self, context: &AppToolExecutionContext) {
-        let Some(tx) = context.dashboard_tx.as_ref() else {
-            return;
-        };
-        let revision = self.store.revision();
-        tx.send_modify(|state| {
-            state.set_app_state_revision(AppId::study().as_str(), revision);
-        });
-    }
-
-    /// Ask clients to move their view to the node the agent just wrote.
-    fn publish_focus(&self, context: &AppToolExecutionContext, node_id: &str) {
-        let Some(tx) = context.dashboard_tx.as_ref() else {
-            return;
-        };
-        let revision = self.store.revision();
-        tx.send_modify(|state| {
-            state.set_app_focus(AppId::study().as_str(), node_id, revision);
-        });
-    }
-
     async fn run_tool(&self, call: &AgentToolCall) -> Result<AppToolExecutionResult> {
         match call.name.as_str() {
             "list_modules" => {
@@ -758,31 +642,6 @@ fn empty_object_schema() -> Value {
     })
 }
 
-fn summarize_study_call(call: &AgentToolCall) -> String {
-    const MAX_CHARS: usize = 120;
-    let mut summary = String::new();
-    if let Value::Object(map) = &call.arguments {
-        for (key, value) in map.iter().take(4) {
-            if value.is_null() {
-                continue;
-            }
-            if !summary.is_empty() {
-                summary.push(' ');
-            }
-            let _ = write!(summary, "{key}={}", value);
-        }
-    }
-    if summary.is_empty() {
-        summary = call.name.clone();
-    }
-    if summary.chars().count() > MAX_CHARS {
-        let truncated: String = summary.chars().take(MAX_CHARS).collect();
-        format!("{truncated}...")
-    } else {
-        summary
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,49 +689,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn node_writes_publish_a_focus_hint() {
-        let (_dir, mut app) = test_app();
-        let module = app.store().create_module("Algebra", "").expect("module");
-        let (tx, rx) = tokio::sync::watch::channel(crate::dashboard::DashboardState::default());
-        let context = AppToolExecutionContext {
-            dashboard_tx: Some(tx),
-            ..test_context()
-        };
-
-        let created = app
-            .execute_tool(
-                &call(
-                    "create_node",
-                    json!({
-                        "module_id": module.id,
-                        "title": "Group",
-                        "summary": "",
-                        "body": "",
-                        "aliases": [],
-                        "tags": [],
-                        "sources": [{ "title": "textbook", "url": "https://example.com" }]
-                    }),
-                ),
-                &context,
-            )
-            .await
-            .expect("create node");
-        let node_id = created.payload["node"]["id"]
-            .as_str()
-            .expect("node id")
-            .to_string();
-
-        let state = rx.borrow().clone();
-        let focus = state
-            .app_focus
-            .iter()
-            .find(|(app_id, _, _)| app_id == "study")
-            .expect("study focus hint");
-        assert_eq!(focus.1, node_id);
-        assert_eq!(focus.2, app.store().revision());
-    }
-
     #[test]
     fn app_id_study_uses_expected_namespace() {
         assert_eq!(AppId::study().as_str(), "study");
@@ -911,7 +727,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn progress_tool_updates_state_render() {
+    async fn progress_tool_persists_understanding() {
         let (_dir, mut app) = test_app();
         let module = app.store().create_module("Algebra", "").expect("module");
         let node = app
@@ -950,11 +766,8 @@ mod tests {
             .expect("update progress");
         assert_eq!(result.payload["understanding"], 88);
 
-        let state = app.render_state();
-        assert!(
-            state.lines.iter().any(|line| line.contains("avg=88%")),
-            "state render missing progress: {state:?}"
-        );
+        let stored = app.store().node_detail(&node.id).expect("read node");
+        assert_eq!(stored.progress.understanding, 88);
     }
 
     fn test_context() -> AppToolExecutionContext {
@@ -967,15 +780,16 @@ mod tests {
                     readable_roots: Vec::new(),
                     writable_roots: Vec::new(),
                     deny_read_paths: Vec::new(),
+                    private_delivery: None,
+                    bound_roots: Vec::new(),
                     deny_write_paths: Vec::new(),
                 },
                 protected_env_vars: Vec::new(),
                 strong_filesystem: crate::sandbox::StrongFilesystemSandboxMode::Off,
             },
-            dashboard_tx: None,
             tool_output_max_tokens: 4096,
             turn_epoch: 0,
-            scope_lsp_enabled: true,
+            actor_call: None,
         }
     }
 }

@@ -163,6 +163,15 @@ fn agent_message_char_count(message: &AgentMessage) -> usize {
                     .iter()
                     .map(|part| match part {
                         AgentContentPart::Text { text } => text.chars().count(),
+                        AgentContentPart::ImageData {
+                            media_type,
+                            data_base64,
+                            description,
+                        } => {
+                            media_type.len()
+                                + data_base64.len()
+                                + description.as_ref().map_or(0, String::len)
+                        }
                         AgentContentPart::Image {
                             path,
                             media_type,
@@ -173,6 +182,14 @@ fn agent_message_char_count(message: &AgentMessage) -> usize {
                                 + description
                                     .as_deref()
                                     .map_or(0, |text| text.chars().count())
+                        }
+                        AgentContentPart::ResourceImage {
+                            resource,
+                            description,
+                        } => {
+                            resource.id.len()
+                                + resource.media_type.len()
+                                + description.as_ref().map_or(0, String::len)
                         }
                     })
                     .sum::<usize>()
@@ -478,7 +495,7 @@ pub fn format_request_error(
         lines.extend(causes.into_iter().map(|cause| format!("- {cause}")));
     }
 
-    miette!(lines.join("\n"))
+    ModelRequestFailure::report(ModelRequestFailure::request_kind(err), lines.join("\n"))
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -586,7 +603,10 @@ pub async fn send_request_for_streaming_response(
             ];
             lines.extend(request_context.iter().cloned());
             lines.push("kind=response_header_timeout".to_string());
-            Err(miette!(lines.join("\n")))
+            Err(ModelRequestFailure::report(
+                ModelFailureKind::Timeout,
+                lines.join("\n"),
+            ))
         }
     }
 }
@@ -611,7 +631,10 @@ pub async fn read_response_text_with_timeout(
             ];
             lines.extend(request_context.iter().cloned());
             lines.push("kind=response_body_timeout".to_string());
-            Err(miette!(lines.join("\n")))
+            Err(ModelRequestFailure::report(
+                ModelFailureKind::Timeout,
+                lines.join("\n"),
+            ))
         }
     }
 }

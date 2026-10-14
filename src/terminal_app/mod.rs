@@ -15,26 +15,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    activity_event::{
-        TerminalActivityAction, TerminalActivityDescriptor, ToolCallActivityEvent,
-        compact_preserved_body_lines,
-    },
-    app::{
-        App, AppDocs, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
-        AppToolSpec,
-    },
+    actors::ToolPermissionRequest,
+    app::{App, AppDocs, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
     core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWaitMode, TerminalWriteStdinArgs},
-    dashboard::{
-        DashboardActivityEvent, apply_activity_event, terminal_activity_event_from_terminal_data,
-    },
-    reasoning::{episode::EpisodeActionRecord, prompts::APP_TERMINAL, runtime::AgentToolCall},
+    model_protocol::AgentToolCall,
     sandbox::RuntimeSandboxPolicy,
     schema_utils::model_schema_for,
 };
 
 pub struct TerminalApp {
     sessions: BTreeMap<String, TerminalSession>,
-    next_session_index: usize,
     output_buffer_capacity: usize,
 }
 
@@ -52,6 +42,7 @@ struct TerminalSession {
     output_offset: usize,
     last_activity: Instant,
     state: TerminalSessionState,
+    approved_roots: ToolPermissionRequest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,7 +64,10 @@ pub struct TerminalSessionState {
     pub exit_code: Option<i32>,
     pub cwd: Option<String>,
     pub has_unread_output: bool,
-    pub last_output_preview: String,
+    #[serde(default)]
+    pub started_at_ms: Option<i64>,
+    #[serde(default)]
+    pub finished_at_ms: Option<i64>,
     #[serde(default)]
     pub output_total_written_bytes: usize,
     #[serde(default)]
@@ -82,6 +76,12 @@ pub struct TerminalSessionState {
     pub output_dropped_bytes: usize,
     #[serde(default)]
     pub output_buffer_capacity: usize,
+}
+
+impl Default for TerminalApp {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TerminalApp {
@@ -99,7 +99,6 @@ impl TerminalApp {
     pub const fn new() -> Self {
         Self {
             sessions: BTreeMap::new(),
-            next_session_index: 1,
             output_buffer_capacity: DEFAULT_OUTPUT_BUFFER_CAPACITY_BYTES,
         }
     }
@@ -108,7 +107,6 @@ impl TerminalApp {
     const fn new_with_output_buffer_capacity(output_buffer_capacity: usize) -> Self {
         Self {
             sessions: BTreeMap::new(),
-            next_session_index: 1,
             output_buffer_capacity,
         }
     }
@@ -220,10 +218,29 @@ impl TerminalApp {
             )
             .map_err(|err| miette!("failed to spawn terminal process: {err}"))?,
         );
+        session.approved_roots = ToolPermissionRequest {
+            operation_details: serde_json::Value::Null,
+            readable_roots: sandbox_policy
+                .filesystem
+                .readable_roots
+                .iter()
+                .filter(|path| sandbox_policy.is_path_readable(path))
+                .cloned()
+                .collect(),
+            writable_roots: sandbox_policy
+                .filesystem
+                .writable_roots
+                .iter()
+                .map(|root| root.root.clone())
+                .filter(|path| sandbox_policy.is_path_writable(path))
+                .collect(),
+        };
         session.output_offset = 0;
         session.state.command = Some(command);
         session.state.status = "running".to_string();
         session.state.exit_code = None;
+        session.state.started_at_ms = Some(chrono::Utc::now().timestamp_millis());
+        session.state.finished_at_ms = None;
         session.state.output_buffer_capacity = output_buffer_capacity;
         if let Some(workdir) = effective_workdir.clone() {
             session.state.cwd = Some(workdir);
@@ -419,12 +436,14 @@ impl TerminalApp {
     }
 
     fn create_session(&mut self) -> String {
-        let session_id = format!("terminal-session-{}", self.next_session_index);
-        self.next_session_index += 1;
+        // Instance reconstruction must never let an old reference target a
+        // different process, including after idle passivation or restart.
+        let session_id = format!("terminal-session-{}", uuid::Uuid::new_v4());
         let session = TerminalSession {
             process: None,
             output_offset: 0,
             last_activity: Instant::now(),
+            approved_roots: ToolPermissionRequest::default(),
             state: TerminalSessionState {
                 session_id: session_id.clone(),
                 process_id: None,
@@ -433,7 +452,8 @@ impl TerminalApp {
                 exit_code: None,
                 cwd: None,
                 has_unread_output: true,
-                last_output_preview: String::new(),
+                started_at_ms: None,
+                finished_at_ms: None,
                 output_total_written_bytes: 0,
                 output_retained_bytes: 0,
                 output_dropped_bytes: 0,
@@ -878,48 +898,17 @@ fn compact_terminal_model_content(
 
 #[async_trait]
 impl App for TerminalApp {
+    fn can_passivate(&self) -> bool {
+        // Retain both live processes and unread/retained output. Session IDs
+        // must not silently become invalid (or be reused) across inputs.
+        self.sessions.is_empty()
+    }
     fn id(&self) -> AppId {
         AppId::terminal()
     }
 
-    fn render_state(&self) -> AppStateRender {
-        let running_sessions = self
-            .sessions
-            .values()
-            .filter(|session| session.state.status == "running")
-            .count();
-        let unread_session_ids = self
-            .sessions
-            .values()
-            .filter(|session| session.state.has_unread_output)
-            .map(|session| session.state.session_id.clone())
-            .collect::<Vec<_>>();
-        let mut lines = vec![
-            "kind=terminal".to_string(),
-            if unread_session_ids.is_empty() {
-                "unread_sessions=none".to_string()
-            } else {
-                format!("unread_sessions={}", unread_session_ids.join(","))
-            },
-        ];
-
-        if self.sessions.is_empty() {
-            lines.push("sessions=none".to_string());
-        } else {
-            lines.push(format!("active_sessions={running_sessions}"));
-            for session in self.sessions.values() {
-                lines.push(render_session_state_line(&session.state));
-            }
-        }
-
-        AppStateRender {
-            title: "Terminal".to_string(),
-            lines,
-        }
-    }
-
     fn docs(&self) -> AppDocs {
-        APP_TERMINAL.app_docs()
+        AppDocs::from_markdown(include_str!("../app_instructions/terminal.md"))
     }
 
     fn tool_specs(&self) -> Vec<AppToolSpec> {
@@ -942,95 +931,101 @@ impl App for TerminalApp {
         ]
     }
 
-    fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-        match call.name.as_str() {
-            "terminal_exec" => {
-                let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
-                Ok(EpisodeActionRecord {
-                    kind: "terminal_exec".to_string(),
-                    summary: format!(
-                        "command={} session={} workdir={} yield_time_ms={}",
-                        summarize_terminal_inline_text(&args.command),
-                        args.session_id.unwrap_or_else(|| "new".to_string()),
-                        args.workdir.unwrap_or_else(|| "none".to_string()),
-                        args.yield_time_ms
-                            .map_or_else(|| "default".to_string(), |value| value.to_string())
-                    ),
-                })
-            }
-            "terminal_write_stdin" => {
-                let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
-                let wait_mode = args.wait_mode.unwrap_or(TerminalWaitMode::AnyOutput);
-                Ok(EpisodeActionRecord {
-                    kind: "terminal_write_stdin".to_string(),
-                    summary: format!(
-                        "session={} mode={} wait_mode={} yield_time_ms={}",
-                        args.session_id,
-                        terminal_progress_mode(&args.text),
-                        terminal_wait_mode_label(wait_mode),
-                        args.yield_time_ms
-                            .map_or_else(|| "default".to_string(), |value| value.to_string())
-                    ),
-                })
-            }
-            "terminal_terminate" => {
-                let args: TerminalTerminateArgs = parse_terminal_tool_args(call)?;
-                Ok(EpisodeActionRecord {
-                    kind: "terminal_terminate".to_string(),
-                    summary: format!("session={}", args.session_id),
-                })
-            }
-            _ => Err(miette!("unknown terminal tool `{}`", call.name)),
-        }
-    }
-
-    fn tool_call_activity_event(
+    fn permission_request(
         &self,
         call: &AgentToolCall,
-    ) -> Result<Option<ToolCallActivityEvent>> {
-        match call.name.as_str() {
+        context: &AppToolExecutionContext,
+    ) -> Result<ToolPermissionRequest> {
+        let mut request = ToolPermissionRequest::default();
+        let session_id = match call.name.as_str() {
             "terminal_exec" => {
                 let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
-                Ok(Some(ToolCallActivityEvent::terminal(
-                    TerminalActivityAction::Execute,
-                    summarize_terminal_inline_text(&args.command),
-                    vec![format!(
-                        "session={} workdir={} yield_time_ms={}",
-                        args.session_id.unwrap_or_else(|| "new".to_string()),
-                        args.workdir.unwrap_or_else(|| "-".to_string()),
-                        args.yield_time_ms
-                            .map_or_else(|| "default".to_string(), |value| value.to_string())
-                    )],
-                )))
+                let reads = args.additional_read_roots.unwrap_or_default();
+                let writes = args.additional_write_roots.unwrap_or_default();
+                if reads.len() > 32 || writes.len() > 32 {
+                    return Err(miette!("too many terminal permission roots"));
+                }
+                request.readable_roots = reads
+                    .iter()
+                    .map(|path| crate::file_io::resolve_file_path(&context.execution_cwd, path))
+                    .collect::<Result<_>>()?;
+                request.writable_roots = writes
+                    .iter()
+                    .map(|path| crate::file_io::resolve_file_path(&context.execution_cwd, path))
+                    .collect::<Result<_>>()?;
+                let workdir = args.workdir.as_deref().unwrap_or(
+                    context
+                        .execution_cwd
+                        .to_str()
+                        .ok_or_else(|| miette!("workspace path is not UTF-8"))?,
+                );
+                request
+                    .readable_roots
+                    .push(crate::file_io::resolve_file_path(
+                        &context.execution_cwd,
+                        workdir,
+                    )?);
+                args.session_id
+                    .filter(|id| !id.trim().is_empty() && id.trim().to_lowercase() != "null")
             }
             "terminal_write_stdin" => {
-                let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
-                let wait_mode = args.wait_mode.unwrap_or(TerminalWaitMode::AnyOutput);
-                Ok(Some(ToolCallActivityEvent::terminal(
-                    if args.text.is_empty() {
-                        TerminalActivityAction::Poll
-                    } else {
-                        TerminalActivityAction::Continue
-                    },
-                    summarize_terminal_inline_text(&args.session_id),
-                    vec![format!(
-                        "wait_mode={} yield_time_ms={}",
-                        terminal_wait_mode_label(wait_mode),
-                        args.yield_time_ms
-                            .map_or_else(|| "default".to_string(), |value| value.to_string())
-                    )],
-                )))
+                Some(parse_terminal_tool_args::<TerminalWriteStdinArgs>(call)?.session_id)
             }
-            "terminal_terminate" => {
-                let args: TerminalTerminateArgs = parse_terminal_tool_args(call)?;
-                Ok(Some(ToolCallActivityEvent::terminal(
-                    TerminalActivityAction::Terminate,
-                    format!("terminate {}", args.session_id),
-                    Vec::new(),
-                )))
-            }
-            _ => Err(miette!("unknown terminal tool `{}`", call.name)),
+            _ => None,
+        };
+        if let Some(id) = session_id {
+            let session = self
+                .sessions
+                .get(&id)
+                .ok_or_else(|| miette!("unknown terminal session"))?;
+            request
+                .readable_roots
+                .extend(session.approved_roots.readable_roots.clone());
+            request
+                .writable_roots
+                .extend(session.approved_roots.writable_roots.clone());
         }
+        request.readable_roots.sort();
+        request.readable_roots.dedup();
+        request.writable_roots.sort();
+        request.writable_roots.dedup();
+        request
+            .readable_roots
+            .retain(|path| !context.sandbox_policy.is_path_readable(path));
+        request
+            .writable_roots
+            .retain(|path| !context.sandbox_policy.is_path_writable(path));
+        Ok(request)
+    }
+
+    fn before_tool_call(
+        &self,
+        call: &AgentToolCall,
+        context: &AppToolExecutionContext,
+    ) -> Result<()> {
+        let process_policy = terminal_process_policy(context);
+        if call.name == "terminal_exec" {
+            let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
+            let workdir = args.workdir.as_deref().map_or_else(
+                || context.execution_cwd.clone(),
+                |path| context.resolve_tool_path(Path::new(path), None),
+            );
+            process_policy.ensure_path_readable(&workdir, "terminal workdir")?;
+        }
+        if call.name == "terminal_write_stdin" {
+            let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
+            let session = self
+                .sessions
+                .get(&args.session_id)
+                .ok_or_else(|| miette!("unknown terminal session"))?;
+            for path in &session.approved_roots.readable_roots {
+                process_policy.ensure_path_readable(path, "terminal session read root")?;
+            }
+            for path in &session.approved_roots.writable_roots {
+                process_policy.ensure_path_writable(path, "terminal session write root")?;
+            }
+        }
+        Ok(())
     }
 
     async fn execute_tool(
@@ -1038,6 +1033,7 @@ impl App for TerminalApp {
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
     ) -> Result<AppToolExecutionResult> {
+        self.before_tool_call(call, context)?;
         match call.name.as_str() {
             "terminal_exec" => {
                 let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
@@ -1063,31 +1059,18 @@ impl App for TerminalApp {
                     .workdir
                     .clone()
                     .or_else(|| Some(context.execution_cwd.display().to_string()));
-                let dashboard_tx = context.dashboard_tx.clone();
+                let process_policy = terminal_process_policy(context);
                 let result = self
                     .exec_command_with_progress(
                         TerminalExecCommandRequest {
                             command: args.command.clone(),
                             session_id: args.session_id.clone(),
                             workdir: effective_workdir,
-                            sandbox_policy: &context.sandbox_policy,
+                            sandbox_policy: &process_policy,
                             yield_time_ms: args.yield_time_ms,
                             max_chars: args.max_chars,
                         },
-                        move |session, delta| {
-                            if let Some(tx) = &dashboard_tx {
-                                tx.send_modify(|state| {
-                                    apply_activity_event(
-                                        state,
-                                        DashboardActivityEvent::ExecUpdate {
-                                            key: call.id.clone(),
-                                            meta: Some(terminal_session_meta(session)),
-                                            output_lines: compact_preserved_body_lines(delta, 10),
-                                        },
-                                    );
-                                });
-                            }
-                        },
+                        |_session, _delta| {},
                     )
                     .await?;
                 let running = result.session.status == "running";
@@ -1124,7 +1107,7 @@ impl App for TerminalApp {
                     &extra_lines,
                     context.tool_output_max_tokens,
                 );
-                Ok(AppToolExecutionResult::from_activity_event(
+                Ok(AppToolExecutionResult::new(
                     summary,
                     json!({
                         "session": result.session,
@@ -1138,19 +1121,6 @@ impl App for TerminalApp {
                         "max_chars": args.max_chars,
                     }),
                     Some(model_content),
-                    terminal_activity_event_from_terminal_data(TerminalActivityDescriptor {
-                        action: TerminalActivityAction::Execute,
-                        origin: None,
-                        title: summarize_terminal_inline_text(
-                            result.session.command.as_deref().unwrap_or(&args.command),
-                        ),
-                        body_lines: {
-                            let mut body = vec![terminal_session_meta(&result.session)];
-                            body.extend(terminal_output_metadata_lines(&result));
-                            body.extend(compact_preserved_body_lines(&result.output, 10));
-                            body
-                        },
-                    }),
                 ))
             }
             "terminal_write_stdin" => {
@@ -1172,7 +1142,6 @@ impl App for TerminalApp {
                 if command_mentions_protected_paths(context, &args.text) {
                     return Err(terminal_protection_error("stdin references protected path"));
                 }
-                let dashboard_tx = context.dashboard_tx.clone();
                 let result = self
                     .write_stdin_with_progress(
                         &args.session_id,
@@ -1180,32 +1149,13 @@ impl App for TerminalApp {
                         wait_mode,
                         args.yield_time_ms,
                         args.max_chars,
-                        move |session, delta| {
-                            if let Some(tx) = &dashboard_tx {
-                                tx.send_modify(|state| {
-                                    apply_activity_event(
-                                        state,
-                                        DashboardActivityEvent::ExecUpdate {
-                                            key: call.id.clone(),
-                                            meta: Some(terminal_session_meta(session)),
-                                            output_lines: compact_preserved_body_lines(delta, 10),
-                                        },
-                                    );
-                                });
-                            }
-                        },
+                        |_session, _delta| {},
                     )
                     .await?;
                 let mode = terminal_progress_mode(&args.text);
                 let wait_mode_label = terminal_wait_mode_label(wait_mode);
                 let running = result.session.status == "running";
-                let command_label = summarize_terminal_inline_text(
-                    result
-                        .session
-                        .command
-                        .as_deref()
-                        .unwrap_or(&args.session_id),
-                );
+
                 let summary = match (mode, running) {
                     ("poll", true) => {
                         format!(
@@ -1256,7 +1206,7 @@ impl App for TerminalApp {
                     &extra_lines,
                     context.tool_output_max_tokens,
                 );
-                Ok(AppToolExecutionResult::from_activity_event(
+                Ok(AppToolExecutionResult::new(
                     summary,
                     json!({
                         "session": result.session,
@@ -1272,67 +1222,48 @@ impl App for TerminalApp {
                         "max_chars": args.max_chars,
                     }),
                     Some(model_content),
-                    terminal_activity_event_from_terminal_data(TerminalActivityDescriptor {
-                        action: if running {
-                            if args.text.is_empty() {
-                                TerminalActivityAction::Poll
-                            } else {
-                                TerminalActivityAction::Continue
-                            }
-                        } else {
-                            TerminalActivityAction::Continue
-                        },
-                        origin: None,
-                        title: command_label,
-                        body_lines: {
-                            let mut body = vec![terminal_session_meta(&result.session)];
-                            body.extend(terminal_output_metadata_lines(&result));
-                            body.extend(compact_preserved_body_lines(&result.output, 10));
-                            body
-                        },
-                    }),
                 ))
             }
             "terminal_terminate" => {
                 let args: TerminalTerminateArgs = parse_terminal_tool_args(call)?;
                 let session = self.terminate_session(&args.session_id)?;
-                Ok(AppToolExecutionResult::from_activity_event(
+                Ok(AppToolExecutionResult::new(
                     format!("terminated {}", display_session_label(&session.session_id)),
                     json!({ "session": session }),
                     None,
-                    terminal_activity_event_from_terminal_data(TerminalActivityDescriptor {
-                        action: TerminalActivityAction::Terminate,
-                        origin: None,
-                        title: summarize_terminal_inline_text(
-                            session.command.as_deref().unwrap_or(&args.session_id),
-                        ),
-                        body_lines: vec![terminal_session_meta(&session)],
-                    }),
                 ))
             }
             _ => Err(miette!("unknown terminal tool `{}`", call.name)),
         }
     }
+}
 
-    async fn wait_until_settled(&self, silence_duration: Duration, timeout: Duration) -> bool {
-        let Some(session) = self
-            .sessions
-            .values()
-            .find(|session| session.state.has_unread_output)
-            .or_else(|| {
-                self.sessions
-                    .values()
-                    .find(|session| session.state.status == "running")
-            })
-            .or_else(|| self.sessions.values().next())
-        else {
-            return true;
-        };
-        match session.process.as_ref() {
-            Some(process) => process.wait_until_silent(silence_duration, timeout).await,
-            None => true,
+fn terminal_process_policy(context: &AppToolExecutionContext) -> RuntimeSandboxPolicy {
+    let mut policy = context.sandbox_policy.clone();
+    if let Some(caller) = &context.actor_call {
+        for root in &caller.private_roots {
+            policy.filesystem.deny_read_paths.push(root.clone());
+            policy.filesystem.deny_write_paths.push(root.clone());
         }
+        policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
     }
+    if let Some(scope) = policy.filesystem.private_delivery.take() {
+        policy.filesystem.deny_read_paths.push(scope.root.clone());
+        policy.filesystem.deny_write_paths.push(scope.root);
+    }
+    for key in [
+        "SSH_AUTH_SOCK",
+        "GPG_AGENT_INFO",
+        "AWS_SESSION_TOKEN",
+        "AZURE_ACCESS_TOKEN",
+    ] {
+        policy.protected_env_vars.push(key.into());
+    }
+    policy.filesystem.deny_read_paths.sort();
+    policy.filesystem.deny_read_paths.dedup();
+    policy.filesystem.deny_write_paths.sort();
+    policy.filesystem.deny_write_paths.dedup();
+    policy
 }
 
 fn refresh_terminal_session(session: &mut TerminalSession) {
@@ -1347,6 +1278,10 @@ fn refresh_terminal_session(session: &mut TerminalSession) {
                 session.state.exit_code = exit_status.code();
                 session.state.has_unread_output = true;
                 session.state.status = "exited".to_string();
+                session
+                    .state
+                    .finished_at_ms
+                    .get_or_insert_with(|| chrono::Utc::now().timestamp_millis());
                 process_running = false;
             }
             Ok(None) => {
@@ -1355,15 +1290,10 @@ fn refresh_terminal_session(session: &mut TerminalSession) {
             Err(_) => {}
         }
     }
-    let output_tail = session
-        .process
-        .as_ref()
-        .map(|process| process.output_tail(800))
-        .unwrap_or_default();
+
     if let Some(process) = session.process.as_ref() {
         apply_terminal_output_stats(&mut session.state, process.output_stats());
     }
-    session.state.last_output_preview = preview_from_output_tail(&output_tail);
     session.state.has_unread_output = session
         .process
         .as_ref()
@@ -1424,57 +1354,6 @@ async fn wait_for_trailing_terminal_output(session: &TerminalSession) {
         .await;
 }
 
-fn render_session_state_line(state: &TerminalSessionState) -> String {
-    format!(
-        "session={} status={} pid={} exit={} cwd={} unread={} output_total_bytes={} output_retained_bytes={} output_dropped_bytes={} output_buffer_capacity={} command={} preview={}",
-        state.session_id,
-        state.status,
-        state
-            .process_id
-            .map_or_else(|| "none".to_string(), |value| value.to_string()),
-        state
-            .exit_code
-            .map_or_else(|| "none".to_string(), |value| value.to_string()),
-        state.cwd.as_deref().unwrap_or("unknown"),
-        state.has_unread_output,
-        state.output_total_written_bytes,
-        state.output_retained_bytes,
-        state.output_dropped_bytes,
-        state.output_buffer_capacity,
-        state.command.as_deref().unwrap_or("<none>"),
-        state.last_output_preview
-    )
-}
-
-fn preview_from_output_tail(screen: &str) -> String {
-    let bytes = screen.as_bytes();
-    let mut end = bytes.len();
-    loop {
-        while end > 0 && (bytes[end - 1] == b'\n' || bytes[end - 1] == b'\r') {
-            end -= 1;
-        }
-        if end == 0 {
-            return String::new();
-        }
-        let mut start = end;
-        while start > 0 && bytes[start - 1] != b'\n' && bytes[start - 1] != b'\r' {
-            start -= 1;
-        }
-        let line = screen.get(start..end).unwrap_or_default().trim();
-        if !line.is_empty() {
-            return line
-                .chars()
-                .rev()
-                .take(120)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-        }
-        end = start;
-    }
-}
-
 fn truncate_terminal_output(content: String, max_chars: Option<usize>) -> String {
     truncate_terminal_output_tail(content, max_chars, "terminal output shortened by max_chars")
 }
@@ -1517,6 +1396,20 @@ fn truncate_terminal_output_tail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_sessions_prevent_passivation_and_reconstruction_never_reuses_ids() {
+        let mut app = TerminalApp::new();
+        assert!(app.can_passivate());
+        let old = app.create_session();
+        assert!(!app.can_passivate());
+        app.terminate_session(&old).unwrap();
+        assert!(app.can_passivate());
+        let mut rebuilt = TerminalApp::new();
+        let fresh = rebuilt.create_session();
+        assert_ne!(old, fresh);
+        assert!(rebuilt.session_state(&old).is_err());
+    }
     use std::{
         env,
         time::{Duration, Instant},
@@ -1562,6 +1455,8 @@ mod tests {
                 readable_roots: Vec::new(),
                 writable_roots: Vec::new(),
                 deny_read_paths: Vec::new(),
+                private_delivery: None,
+                bound_roots: Vec::new(),
                 deny_write_paths: Vec::new(),
             },
             protected_env_vars: Vec::new(),
@@ -2336,10 +2231,9 @@ mod tests {
         let context = AppToolExecutionContext {
             execution_cwd: std::path::PathBuf::from("/tmp"),
             sandbox_policy: policy,
-            dashboard_tx: None,
             tool_output_max_tokens: 0,
             turn_epoch: 0,
-            scope_lsp_enabled: false,
+            actor_call: None,
         };
         assert!(command_mentions_protected_paths(
             &context,
@@ -2365,5 +2259,81 @@ mod tests {
             &context,
             "echo --note=protected-root is just text"
         ));
+    }
+}
+#[test]
+fn session_extra_roots_are_requested_again_before_stdin() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let root = outside.path().canonicalize().unwrap();
+    let mut app = TerminalApp::new();
+    let session_id = app.create_session();
+    app.sessions.get_mut(&session_id).unwrap().approved_roots = ToolPermissionRequest {
+        operation_details: serde_json::Value::Null,
+        readable_roots: vec![root.clone()],
+        writable_roots: vec![root.clone()],
+    };
+    let mut policy = RuntimeSandboxPolicy::disabled();
+    policy.filesystem.full_disk_read = false;
+    policy.filesystem.full_disk_write = false;
+    policy.filesystem.readable_roots = vec![dir.path().into()];
+    let base = AppToolExecutionContext {
+        execution_cwd: dir.path().into(),
+        sandbox_policy: policy,
+        tool_output_max_tokens: 1000,
+        turn_epoch: 1,
+        actor_call: None,
+    };
+    let call = AgentToolCall {
+        id: "call".into(),
+        name: "terminal_write_stdin".into(),
+        arguments: json!({"session_id": session_id, "text":"", "wait_mode":null, "yield_time_ms":null, "max_chars":null}),
+    };
+    let request = app.permission_request(&call, &base).unwrap();
+    assert_eq!(
+        request.readable_roots.as_slice(),
+        std::slice::from_ref(&root)
+    );
+    assert_eq!(
+        request.writable_roots.as_slice(),
+        std::slice::from_ref(&root)
+    );
+    assert!(app.before_tool_call(&call, &base).is_err());
+    let mut effective = base.clone();
+    effective
+        .sandbox_policy
+        .filesystem
+        .readable_roots
+        .push(root.clone());
+    effective
+        .sandbox_policy
+        .filesystem
+        .writable_roots
+        .push(crate::sandbox::WritableRoot {
+            root,
+            read_only_subpaths: vec![],
+        });
+    app.before_tool_call(&call, &effective).unwrap();
+    assert!(
+        app.permission_request(&call, &effective)
+            .unwrap()
+            .readable_roots
+            .is_empty()
+    );
+}
+
+#[test]
+fn terminal_extra_roots_schema_is_required_nullable_and_portable() {
+    let schema = model_schema_for::<TerminalExecArgs>();
+    crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
+    for name in ["additional_read_roots", "additional_write_roots"] {
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item == name)
+        );
+        assert_eq!(schema["properties"][name]["type"], json!(["array", "null"]));
     }
 }

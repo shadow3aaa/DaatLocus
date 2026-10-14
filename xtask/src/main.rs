@@ -1,1258 +1,628 @@
-use std::{
-    error::Error,
-    fmt::Write as _,
-    fs,
-    io::{self, BufWriter, IsTerminal, Write},
-    path::{Component, Path, PathBuf},
-    process::{Command, ExitCode},
-};
+//! Distribution builds ship the desktop client and independent embedded-WebUI service.
+mod android;
+mod reporting;
 
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use reporting::{packaged, status};
 use serde::Deserialize;
-
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const DEFAULT_BINARY_PACKAGE_DIR_NAME: &str = "package";
-const WINDOWS_MSI_TARGET: &str = "x86_64-pc-windows-msvc";
-const LAUNCHER_PACKAGE_NAME: &str = "daat-locus-launcher";
-const WINDOWS_MSI_UTIL_EXTENSION: &str = "WixToolset.Util.wixext";
-const WINDOWS_BOOTSTRAPPER_EXTENSION: &str = "WixToolset.BootstrapperApplications.wixext";
-const WINDOWS_MSI_ICON_SIZES: &[u32] = &[16, 24, 32, 48, 64, 128, 256];
-const WINDOWS_BOOTSTRAPPER_LOGO_SIZE: u32 = 128;
-const MACOS_APP_BUNDLE_NAME: &str = "Daat Locus.app";
-const MACOS_BUNDLE_IDENTIFIER: &str = "io.daat-locus.app";
-const MACOS_ICON_FILE_STEM: &str = "AppIcon";
-const MACOS_PKG_IDENTIFIER: &str = "io.daat-locus.pkg";
-const MACOS_CLI_WRAPPER_NAME: &str = "daat-locus";
-const MACOS_INSTALLED_CLI_TARGET: &str = "/Applications/Daat Locus.app/Contents/MacOS/daat-locus";
-const MACOS_ICONSET: &[(u32, &str)] = &[
-    (16, "icon_16x16.png"),
-    (32, "icon_16x16@2x.png"),
-    (32, "icon_32x32.png"),
-    (64, "icon_32x32@2x.png"),
-    (128, "icon_128x128.png"),
-    (256, "icon_128x128@2x.png"),
-    (256, "icon_256x256.png"),
-    (512, "icon_256x256@2x.png"),
-    (512, "icon_512x512.png"),
-    (1024, "icon_512x512@2x.png"),
-];
-
-fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("error: {err}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-fn run() -> Result<()> {
-    let cli = Cli::parse();
-    match cli.command {
-        Some(XtaskCommand::Package(args)) => match args.command {
-            PackageSubcommand::Binary(args) => package_release_binary(args)?,
-            PackageSubcommand::Macos(args) => package_macos_installer(&args)?,
-            PackageSubcommand::Windows(args) => package_windows_msi(&args)?,
-        },
-        None => {
-            let mut command = Cli::command();
-            command.print_help()?;
-            println!();
-        }
-    }
-    Ok(())
-}
-
-#[derive(Debug, Parser)]
-#[command(name = "xtask", about = "Project automation commands.")]
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+const UI_MARKER: &[u8] = b"DaatLocus.EmbeddedWebUI.v1";
+#[derive(Parser)]
+#[command(name = "xtask", about = "Build and package Daat Locus.")]
 struct Cli {
     #[command(subcommand)]
-    command: Option<XtaskCommand>,
+    command: Task,
 }
-
-#[derive(Debug, Subcommand)]
-enum XtaskCommand {
-    /// Build project package artifacts.
-    Package(PackageArgs),
+#[derive(Subcommand)]
+enum Task {
+    Package {
+        #[command(subcommand)]
+        format: Format,
+    },
 }
-
-#[derive(Debug, Args)]
-struct PackageArgs {
-    #[command(subcommand)]
-    command: PackageSubcommand,
+#[derive(Subcommand)]
+enum Format {
+    Binary(Package),
+    Windows(Package),
+    Macos(Package),
+    /// Build an Android APK with the embedded backend and WebUI.
+    Android(android::Package),
 }
-
-#[derive(Debug, Subcommand)]
-enum PackageSubcommand {
-    /// Package an already-built release binary for cargo-binstall.
-    Binary(PackageReleaseArgs),
-
-    /// Build the macOS app bundle and installer package.
-    #[command(name = "macos")]
-    Macos(PackageMacosInstallerArgs),
-
-    /// Build the Windows x64 MSI and bootstrapper installers.
-    Windows(PackageWindowsMsiArgs),
-}
-
-#[derive(Debug, Args)]
-struct PackageMacosInstallerArgs {
-    #[arg(long, value_name = "TARGET")]
+#[derive(Args)]
+struct Package {
+    #[arg(long)]
     target: Option<String>,
-
-    #[arg(long, hide = true)]
-    skip_build: bool,
-
-    #[arg(long, hide = true)]
-    keep_work_dir: bool,
-}
-
-#[derive(Debug, Args)]
-struct PackageWindowsMsiArgs {
-    #[arg(long, hide = true)]
-    skip_build: bool,
-
-    #[arg(long, hide = true)]
-    keep_work_dir: bool,
-}
-
-#[derive(Debug, Args)]
-struct PackageReleaseArgs {
-    #[arg(long, value_name = "TARGET")]
-    target: Option<String>,
-
-    #[arg(long, value_name = "PATH")]
+    #[arg(long)]
     release_dir: Option<PathBuf>,
-
-    #[arg(
-        long,
-        value_name = "PATH",
-        help = "Output directory (defaults to target/<target>/release/package)"
-    )]
+    #[arg(long)]
     out_dir: Option<PathBuf>,
+    #[arg(long)]
+    skip_build: bool,
 }
-
-#[derive(Debug, Deserialize)]
-struct RootManifest {
-    package: RootPackage,
+#[derive(Deserialize)]
+struct Manifest {
+    package: Metadata,
 }
-
-#[derive(Debug, Deserialize)]
-struct RootPackage {
+#[derive(Deserialize)]
+struct Metadata {
     name: String,
     version: String,
-    description: Option<String>,
-    license: Option<String>,
-    #[serde(default)]
     authors: Vec<String>,
-    repository: Option<String>,
 }
-
-struct MacosPackageContext {
+struct Context {
+    root: PathBuf,
+    meta: Metadata,
     target: String,
-    repo: PathBuf,
-    package: RootPackage,
-    paths: MacosInstallerPaths,
-    main_binary_name: String,
-    launcher_binary_name: String,
+    release: PathBuf,
+    output: PathBuf,
 }
-
-struct WindowsPackageContext {
-    repo: PathBuf,
-    package: RootPackage,
-    paths: WindowsMsiPaths,
-    binary_name: String,
-}
-
-struct MacosInstallerPaths {
-    work_dir: PathBuf,
-    output_dir: PathBuf,
-    app_dir: PathBuf,
-    macos_dir: PathBuf,
-    resources_dir: PathBuf,
-    pkg_root_dir: PathBuf,
-    pkg_app_dir: PathBuf,
-    pkg_cli_dir: PathBuf,
-    binary_path: PathBuf,
-    launcher_binary_path: PathBuf,
-    info_plist_path: PathBuf,
-    iconset_dir: PathBuf,
-    icon_path: PathBuf,
-    component_pkg_path: PathBuf,
-    distribution_path: PathBuf,
-    pkg_path: PathBuf,
-}
-
-struct WindowsMsiPaths {
-    work_dir: PathBuf,
-    output_dir: PathBuf,
-    binary_path: PathBuf,
-    launcher_binary_path: PathBuf,
-    icon_path: PathBuf,
-    bootstrapper_logo_path: PathBuf,
-    license_rtf_path: PathBuf,
-    generated_wxs_path: PathBuf,
-    generated_bundle_wxs_path: PathBuf,
-    msi_path: PathBuf,
-    bootstrapper_path: PathBuf,
-}
-
-struct MacosInfoPlistData {
-    product_name: String,
-    executable_name: String,
-    icon_file: String,
-    bundle_identifier: String,
-    version: String,
-}
-
-struct WindowsMsiTemplateData {
-    product_name: String,
-    package_name: String,
-    version: String,
-    manufacturer: String,
-    description: String,
-    license: String,
-    repository: String,
-    binary_name: String,
-    binary_path: String,
-    launcher_binary_path: String,
-    msi_path: String,
-    icon_path: String,
-    bootstrapper_logo_path: String,
-    license_rtf_path: String,
-    upgrade_code: String,
-    bundle_upgrade_code: String,
-    app_component_guid: String,
-    launcher_component_guid: String,
-    path_component_guid: String,
-    shortcut_component_guid: String,
-}
-
-fn package_release_binary(args: PackageReleaseArgs) -> Result<()> {
-    let target = match args.target {
-        Some(target) => target,
-        None => rustc_host_target()?,
-    };
-    ensure_safe_relative_path("target triple", Path::new(&target))?;
-    let manifest = read_root_manifest()?;
-    let repo = repo_root();
-    let release_dir = args
-        .release_dir
-        .unwrap_or_else(|| repo.join("target").join(&target).join("release"));
-    let binary_name = binary_name(&manifest.package.name);
-    let binary_path = release_dir.join(&binary_name);
-    if !binary_path.is_file() {
-        return Err(format!(
-            "release binary missing at {}; build it first with `cargo build --release --target {}`",
-            binary_path.display(),
-            target
-        )
-        .into());
-    }
-
-    let package_dir_name = format!(
-        "{}-{}-{}",
-        manifest.package.name, manifest.package.version, target
-    );
-    let stage_root = repo.join("target").join("xtask").join("package-release");
-    if stage_root.exists() {
-        fs::remove_dir_all(&stage_root)?;
-    }
-    let package_dir = stage_root.join(&package_dir_name);
-    fs::create_dir_all(&package_dir)?;
-    fs::copy(&binary_path, package_dir.join(&binary_name))?;
-
-    let out_dir = match &args.out_dir {
-        Some(out_dir) if out_dir.is_absolute() => out_dir.clone(),
-        Some(out_dir) => repo.join(out_dir),
-        None => release_dir.join(DEFAULT_BINARY_PACKAGE_DIR_NAME),
-    };
-    fs::create_dir_all(&out_dir)?;
-    let archive_path = out_dir.join(format!(
-        "{}-{}-{}.tar.zst",
-        manifest.package.name, manifest.package.version, target
-    ));
-    if archive_path.exists() {
-        fs::remove_file(&archive_path)?;
-    }
-    archive_tar_zst(&stage_root, &archive_path)?;
-
-    let archive_entry = format!("{package_dir_name}/{binary_name}");
-    if !tar_zst_contains_entry(&archive_path, &archive_entry)? {
-        return Err(format!(
-            "release archive {} does not contain required entry `{archive_entry}`",
-            archive_path.display()
-        )
-        .into());
-    }
-
-    print_packaged_artifact(&format!("release binary for {target}"), &archive_path);
-    Ok(())
-}
-fn build_release_binaries(package_name: &str, target: &str, label: &str) -> Result<()> {
-    run_command(
-        Command::new("cargo")
-            .arg("build")
-            .arg("-p")
-            .arg(package_name)
-            .arg("-p")
-            .arg(LAUNCHER_PACKAGE_NAME)
-            .arg("--release")
-            .arg("--locked")
-            .arg("--target")
-            .arg(target),
-        label,
-    )
-}
-
-fn ensure_file_exists(path: &Path, message: &str) -> Result<()> {
-    if path.is_file() {
-        Ok(())
-    } else {
-        Err(format!("{message}: {}", path.display()).into())
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("error: {error}");
+        std::process::exit(1);
     }
 }
-
-fn remove_if_exists(path: &Path) -> Result<()> {
-    if path.exists() {
-        if path.is_dir() {
-            fs::remove_dir_all(path)?;
-        } else {
-            fs::remove_file(path)?;
-        }
-    }
-    Ok(())
-}
-
-fn package_macos_context(args: &PackageMacosInstallerArgs) -> Result<MacosPackageContext> {
-    let target = args.target.clone().map_or_else(rustc_host_target, Ok)?;
-    ensure_safe_relative_path("target triple", Path::new(&target))?;
-    let manifest = read_root_manifest()?;
-    let repo = repo_root();
-    let main_binary_name = binary_name(&manifest.package.name);
-    let launcher_binary_name = binary_name(LAUNCHER_PACKAGE_NAME);
-    let paths = macos_installer_paths(
-        &repo,
-        &manifest.package,
-        &target,
-        &main_binary_name,
-        &launcher_binary_name,
-    );
-    Ok(MacosPackageContext {
-        target,
-        repo,
-        package: manifest.package,
-        paths,
-        main_binary_name,
-        launcher_binary_name,
-    })
-}
-
-fn prepare_macos_bundle(context: &MacosPackageContext, keep_work_dir: bool) -> Result<()> {
-    let paths = &context.paths;
-    if !keep_work_dir {
-        remove_if_exists(&paths.work_dir)?;
-    }
-    for path in [
-        &paths.app_dir,
-        &paths.pkg_root_dir,
-        &paths.component_pkg_path,
-        &paths.pkg_path,
-    ] {
-        remove_if_exists(path)?;
-    }
-    fs::create_dir_all(&paths.output_dir)?;
-    fs::create_dir_all(&paths.macos_dir)?;
-    fs::create_dir_all(&paths.resources_dir)?;
-    fs::copy(
-        &paths.binary_path,
-        paths.macos_dir.join(&context.main_binary_name),
-    )?;
-    fs::copy(
-        &paths.launcher_binary_path,
-        paths.macos_dir.join(&context.launcher_binary_name),
-    )?;
-    render_macos_info_plist(
-        &context
-            .repo
-            .join("packaging")
-            .join("macos")
-            .join("Info.plist"),
-        &paths.info_plist_path,
-        &MacosInfoPlistData {
-            product_name: product_name(&context.package.name),
-            executable_name: context.launcher_binary_name.clone(),
-            icon_file: MACOS_ICON_FILE_STEM.to_string(),
-            bundle_identifier: MACOS_BUNDLE_IDENTIFIER.to_string(),
-            version: context.package.version.clone(),
-        },
-    )?;
-    render_macos_icns(
-        &context.repo.join("assets").join("logo.svg"),
-        &paths.iconset_dir,
-        &paths.icon_path,
-    )?;
-    Ok(())
-}
-
-fn build_macos_installer(context: &MacosPackageContext) -> Result<()> {
-    let paths = &context.paths;
-    fs::create_dir_all(
-        paths
-            .pkg_app_dir
-            .parent()
-            .ok_or("macOS package app path has no parent")?,
-    )?;
-    fs::create_dir_all(&paths.pkg_cli_dir)?;
-    copy_dir_recursive(&paths.app_dir, &paths.pkg_app_dir)?;
-    write_macos_cli_wrapper(&paths.pkg_cli_dir.join(MACOS_CLI_WRAPPER_NAME))?;
-    create_macos_pkg(
-        paths,
-        &product_name(&context.package.name),
-        &context.package.version,
-    )
-}
-
-fn package_macos_installer(args: &PackageMacosInstallerArgs) -> Result<()> {
-    if !cfg!(target_os = "macos") {
-        return Err("macOS installer packaging requires macOS".into());
-    }
-    let context = package_macos_context(args)?;
-    if !args.skip_build {
-        build_release_binaries(
-            &context.package.name,
-            &context.target,
-            "build macOS release binaries",
-        )?;
-    }
-    ensure_file_exists(
-        &context.paths.binary_path,
-        "release binary missing; run `cargo xtask package macos` without --skip-build to build it",
-    )?;
-    ensure_file_exists(
-        &context.paths.launcher_binary_path,
-        "launcher binary missing; run `cargo xtask package macos` without --skip-build to build it",
-    )?;
-    prepare_macos_bundle(&context, args.keep_work_dir)?;
-    build_macos_installer(&context)?;
-    ensure_file_exists(
-        &context.paths.pkg_path,
-        "productbuild did not create expected PKG",
-    )?;
-    print_packaged_artifact("macOS app bundle", &context.paths.app_dir);
-    print_packaged_artifact("macOS installer", &context.paths.pkg_path);
-    Ok(())
-}
-
-fn package_windows_msi(args: &PackageWindowsMsiArgs) -> Result<()> {
-    if !cfg!(windows) {
-        return Err("Windows installer packaging requires Windows".into());
-    }
-    let manifest = read_root_manifest()?;
-    let repo = repo_root();
-    let binary_name = binary_name(&manifest.package.name);
-    let paths = windows_msi_paths(&repo, &manifest.package, &binary_name)?;
-    let context = WindowsPackageContext {
-        repo,
-        package: manifest.package,
-        paths,
-        binary_name,
-    };
-    if !args.skip_build {
-        build_release_binaries(
-            &context.package.name,
-            WINDOWS_MSI_TARGET,
-            "build Windows release binaries",
-        )?;
-    }
-    ensure_file_exists(
-        &context.paths.binary_path,
-        "release binary missing; run `cargo xtask package windows` without --skip-build to build it",
-    )?;
-    ensure_file_exists(
-        &context.paths.launcher_binary_path,
-        "launcher binary missing; run `cargo xtask package windows` without --skip-build to build it",
-    )?;
-    if !args.keep_work_dir {
-        remove_if_exists(&context.paths.work_dir)?;
-    }
-    fs::create_dir_all(&context.paths.work_dir)?;
-    fs::create_dir_all(&context.paths.output_dir)?;
-    build_windows_msi_artifacts(&context)?;
-    print_packaged_artifact("Windows MSI", &context.paths.msi_path);
-    print_packaged_artifact("Windows bootstrapper", &context.paths.bootstrapper_path);
-    Ok(())
-}
-
-fn build_windows_msi_artifacts(context: &WindowsPackageContext) -> Result<()> {
-    let paths = &context.paths;
-    render_svg_icon_to_ico(
-        &context.repo.join("assets").join("logo.svg"),
-        &paths.icon_path,
-    )?;
-    render_svg_to_png(
-        &context.repo.join("assets").join("logo.svg"),
-        &paths.bootstrapper_logo_path,
-        WINDOWS_BOOTSTRAPPER_LOGO_SIZE,
-        WINDOWS_BOOTSTRAPPER_LOGO_SIZE,
-    )?;
-    render_text_file_to_rtf(&context.repo.join("LICENSE"), &paths.license_rtf_path)?;
-    let template_data = windows_msi_template_data(&context.package, paths, &context.binary_name)?;
-    build_windows_msi(paths, &context.repo, &template_data)?;
-    build_windows_bootstrapper(paths, &context.repo, &template_data)
-}
-
-fn build_windows_msi(
-    paths: &WindowsMsiPaths,
-    repo: &Path,
-    template_data: &WindowsMsiTemplateData,
-) -> Result<()> {
-    render_windows_msi_template(
-        &repo
-            .join("packaging")
-            .join("windows")
-            .join("daat-locus.wxs"),
-        &paths.generated_wxs_path,
-        template_data,
-    )?;
-    remove_if_exists(&paths.msi_path)?;
-    run_command(
-        Command::new("wix")
-            .arg("build")
-            .arg(&paths.generated_wxs_path)
-            .arg("-ext")
-            .arg(WINDOWS_MSI_UTIL_EXTENSION)
-            .arg("-o")
-            .arg(&paths.msi_path),
-        "build Windows MSI",
-    )?;
-    ensure_file_exists(&paths.msi_path, "WiX did not create expected MSI")
-}
-
-fn build_windows_bootstrapper(
-    paths: &WindowsMsiPaths,
-    repo: &Path,
-    template_data: &WindowsMsiTemplateData,
-) -> Result<()> {
-    render_windows_msi_template(
-        &repo
-            .join("packaging")
-            .join("windows")
-            .join("daat-locus-bootstrapper.wxs"),
-        &paths.generated_bundle_wxs_path,
-        template_data,
-    )?;
-    remove_if_exists(&paths.bootstrapper_path)?;
-    run_command(
-        Command::new("wix")
-            .arg("build")
-            .arg(&paths.generated_bundle_wxs_path)
-            .arg("-ext")
-            .arg(WINDOWS_BOOTSTRAPPER_EXTENSION)
-            .arg("-o")
-            .arg(&paths.bootstrapper_path),
-        "build Windows bootstrapper",
-    )?;
-    ensure_file_exists(
-        &paths.bootstrapper_path,
-        "WiX did not create expected bootstrapper",
-    )
-}
-
-fn print_packaged_artifact(label: &str, path: &Path) {
-    let url = file_url(path);
-    let link = terminal_hyperlink(&url, &url);
-    println!("{} {label} at {link}", cargo_status("Packaged"));
-}
-
-fn cargo_status(status: &str) -> String {
-    if io::stdout().is_terminal() {
-        format!("\x1b[1m\x1b[92m{status:>12}\x1b[0m")
-    } else {
-        format!("{status:>12}")
-    }
-}
-
-fn terminal_hyperlink(url: &str, text: &str) -> String {
-    if io::stdout().is_terminal() {
-        format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
-    } else {
-        text.to_string()
-    }
-}
-
-fn file_url(path: &Path) -> String {
-    let absolute = path.canonicalize().unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            repo_root().join(path)
-        }
-    });
-    let mut path_text = absolute.display().to_string();
-    if let Some(stripped) = path_text.strip_prefix(r"\\?\UNC\") {
-        path_text = format!(r"\\{stripped}");
-    } else if let Some(stripped) = path_text.strip_prefix(r"\\?\") {
-        path_text = stripped.to_string();
-    }
-
-    let normalized = path_text.replace('\\', "/");
-    normalized.strip_prefix("//").map_or_else(
-        || {
-            if normalized.starts_with('/') {
-                format!("file://{}", percent_encode_file_url_path(&normalized))
-            } else {
-                format!("file:///{}", percent_encode_file_url_path(&normalized))
-            }
-        },
-        |unc_path| format!("file://{}", percent_encode_file_url_path(unc_path)),
-    )
-}
-
-fn percent_encode_file_url_path(path: &str) -> String {
-    let mut encoded = String::with_capacity(path.len());
-    for byte in path.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
-                encoded.push(byte as char);
-            }
-            _ => {
-                write!(encoded, "%{byte:02X}").expect("writing to String cannot fail");
-            }
-        }
-    }
-    encoded
-}
-
-fn macos_installer_paths(
-    repo: &Path,
-    package: &RootPackage,
-    target: &str,
-    main_binary_name: &str,
-    launcher_binary_name: &str,
-) -> MacosInstallerPaths {
-    let release_dir = repo.join("target").join(target).join("release");
-    let output_dir = release_dir.join("macos");
-    let work_dir = release_dir.join("macos-work");
-    let app_dir = output_dir.join(MACOS_APP_BUNDLE_NAME);
-    let contents_dir = app_dir.join("Contents");
-    let macos_dir = contents_dir.join("MacOS");
-    let resources_dir = contents_dir.join("Resources");
-    let pkg_root_dir = work_dir.join("pkg-root");
-    let pkg_app_dir = pkg_root_dir
-        .join("Applications")
-        .join(MACOS_APP_BUNDLE_NAME);
-    let pkg_cli_dir = pkg_root_dir.join("usr").join("local").join("bin");
-    let iconset_dir = work_dir.join(format!("{MACOS_ICON_FILE_STEM}.iconset"));
-    let component_pkg_path = work_dir.join(format!("{}-component.pkg", package.name));
-    let distribution_path = work_dir.join(format!("{}-distribution.xml", package.name));
-    let pkg_path = output_dir.join(format!(
-        "{}-{}-{}.pkg",
-        package.name, package.version, target
-    ));
-
-    MacosInstallerPaths {
-        binary_path: release_dir.join(main_binary_name),
-        launcher_binary_path: release_dir.join(launcher_binary_name),
-        info_plist_path: contents_dir.join("Info.plist"),
-        icon_path: resources_dir.join(format!("{MACOS_ICON_FILE_STEM}.icns")),
-        work_dir,
-        output_dir,
-        app_dir,
-        macos_dir,
-        resources_dir,
-        pkg_root_dir,
-        pkg_app_dir,
-        pkg_cli_dir,
-        iconset_dir,
-        component_pkg_path,
-        distribution_path,
-        pkg_path,
-    }
-}
-
-fn render_macos_info_plist(
-    template_path: &Path,
-    output_path: &Path,
-    data: &MacosInfoPlistData,
-) -> Result<()> {
-    let mut text = fs::read_to_string(template_path)?;
-    let replacements = [
-        ("{{product_name}}", data.product_name.as_str()),
-        ("{{executable_name}}", data.executable_name.as_str()),
-        ("{{icon_file}}", data.icon_file.as_str()),
-        ("{{bundle_identifier}}", data.bundle_identifier.as_str()),
-        ("{{version}}", data.version.as_str()),
-    ];
-    for (placeholder, value) in replacements {
-        text = text.replace(placeholder, &escape_xml(value));
-    }
-    fs::write(output_path, text)?;
-    Ok(())
-}
-
-fn render_macos_icns(svg_path: &Path, iconset_dir: &Path, icns_path: &Path) -> Result<()> {
-    if iconset_dir.exists() {
-        fs::remove_dir_all(iconset_dir)?;
-    }
-    fs::create_dir_all(iconset_dir)?;
-    for &(size, name) in MACOS_ICONSET {
-        render_svg_to_png(svg_path, &iconset_dir.join(name), size, size)?;
-    }
-    run_command(
-        Command::new("iconutil")
-            .arg("-c")
-            .arg("icns")
-            .arg(iconset_dir)
-            .arg("-o")
-            .arg(icns_path),
-        "build macOS icns",
-    )?;
-    Ok(())
-}
-
-fn write_macos_cli_wrapper(path: &Path) -> Result<()> {
-    fs::write(path, macos_cli_wrapper_text(MACOS_INSTALLED_CLI_TARGET))?;
-    run_command(
-        Command::new("chmod").arg("755").arg(path),
-        "mark macOS CLI wrapper executable",
-    )?;
-    Ok(())
-}
-
-fn macos_cli_wrapper_text(target: &str) -> String {
-    format!("#!/bin/sh\nexec {} \"$@\"\n", shell_single_quote(target))
-}
-
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)?;
-    let mut entries = fs::read_dir(source)?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .collect::<Vec<_>>();
-    entries.sort();
-    for entry in entries {
-        let destination_entry = destination.join(
-            entry
-                .file_name()
-                .ok_or("directory entry has no file name")?,
-        );
-        if entry.is_dir() {
-            copy_dir_recursive(&entry, &destination_entry)?;
-        } else {
-            fs::copy(&entry, &destination_entry)?;
-        }
-    }
-    Ok(())
-}
-
-fn create_macos_pkg(paths: &MacosInstallerPaths, product_name: &str, version: &str) -> Result<()> {
-    run_command(
-        Command::new("pkgbuild")
-            .arg("--root")
-            .arg(&paths.pkg_root_dir)
-            .arg("--identifier")
-            .arg(MACOS_PKG_IDENTIFIER)
-            .arg("--version")
-            .arg(version)
-            .arg("--install-location")
-            .arg("/")
-            .arg("--ownership")
-            .arg("recommended")
-            .arg(&paths.component_pkg_path),
-        "build macOS component package",
-    )?;
-    write_macos_distribution(
-        &paths.distribution_path,
-        product_name,
-        version,
-        paths
-            .component_pkg_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or("macOS component package path has no file name")?,
-    )?;
-    run_command(
-        Command::new("productbuild")
-            .arg("--distribution")
-            .arg(&paths.distribution_path)
-            .arg("--package-path")
-            .arg(&paths.work_dir)
-            .arg(&paths.pkg_path),
-        "build macOS installer package",
-    )?;
-    Ok(())
-}
-
-fn write_macos_distribution(
-    path: &Path,
-    product_name: &str,
-    version: &str,
-    component_pkg_name: &str,
-) -> Result<()> {
-    fs::write(
-        path,
-        macos_distribution_xml(product_name, version, component_pkg_name),
-    )?;
-    Ok(())
-}
-
-fn macos_distribution_xml(product_name: &str, version: &str, component_pkg_name: &str) -> String {
-    format!(
-        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<installer-gui-script minSpecVersion=\"1\">\n  <title>{}</title>\n  <options customize=\"never\" require-scripts=\"false\"/>\n  <domains enable_anywhere=\"false\" enable_currentUserHome=\"false\" enable_localSystem=\"true\"/>\n  <choices-outline>\n    <line choice=\"default\"/>\n  </choices-outline>\n  <choice id=\"default\" title=\"{}\">\n    <pkg-ref id=\"{}\"/>\n  </choice>\n  <pkg-ref id=\"{}\" version=\"{}\" auth=\"Root\">{}</pkg-ref>\n</installer-gui-script>\n",
-        escape_xml(product_name),
-        escape_xml(product_name),
-        MACOS_PKG_IDENTIFIER,
-        MACOS_PKG_IDENTIFIER,
-        escape_xml(version),
-        escape_xml(component_pkg_name),
-    )
-}
-
-fn windows_msi_paths(
-    repo: &Path,
-    package: &RootPackage,
-    main_binary_name: &str,
-) -> Result<WindowsMsiPaths> {
-    ensure_safe_relative_path("target triple", Path::new(WINDOWS_MSI_TARGET))?;
-    let release_dir = repo.join("target").join(WINDOWS_MSI_TARGET).join("release");
-    let work_dir = release_dir.join("msi-work");
-    let output_dir = release_dir.join("msi");
-    let msi_path = output_dir.join(format!(
-        "{}-{}-{}.msi",
-        package.name, package.version, WINDOWS_MSI_TARGET
-    ));
-    let bootstrapper_path = output_dir.join(format!(
-        "{}-{}-{}-setup.exe",
-        package.name, package.version, WINDOWS_MSI_TARGET
-    ));
-
-    Ok(WindowsMsiPaths {
-        binary_path: release_dir.join(main_binary_name),
-        launcher_binary_path: release_dir.join(binary_name(LAUNCHER_PACKAGE_NAME)),
-        icon_path: work_dir.join(format!("{}.ico", package.name)),
-        bootstrapper_logo_path: work_dir.join(format!("{}-bootstrapper-logo.png", package.name)),
-        license_rtf_path: work_dir.join(format!("{}-license.rtf", package.name)),
-        generated_wxs_path: work_dir.join(format!("{}.wxs", package.name)),
-        generated_bundle_wxs_path: work_dir.join(format!("{}-bootstrapper.wxs", package.name)),
-        work_dir,
-        output_dir,
-        msi_path,
-        bootstrapper_path,
-    })
-}
-
-fn windows_msi_template_data(
-    package: &RootPackage,
-    paths: &WindowsMsiPaths,
-    binary_name: &str,
-) -> Result<WindowsMsiTemplateData> {
-    Ok(WindowsMsiTemplateData {
-        product_name: product_name(&package.name),
-        package_name: package.name.clone(),
-        version: msi_version(&package.version)?,
-        manufacturer: package_manufacturer(package),
-        description: package.description.clone().unwrap_or_default(),
-        license: package.license.clone().unwrap_or_default(),
-        repository: package.repository.clone().unwrap_or_default(),
-        binary_name: binary_name.to_string(),
-        binary_path: wix_path(&paths.binary_path),
-        launcher_binary_path: wix_path(&paths.launcher_binary_path),
-        msi_path: wix_path(&paths.msi_path),
-        icon_path: wix_path(&paths.icon_path),
-        bootstrapper_logo_path: wix_path(&paths.bootstrapper_logo_path),
-        license_rtf_path: wix_path(&paths.license_rtf_path),
-        upgrade_code: "ce78b6f8-ed5d-4ea4-823e-25ef51910924".to_string(),
-        bundle_upgrade_code: "dc1d21bb-0a31-4c37-a8b4-045875b1e202".to_string(),
-        app_component_guid: "1c3dbd45-2997-4aa7-8906-d7bf8e169cba".to_string(),
-        launcher_component_guid: "89344c45-7d12-409b-b44e-eeb10ad70212".to_string(),
-        path_component_guid: "7dff73dd-d542-4793-afb5-f93d1e2d921f".to_string(),
-        shortcut_component_guid: "3da8345e-d097-4875-a50a-2f5132209088".to_string(),
-    })
-}
-
-fn run_command(command: &mut Command, label: &str) -> Result<()> {
+fn command(command: &mut Command) -> Result<()> {
     let status = command.status()?;
     if !status.success() {
-        return Err(format!("{label} failed with status {status}").into());
+        return Err(format!("Command failed: {command:?}").into());
     }
     Ok(())
 }
-
-fn render_svg_to_pixmap(
-    tree: &resvg::usvg::Tree,
-    width: u32,
-    height: u32,
-    label: &str,
-) -> Result<resvg::tiny_skia::Pixmap> {
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| format!("failed to allocate {width}x{height} {label} pixmap"))?;
-    let original_size = tree.size();
-    let width_as_float = width
-        .to_string()
-        .parse::<f32>()
-        .map_err(|error| format!("cannot convert icon width {width} to float: {error}"))?;
-    let height_as_float = height
-        .to_string()
-        .parse::<f32>()
-        .map_err(|error| format!("cannot convert icon height {height} to float: {error}"))?;
-    let transform = resvg::tiny_skia::Transform::from_scale(
-        width_as_float / original_size.width(),
-        height_as_float / original_size.height(),
-    );
-    resvg::render(tree, transform, &mut pixmap.as_mut());
-    Ok(pixmap)
-}
-
-fn render_svg_icon_to_ico(svg_path: &Path, ico_path: &Path) -> Result<()> {
-    let tree = parse_svg(svg_path)?;
-    let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
-
-    for &size in WINDOWS_MSI_ICON_SIZES {
-        let image = ico::IconImage::from_rgba_data(
-            size,
-            size,
-            render_svg_to_pixmap(&tree, size, size, "icon")?.take_demultiplied(),
-        );
-        icon_dir.add_entry(ico::IconDirEntry::encode(&image)?);
+fn output(command: &mut Command) -> Result<String> {
+    let result = command.output()?;
+    if !result.status.success() {
+        return Err(String::from_utf8_lossy(&result.stderr).into_owned().into());
     }
-
-    let file = fs::File::create(ico_path)?;
-    icon_dir.write(BufWriter::new(file))?;
-    Ok(())
+    Ok(String::from_utf8(result.stdout)?)
 }
-
-fn render_svg_to_png(svg_path: &Path, png_path: &Path, width: u32, height: u32) -> Result<()> {
-    let tree = parse_svg(svg_path)?;
-    let pixmap = render_svg_to_pixmap(&tree, width, height, "logo")?;
-
-    let file = fs::File::create(png_path)?;
-    let mut encoder = png::Encoder::new(BufWriter::new(file), width, height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header()?;
-    writer.write_image_data(&pixmap.take_demultiplied())?;
-    Ok(())
-}
-
-fn parse_svg(svg_path: &Path) -> Result<resvg::usvg::Tree> {
-    let svg_data = fs::read(svg_path)?;
-    let options = resvg::usvg::Options {
-        resources_dir: svg_path.parent().map(Path::to_path_buf),
-        ..resvg::usvg::Options::default()
-    };
-    Ok(resvg::usvg::Tree::from_data(&svg_data, &options)?)
-}
-
-fn render_text_file_to_rtf(text_path: &Path, rtf_path: &Path) -> Result<()> {
-    let text = fs::read_to_string(text_path)?;
-    let mut rtf = String::from(r"{\rtf1\ansi\deff0{\fonttbl{\f0 Consolas;}}\fs18 ");
-    for line in text.lines() {
-        rtf.push_str(&escape_rtf(line));
-        rtf.push_str(r"\par ");
-    }
-    rtf.push('}');
-    fs::write(rtf_path, rtf)?;
-    Ok(())
-}
-
-fn escape_rtf(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '\\' => escaped.push_str(r"\\"),
-            '{' => escaped.push_str(r"\{"),
-            '}' => escaped.push_str(r"\}"),
-            '\t' => escaped.push_str(r"\tab "),
-            '\u{00}'..='\u{7f}' => escaped.push(ch),
-            _ => {
-                write!(escaped, r"\u{}?", ch as i32).expect("writing to String cannot fail");
-            }
+fn run() -> Result<()> {
+    let started = std::time::Instant::now();
+    let Cli {
+        command: Task::Package { format },
+    } = Cli::parse();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let meta: Manifest = toml::from_str(&fs::read_to_string(root.join("Cargo.toml"))?)?;
+    let (args, kind) = match format {
+        Format::Binary(args) => (args, "binary"),
+        Format::Windows(args) => (args, "windows"),
+        Format::Macos(args) => (args, "macos"),
+        Format::Android(args) => {
+            android::package(&root, &meta.package, args)?;
+            status(
+                "Finished",
+                &format!("packaging in {:.2}s", started.elapsed().as_secs_f64()),
+            );
+            return Ok(());
         }
+    };
+    let target = args.target.unwrap_or_else(|| {
+        output(Command::new("rustc").arg("-vV"))
+            .expect("Rust toolchain")
+            .lines()
+            .find_map(|line| line.strip_prefix("host: ").map(str::to_owned))
+            .expect("host target")
+    });
+    validate_target(&target)?;
+    if kind == "windows" && (!cfg!(windows) || !target.contains("windows-msvc")) {
+        return Err("Windows installers require a Windows MSVC host/target".into());
     }
-    escaped
-}
-
-fn render_windows_msi_template(
-    template_path: &Path,
-    output_path: &Path,
-    data: &WindowsMsiTemplateData,
-) -> Result<()> {
-    let mut text = fs::read_to_string(template_path)?;
-    let replacements = [
-        ("{{product_name}}", data.product_name.as_str()),
-        ("{{package_name}}", data.package_name.as_str()),
-        ("{{version}}", data.version.as_str()),
-        ("{{manufacturer}}", data.manufacturer.as_str()),
-        ("{{description}}", data.description.as_str()),
-        ("{{license}}", data.license.as_str()),
-        ("{{repository}}", data.repository.as_str()),
-        ("{{binary_name}}", data.binary_name.as_str()),
-        ("{{binary_path}}", data.binary_path.as_str()),
-        (
-            "{{launcher_binary_path}}",
-            data.launcher_binary_path.as_str(),
-        ),
-        ("{{msi_path}}", data.msi_path.as_str()),
-        ("{{icon_path}}", data.icon_path.as_str()),
-        (
-            "{{bootstrapper_logo_path}}",
-            data.bootstrapper_logo_path.as_str(),
-        ),
-        ("{{license_rtf_path}}", data.license_rtf_path.as_str()),
-        ("{{upgrade_code}}", data.upgrade_code.as_str()),
-        ("{{bundle_upgrade_code}}", data.bundle_upgrade_code.as_str()),
-        ("{{app_component_guid}}", data.app_component_guid.as_str()),
-        (
-            "{{launcher_component_guid}}",
-            data.launcher_component_guid.as_str(),
-        ),
-        ("{{path_component_guid}}", data.path_component_guid.as_str()),
-        (
-            "{{shortcut_component_guid}}",
-            data.shortcut_component_guid.as_str(),
-        ),
-    ];
-
-    for (placeholder, value) in replacements {
-        text = text.replace(placeholder, &escape_xml(value));
+    if kind == "macos" && (!cfg!(target_os = "macos") || !target.contains("apple-darwin")) {
+        return Err("macOS installers require a macOS host/target".into());
     }
-
-    let mut file = fs::File::create(output_path)?;
-    file.write_all(text.as_bytes())?;
+    status(
+        "Packaging",
+        &format!(
+            "{} v{} ({kind}, {target})",
+            meta.package.name, meta.package.version
+        ),
+    );
+    if !args.skip_build {
+        let mut build = Command::new("cargo");
+        build
+            .current_dir(&root)
+            .args([
+                "build",
+                "--release",
+                "--locked",
+                "--target",
+                &target,
+                "-p",
+                "daat-locus",
+            ])
+            .env_remove("DAAT_LOCUS_BUILD_WEBUI");
+        if desktop_target(&target) {
+            build.args(["-p", "daat-locus-app"]);
+        }
+        command(&mut build)?;
+    }
+    let release = args
+        .release_dir
+        .map(|path| absolute(&root, path))
+        .unwrap_or_else(|| root.join("target").join(&target).join("release"));
+    let output = args
+        .out_dir
+        .map(|path| absolute(&root, path))
+        .unwrap_or_else(|| release.join("package"));
+    fs::create_dir_all(&output)?;
+    let context = Context {
+        root,
+        meta: meta.package,
+        target,
+        release,
+        output,
+    };
+    let binary = context.binary("daat-locus");
+    require_embedded(&binary)?;
+    if desktop_target(&context.target) && !context.binary("daat-locus-app").is_file() {
+        return Err("Desktop client is missing; build daat-locus-app".into());
+    }
+    match kind {
+        "binary" => archive(&context)?,
+        "windows" => windows(&context)?,
+        _ => macos(&context)?,
+    };
+    status(
+        "Finished",
+        &format!("packaging in {:.2}s", started.elapsed().as_secs_f64()),
+    );
     Ok(())
 }
-
-fn msi_version(version: &str) -> Result<String> {
-    let core = version.split_once('-').map_or(version, |(core, _)| core);
-    let parts = core.split('.').collect::<Vec<_>>();
-    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+fn absolute(root: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
+}
+fn validate_target(target: &str) -> Result<()> {
+    if target.is_empty()
+        || target.contains("..")
+        || !target
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err("Invalid target triple".into());
+    }
+    Ok(())
+}
+fn desktop_target(target: &str) -> bool {
+    target.contains("windows-msvc") || target.contains("apple-darwin")
+}
+impl Context {
+    fn binary(&self, name: &str) -> PathBuf {
+        self.release.join(format!(
+            "{name}{}",
+            if self.target.contains("windows") {
+                ".exe"
+            } else {
+                ""
+            }
+        ))
+    }
+    fn stem(&self) -> String {
+        format!("{}-{}-{}", self.meta.name, self.meta.version, self.target)
+    }
+    fn work(&self) -> Result<PathBuf> {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let path = self
+            .root
+            .join("target/packaging")
+            .join(format!("{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&path)?;
+        Ok(path)
+    }
+}
+fn require_embedded(path: &Path) -> Result<()> {
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err("Distribution binaries cannot be symlinks".into());
+    }
+    if !contains_ui_marker(fs::File::open(path)?)? {
         return Err(format!(
-            "package version `{version}` must be three numeric components for MSI packaging"
+            "{} has no embedded WebUI; rebuild with default settings",
+            path.display()
         )
         .into());
     }
-    for part in &parts {
-        part.parse::<u16>().map_err(|_| {
-            format!("package version `{version}` contains non-numeric MSI component `{part}`")
-        })?;
-    }
-    Ok(parts.join("."))
-}
-
-fn product_name(package_name: &str) -> String {
-    package_name
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let mut chars = part.chars();
-            chars.next().map_or_else(String::new, |first| {
-                first.to_uppercase().collect::<String>() + chars.as_str()
-            })
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn package_manufacturer(package: &RootPackage) -> String {
-    package
-        .authors
-        .first()
-        .map(|author| {
-            author
-                .split('<')
-                .next()
-                .unwrap_or(author)
-                .trim()
-                .to_string()
-        })
-        .filter(|author| !author.is_empty())
-        .unwrap_or_else(|| product_name(&package.name))
-}
-
-fn wix_path(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
-
-fn escape_xml(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&apos;"),
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
-}
-
-fn archive_tar_zst(stage_root: &Path, archive_path: &Path) -> Result<()> {
-    if let Some(parent) = archive_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let file = fs::File::create(archive_path)?;
-    let mut encoder = zstd::stream::write::Encoder::new(file, 19)?;
-    encoder.multithread(zstd_worker_count())?;
-    let mut builder = tar::Builder::new(encoder);
-    builder.append_dir_all(".", stage_root)?;
-    let encoder = builder.into_inner()?;
-    encoder.finish()?;
     Ok(())
 }
-
-fn tar_zst_contains_entry(archive_path: &Path, expected_entry: &str) -> Result<bool> {
-    let file = fs::File::open(archive_path)?;
-    let decoder = zstd::stream::read::Decoder::new(file)?;
-    let mut archive = tar::Archive::new(decoder);
-    for entry in archive.entries()? {
-        let entry = entry?;
-        if archive_entry_path(&entry.path()?) == expected_entry {
+fn contains_ui_marker(mut reader: impl std::io::Read) -> std::io::Result<bool> {
+    // Android debug libraries can exceed a gigabyte. Scan without buffering the
+    // whole library and retain the overlap when the marker spans two reads.
+    let mut buffer = vec![0; 64 * 1024 + UI_MARKER.len()];
+    let mut retained = 0;
+    loop {
+        let read = reader.read(&mut buffer[retained..])?;
+        if read == 0 {
+            return Ok(false);
+        }
+        let length = retained + read;
+        if buffer[..length]
+            .windows(UI_MARKER.len())
+            .any(|part| part == UI_MARKER)
+        {
             return Ok(true);
         }
-    }
-    Ok(false)
-}
-
-fn archive_entry_path(path: &Path) -> String {
-    path.components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn zstd_worker_count() -> u32 {
-    std::thread::available_parallelism().map_or(1, |count| {
-        u32::try_from(count.get().clamp(1, 8)).expect("clamped zstd worker count fits in u32")
-    })
-}
-
-fn read_root_manifest() -> Result<RootManifest> {
-    let text = fs::read_to_string(repo_root().join("Cargo.toml"))?;
-    Ok(toml::from_str(&text)?)
-}
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask manifest has parent")
-        .to_path_buf()
-}
-
-fn rustc_host_target() -> Result<String> {
-    let output = Command::new("rustc").arg("-vV").output()?;
-    if !output.status.success() {
-        return Err("rustc -vV failed".into());
-    }
-    let stdout = String::from_utf8(output.stdout)?;
-    stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
-        .ok_or_else(|| "rustc -vV did not report host target".into())
-}
-
-fn binary_name(package_name: &str) -> String {
-    if cfg!(windows) {
-        format!("{package_name}.exe")
-    } else {
-        package_name.to_string()
+        retained = length.min(UI_MARKER.len() - 1);
+        buffer.copy_within(length - retained..length, 0);
     }
 }
-
-fn ensure_safe_relative_path(label: &str, path: &Path) -> Result<()> {
-    if path.is_absolute() {
-        return Err(format!("{label} must be relative, got {}", path.display()).into());
+fn archive(context: &Context) -> Result<()> {
+    let path = context.output.join(format!("{}.tar.zst", context.stem()));
+    let encoder = zstd::Encoder::new(fs::File::create(&path)?, 15)?;
+    let mut tar = tar::Builder::new(encoder);
+    let binary = context.binary("daat-locus");
+    tar.append_path_with_name(
+        &binary,
+        PathBuf::from(context.stem()).join(binary.file_name().unwrap()),
+    )?;
+    if desktop_target(&context.target) {
+        let client = context.binary("daat-locus-app");
+        tar.append_path_with_name(
+            &client,
+            PathBuf::from(context.stem()).join(client.file_name().unwrap()),
+        )?;
     }
-    for component in path.components() {
-        match component {
-            Component::Normal(_) => {}
-            _ => {
-                return Err(
-                    format!("{label} contains unsafe component: {}", path.display()).into(),
-                );
+    tar.into_inner()?.finish()?;
+    let reader = zstd::Decoder::new(fs::File::open(&path)?)?;
+    if tar::Archive::new(reader).entries()?.count()
+        != if desktop_target(&context.target) {
+            2
+        } else {
+            1
+        }
+    {
+        return Err("Archive verification failed".into());
+    }
+    packaged("binary archive", &path)?;
+    Ok(())
+}
+fn xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+fn raster(root: &Path, size: u32) -> Result<Vec<u8>> {
+    let tree = resvg::usvg::Tree::from_data(
+        &fs::read(root.join("assets/logo.svg"))?,
+        &resvg::usvg::Options::default(),
+    )?;
+    let mut pixels = resvg::tiny_skia::Pixmap::new(size, size).ok_or("Invalid icon dimensions")?;
+    let scale = size as f32 / tree.size().width();
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixels.as_mut(),
+    );
+    let mut rgba = pixels.data().to_vec();
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        let alpha = pixel[3] as u32;
+        if alpha > 0 && alpha < 255 {
+            for color in &mut pixel[..3] {
+                *color = ((*color as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
             }
         }
     }
+    Ok(rgba)
+}
+fn png_file(root: &Path, path: &Path, size: u32) -> Result<()> {
+    let mut encoder = png::Encoder::new(fs::File::create(path)?, size, size);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()?
+        .write_image_data(&raster(root, size)?)?;
     Ok(())
 }
-
+fn windows(context: &Context) -> Result<()> {
+    let work = context.work()?;
+    let icon = work.join("app.ico");
+    let mut directory = ico::IconDir::new(ico::ResourceType::Icon);
+    for size in [16, 24, 32, 48, 64, 128, 256] {
+        directory.add_entry(ico::IconDirEntry::encode(&ico::IconImage::from_rgba_data(
+            size,
+            size,
+            raster(&context.root, size)?,
+        ))?);
+    }
+    directory.write(fs::File::create(&icon)?)?;
+    let client = context.binary("daat-locus-app");
+    if !client.is_file() {
+        return Err("Desktop client is missing".into());
+    }
+    let source = work.join("package.wxs");
+    let msi = context.output.join(format!("{}.msi", context.stem()));
+    fs::write(
+        &source,
+        format!(
+            r#"<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+<Package Name="Daat Locus" Manufacturer="{}" Version="{}" UpgradeCode="B84D8EAD-E478-4567-9883-68D7395CBAE6" Scope="perUser">
+<MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version is installed."/><MediaTemplate EmbedCab="yes"/>
+<Icon Id="AppIcon" SourceFile="{}"/><Property Id="ARPPRODUCTICON" Value="AppIcon"/>
+<StandardDirectory Id="LocalAppDataFolder"><Directory Id="INSTALLFOLDER" Name="Daat Locus">
+<Component Id="Main"><File Id="MainExe" Source="{}" KeyPath="yes"/></Component>
+<Component Id="Launcher"><File Id="LauncherExe" Source="{}" KeyPath="yes"/></Component>
+<Component Id="Path"><Environment Id="UserPath" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="no"/><RegistryValue Root="HKCU" Key="Software\DaatLocus" Name="Path" Value="1" Type="integer" KeyPath="yes"/></Component>
+</Directory></StandardDirectory>
+<StandardDirectory Id="ProgramMenuFolder"><Directory Id="MenuFolder" Name="Daat Locus"><Component Id="Shortcut">
+<Shortcut Id="Launch" Name="Daat Locus" Target="[#LauncherExe]" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon"/>
+<RemoveFolder Id="RemoveMenu" On="uninstall"/><RegistryValue Root="HKCU" Key="Software\DaatLocus" Name="Menu" Value="1" Type="integer" KeyPath="yes"/>
+</Component></Directory></StandardDirectory>
+<Feature Id="Product"><ComponentRef Id="Main"/><ComponentRef Id="Launcher"/><ComponentRef Id="Path"/><ComponentRef Id="Shortcut"/></Feature>
+</Package></Wix>"#,
+            xml(context
+                .meta
+                .authors
+                .first()
+                .map_or("Daat Locus", String::as_str)),
+            xml(&context.meta.version),
+            xml(&icon.to_string_lossy()),
+            xml(&context.binary("daat-locus").to_string_lossy()),
+            xml(&client.to_string_lossy())
+        ),
+    )?;
+    command(
+        Command::new("wix")
+            .args([
+                "build",
+                "-ext",
+                "WixToolset.Util.wixext",
+                "-arch",
+                if context.target.starts_with("aarch64") {
+                    "arm64"
+                } else {
+                    "x64"
+                },
+            ])
+            .arg(&source)
+            .arg("-o")
+            .arg(&msi),
+    )?;
+    let license = work.join("license.rtf");
+    let body = fs::read_to_string(context.root.join("LICENSE"))?
+        .replace('\\', "\\\\")
+        .replace('{', "\\{")
+        .replace('}', "\\}")
+        .replace('\n', "\\par\n");
+    fs::write(&license, format!("{{\\rtf1\\ansi {body}}}"))?;
+    let logo = work.join("logo.png");
+    png_file(&context.root, &logo, 128)?;
+    let webview = work.join("MicrosoftEdgeWebview2Setup.exe");
+    let response = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?
+        .get("https://go.microsoft.com/fwlink/p/?LinkId=2124703")
+        .send()?
+        .error_for_status()?;
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    response.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 4 * 1024 * 1024 || !bytes.starts_with(b"MZ") {
+        return Err("Invalid WebView2 bootstrapper".into());
+    }
+    fs::write(&webview, bytes)?;
+    // Validate the official bootstrapper before embedding any executable installer.
+    command(Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $signature=Get-AuthenticodeSignature -LiteralPath $env:DAAT_LOCUS_WEBVIEW_BOOTSTRAPPER; if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation') { exit 1 }"])
+        .env_remove("PSModulePath")
+        .env("DAAT_LOCUS_WEBVIEW_BOOTSTRAPPER", &webview))?;
+    let bundle = work.join("bundle.wxs");
+    let setup = context.output.join(format!("{}-setup.exe", context.stem()));
+    fs::write(
+        &bundle,
+        format!(
+            r#"<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+<Bundle Name="Daat Locus" Manufacturer="Daat Locus" Version="{}" UpgradeCode="38B2E30A-C2C8-4DEE-BD10-1520DF7A9E3F" IconSourceFile="{}">
+<BootstrapperApplication><bal:WixStandardBootstrapperApplication Theme="rtfLargeLicense" LicenseFile="{}" LogoFile="{}" SuppressOptionsUI="yes"/></BootstrapperApplication>
+<Variable Name="WebView2Machine32" Type="version" Value="0.0.0.0"/>
+<Variable Name="WebView2Machine64" Type="version" Value="0.0.0.0"/>
+<Variable Name="WebView2User32" Type="version" Value="0.0.0.0"/>
+<Variable Name="WebView2User64" Type="version" Value="0.0.0.0"/>
+<util:RegistrySearch Id="WebView2Machine32Search" Variable="WebView2Machine32" Root="HKLM" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always32"/>
+<util:RegistrySearch Id="WebView2Machine64Search" Variable="WebView2Machine64" Root="HKLM" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always64"/>
+<util:RegistrySearch Id="WebView2User32Search" Variable="WebView2User32" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always32"/>
+<util:RegistrySearch Id="WebView2User64Search" Variable="WebView2User64" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always64"/>
+<Chain>
+<ExePackage Id="WebView2" SourceFile="{}" InstallArguments="/silent /install" DetectCondition="WebView2Machine32 &gt; v0.0.0.0 OR WebView2Machine64 &gt; v0.0.0.0 OR WebView2User32 &gt; v0.0.0.0 OR WebView2User64 &gt; v0.0.0.0" Permanent="yes" PerMachine="no" Vital="yes">
+<ExitCode Value="0" Behavior="success"/>
+<!-- 0x80040828: a concurrent installer has already installed the runtime. -->
+<ExitCode Value="-2147219416" Behavior="success"/>
+<ExitCode Value="3010" Behavior="scheduleReboot"/>
+<ExitCode Value="1641" Behavior="forceReboot"/>
+<ExitCode Behavior="error"/>
+</ExePackage>
+<MsiPackage SourceFile="{}" Compressed="yes"/>
+</Chain>
+</Bundle>
+</Wix>"#,
+            xml(&context.meta.version),
+            xml(&icon.to_string_lossy()),
+            xml(&license.to_string_lossy()),
+            xml(&logo.to_string_lossy()),
+            xml(&webview.to_string_lossy()),
+            xml(&msi.to_string_lossy())
+        ),
+    )?;
+    command(
+        Command::new("wix")
+            .args([
+                "build",
+                "-ext",
+                "WixToolset.BootstrapperApplications.wixext",
+                "-ext",
+                "WixToolset.Util.wixext",
+            ])
+            .arg(bundle)
+            .arg("-o")
+            .arg(&setup),
+    )?;
+    packaged("Windows MSI", &msi)?;
+    packaged("Windows setup", &setup)?;
+    Ok(())
+}
+fn copy_tree(source: &Path, target: &Path) -> Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_symlink() {
+            return Err("Bundle source cannot contain symlinks".into());
+        }
+        if ty.is_dir() {
+            copy_tree(&entry.path(), &target.join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), target.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+fn macos(context: &Context) -> Result<()> {
+    let work = context.work()?;
+    let app = work.join("Daat Locus.app");
+    let bin = app.join("Contents/MacOS");
+    let resources = app.join("Contents/Resources");
+    fs::create_dir_all(&bin)?;
+    fs::create_dir_all(&resources)?;
+    for name in ["daat-locus", "daat-locus-app"] {
+        fs::copy(context.binary(name), bin.join(name))?;
+    }
+    let iconset = work.join("AppIcon.iconset");
+    fs::create_dir_all(&iconset)?;
+    for (size, name) in [
+        (16, "icon_16x16.png"),
+        (32, "icon_16x16@2x.png"),
+        (32, "icon_32x32.png"),
+        (64, "icon_32x32@2x.png"),
+        (128, "icon_128x128.png"),
+        (256, "icon_128x128@2x.png"),
+        (256, "icon_256x256.png"),
+        (512, "icon_256x256@2x.png"),
+        (512, "icon_512x512.png"),
+        (1024, "icon_512x512@2x.png"),
+    ] {
+        png_file(&context.root, &iconset.join(name), size)?;
+    }
+    command(
+        Command::new("iconutil")
+            .args(["-c", "icns"])
+            .arg(iconset)
+            .arg("-o")
+            .arg(resources.join("AppIcon.icns")),
+    )?;
+    fs::write(
+        app.join("Contents/Info.plist"),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleName</key><string>Daat Locus</string><key>CFBundleDisplayName</key><string>Daat Locus</string><key>CFBundleExecutable</key><string>daat-locus-app</string><key>CFBundleIdentifier</key><string>io.daat-locus.app</string><key>CFBundleIconFile</key><string>AppIcon</string><key>CFBundleShortVersionString</key><string>{}</string><key>CFBundleVersion</key><string>{}</string><key>CFBundlePackageType</key><string>APPL</string><key>LSMinimumSystemVersion</key><string>11.0</string></dict></plist>"#,
+            xml(&context.meta.version),
+            xml(&context.meta.version)
+        ),
+    )?;
+    let stage = work.join("installer-root");
+    copy_tree(&app, &stage.join("Applications/Daat Locus.app"))?;
+    let cli = stage.join("usr/local/bin");
+    fs::create_dir_all(&cli)?;
+    fs::write(
+        cli.join("daat-locus"),
+        "#!/bin/sh\nexec '/Applications/Daat Locus.app/Contents/MacOS/daat-locus' \"$@\"\n",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(cli.join("daat-locus"), fs::Permissions::from_mode(0o755))?;
+    }
+    let pkg = context.output.join(format!("{}.pkg", context.stem()));
+    command(
+        Command::new("pkgbuild")
+            .arg("--root")
+            .arg(stage)
+            .args([
+                "--identifier",
+                "io.daat-locus.pkg",
+                "--version",
+                &context.meta.version,
+                "--install-location",
+                "/",
+            ])
+            .arg(&pkg),
+    )?;
+    copy_tree(&app, &context.output.join("Daat Locus.app"))?;
+    packaged("macOS app", &context.output.join("Daat Locus.app"))?;
+    packaged("macOS installer", &pkg)?;
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
-    use super::{escape_rtf, macos_cli_wrapper_text, macos_distribution_xml, shell_single_quote};
-
-    const WINDOWS_MSI_TEMPLATE: &str = include_str!("../../packaging/windows/daat-locus.wxs");
-    const BOOTSTRAPPER_TEMPLATE: &str =
-        include_str!("../../packaging/windows/daat-locus-bootstrapper.wxs");
-
+    use super::*;
     #[test]
-    fn windows_msi_keeps_launcher_out_of_user_path() {
-        assert!(WINDOWS_MSI_TEMPLATE.contains("Value=\"[INSTALLFOLDER]\""));
-        assert!(WINDOWS_MSI_TEMPLATE.contains("Id=\"LauncherFolder\" Name=\"Launcher\""));
-        assert!(WINDOWS_MSI_TEMPLATE.contains("Target=\"[#LauncherExecutableFile]\""));
+    fn embedded_marker_can_span_short_reads() {
+        struct Chunks(std::io::Cursor<Vec<u8>>);
+        impl std::io::Read for Chunks {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = buffer.len().min(7);
+                std::io::Read::read(&mut self.0, &mut buffer[..count])
+            }
+        }
+        let mut data = vec![0; 19];
+        data.extend_from_slice(UI_MARKER);
+        assert!(contains_ui_marker(Chunks(std::io::Cursor::new(data))).unwrap());
+        assert!(!contains_ui_marker(&b"no embedded assets"[..]).unwrap());
     }
-
     #[test]
-    fn bootstrapper_uses_real_standard_ba_theme() {
-        assert!(BOOTSTRAPPER_TEMPLATE.contains("WixStandardBootstrapperApplication"));
-        assert!(BOOTSTRAPPER_TEMPLATE.contains("Theme=\"rtfLargeLicense\""));
-        assert!(BOOTSTRAPPER_TEMPLATE.contains("LicenseFile=\"{{license_rtf_path}}\""));
-        assert!(BOOTSTRAPPER_TEMPLATE.contains("LogoFile=\"{{bootstrapper_logo_path}}\""));
-        assert!(!BOOTSTRAPPER_TEMPLATE.contains("LicenseUrl="));
-        assert!(!BOOTSTRAPPER_TEMPLATE.contains("Theme=\"none\""));
+    fn target_is_one_component_and_xml_fields_are_escaped() {
+        assert!(validate_target("x86_64-pc-windows-msvc").is_ok());
+        for value in ["../escape", "/tmp", "x/../y", ""] {
+            assert!(validate_target(value).is_err());
+        }
+        assert_eq!(xml("a&\"b<"), "a&amp;&quot;b&lt;");
     }
-
     #[test]
-    fn bootstrapper_does_not_show_nested_msi_ui() {
-        assert!(!BOOTSTRAPPER_TEMPLATE.contains("DisplayInternalUICondition"));
-    }
-
-    #[test]
-    fn bootstrapper_bundle_name_is_product_name() {
-        assert!(BOOTSTRAPPER_TEMPLATE.contains("Name=\"{{product_name}}\""));
-        assert!(!BOOTSTRAPPER_TEMPLATE.contains("Name=\"{{product_name}} Setup\""));
-    }
-
-    #[test]
-    fn rtf_escaping_preserves_rtf_syntax() {
-        assert_eq!(escape_rtf(r"a\b{c}"), r"a\\b\{c\}");
-        assert_eq!(escape_rtf("x\ty"), r"x\tab y");
-    }
-
-    #[test]
-    fn shell_single_quote_handles_spaces_and_quotes() {
+    fn archive_has_expected_binary_and_no_extra_tree() {
+        let root = std::env::temp_dir().join(format!("dl-package-test-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let c = Context {
+            root: root.clone(),
+            meta: Metadata {
+                name: "daat-locus".into(),
+                version: "0.5.0".into(),
+                authors: vec![],
+            },
+            target: "x86_64-pc-windows-msvc".into(),
+            release: root.clone(),
+            output: root,
+        };
+        fs::write(c.binary("daat-locus"), UI_MARKER).unwrap();
+        fs::write(c.binary("daat-locus-app"), b"desktop-client").unwrap();
+        require_embedded(&c.binary("daat-locus")).unwrap();
+        archive(&c).unwrap();
+        let reader = zstd::Decoder::new(
+            fs::File::open(c.output.join(format!("{}.tar.zst", c.stem()))).unwrap(),
+        )
+        .unwrap();
+        let mut archive = tar::Archive::new(reader);
+        let paths: Vec<_> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().into_owned())
+            .collect();
         assert_eq!(
-            shell_single_quote("/Applications/Daat Locus.app/Contents/MacOS/daat-locus"),
-            "'/Applications/Daat Locus.app/Contents/MacOS/daat-locus'"
+            paths,
+            vec![
+                PathBuf::from("daat-locus-0.5.0-x86_64-pc-windows-msvc/daat-locus.exe"),
+                PathBuf::from("daat-locus-0.5.0-x86_64-pc-windows-msvc/daat-locus-app.exe")
+            ]
         );
-        assert_eq!(shell_single_quote("/tmp/it's-here"), "'/tmp/it'\\''s-here'");
-    }
-
-    #[test]
-    fn macos_cli_wrapper_execs_installed_app_binary() {
-        assert_eq!(
-            macos_cli_wrapper_text("/Applications/Daat Locus.app/Contents/MacOS/daat-locus"),
-            "#!/bin/sh\nexec '/Applications/Daat Locus.app/Contents/MacOS/daat-locus' \"$@\"\n"
-        );
-    }
-
-    #[test]
-    fn macos_distribution_uses_product_title() {
-        let distribution =
-            macos_distribution_xml("Daat Locus", "0.2.0", "daat-locus-component.pkg");
-
-        assert!(distribution.contains("<title>Daat Locus</title>"));
-        assert!(distribution.contains("<choice id=\"default\" title=\"Daat Locus\">"));
-        assert!(distribution.contains(
-            "<pkg-ref id=\"io.daat-locus.pkg\" version=\"0.2.0\" auth=\"Root\">daat-locus-component.pkg</pkg-ref>"
-        ));
     }
 }

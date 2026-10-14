@@ -1,84 +1,30 @@
 #!/bin/sh
 set -eu
 
-# Local quality gate for commits. Keep this aligned with CI and with the
-# embedded WebUI build so warnings are caught before a push reaches CI.
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-cd "$REPO_ROOT"
+# Validate the Actor/App backend. Offline builds use a caller-provided cached
+# DAAT_LOCUS_MODEL_CATALOG_PATH; model providers in tests are mocks.
+export DAAT_LOCUS_BUILD_WEBUI=0
+cargo fmt --all -- --check
+cargo clippy --locked -p daat-locus -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-macros -p xtask --all-targets -- -D warnings
+cargo test --locked -p daat-locus --lib --bins --test http_api
+cargo test --locked -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-macros -p xtask
 
-WARNING_PATTERN='(^|[^[:alpha:]])warn(ing|ings)?([^[:alpha:]]|$)|^\(!\)'
-
-section() {
-    printf '\n==> %s\n' "$1"
-}
-
-run() {
-    label="$1"
-    shift
-    section "$label"
-    "$@"
-}
-
-run_no_warnings() {
-    label="$1"
-    shift
-    section "$label"
-
-    output_file="$(mktemp "${TMPDIR:-/tmp}/daat-locus-hook.XXXXXX")"
-    set +e
-    "$@" >"$output_file" 2>&1
-    status="$?"
-    set -e
-
-    cat "$output_file"
-
-    if [ "$status" -ne 0 ]; then
-        rm -f "$output_file"
-        printf '\n%s failed with exit status %s.\n' "$label" "$status" >&2
-        exit "$status"
-    fi
-
-    if grep -Eiq "$WARNING_PATTERN" "$output_file"; then
-        printf '\n%s emitted warning-like output; failing pre-commit hook.\n' "$label" >&2
-        printf 'Matched warning lines:\n' >&2
-        grep -Ein "$WARNING_PATTERN" "$output_file" >&2 || true
-        rm -f "$output_file"
-        exit 1
-    fi
-
-    rm -f "$output_file"
-}
-
-run "Rust formatting" cargo fmt --all -- --check
-run_no_warnings "Rust warnings" env RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings" cargo check --locked --all-targets
-run "Rust clippy" cargo clippy --locked --all-targets -- -D warnings
-
-section "Config schema"
-schema_file="schemas/config.schema.json"
-schema_tmp="$(mktemp "${TMPDIR:-/tmp}/daat-locus-schema.XXXXXX")"
-cargo run -p daat-locus --locked -- config-schema > "$schema_tmp"
-if ! diff -u "$schema_file" "$schema_tmp"; then
-    rm -f "$schema_tmp"
-    printf '\n%s is out of date; regenerate with: cargo run -p daat-locus -- config-schema > %s\n' "$schema_file" "$schema_file" >&2
-    exit 1
-fi
-rm -f "$schema_tmp"
-
-if [ ! -f webui/package.json ]; then
-    printf 'webui/package.json not found; cannot check WebUI warnings.\n' >&2
+if ! command -v bun >/dev/null 2>&1; then
+    printf 'Bun is required for WebUI infrastructure checks.\n' >&2
     exit 1
 fi
 
-if command -v bun >/dev/null 2>&1; then
-    (
-        cd webui
-        run "WebUI dependencies" bun install --frozen-lockfile
-        run_no_warnings "WebUI warnings" bun run build
-    )
-else
-    printf 'Bun is not available; cannot check WebUI warnings.\n' >&2
-    exit 1
-fi
+(
+    cd webui
+    bun run typecheck
+    bun run test
+)
 
-printf '\nPre-commit quality checks passed.\n'
+(
+    cd workers/signaling
+    bun run typecheck
+    bun test
+)

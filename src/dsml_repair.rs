@@ -4,7 +4,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 use tracing::warn;
 
-use crate::reasoning::runtime::AgentToolCall;
+use crate::model_protocol::AgentToolCall;
 
 static DSML_FUNCTION_CALLS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"<[｜|]DSML[｜|]function_calls>[\s\S]*?</?[｜|]DSML[｜|]function_calls>")

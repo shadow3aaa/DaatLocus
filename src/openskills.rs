@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     daat_locus_paths::daat_locus_paths_sync,
     persistence::{PersistenceFileMode, PersistenceStore, write_bytes_atomic_sync},
+    sandbox::RuntimeSandboxPolicy,
 };
 
 const SKILL_FILE_NAME: &str = "SKILL.md";
@@ -20,10 +21,6 @@ const MAX_SCAN_DEPTH: usize = 6;
 const MAX_SKILL_DIRS_PER_ROOT: usize = 2_000;
 const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1_024;
-
-mod builtin_skill_bindings {
-    include!(concat!(env!("OUT_DIR"), "/builtin_skills.rs"));
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpenSkillsCatalog {
@@ -54,30 +51,6 @@ pub enum OpenSkillScope {
 pub struct OpenSkillError {
     pub path: PathBuf,
     pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct OpenSkillDashboardSummary {
-    pub name: String,
-    pub description: String,
-    pub path: String,
-    pub scope: String,
-    pub allow_implicit_invocation: bool,
-    pub user_disabled: bool,
-    pub auto_use_enabled: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct OpenSkillDashboardError {
-    pub path: String,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenSkillInjection {
-    pub name: String,
-    pub path: PathBuf,
-    pub contents: String,
 }
 
 #[derive(Debug, Clone)]
@@ -136,48 +109,16 @@ impl fmt::Display for SkillParseError {
 }
 
 impl OpenSkillsCatalog {
-    #[cfg(test)]
-    fn skills(&self) -> &[OpenSkill] {
+    pub fn skills(&self) -> &[OpenSkill] {
         &self.skills
     }
 
-    /// Returns the skill whose SKILL.md path matches, if any.
-    pub(crate) fn skill_for_path(&self, path: &std::path::Path) -> Option<&OpenSkill> {
-        self.skills.iter().find(|skill| skill.path == path)
-    }
-
-    #[cfg(test)]
-    fn errors(&self) -> &[OpenSkillError] {
+    pub fn errors(&self) -> &[OpenSkillError] {
         &self.errors
     }
 
     pub fn render_prompt_block(&self) -> Option<String> {
         self.render_prompt_block_with_budget(SKILL_METADATA_BUDGET_CHARS)
-    }
-
-    pub fn dashboard_summaries(&self) -> Vec<OpenSkillDashboardSummary> {
-        self.skills
-            .iter()
-            .map(|skill| OpenSkillDashboardSummary {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-                path: display_path(&skill.path),
-                scope: skill.scope.label().to_string(),
-                allow_implicit_invocation: skill.allow_implicit_invocation,
-                user_disabled: skill.user_disabled,
-                auto_use_enabled: skill.auto_use_enabled(),
-            })
-            .collect()
-    }
-
-    pub fn dashboard_errors(&self) -> Vec<OpenSkillDashboardError> {
-        self.errors
-            .iter()
-            .map(|error| OpenSkillDashboardError {
-                path: display_path(&error.path),
-                message: error.message.clone(),
-            })
-            .collect()
     }
 
     fn render_prompt_block_with_budget(&self, metadata_budget_chars: usize) -> Option<String> {
@@ -198,7 +139,7 @@ impl OpenSkillsCatalog {
 
         let mut lines = vec![
             "## Skills".to_string(),
-            "A skill is a set of local instructions stored in a `SKILL.md` file. Below is the list of OpenSkills available in this session. Each entry includes a name, description, and path so the model can read the source instructions when a skill applies.".to_string(),
+            "A skill is a set of local instructions stored in a `SKILL.md` file. Below is the list of OpenSkills available in this context. Each entry includes a name, description, and path so the model can read the source instructions when a skill applies.".to_string(),
         ];
 
         if !alias_plan.root_lines.is_empty() {
@@ -221,41 +162,6 @@ impl OpenSkillsCatalog {
 
         Some(lines.join("\n"))
     }
-
-    pub fn explicit_skill_injections_for_text(&self, text: &str) -> Vec<OpenSkillInjection> {
-        let mentions = extract_dollar_mentions(text);
-        if mentions.is_empty() {
-            return Vec::new();
-        }
-
-        let name_counts = skill_name_counts(&self.skills);
-        let mut seen_paths = HashSet::new();
-        let mut injections = Vec::new();
-        for skill in &self.skills {
-            if !mentions.contains(skill.name.as_str()) {
-                continue;
-            }
-            if name_counts.get(skill.name.as_str()).copied().unwrap_or(0) != 1 {
-                continue;
-            }
-            if !seen_paths.insert(skill.path.clone()) {
-                continue;
-            }
-            match fs::read_to_string(&skill.path) {
-                Ok(contents) => injections.push(OpenSkillInjection {
-                    name: skill.name.clone(),
-                    path: skill.path.clone(),
-                    contents,
-                }),
-                Err(err) => tracing::warn!(
-                    "failed to read explicitly mentioned skill {} at {}: {err}",
-                    skill.name,
-                    skill.path.display()
-                ),
-            }
-        }
-        injections
-    }
 }
 
 impl OpenSkillScope {
@@ -264,14 +170,6 @@ impl OpenSkillScope {
             Self::Project => 0,
             Self::DaatLocusHome => 1,
             Self::User => 2,
-        }
-    }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Project => "project",
-            Self::DaatLocusHome => "daat-locus",
-            Self::User => "user",
         }
     }
 }
@@ -283,7 +181,6 @@ impl OpenSkill {
 }
 
 pub fn load_openskills_for_runtime(execution_cwd: &Path) -> OpenSkillsCatalog {
-    ensure_builtin_skills_on_disk();
     let disabled_paths = load_openskills_user_config().disabled_paths;
     let catalog =
         load_openskills_from_roots_with_disabled_paths(skill_roots(execution_cwd), disabled_paths);
@@ -297,34 +194,19 @@ pub fn load_openskills_for_runtime(execution_cwd: &Path) -> OpenSkillsCatalog {
     catalog
 }
 
-fn ensure_builtin_skills_on_disk() {
-    let target_dir = daat_locus_paths_sync().root().join(SKILLS_DIR_NAME);
-    if let Err(err) = fs::create_dir_all(&target_dir) {
-        tracing::warn!(
-            "failed to create builtin skills dir {}: {err}",
-            target_dir.display()
-        );
-        return;
-    }
-    for (name, content) in builtin_skill_bindings::BUILTIN_SKILL_SOURCES {
-        let skill_dir = target_dir.join(name);
-        if let Err(err) = fs::create_dir_all(&skill_dir) {
-            tracing::warn!(
-                "failed to create builtin skill dir {}: {err}",
-                skill_dir.display()
-            );
-            continue;
-        }
-        let skill_file = skill_dir.join(SKILL_FILE_NAME);
-        let need_write =
-            fs::read_to_string(&skill_file).map_or(true, |existing| existing != *content);
-        if need_write && let Err(err) = fs::write(&skill_file, content) {
-            tracing::warn!(
-                "failed to write builtin skill {}: {err}",
-                skill_file.display()
-            );
-        }
-    }
+/// Discover only authorized instruction resources. Permission checks happen
+/// before traversing directories and before reading skill or metadata files,
+/// including symlink targets.
+pub fn load_openskills_with_policy(
+    execution_cwd: &Path,
+    policy: &RuntimeSandboxPolicy,
+) -> OpenSkillsCatalog {
+    let disabled_paths = if policy.is_path_readable(&openskills_user_config_path()) {
+        load_openskills_user_config().disabled_paths
+    } else {
+        Vec::new()
+    };
+    load_openskills_from_roots_with_policy(skill_roots(execution_cwd), disabled_paths, Some(policy))
 }
 
 pub fn reload_openskills_for_runtime(execution_cwd: &Path) -> OpenSkillsCatalog {
@@ -422,6 +304,14 @@ fn load_openskills_from_roots_with_disabled_paths(
     roots: Vec<SkillRoot>,
     disabled_paths: Vec<PathBuf>,
 ) -> OpenSkillsCatalog {
+    load_openskills_from_roots_with_policy(roots, disabled_paths, None)
+}
+
+fn load_openskills_from_roots_with_policy(
+    roots: Vec<SkillRoot>,
+    disabled_paths: Vec<PathBuf>,
+    policy: Option<&RuntimeSandboxPolicy>,
+) -> OpenSkillsCatalog {
     let mut catalog = OpenSkillsCatalog::default();
     let mut root_by_skill_path = HashMap::new();
     let mut used_roots = Vec::new();
@@ -432,8 +322,11 @@ fn load_openskills_from_roots_with_disabled_paths(
 
     for root in roots {
         let root_path = canonicalize_lossy(&root.path);
+        if policy.is_some_and(|policy| !policy.is_path_readable(&root_path)) {
+            continue;
+        }
         let before = catalog.skills.len();
-        discover_skills_under_root(&root_path, root.scope, &mut catalog);
+        discover_skills_under_root(&root_path, root.scope, &mut catalog, policy);
         if catalog.skills.len() > before {
             used_roots.push(root_path.clone());
             for skill in &catalog.skills[before..] {
@@ -545,7 +438,12 @@ fn normalize_openskills_user_config(config: &mut OpenSkillsUserConfig) {
     config.disabled_paths.dedup();
 }
 
-fn discover_skills_under_root(root: &Path, scope: OpenSkillScope, catalog: &mut OpenSkillsCatalog) {
+fn discover_skills_under_root(
+    root: &Path,
+    scope: OpenSkillScope,
+    catalog: &mut OpenSkillsCatalog,
+    policy: Option<&RuntimeSandboxPolicy>,
+) {
     if !root.is_dir() {
         return;
     }
@@ -555,6 +453,9 @@ fn discover_skills_under_root(root: &Path, scope: OpenSkillScope, catalog: &mut 
     let mut truncated = false;
 
     while let Some((dir, depth)) = queue.pop_front() {
+        if policy.is_some_and(|policy| !policy.is_path_readable(&dir)) {
+            continue;
+        }
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(err) => {
@@ -568,6 +469,9 @@ fn discover_skills_under_root(root: &Path, scope: OpenSkillScope, catalog: &mut 
 
         for entry in entries.flatten() {
             let path = entry.path();
+            if policy.is_some_and(|policy| !policy.is_path_readable(&path)) {
+                continue;
+            }
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();
             if file_name.starts_with('.') {
@@ -601,7 +505,7 @@ fn discover_skills_under_root(root: &Path, scope: OpenSkillScope, catalog: &mut 
             }
 
             if metadata.is_file() && file_name == SKILL_FILE_NAME {
-                match parse_skill_file(&path, scope) {
+                match parse_skill_file(&path, scope, policy) {
                     Ok(skill) => catalog.skills.push(skill),
                     Err(err) => catalog.errors.push(OpenSkillError {
                         path: path.clone(),
@@ -620,8 +524,12 @@ fn discover_skills_under_root(root: &Path, scope: OpenSkillScope, catalog: &mut 
     }
 }
 
-fn parse_skill_file(path: &Path, scope: OpenSkillScope) -> Result<OpenSkill, SkillParseError> {
-    let contents = fs::read_to_string(path).map_err(SkillParseError::Read)?;
+fn parse_skill_file(
+    path: &Path,
+    scope: OpenSkillScope,
+    policy: Option<&RuntimeSandboxPolicy>,
+) -> Result<OpenSkill, SkillParseError> {
+    let contents = read_skill_text(path, policy).map_err(SkillParseError::Read)?;
     let frontmatter = extract_frontmatter(&contents).ok_or(SkillParseError::MissingFrontmatter)?;
     let parsed: SkillFrontmatter =
         serde_yaml::from_str(&frontmatter).map_err(SkillParseError::InvalidYaml)?;
@@ -646,23 +554,40 @@ fn parse_skill_file(path: &Path, scope: OpenSkillScope) -> Result<OpenSkill, Ski
         description,
         path: canonicalize_lossy(path),
         scope,
-        allow_implicit_invocation: load_allow_implicit_invocation(path),
+        allow_implicit_invocation: load_allow_implicit_invocation(path, policy),
         user_disabled: false,
     })
 }
 
-fn load_allow_implicit_invocation(skill_path: &Path) -> bool {
+fn load_allow_implicit_invocation(
+    skill_path: &Path,
+    policy: Option<&RuntimeSandboxPolicy>,
+) -> bool {
     let Some(skill_dir) = skill_path.parent() else {
         return true;
     };
     let metadata_path = skill_dir.join("agents").join("openai.yaml");
-    let Ok(contents) = fs::read_to_string(metadata_path) else {
+    if policy.is_some_and(|policy| !policy.is_path_readable(&metadata_path)) {
+        return true;
+    }
+    let Ok(contents) = read_skill_text(&metadata_path, policy) else {
         return true;
     };
     serde_yaml::from_str::<OpenAiSkillMetadata>(&contents)
         .ok()
         .and_then(|metadata| metadata.policy.allow_implicit_invocation)
         .unwrap_or(true)
+}
+
+fn read_skill_text(path: &Path, policy: Option<&RuntimeSandboxPolicy>) -> io::Result<String> {
+    let bytes = crate::file_io::read_authorized_bytes(
+        path,
+        256 * 1024,
+        policy.unwrap_or(&RuntimeSandboxPolicy::disabled()),
+    )
+    .map_err(|_| io::Error::other("skill resource is unavailable or unauthorized"))?;
+    String::from_utf8(bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "skill resource is not UTF-8"))
 }
 
 fn default_skill_name(path: &Path) -> String {
@@ -893,62 +818,7 @@ fn display_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn skill_name_counts(skills: &[OpenSkill]) -> HashMap<&str, usize> {
-    let mut counts = HashMap::new();
-    for skill in skills {
-        *counts.entry(skill.name.as_str()).or_insert(0) += 1;
-    }
-    counts
-}
-
-fn extract_dollar_mentions(text: &str) -> HashSet<&str> {
-    let bytes = text.as_bytes();
-    let mut mentions = HashSet::new();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] != b'$' {
-            index += 1;
-            continue;
-        }
-
-        let name_start = index + 1;
-        let Some(first) = bytes.get(name_start) else {
-            index += 1;
-            continue;
-        };
-        if !is_mention_name_char(*first) {
-            index += 1;
-            continue;
-        }
-
-        let mut name_end = name_start + 1;
-        while let Some(next) = bytes.get(name_end)
-            && is_mention_name_char(*next)
-        {
-            name_end += 1;
-        }
-
-        let name = &text[name_start..name_end];
-        if !is_common_env_var(name) {
-            mentions.insert(name);
-        }
-        index = name_end;
-    }
-    mentions
-}
-
-const fn is_mention_name_char(byte: u8) -> bool {
-    matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b':')
-}
-
-fn is_common_env_var(name: &str) -> bool {
-    matches!(
-        name.to_ascii_uppercase().as_str(),
-        "PATH" | "HOME" | "USER" | "SHELL" | "PWD" | "TMPDIR" | "TEMP" | "TMP" | "LANG" | "TERM"
-    )
-}
-
-const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r"- Discovery: The list above is the OpenSkills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
+const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r"- Discovery: The list above is the OpenSkills available in this context (name + description + file path). Skill bodies live on disk at the listed paths.
 - Trigger rules: If the user names a skill with `$SkillName` or plain text, or the task clearly matches a skill description above, use that skill for the current turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
 - How to use a skill:
   1. Before task actions that rely on a skill, use Terminal or Coding tools as needed and read that skill's `SKILL.md` completely.
@@ -957,7 +827,7 @@ const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r"- Discovery: The list abov
   4. Prefer running or adapting provided `scripts/` and reusing provided `assets/` or templates when applicable.
 - If a named skill is missing, unreadable, or invalid, say so briefly and continue with the best fallback.";
 
-const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r"- Discovery: The list above is the OpenSkills available in this session (name + description + short path). Expand short paths with the matching alias from `### Skill roots`.
+const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r"- Discovery: The list above is the OpenSkills available in this context (name + description + short path). Expand short paths with the matching alias from `### Skill roots`.
 - Trigger rules: If the user names a skill with `$SkillName` or plain text, or the task clearly matches a skill description above, use that skill for the current turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
 - How to use a skill:
   1. Expand the listed short `file` path with `### Skill roots`, then use Terminal or Coding tools as needed and read that skill's `SKILL.md` completely before task actions that rely on it.
@@ -969,6 +839,45 @@ const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r"- Discovery: The list above is th
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authorized_catalog_excludes_denied_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        let denied = dir.path().join("denied");
+        fs::create_dir_all(&allowed).unwrap();
+        fs::create_dir_all(&denied).unwrap();
+        fs::write(
+            allowed.join("SKILL.md"),
+            "---\nname: allowed\ndescription: permitted instruction\n---\nbody",
+        )
+        .unwrap();
+        fs::write(
+            denied.join("SKILL.md"),
+            "---\nname: secret\ndescription: denied instruction\n---\nbody",
+        )
+        .unwrap();
+        let mut policy = RuntimeSandboxPolicy::disabled();
+        policy.filesystem.full_disk_read = false;
+        policy.filesystem.readable_roots = vec![allowed.clone()];
+        let catalog = load_openskills_from_roots_with_policy(
+            vec![
+                SkillRoot {
+                    path: allowed,
+                    scope: OpenSkillScope::Project,
+                },
+                SkillRoot {
+                    path: denied,
+                    scope: OpenSkillScope::User,
+                },
+            ],
+            Vec::new(),
+            Some(&policy),
+        );
+        assert_eq!(catalog.skills().len(), 1);
+        assert_eq!(catalog.skills()[0].name, "allowed");
+        assert!(!catalog.render_prompt_block().unwrap().contains("secret"));
+    }
 
     #[test]
     fn loads_skill_from_project_agents_skills() {
@@ -1065,30 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_dollar_mention_injects_skill_body() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().join(".agents").join("skills");
-        let skill_dir = root.join("writer");
-        fs::create_dir_all(&skill_dir).expect("create skill dir");
-        fs::write(
-            skill_dir.join(SKILL_FILE_NAME),
-            "---\nname: writer\ndescription: Write release notes\n---\n\n# Writer\nUse concise notes.\n",
-        )
-        .expect("write skill");
-        let catalog = load_openskills_from_roots(vec![SkillRoot {
-            path: root,
-            scope: OpenSkillScope::Project,
-        }]);
-
-        let injections = catalog.explicit_skill_injections_for_text("please use $writer here");
-
-        assert_eq!(injections.len(), 1);
-        assert_eq!(injections[0].name, "writer");
-        assert!(injections[0].contents.contains("Use concise notes."));
-    }
-
-    #[test]
-    fn user_disabled_skill_is_manual_only_but_explicit_mentions_still_work() {
+    fn user_disabled_skill_remains_discoverable_but_is_not_auto_included() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join(".agents").join("skills");
         let skill_dir = root.join("writer");
@@ -1111,33 +997,6 @@ mod tests {
         assert!(catalog.skills()[0].user_disabled);
         assert!(!catalog.skills()[0].auto_use_enabled());
         assert!(catalog.render_prompt_block_with_budget(8_000).is_none());
-
-        let injections = catalog.explicit_skill_injections_for_text("please use $writer here");
-        assert_eq!(injections.len(), 1);
-        assert!(injections[0].contents.contains("Use concise notes."));
-    }
-
-    #[test]
-    fn duplicate_skill_names_are_not_injected_by_plain_mention() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().join(".agents").join("skills");
-        for dir in ["a", "b"] {
-            let skill_dir = root.join(dir);
-            fs::create_dir_all(&skill_dir).expect("create skill dir");
-            fs::write(
-                skill_dir.join(SKILL_FILE_NAME),
-                "---\nname: dup\ndescription: Duplicate name\n---\n\n# Dup\n",
-            )
-            .expect("write skill");
-        }
-        let catalog = load_openskills_from_roots(vec![SkillRoot {
-            path: root,
-            scope: OpenSkillScope::Project,
-        }]);
-
-        let injections = catalog.explicit_skill_injections_for_text("use $dup");
-
-        assert!(injections.is_empty());
     }
 
     #[test]

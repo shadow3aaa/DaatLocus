@@ -1,9 +1,5 @@
-use serde::Deserialize;
 use std::{
-    collections::BTreeSet,
-    env,
-    fmt::Write as _,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
@@ -12,13 +8,13 @@ use std::{
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     emit_build_target();
-    download_models_dev_catalog();
-    if env::var_os("DAAT_LOCUS_SKIP_WEBUI_BUILD").is_none() {
+    write_models_dev_catalog();
+    println!("cargo:rerun-if-env-changed=DAAT_LOCUS_BUILD_WEBUI");
+    if env::var("DAAT_LOCUS_BUILD_WEBUI").ok().as_deref() != Some("0") {
         build_embedded_webui(&manifest_dir);
+    } else {
+        write_webui_assets(None);
     }
-    write_prompt_bindings(&manifest_dir);
-    write_builtin_skill_bindings(&manifest_dir);
-    write_builtin_workflow_bindings(&manifest_dir);
 }
 
 fn emit_build_target() {
@@ -28,10 +24,18 @@ fn emit_build_target() {
 
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 
-fn download_models_dev_catalog() {
+fn write_models_dev_catalog() {
     let out_path = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("models-dev-api.json");
-    let body = fetch_models_dev_catalog()
-        .unwrap_or_else(|err| panic!("failed to download {MODELS_DEV_API_URL}: {err}"));
+    println!("cargo:rerun-if-env-changed=DAAT_LOCUS_MODEL_CATALOG_PATH");
+    let body = if let Some(path) = env::var_os("DAAT_LOCUS_MODEL_CATALOG_PATH") {
+        let path = PathBuf::from(path);
+        println!("cargo:rerun-if-changed={}", path.display());
+        fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read model catalog {}: {err}", path.display()))
+    } else {
+        fetch_models_dev_catalog()
+            .unwrap_or_else(|err| panic!("failed to download {MODELS_DEV_API_URL}: {err}"))
+    };
     validate_models_dev_catalog(&body);
     fs::write(&out_path, body).unwrap_or_else(|err| {
         panic!(
@@ -55,11 +59,11 @@ fn fetch_models_dev_catalog() -> Result<String, reqwest::Error> {
 
 fn validate_models_dev_catalog(body: &str) {
     let root: serde_json::Value = serde_json::from_str(body)
-        .unwrap_or_else(|err| panic!("{MODELS_DEV_API_URL} returned invalid JSON: {err}"));
+        .unwrap_or_else(|err| panic!("model catalog contains invalid JSON: {err}"));
     assert!(
         root.as_object()
             .is_some_and(|providers| !providers.is_empty()),
-        "{MODELS_DEV_API_URL} returned an empty provider catalog"
+        "model catalog contains no providers"
     );
 }
 
@@ -77,8 +81,12 @@ fn build_embedded_webui(manifest_dir: &Path) {
         webui_dir.display()
     );
 
-    prepare_webui_worktree(&webui_dir, &webui_work);
     let bun_command = webui_bun_command();
+    // Build the shared cryptographic client in the real workspace. Its separate
+    // target directory prevents nested Cargo builds from locking this build.
+    emit_rerun_if_changed_recursively(&manifest_dir.join("crates/daat-locus-auth"));
+    run_webui_command(&bun_command, &["run", "build:auth"], &webui_dir);
+    prepare_webui_worktree(&webui_dir, &webui_work);
     run_webui_command(&bun_command, &["install", "--frozen-lockfile"], &webui_work);
     run_webui_build_command(&bun_command, &webui_work, &webui_dist, &assets_dir);
 
@@ -88,6 +96,72 @@ fn build_embedded_webui(manifest_dir: &Path) {
         "WebUI build did not produce required entry {}",
         dist_index.display()
     );
+    write_webui_assets(Some(&webui_dist));
+}
+
+fn write_webui_assets(dist: Option<&Path>) {
+    fn collect(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).expect("read WebUI assets") {
+            let entry = entry.expect("WebUI asset entry");
+            let kind = entry.file_type().expect("WebUI asset type");
+            assert!(!kind.is_symlink(), "WebUI assets cannot be symlinks");
+            if kind.is_dir() {
+                collect(root, &entry.path(), files);
+            } else if kind.is_file() {
+                files.push(
+                    entry
+                        .path()
+                        .strip_prefix(root)
+                        .expect("WebUI asset root")
+                        .to_path_buf(),
+                );
+            }
+        }
+    }
+    let mut generated = String::from("const WEBUI_ASSETS: &[(&str, &str, &[u8])] = &[\n");
+    if let Some(dist) = dist {
+        let marker = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("webui-build.json");
+        let info = serde_json::json!({"format":"DaatLocus.EmbeddedWebUI.v1","version":env::var("CARGO_PKG_VERSION").expect("version"),"target":env::var("TARGET").expect("target")});
+        fs::write(&marker, serde_json::to_vec(&info).expect("build info"))
+            .expect("write build info");
+        generated.push_str(&format!(
+            "(\"/.well-known/daat-locus-build.json\",\"application/json\",include_bytes!({:?})),\n",
+            marker
+        ));
+        let mut files = Vec::new();
+        collect(dist, dist, &mut files);
+        files.sort();
+        for relative in files {
+            let key = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
+            let mime = match relative.extension().and_then(|s| s.to_str()) {
+                Some("html") => "text/html; charset=utf-8",
+                Some("css") => "text/css; charset=utf-8",
+                Some("js" | "mjs") => "text/javascript; charset=utf-8",
+                Some("wasm") => "application/wasm",
+                Some("json" | "map") => "application/json",
+                Some("svg") => "image/svg+xml",
+                Some("png") => "image/png",
+                Some("jpg" | "jpeg") => "image/jpeg",
+                Some("webp") => "image/webp",
+                Some("gif") => "image/gif",
+                Some("ico") => "image/x-icon",
+                Some("woff") => "font/woff",
+                Some("woff2") => "font/woff2",
+                Some("txt") => "text/plain; charset=utf-8",
+                _ => "application/octet-stream",
+            };
+            generated.push_str(&format!(
+                "({key:?}, {mime:?}, include_bytes!({:?})),\n",
+                dist.join(relative).to_string_lossy()
+            ));
+        }
+    }
+    generated.push_str("];\n");
+    fs::write(
+        PathBuf::from(env::var_os("OUT_DIR").expect("out dir")).join("webui-assets.rs"),
+        generated,
+    )
+    .expect("write WebUI asset manifest");
 }
 
 fn emit_webui_rerun_inputs(webui_dir: &Path, assets_dir: &Path) {
@@ -99,11 +173,12 @@ fn emit_webui_rerun_inputs(webui_dir: &Path, assets_dir: &Path) {
         webui_dir.join("tailwind.config.cjs"),
         webui_dir.join("tsconfig.json"),
         webui_dir.join("vite.config.ts"),
-        assets_dir.join("logo.svg"),
+        assets_dir.join("logo-mark.svg"),
     ] {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     emit_rerun_if_changed_recursively(&webui_dir.join("src"));
+    emit_rerun_if_changed_recursively(&webui_dir.join("scripts"));
 }
 
 fn prepare_webui_worktree(source_dir: &Path, work_dir: &Path) {
@@ -134,6 +209,7 @@ fn prepare_webui_worktree(source_dir: &Path, work_dir: &Path) {
         copy_webui_file(source_dir, work_dir, relative);
     }
     copy_webui_dir(&source_dir.join("src"), &work_dir.join("src"));
+    copy_webui_dir(&source_dir.join("scripts"), &work_dir.join("scripts"));
 }
 
 fn copy_webui_file(source_dir: &Path, work_dir: &Path, relative: &str) {
@@ -187,6 +263,9 @@ fn copy_webui_dir(source: &Path, destination: &Path) {
 }
 
 fn emit_rerun_if_changed_recursively(path: &Path) {
+    if path.file_name().is_some_and(|name| name == "generated") {
+        return;
+    }
     println!("cargo:rerun-if-changed={}", path.display());
     if !path.is_dir() {
         return;
@@ -233,6 +312,7 @@ fn run_webui_build_command(
         .args(["run", "build"])
         .env("DAAT_LOCUS_WEBUI_OUT_DIR", out_dir)
         .env("DAAT_LOCUS_ASSETS_DIR", assets_dir)
+        .env("DAAT_LOCUS_AUTH_WASM_READY", "1")
         .current_dir(webui_dir);
     run_webui_command_status(command, "WebUI build");
 }
@@ -291,466 +371,4 @@ fn executable_candidate(candidate: &Path) -> Option<PathBuf> {
     {
         None
     }
-}
-
-struct PromptBinding {
-    prompt_id: String,
-    const_name: String,
-    source_const_name: String,
-    content: String,
-    kind: PromptBindingKind,
-}
-
-enum PromptBindingKind {
-    Raw,
-    App(AppPromptBinding),
-    Persona(PersonaPromptBinding),
-}
-
-struct AppPromptBinding {
-    docs: String,
-}
-
-struct PersonaPromptBinding {
-    name: String,
-    language: String,
-    identity_summary: String,
-}
-
-fn collect_prompt_bindings(prompts_dir: &Path, prompt_files: Vec<PathBuf>) -> Vec<PromptBinding> {
-    let mut const_names = BTreeSet::new();
-    let mut prompts = Vec::<PromptBinding>::new();
-    for path in prompt_files {
-        println!("cargo:rerun-if-changed={}", path.display());
-        let relative = path
-            .strip_prefix(prompts_dir)
-            .expect("prompt file under prompt dir");
-        let prompt_id = prompt_id_from_relative_path(relative);
-        let const_name = prompt_const_name_from_relative_path(relative);
-        assert!(
-            const_names.insert(const_name.clone()),
-            "duplicate generated prompt constant name {const_name}"
-        );
-        let content = fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("failed to read prompt {}: {err}", path.display()));
-        let content = trim_trailing_line_endings(&content).to_string();
-        let kind = if is_app_prompt_file(relative) {
-            PromptBindingKind::App(parse_app_prompt_binding(&path, &content))
-        } else if is_persona_prompt_file(relative) {
-            PromptBindingKind::Persona(parse_persona_prompt_binding(&path, &content))
-        } else {
-            PromptBindingKind::Raw
-        };
-        let source_const_name = if matches!(
-            &kind,
-            PromptBindingKind::App(_) | PromptBindingKind::Persona(_)
-        ) {
-            let source_const_name = format!("{const_name}_SOURCE");
-            assert!(
-                const_names.insert(source_const_name.clone()),
-                "duplicate generated prompt constant name {source_const_name}"
-            );
-            source_const_name
-        } else {
-            const_name.clone()
-        };
-        prompts.push(PromptBinding {
-            prompt_id,
-            const_name,
-            source_const_name,
-            content,
-            kind,
-        });
-    }
-    prompts
-}
-
-fn render_prompt_bindings(prompts: &[PromptBinding]) -> String {
-    let mut code = String::from("// @generated by build.rs. Do not edit by hand.\n\n");
-    for prompt in prompts {
-        match &prompt.kind {
-            PromptBindingKind::Raw => {
-                writeln!(
-                    code,
-                    "pub const {}: &str = {:?};\n",
-                    prompt.const_name, prompt.content
-                )
-                .expect("write raw prompt binding");
-            }
-            PromptBindingKind::App(app) => {
-                writeln!(
-                    code,
-                    "#[cfg(test)]\npub const {}: &str = {:?};\n",
-                    prompt.source_const_name, prompt.content
-                )
-                .expect("write app prompt source binding");
-                writeln!(
-                    code,
-                    "pub const {}: super::AppPrompt = super::AppPrompt {{",
-                    prompt.const_name
-                )
-                .expect("write app prompt binding");
-                writeln!(code, "    docs: {:?},", app.docs).expect("write app prompt docs");
-                code.push_str("};\n\n");
-            }
-            PromptBindingKind::Persona(persona) => {
-                writeln!(
-                    code,
-                    "#[cfg(test)]\npub const {}: &str = {:?};\n",
-                    prompt.source_const_name, prompt.content
-                )
-                .expect("write persona prompt source binding");
-                writeln!(
-                    code,
-                    "pub const {}: super::PromptPersona = super::PromptPersona {{",
-                    prompt.const_name
-                )
-                .expect("write persona prompt binding");
-                writeln!(code, "    name: {:?},", persona.name).expect("write persona name");
-                writeln!(code, "    language: {:?},", persona.language)
-                    .expect("write persona language");
-                writeln!(
-                    code,
-                    "    identity_summary: {:?},",
-                    persona.identity_summary
-                )
-                .expect("write persona identity summary");
-                code.push_str("};\n\n");
-            }
-        }
-    }
-    code.push_str("#[cfg(test)]\npub const PROMPT_SOURCES: &[(&str, &str)] = &[\n");
-    for prompt in prompts {
-        writeln!(
-            code,
-            "    ({:?}, {}),",
-            prompt.prompt_id, prompt.source_const_name
-        )
-        .expect("write prompt source entry");
-    }
-    code.push_str(
-        "];
-",
-    );
-    code
-}
-
-fn write_prompt_bindings(manifest_dir: &Path) {
-    let prompts_dir = manifest_dir.join("prompts");
-    println!("cargo:rerun-if-changed={}", prompts_dir.display());
-    assert!(
-        prompts_dir.is_dir(),
-        "prompt directory not found: {}",
-        prompts_dir.display()
-    );
-
-    let mut prompt_files = Vec::<PathBuf>::new();
-    collect_prompt_markdown_files(&prompts_dir, &mut prompt_files);
-    prompt_files.sort();
-    assert!(
-        !prompt_files.is_empty(),
-        "prompt directory contains no markdown files: {}",
-        prompts_dir.display()
-    );
-
-    let prompts = collect_prompt_bindings(&prompts_dir, prompt_files);
-    let code = render_prompt_bindings(&prompts);
-    let out_path = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("prompt_bindings.rs");
-    fs::write(out_path, code).expect("write prompt bindings");
-}
-
-fn is_app_prompt_file(relative: &Path) -> bool {
-    let components = relative
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    components.len() == 2
-        && components[0] == "apps"
-        && relative.extension().and_then(|value| value.to_str()) == Some("md")
-}
-
-fn is_persona_prompt_file(relative: &Path) -> bool {
-    let components = relative
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    components.len() == 2
-        && components[0] == "persona"
-        && relative.extension().and_then(|value| value.to_str()) == Some("md")
-}
-
-fn collect_prompt_markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let mut entries = fs::read_dir(dir)
-        .unwrap_or_else(|err| panic!("failed to read prompt dir {}: {err}", dir.display()))
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .collect::<Vec<_>>();
-    entries.sort();
-
-    for entry in entries {
-        if entry.is_dir() {
-            collect_prompt_markdown_files(&entry, out);
-        } else if entry.extension().and_then(|value| value.to_str()) == Some("md") {
-            out.push(entry);
-        }
-    }
-}
-
-fn prompt_id_from_relative_path(relative: &Path) -> String {
-    relative
-        .with_extension("")
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn prompt_const_name_from_relative_path(relative: &Path) -> String {
-    if let Some(app_stem) = app_prompt_stem(relative) {
-        return format!("APP_{}", sanitize_const_name(&app_stem));
-    }
-    if let Some(persona_stem) = persona_prompt_stem(relative) {
-        return format!("PERSONA_{}", sanitize_const_name(&persona_stem));
-    }
-    let raw = relative
-        .with_extension("")
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("_");
-    sanitize_const_name(&raw)
-}
-
-fn app_prompt_stem(relative: &Path) -> Option<String> {
-    if !is_app_prompt_file(relative) {
-        return None;
-    }
-    relative
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .map(ToOwned::to_owned)
-}
-
-fn persona_prompt_stem(relative: &Path) -> Option<String> {
-    if !is_persona_prompt_file(relative) {
-        return None;
-    }
-    relative
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .map(ToOwned::to_owned)
-}
-
-fn sanitize_const_name(raw: &str) -> String {
-    let mut name = String::new();
-    let mut previous_was_underscore = false;
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() {
-            name.push(ch.to_ascii_uppercase());
-            previous_was_underscore = false;
-        } else if !previous_was_underscore {
-            name.push('_');
-            previous_was_underscore = true;
-        }
-    }
-    let name = name.trim_matches('_').to_string();
-    assert!(
-        !name.is_empty(),
-        "prompt path produced empty constant name from {raw:?}"
-    );
-    name
-}
-
-fn trim_trailing_line_endings(input: &str) -> &str {
-    input.trim_end_matches(['\r', '\n'])
-}
-
-fn parse_app_prompt_binding(path: &Path, content: &str) -> AppPromptBinding {
-    parse_app_prompt_binding_inner(content)
-        .unwrap_or_else(|err| panic!("invalid app prompt doc {}: {err}", path.display()))
-}
-
-fn parse_app_prompt_binding_inner(content: &str) -> Result<AppPromptBinding, String> {
-    let docs = content.trim().to_string();
-    if docs.is_empty() {
-        return Err("missing app docs body".to_string());
-    }
-    Ok(AppPromptBinding { docs })
-}
-
-fn parse_persona_prompt_binding(path: &Path, content: &str) -> PersonaPromptBinding {
-    parse_persona_prompt_binding_inner(content)
-        .unwrap_or_else(|err| panic!("invalid persona prompt doc {}: {err}", path.display()))
-}
-
-fn parse_persona_prompt_binding_inner(content: &str) -> Result<PersonaPromptBinding, String> {
-    let (frontmatter, body) = split_prompt_frontmatter(content)
-        .ok_or_else(|| "expected leading frontmatter delimited by ---".to_string())?;
-    let parsed: PersonaFrontmatter = serde_yaml::from_str(frontmatter)
-        .map_err(|error| format!("invalid persona frontmatter: {error}"))?;
-    let name = parsed.name.trim().to_string();
-    if name.is_empty() {
-        return Err("name cannot be empty".to_string());
-    }
-    let language = parsed.language.trim().to_string();
-    let language = if language.is_empty() {
-        default_prompt_persona_language().to_string()
-    } else {
-        language
-    };
-    let identity_summary = body.trim().to_string();
-    if identity_summary.is_empty() {
-        return Err("missing persona body".to_string());
-    }
-    Ok(PersonaPromptBinding {
-        name,
-        language,
-        identity_summary,
-    })
-}
-
-#[derive(Deserialize)]
-struct PersonaFrontmatter {
-    name: String,
-    #[serde(default)]
-    language: String,
-}
-
-const fn default_prompt_persona_language() -> &'static str {
-    "configured-locale"
-}
-
-/// YAML between a leading `---` line and the next closing `---` line.
-///
-/// LF and CRLF are both accepted. Missing, unclosed, or empty frontmatter is
-/// rejected. Returns the raw frontmatter text and the body after the fence.
-fn split_prompt_frontmatter(content: &str) -> Option<(&str, &str)> {
-    let mut offset = 0usize;
-    let mut lines = Vec::new();
-    for segment in content.split_inclusive('\n') {
-        let start = offset;
-        offset += segment.len();
-        let body_len = segment.trim_end_matches(['\r', '\n']).len();
-        lines.push((start, start + body_len, offset));
-    }
-
-    let (open_start, open_end, _) = lines.first().copied()?;
-    if content[open_start..open_end].trim() != "---" || open_end == content.len() {
-        return None;
-    }
-
-    let mut close = None;
-    for &(start, end, next) in lines.iter().skip(1) {
-        if content[start..end].trim() == "---" {
-            close = Some((start, next));
-            break;
-        }
-    }
-    let (close_start, body_start) = close?;
-    let frontmatter = content[open_end..close_start].trim();
-    if frontmatter.is_empty() {
-        return None;
-    }
-    Some((frontmatter, &content[body_start..]))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_persona_prompt_binding_inner;
-
-    #[test]
-    fn persona_frontmatter_accepts_crlf() {
-        let parsed = parse_persona_prompt_binding_inner(
-            "---\r\nname: Test Persona\r\nlanguage: zh-CN\r\n---\r\n\r\nUse Chinese.\r\n",
-        )
-        .expect("crlf frontmatter");
-        assert_eq!(parsed.name, "Test Persona");
-        assert_eq!(parsed.language, "zh-CN");
-        assert_eq!(parsed.identity_summary, "Use Chinese.");
-    }
-
-    #[test]
-    fn persona_frontmatter_rejects_missing_closing_fence() {
-        let parsed = parse_persona_prompt_binding_inner(
-            "---\nname: Test Persona\nlanguage: en-US\n\nBody.\n",
-        );
-        assert!(parsed.is_err(), "unclosed frontmatter should fail");
-    }
-}
-
-fn write_builtin_skill_bindings(manifest_dir: &Path) {
-    let skills_dir = manifest_dir.join("skills");
-    println!("cargo:rerun-if-changed={}", skills_dir.display());
-
-    let mut sources = Vec::<(String, PathBuf)>::new();
-    if let Ok(entries) = fs::read_dir(&skills_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let skill_file = path.join("SKILL.md");
-            if !skill_file.is_file() {
-                continue;
-            }
-            println!("cargo:rerun-if-changed={}", skill_file.display());
-            let dir_name = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .expect("skill dir name")
-                .to_string();
-            let canonical = skill_file
-                .canonicalize()
-                .unwrap_or_else(|_| skills_dir.join(&dir_name).join("SKILL.md"));
-            sources.push((dir_name, canonical));
-        }
-    }
-    sources.sort_by(|left, right| left.0.cmp(&right.0));
-
-    let out_path = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("builtin_skills.rs");
-    let mut code = String::from("pub(super) const BUILTIN_SKILL_SOURCES: &[(&str, &str)] = &[\n");
-    for (id, path) in &sources {
-        let path = path.to_string_lossy().replace('\\', "/");
-        writeln!(code, "    ({id:?}, include_str!(r\"{path}\")),")
-            .expect("write built-in skill source entry");
-    }
-    code.push_str("];\n");
-    fs::write(out_path, code).expect("write builtin skill bindings");
-}
-
-fn write_builtin_workflow_bindings(manifest_dir: &Path) {
-    let workflows_dir = manifest_dir.join("workflows");
-    println!("cargo:rerun-if-changed={}", workflows_dir.display());
-
-    let mut sources = Vec::<(String, PathBuf)>::new();
-    if let Ok(entries) = fs::read_dir(&workflows_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("lua") {
-                continue;
-            }
-            println!("cargo:rerun-if-changed={}", path.display());
-            let id = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .expect("workflow file stem")
-                .to_string();
-            let canonical = path
-                .canonicalize()
-                .unwrap_or_else(|_| workflows_dir.join(format!("{id}.lua")));
-            sources.push((id, canonical));
-        }
-    }
-    sources.sort_by(|left, right| left.0.cmp(&right.0));
-
-    let out_path =
-        PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("builtin_workflows.rs");
-    let mut code =
-        String::from("pub(super) const BUILTIN_WORKFLOW_SOURCES: &[(&str, &str)] = &[\n");
-    for (id, path) in &sources {
-        let path = path.to_string_lossy().replace('\\', "/");
-        writeln!(code, "    ({id:?}, include_str!(r\"{path}\")),")
-            .expect("write built-in workflow source entry");
-    }
-    code.push_str("];\n");
-    fs::write(out_path, code).expect("write builtin workflow bindings");
 }

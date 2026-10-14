@@ -11,8 +11,8 @@
 //! (`ProviderConfig::AnthropicCompatible`), not an `openai-compatible`
 //! `api_style`.
 
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use super::transport::{Authentication, BackendHttp};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
@@ -20,31 +20,25 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use miette::{Result, miette};
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
 use tracing::warn;
 
+use super::extract_json_value_from_content;
 use super::io::{
-    default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
-    looks_like_vision_unsupported_error, non_empty_string, parse_retry_after_seconds,
-    read_response_text_with_timeout, send_request_for_streaming_response,
-    summarize_agent_turn_request, summarize_prompt_request, truncate_for_error,
-    truncate_for_json_error,
+    format_request_error, looks_like_context_window_error, looks_like_vision_unsupported_error,
+    non_empty_string, read_response_text_with_timeout, summarize_agent_turn_request,
+    summarize_prompt_request, truncate_for_error, truncate_for_json_error,
 };
 use super::payload::{flatten_tool_result_as_assistant_text, image_part_data_url};
-use super::{extract_json_value_from_content, shared_request_rate_limiter};
 use crate::context_budget::{ContextBudgetExceededError, RequestBudgetLimits};
 use crate::core::{
     ModelProgressSink, ModelProvider, ModelRequestOptions, TokenUsage, TokenUsageInfo,
 };
 use crate::model_catalog::catalog_model_capacity;
-use crate::reasoning::runtime::{
+use crate::model_protocol::{
     AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec, AgentToolSpec,
     AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, PromptRequest,
 };
 
-/// Value sent in the `anthropic-version` header. Every Anthropic-compatible
-/// relay and the official API accept the stable `2023-06-01` version.
-const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Anthropic requires `max_tokens > budget_tokens` and `budget_tokens >= 1024`.
 const MIN_THINKING_BUDGET_TOKENS: u64 = 1024;
 
@@ -59,13 +53,12 @@ const THINKING_MODE_DISABLED: u8 = 3;
 const MAX_THINKING_RETRIES: u8 = 2;
 
 pub struct AnthropicCompatibleClient {
-    client: reqwest::Client,
+    transport: BackendHttp,
     api_key: String,
     base_url: String,
     model: String,
     temperature: f64,
     thinking_budget: Option<String>,
-    rpm: Option<usize>,
     request_timeout: Duration,
     stream_idle_timeout: Duration,
     context_window_tokens: usize,
@@ -73,7 +66,6 @@ pub struct AnthropicCompatibleClient {
     auto_compact_threshold_tokens: usize,
     reserved_output_tokens: usize,
     max_completion_tokens: usize,
-    request_rate_limiter: Option<Arc<Mutex<VecDeque<Instant>>>>,
     token_usage: std::sync::Mutex<TokenUsageInfo>,
     supports_vision: AtomicBool,
     /// Extended thinking request shape. `AUTO` prefers adaptive thinking and
@@ -91,10 +83,7 @@ impl AnthropicCompatibleClient {
         let base_url = crate::config::normalize_provider_base_url(base_url);
         let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
         let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .build()
-            .expect("failed to build anthropic-compatible http client");
+        let transport = BackendHttp::new(&base_url, model_config);
         let context_window_tokens = model_config.context_window_tokens();
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
@@ -104,7 +93,7 @@ impl AnthropicCompatibleClient {
             catalog_model_capacity(&model_config.model_id).is_some_and(|c| c.supports_vision)
         });
         Self {
-            client,
+            transport,
             api_key: api_key.to_string(),
             base_url: base_url.clone(),
             model: model_config.model_id.clone(),
@@ -112,7 +101,6 @@ impl AnthropicCompatibleClient {
             thinking_budget: model_config
                 .thinking_budget()
                 .map(|budget| budget.as_str().to_string()),
-            rpm: model_config.rpm(),
             request_timeout,
             stream_idle_timeout,
             context_window_tokens,
@@ -120,11 +108,6 @@ impl AnthropicCompatibleClient {
             auto_compact_threshold_tokens,
             reserved_output_tokens,
             max_completion_tokens,
-            request_rate_limiter: shared_request_rate_limiter(
-                &base_url,
-                &model_config.model_id,
-                model_config.rpm(),
-            ),
             token_usage: std::sync::Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
@@ -157,140 +140,6 @@ impl AnthropicCompatibleClient {
             context_window_tokens: self.effective_context_window_tokens,
             auto_compact_threshold_tokens: self.auto_compact_threshold_tokens,
             reserved_output_tokens: self.reserved_output_tokens,
-        }
-    }
-
-    async fn wait_for_request_slot(&self, _request_context: &[String]) {
-        let Some(limiter) = &self.request_rate_limiter else {
-            return;
-        };
-        let Some(rpm) = self.rpm else {
-            return;
-        };
-        let window = Duration::from_mins(1);
-        loop {
-            let mut queue = limiter.lock().await;
-            let now = Instant::now();
-            queue.retain(|t| now.duration_since(*t) < window);
-            if queue.len() < rpm {
-                queue.push_back(now);
-                return;
-            }
-            let oldest = *queue.front().unwrap();
-            let wait = window.checked_sub(now.duration_since(oldest)).unwrap();
-            drop(queue);
-            tokio::time::sleep(wait).await;
-        }
-    }
-
-    async fn post_messages_with_retry(
-        &self,
-        payload: &Value,
-        request_context: &[String],
-        session_headers: &reqwest::header::HeaderMap,
-    ) -> Result<reqwest::Response> {
-        const MAX_429_RETRIES: usize = 4;
-        const MAX_5XX_RETRIES: usize = 3;
-
-        let url = self.url();
-        let mut rate_limit_attempt = 0usize;
-        let mut transient_attempt = 0usize;
-        loop {
-            self.wait_for_request_slot(request_context).await;
-            let request = self
-                .client
-                .post(&url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .header(
-                    reqwest::header::AUTHORIZATION,
-                    format!("Bearer {}", self.api_key),
-                )
-                .headers(session_headers.clone())
-                .json(payload);
-            let response = send_request_for_streaming_response(
-                request,
-                self.request_timeout,
-                "anthropic-compatible request failed",
-                &url,
-                request_context,
-            )
-            .await?;
-
-            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                let retry_after = response
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(parse_retry_after_seconds);
-                let body = read_response_text_with_timeout(
-                    response,
-                    self.request_timeout,
-                    "anthropic-compatible 429 body read failed",
-                    &url,
-                    request_context,
-                )
-                .await?;
-
-                if rate_limit_attempt >= MAX_429_RETRIES {
-                    return Err(miette!(
-                        "anthropic-compatible returned HTTP 429 after {} retries: {}",
-                        MAX_429_RETRIES,
-                        truncate_for_error(&body)
-                    ));
-                }
-
-                let delay = retry_after.map_or_else(
-                    || default_rate_limit_backoff(rate_limit_attempt),
-                    Duration::from_secs,
-                );
-                warn!(
-                    "anthropic-compatible returned HTTP 429; retrying in {} ms (attempt {}/{})\n{}",
-                    delay.as_millis(),
-                    rate_limit_attempt + 1,
-                    MAX_429_RETRIES,
-                    request_context.join("\n")
-                );
-                tokio::time::sleep(delay).await;
-                rate_limit_attempt += 1;
-                continue;
-            }
-
-            if response.status().is_server_error() {
-                let status = response.status();
-                let body = read_response_text_with_timeout(
-                    response,
-                    self.request_timeout,
-                    "anthropic-compatible 5xx body read failed",
-                    &url,
-                    request_context,
-                )
-                .await?;
-
-                if transient_attempt >= MAX_5XX_RETRIES {
-                    return Err(miette!(
-                        "anthropic-compatible returned HTTP {} after {} retries: {}",
-                        status,
-                        MAX_5XX_RETRIES,
-                        truncate_for_error(&body)
-                    ));
-                }
-
-                let delay = Duration::from_millis(400 * (1u64 << transient_attempt));
-                warn!(
-                    "anthropic-compatible returned HTTP {}; retrying in {} ms (attempt {}/{})\n{}",
-                    status,
-                    delay.as_millis(),
-                    transient_attempt + 1,
-                    MAX_5XX_RETRIES,
-                    request_context.join("\n")
-                );
-                tokio::time::sleep(delay).await;
-                transient_attempt += 1;
-                continue;
-            }
-
-            return Ok(response);
         }
     }
 
@@ -383,16 +232,20 @@ impl ModelProvider for AnthropicCompatibleClient {
     ) -> Result<Value> {
         let budget = &options.budget;
         let request_context = summarize_prompt_request(&request, Some(budget));
-        let session_headers =
-            super::opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
+        let backend_request = self.transport.request(
+            "/messages",
+            Authentication::Anthropic(&self.api_key),
+            &reqwest::header::HeaderMap::new(),
+            &options,
+        )?;
         let tool_name = request.tool_name.clone();
         // Some models (e.g. Claude Opus 5.5) reject a forced tool_choice; fall back
         // to `auto` and read the structured object from the text answer.
         let mut force_tool = true;
         let response = loop {
             let payload = build_prompt_payload(self, &request, force_tool);
-            let response = self
-                .post_messages_with_retry(&payload, &request_context, &session_headers)
+            let response = backend_request
+                .post(&payload, &request_context, self.request_timeout)
                 .await?;
             let status = response.status();
             if status.is_success() {
@@ -459,14 +312,18 @@ impl ModelProvider for AnthropicCompatibleClient {
     ) -> Result<AgentTurnStreamResult> {
         let budget = &options.budget;
         let request_context = summarize_agent_turn_request(&request, Some(budget));
-        let session_headers =
-            super::opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
+        let backend_request = self.transport.request(
+            "/messages",
+            Authentication::Anthropic(&self.api_key),
+            &reqwest::header::HeaderMap::new(),
+            &options,
+        )?;
         let mut strip_images = !self.supports_vision.load(Ordering::Relaxed);
         let mut thinking_retries = 0u8;
         loop {
             let payload = build_agent_payload(self, &request, strip_images);
-            let response = self
-                .post_messages_with_retry(&payload, &request_context, &session_headers)
+            let response = backend_request
+                .post(&payload, &request_context, self.request_timeout)
                 .await?;
             let status = response.status();
             if status.is_success() {
@@ -1011,13 +868,14 @@ fn anthropic_user_blocks(content: &AgentContent, strip_images: bool) -> Vec<Valu
                     blocks.push(json!({ "type": "text", "text": text }));
                 }
             }
-            AgentContentPart::Image {
-                path, description, ..
-            } => {
+            AgentContentPart::Image { .. }
+            | AgentContentPart::ResourceImage { .. }
+            | AgentContentPart::ImageData { .. } => {
+                let label = part.image_label().unwrap_or("image");
                 if strip_images {
                     blocks.push(json!({
                         "type": "text",
-                        "text": format!("[image: {}]", description.as_deref().unwrap_or(path)),
+                        "text": format!("[image: {}]", label),
                     }));
                     continue;
                 }
@@ -1026,7 +884,7 @@ fn anthropic_user_blocks(content: &AgentContent, strip_images: bool) -> Vec<Valu
                         "type": "text",
                         "text": format!(
                             "[image attachment unavailable: {}]",
-                            description.as_deref().unwrap_or(path)
+                            label
                         ),
                     }));
                     continue;
@@ -1038,7 +896,7 @@ fn anthropic_user_blocks(content: &AgentContent, strip_images: bool) -> Vec<Valu
                         "type": "text",
                         "text": format!(
                             "[image attachment unavailable: {}]",
-                            description.as_deref().unwrap_or(path)
+                            label
                         ),
                     }));
                 }

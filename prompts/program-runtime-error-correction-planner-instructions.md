@@ -1,4 +1,0 @@
-- Prefer the smallest effective incremental runtime contract additions.
-- Do not duplicate semantically equivalent rules already present in current runtime contract additions.
-- Only use the supplied RuntimeErrorCase records as evidence.
-- If a case looks like task quality, workflow optimization, or ordinary tool/environment failure, do not create a candidate from it.

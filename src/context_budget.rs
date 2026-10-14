@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::reasoning::runtime::{
+use crate::model_protocol::{
     AgentMessage, AgentToolInputSpec, AgentToolSpec, HistoryMessage, PromptRequest,
     estimate_assistant_tool_call_protocol_tokens,
 };
@@ -207,21 +207,37 @@ pub fn truncate_text_to_token_budget_with_notice(
     max_tokens: usize,
     notice: &str,
 ) -> String {
-    let max_chars = max_tokens.saturating_mul(APPROX_BYTES_PER_TOKEN).max(1);
-    let total_chars = text.chars().count();
-    if total_chars <= max_chars {
-        return text.to_string();
+    let max_bytes = max_tokens.saturating_mul(APPROX_BYTES_PER_TOKEN);
+    if text.len() <= max_bytes {
+        return text.to_owned();
     }
-
-    let kept = text.chars().take(max_chars).collect::<String>();
-    format!(
-        "{kept}\n{notice} ({} chars omitted)",
-        total_chars.saturating_sub(max_chars)
-    )
+    let total = text.chars().count();
+    let marker = format!("{notice} ({total} chars omitted)");
+    let mut end = max_bytes.saturating_sub(marker.len() + 1).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let marker = format!(
+        "{notice} ({} chars omitted)",
+        total - text[..end].chars().count()
+    );
+    if marker.len() + 1 > max_bytes {
+        return utf8_prefix(&marker, max_bytes).to_owned();
+    }
+    let result = format!("{}\n{marker}", &text[..end]);
+    utf8_prefix(&result, max_bytes).to_owned()
 }
 
-pub fn estimate_agent_turn_request(
-    messages: &[AgentMessage],
+pub(crate) fn utf8_prefix(text: &str, bytes: usize) -> &str {
+    let mut end = text.len().min(bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+pub fn estimate_agent_turn_request<'a>(
+    messages: impl IntoIterator<Item = &'a AgentMessage>,
     tools: &[AgentToolSpec],
     limits: RequestBudgetLimits,
 ) -> RequestBudgetBreakdown {
@@ -346,14 +362,6 @@ pub fn estimate_prompt_request(
                 .sum(),
         },
         BudgetSection {
-            name: "memory_messages",
-            tokens: request
-                .long_term_memory_messages
-                .iter()
-                .map(estimate_history_message_tokens)
-                .sum(),
-        },
-        BudgetSection {
             name: "history_messages",
             tokens: request
                 .history_messages
@@ -465,6 +473,16 @@ mod tests {
             }],
             limits,
         )
+    }
+
+    #[test]
+    fn multilingual_truncation_uses_the_same_byte_budget_as_token_estimation() {
+        let text = "中文🙂".repeat(1000);
+        for tokens in [1, 16, 100, 4096] {
+            let truncated = truncate_text_to_token_budget(&text, tokens);
+            assert!(approx_token_count(&truncated) <= tokens);
+            assert!(text.starts_with(truncated.split('\n').next().unwrap_or("")) || tokens < 32);
+        }
     }
 
     #[test]

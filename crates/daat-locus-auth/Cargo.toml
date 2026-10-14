@@ -1,0 +1,26 @@
+[package]
+name = "daat-locus-auth"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[features]
+browser = ["dep:wasm-bindgen"]
+
+[dependencies]
+opaque-ke = { version = "=4.0.1", features = ["argon2", "std"] }
+rand = "0.8"
+sha2 = "0.10"
+zeroize = "1"
+aes-gcm = "0.10"
+hkdf = "0.12"
+wasm-bindgen = { version = "=0.2.128", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

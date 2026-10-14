@@ -23,35 +23,17 @@ pub enum PersistenceFileMode {
 }
 
 impl PersistenceStore {
+    pub const fn from_paths(paths: DaatLocusPaths) -> Self {
+        Self { paths }
+    }
+
     pub async fn runtime() -> Self {
-        Self::for_session(None).await
-    }
-
-    pub fn runtime_sync() -> Self {
-        Self::for_session_sync(None)
-    }
-
-    pub async fn for_session(session_id: Option<&str>) -> Self {
-        if let Some(id) = session_id {
-            let paths = DaatLocusPaths::for_session(id);
-            let _ = tokio::fs::create_dir_all(paths.state_dir()).await;
-            let _ = tokio::fs::create_dir_all(paths.memory_dir()).await;
-            let _ = tokio::fs::create_dir_all(paths.cache_dir()).await;
-            return Self { paths };
-        }
         Self {
             paths: daat_locus_paths().await,
         }
     }
 
-    pub fn for_session_sync(session_id: Option<&str>) -> Self {
-        if let Some(id) = session_id {
-            let paths = DaatLocusPaths::for_session(id);
-            let _ = fs::create_dir_all(paths.state_dir());
-            let _ = fs::create_dir_all(paths.memory_dir());
-            let _ = fs::create_dir_all(paths.cache_dir());
-            return Self { paths };
-        }
+    pub fn runtime_sync() -> Self {
         Self {
             paths: daat_locus_paths_sync(),
         }
@@ -63,10 +45,6 @@ impl PersistenceStore {
 
     pub fn state_file(&self, file_name: &str) -> PathBuf {
         self.paths.state_file(file_name)
-    }
-
-    pub fn memory_file(&self, file_name: &str) -> PathBuf {
-        self.paths.memory_file(file_name)
     }
 
     pub async fn read_postcard_state_or_default<T>(&self, file_name: &str, label: &str) -> T
@@ -83,51 +61,11 @@ impl PersistenceStore {
         read_postcard_or_default_sync(&self.state_file(file_name), label)
     }
 
-    pub async fn read_postcard_memory<T>(&self, file_name: &str, label: &str) -> Option<T>
-    where
-        T: DeserializeOwned,
-    {
-        read_postcard_optional(&self.memory_file(file_name), label).await
-    }
-
     pub async fn read_json_config_or_default<T>(&self, file_name: &str, label: &str) -> T
     where
         T: DeserializeOwned + Default,
     {
         read_json_or_default(&self.config_file(file_name), label).await
-    }
-
-    pub async fn read_json_memory<T>(&self, file_name: &str, label: &str) -> Option<T>
-    where
-        T: DeserializeOwned,
-    {
-        read_json_optional(&self.memory_file(file_name), label).await
-    }
-
-    pub async fn write_postcard_memory<T>(&self, file_name: &str, value: &T) -> Result<()>
-    where
-        T: Serialize + ?Sized + Sync,
-    {
-        write_postcard_atomic(
-            &self.memory_file(file_name),
-            value,
-            PersistenceFileMode::Default,
-        )
-        .await
-    }
-
-    pub async fn write_json_memory<T>(&self, file_name: &str, value: &T) -> Result<()>
-    where
-        T: Serialize + ?Sized + Sync,
-    {
-        let bytes = serde_json::to_vec_pretty(value).into_diagnostic()?;
-        write_bytes_atomic(
-            self.memory_file(file_name),
-            bytes,
-            PersistenceFileMode::Default,
-        )
-        .await
-        .into_diagnostic()
     }
 
     pub async fn read_json_state_or_default<T>(&self, file_name: &str, label: &str) -> T
@@ -308,12 +246,15 @@ pub fn write_bytes_atomic_sync(
             .create_new(true)
             .open(&temp_path)?;
         if mode == PersistenceFileMode::Private {
-            set_private_file_permissions(&temp_path);
+            set_private_file_permissions(&temp_path)?;
         }
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
         fs::rename(&temp_path, path)?;
+        if mode == PersistenceFileMode::Private {
+            set_private_file_permissions(path)?;
+        }
         sync_parent_dir(parent);
         Ok(())
     })();
@@ -341,17 +282,29 @@ pub fn append_bytes_durable_sync(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-pub fn set_private_file_permissions(path: &Path) {
+pub fn set_private_file_permissions(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .expect("private persistence file permissions should be set");
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        crate::actors::permissions::protect_private_path(path).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Cannot establish private storage permissions",
+            )
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Private storage permissions are unavailable",
+        ))
     }
 }
 

@@ -1,32 +1,7 @@
-//! Bounded tool output with a re-readable spill file.
-//!
-//! A tool result that exceeds its context budget is cut down for the model and
-//! the full text is written to a shared temporary pool. The truncation marker
-//! tells the model where the remainder went so it can pull back just the range
-//! it actually needs instead of guessing.
-//!
-//! Ownership split:
-//!
-//! - Session processes write spills and never collect them.
-//! - The Manager daemon owns age-based collection of the pool.
-//!
-//! Sessions are runtime workers with no global view, and the pool is shared by
-//! every session, so letting each writer also collect would make every session
-//! responsible for files it knows nothing about. The Manager already owns
-//! global housekeeping (config recovery, registry pruning) and outlives all
-//! sessions.
-//!
-//! The pool lives under the OS temp directory rather than `DAAT_LOCUS_HOME`
-//! because the Daat home is a sandbox deny-listed root that protects API keys,
-//! the daemon token, and session state. A spill written there could not be
-//! `read_file` at all. The OS temp dir is already readable, and the pool is
-//! added to `deny_write_paths` so the model can read back its own overflow but
-//! cannot overwrite a spill that another pending tool result still points at.
-//!
-//! Collection is a stat sweep, not per-file timers. The deadline lives in each
-//! file's mtime rather than in memory, so it survives a Manager restart, and a
-//! file that is due but momentarily undeletable (a Session still holding it
-//! open on Windows) is simply retried by the next sweep.
+//! Bound model-visible tool output and store readable overflow in a temporary pool.
+//! Actor execution supplies continuations backed by its immutable resource ledger.
+//! Standalone temporary-pool writers and collection are separate helpers.
+//! The pool must remain readable and protected against model writes by access policy.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -40,7 +15,7 @@ use crate::context_budget::APPROX_BYTES_PER_TOKEN;
 /// model can recover from, so expiry is a cost, not a correctness break.
 pub const SPILL_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// How often the Manager sweeps the pool.
+/// How often the service sweeps the pool.
 ///
 /// Bounds worst-case overshoot at roughly a tenth of the TTL. This is the only
 /// knob controlling how promptly expired spills are reclaimed, and a longer
@@ -55,15 +30,15 @@ const PLAIN_TRUNCATION_NOTICE: &str = "[tool output too long; model content trun
 /// Identity used to name one spill file.
 #[derive(Clone, Copy, Debug)]
 pub struct SpillContext<'a> {
-    pub session_hint: &'a str,
+    pub source_hint: &'a str,
     pub tool_name: &'a str,
     pub call_id: &'a str,
 }
 
 impl<'a> SpillContext<'a> {
-    pub fn new(session_hint: &'a str, tool_name: &'a str, call_id: &'a str) -> Self {
+    pub fn new(source_hint: &'a str, tool_name: &'a str, call_id: &'a str) -> Self {
         Self {
-            session_hint,
+            source_hint,
             tool_name,
             call_id,
         }
@@ -77,7 +52,7 @@ pub fn pool_dir() -> PathBuf {
         .join(POOL_SUBDIR_NAME)
 }
 
-/// Create the pool if needed. Idempotent; the Manager calls it at boot and
+/// Create the pool if needed. Idempotent; the service calls it at boot and
 /// every spill write calls it before writing.
 pub fn ensure_pool_dir() -> std::io::Result<PathBuf> {
     let dir = pool_dir();
@@ -130,7 +105,7 @@ fn bound_tool_model_content_in(
         return prefix.text;
     }
 
-    match target {
+    let bounded = match target {
         None => append_plain_truncation(prefix.text, max_chars, prefix.total_chars),
         Some(OverflowTarget::Continue { instruction }) => {
             let marker = format!(
@@ -148,51 +123,47 @@ fn bound_tool_model_content_in(
             }
             None => append_plain_truncation(prefix.text, max_chars, prefix.total_chars),
         },
-    }
+    };
+    crate::context_budget::utf8_prefix(&bounded, max_chars).to_owned()
 }
 
 struct CharPrefix {
     text: String,
-    kept_chars: usize,
     total_chars: usize,
     /// True when `text` already contains every char of the source.
     exhausted: bool,
 }
 
-/// One forward scan. Stops copying once `limit` chars are kept, but keeps
+/// One forward scan. Stops copying once `limit` UTF-8 bytes are kept, but keeps
 /// counting so callers still know the full length.
 fn take_chars_bounded(text: &str, limit: usize) -> CharPrefix {
-    let mut out = String::new();
-    let mut total = 0usize;
-    for ch in text.chars() {
-        if total < limit {
-            out.push(ch);
-        }
-        total += 1;
-    }
+    let out = crate::context_budget::utf8_prefix(text, limit).to_owned();
     CharPrefix {
-        kept_chars: total.min(limit),
+        total_chars: text.chars().count(),
+        exhausted: out.len() == text.len(),
         text: out,
-        total_chars: total,
-        exhausted: total <= limit,
     }
 }
 
 /// Keep as much of the already-scanned head as fits once the marker has been
 /// accounted for, so the result stays inside the budget instead of overshooting it.
 fn keep_head_from_prefix(prefix: &CharPrefix, max_chars: usize, marker: &str) -> String {
-    let head_chars = max_chars.saturating_sub(marker.chars().count()).max(1);
-    if head_chars >= prefix.kept_chars {
-        return prefix.text.clone();
-    }
-    prefix.text.chars().take(head_chars).collect()
+    let head_bytes = max_chars.saturating_sub(marker.len() + 1);
+    crate::context_budget::utf8_prefix(&prefix.text, head_bytes).to_owned()
 }
 
 fn append_plain_truncation(kept: String, max_chars: usize, total_chars: usize) -> String {
-    format!(
-        "{kept}\n{PLAIN_TRUNCATION_NOTICE} ({} chars omitted)",
-        total_chars.saturating_sub(max_chars)
-    )
+    let marker = format!(
+        "{PLAIN_TRUNCATION_NOTICE} ({} chars omitted)",
+        total_chars.saturating_sub(kept.chars().count())
+    );
+    let head =
+        crate::context_budget::utf8_prefix(&kept, max_chars.saturating_sub(marker.len() + 1));
+    let marker = format!(
+        "{PLAIN_TRUNCATION_NOTICE} ({} chars omitted)",
+        total_chars.saturating_sub(head.chars().count())
+    );
+    crate::context_budget::utf8_prefix(&format!("{head}\n{marker}"), max_chars).to_owned()
 }
 
 struct WrittenSpill {
@@ -261,7 +232,7 @@ fn spill_file_name(created: SystemTime, ctx: &SpillContext<'_>) -> String {
         .unwrap_or_default();
     format!(
         "{millis}-{}-{}-{}.txt",
-        sanitize_component(ctx.session_hint, 8),
+        sanitize_component(ctx.source_hint, 8),
         sanitize_component(ctx.tool_name, 40),
         sanitize_component(ctx.call_id, 12),
     )
@@ -293,7 +264,7 @@ fn sanitize_component(value: &str, max_len: usize) -> String {
 pub struct SweepReport {
     pub removed: usize,
     /// Expired files that could not be removed right now, typically because a
-    /// Session still holds one open. The next sweep retries them.
+    /// writer still holds one open. The next sweep retries them.
     pub deferred: usize,
     pub retained: usize,
 }
@@ -332,7 +303,7 @@ fn sweep_dir(dir: &Path, now: SystemTime) -> SweepReport {
             report.retained += 1;
             continue;
         }
-        // The Manager is the only deleter, so a failure here is never a race
+        // The service is the only deleter, so a failure here is never a race
         // with another collector. The file is due either way, so a failure is
         // counted and retried by the next pass rather than surfaced.
         match std::fs::remove_file(entry.path()) {
@@ -344,7 +315,7 @@ fn sweep_dir(dir: &Path, now: SystemTime) -> SweepReport {
     report
 }
 
-/// Manager-side collection: one pass at boot, then one per interval.
+/// service-side collection: one pass at boot, then one per interval.
 ///
 /// There is deliberately no filesystem watcher here. The sweep is authoritative
 /// and the watcher could only ever shave the sweep interval off a file's
@@ -376,6 +347,14 @@ fn sweep_once() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multilingual_tool_observations_are_bounded_in_bytes() {
+        let text = "中文🙂".repeat(1000);
+        let bounded = bound_tool_model_content(&text, 100, None);
+        assert!(crate::context_budget::approx_token_count(&bounded) <= 100);
+        assert!(bounded.contains(PLAIN_TRUNCATION_NOTICE));
+    }
 
     #[test]
     fn sanitize_component_is_platform_safe() {
@@ -575,7 +554,7 @@ mod tests {
         std::fs::create_dir_all(&pool).expect("create pool");
 
         let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
-        crate::runtime::bootstrap::deny_tool_output_spill_writes_for_test(&mut policy, &pool);
+        policy.filesystem.deny_write_paths.push(pool.clone());
 
         let inside = pool.join("spill.txt");
         assert!(

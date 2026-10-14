@@ -1,0 +1,15 @@
+{
+  "name": "daat-locus-signaling",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "dev": "wrangler dev --local"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261010.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.0.0"
+  }
+}

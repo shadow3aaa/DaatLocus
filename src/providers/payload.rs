@@ -76,7 +76,7 @@ pub(super) fn build_agent_turn_payload_common(
 }
 
 pub(super) fn history_message_to_openai_message(
-    message: &crate::reasoning::runtime::HistoryMessage,
+    message: &crate::model_protocol::HistoryMessage,
     flatten_tool_messages: bool,
 ) -> serde_json::Value {
     provider_message_from_agent_message(&message.message, flatten_tool_messages)
@@ -90,12 +90,6 @@ pub(super) fn prompt_request_to_openai_messages(
         .system_messages
         .into_iter()
         .map(|message| json!({"role": "system", "content": message}))
-        .chain(
-            request
-                .long_term_memory_messages
-                .into_iter()
-                .map(|message| history_message_to_openai_message(&message, flatten_tool_messages)),
-        )
         .chain(
             request
                 .history_messages
@@ -249,6 +243,14 @@ pub(super) fn flatten_tool_result_as_assistant_text(name: &str, content: &str) -
 }
 
 pub(super) fn image_part_data_url(part: &AgentContentPart) -> Option<String> {
+    if let AgentContentPart::ImageData {
+        media_type,
+        data_base64,
+        ..
+    } = part
+    {
+        return Some(format!("data:{media_type};base64,{data_base64}"));
+    }
     let AgentContentPart::Image {
         path, media_type, ..
     } = part
@@ -314,15 +316,16 @@ fn openai_user_content(content: &AgentContent, strip_images: bool) -> serde_json
                     "text": text,
                 }));
             }
-            AgentContentPart::Image {
-                path, description, ..
-            } => {
+            AgentContentPart::Image { .. }
+            | AgentContentPart::ResourceImage { .. }
+            | AgentContentPart::ImageData { .. } => {
+                let label = part.image_label().unwrap_or("image");
                 if strip_images {
                     parts.push(json!({
                         "type": "text",
                         "text": format!(
                             "[image: {}]",
-                            description.as_deref().unwrap_or(path)
+                            label
                         ),
                     }));
                     continue;
@@ -332,7 +335,7 @@ fn openai_user_content(content: &AgentContent, strip_images: bool) -> serde_json
                         "type": "text",
                         "text": format!(
                             "[image attachment unavailable: {}]",
-                            description.as_deref().unwrap_or(path)
+                            label
                         ),
                     }));
                     continue;

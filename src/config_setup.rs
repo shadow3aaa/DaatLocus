@@ -1,9 +1,13 @@
+use base64::Engine;
+use sha2::Digest;
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     time::Duration,
 };
+use tokio::{net::TcpListener, sync::oneshot};
 
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
@@ -11,9 +15,8 @@ use uuid::Uuid;
 
 use crate::{
     config::{
-        Config, DaemonConfig, ModelConfig, ProviderConfig, ScopeConfig, SleepConfig,
-        TelegramConfig, ThinkingBudget, load_config, normalize_provider_base_url, parse_env_ref,
-        write_config,
+        Config, DaemonConfig, ModelConfig, ProviderConfig, ThinkingBudget, load_config,
+        normalize_provider_base_url, parse_env_ref, write_config,
     },
     daat_locus_paths::daat_locus_paths,
     i18n::Locale,
@@ -27,10 +30,6 @@ use crate::{
         CodexOAuthTokens, codex_cli_auth_file, import_codex_cli_oauth_file,
         write_codex_oauth_tokens,
     },
-    reasoning::turn_compile::{
-        PromptPersonaSpec, load_prompt_persona_spec_sync, prompt_persona_path_sync,
-        render_prompt_persona_markdown,
-    },
 };
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -40,6 +39,10 @@ const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_OAUTH_ISSUER: &str = "https://auth.openai.com";
+const CODEX_OAUTH_DEFAULT_BROWSER_PORT: u16 = 1455;
+const CODEX_OAUTH_ORIGINATOR: &str = "codex_cli_rs";
+const CODEX_OAUTH_SCOPES: &str =
+    "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const CODEX_DEVICE_USER_CODE_PATH: &str = "/api/accounts/deviceauth/usercode";
 const CODEX_DEVICE_TOKEN_PATH: &str = "/api/accounts/deviceauth/token";
 const CODEX_OAUTH_TOKEN_PATH: &str = "/oauth/token";
@@ -73,8 +76,36 @@ impl ConfigReadinessReport {
     }
 }
 
+/// Inspect the service's effective configuration without reading, repairing or
+/// creating a process-global configuration file.
+pub fn readiness_for_config(config: &Config) -> ConfigReadinessReport {
+    let parts = match toml::to_string(config) {
+        Ok(text) => match read_config_readiness_from_str(&text) {
+            ConfigReadOutcome::Parsed(parts) => parts,
+            _ => ReadinessParts {
+                kind: ConfigReadinessKind::Incomplete,
+                port: config.daemon.port,
+                message: "Configuration is incomplete".into(),
+            },
+        },
+        Err(_) => ReadinessParts {
+            kind: ConfigReadinessKind::Incomplete,
+            port: config.daemon.port,
+            message: "Configuration is incomplete".into(),
+        },
+    };
+    ConfigReadinessReport {
+        kind: parts.kind,
+        config_path: String::new(),
+        backup_path: String::new(),
+        port: parts.port,
+        message: parts.message,
+        recovery_note: None,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
-pub struct ManagerBootConfig {
+pub struct ServiceBootConfig {
     pub port: u16,
 }
 
@@ -83,51 +114,23 @@ pub struct SetupConfigRequest {
     #[serde(default)]
     pub locale: Option<Locale>,
     #[serde(default)]
-    pub persona_name: Option<String>,
-    #[serde(default)]
-    pub persona_language: Option<String>,
-    #[serde(default)]
-    pub persona_identity_summary: Option<String>,
-    #[serde(default)]
     pub providers: Vec<SetupProviderRequest>,
     #[serde(default)]
     pub models: Vec<SetupModelRequest>,
     #[serde(default)]
     pub main_model: Option<String>,
     #[serde(default)]
-    pub efficient_model: Option<String>,
-    #[serde(default)]
-    pub provider_kind: Option<SetupProviderKind>,
-    #[serde(default)]
-    pub provider_name: Option<String>,
-    #[serde(default)]
-    pub main_model_name: Option<String>,
-    #[serde(default)]
-    pub main_model_id: Option<String>,
-    #[serde(default)]
-    pub efficient_model_name: Option<String>,
-    #[serde(default)]
-    pub efficient_model_id: Option<String>,
-    #[serde(default)]
-    pub api_key: Option<String>,
-    #[serde(default)]
-    pub base_url: Option<String>,
+    pub approval_model: Option<String>,
     #[serde(default)]
     pub daemon_port: Option<u16>,
-    #[serde(default)]
-    pub telegram_enabled: Option<bool>,
-    #[serde(default)]
-    pub telegram_bot_token: Option<String>,
-    #[serde(default)]
-    pub sleep_enabled: Option<bool>,
-    #[serde(default)]
-    pub scope_lsp_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetupProviderRequest {
     pub kind: SetupProviderKind,
     pub name: String,
+    #[serde(default)]
+    pub credential_name: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -221,6 +224,7 @@ pub struct SetupDiscoverModelsRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetupDiscoverModelsResponse {
     pub models: Vec<SetupDiscoveredModel>,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,6 +319,7 @@ pub struct SetupDiscoveredModel {
     pub supports_vision: Option<bool>,
     #[serde(default)]
     pub thinking_budgets: Vec<String>,
+    pub reasoning_options: Vec<ReasoningOption>,
 }
 
 #[derive(Debug)]
@@ -342,19 +347,19 @@ struct BootDaemonConfig {
     port: Option<u16>,
 }
 
-pub async fn read_manager_boot_config() -> ManagerBootConfig {
+pub async fn read_service_boot_config() -> ServiceBootConfig {
     let paths = daat_locus_paths().await;
     let config_path = paths.config_file(CONFIG_FILE_NAME);
     let backup_path = paths.config_file(CONFIG_BACKUP_FILE_NAME);
     let default_port = DaemonConfig::default().port;
 
     if let Some(port) = read_boot_port_from_path(&config_path).await {
-        return ManagerBootConfig { port };
+        return ServiceBootConfig { port };
     }
     if let Some(port) = read_boot_port_from_path(&backup_path).await {
-        return ManagerBootConfig { port };
+        return ServiceBootConfig { port };
     }
-    ManagerBootConfig { port: default_port }
+    ServiceBootConfig { port: default_port }
 }
 
 pub async fn ensure_config_readiness() -> ConfigReadinessReport {
@@ -417,19 +422,49 @@ pub async fn load_complete_config() -> Result<Config> {
         .map_err(|err| miette!("failed to load complete config: {err}"))
 }
 
-pub async fn write_setup_config(request: SetupConfigRequest) -> Result<ConfigReadinessReport> {
+/// Prepare a complete candidate without changing the live config file.
+pub async fn prepare_setup_config(request: &SetupConfigRequest) -> Result<Config> {
     let base_config = load_config().await.unwrap_or_else(|_| Config::default());
-    let config = config_from_setup_request_with_base(&request, base_config)?;
+    prepare_setup_config_with_base(request, base_config)
+}
+
+pub fn prepare_setup_config_with_base(
+    request: &SetupConfigRequest,
+    base: Config,
+) -> Result<Config> {
+    let config = config_from_setup_request_with_base(request, base)?;
     config
         .validate()
         .map_err(|err| miette!("setup config is internally invalid: {err}"))?;
-    write_config(&config)
+    validate_complete_candidate(&config)?;
+    Ok(config)
+}
+
+fn validate_complete_candidate(config: &Config) -> Result<()> {
+    let text =
+        toml::to_string_pretty(config).map_err(|_| miette!("Cannot encode setup configuration"))?;
+    match read_config_readiness_from_str(&text) {
+        ConfigReadOutcome::Parsed(parts) if parts.kind == ConfigReadinessKind::Complete => Ok(()),
+        _ => Err(miette!("Setup configuration is incomplete")),
+    }
+}
+
+/// Persist exactly the prevalidated candidate, rather than rebuilding against a
+/// different base after another owner update wins the lifecycle lock.
+pub async fn write_prepared_setup_config(config: &Config) -> Result<ConfigReadinessReport> {
+    config
+        .validate()
+        .map_err(|_| miette!("Invalid setup configuration"))?;
+    validate_complete_candidate(config)?;
+    write_config(config)
         .await
         .map_err(|err| miette!("failed to write setup config: {err}"))?;
-    write_setup_persona(&request)
-        .await
-        .map_err(|err| miette!("failed to write setup persona: {err}"))?;
     Ok(ensure_config_readiness().await)
+}
+
+pub async fn write_setup_config(request: SetupConfigRequest) -> Result<ConfigReadinessReport> {
+    let candidate = prepare_setup_config(&request).await?;
+    write_prepared_setup_config(&candidate).await
 }
 
 pub async fn read_setup_config() -> Result<SetupConfigRequest> {
@@ -470,12 +505,28 @@ pub async fn discover_setup_models(
 ) -> Result<SetupDiscoverModelsResponse> {
     let name = required_name(&request.provider.name, "provider.name")?;
     let provider = provider_from_setup_provider(&request.provider)?;
-    let models = discover_model_ids(&name, &provider)
-        .await?
+    #[cfg(not(test))]
+    let (_, discovery) = tokio::join!(
+        crate::model_catalog::refresh_models_dev_cache_if_stale(),
+        discover_model_ids(&name, &provider)
+    );
+    #[cfg(test)]
+    let discovery = discover_model_ids(&name, &provider).await;
+    let (discovered, source) = match discovery {
+        Ok(models) if !models.is_empty() => (models, "provider"),
+        _ => (
+            crate::model_discovery::catalog_discovery_models(&provider),
+            "catalog",
+        ),
+    };
+    let models = discovered
         .into_iter()
         .map(|model| setup_discovered_model(&provider, model))
         .collect();
-    Ok(SetupDiscoverModelsResponse { models })
+    Ok(SetupDiscoverModelsResponse {
+        models,
+        source: source.into(),
+    })
 }
 
 pub async fn run_setup_provider_auth(
@@ -571,8 +622,7 @@ pub async fn complete_setup_provider_auth(
     }
 }
 
-fn setup_config_from_config(config: &Config) -> SetupConfigRequest {
-    let persona = load_prompt_persona_spec_sync();
+pub(crate) fn setup_config_from_config(config: &Config) -> SetupConfigRequest {
     let mut providers = config
         .providers
         .iter()
@@ -589,19 +639,11 @@ fn setup_config_from_config(config: &Config) -> SetupConfigRequest {
 
     SetupConfigRequest {
         locale: Some(config.locale),
-        persona_name: Some(persona.name),
-        persona_language: Some(persona.language),
-        persona_identity_summary: Some(persona.identity_summary),
         providers,
         models,
         main_model: Some(config.main_model.clone()),
-        efficient_model: Some(config.efficient_model.clone()),
+        approval_model: config.approval_model.clone(),
         daemon_port: Some(config.daemon.port),
-        telegram_enabled: Some(config.telegram.enabled),
-        telegram_bot_token: Some(config.telegram.bot_token.clone()),
-        sleep_enabled: Some(config.sleep.enabled),
-        scope_lsp_enabled: Some(config.scope.lsp_enabled),
-        ..SetupConfigRequest::default()
     }
 }
 
@@ -610,6 +652,7 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
         ProviderConfig::Openai { api_key, base_url } => SetupProviderRequest {
             kind: SetupProviderKind::Openai,
             name: name.to_string(),
+            credential_name: Some(name.to_string()),
             api_key: Some(api_key.clone()),
             base_url: base_url.clone(),
             keep_alive: None,
@@ -621,6 +664,7 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
         ProviderConfig::GithubCopilot { github_token } => SetupProviderRequest {
             kind: SetupProviderKind::GithubCopilot,
             name: name.to_string(),
+            credential_name: Some(name.to_string()),
             api_key: Some(github_token.clone()),
             base_url: None,
             keep_alive: None,
@@ -639,6 +683,7 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
         } => SetupProviderRequest {
             kind: SetupProviderKind::OpenaiCodexOauth,
             name: name.to_string(),
+            credential_name: Some(name.to_string()),
             api_key: None,
             base_url: base_url.clone(),
             keep_alive: None,
@@ -650,6 +695,7 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
         ProviderConfig::OpenCodeConsoleOauth { base_url, .. } => SetupProviderRequest {
             kind: SetupProviderKind::OpenCodeConsole,
             name: name.to_string(),
+            credential_name: Some(name.to_string()),
             api_key: None,
             base_url: base_url.clone(),
             keep_alive: None,
@@ -663,6 +709,7 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
         } => SetupProviderRequest {
             kind: SetupProviderKind::OpenaiCompatible,
             name: name.to_string(),
+            credential_name: Some(name.to_string()),
             api_key: Some(api_key.clone()),
             base_url: Some(base_url.clone()),
             keep_alive: None,
@@ -676,6 +723,7 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
         } => SetupProviderRequest {
             kind: SetupProviderKind::AnthropicCompatible,
             name: name.to_string(),
+            credential_name: Some(name.to_string()),
             api_key: Some(api_key.clone()),
             base_url: Some(base_url.clone()),
             keep_alive: None,
@@ -701,6 +749,7 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
                     SetupProviderKind::Ollama
                 },
                 name: name.to_string(),
+                credential_name: Some(name.to_string()),
                 api_key: api_key.clone(),
                 base_url: host.clone(),
                 keep_alive: keep_alive.clone(),
@@ -751,41 +800,26 @@ fn config_from_setup_request_with_base(
         providers,
         models,
         main_model,
-        efficient_model,
-    } = if !request.providers.is_empty() || !request.models.is_empty() {
-        config_registries_from_setup_request(request)?
-    } else {
-        legacy_config_registries_from_setup_request(request)?
-    };
+    } = config_registries_from_setup_request(request)?;
     let daemon_port = request
         .daemon_port
         .filter(|port| *port > 0)
         .unwrap_or(base.daemon.port);
-
-    let telegram = TelegramConfig {
-        enabled: request.telegram_enabled.unwrap_or(base.telegram.enabled),
-        bot_token: request
-            .telegram_bot_token
-            .clone()
-            .unwrap_or_else(|| base.telegram.bot_token.clone()),
-        poll_timeout_secs: base.telegram.poll_timeout_secs,
-    };
+    let approval_model = request
+        .approval_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| required_name(name, "approval_model"))
+        .transpose()?;
 
     Ok(Config {
         providers,
         models,
         locale: request.locale.unwrap_or(base.locale),
         main_model,
-        efficient_model,
+        approval_model,
         daemon: DaemonConfig { port: daemon_port },
-        telegram,
-        sleep: SleepConfig {
-            enabled: request.sleep_enabled.unwrap_or(base.sleep.enabled),
-        },
-        scope: ScopeConfig {
-            lsp_enabled: request.scope_lsp_enabled.unwrap_or(base.scope.lsp_enabled),
-        },
-        ..base
     })
 }
 
@@ -793,7 +827,6 @@ struct SetupConfigRegistryParts {
     providers: HashMap<String, ProviderConfig>,
     models: HashMap<String, ModelConfig>,
     main_model: String,
-    efficient_model: String,
 }
 
 fn config_registries_from_setup_request(
@@ -836,155 +869,11 @@ fn config_registries_from_setup_request(
     }
 
     let main_model = required_name(request.main_model.as_deref().unwrap_or(""), "main_model")?;
-    let efficient_model = required_name(
-        request
-            .efficient_model
-            .as_deref()
-            .filter(|model| !model.trim().is_empty())
-            .unwrap_or(&main_model),
-        "efficient_model",
-    )?;
     Ok(SetupConfigRegistryParts {
         providers,
         models,
         main_model,
-        efficient_model,
     })
-}
-
-fn legacy_config_registries_from_setup_request(
-    request: &SetupConfigRequest,
-) -> Result<SetupConfigRegistryParts> {
-    let provider_kind = request
-        .provider_kind
-        .ok_or_else(|| miette!("provider_kind is required"))?;
-    let provider_name = required_name(
-        request.provider_name.as_deref().unwrap_or(""),
-        "provider_name",
-    )?;
-    let main_model_name = required_name(
-        request.main_model_name.as_deref().unwrap_or(""),
-        "main_model_name",
-    )?;
-    let main_model_id = required_name(
-        request.main_model_id.as_deref().unwrap_or(""),
-        "main_model_id",
-    )?;
-    let efficient_model_name = required_name(
-        request.efficient_model_name.as_deref().unwrap_or(""),
-        "efficient_model_name",
-    )?;
-    let efficient_model_id = required_name(
-        request.efficient_model_id.as_deref().unwrap_or(""),
-        "efficient_model_id",
-    )?;
-
-    let provider = provider_from_setup_legacy(provider_kind, request)?;
-    let mut providers = HashMap::new();
-    providers.insert(provider_name.clone(), provider.clone());
-
-    let mut models = HashMap::new();
-    models.insert(
-        main_model_name.clone(),
-        model_from_setup(&provider_name, &provider, &main_model_id),
-    );
-    if efficient_model_name != main_model_name {
-        models.insert(
-            efficient_model_name.clone(),
-            model_from_setup(&provider_name, &provider, &efficient_model_id),
-        );
-    }
-
-    Ok(SetupConfigRegistryParts {
-        providers,
-        models,
-        main_model: main_model_name,
-        efficient_model: efficient_model_name,
-    })
-}
-
-async fn write_setup_persona(request: &SetupConfigRequest) -> Result<()> {
-    let current = load_prompt_persona_spec_sync();
-    let default = PromptPersonaSpec::default();
-    let name = match request.persona_name.as_deref() {
-        Some(name) => required_name(name, "persona_name")?,
-        None => default.name.clone(),
-    };
-    let language = request
-        .persona_language
-        .as_deref()
-        .map(str::trim)
-        .filter(|language| !language.is_empty())
-        .unwrap_or(default.language.as_str())
-        .to_string();
-    let identity_summary = request
-        .persona_identity_summary
-        .as_deref()
-        .map(str::trim)
-        .filter(|summary| !summary.is_empty())
-        .unwrap_or_else(|| {
-            let current_summary = current.identity_summary.trim();
-            if current_summary.is_empty() {
-                default.identity_summary.trim()
-            } else {
-                current_summary
-            }
-        })
-        .to_string();
-    let persona = PromptPersonaSpec {
-        name,
-        language,
-        identity_summary,
-    };
-    let content = render_prompt_persona_markdown(&persona);
-    write_bytes_atomic(
-        prompt_persona_path_sync(),
-        content.into_bytes(),
-        PersistenceFileMode::Private,
-    )
-    .await
-    .map_err(|err| miette!("write persona file failed: {err}"))
-}
-
-fn provider_from_setup_legacy(
-    provider_kind: SetupProviderKind,
-    request: &SetupConfigRequest,
-) -> Result<ProviderConfig> {
-    let api_key = request.api_key.as_deref().unwrap_or("").trim().to_string();
-    let base_url = request.base_url.as_deref().unwrap_or("").trim();
-    match provider_kind {
-        SetupProviderKind::Openai => Ok(ProviderConfig::Openai {
-            api_key,
-            base_url: optional_normalized_url(base_url),
-        }),
-        SetupProviderKind::OpenaiCompatible => Ok(ProviderConfig::OpenaiCompatible {
-            base_url: required_string(base_url, "base_url")?,
-            api_key,
-        }),
-        SetupProviderKind::AnthropicCompatible => Ok(ProviderConfig::AnthropicCompatible {
-            base_url: required_string(base_url, "base_url")?,
-            api_key,
-        }),
-        SetupProviderKind::OpenaiCodexOauth => Err(miette!(
-            "legacy Codex OAuth setup requires an imported Daat auth file"
-        )),
-        SetupProviderKind::OpenCodeConsole => Err(miette!(
-            "OpenCode Console OAuth setup requires a completed device login"
-        )),
-        SetupProviderKind::GithubCopilot => Ok(ProviderConfig::GithubCopilot {
-            github_token: api_key,
-        }),
-        SetupProviderKind::Ollama => Ok(ProviderConfig::Ollama {
-            host: optional_normalized_url(base_url),
-            api_key: (!api_key.is_empty()).then_some(api_key),
-            keep_alive: None,
-        }),
-        SetupProviderKind::OllamaCloud => Ok(ProviderConfig::Ollama {
-            host: Some("https://ollama.com".to_string()),
-            api_key: Some(required_string(&api_key, "api_key")?),
-            keep_alive: None,
-        }),
-    }
 }
 
 fn provider_from_setup_provider(provider: &SetupProviderRequest) -> Result<ProviderConfig> {
@@ -1049,48 +938,6 @@ fn required_codex_auth_file(provider: &SetupProviderRequest) -> Result<String> {
     Ok(auth_file.to_string())
 }
 
-#[cfg(test)]
-async fn prepare_setup_provider_credential(provider: &SetupProviderRequest) -> Result<()> {
-    if provider.kind != SetupProviderKind::OpenaiCodexOauth {
-        return Ok(());
-    }
-
-    match provider
-        .codex_auth_method
-        .unwrap_or(SetupCodexAuthMethod::ExistingAuthFile)
-    {
-        SetupCodexAuthMethod::ImportLocalCodex => {
-            import_codex_auth_for_provider(codex_cli_auth_file())
-                .await
-                .map(|_| ())
-        }
-        SetupCodexAuthMethod::ImportAuthFile => {
-            let path = provider
-                .codex_auth_file
-                .as_deref()
-                .map(str::trim)
-                .filter(|path| !path.is_empty())
-                .ok_or_else(|| miette!("provider.codex_auth_file is required"))?;
-            import_codex_auth_for_provider(expand_user_path(path))
-                .await
-                .map(|_| ())
-        }
-        SetupCodexAuthMethod::ExistingAuthFile
-        | SetupCodexAuthMethod::BrowserLogin
-        | SetupCodexAuthMethod::DeviceLogin => {
-            let auth_file = codex_auth_file_for_provider(provider)?;
-            if auth_file.exists() {
-                Ok(())
-            } else {
-                Err(miette!(
-                    "Codex OAuth auth file does not exist: {}",
-                    auth_file.display()
-                ))
-            }
-        }
-    }
-}
-
 async fn run_codex_setup_provider_auth(
     provider: &SetupProviderRequest,
 ) -> Result<SetupProviderAuthResponse> {
@@ -1099,11 +946,7 @@ async fn run_codex_setup_provider_auth(
         .unwrap_or(SetupCodexAuthMethod::ExistingAuthFile)
     {
         SetupCodexAuthMethod::BrowserLogin => {
-            let tokens = crate::config_wizard::run_codex_oauth_browser_flow(
-                Locale::default(),
-                |_prompt, _lines| Ok(()),
-            )
-            .await?;
+            let tokens = run_codex_oauth_browser_flow().await?;
             let auth_file = write_codex_tokens_for_provider(provider, &tokens).await?;
             Ok(SetupProviderAuthResponse {
                 api_key: None,
@@ -1602,7 +1445,8 @@ fn setup_discovered_model(
         context_window_tokens: Some(capacity.context_window_tokens),
         max_completion_tokens: Some(capacity.max_completion_tokens),
         supports_vision: Some(capacity.supports_vision),
-        thinking_budgets: reasoning_option_values(reasoning_options),
+        thinking_budgets: reasoning_option_values(reasoning_options.clone()),
+        reasoning_options,
     }
 }
 
@@ -1615,18 +1459,6 @@ fn reasoning_option_values(options: Vec<ReasoningOption>) -> Vec<String> {
             ReasoningOption::BudgetTokens { .. } => Vec::new(),
         })
         .collect()
-}
-
-fn model_from_setup(provider_name: &str, provider: &ProviderConfig, model_id: &str) -> ModelConfig {
-    let capacity = resolve_model_capacity(provider, model_id, None, None, None);
-    ModelConfig {
-        provider: provider_name.to_string(),
-        model_id: model_id.to_string(),
-        context_window_tokens: capacity.context_window_tokens,
-        max_completion_tokens: capacity.max_completion_tokens,
-        supports_vision: Some(capacity.supports_vision),
-        ..ModelConfig::default()
-    }
 }
 
 fn model_from_setup_model(
@@ -1684,7 +1516,7 @@ fn required_name(value: &str, field: &str) -> Result<String> {
     value
         .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+            if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.') {
                 ch
             } else {
                 '-'
@@ -1912,7 +1744,6 @@ fn has_agent_config_intent(value: &toml::Value) -> bool {
     table_is_nonempty(value, "providers")
         || table_is_nonempty(value, "models")
         || string_is_nonempty(value, "main_model")
-        || string_is_nonempty(value, "efficient_model")
 }
 
 fn table_is_nonempty(value: &toml::Value, key: &str) -> bool {
@@ -1932,9 +1763,6 @@ fn string_is_nonempty(value: &toml::Value, key: &str) -> bool {
 fn raw_role_error(value: &toml::Value) -> Option<String> {
     if !string_is_nonempty(value, "main_model") {
         return Some("main_model is not configured".to_string());
-    }
-    if !string_is_nonempty(value, "efficient_model") {
-        return Some("efficient_model is not configured".to_string());
     }
     None
 }
@@ -2055,7 +1883,7 @@ fn model_completeness_error(config: &Config) -> Option<String> {
         .iter()
         .map(|(name, model)| (name.as_str(), model))
         .collect();
-    for role in [&config.main_model, &config.efficient_model] {
+    for role in std::iter::once(&config.main_model).chain(config.approval_model.iter()) {
         let Some(model) = models_by_name.get(role.as_str()) else {
             return Some(format!("model role '{role}' references a missing model"));
         };
@@ -2122,9 +1950,272 @@ fn report(
     }
 }
 
+#[derive(Debug, Clone)]
+struct CodexPkceCodes {
+    code_verifier: String,
+    code_challenge: String,
+}
+
+#[derive(Clone)]
+struct CodexOAuthCallbackState {
+    expected_state: String,
+    callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<CodexOAuthCallbackResult>>>>,
+}
+
+#[derive(Debug)]
+enum CodexOAuthCallbackResult {
+    Code(String),
+    Error(String),
+}
+
+#[derive(serde::Deserialize)]
+struct CodexOAuthCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+async fn run_codex_oauth_browser_flow() -> Result<CodexOAuthTokens> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| miette!("OpenAI Codex HTTP client failed: {e}"))?;
+
+    let pkce = generate_codex_pkce();
+    let state = generate_codex_oauth_state();
+    let listener = bind_codex_oauth_callback_listener().await?;
+    let actual_port = listener
+        .local_addr()
+        .map_err(|e| miette!("OpenAI Codex callback listener address failed: {e}"))?
+        .port();
+    let redirect_uri = format!("http://localhost:{actual_port}/auth/callback");
+    let auth_url = build_codex_authorize_url(&redirect_uri, &pkce, &state);
+    let (callback_tx, callback_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+    let app = axum::Router::new()
+        .route(
+            "/auth/callback",
+            axum::routing::get(handle_codex_oauth_callback),
+        )
+        .with_state(CodexOAuthCallbackState {
+            expected_state: state,
+            callback_tx: Arc::new(tokio::sync::Mutex::new(Some(callback_tx))),
+        });
+
+    let server_handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let _ = open_url(&auth_url);
+
+    let callback = tokio::time::timeout(Duration::from_mins(15), callback_rx)
+        .await
+        .map_err(|_| miette!("OpenAI Codex browser authorization timed out"))?
+        .map_err(|_| miette!("OpenAI Codex callback server stopped before authorization"))?;
+    let _ = shutdown_tx.send(());
+    match tokio::time::timeout(Duration::from_secs(2), server_handle).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(err))) => tracing::debug!("OpenAI Codex callback server stopped: {err}"),
+        Ok(Err(err)) => tracing::debug!("OpenAI Codex callback server task failed: {err}"),
+        Err(_) => tracing::debug!("OpenAI Codex callback server did not stop within timeout"),
+    }
+
+    let authorization_code = match callback {
+        CodexOAuthCallbackResult::Code(code) => code,
+        CodexOAuthCallbackResult::Error(error) => {
+            return Err(miette!(
+                "OpenAI Codex browser authorization failed: {error}"
+            ));
+        }
+    };
+
+    exchange_codex_authorization_code_with_pkce(
+        &http,
+        &authorization_code,
+        &pkce.code_verifier,
+        &redirect_uri,
+    )
+    .await
+}
+
+async fn bind_codex_oauth_callback_listener() -> Result<TcpListener> {
+    let default_addr =
+        std::net::SocketAddr::from(([127, 0, 0, 1], CODEX_OAUTH_DEFAULT_BROWSER_PORT));
+    match TcpListener::bind(default_addr).await {
+        Ok(listener) => Ok(listener),
+        Err(default_err) => {
+            let fallback_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+            TcpListener::bind(fallback_addr).await.map_err(|fallback_err| {
+                miette!(
+                    "OpenAI Codex callback listener failed on {default_addr} ({default_err}) and on an ephemeral port ({fallback_err})"
+                )
+            })
+        }
+    }
+}
+
+async fn handle_codex_oauth_callback(
+    axum::extract::State(state): axum::extract::State<CodexOAuthCallbackState>,
+    axum::extract::Query(query): axum::extract::Query<CodexOAuthCallbackQuery>,
+) -> impl axum::response::IntoResponse {
+    let result = match (query.error, query.code, query.state) {
+        (Some(error), _, _) => {
+            let detail = query
+                .error_description
+                .filter(|description| !description.trim().is_empty())
+                .map(|description| format!("{error}: {description}"))
+                .unwrap_or(error);
+            CodexOAuthCallbackResult::Error(detail)
+        }
+        (_, Some(code), Some(callback_state)) if callback_state == state.expected_state => {
+            CodexOAuthCallbackResult::Code(code)
+        }
+        (_, Some(_), _) => {
+            CodexOAuthCallbackResult::Error("OAuth callback state did not match".to_string())
+        }
+        _ => CodexOAuthCallbackResult::Error(
+            "OAuth callback did not include an authorization code".to_string(),
+        ),
+    };
+
+    let is_success = matches!(result, CodexOAuthCallbackResult::Code(_));
+    let callback_sender = state.callback_tx.lock().await.take();
+    if let Some(tx) = callback_sender {
+        let _ = tx.send(result);
+    }
+
+    let status = if is_success {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::BAD_REQUEST
+    };
+    let title = if is_success {
+        "OpenAI Codex authorization complete"
+    } else {
+        "OpenAI Codex authorization failed"
+    };
+    let body = if is_success {
+        "Authorization is complete. You can close this tab and return to Daat Locus."
+    } else {
+        "Authorization failed. Return to Daat Locus for details."
+    };
+    (
+        status,
+        axum::response::Html(codex_oauth_callback_html(title, body)),
+    )
+}
+
+fn codex_oauth_callback_html(title: &str, body: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 3rem; line-height: 1.5; }}
+    main {{ max-width: 42rem; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{title}</h1>
+    <p>{body}</p>
+  </main>
+</body>
+</html>"#
+    )
+}
+
+fn build_codex_authorize_url(redirect_uri: &str, pkce: &CodexPkceCodes, state: &str) -> String {
+    let query = [
+        ("response_type", "code"),
+        ("client_id", CODEX_OAUTH_CLIENT_ID),
+        ("redirect_uri", redirect_uri),
+        ("scope", CODEX_OAUTH_SCOPES),
+        ("code_challenge", pkce.code_challenge.as_str()),
+        ("code_challenge_method", "S256"),
+        ("id_token_add_organizations", "true"),
+        ("codex_cli_simplified_flow", "true"),
+        ("state", state),
+        ("originator", CODEX_OAUTH_ORIGINATOR),
+    ];
+    let qs = query
+        .into_iter()
+        .map(|(key, value)| format!("{key}={}", urlenc(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{CODEX_OAUTH_ISSUER}/oauth/authorize?{qs}")
+}
+
+fn generate_codex_pkce() -> CodexPkceCodes {
+    let mut bytes = [0u8; 64];
+    fill_uuid_random_bytes(&mut bytes);
+    let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let digest = sha2::Sha256::digest(code_verifier.as_bytes());
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    CodexPkceCodes {
+        code_verifier,
+        code_challenge,
+    }
+}
+
+fn generate_codex_oauth_state() -> String {
+    let mut bytes = [0u8; 32];
+    fill_uuid_random_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn fill_uuid_random_bytes(bytes: &mut [u8]) {
+    for chunk in bytes.chunks_mut(16) {
+        let uuid = uuid::Uuid::new_v4();
+        chunk.copy_from_slice(&uuid.as_bytes()[..chunk.len()]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_model_is_retained_by_setup_roundtrip_and_checked_by_readiness() {
+        let mut config = Config {
+            main_model: "main".into(),
+            approval_model: Some("review".into()),
+            ..Default::default()
+        };
+        config.providers.insert(
+            "openai".into(),
+            ProviderConfig::Openai {
+                api_key: "fixture-only-key".into(),
+                base_url: None,
+            },
+        );
+        config.models.insert("main".into(), ModelConfig::default());
+        config
+            .models
+            .insert("review".into(), ModelConfig::default());
+        let request = setup_config_from_config(&config);
+        assert_eq!(request.approval_model.as_deref(), Some("review"));
+        let json = serde_json::to_value(request).unwrap();
+        let request: SetupConfigRequest = serde_json::from_value(json).unwrap();
+        let roundtrip = config_from_setup_request(&request).unwrap();
+        assert_eq!(roundtrip.approval_model, config.approval_model);
+        assert!(roundtrip.validate().is_ok());
+        config.approval_model = Some("missing-review-model".into());
+        let outcome = read_config_readiness_from_str(&toml::to_string(&config).unwrap());
+        let ConfigReadOutcome::Parsed(parts) = outcome else {
+            panic!("expected parsed readiness");
+        };
+        assert_eq!(parts.kind, ConfigReadinessKind::Incomplete);
+    }
 
     #[test]
     fn only_port_config_is_unconfigured() {
@@ -2137,14 +2228,13 @@ mod tests {
     }
 
     #[test]
-    fn default_placeholder_config_is_incomplete() {
+    fn default_config_is_unconfigured() {
         let text = toml::to_string_pretty(&Config::default()).unwrap();
         let outcome = read_config_readiness_from_str(&text);
         let ConfigReadOutcome::Parsed(parts) = outcome else {
             panic!("expected parsed readiness");
         };
-        assert_eq!(parts.kind, ConfigReadinessKind::Incomplete);
-        assert!(parts.message.contains("placeholder"));
+        assert_eq!(parts.kind, ConfigReadinessKind::Unconfigured);
     }
 
     #[test]
@@ -2170,7 +2260,6 @@ model_id = "gpt-4.1"
     fn configured_openai_config_is_complete() {
         let text = r#"
 main_model = "main"
-efficient_model = "fast"
 
 [providers.openai]
 type = "openai"
@@ -2213,13 +2302,15 @@ model_id = "gpt-4.1-mini"
     }
 
     #[test]
-    fn setup_discovered_model_fills_codex_reasoning_defaults() {
+    fn setup_discovered_unknown_codex_model_exposes_reasoning_fallback() {
         let provider = ProviderConfig::OpenaiCodexOauth {
             base_url: None,
             auth_file: "C:/example/codex-auth.json".to_string(),
         };
         let discovered = DiscoveredModel {
-            id: "gpt-5.4".to_string(),
+            // A real model's supported efforts belong to mutable catalog data.
+            // Test our stable fallback contract with a deliberately absent ID.
+            id: "test-codex-model-not-in-catalog".to_string(),
             context_window: None,
             max_output_tokens: None,
             supports_vision: None,
@@ -2228,10 +2319,16 @@ model_id = "gpt-4.1-mini"
 
         let model = setup_discovered_model(&provider, discovered);
 
-        assert_eq!(
-            model.thinking_budgets,
-            vec!["none", "minimal", "low", "medium", "high", "xhigh"]
+        assert!(!model.thinking_budgets.is_empty());
+        assert!(
+            model
+                .thinking_budgets
+                .iter()
+                .all(|value| !value.trim().is_empty())
         );
+        assert!(model.thinking_budgets.iter().any(|value| value == "high"));
+        let unique: std::collections::HashSet<_> = model.thinking_budgets.iter().collect();
+        assert_eq!(unique.len(), model.thinking_budgets.len());
     }
 
     #[test]
@@ -2251,144 +2348,41 @@ model_id = "gpt-4.1-mini"
         let model = setup_discovered_model(&provider, discovered);
 
         assert_eq!(model.thinking_budgets, vec!["true", "false"]);
-    }
-
-    #[test]
-    fn setup_config_round_trips_telegram_settings() {
-        let base_config = Config {
-            telegram: TelegramConfig {
-                enabled: false,
-                bot_token: "$TELEGRAM_BOT_TOKEN".to_string(),
-                poll_timeout_secs: 45,
-            },
-            ..Config::default()
-        };
-
-        let request = setup_config_from_config(&base_config);
-
-        assert_eq!(request.telegram_enabled, Some(false));
-        assert_eq!(
-            request.telegram_bot_token.as_deref(),
-            Some("$TELEGRAM_BOT_TOKEN")
-        );
-
-        let mut next_request = request;
-        next_request.telegram_enabled = Some(true);
-        next_request.telegram_bot_token = Some("123456789:bot-token".to_string());
-
-        let next_config = config_from_setup_request_with_base(&next_request, base_config).unwrap();
-
-        assert!(next_config.telegram.enabled);
-        assert_eq!(next_config.telegram.bot_token, "123456789:bot-token");
-        assert_eq!(next_config.telegram.poll_timeout_secs, 45);
-    }
-
-    #[test]
-    fn setup_config_round_trips_scope_lsp_enabled() {
-        let base_config = Config {
-            scope: ScopeConfig { lsp_enabled: false },
-            ..Config::default()
-        };
-
-        let request = setup_config_from_config(&base_config);
-
-        assert_eq!(request.scope_lsp_enabled, Some(false));
-
-        let mut next_request = request;
-        next_request.scope_lsp_enabled = Some(true);
-
-        let next_config = config_from_setup_request_with_base(&next_request, base_config).unwrap();
-
-        assert!(next_config.scope.lsp_enabled);
+        assert_eq!(model.reasoning_options, vec![ReasoningOption::Toggle]);
     }
 
     #[tokio::test]
-    async fn import_auth_file_copies_cli_tokens_to_provider_file() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let _home_override =
-            crate::runtime::bootstrap::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
-        let codex_home = temp.path().join("codex-home");
-        let source_auth_file = codex_home.join("auth.json");
-        tokio::fs::create_dir_all(&codex_home)
-            .await
-            .expect("create Codex home");
-        tokio::fs::write(
-            &source_auth_file,
-            br#"{
-                "auth_mode": "chatgpt",
-                "tokens": {
-                    "id_token": "id-token",
-                    "access_token": "access-token",
-                    "refresh_token": "refresh-token",
-                    "account_id": "account-123"
-                }
-            }"#,
-        )
-        .await
-        .expect("write Codex auth file");
-
-        let provider = SetupProviderRequest {
-            kind: SetupProviderKind::OpenaiCodexOauth,
-            name: "codex-oauth".to_string(),
-            api_key: None,
-            base_url: None,
-            keep_alive: None,
-            codex_auth_method: Some(SetupCodexAuthMethod::ImportAuthFile),
-            codex_auth_file: Some(source_auth_file.display().to_string()),
-            opencode_auth_method: None,
-            github_auth_method: None,
+    async fn unavailable_provider_discovery_returns_catalog_options() {
+        let request = SetupDiscoverModelsRequest {
+            provider: serde_json::from_value(serde_json::json!({
+                "name":"offline", "kind":"openai", "api_key":"test", "base_url":"http://127.0.0.1:1"
+            }))
+            .unwrap(),
         };
-        prepare_setup_provider_credential(&provider)
-            .await
-            .expect("import Codex auth file");
-
-        let destination = crate::providers::imported_codex_oauth_auth_file(
-            &tokio::fs::read(&source_auth_file)
-                .await
-                .expect("read Codex auth source"),
-        );
-        let imported: CodexOAuthTokens = serde_json::from_slice(
-            &tokio::fs::read(&destination)
-                .await
-                .expect("read imported OAuth file"),
-        )
-        .expect("parse imported OAuth file");
-        assert_eq!(imported.id_token, "id-token");
-        assert_eq!(imported.access_token, "access-token");
-        assert_eq!(imported.refresh_token, "refresh-token");
-        assert_eq!(imported.account_id.as_deref(), Some("account-123"));
+        let result = discover_setup_models(request).await.unwrap();
+        assert_eq!(result.source, "catalog");
         assert!(
-            destination
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("codex-auth-") && name.ends_with(".json"))
+            result
+                .models
+                .iter()
+                .any(|model| model.id == "gpt-4o" && model.supports_vision == Some(true))
         );
-        assert_ne!(destination, source_auth_file);
     }
 
-    #[tokio::test]
-    async fn write_setup_persona_updates_identity_summary() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let _home_override =
-            crate::runtime::bootstrap::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
-        let request = SetupConfigRequest {
-            persona_name: Some("CustomAgent".to_string()),
-            persona_language: Some("en-US".to_string()),
-            persona_identity_summary: Some(
-                "{{name}} answers with extra context.\nKeep a calm tone.".to_string(),
-            ),
-            ..SetupConfigRequest::default()
-        };
-
-        write_setup_persona(&request).await.unwrap();
-
-        let persona = load_prompt_persona_spec_sync();
-        assert_eq!(persona.name, "CustomAgent");
-        assert_eq!(persona.language, "en-US");
-        assert_eq!(
-            persona.identity_summary,
-            "{{name}} answers with extra context.\nKeep a calm tone."
-        );
+    #[test]
+    fn unicode_configuration_names_preserve_model_and_provider_references() {
+        let request: SetupConfigRequest = serde_json::from_value(serde_json::json!({
+            "providers":[{"name":"本地验证","kind":"openai","api_key":"test"}],
+            "models":[{"name":"默认模型","provider_name":"本地验证","model_id":"gpt-4.1"}],
+            "main_model":"默认模型"
+        }))
+        .unwrap();
+        let config = prepare_setup_config_with_base(&request, Config::default()).unwrap();
+        let persisted = toml::to_string(&config).unwrap();
+        let restored: Config = toml::from_str(&persisted).unwrap();
+        assert_eq!(restored.main_model, "默认模型");
+        assert_eq!(restored.models["默认模型"].provider, "本地验证");
+        assert!(restored.providers.contains_key("本地验证"));
     }
 
     #[test]

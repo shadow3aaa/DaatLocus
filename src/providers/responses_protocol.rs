@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-use crate::reasoning::runtime::{AgentContent, AgentMessage, AgentToolInputSpec, AgentToolSpec};
+use crate::model_protocol::{AgentContent, AgentMessage, AgentToolInputSpec, AgentToolSpec};
 
 use super::{flatten_tool_result_as_assistant_text, io::responses_safe_call_id};
 
@@ -149,8 +149,13 @@ pub(super) async fn test_sse_response(events: &[Value], done: bool) -> reqwest::
     }
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = [0; 4096];
-        socket.read(&mut request).await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+            assert!(request.len() <= 4096, "test request header limit exceeded");
+        }
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -171,7 +176,7 @@ pub(super) async fn test_sse_response(events: &[Value], done: bool) -> reqwest::
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reasoning::runtime::AgentToolCall;
+    use crate::model_protocol::AgentToolCall;
 
     fn user_message(content: &AgentContent, _: bool) -> Value {
         json!({"type": "message", "role": "user", "content": content.as_text()})

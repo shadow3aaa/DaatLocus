@@ -139,7 +139,7 @@ fn object_struct_schema(
 
     Ok(quote! {{
         let mut property_map = ::serde_json::Map::new();
-        let mut required = ::std::vec::Vec::new();
+        let mut required = ::std::vec::Vec::<::serde_json::Value>::new();
         #(#properties)*
         #(#required)*
         crate::schema_utils::model_schema(::serde_json::json!({

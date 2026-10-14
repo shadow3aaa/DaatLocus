@@ -1,43 +1,22 @@
 use serde_json::to_string_pretty;
-use tokio::sync::watch::Sender;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
 use crate::{
     context_budget::RequestBudgetBreakdown,
-    daat_locus_paths::{DaatLocusPaths, daat_locus_paths},
-    dashboard::{DashboardRuntimeStatusLevel, DashboardState},
-    reasoning::runtime::{
+    daat_locus_paths::DaatLocusPaths,
+    model_protocol::{
         AgentContentPart, AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult,
         render_assistant_tool_call_protocol_dump,
     },
 };
 
 pub const DAEMON_LOG_FILE_NAME: &str = "daat-locus.log";
-pub const SESSION_LOG_FILE_NAME: &str = "session.log";
 const RAW_MESSAGES_DUMP_FILE_NAME: &str = "messages.txt";
 const RAW_LAST_RESPONSE_DUMP_FILE_NAME: &str = "last_response.txt";
 
-#[derive(Clone, Copy)]
-pub enum RuntimeStatusLevel {
-    Info,
-    Warn,
-    Error,
-}
-
-impl RuntimeStatusLevel {
-    const fn dashboard_level(self) -> DashboardRuntimeStatusLevel {
-        match self {
-            Self::Info => DashboardRuntimeStatusLevel::Info,
-            Self::Warn => DashboardRuntimeStatusLevel::Warn,
-            Self::Error => DashboardRuntimeStatusLevel::Error,
-        }
-    }
-}
-
 /// Initialize file logging and return the guard that must be held until process exit.
-pub async fn init_logging(session_id: Option<&str>) -> WorkerGuard {
-    let paths = paths_for_logging_scope(session_id).await;
+pub async fn init_logging(paths: &DaatLocusPaths) -> WorkerGuard {
     let log_dir = paths.logs_dir();
     if let Err(err) = tokio::fs::create_dir_all(&log_dir).await {
         eprintln!(
@@ -55,12 +34,7 @@ pub async fn init_logging(session_id: Option<&str>) -> WorkerGuard {
         return guard;
     }
 
-    let log_file_name = if has_session_scope(session_id) {
-        SESSION_LOG_FILE_NAME
-    } else {
-        DAEMON_LOG_FILE_NAME
-    };
-    let file_appender = tracing_appender::rolling::never(&log_dir, log_file_name);
+    let file_appender = tracing_appender::rolling::never(&log_dir, DAEMON_LOG_FILE_NAME);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -89,101 +63,34 @@ pub async fn init_logging(session_id: Option<&str>) -> WorkerGuard {
     guard
 }
 
-fn has_session_scope(session_id: Option<&str>) -> bool {
-    session_id.is_some_and(|value| !value.trim().is_empty())
-}
-
-async fn paths_for_logging_scope(session_id: Option<&str>) -> DaatLocusPaths {
-    if let Some(paths) = session_paths_for_logging_scope(session_id) {
-        paths
-    } else {
-        daat_locus_paths().await
-    }
-}
-
-fn session_paths_for_logging_scope(session_id: Option<&str>) -> Option<DaatLocusPaths> {
-    session_id
-        .filter(|value| !value.trim().is_empty())
-        .map(DaatLocusPaths::for_session)
-}
-
-pub fn set_runtime_status(
-    tx: Option<&Sender<DashboardState>>,
-    level: RuntimeStatusLevel,
-    message: impl Into<String>,
-) {
-    let message = message.into();
-    match level {
-        RuntimeStatusLevel::Info => tracing::info!("{message}"),
-        RuntimeStatusLevel::Warn => tracing::warn!("{message}"),
-        RuntimeStatusLevel::Error => tracing::error!("{message}"),
-    }
-    set_dashboard_runtime_status(tx, &message, Some(level.dashboard_level()));
-}
-
-pub fn set_runtime_status_only(tx: Option<&Sender<DashboardState>>, message: impl Into<String>) {
-    set_dashboard_runtime_status(tx, &message.into(), None);
-}
-
-fn set_dashboard_runtime_status(
-    tx: Option<&Sender<DashboardState>>,
-    message: &str,
-    level: Option<DashboardRuntimeStatusLevel>,
-) {
-    if let Some(tx) = tx {
-        tx.send_if_modified(|state| {
-            if state.runtime_status.as_deref() == Some(message)
-                && state.runtime_status_level == level
-            {
-                false
-            } else {
-                state.runtime_status = Some(message.to_string());
-                state.runtime_status_level = level;
-                true
-            }
-        });
-    }
-}
-
-pub fn clear_runtime_status(tx: Option<&Sender<DashboardState>>) {
-    if let Some(tx) = tx {
-        tx.send_if_modified(|state| {
-            if state.runtime_status.is_none() && state.runtime_status_level.is_none() {
-                false
-            } else {
-                state.runtime_status = None;
-                state.runtime_status_level = None;
-                true
-            }
-        });
-    }
-}
-
 pub async fn write_current_turn_messages_dump(
-    session_id: Option<&str>,
+    system: &crate::actors::ActorSystem,
+    actor: &str,
     request: &AgentTurnRequest,
     budget: &RequestBudgetBreakdown,
     model_name: Option<&str>,
-) {
+) -> miette::Result<()> {
     let body = render_current_turn_messages_dump(request, budget, model_name);
-    write_current_turn_raw_file(session_id, RAW_MESSAGES_DUMP_FILE_NAME, body).await;
+    write_current_turn_raw_file(system, actor, RAW_MESSAGES_DUMP_FILE_NAME, body).await
 }
 
 pub async fn write_current_turn_response_dump(
-    session_id: Option<&str>,
+    system: &crate::actors::ActorSystem,
+    actor: &str,
     response: &AgentTurnStreamResult,
     attempt: usize,
-) {
+) -> miette::Result<()> {
     let body = render_current_turn_response_dump(response, attempt);
-    write_current_turn_raw_file(session_id, RAW_LAST_RESPONSE_DUMP_FILE_NAME, body).await;
+    write_current_turn_raw_file(system, actor, RAW_LAST_RESPONSE_DUMP_FILE_NAME, body).await
 }
 
 pub async fn write_current_turn_response_error_dump(
-    session_id: Option<&str>,
+    system: &crate::actors::ActorSystem,
+    actor: &str,
     error: &str,
     attempt: usize,
     will_retry: bool,
-) {
+) -> miette::Result<()> {
     let mut lines = vec![
         "status=error".to_string(),
         format!("attempt={attempt}"),
@@ -195,36 +102,34 @@ pub async fn write_current_turn_response_error_dump(
     lines.push(String::new());
     lines.push("note=contents reflect the latest LLM request outcome for this turn".to_string());
     write_current_turn_raw_file(
-        session_id,
+        system,
+        actor,
         RAW_LAST_RESPONSE_DUMP_FILE_NAME,
         lines.join("\n"),
     )
-    .await;
+    .await
 }
 
-async fn write_current_turn_raw_file(session_id: Option<&str>, file_name: &str, body: String) {
-    let Some(paths) = session_paths_for_logging_scope(session_id) else {
-        tracing::warn!(
-            "skipping current turn raw dump `{file_name}` because no session id is available"
-        );
-        return;
-    };
-    let raw_dir = paths.raw_dir();
-    if let Err(err) = tokio::fs::create_dir_all(&raw_dir).await {
-        tracing::warn!(
-            "failed to create raw directory for current turn dump {}: {err}",
-            raw_dir.display()
-        );
-        return;
-    }
-
-    let dump_path = paths.raw_file(file_name);
-    if let Err(err) = tokio::fs::write(&dump_path, body).await {
-        tracing::warn!(
-            "failed to write current turn dump {}: {err}",
-            dump_path.display()
-        );
-    }
+async fn write_current_turn_raw_file(
+    system: &crate::actors::ActorSystem,
+    actor: &str,
+    file_name: &str,
+    body: String,
+) -> miette::Result<()> {
+    use miette::IntoDiagnostic;
+    let directory = system.actor_state_dir(actor).join("diagnostics");
+    crate::file_io::ensure_directory(
+        &crate::sandbox::RuntimeSandboxPolicy::disabled(),
+        &directory,
+    )?;
+    crate::actors::permissions::protect_private_path(&directory)?;
+    crate::persistence::write_bytes_atomic(
+        directory.join(file_name),
+        system.redact_secrets(&body).into_bytes(),
+        crate::persistence::PersistenceFileMode::Private,
+    )
+    .await
+    .into_diagnostic()
 }
 
 fn render_current_turn_messages_dump(
@@ -313,6 +218,18 @@ fn render_agent_message_dump(message: &AgentMessage) -> Vec<String> {
                     AgentContentPart::Text { text } => {
                         lines.push(format!("part[{index}]=text chars={}", text.chars().count()));
                     }
+                    AgentContentPart::ImageData {
+                        media_type,
+                        data_base64,
+                        ..
+                    } => lines.push(format!(
+                        "part[{index}]=resolved-image media_type={media_type} encoded_bytes={}",
+                        data_base64.len()
+                    )),
+                    AgentContentPart::ResourceImage { resource, .. } => lines.push(format!(
+                        "part[{index}]=image resource={} media_type={}",
+                        resource.id, resource.media_type
+                    )),
                     AgentContentPart::Image {
                         path,
                         media_type,

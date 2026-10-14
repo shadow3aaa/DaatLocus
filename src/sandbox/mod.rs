@@ -39,6 +39,12 @@ impl WritableRoot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrivateDeliveryScope {
+    pub root: PathBuf,
+    pub own_readable: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileSystemSandboxPolicy {
     pub full_disk_read: bool,
     pub full_disk_write: bool,
@@ -46,6 +52,10 @@ pub struct FileSystemSandboxPolicy {
     pub writable_roots: Vec<WritableRoot>,
     pub deny_read_paths: Vec<PathBuf>,
     pub deny_write_paths: Vec<PathBuf>,
+    pub private_delivery: Option<PrivateDeliveryScope>,
+    /// Canonical roots captured when authority was granted. Replacing one with
+    /// a symlink must not silently authorize the symlink's new destination.
+    pub bound_roots: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,6 +153,10 @@ impl SandboxAsyncChild {
         args: Vec<String>,
         options: SandboxProcessOptions,
     ) -> std::io::Result<Self> {
+        policy
+            .filesystem
+            .ensure_root_bindings()
+            .map_err(std::io::Error::other)?;
         #[cfg(target_os = "windows")]
         {
             if policy.strong_filesystem != StrongFilesystemSandboxMode::Off
@@ -192,6 +206,8 @@ impl SandboxAsyncChild {
         let mut command = tokio::process::Command::new(spawn_spec.program);
         command.args(spawn_spec.args);
         apply_tokio_command_options(policy, &mut command, options);
+        #[cfg(windows)]
+        let _creation = crate::process_spawn::creation_lock()?;
         let inner = command.spawn()?;
         Ok(Self {
             inner: SandboxAsyncChildInner::Tokio(inner),
@@ -388,7 +404,8 @@ const fn filesystem_policy_requires_backend(policy: &FileSystemSandboxPolicy) ->
         && policy.readable_roots.is_empty()
         && policy.writable_roots.is_empty()
         && policy.deny_read_paths.is_empty()
-        && policy.deny_write_paths.is_empty())
+        && policy.deny_write_paths.is_empty()
+        && policy.private_delivery.is_none())
 }
 
 fn strip_protected_env_from_tokio_command(
@@ -543,6 +560,8 @@ impl FileSystemSandboxPolicy {
             writable_roots: Vec::new(),
             deny_read_paths: Vec::new(),
             deny_write_paths: Vec::new(),
+            private_delivery: None,
+            bound_roots: Vec::new(),
         }
     }
 
@@ -553,6 +572,21 @@ impl FileSystemSandboxPolicy {
             && self.writable_roots.is_empty()
             && self.deny_read_paths.is_empty()
             && self.deny_write_paths.is_empty()
+            && self.private_delivery.is_none()
+            && self.bound_roots.is_empty()
+    }
+
+    pub fn ensure_root_bindings(&self) -> Result<()> {
+        if self
+            .bound_roots
+            .iter()
+            .any(|root| resolve_path_for_check(root) != normalize_path(root))
+        {
+            return Err(miette!(
+                "An authorized filesystem root was replaced; reconfigure its access before continuing"
+            ));
+        }
+        Ok(())
     }
 
     pub fn protected_paths(&self) -> Vec<PathBuf> {
@@ -561,6 +595,7 @@ impl FileSystemSandboxPolicy {
                 .deny_read_paths
                 .iter()
                 .chain(self.deny_write_paths.iter())
+                .chain(self.private_delivery.iter().map(|scope| &scope.root))
                 .flat_map(|path| [normalize_path(path), resolve_path_for_check(path)])
                 .collect::<Vec<_>>();
             paths.sort();
@@ -571,6 +606,15 @@ impl FileSystemSandboxPolicy {
 
     pub fn is_path_readable(&self, path: &Path) -> bool {
         with_path_resolution_cache(|| {
+            if self.ensure_root_bindings().is_err() {
+                return false;
+            }
+            if self.private_delivery.as_ref().is_some_and(|scope| {
+                path_is_or_descends_logical_or_resolved(path, &scope.root)
+                    && !path_is_or_descends_resolved(path, &scope.own_readable)
+            }) {
+                return false;
+            }
             if path_is_denied(path, &self.deny_read_paths) {
                 return false;
             }
@@ -589,6 +633,16 @@ impl FileSystemSandboxPolicy {
 
     pub fn is_path_writable(&self, path: &Path) -> bool {
         with_path_resolution_cache(|| {
+            if self.ensure_root_bindings().is_err() {
+                return false;
+            }
+            if self
+                .private_delivery
+                .as_ref()
+                .is_some_and(|scope| path_is_or_descends_logical_or_resolved(path, &scope.root))
+            {
+                return false;
+            }
             if path_is_denied(path, &self.deny_write_paths) {
                 return false;
             }
@@ -666,6 +720,8 @@ impl RuntimeSandboxPolicy {
                 writable_roots: Vec::new(),
                 deny_read_paths: protected_runtime_paths,
                 deny_write_paths,
+                private_delivery: None,
+                bound_roots: Vec::new(),
             },
             protected_env_vars,
             strong_filesystem,
@@ -720,6 +776,7 @@ impl RuntimeSandboxPolicy {
         program: PathBuf,
         args: Vec<String>,
     ) -> Result<SandboxSpawnSpec> {
+        self.filesystem.ensure_root_bindings()?;
         if self.strong_filesystem == StrongFilesystemSandboxMode::Off {
             return Ok(SandboxSpawnSpec { program, args });
         }
@@ -842,6 +899,67 @@ mod tests {
         FileSystemSandboxPolicy, RuntimeSandboxPolicy, SandboxAsyncChild, SandboxProcessOptions,
         SandboxStdio, StrongFilesystemSandboxMode, WritableRoot,
     };
+
+    #[test]
+    fn account_namespace_protects_future_profiles_and_keeps_own_deliveries_readable() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("accounts");
+        let own = base.join("profiles/alice/delivery/core");
+        std::fs::create_dir_all(&own).unwrap();
+        let mut policy = RuntimeSandboxPolicy::disabled();
+        policy.filesystem.private_delivery = Some(super::PrivateDeliveryScope {
+            root: base.clone(),
+            own_readable: own.clone(),
+        });
+        std::fs::write(own.join("answer.txt"), "answer").unwrap();
+        // A later account cannot become visible through broad filesystem grants.
+        let other = base.join("profiles/bob/state");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("secret.txt"), "private account").unwrap();
+        let read = |path: &Path| {
+            crate::file_io::read_file(
+                directory.path(),
+                &policy,
+                &crate::file_io::ReadFileArgs {
+                    path: path.to_string_lossy().into_owned(),
+                    start_line: None,
+                    line_count: None,
+                },
+            )
+        };
+        assert!(read(&own.join("answer.txt")).is_ok());
+        assert!(read(&other.join("secret.txt")).is_err());
+        assert!(!policy.is_path_writable(&own.join("answer.txt")));
+        assert!(!policy.is_path_writable(&other.join("next.txt")));
+        assert!(!policy.is_path_readable(&base));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_an_authorized_root_cannot_rebind_its_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("private.txt"), "outside data").unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let mut policy = FileSystemSandboxPolicy::unrestricted();
+        policy.full_disk_read = false;
+        policy.full_disk_write = false;
+        policy.readable_roots = vec![root.clone()];
+        policy.writable_roots = vec![WritableRoot {
+            root: root.clone(),
+            read_only_subpaths: vec![],
+        }];
+        policy.bound_roots = vec![root.clone()];
+        assert!(policy.is_path_readable(&root));
+        std::fs::rename(&root, directory.path().join("original-project")).unwrap();
+        std::os::unix::fs::symlink(&outside, &root).unwrap();
+        assert!(policy.ensure_root_bindings().is_err());
+        assert!(!policy.is_path_readable(&root.join("private.txt")));
+        assert!(!policy.is_path_writable(&root.join("private.txt")));
+    }
 
     #[test]
     fn sandbox_stdio_variants_are_stable() {
@@ -975,6 +1093,8 @@ mod tests {
                 }],
                 deny_read_paths: vec![protected_home.clone()],
                 deny_write_paths: vec![protected_home.clone()],
+                private_delivery: None,
+                bound_roots: Vec::new(),
             },
             protected_env_vars: Vec::new(),
             strong_filesystem: StrongFilesystemSandboxMode::Required,
@@ -1228,6 +1348,8 @@ exit 42
             }],
             deny_read_paths: Vec::new(),
             deny_write_paths: Vec::new(),
+            private_delivery: None,
+            bound_roots: Vec::new(),
         };
 
         assert!(policy.is_path_writable(&workspace_dir.join("normal.txt")));

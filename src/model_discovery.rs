@@ -1,4 +1,4 @@
-//! Provider model discovery shared by the CLI/TUI config wizard and `WebUI` setup.
+//! Provider model discovery for configuration and capability lookup.
 
 use std::time::Duration;
 
@@ -139,6 +139,35 @@ fn catalog_provider_id_for_base_url_and_model(base_url: &str, model_id: &str) ->
     } else {
         None
     }
+}
+
+/// Directory suggestions are explicitly separate from live provider availability.
+pub fn catalog_discovery_models(provider: &ProviderConfig) -> Vec<DiscoveredModel> {
+    let provider_ids = match provider {
+        ProviderConfig::Openai { base_url: None, .. } | ProviderConfig::OpenaiCodexOauth { .. } => {
+            vec!["openai".into()]
+        }
+        ProviderConfig::GithubCopilot { .. } => vec!["github-copilot".into()],
+        ProviderConfig::Openai {
+            base_url: Some(base_url),
+            ..
+        }
+        | ProviderConfig::OpenaiCompatible { base_url, .. }
+        | ProviderConfig::AnthropicCompatible { base_url, .. } => {
+            catalog_provider_ids_for_api_url(base_url)
+        }
+        ProviderConfig::Ollama { .. } | ProviderConfig::OpenCodeConsoleOauth { .. } => Vec::new(),
+    };
+    crate::model_catalog::catalog_model_ids(&provider_ids)
+        .into_iter()
+        .map(|id| DiscoveredModel {
+            id,
+            context_window: None,
+            max_output_tokens: None,
+            supports_vision: None,
+            reasoning_options: None,
+        })
+        .collect()
 }
 
 /// Fetch provider model IDs. Failures return an empty list.

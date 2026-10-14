@@ -21,7 +21,7 @@ use crate::{
     context_budget::{ContextBudgetExceededError, RequestBudgetLimits},
     core::{ModelProvider, ModelRequestOptions, TokenUsage, TokenUsageInfo},
     dsml_repair,
-    reasoning::runtime::{
+    model_protocol::{
         AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec,
         AgentToolSpec, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, PromptRequest,
         assistant_tool_call_protocol_char_count, summarize_assistant_tool_call_protocol,
@@ -51,6 +51,10 @@ mod anthropic_compat;
 pub mod responses_compat;
 mod responses_protocol;
 
+mod transport;
+use transport::{Authentication, BackendHttp};
+mod failure;
+pub(crate) use failure::{ModelFailureKind, ModelRequestFailure};
 mod io;
 use io::{
     StreamingToolCallBuilder, default_rate_limit_backoff, format_request_error,
@@ -74,7 +78,7 @@ use payload::{
 use thinking::{DEEPSEEK_THINKING_MAX_TOKENS, apply_optional_thinking_budget};
 use thinking::{apply_provider_thinking_config, max_completion_tokens_for_chat_payload};
 pub struct OpenAIClient {
-    client: reqwest::Client,
+    transport: BackendHttp,
     pub(crate) api_key: String,
     pub(crate) base_url: String,
     /// Chat completions path. Defaults to "/chat/completions".
@@ -84,7 +88,6 @@ pub struct OpenAIClient {
     model: String,
     temperature: f64,
     thinking_budget: Option<String>,
-    rpm: Option<usize>,
     request_timeout: Duration,
     stream_idle_timeout: Duration,
     context_window_tokens: usize,
@@ -92,7 +95,6 @@ pub struct OpenAIClient {
     auto_compact_threshold_tokens: usize,
     reserved_output_tokens: usize,
     max_completion_tokens: usize,
-    request_rate_limiter: Option<Arc<tokio::sync::Mutex<VecDeque<Instant>>>>,
     adapter_state: Mutex<ChatCompletionsAdapterState>,
     token_usage: Mutex<TokenUsageInfo>,
 }
@@ -205,10 +207,7 @@ impl OpenAIClient {
         let base_url = normalize_provider_base_url(base_url);
         let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
         let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .build()
-            .expect("failed to build llm http client");
+        let transport = BackendHttp::new(&base_url, model_config);
         let context_window_tokens = model_config.context_window_tokens();
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
@@ -217,7 +216,7 @@ impl OpenAIClient {
         let reserved_output_tokens = model_config.reserved_output_tokens().max(1);
         let max_completion_tokens = model_config.max_completion_tokens();
         Self {
-            client,
+            transport,
             api_key: api_key.to_string(),
             base_url: base_url.clone(),
             completions_path: "/chat/completions",
@@ -227,7 +226,6 @@ impl OpenAIClient {
             thinking_budget: model_config
                 .thinking_budget()
                 .map(|budget| budget.as_str().to_string()),
-            rpm: model_config.rpm(),
             request_timeout,
             stream_idle_timeout,
             context_window_tokens,
@@ -235,11 +233,6 @@ impl OpenAIClient {
             auto_compact_threshold_tokens,
             reserved_output_tokens,
             max_completion_tokens,
-            request_rate_limiter: shared_request_rate_limiter(
-                &base_url,
-                &model_config.model_id,
-                model_config.rpm(),
-            ),
             adapter_state: Mutex::new({
                 use crate::model_catalog::catalog_model_capacity;
                 let vision_mode = match model_config.supports_vision {
@@ -308,171 +301,6 @@ impl OpenAIClient {
         }
     }
 
-    async fn wait_for_request_slot(&self, request_context: &[String]) {
-        let Some(rpm) = self.rpm else {
-            return;
-        };
-        let Some(limiter) = &self.request_rate_limiter else {
-            return;
-        };
-
-        let mut logged_wait = false;
-        loop {
-            let wait_duration = {
-                let mut timestamps = limiter.lock().await;
-                let now = Instant::now();
-                while let Some(front) = timestamps.front().copied() {
-                    if now.duration_since(front) >= Duration::from_mins(1) {
-                        timestamps.pop_front();
-                    } else {
-                        break;
-                    }
-                }
-
-                if timestamps.len() < rpm {
-                    timestamps.push_back(now);
-                    None
-                } else {
-                    timestamps.front().copied().map(|front| {
-                        Duration::from_mins(1).saturating_sub(now.duration_since(front))
-                    })
-                }
-            };
-
-            let Some(delay) = wait_duration else {
-                return;
-            };
-
-            if !logged_wait {
-                warn!(
-                    "llm rpm throttle waiting {} ms before next request (rpm={})\n{}",
-                    delay.as_millis(),
-                    rpm,
-                    request_context.join("\n")
-                );
-                logged_wait = true;
-            }
-            tokio::time::sleep(delay).await;
-        }
-    }
-
-    async fn post_json_with_rate_limit_retry(
-        &self,
-        url: &str,
-        payload: &serde_json::Value,
-        request_context: &[String],
-        response_header_timeout: Duration,
-        session_headers: &reqwest::header::HeaderMap,
-    ) -> Result<reqwest::Response> {
-        const MAX_429_RETRIES: usize = 4;
-        const MAX_5XX_RETRIES: usize = 3;
-
-        let mut request_headers = self.extra_headers.clone();
-        request_headers.extend(
-            session_headers
-                .iter()
-                .map(|(name, value)| (name.clone(), value.clone())),
-        );
-        let mut rate_limit_attempt = 0usize;
-        let mut transient_attempt = 0usize;
-        loop {
-            self.wait_for_request_slot(request_context).await;
-            let request = self
-                .client
-                .post(url)
-                .bearer_auth(&self.api_key)
-                .headers(request_headers.clone())
-                .json(payload);
-            let response = send_request_for_streaming_response(
-                request,
-                response_header_timeout,
-                "llm request failed",
-                url,
-                request_context,
-            )
-            .await?;
-
-            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                let retry_after = response
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(parse_retry_after_seconds);
-                let body = read_response_text_with_timeout(
-                    response,
-                    response_header_timeout,
-                    "llm 429 response body read failed",
-                    url,
-                    request_context,
-                )
-                .await?;
-
-                if rate_limit_attempt >= MAX_429_RETRIES {
-                    return Err(miette!(
-                        "llm api returned HTTP 429 after {} retries: {}",
-                        MAX_429_RETRIES,
-                        truncate_for_error(&body)
-                    ));
-                }
-
-                let delay = retry_after.map_or_else(
-                    || default_rate_limit_backoff(rate_limit_attempt),
-                    Duration::from_secs,
-                );
-                let delay_ms = delay.as_millis();
-                warn!(
-                    "llm api returned HTTP 429; retrying request in {} ms (attempt {}/{})\n{}",
-                    delay_ms,
-                    rate_limit_attempt + 1,
-                    MAX_429_RETRIES,
-                    request_context.join("\n")
-                );
-                tokio::time::sleep(delay).await;
-                rate_limit_attempt += 1;
-                continue;
-            }
-
-            if response.status().is_server_error() {
-                let status = response.status();
-                let body = read_response_text_with_timeout(
-                    response,
-                    response_header_timeout,
-                    "llm 5xx response body read failed",
-                    url,
-                    request_context,
-                )
-                .await?;
-
-                if transient_attempt >= MAX_5XX_RETRIES {
-                    return Err(miette!(
-                        "llm api returned HTTP {} after {} retries: {}",
-                        status,
-                        MAX_5XX_RETRIES,
-                        truncate_for_error(&body)
-                    ));
-                }
-
-                let delay = Duration::from_millis(400 * (1u64 << transient_attempt));
-                let delay_ms = delay.as_millis();
-                warn!(
-                    "llm api returned HTTP {}; retrying request in {} ms (attempt {}/{})\n{}",
-                    status,
-                    delay_ms,
-                    transient_attempt + 1,
-                    MAX_5XX_RETRIES,
-                    request_context.join("\n")
-                );
-                tokio::time::sleep(delay).await;
-                transient_attempt += 1;
-                continue;
-            }
-
-            {
-                return Ok(response);
-            }
-        }
-    }
-
     /// Step adapter state to the next downgrade level on a 400 response.
     /// Order: omit function `strict`, downgrade `tool_choice`
     /// (`NamedFunction` → `RequiredString` → Omit), then downgrade the
@@ -526,21 +354,19 @@ impl OpenAIClient {
         let output_schema = request.output_schema.clone();
         let budget = &options.budget;
         let request_context = summarize_prompt_request(&request, Some(budget));
-        let session_headers =
-            opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
+        let backend_request = self.transport.request(
+            self.completions_path,
+            Authentication::Bearer(&self.api_key),
+            &self.extra_headers,
+            options,
+        )?;
         let mut adapter_state = self.adapter_state_guard();
         let body = loop {
             let payload =
                 self.current_adapter()
                     .build_prompt_payload(self, &request, output_schema.clone());
-            let response = self
-                .post_json_with_rate_limit_retry(
-                    &url,
-                    &payload,
-                    &request_context,
-                    self.stream_idle_timeout,
-                    &session_headers,
-                )
+            let response = backend_request
+                .post(&payload, &request_context, self.stream_idle_timeout)
                 .await?;
             let status = response.status();
             let body = read_response_text_with_timeout(
@@ -653,8 +479,12 @@ impl OpenAIClient {
         let budget = &options.budget;
         let request_context = summarize_agent_turn_request(&request, Some(budget));
         let request_has_tools = !request.tools.is_empty();
-        let session_headers =
-            opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
+        let backend_request = self.transport.request(
+            self.completions_path,
+            Authentication::Bearer(&self.api_key),
+            &self.extra_headers,
+            options,
+        )?;
         let request_has_reasoning_content = request.messages.iter().any(|message| {
             matches!(
                 message,
@@ -669,14 +499,8 @@ impl OpenAIClient {
             let payload =
                 self.current_adapter()
                     .build_agent_turn_payload(self, request.clone(), true);
-            let response = self
-                .post_json_with_rate_limit_retry(
-                    &url,
-                    &payload,
-                    &request_context,
-                    self.request_timeout,
-                    &session_headers,
-                )
+            let response = backend_request
+                .post(&payload, &request_context, self.request_timeout)
                 .await?;
             let status = response.status();
             let content_type = response
@@ -1385,11 +1209,12 @@ pub(crate) fn opencode_gateway_headers(
     if !is_opencode_gateway_base_url(base_url) {
         return headers;
     }
-    let Some(conversation_id) = conversation_id else {
-        return headers;
-    };
-    if let Ok(value) = reqwest::header::HeaderValue::from_str(&opencode_session_id(conversation_id))
-    {
+    // Independent requests still need a complete transport identity. Keep it
+    // request-local so it cannot reuse worker history or grow the conversation cache.
+    let session = conversation_id
+        .map(opencode_session_id)
+        .unwrap_or_else(|| format!("ses_{}", opencode_identifier(true)));
+    if let Ok(value) = reqwest::header::HeaderValue::from_str(&session) {
         headers.insert("x-opencode-session", value);
     }
     if let Ok(value) =
@@ -1398,7 +1223,6 @@ pub(crate) fn opencode_gateway_headers(
         headers.insert("x-opencode-request", value);
     }
     headers.insert("x-opencode-client", OPENCODE_CLIENT_ID.parse().unwrap());
-    headers.insert("x-opencode-project", OPENCODE_PROJECT_ID.parse().unwrap());
     headers.insert("x-opencode-project", OPENCODE_PROJECT_ID.parse().unwrap());
     headers.insert(
         reqwest::header::USER_AGENT,
@@ -1833,7 +1657,7 @@ fn repair_dsml_in_stream_result(
 mod tests {
     use super::*;
     use crate::config::ThinkingBudget;
-    use crate::reasoning::runtime::{AgentToolCall, HistoryMessage};
+    use crate::model_protocol::{AgentToolCall, HistoryMessage};
     use serde_json::json;
 
     fn thinking_budget(value: &str) -> ThinkingBudget {
@@ -2010,7 +1834,7 @@ mod tests {
                         arguments: json!({"plan": []}),
                     }],
                 ),
-                AgentMessage::tool("call_123", "update_plan", "{\"ok\":true}"),
+                AgentMessage::tool("call_123", "file_read", "{\"ok\":true}"),
             ],
             true,
             false,
@@ -2060,12 +1884,10 @@ mod tests {
             tool_description: "demo".to_string(),
             output_schema: json!({"type":"object","properties":{},"required":[]}),
             system_messages: vec![],
-            long_term_memory_messages: vec![],
             history_messages: vec![HistoryMessage::tool(
                 "call_x",
-                "update_plan",
-                "tool_call_id=call_x\nname=update_plan\nsummary=updated plan",
-                None,
+                "file_read",
+                "tool_call_id=call_x\nname=file_read\nsummary=read file",
             )],
             current_user_message: "hello".to_string(),
             retry_messages: vec![],
@@ -2222,11 +2044,12 @@ mod tests {
     }
 
     #[test]
-    fn opencode_gateway_headers_skip_without_conversation_or_gateway() {
-        assert!(
-            opencode_gateway_headers("https://opencode.ai/zen/v1", None).is_empty(),
-            "missing conversation must not send partial gateway headers"
-        );
+    fn independent_gateway_requests_have_isolated_transport_identity() {
+        let first = opencode_gateway_headers("https://opencode.ai/zen/v1", None);
+        let second = opencode_gateway_headers("https://opencode.ai/zen/v1", None);
+        assert_eq!(first.len(), 5);
+        assert_ne!(first["x-opencode-session"], second["x-opencode-session"]);
+        assert_ne!(first["x-opencode-request"], second["x-opencode-request"]);
         assert!(
             opencode_gateway_headers("https://api.openai.com/v1", Some("session-1")).is_empty(),
             "non-gateway providers must not receive opencode headers"
@@ -2370,7 +2193,6 @@ mod tests {
                 "additionalProperties": false
             }),
             system_messages: vec![],
-            long_term_memory_messages: vec![],
             history_messages: vec![],
             current_user_message: "hello".to_string(),
             retry_messages: vec![],

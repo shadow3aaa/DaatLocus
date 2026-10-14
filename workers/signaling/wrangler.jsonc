@@ -1,0 +1,42 @@
+{
+  "name": "daat-locus-signaling",
+  "account_id": "e287f47938375dd5a0a647071dff33f1",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GROUPS",
+        "class_name": "SignalGroup"
+      },
+      {
+        "name": "ACCOUNTS",
+        "class_name": "AccountRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "SignalGroup"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "AccountRoom"
+      ]
+    }
+  ],
+  "vars": {
+    "GROUP_ROOTS": "{}",
+    "REVOKED_STAGES": "[]"
+  },
+  "routes": [
+    {
+      "pattern": "dl.shadow3.work",
+      "custom_domain": true
+    }
+  ]
+}

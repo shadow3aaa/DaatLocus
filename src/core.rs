@@ -12,10 +12,7 @@ use crate::{
         ContextBudgetExceededError, RequestBudgetBreakdown, RequestBudgetLimits,
         estimate_agent_turn_request, estimate_prompt_request,
     },
-    events::EventDisposition,
-    live_progress::LiveProgressEvent,
-    plan::PlanStatus,
-    reasoning::runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
+    model_protocol::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
 };
 
 const MAX_DAILY_TOKEN_USAGE_DAYS: usize = 30;
@@ -27,6 +24,10 @@ pub struct TerminalExecArgs {
     /// Existing session id to reuse; null or empty creates a new session. Never invent a session id.
     pub session_id: Option<String>,
     pub workdir: Option<String>,
+    /// Explicit filesystem read roots requested for this command, otherwise null.
+    pub additional_read_roots: Option<Vec<String>>,
+    /// Explicit filesystem write roots requested for this command, otherwise null.
+    pub additional_write_roots: Option<Vec<String>>,
     pub yield_time_ms: Option<u64>,
     pub max_chars: Option<usize>,
 }
@@ -135,29 +136,7 @@ pub struct BrowserClosePageArgs {
     pub page_id: String,
 }
 
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct EventResolveArgs {
-    pub disposition: EventDisposition,
-    pub reply_message: Option<String>,
-    pub note: Option<String>,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct UpdatePlanStepArgs {
-    pub step: String,
-    pub status: PlanStatus,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct UpdatePlanArgs {
-    pub explanation: Option<String>,
-    pub plan: Vec<UpdatePlanStepArgs>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input_tokens: i64,
     pub cached_input_tokens: i64,
@@ -166,13 +145,13 @@ pub struct TokenUsage {
     pub total_tokens: i64,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DailyTokenUsage {
     pub date: String,
     pub usage: TokenUsage,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct TokenUsageInfo {
     pub total_token_usage: TokenUsage,
     pub last_token_usage: TokenUsage,
@@ -182,6 +161,41 @@ pub struct TokenUsageInfo {
 }
 
 impl TokenUsage {
+    pub fn delta_from(&self, previous: &Self) -> Self {
+        Self {
+            input_tokens: self
+                .input_tokens
+                .saturating_sub(previous.input_tokens)
+                .max(0),
+            cached_input_tokens: self
+                .cached_input_tokens
+                .saturating_sub(previous.cached_input_tokens)
+                .max(0),
+            output_tokens: self
+                .output_tokens
+                .saturating_sub(previous.output_tokens)
+                .max(0),
+            reasoning_output_tokens: self
+                .reasoning_output_tokens
+                .saturating_sub(previous.reasoning_output_tokens)
+                .max(0),
+            total_tokens: self
+                .total_tokens
+                .saturating_sub(previous.total_tokens)
+                .max(0),
+        }
+    }
+    fn valid(&self) -> bool {
+        [
+            self.input_tokens,
+            self.cached_input_tokens,
+            self.output_tokens,
+            self.reasoning_output_tokens,
+            self.total_tokens,
+        ]
+        .iter()
+        .all(|amount| *amount >= 0)
+    }
     pub const fn is_zero(&self) -> bool {
         self.total_tokens == 0
             && self.input_tokens == 0
@@ -191,15 +205,28 @@ impl TokenUsage {
     }
 
     pub const fn add_assign(&mut self, other: &Self) {
-        self.input_tokens += other.input_tokens;
-        self.cached_input_tokens += other.cached_input_tokens;
-        self.output_tokens += other.output_tokens;
-        self.reasoning_output_tokens += other.reasoning_output_tokens;
-        self.total_tokens += other.total_tokens;
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(other.cached_input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.reasoning_output_tokens = self
+            .reasoning_output_tokens
+            .saturating_add(other.reasoning_output_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
     }
 }
 
 impl TokenUsageInfo {
+    pub fn valid(&self) -> bool {
+        self.total_token_usage.valid()
+            && self.last_token_usage.valid()
+            && self.daily_token_usage.len() <= MAX_DAILY_TOKEN_USAGE_DAYS
+            && self
+                .daily_token_usage
+                .iter()
+                .all(|day| day.date.len() <= 32 && day.usage.valid())
+    }
     pub fn append_last_usage(&mut self, last: TokenUsage) {
         self.total_token_usage.add_assign(&last);
         self.append_daily_usage(&last);
@@ -259,39 +286,48 @@ impl TokenUsageInfo {
 /// An explicit, runtime-owned sink for streaming model progress.
 ///
 /// Model providers may report model output through this sink, but they never
-/// receive the session's mutable runtime state.
+/// receive mutable execution state.
+/// Model output observations, independent of clients and transports.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelProgressEvent {
+    GenerationStarted,
+    DraftReset,
+    AssistantContent { content: String },
+    ReasoningContent { content: String },
+}
+
 #[derive(Clone)]
 pub struct ModelProgressSink {
-    sender: tokio::sync::mpsc::UnboundedSender<LiveProgressEvent>,
+    sender: tokio::sync::mpsc::UnboundedSender<ModelProgressEvent>,
 }
 
 impl ModelProgressSink {
-    pub const fn new(sender: tokio::sync::mpsc::UnboundedSender<LiveProgressEvent>) -> Self {
+    pub const fn new(sender: tokio::sync::mpsc::UnboundedSender<ModelProgressEvent>) -> Self {
         Self { sender }
     }
 
     pub fn emit_assistant_content(&self, content: impl Into<String>) {
-        let _ = self.sender.send(LiveProgressEvent::AssistantContent {
+        let _ = self.sender.send(ModelProgressEvent::AssistantContent {
             content: content.into(),
         });
     }
 
     pub fn emit_reasoning_content(&self, content: impl Into<String>) {
-        let _ = self.sender.send(LiveProgressEvent::ReasoningContent {
+        let _ = self.sender.send(ModelProgressEvent::ReasoningContent {
             content: content.into(),
         });
     }
 
     /// Drop buffered draft output because the runtime committed it.
     pub fn emit_draft_reset(&self) {
-        let _ = self.sender.send(LiveProgressEvent::DraftReset);
+        let _ = self.sender.send(ModelProgressEvent::DraftReset);
     }
 }
 
 /// Explicit metadata and runtime policy for one provider call.
 ///
 /// This contains only values a provider is allowed to observe. It deliberately
-/// excludes [`crate::context::Context`], which remains owned by the runtime.
+/// excludes mutable execution state.
 #[derive(Clone)]
 pub struct ModelRequestOptions {
     pub conversation_id: Option<String>,
@@ -353,8 +389,8 @@ impl ModelRequestOptions {
 /// Model protocol provider abstraction.
 ///
 /// Providers translate explicit model requests to an upstream protocol. They
-/// do not receive runtime state, own request budgets, or construct call
-/// metadata; the runtime supplies fully-validated [`ModelRequestOptions`].
+/// do not receive runtime state or own request budgets. The runtime supplies
+/// validated model options; the provider HTTP boundary owns transport metadata.
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     /// Complete a structured request and return the raw JSON argument object.
@@ -404,11 +440,11 @@ impl Default for AgentTurnRetryPolicy {
 }
 
 impl AgentTurnRetryPolicy {
-    fn request_timeout_for_attempt(self, attempt: usize) -> Duration {
+    pub fn request_timeout_for_attempt(self, attempt: usize) -> Duration {
         exponential_retry_duration(self.base_request_timeout, self.max_request_timeout, attempt)
     }
 
-    fn backoff_for_attempt(self, attempt: usize) -> Duration {
+    pub fn backoff_for_attempt(self, attempt: usize) -> Duration {
         exponential_retry_duration(self.base_backoff, self.max_backoff, attempt)
     }
 }
@@ -617,7 +653,11 @@ pub fn model_request_error_detail(err: &miette::Report) -> String {
 }
 
 pub fn should_retry_agent_turn_error(error: &miette::Report) -> bool {
-    !is_context_budget_error(error) && !is_permanent_model_request_error(&error.to_string())
+    !is_context_budget_error(error)
+        && error
+            .downcast_ref::<crate::providers::ModelRequestFailure>()
+            .is_none_or(|error| error.retryable())
+        && !is_permanent_model_request_error(&error.to_string())
 }
 
 fn is_context_budget_error(error: &miette::Report) -> bool {
@@ -747,6 +787,19 @@ mod tests {
     }
     #[tokio::test]
     async fn does_not_retry_permanent_or_context_budget_agent_turn_failures() {
+        use crate::providers::{ModelFailureKind, ModelRequestFailure};
+        for kind in [
+            ModelFailureKind::Authentication,
+            ModelFailureKind::Forbidden,
+            ModelFailureKind::CertificateRevoked,
+            ModelFailureKind::CertificateInvalid,
+        ] {
+            assert_non_retryable_agent_turn_failure(ModelRequestFailure::report(
+                kind,
+                "private model diagnostics".into(),
+            ))
+            .await;
+        }
         let permanent_error =
             miette!("model provider returned HTTP 400 Bad Request: invalid_request_error");
         assert_non_retryable_agent_turn_failure(permanent_error).await;

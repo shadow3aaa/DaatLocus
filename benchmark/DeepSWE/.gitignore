@@ -1,6 +1,0 @@
-.venv/
-.cache/
-__pycache__/
-*.py[cod]
-/jobs
-/static/out/

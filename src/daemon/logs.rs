@@ -1,23 +1,10 @@
-use std::{
-    path::{Path, PathBuf},
-    time::UNIX_EPOCH,
-};
-
-use axum::{
-    Json,
-    extract::{Query, State},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-};
+//! Bounded, cursor-based file log reads. Callers own source selection and access checks.
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
 };
-
-use crate::daat_locus_paths::daat_locus_paths;
-
-use super::{DAEMON_MAIN_LOG, SESSION_LOG, ServerState, session};
 
 const DEFAULT_LOG_LINE_LIMIT: usize = 500;
 const MAX_LOG_LINE_LIMIT: usize = 2_000;
@@ -25,25 +12,14 @@ const LOG_READ_CHUNK_SIZE: usize = 64 * 1024;
 const LOG_TAIL_MAX_BYTES: usize = 1024 * 1024;
 const LOG_FORWARD_MAX_BYTES: usize = 512 * 1024;
 
+#[derive(Debug, Deserialize)]
+pub struct LogReadQuery {
+    pub cursor: Option<u64>,
+    pub limit: Option<usize>,
+}
+
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct LogSourceEntry {
-    pub id: String,
-    pub label: String,
-    pub description: String,
-    pub path: String,
-    pub exists: bool,
-    pub size_bytes: u64,
-    pub modified_at_ms: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct LogSourcesResponse {
-    pub sources: Vec<LogSourceEntry>,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct LogReadResponse {
-    pub source: LogSourceEntry,
+pub struct LogFileRead {
     pub lines: Vec<String>,
     pub next_cursor: u64,
     pub file_size_bytes: u64,
@@ -52,23 +28,8 @@ pub(super) struct LogReadResponse {
     pub reset: bool,
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct LogsReadQuery {
-    source: String,
-    cursor: Option<u64>,
-    limit: Option<usize>,
-}
-
-struct LogFileRead {
-    lines: Vec<String>,
-    next_cursor: u64,
-    file_size_bytes: u64,
-    truncated_start: bool,
-    has_more: bool,
-    reset: bool,
-}
-
-enum ReadLogError {
+#[derive(Debug)]
+pub enum ReadLogError {
     NotFound,
     Io(std::io::Error),
 }
@@ -83,154 +44,7 @@ impl From<std::io::Error> for ReadLogError {
     }
 }
 
-pub(super) async fn sources_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    Json(LogSourcesResponse {
-        sources: log_sources(&state.sessions).await,
-    })
-    .into_response()
-}
-
-pub(super) async fn read_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    Query(query): Query<LogsReadQuery>,
-) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let Some(source) = log_sources(&state.sessions)
-        .await
-        .into_iter()
-        .find(|source| source.id == query.source)
-    else {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!("unknown log source `{}`", query.source),
-        )
-            .into_response();
-    };
-
-    match read_log_path(Path::new(&source.path), &query).await {
-        Ok(read) => Json(LogReadResponse {
-            source,
-            lines: read.lines,
-            next_cursor: read.next_cursor,
-            file_size_bytes: read.file_size_bytes,
-            truncated_start: read.truncated_start,
-            has_more: read.has_more,
-            reset: read.reset,
-        })
-        .into_response(),
-        Err(ReadLogError::NotFound) => (
-            StatusCode::NOT_FOUND,
-            format!("log source `{}` does not exist yet", query.source),
-        )
-            .into_response(),
-        Err(ReadLogError::Io(error)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to read log source `{}`: {error}", query.source),
-        )
-            .into_response(),
-    }
-}
-
-async fn log_sources(sessions: &session::SessionRegistry) -> Vec<LogSourceEntry> {
-    let paths = daat_locus_paths().await;
-    let daemon_log = paths.logs_file(DAEMON_MAIN_LOG);
-    let daemon_metadata = tokio::fs::metadata(&daemon_log).await.ok();
-    let mut sources = vec![log_source_entry(
-        "daemon-main",
-        "Daemon log",
-        "Daemon tracing plus stdout/stderr output.",
-        daemon_log,
-        daemon_metadata,
-    )];
-    sources.extend(session_log_sources(paths.sessions_dir(), sessions.list()).await);
-    sources
-}
-
-async fn session_log_sources(
-    sessions_dir: PathBuf,
-    sessions: Vec<session::SessionInfo>,
-) -> Vec<LogSourceEntry> {
-    let Ok(mut entries) = tokio::fs::read_dir(sessions_dir).await else {
-        return Vec::new();
-    };
-    let mut sources = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let Ok(file_type) = entry.file_type().await else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        let candidate_dir = entry.path();
-        let Some(session_id) = candidate_dir.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let path = candidate_dir.join("logs").join(SESSION_LOG);
-        let Ok(metadata) = tokio::fs::metadata(&path).await else {
-            continue;
-        };
-        if !metadata.is_file() {
-            continue;
-        }
-        sources.push(log_source_entry(
-            format!("session-log-{session_id}"),
-            session_log_label(session_id, &sessions),
-            session_id.to_string(),
-            path,
-            Some(metadata),
-        ));
-    }
-    sources.sort_by(|left, right| left.label.cmp(&right.label));
-    sources
-}
-
-fn session_log_label(session_id: &str, sessions: &[session::SessionInfo]) -> String {
-    sessions
-        .iter()
-        .find(|info| info.session_id.as_str() == session_id)
-        .and_then(|info| info.title.as_deref())
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .unwrap_or("Untitled session")
-        .to_string()
-}
-
-fn log_source_entry(
-    id: impl Into<String>,
-    label: impl Into<String>,
-    description: impl Into<String>,
-    path: PathBuf,
-    metadata: Option<std::fs::Metadata>,
-) -> LogSourceEntry {
-    let modified_at_ms = metadata
-        .as_ref()
-        .and_then(|metadata| metadata.modified().ok())
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok());
-
-    LogSourceEntry {
-        id: id.into(),
-        label: label.into(),
-        description: description.into(),
-        path: path.display().to_string(),
-        exists: metadata.as_ref().is_some_and(std::fs::Metadata::is_file),
-        size_bytes: metadata.as_ref().map_or(0, std::fs::Metadata::len),
-        modified_at_ms,
-    }
-}
-
-async fn read_log_path(path: &Path, query: &LogsReadQuery) -> Result<LogFileRead, ReadLogError> {
+pub async fn read_log_path(path: &Path, query: &LogReadQuery) -> Result<LogFileRead, ReadLogError> {
     let mut file = File::open(path).await?;
     let file_size = file.seek(std::io::SeekFrom::End(0)).await?;
     drop(file);
@@ -379,51 +193,4 @@ fn lines_from_bytes(buffer: &[u8], starts_mid_line: bool) -> Vec<String> {
     };
 
     text.lines().map(std::string::ToString::to_string).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn session_log_sources_lists_per_session_logs_only() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let sessions_dir = temp.path().to_path_buf();
-        let session_log_dir = sessions_dir.join("abc").join("logs");
-        tokio::fs::create_dir_all(&session_log_dir)
-            .await
-            .expect("create session log dir");
-        tokio::fs::write(session_log_dir.join("session.log"), b"panic\n")
-            .await
-            .expect("write session log");
-        tokio::fs::write(session_log_dir.join("session-abc-stdio.log"), b"old\n")
-            .await
-            .expect("write old log");
-        tokio::fs::write(sessions_dir.join("daat-locus.log"), b"main\n")
-            .await
-            .expect("write main log");
-
-        let sessions = vec![session::SessionInfo {
-            session_id: session::SessionId::from_string("abc").expect("session id"),
-            scope: session::SessionScope::General,
-            pid: None,
-            status: session::SessionStatus::Dormant,
-            ipc_name: None,
-            ipc_token_hash: None,
-            project_dir: None,
-            title: Some("Fix render slot label".to_string()),
-            started_at_ms: 0,
-            last_seen_at_ms: None,
-        }];
-        let sources = session_log_sources(sessions_dir, sessions).await;
-
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].id, "session-log-abc");
-        assert_eq!(sources[0].label, "Fix render slot label");
-        assert_eq!(sources[0].description, "abc");
-        assert!(
-            PathBuf::from(&sources[0].path)
-                .ends_with(Path::new("abc").join("logs").join("session.log"))
-        );
-    }
 }

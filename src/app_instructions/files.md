@@ -1,0 +1,1 @@
+Read files before changing them. Supply the whole-file sha256 returned by read_file for edits and overwrites. A null expected_sha256 creates a new file only. edit_file requires an exact, unique old_text match. Read skill instructions with read_file when an available skill applies; skills are instruction resources.

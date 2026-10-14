@@ -1,5 +1,4 @@
-use std::collections::VecDeque;
-use std::sync::Arc;
+use super::transport::{Authentication, BackendHttp};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -7,42 +6,38 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use miette::{Result, miette};
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
 use tracing::warn;
 
+use super::extract_json_value_from_content;
 use super::io::{
-    default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
-    non_empty_string, parse_retry_after_seconds, read_response_text_with_timeout,
-    send_request_for_streaming_response, truncate_for_error, truncate_for_json_error,
+    format_request_error, looks_like_context_window_error, non_empty_string,
+    read_response_text_with_timeout, truncate_for_error, truncate_for_json_error,
 };
 use super::payload::image_part_data_url;
-use super::{extract_json_value_from_content, shared_request_rate_limiter};
 use crate::context_budget::{ContextBudgetExceededError, RequestBudgetLimits};
 use crate::core::{
     ModelProgressSink, ModelProvider, ModelRequestOptions, TokenUsage, TokenUsageInfo,
 };
 use crate::model_catalog::catalog_model_capacity;
-use crate::reasoning::runtime::{
+use crate::model_protocol::{
     AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentTurnItem, AgentTurnRequest,
     AgentTurnStreamResult, HistoryMessage, PromptRequest,
 };
 
 pub struct ResponsesCompatibleClient {
-    client: reqwest::Client,
+    transport: BackendHttp,
     api_key: String,
     /// Extra headers attached to each request (e.g. the OpenCode org id).
     extra_headers: reqwest::header::HeaderMap,
     base_url: String,
     model: String,
     thinking_budget: Option<String>,
-    rpm: Option<usize>,
     request_timeout: Duration,
     stream_idle_timeout: Duration,
     context_window_tokens: usize,
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
     reserved_output_tokens: usize,
-    request_rate_limiter: Option<Arc<Mutex<VecDeque<Instant>>>>,
     token_usage: std::sync::Mutex<TokenUsageInfo>,
     supports_vision: std::sync::atomic::AtomicBool,
     /// Whether the provider accepts `reasoning.summary`. It is an optional
@@ -71,10 +66,7 @@ impl ResponsesCompatibleClient {
         let base_url = crate::config::normalize_provider_base_url(base_url);
         let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
         let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .build()
-            .expect("failed to build responses-compatible http client");
+        let transport = BackendHttp::new(&base_url, model_config);
         let context_window_tokens = model_config.context_window_tokens();
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
@@ -83,7 +75,7 @@ impl ResponsesCompatibleClient {
             catalog_model_capacity(&model_config.model_id).is_some_and(|c| c.supports_vision)
         });
         Self {
-            client,
+            transport,
             api_key: api_key.to_string(),
             extra_headers: reqwest::header::HeaderMap::new(),
             base_url: base_url.clone(),
@@ -91,18 +83,12 @@ impl ResponsesCompatibleClient {
             thinking_budget: model_config
                 .thinking_budget()
                 .map(|budget| budget.as_str().to_string()),
-            rpm: model_config.rpm(),
             request_timeout,
             stream_idle_timeout,
             context_window_tokens,
             effective_context_window_tokens,
             auto_compact_threshold_tokens,
             reserved_output_tokens,
-            request_rate_limiter: shared_request_rate_limiter(
-                &base_url,
-                &model_config.model_id,
-                model_config.rpm(),
-            ),
             token_usage: std::sync::Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
@@ -123,137 +109,6 @@ impl ResponsesCompatibleClient {
             context_window_tokens: self.effective_context_window_tokens,
             auto_compact_threshold_tokens: self.auto_compact_threshold_tokens,
             reserved_output_tokens: self.reserved_output_tokens,
-        }
-    }
-
-    async fn wait_for_request_slot(&self, _request_context: &[String]) {
-        let Some(limiter) = &self.request_rate_limiter else {
-            return;
-        };
-        let Some(rpm) = self.rpm else {
-            return;
-        };
-        let window = Duration::from_mins(1);
-        loop {
-            let mut queue = limiter.lock().await;
-            let now = Instant::now();
-            queue.retain(|t| now.duration_since(*t) < window);
-            if queue.len() < rpm {
-                queue.push_back(now);
-                return;
-            }
-            let oldest = *queue.front().unwrap();
-            let wait = window.checked_sub(now.duration_since(oldest)).unwrap();
-            drop(queue);
-            tokio::time::sleep(wait).await;
-        }
-    }
-
-    async fn post_responses_with_retry(
-        &self,
-        payload: &Value,
-        request_context: &[String],
-        session_headers: &reqwest::header::HeaderMap,
-    ) -> Result<reqwest::Response> {
-        const MAX_429_RETRIES: usize = 4;
-        const MAX_5XX_RETRIES: usize = 3;
-
-        let url = self.url();
-        let mut rate_limit_attempt = 0usize;
-        let mut transient_attempt = 0usize;
-        loop {
-            self.wait_for_request_slot(request_context).await;
-            let mut request_headers = self.extra_headers.clone();
-            request_headers.extend(session_headers.clone());
-            let request = self
-                .client
-                .post(&url)
-                .bearer_auth(&self.api_key)
-                .headers(request_headers)
-                .json(payload);
-            let response = send_request_for_streaming_response(
-                request,
-                self.request_timeout,
-                "responses-compatible request failed",
-                &url,
-                request_context,
-            )
-            .await?;
-
-            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                let retry_after = response
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(parse_retry_after_seconds);
-                let body = read_response_text_with_timeout(
-                    response,
-                    self.request_timeout,
-                    "responses-compatible 429 body read failed",
-                    &url,
-                    request_context,
-                )
-                .await?;
-
-                if rate_limit_attempt >= MAX_429_RETRIES {
-                    return Err(miette!(
-                        "responses-compatible returned HTTP 429 after {} retries: {}",
-                        MAX_429_RETRIES,
-                        truncate_for_error(&body)
-                    ));
-                }
-
-                let delay = retry_after.map_or_else(
-                    || default_rate_limit_backoff(rate_limit_attempt),
-                    Duration::from_secs,
-                );
-                warn!(
-                    "responses-compatible returned HTTP 429; retrying in {} ms (attempt {}/{})\n{}",
-                    delay.as_millis(),
-                    rate_limit_attempt + 1,
-                    MAX_429_RETRIES,
-                    request_context.join("\n")
-                );
-                tokio::time::sleep(delay).await;
-                rate_limit_attempt += 1;
-                continue;
-            }
-
-            if response.status().is_server_error() {
-                let status = response.status();
-                let body = read_response_text_with_timeout(
-                    response,
-                    self.request_timeout,
-                    "responses-compatible 5xx body read failed",
-                    &url,
-                    request_context,
-                )
-                .await?;
-
-                if transient_attempt >= MAX_5XX_RETRIES {
-                    return Err(miette!(
-                        "responses-compatible returned HTTP {} after {} retries: {}",
-                        status,
-                        MAX_5XX_RETRIES,
-                        truncate_for_error(&body)
-                    ));
-                }
-
-                let delay = Duration::from_millis(400 * (1u64 << transient_attempt));
-                warn!(
-                    "responses-compatible returned HTTP {}; retrying in {} ms (attempt {}/{})\n{}",
-                    status,
-                    delay.as_millis(),
-                    transient_attempt + 1,
-                    MAX_5XX_RETRIES,
-                    request_context.join("\n")
-                );
-                tokio::time::sleep(delay).await;
-                transient_attempt += 1;
-                continue;
-            }
-
-            return Ok(response);
         }
     }
 
@@ -509,8 +364,12 @@ impl ModelProvider for ResponsesCompatibleClient {
     ) -> Result<Value> {
         let budget = &options.budget;
         let request_context = super::io::summarize_prompt_request(&request, Some(budget));
-        let session_headers =
-            super::opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
+        let backend_request = self.transport.request(
+            "/responses",
+            Authentication::Bearer(&self.api_key),
+            &self.extra_headers,
+            &options,
+        )?;
         let (instructions, input) =
             history_messages_to_responses_parts(request.all_messages(), false);
         let mut payload = base_payload(
@@ -528,8 +387,8 @@ impl ModelProvider for ResponsesCompatibleClient {
                 "schema": request.output_schema.clone(),
             }
         });
-        let response = self
-            .post_responses_with_retry(&payload, &request_context, &session_headers)
+        let response = backend_request
+            .post(&payload, &request_context, self.request_timeout)
             .await?;
         let status = response.status();
         if !status.is_success() {
@@ -568,13 +427,17 @@ impl ModelProvider for ResponsesCompatibleClient {
     ) -> Result<AgentTurnStreamResult> {
         let budget = &options.budget;
         let request_context = super::io::summarize_agent_turn_request(&request, Some(budget));
-        let session_headers =
-            super::opencode_gateway_headers(&self.base_url, options.conversation_id.as_deref());
+        let backend_request = self.transport.request(
+            "/responses",
+            Authentication::Bearer(&self.api_key),
+            &self.extra_headers,
+            &options,
+        )?;
         let mut strip_images = !self.supports_vision.load(Ordering::Relaxed);
         loop {
             let payload = build_agent_payload(self, &request, strip_images);
-            let response = self
-                .post_responses_with_retry(&payload, &request_context, &session_headers)
+            let response = backend_request
+                .post(&payload, &request_context, self.request_timeout)
                 .await?;
             let status = response.status();
             if status.is_success() {
@@ -783,15 +646,16 @@ fn responses_user_message(content: &AgentContent, strip_images: bool) -> Value {
                     "text": text,
                 }));
             }
-            AgentContentPart::Image {
-                path, description, ..
-            } => {
+            AgentContentPart::Image { .. }
+            | AgentContentPart::ResourceImage { .. }
+            | AgentContentPart::ImageData { .. } => {
+                let label = part.image_label().unwrap_or("image");
                 if strip_images {
                     parts.push(json!({
                         "type": "input_text",
                         "text": format!(
                             "[image: {}]",
-                            description.as_deref().unwrap_or(path)
+                            label
                         ),
                     }));
                     continue;
@@ -801,7 +665,7 @@ fn responses_user_message(content: &AgentContent, strip_images: bool) -> Value {
                         "type": "input_text",
                         "text": format!(
                             "[image attachment unavailable: {}]",
-                            description.as_deref().unwrap_or(path)
+                            label
                         ),
                     }));
                     continue;
@@ -820,7 +684,7 @@ fn responses_user_message(content: &AgentContent, strip_images: bool) -> Value {
     })
 }
 
-fn agent_tool_to_responses_tool(tool: crate::reasoning::runtime::AgentToolSpec) -> Value {
+fn agent_tool_to_responses_tool(tool: crate::model_protocol::AgentToolSpec) -> Value {
     super::responses_protocol::tool_to_responses_tool(tool)
 }
 

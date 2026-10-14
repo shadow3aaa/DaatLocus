@@ -6,7 +6,7 @@ use miette::{Result, miette};
 use crate::{
     config::{ModelConfig, redact_secret_text},
     core::{ModelProvider, ModelRequestOptions, TokenUsageInfo},
-    reasoning::runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
+    model_protocol::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
 };
 
 use super::OpenAIClient;

@@ -1,168 +1,78 @@
 name: Release Binaries
-
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to upload to, for example v0.1.0. Leave empty to only upload workflow artifacts.
+        description: Existing release tag; leave empty for workflow artifacts only
         required: false
         type: string
   push:
-    tags:
-      - "v*"
-
+    tags: ['v*']
 permissions:
-  contents: write
-
+  contents: read
 concurrency:
-  group: release-binaries-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
-
 jobs:
   build:
-    name: Build release binary (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-
-      - name: Install Linux tray dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Cache Cargo build outputs
-        uses: Swatinem/rust-cache@v2
-
-      - name: Resolve host target
-        id: host
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-pack --locked
+      - id: host
         shell: bash
         run: |
-          target="$(rustc -vV | sed -n 's/^host: //p')"
-          echo "target=$target" >> "$GITHUB_OUTPUT"
-
-      - name: Build release binary
-        run: cargo build -p daat-locus --release --locked --target "${{ steps.host.outputs.target }}"
-
-      - name: Package release binary
-        shell: bash
+          echo "target=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_OUTPUT"
+      - name: Build embedded binary archive
         run: cargo xtask package binary --target "${{ steps.host.outputs.target }}"
-
-      - name: Package macOS installer
-        if: matrix.os == 'macos-latest'
-        shell: bash
-        run: cargo xtask package macos --target "${{ steps.host.outputs.target }}"
-
-      - name: Set up .NET SDK
-        if: matrix.os == 'windows-latest'
-        uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v4
+        if: runner.os == 'Windows'
         with:
           dotnet-version: '8.x'
-
-      - name: Install WiX Toolset
-        if: matrix.os == 'windows-latest'
+      - name: Install WiX
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $wixToolsDir = "$env:USERPROFILE\.dotnet\tools"
           dotnet tool install --global wix --version 6.0.0
-          $wixToolsDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          & "$wixToolsDir\wix.exe" extension add WixToolset.Util.wixext/6.0.0
-          & "$wixToolsDir\wix.exe" extension add WixToolset.BootstrapperApplications.wixext/6.0.0
-
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add WixToolset.Util.wixext/6.0.0
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add WixToolset.BootstrapperApplications.wixext/6.0.0
       - name: Package Windows installers
-        if: matrix.os == 'windows-latest'
-        run: cargo xtask package windows
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        run: cargo xtask package windows --skip-build --target "${{ steps.host.outputs.target }}"
+      - name: Package macOS app and installer
+        if: runner.os == 'macOS'
+        run: cargo xtask package macos --skip-build --target "${{ steps.host.outputs.target }}"
+      - uses: actions/upload-artifact@v4
         with:
           name: daat-locus-${{ steps.host.outputs.target }}
           if-no-files-found: error
-          path: target/${{ steps.host.outputs.target }}/release/package/daat-locus-*.tar.zst
-
-      - name: Upload Windows setup artifact
-        if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: daat-locus-${{ steps.host.outputs.target }}-windows-setup
-          if-no-files-found: error
-          path: target/x86_64-pc-windows-msvc/release/msi/*-setup.exe
-
-
-      - name: Upload macOS installer artifact
-        if: matrix.os == 'macos-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: daat-locus-${{ steps.host.outputs.target }}-macos-installer
-          if-no-files-found: error
-          path: target/${{ steps.host.outputs.target }}/release/macos/*.pkg
-
+          path: |
+            target/${{ steps.host.outputs.target }}/release/package/*.tar.zst
+            target/${{ steps.host.outputs.target }}/release/package/*.msi
+            target/${{ steps.host.outputs.target }}/release/package/*-setup.exe
+            target/${{ steps.host.outputs.target }}/release/package/*.pkg
   publish:
-    name: Upload release assets
     needs: build
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
+    if: github.event_name == 'push' || inputs.tag != ''
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Resolve release tag
-        id: release
-        shell: bash
-        run: |
-          tag=""
-          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            tag="$GITHUB_REF_NAME"
-          else
-            tag="${{ github.event.inputs.tag }}"
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve release notes
-        id: release_notes
-        shell: bash
-        run: |
-          notes="docs/releases/${{ steps.release.outputs.tag }}.md"
-          if [ ! -f "$notes" ]; then
-            echo "::error::Missing release notes file: $notes"
-            echo "::error::Create docs/releases/${{ steps.release.outputs.tag }}.md before publishing."
-            exit 1
-          fi
-          echo "path=$notes" >> "$GITHUB_OUTPUT"
-
-      - name: Download release artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           pattern: daat-locus-*
-          path: target/release-artifacts
+          path: artifacts
           merge-multiple: true
-
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.release.outputs.tag }}
-          body_path: ${{ steps.release_notes.outputs.path }}
-          files: |
-            target/release-artifacts/*.tar.zst
-            target/release-artifacts/*-setup.exe
-            target/release-artifacts/*.pkg
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/*

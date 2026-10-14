@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use daat_locus_macros::model_schema;
 use miette::{Result, miette};
 use serde_json::{Map, Value, json};
 
@@ -244,39 +243,6 @@ pub fn nullable_schema(mut schema: Value) -> Value {
     schema
 }
 
-#[model_schema]
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct StructuredEditArgsSchema {
-    pub edits: Vec<StructuredEditSchema>,
-}
-
-#[model_schema]
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct StructuredEditSchema {
-    pub path: String,
-    /// Operation kind. Omitted or null defaults to `append` for new files.
-    pub op: Option<StructuredEditOpSchema>,
-    /// `line#hash` anchor (e.g., `42#ab`), without the `|source_line` portion shown in read output.
-    /// Omitted or null defaults to `"1#"` for new files.
-    pub start: Option<String>,
-    /// `line#hash` end anchor, required for `replace` and ignored for `append`/`prepend`.
-    pub end: Option<String>,
-    pub content: Option<String>,
-}
-
-#[model_schema]
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum StructuredEditOpSchema {
-    Replace,
-    Append,
-    Prepend,
-}
-
-pub fn structured_edit_args_schema() -> Value {
-    model_schema_for::<StructuredEditArgsSchema>()
-}
-
 fn validate_schema_at(schema: &Value, path: &str, root: bool, errors: &mut Vec<String>) {
     let Some(object) = schema.as_object() else {
         errors.push(format!("{path}: schema must be a JSON object"));
@@ -475,21 +441,9 @@ fn validate_array_schema(object: &Map<String, Value>, path: &str, errors: &mut V
 #[cfg(test)]
 mod tests {
     use super::{
-        boolean_schema, model_schema, nullable_schema, string_schema, structured_edit_args_schema,
-        validate_model_facing_schema,
+        boolean_schema, model_schema, nullable_schema, string_schema, validate_model_facing_schema,
     };
-    use serde_json::{Value, json};
-
-    fn contains_key(value: &Value, needle: &str) -> bool {
-        match value {
-            Value::Object(object) => {
-                object.contains_key(needle)
-                    || object.values().any(|value| contains_key(value, needle))
-            }
-            Value::Array(values) => values.iter().any(|value| contains_key(value, needle)),
-            _ => false,
-        }
-    }
+    use serde_json::json;
 
     #[test]
     fn object_schema_requires_every_property_and_forbids_extra_properties() {
@@ -576,32 +530,6 @@ mod tests {
             .to_string();
 
         assert!(err.contains("forbidden schema keyword `minItems`"), "{err}");
-    }
-
-    #[test]
-    fn structured_edit_schema_uses_portable_nullable_fields() {
-        let schema = structured_edit_args_schema();
-
-        validate_model_facing_schema(&schema).unwrap();
-        for key in ["oneOf", "anyOf", "allOf", "minItems"] {
-            assert!(!contains_key(&schema, key), "{schema:#}");
-        }
-        assert_eq!(
-            schema["properties"]["edits"]["items"]["properties"]["content"]["type"],
-            json!(["string", "null"])
-        );
-        assert_eq!(
-            schema["properties"]["edits"]["items"]["properties"]["end"]["type"],
-            json!(["string", "null"])
-        );
-        assert_eq!(
-            schema["properties"]["edits"]["items"]["properties"]["start"]["description"],
-            "`line#hash` anchor (e.g., `42#ab`), without the `|source_line` portion shown in read output. Omitted or null defaults to `\"1#\"` for new files."
-        );
-        assert_eq!(
-            schema["properties"]["edits"]["items"]["properties"]["end"]["description"],
-            "`line#hash` end anchor, required for `replace` and ignored for `append`/`prepend`."
-        );
     }
 
     #[test]

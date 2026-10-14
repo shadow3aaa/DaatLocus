@@ -32,13 +32,3 @@ impl Locale {
         }
     }
 }
-
-#[macro_export]
-macro_rules! tr {
-    ($locale:expr, $key:literal) => {
-        ::rust_i18n::t!($key, locale = $locale.as_str()).to_string()
-    };
-    ($locale:expr, $key:literal, $($arg:ident = $value:expr),+ $(,)?) => {
-        ::rust_i18n::t!($key, locale = $locale.as_str(), $($arg = $value),+).to_string()
-    };
-}

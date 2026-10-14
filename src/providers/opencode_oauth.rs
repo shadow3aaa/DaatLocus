@@ -21,8 +21,8 @@ use crate::config::{ModelConfig, redact_secret_text};
 use crate::context_budget::RequestBudgetLimits;
 use crate::core::{ModelProvider, ModelRequestOptions, TokenUsageInfo};
 use crate::daat_locus_paths::daat_locus_paths_sync;
+use crate::model_protocol::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest};
 use crate::persistence::{PersistenceFileMode, write_bytes_atomic};
-use crate::reasoning::runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest};
 
 /// Default OpenCode Console origin used for the device-code OAuth flow.
 pub const OPENCODE_OAUTH_DEFAULT_SERVER: &str = "https://opencode.ai/console";

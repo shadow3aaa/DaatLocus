@@ -1,7 +1,10 @@
 //! The current catalog is downloaded into Cargo's `OUT_DIR` by `build.rs` and
 //! compiled into the binary. A newer runtime cache can override that snapshot.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    sync::{Arc, OnceLock, RwLock},
+    time::{Duration, Instant},
+};
 
 use crate::daat_locus_paths::daat_locus_paths;
 #[cfg(not(test))]
@@ -34,32 +37,71 @@ pub const fn conservative_model_capacity() -> ModelCapacity {
 ///
 /// The parsed tree lives behind `Arc` in a `OnceLock`. Callers clone the `Arc`
 /// (reference count) instead of deep-copying the `serde_json::Value`.
-fn load_catalog_json() -> Arc<serde_json::Value> {
-    static CATALOG: OnceLock<Arc<serde_json::Value>> = OnceLock::new();
-    Arc::clone(CATALOG.get_or_init(|| {
+fn catalog_store() -> &'static RwLock<Arc<serde_json::Value>> {
+    static CATALOG: OnceLock<RwLock<Arc<serde_json::Value>>> = OnceLock::new();
+    CATALOG.get_or_init(|| {
         #[cfg(not(test))]
         {
             let paths = daat_locus_paths_sync();
             if let Ok(text) = std::fs::read_to_string(paths.models_dev_cache())
-                && let Ok(root) = serde_json::from_str::<serde_json::Value>(&text)
+                && let Ok(root) = validated_catalog(&text)
             {
-                return Arc::new(root);
+                return RwLock::new(Arc::new(root));
             }
         }
-        Arc::new(serde_json::from_str(COMPILED_API_JSON).unwrap_or(serde_json::Value::Null))
-    }))
+        RwLock::new(Arc::new(
+            validated_catalog(COMPILED_API_JSON).expect("valid compiled models.dev catalog"),
+        ))
+    })
+}
+
+fn load_catalog_json() -> Arc<serde_json::Value> {
+    Arc::clone(&catalog_store().read().expect("catalog lock"))
+}
+
+fn validated_catalog(text: &str) -> Result<serde_json::Value, String> {
+    let root: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| "Invalid model catalog")?;
+    if !root.as_object().is_some_and(|providers| {
+        providers.values().any(|provider| {
+            provider["models"].as_object().is_some_and(|models| {
+                models
+                    .values()
+                    .any(|model| capacity_for_model(model).is_some())
+            })
+        })
+    }) {
+        return Err("Empty model catalog".into());
+    }
+    Ok(root)
 }
 
 /// Refresh the local cache from models.dev. Returns Ok if cache was written.
 pub async fn refresh_models_dev_cache() -> Result<(), String> {
-    let response = reqwest::get("https://models.dev/api.json")
+    let mut response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .build()
+        .map_err(|_| "Cannot create catalog client")?
+        .get("https://models.dev/api.json")
+        .send()
         .await
-        .map_err(|e| format!("fetch models.dev failed: {e}"))?
-        .text()
+        .map_err(|_| "Cannot fetch model catalog")?
+        .error_for_status()
+        .map_err(|_| "Catalog service unavailable")?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| format!("read models.dev response failed: {e}"))?;
-    let _: serde_json::Value = serde_json::from_str(&response)
-        .map_err(|e| format!("models.dev returned invalid JSON: {e}"))?;
+        .map_err(|_| "Cannot read model catalog")?
+    {
+        if bytes.len() + chunk.len() > 16 * 1024 * 1024 {
+            return Err("Model catalog is too large".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let root = validated_catalog(
+        std::str::from_utf8(&bytes).map_err(|_| "Invalid model catalog encoding")?,
+    )?;
     let paths = daat_locus_paths().await;
     let cache_path = paths.models_dev_cache();
     if let Some(parent) = cache_path.parent() {
@@ -67,11 +109,67 @@ pub async fn refresh_models_dev_cache() -> Result<(), String> {
             .await
             .map_err(|e| format!("create cache dir failed: {e}"))?;
     }
-    tokio::fs::write(&cache_path, &response)
-        .await
-        .map_err(|e| format!("write cache file failed: {e}"))?;
-    tracing::info!("refreshed models.dev cache ({} bytes)", response.len());
+    crate::persistence::write_bytes_atomic(
+        cache_path,
+        bytes,
+        crate::persistence::PersistenceFileMode::Default,
+    )
+    .await
+    .map_err(|e| format!("write cache file failed: {e}"))?;
+    *catalog_store().write().expect("catalog lock") = Arc::new(root);
     Ok(())
+}
+
+/// Refresh once a day, retrying failures after a short backoff. Existing readers
+/// retain the last valid tree; a failed download never replaces it or the cache.
+pub async fn refresh_models_dev_cache_if_stale() {
+    static ATTEMPT: tokio::sync::Mutex<Option<(Instant, Duration)>> =
+        tokio::sync::Mutex::const_new(None);
+    let mut attempt = ATTEMPT.lock().await;
+    if attempt
+        .as_ref()
+        .is_some_and(|(at, delay)| at.elapsed() < *delay)
+    {
+        return;
+    }
+    let paths = daat_locus_paths().await;
+    if attempt.is_none()
+        && tokio::fs::metadata(paths.models_dev_cache())
+            .await
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age < Duration::from_secs(86400))
+        && tokio::fs::read_to_string(paths.models_dev_cache())
+            .await
+            .ok()
+            .is_some_and(|text| validated_catalog(&text).is_ok())
+    {
+        *attempt = Some((Instant::now(), Duration::from_secs(86400)));
+        return;
+    }
+    let delay = if refresh_models_dev_cache().await.is_ok() {
+        86400
+    } else {
+        300
+    };
+    *attempt = Some((Instant::now(), Duration::from_secs(delay)));
+}
+
+pub fn catalog_model_ids(provider_ids: &[String]) -> Vec<String> {
+    let root = load_catalog_json();
+    let mut ids = std::collections::BTreeSet::new();
+    if let Some(providers) = root.as_object() {
+        for (id, provider) in providers {
+            if !provider_ids.is_empty() && !provider_ids.contains(id) {
+                continue;
+            }
+            if let Some(models) = provider["models"].as_object() {
+                ids.extend(models.keys().cloned());
+            }
+        }
+    }
+    ids.into_iter().take(10000).collect()
 }
 
 fn input_modalities_suggest_vision(modalities: &serde_json::Value) -> bool {
@@ -94,7 +192,8 @@ fn normalize_catalog_api_url(value: &str) -> Option<String> {
 }
 
 /// Reasoning configuration option discovered from models.dev.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReasoningOption {
     Toggle,
     Effort { values: Vec<String> },
@@ -288,6 +387,21 @@ pub fn catalog_provider_has_model(provider_id: &str, model_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_or_empty_catalog_cannot_replace_the_snapshot() {
+        for invalid in [
+            "not json",
+            "null",
+            "{}",
+            r#"{"error":"unavailable"}"#,
+            r#"{"openai":{"models":{}}}"#,
+        ] {
+            assert!(validated_catalog(invalid).is_err());
+        }
+        assert!(validated_catalog(COMPILED_API_JSON).is_ok());
+        assert!(!catalog_model_ids(&["openai".into()]).is_empty());
+    }
 
     #[test]
     fn provider_api_url_matching_is_exact_after_trailing_slash_trim() {

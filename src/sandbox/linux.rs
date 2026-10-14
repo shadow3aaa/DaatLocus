@@ -187,6 +187,8 @@ mod tests {
             readable_roots: Vec::new(),
             writable_roots: Vec::new(),
             deny_read_paths: vec![protected_home.clone()],
+            private_delivery: None,
+            bound_roots: Vec::new(),
             deny_write_paths: vec![source_root.clone()],
         };
 
@@ -219,6 +221,8 @@ mod tests {
             readable_roots: Vec::new(),
             writable_roots: Vec::new(),
             deny_read_paths: vec![protected_home.clone()],
+            private_delivery: None,
+            bound_roots: Vec::new(),
             deny_write_paths: vec![protected_home.clone()],
         };
 
@@ -248,6 +252,8 @@ mod tests {
                 read_only_subpaths: vec![git_dir.clone()],
             }],
             deny_read_paths: Vec::new(),
+            private_delivery: None,
+            bound_roots: Vec::new(),
             deny_write_paths: Vec::new(),
         };
 
@@ -276,6 +282,8 @@ mod tests {
             readable_roots: Vec::new(),
             writable_roots: Vec::new(),
             deny_read_paths: Vec::new(),
+            private_delivery: None,
+            bound_roots: Vec::new(),
             deny_write_paths: Vec::new(),
         };
 

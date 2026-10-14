@@ -1,106 +1,14 @@
-use std::fmt::Write as _;
-use std::{env, ffi::OsStr, fs, io::Read, io::Write as _, path::Path, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf};
 
-use crate::{
-    commands::reset::{run_compile_reset, run_memory_reset, run_reset_all, run_state_reset},
-    config::load_config,
-    daemon::{
-        CreatedDaemonToken, DaemonClient, DaemonTokenListEntry, connect_daemon_status,
-        connect_existing_daemon, connect_or_start_daemon, create_daemon_token, list_daemon_tokens,
-        revoke_daemon_token, rotate_daemon_token, spawn_detached_daemon_process, status_summary,
-        wait_for_daemon_ready, wait_for_daemon_restarted, wait_for_daemon_shutdown,
-    },
-    dashboard::run_tui_dashboard,
-    i18n::Locale,
-    logging::init_logging,
-};
-use crate::{config, config_setup, config_wizard};
-#[cfg(feature = "tui-perf-cmd")]
-use clap::Args;
 use clap::{
-    ColorChoice, CommandFactory, Parser, Subcommand,
-    builder::styling::{AnsiColor, Styles},
+    Args, Parser, Subcommand,
+    builder::{
+        PathBufValueParser, TypedValueParser,
+        styling::{AnsiColor, Styles},
+    },
 };
-use miette::{IntoDiagnostic, Result, miette};
-use ratatui::{
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{ListItem, ListState},
-};
-use std::path::PathBuf;
 
-pub fn parse_args() -> Cli {
-    if is_top_level_help_request(env::args_os()) {
-        print_top_level_help();
-        std::process::exit(0);
-    }
-    Cli::parse()
-}
-
-fn is_top_level_help_request<I, S>(args: I) -> bool
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let args = args.into_iter().collect::<Vec<_>>();
-    matches!(
-        args.get(1).and_then(|arg| arg.as_ref().to_str()),
-        Some("-h" | "--help" | "help")
-    ) && args.len() == 2
-}
-
-fn print_top_level_help() {
-    print!("{}", top_level_help_text());
-}
-
-fn top_level_help_text() -> String {
-    let logo = crate::terminal_logo::render_daat_locus_logo();
-    let mut command = Cli::command()
-        .color(ColorChoice::Always)
-        .styles(HELP_STYLES)
-        .after_help(top_level_after_help_text());
-    let help = command.render_help();
-
-    format!("{logo}\n\n{}", help.ansi())
-}
-
-fn top_level_after_help_text() -> String {
-    let green = "\x1b[38;5;120m";
-    let cyan = "\x1b[38;5;87m";
-    let reset = "\x1b[0m";
-    let webui_url = webui_help_url();
-
-    format!("{green}WebUI{reset}\n  If Daat Locus is running, open {cyan}{webui_url}{reset}")
-}
-
-fn webui_help_url() -> String {
-    format!(
-        "http://{}:{}",
-        crate::daemon::DAEMON_CLIENT_HOST,
-        configured_help_daemon_port()
-    )
-}
-
-fn configured_help_daemon_port() -> u16 {
-    let default_port = crate::config::DaemonConfig::default().port;
-    let config_path = crate::daat_locus_paths::daat_locus_paths_sync().config_file("config.toml");
-    configured_help_daemon_port_from_path(&config_path).unwrap_or(default_port)
-}
-
-fn configured_help_daemon_port_from_path(config_path: &Path) -> Option<u16> {
-    let Ok(content) = fs::read_to_string(config_path) else {
-        return None;
-    };
-    let value = toml::from_str::<toml::Value>(&content).ok()?;
-    value
-        .get("daemon")
-        .and_then(toml::Value::as_table)
-        .and_then(|daemon| daemon.get("port"))
-        .and_then(toml::Value::as_integer)
-        .and_then(|port| u16::try_from(port).ok())
-        .filter(|port| *port > 0)
-}
-
+// The original terminal help palette; clap controls terminal color detection.
 const HELP_STYLES: Styles = Styles::styled()
     .header(AnsiColor::BrightGreen.on_default().bold())
     .usage(AnsiColor::BrightGreen.on_default().bold())
@@ -109,1591 +17,298 @@ const HELP_STYLES: Styles = Styles::styled()
     .valid(AnsiColor::BrightGreen.on_default())
     .invalid(AnsiColor::BrightYellow.on_default());
 
+const AFTER_HELP: &str = "\x1b[92;1mExamples\x1b[0m\n  \x1b[96mdaat-locus serve\x1b[0m\n  \x1b[96mdaat-locus serve --profile work --listen 127.0.0.1:45825\x1b[0m\n\n\x1b[38;5;120mWebUI\x1b[0m\n  Open the URL printed at startup and sign in with your account.";
+
+#[derive(Debug, Parser)]
+#[command(name = "daat-locus", version, propagate_version = true)]
+#[command(about = "Local Actor/App service with a WebUI.")]
+#[command(styles = HELP_STYLES, before_help = crate::terminal_logo::render_daat_locus_logo())]
+#[command(after_help = AFTER_HELP)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[command(flatten)]
+    service: ServiceArgs,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Internal desktop bootstrap protocol; reads a bounded OPAQUE message from stdin.
+    #[command(hide = true)]
+    ClientBootstrap,
+    /// Start the Actor service and WebUI in the foreground (the default).
+    Serve,
+    /// Start the service in the background; optionally open its WebUI.
+    Start {
+        #[arg(long)]
+        open: bool,
+    },
+    /// Show this profile's daemon status without starting a service.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop this profile's daemon gracefully.
+    Stop,
+    /// Restart this profile's daemon, preserving its launch options.
+    Restart {
+        #[arg(long)]
+        open: bool,
+    },
+    /// Create an account using the local profile's OS permissions.
+    Account {
+        #[command(subcommand)]
+        action: AccountCommand,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub enum AccountCommand {
+    /// Create the profile's account; read the password from stdin, never argv.
+    Create {
+        name: String,
+        #[arg(long, required = true)]
+        password_stdin: bool,
+    },
+}
+
+#[derive(Debug, Args, Default)]
+pub struct ServiceArgs {
+    /// Use an isolated local account profile.
+    #[arg(long, global = true, value_name = "NAME", value_parser = parse_profile)]
+    pub profile: Option<String>,
+    /// Bind to this address; defaults to loopback and the configured port.
+    #[arg(long, global = true, value_name = "ADDRESS:PORT")]
+    pub listen: Option<SocketAddr>,
+    /// Root Actor workspace; defaults to ~/daat-locus-workspace.
+    #[arg(long, global = true, value_name = "ABSOLUTE_PATH", value_parser = PathBufValueParser::new().try_map(absolute_workspace))]
+    pub workspace: Option<PathBuf>,
+}
+
+pub fn parse_args() -> (Command, ServiceArgs) {
+    let cli = Cli::parse();
+    (cli.command.unwrap_or(Command::Serve), cli.service)
+}
+
+fn parse_profile(value: &str) -> Result<String, String> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("profile must contain 1–64 ASCII letters, digits, '-' or '_'".into());
+    }
+    Ok(value.to_owned())
+}
+
+fn absolute_workspace(path: PathBuf) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("workspace must be an absolute path".into());
+    }
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::{CommandFactory, error::ErrorKind};
 
     #[test]
-    fn top_level_help_request_is_handled_by_custom_banner() {
-        assert!(is_top_level_help_request(["daat-locus", "--help"]));
-        assert!(is_top_level_help_request(["daat-locus", "-h"]));
-        assert!(is_top_level_help_request(["daat-locus", "help"]));
-        assert!(!is_top_level_help_request([
-            "daat-locus",
-            "config",
-            "--help"
-        ]));
-    }
-
-    #[test]
-    fn custom_help_contains_logo_and_entrypoints() {
-        let help = top_level_help_text();
-
-        assert!(help.contains("Usage:"));
-        assert!(help.contains("run"));
-        assert!(help.contains("Start the foreground runtime flow"));
-        assert!(help.contains("code"));
-        assert!(help.contains("Open a coding session tied to a project directory"));
-        assert!(help.contains("ls"));
-        assert!(help.contains("List sessions known to the daemon"));
-        assert!(help.contains("status"));
-        assert!(help.contains("Show daemon status"));
-        assert!(help.contains("token"));
-        assert!(help.contains("Manage daemon access tokens"));
-        assert!(help.contains("serve"));
-        assert!(!help.contains("config-schema"));
-        assert!(help.contains("WebUI"));
-        assert!(help.contains("http://localhost:"));
-        assert!(help.contains("\x1b[38;5;87m"));
-        assert!(help.contains("\x1b[92mUsage:"));
-        assert!(help.contains("\x1b[96mrun"));
-        assert!(!help.contains("long-running local agent runtime"));
-        assert!(!help.contains('╭'));
-    }
-
-    #[test]
-    fn config_help_only_exposes_menu_and_show() {
+    fn help_has_the_original_logo_palette_and_current_service_controls() {
+        Cli::command().debug_assert();
         let mut command = Cli::command();
-        let config_help = command
-            .find_subcommand_mut("config")
-            .expect("config subcommand")
-            .render_help()
-            .ansi()
-            .to_string();
-
-        assert!(config_help.contains("show"));
-        assert!(!config_help.contains("add-provider"));
-        assert!(!config_help.contains("add-model"));
-        assert!(!config_help.contains("set-main-model"));
-        assert!(!config_help.contains("set-efficient-model"));
-        assert!(!config_help.contains("set-telegram"));
+        let help = command.render_help().ansi().to_string();
+        for value in [
+            "Usage:",
+            "serve",
+            "start",
+            "status",
+            "stop",
+            "restart",
+            "--listen",
+            "--profile",
+            "--workspace",
+            "--version",
+            "WebUI",
+            "\x1b[38;5;87m",
+            "\x1b[38;5;141m",
+        ] {
+            assert!(help.contains(value), "missing {value:?}");
+        }
+        for value in ["workflow", "sleep", "session-id", "--ipc", "tui"] {
+            assert!(!help.contains(value), "obsolete {value:?}");
+        }
     }
 
     #[test]
-    fn help_daemon_port_reads_config_file() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let config_path = temp.path().join("config.toml");
-        fs::write(&config_path, "[daemon]\nport = 53826\n").expect("write config");
-
-        assert_eq!(
-            configured_help_daemon_port_from_path(&config_path),
-            Some(53826)
-        );
-    }
-
-    #[test]
-    fn help_daemon_port_missing_config_uses_default() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let config_path = temp.path().join("missing-config.toml");
-
-        assert_eq!(
-            configured_help_daemon_port_from_path(&config_path)
-                .unwrap_or_else(|| crate::config::DaemonConfig::default().port),
-            crate::config::DaemonConfig::default().port
-        );
-    }
-}
-
-#[derive(Debug, Parser)]
-#[command(name = "daat-locus")]
-pub struct Cli {
-    #[command(subcommand)]
-    command: Option<DaatLocusCommand>,
-    #[arg(long, hide = true)]
-    session_id: Option<String>,
-    #[arg(long, hide = true)]
-    ipc_name: Option<PathBuf>,
-    #[arg(long, hide = true)]
-    ipc_token: Option<String>,
-    #[arg(long, hide = true)]
-    session_project_dir: Option<PathBuf>,
-    #[arg(long, hide = true)]
-    session_study: bool,
-}
-
-#[derive(Debug, Subcommand)]
-enum DaatLocusCommand {
-    /// Start the foreground runtime flow.
-    Run,
-    /// Open a coding session tied to a project directory.
-    #[command(name = "code")]
-    Code {
-        /// Project directory path.
-        project_dir: PathBuf,
-    },
-    /// List sessions known to the daemon.
-    #[command(name = "ls", visible_alias = "list")]
-    Ls,
-    /// Attach to an already-running daemon.
-    Attach,
-    /// Send a one-shot message to the running agent and wait for its reply.
-    Send {
-        /// Match the target session by session id prefix; defaults to the general CLI session.
-        #[arg(short = 's', long = "session", value_name = "SESSION_ID_PREFIX")]
-        session: Option<String>,
-        /// Print the raw final reply instead of terminal-rendered Markdown.
-        #[arg(long)]
-        raw: bool,
-        /// Print JSON metadata; ignores --raw.
-        #[arg(long)]
-        json: bool,
-        /// Prompt text. Multiple words are joined with spaces; stdin is used when omitted.
-        prompt: Vec<String>,
-    },
-    /// Show daemon status.
-    Status,
-    /// Manage daemon access tokens.
-    Token {
-        #[command(subcommand)]
-        target: DaemonTokenTarget,
-    },
-    /// Stop the background daemon.
-    Stop,
-    /// Restart the background daemon.
-    Restart,
-    /// Start the daemon in the foreground.
-    Serve,
-    /// Clear local state or cache data.
-    Reset {
-        #[command(subcommand)]
-        target: ResetTarget,
-    },
-    /// Manage configuration.
-    Config {
-        #[command(subcommand)]
-        target: Option<ConfigTarget>,
-    },
-    /// Developer-only commands.
-    #[cfg(feature = "tui-perf-cmd")]
-    #[command(name = "dev", hide = true)]
-    Dev {
-        #[command(subcommand)]
-        target: DevTarget,
-    },
-    /// Print the JSON Schema for config.toml.
-    #[command(name = "config-schema", hide = true)]
-    ConfigSchema,
-}
-
-#[cfg(feature = "tui-perf-cmd")]
-#[derive(Debug, Subcommand)]
-enum DevTarget {
-    /// Run deterministic TUI render performance scenarios.
-    #[command(name = "tui-perf", hide = true)]
-    TuiPerf(TuiPerfCliArgs),
-}
-
-#[cfg(feature = "tui-perf-cmd")]
-#[derive(Debug, Args)]
-struct TuiPerfCliArgs {
-    /// Scenario to render: mixed, long-history, scrolling, live-activity, command-panels.
-    #[arg(long, default_value = "mixed")]
-    scenario: String,
-    /// Measured frame count after warmup.
-    #[arg(long, default_value_t = 120)]
-    frames: usize,
-    /// Warmup frames excluded from timing aggregates.
-    #[arg(long, default_value_t = 10)]
-    warmup: usize,
-    /// Mock terminal width.
-    #[arg(long, default_value_t = 120)]
-    width: u16,
-    /// Mock terminal height.
-    #[arg(long, default_value_t = 40)]
-    height: u16,
-    /// Emit machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Subcommand)]
-enum ConfigTarget {
-    /// Show the current config summary with secrets masked.
-    Show,
-}
-
-#[derive(Debug, Subcommand)]
-enum ResetTarget {
-    /// Clear compiled prompt cache.
-    #[command(name = "compile", alias = "complite")]
-    Compile,
-    /// Clear runtime state such as daemon locks and sockets.
-    State,
-    /// Clear conversation history, runtime memory records, and reasoning traces.
-    Memory,
-    /// Clear state, memory, and compile data.
-    All,
-}
-
-#[derive(Debug, Subcommand)]
-enum DaemonTokenTarget {
-    /// Create a new full-access daemon token.
-    Create { name: String },
-    /// List daemon token metadata without revealing token secrets.
-    List,
-    /// Revoke a daemon token by id or name.
-    Revoke { selector: String },
-    /// Rotate a daemon token by id or name and print the new secret once.
-    Rotate { selector: String },
-}
-
-pub async fn async_main(cli: Cli) -> Result<()> {
-    let _log_guard = init_logging(cli.session_id.as_deref()).await;
-
-    match cli.command.as_ref() {
-        Some(DaatLocusCommand::Reset {
-            target: ResetTarget::Compile,
-        }) => {
-            run_compile_reset().await?;
-            return Ok(());
-        }
-        Some(DaatLocusCommand::Reset {
-            target: ResetTarget::State,
-        }) => {
-            run_state_reset().await?;
-            return Ok(());
-        }
-        Some(DaatLocusCommand::Reset {
-            target: ResetTarget::Memory,
-        }) => {
-            run_memory_reset().await?;
-            return Ok(());
-        }
-        Some(DaatLocusCommand::Reset {
-            target: ResetTarget::All,
-        }) => {
-            run_reset_all().await?;
-            return Ok(());
-        }
-        // Config subcommands may run before a complete config exists.
-        Some(DaatLocusCommand::Config { target }) => {
-            return run_config_command(target.as_ref()).await;
-        }
-        Some(DaatLocusCommand::ConfigSchema) => {
-            print_config_schema()?;
-            return Ok(());
-        }
-        #[cfg(feature = "tui-perf-cmd")]
-        Some(DaatLocusCommand::Dev {
-            target: DevTarget::TuiPerf(args),
-        }) => {
-            crate::dashboard::tui_perf::run_tui_perf_command(
-                &crate::dashboard::tui_perf::TuiPerfCommand {
-                    scenario: args.scenario.clone(),
-                    frames: args.frames,
-                    warmup: args.warmup,
-                    width: args.width,
-                    height: args.height,
-                    json: args.json,
-                },
-            )?;
-            return Ok(());
-        }
-        Some(DaatLocusCommand::Status) => {
-            run_daemon_status_command().await?;
-            return Ok(());
-        }
-        Some(DaatLocusCommand::Token { target }) => {
-            run_daemon_token_command(target).await?;
-            return Ok(());
-        }
-        Some(DaatLocusCommand::Stop) => {
-            run_daemon_stop_command().await?;
-            return Ok(());
-        }
-        Some(DaatLocusCommand::Restart) => {
-            run_daemon_restart_command().await?;
-            return Ok(());
-        }
-        Some(DaatLocusCommand::Attach) => {
-            let client = connect_existing_daemon().await?;
-            run_session_selector(client, None).await?;
-            return Ok(());
-        }
-        Some(DaatLocusCommand::Ls) => {
-            run_list_sessions_command().await?;
-            return Ok(());
-        }
-        Some(DaatLocusCommand::Send {
-            session,
-            raw,
-            json,
-            prompt,
-        }) => {
-            run_send_command(prompt, session.as_deref(), *raw, *json).await?;
-            return Ok(());
-        }
-        _ => {}
-    }
-
-    if matches!(
-        cli.command,
-        None | Some(DaatLocusCommand::Run | DaatLocusCommand::Code { .. })
-    ) && route_to_config_ui_if_not_ready().await?
-    {
-        return Ok(());
-    }
-
-    if matches!(cli.command, None | Some(DaatLocusCommand::Run))
-        && let Ok(client) = connect_existing_daemon().await
-    {
-        run_session_selector(client, None).await?;
-        return Ok(());
-    }
-
-    if matches!(cli.command, Some(DaatLocusCommand::Serve)) {
-        if let Some(session_id) = cli.session_id.clone() {
-            let config = config_setup::load_complete_config().await?;
-            let ipc_name = cli
-                .ipc_name
-                .clone()
-                .ok_or_else(|| miette!("--ipc-name is required for session serve"))?;
-            let ipc_token = cli
-                .ipc_token
-                .clone()
-                .ok_or_else(|| miette!("--ipc-token is required for session serve"))?;
-            crate::runtime::session_server::run_session_serve(
-                config,
-                crate::runtime::session_server::SessionServeArgs {
-                    session_id,
-                    ipc_name: ipc_name.display().to_string(),
-                    ipc_token,
-                    project_dir: cli.session_project_dir.clone(),
-                    study_mode: cli.session_study,
-                },
-            )
-            .await?;
-            return Ok(());
-        }
-        let config = manager_daemon_config().await?;
-        run_daemon_serve_command(config).await?;
-        return Ok(());
-    }
-
-    // First run starts the interactive setup when config.toml is missing.
-    let _config = if config::config_file_exists().await {
-        match load_config().await {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::error!("failed to load config: {e}");
-                eprintln!(
-                    "{}",
-                    crate::tr!(
-                        Locale::default(),
-                        "common.config_load_failed",
-                        error = format!("{e:?}")
-                    )
-                );
-                std::process::exit(1);
-            }
-        }
-    } else {
-        run_first_time_setup_from_cli().await?;
-        return Ok(());
-    };
-
-    if let Some(DaatLocusCommand::Code { project_dir }) = cli.command.as_ref() {
-        run_code_command(project_dir.clone()).await?;
-        return Ok(());
-    }
-
-    if matches!(cli.command, None | Some(DaatLocusCommand::Run)) {
-        let client = connect_or_start_daemon().await?;
-        run_session_selector(client, None).await?;
-        return Ok(());
-    }
-    Ok(())
-}
-
-async fn manager_daemon_config() -> Result<crate::config::Config> {
-    if let Ok(config) = config_setup::load_complete_config().await {
-        return Ok(config);
-    }
-    let readiness = config_setup::ensure_config_readiness().await;
-    let mut config = crate::config::Config::default();
-    config.daemon.port = readiness.port;
-    config.telegram.enabled = false;
-    Ok(config)
-}
-
-async fn route_to_config_ui_if_not_ready() -> Result<bool> {
-    let readiness = config_setup::ensure_config_readiness().await;
-    match readiness.kind {
-        config_setup::ConfigReadinessKind::Complete => Ok(false),
-        config_setup::ConfigReadinessKind::Unconfigured => {
-            run_first_time_setup_from_cli().await?;
-            Ok(true)
-        }
-        config_setup::ConfigReadinessKind::Incomplete => {
-            eprintln!("{}", readiness.agent_unavailable_message());
-            config_wizard::run_config_menu().await?;
-            Ok(true)
-        }
-    }
-}
-
-async fn run_first_time_setup_from_cli() -> Result<()> {
-    match config_wizard::run_first_time_setup().await {
-        Ok(_) => Ok(()),
-        Err(err) if config_wizard::is_setup_cancelled(&err) => Ok(()),
-        Err(err) => {
-            eprintln!(
-                "{}",
-                crate::tr!(
-                    Locale::default(),
-                    "cli.setup_failed",
-                    error = format!("{err:?}")
-                )
-            );
-            std::process::exit(1);
-        }
-    }
-}
-
-async fn run_daemon_serve_command(config: crate::config::Config) -> Result<()> {
-    if !crate::daemon_tray::should_attempt_daemon_tray() {
-        return crate::runtime::daemon_server::run_daemon_serve(config).await;
-    }
-
-    let tray_handle = crate::daemon_tray::DaemonTrayHandle::new();
-    let (tray_startup_tx, tray_startup_rx) = tokio::sync::oneshot::channel();
-    let mut manager_task = tokio::spawn(crate::runtime::daemon_server::run_daemon_serve_with_tray(
-        config,
-        tray_handle.clone(),
-        tray_startup_tx,
-    ));
-
-    let tray_startup = tokio::select! {
-        startup = tray_startup_rx => match startup {
-            Ok(startup) => startup,
-            Err(_) => return flatten_daemon_task_result(manager_task.await),
-        },
-        result = &mut manager_task => return flatten_daemon_task_result(result),
-    };
-
-    if let Err(err) = crate::daemon_tray::run_daemon_tray(&tray_startup, &tray_handle) {
-        tracing::warn!("daemon tray unavailable; continuing without tray: {err:?}");
-    }
-    tray_handle.shutdown();
-    flatten_daemon_task_result(manager_task.await)
-}
-
-fn flatten_daemon_task_result(result: Result<Result<()>, tokio::task::JoinError>) -> Result<()> {
-    result.map_err(|err| miette!("daemon task failed: {err}"))?
-}
-
-async fn run_code_command(project_dir: PathBuf) -> Result<()> {
-    let project_dir_abs = std::fs::canonicalize(&project_dir).map_err(|err| {
-        miette!(
-            "cannot resolve project directory {}: {err}",
-            project_dir.display()
-        )
-    })?;
-    let client = connect_or_start_daemon().await?;
-    run_session_selector(client, Some(project_dir_abs)).await
-}
-
-async fn run_send_command(
-    prompt: &[String],
-    session_prefix: Option<&str>,
-    raw: bool,
-    json: bool,
-) -> Result<()> {
-    let message = read_send_message(prompt)?;
-    let client = connect_or_start_daemon().await?;
-    let client = if let Some(session_prefix) = session_prefix {
-        session_prefix_client(client, session_prefix).await?
-    } else {
-        default_general_session_client(client).await?
-    };
-    let response = client.send_message(&message).await?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&response)
-                .map_err(|err| miette!("encode send response as JSON failed: {err}"))?
-        );
-        return Ok(());
-    }
-
-    let reply = response.reply_message.unwrap_or_default();
-    if raw {
-        println!("{reply}");
-    } else {
-        print_terminal_markdown(&reply);
-    }
-    Ok(())
-}
-
-async fn default_general_session_client(client: DaemonClient) -> Result<DaemonClient> {
-    let sessions = client.list_sessions().await?;
-    if let Some(session) = sessions
-        .iter()
-        .find(|session| matches!(session.scope, crate::daemon::session::SessionScope::General))
-    {
-        return Ok(client.with_session(session.session_id.as_str().to_string()));
-    }
-
-    let session = client.create_session(None, Some("CLI Send")).await?;
-    Ok(client.with_session(session.session_id.as_str().to_string()))
-}
-
-async fn session_prefix_client(client: DaemonClient, prefix: &str) -> Result<DaemonClient> {
-    let sessions = client.list_sessions().await?;
-    let session_id = resolve_session_id_prefix(&sessions, prefix)?;
-    Ok(client.with_session(session_id))
-}
-
-fn resolve_session_id_prefix(
-    sessions: &[crate::daemon::session::SessionSummary],
-    prefix: &str,
-) -> Result<String> {
-    let prefix = prefix.trim();
-    if prefix.is_empty() {
-        return Err(miette!("session prefix cannot be empty"));
-    }
-
-    let mut matches = sessions
-        .iter()
-        .filter(|session| session.session_id.as_str().starts_with(prefix))
-        .collect::<Vec<_>>();
-
-    match matches.len() {
-        0 => Err(miette!(
-            "no session id starts with '{prefix}'; run `daat-locus ls` to list sessions"
-        )),
-        1 => Ok(matches[0].session_id.as_str().to_string()),
-        _ => {
-            matches.sort_by_key(|session| session.session_id.as_str().to_string());
-            let candidates = matches
-                .iter()
-                .map(|session| format!("  {}  {}", session.session_id, session_title(session)))
-                .collect::<Vec<_>>()
-                .join("\n");
-            Err(miette!(
-                "session prefix '{prefix}' is ambiguous:\n{candidates}\nUse a longer prefix from `daat-locus ls`."
-            ))
-        }
-    }
-}
-
-async fn run_list_sessions_command() -> Result<()> {
-    let client = connect_or_start_daemon().await?;
-    let mut sessions = client.list_sessions().await?;
-    sort_selector_sessions(&mut sessions);
-    print!("{}", session_list_text(&sessions));
-    Ok(())
-}
-
-fn session_list_text(sessions: &[crate::daemon::session::SessionSummary]) -> String {
-    if sessions.is_empty() {
-        return "No sessions.\n".to_string();
-    }
-
-    let mut output = format!(
-        "{:<36}  {:<7}  {:<24}  {}\n",
-        "SESSION ID", "SCOPE", "TITLE", "PROJECT"
-    );
-    for session in sessions {
-        let _ = writeln!(
-            output,
-            "{:<36}  {:<7}  {:<24}  {}",
-            session.session_id,
-            session_scope_label(&session.scope),
-            session_title_for_table(session),
-            session_project_for_table(session)
-        );
-    }
-    output
-}
-
-const fn session_scope_label(scope: &crate::daemon::session::SessionScope) -> &'static str {
-    match scope {
-        crate::daemon::session::SessionScope::General => "general",
-        crate::daemon::session::SessionScope::Project { .. } => "project",
-        crate::daemon::session::SessionScope::Study => "study",
-    }
-}
-
-fn session_title_for_table(session: &crate::daemon::session::SessionSummary) -> String {
-    session_title(session).replace(['\r', '\n'], " ")
-}
-
-fn session_project_for_table(session: &crate::daemon::session::SessionSummary) -> String {
-    match &session.scope {
-        crate::daemon::session::SessionScope::General
-        | crate::daemon::session::SessionScope::Study => "-".to_string(),
-        crate::daemon::session::SessionScope::Project { project_dir } => {
-            project_dir.display().to_string()
-        }
-    }
-}
-
-fn read_send_message(prompt: &[String]) -> Result<String> {
-    let message = if prompt.is_empty() {
-        let mut buffer = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buffer)
-            .into_diagnostic()
-            .map_err(|err| miette!("read send prompt from stdin failed: {err}"))?;
-        buffer
-    } else {
-        prompt.join(" ")
-    };
-    let trimmed = message.trim().to_string();
-    if trimmed.is_empty() {
-        return Err(miette!("send prompt is empty"));
-    }
-    Ok(trimmed)
-}
-
-fn print_terminal_markdown(markdown: &str) {
-    let lines =
-        crate::dashboard::cells::markdown::render_markdown(markdown, ratatui::style::Color::White);
-    if lines.is_empty() {
-        println!();
-        return;
-    }
-    for line in lines {
-        let text = line
-            .spans
-            .into_iter()
-            .map(|span| span.content.into_owned())
-            .collect::<String>();
-        println!("{text}");
-    }
-}
-
-async fn run_session_selector(client: DaemonClient, project_dir: Option<PathBuf>) -> Result<()> {
-    use crossterm::event::{Event, KeyCode, KeyEventKind};
-    use ratatui::{
-        DefaultTerminal,
-        layout::{Constraint, Layout},
-        style::{Color, Modifier, Style, Stylize},
-        text::Line,
-        widgets::{Block, Borders, List, ListState, Paragraph},
-    };
-
-    let mut sessions = selector_sessions(&client, project_dir.as_deref()).await;
-    let mut rows = build_session_tree_rows(&sessions, project_dir.as_deref());
-    let mut state = ListState::default();
-    select_first_action_row(&mut state, &rows);
-
-    let mut terminal: Option<DefaultTerminal> = None;
-    let mut last_refresh = std::time::Instant::now();
-    let refresh_interval = std::time::Duration::from_secs(2);
-
-    let result: Result<()> = async {
-        loop {
-            let now = std::time::Instant::now();
-            if now.duration_since(last_refresh) >= refresh_interval {
-                let selected_id = selected_session(&sessions, &rows, state.selected())
-                    .map(|session| session.session_id.as_str().to_string());
-                sessions = selector_sessions(&client, project_dir.as_deref()).await;
-                rows = build_session_tree_rows(&sessions, project_dir.as_deref());
-                last_refresh = now;
-                restore_session_tree_selection(
-                    &mut state,
-                    &sessions,
-                    &rows,
-                    selected_id.as_deref(),
-                );
-            }
-            if terminal.is_none() {
-                let _ = ratatui::try_restore();
-                terminal =
-                    Some(ratatui::try_init().map_err(|e| miette!("failed to init terminal: {e}"))?);
-                while crossterm::event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
-                    let _ = crossterm::event::read();
-                }
-            }
-            let t = terminal.as_mut().unwrap();
-            let title = project_dir.as_ref().map_or_else(
-                || " Daat Locus Sessions ".to_string(),
-                |project_dir| format!(" Daat Locus Code Sessions: {} ", project_dir.display()),
-            );
-
-            t.draw(|frame| {
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray))
-                    .title(Line::from(vec![title.as_str().bold().cyan()]));
-                let inner = block.inner(frame.area());
-                frame.render_widget(block, frame.area());
-
-                let layout = Layout::vertical([
-                    Constraint::Min(3),
-                    Constraint::Length(1),
-                    Constraint::Length(2),
-                ])
-                .split(inner);
-
-                if rows.is_empty() {
-                    let p =
-                        Paragraph::new("(no sessions)").style(Style::default().fg(Color::DarkGray));
-                    frame.render_widget(p, layout[0]);
-                } else {
-                    let items = session_tree_list_items(&sessions, &rows);
-
-                    let list = List::new(items)
-                        .block(Block::default())
-                        .highlight_symbol("> ")
-                        .highlight_style(
-                            Style::default()
-                                .fg(Color::White)
-                                .bg(Color::DarkGray)
-                                .add_modifier(Modifier::BOLD),
-                        )
-                        .repeat_highlight_symbol(true);
-                    frame.render_stateful_widget(list, layout[0], &mut state);
-                }
-
-                let help = Paragraph::new("Enter attach/create  d delete  t title  q quit")
-                    .style(Style::default().fg(Color::DarkGray));
-                frame.render_widget(help, layout[2]);
-            })
-            .map_err(|e| miette!("render error: {e}"))?;
-
-            let ev = crossterm::event::read().map_err(|e| miette!("input error: {e}"))?;
-            let key = match ev {
-                Event::Key(k) if k.kind == KeyEventKind::Press => k,
-                _ => continue,
-            };
-
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Char('d') => {
-                    if let Some(session_id) = selected_session(&sessions, &rows, state.selected())
-                        .map(|session| session.session_id.as_str().to_string())
-                        && client.delete_session(&session_id).await.is_ok()
-                    {
-                        sessions = selector_sessions(&client, project_dir.as_deref()).await;
-                        rows = build_session_tree_rows(&sessions, project_dir.as_deref());
-                        restore_session_tree_selection(&mut state, &sessions, &rows, None);
-                    }
-                }
-                KeyCode::Char('t') => {
-                    if let Some(s) = selected_session(&sessions, &rows, state.selected()).cloned() {
-                        let session_id = s.session_id.as_str().to_string();
-                        let current_title = s.title.clone().unwrap_or_default();
-                        drop(terminal.take());
-                        let _ = ratatui::try_restore();
-                        print!(
-                            "Title [{}]: ",
-                            if current_title.is_empty() {
-                                "untitled"
-                            } else {
-                                current_title.as_str()
-                            }
-                        );
-                        let _ = std::io::stdout().flush();
-                        let mut input = String::new();
-                        if std::io::stdin().read_line(&mut input).is_ok() {
-                            let title = input.trim().to_string();
-                            if !title.is_empty() {
-                                let _ = client.set_session_title(&session_id, &title).await;
-                            }
-                        }
-                        sessions = selector_sessions(&client, project_dir.as_deref()).await;
-                        rows = build_session_tree_rows(&sessions, project_dir.as_deref());
-                        restore_session_tree_selection(
-                            &mut state,
-                            &sessions,
-                            &rows,
-                            Some(session_id.as_str()),
-                        );
-                        terminal = Some(
-                            ratatui::try_init()
-                                .map_err(|e| miette!("failed to reinit terminal: {e}"))?,
-                        );
-                    }
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    select_previous_session_row(&mut state, &rows);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    select_next_session_row(&mut state, &rows);
-                }
-                KeyCode::Enter => {
-                    if let Some(target) = selected_create_target(&rows, state.selected()).cloned() {
-                        if let Ok(session) = create_selector_session(&client, &target).await {
-                            let session_id = session.session_id.as_str().to_string();
-                            sessions = selector_sessions(&client, project_dir.as_deref()).await;
-                            rows = build_session_tree_rows(&sessions, project_dir.as_deref());
-                            restore_session_tree_selection(
-                                &mut state,
-                                &sessions,
-                                &rows,
-                                Some(session_id.as_str()),
-                            );
-                        }
-                    } else if let Some(s) = selected_session(&sessions, &rows, state.selected()) {
-                        let session_id = s.session_id.as_str().to_string();
-                        drop(terminal.take());
-                        let _ = ratatui::try_restore();
-                        return attach_to_daemon(client.clone().with_session(session_id)).await;
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-    .await;
-
-    let _ = ratatui::try_restore();
-    result
-}
-
-async fn selector_sessions(
-    client: &DaemonClient,
-    project_dir: Option<&std::path::Path>,
-) -> Vec<crate::daemon::session::SessionSummary> {
-    let Ok(sessions) = client.list_sessions().await else {
-        return Vec::new();
-    };
-    let mut sessions = sessions
-        .into_iter()
-        .filter(|session| match (&session.scope, project_dir) {
-            (_, None) => true,
-            (
-                crate::daemon::session::SessionScope::Project {
-                    project_dir: stored,
-                },
-                Some(project_dir),
-            ) => stored == project_dir,
-            _ => false,
-        })
-        .collect::<Vec<_>>();
-    sort_selector_sessions(&mut sessions);
-    sessions
-}
-
-async fn create_selector_session(
-    client: &DaemonClient,
-    target: &SessionCreateTarget,
-) -> Result<crate::daemon::session::SessionSummary> {
-    match target {
-        SessionCreateTarget::General => client.create_session(None, None).await,
-        SessionCreateTarget::Project { project_dir } => {
-            let title = project_label(project_dir);
-            client
-                .create_session(Some(project_dir.as_path()), Some(title.as_str()))
-                .await
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SessionCreateTarget {
-    General,
-    Project { project_dir: PathBuf },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SessionTreeRow {
-    Section {
-        label: String,
-        count: usize,
-    },
-    Project {
-        label: String,
-        path: String,
-        count: usize,
-    },
-    Create {
-        target: SessionCreateTarget,
-        label: String,
-        depth: usize,
-    },
-    Session {
-        session_index: usize,
-        depth: usize,
-    },
-}
-
-impl SessionTreeRow {
-    fn indent_depth(&self) -> usize {
-        match self {
-            Self::Create { depth, .. } | Self::Session { depth, .. } => *depth,
-            Self::Section { .. } | Self::Project { .. } => 0,
-        }
-    }
-}
-
-fn build_session_tree_rows(
-    sessions: &[crate::daemon::session::SessionSummary],
-    project_dir_filter: Option<&std::path::Path>,
-) -> Vec<SessionTreeRow> {
-    use std::collections::BTreeMap;
-
-    let mut general = Vec::new();
-    let mut projects: BTreeMap<String, (std::path::PathBuf, Vec<usize>)> = BTreeMap::new();
-
-    for (index, session) in sessions.iter().enumerate() {
-        match &session.scope {
-            crate::daemon::session::SessionScope::General => general.push(index),
-            crate::daemon::session::SessionScope::Project { project_dir } => {
-                projects
-                    .entry(project_dir.display().to_string())
-                    .or_insert_with(|| (project_dir.clone(), Vec::new()))
-                    .1
-                    .push(index);
-            }
-            crate::daemon::session::SessionScope::Study => {}
-        }
-    }
-
-    if let Some(project_dir) = project_dir_filter {
-        projects
-            .entry(project_dir.display().to_string())
-            .or_insert_with(|| (project_dir.to_path_buf(), Vec::new()));
-    }
-
-    let mut rows = Vec::new();
-    if project_dir_filter.is_none() {
-        rows.push(SessionTreeRow::Section {
-            label: "General".to_string(),
-            count: general.len(),
-        });
-        rows.push(SessionTreeRow::Create {
-            target: SessionCreateTarget::General,
-            label: "New general session".to_string(),
-            depth: 1,
-        });
-        rows.extend(
-            general
-                .into_iter()
-                .map(|session_index| SessionTreeRow::Session {
-                    session_index,
-                    depth: 1,
-                }),
-        );
-    }
-
-    let coding_count = projects.values().map(|(_, sessions)| sessions.len()).sum();
-    if coding_count > 0 || project_dir_filter.is_some() {
-        rows.push(SessionTreeRow::Section {
-            label: "Coding".to_string(),
-            count: coding_count,
-        });
-        for (_, (project_dir, project_sessions)) in projects {
-            rows.push(SessionTreeRow::Project {
-                label: project_label(&project_dir),
-                path: project_dir.display().to_string(),
-                count: project_sessions.len(),
-            });
-            rows.push(SessionTreeRow::Create {
-                target: SessionCreateTarget::Project {
-                    project_dir: project_dir.clone(),
-                },
-                label: "New coding session".to_string(),
-                depth: 2,
-            });
-            rows.extend(project_sessions.into_iter().map(|session_index| {
-                SessionTreeRow::Session {
-                    session_index,
-                    depth: 2,
-                }
-            }));
-        }
-    }
-
-    rows
-}
-
-fn session_tree_list_items(
-    sessions: &[crate::daemon::session::SessionSummary],
-    rows: &[SessionTreeRow],
-) -> Vec<ListItem<'static>> {
-    let max_depth = rows
-        .iter()
-        .map(SessionTreeRow::indent_depth)
-        .max()
-        .unwrap_or(0);
-    let mut indents = Vec::with_capacity(max_depth.saturating_add(1));
-    indents.push(String::new());
-    for depth in 1..=max_depth {
-        indents.push("  ".repeat(depth));
-    }
-    rows.iter()
-        .map(|row| match row {
-            SessionTreeRow::Section { label, count } => ListItem::new(Line::from(vec![
-                Span::styled(
-                    label.clone(),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!(" ({count})"), Style::default().fg(Color::DarkGray)),
-            ])),
-            SessionTreeRow::Project { label, path, count } => ListItem::new(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    label.clone(),
-                    Style::default()
-                        .fg(Color::LightCyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!(" ({count})"), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("  {path}"), Style::default().fg(Color::DarkGray)),
-            ])),
-            SessionTreeRow::Create { label, depth, .. } => {
-                let indent = indents.get(*depth).cloned().unwrap_or_default();
-                ListItem::new(Line::from(vec![
-                    Span::raw(indent),
-                    Span::styled("+ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(label.clone(), Style::default().fg(Color::LightGreen)),
-                ]))
-            }
-            SessionTreeRow::Session {
-                session_index,
-                depth,
-            } => {
-                let session = &sessions[*session_index];
-                let indent = indents.get(*depth).cloned().unwrap_or_default();
-                ListItem::new(Line::from(vec![
-                    Span::raw(indent),
-                    Span::styled("- ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(session_title(session), Style::default().fg(Color::White)),
-                    Span::styled(
-                        format!("  {}", short_session_id(session.session_id.as_str())),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]))
-            }
-        })
-        .collect()
-}
-
-fn sort_selector_sessions(sessions: &mut [crate::daemon::session::SessionSummary]) {
-    sessions.sort_by_key(|session| {
-        let scope_order = match &session.scope {
-            crate::daemon::session::SessionScope::General => 0,
-            crate::daemon::session::SessionScope::Project { .. } => 1,
-            crate::daemon::session::SessionScope::Study => 2,
-        };
-        (
-            scope_order,
-            session_project_sort_key(session),
-            session_title(session).to_ascii_lowercase(),
-            session.started_at_ms,
-            session.session_id.as_str().to_string(),
-        )
-    });
-}
-
-fn session_project_sort_key(session: &crate::daemon::session::SessionSummary) -> String {
-    match &session.scope {
-        crate::daemon::session::SessionScope::General
-        | crate::daemon::session::SessionScope::Study => String::new(),
-        crate::daemon::session::SessionScope::Project { project_dir } => {
-            project_dir.display().to_string()
-        }
-    }
-}
-
-fn project_label(project_dir: &std::path::Path) -> String {
-    project_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.trim().is_empty())
-        .map_or_else(|| project_dir.display().to_string(), str::to_string)
-}
-
-fn session_title(session: &crate::daemon::session::SessionSummary) -> String {
-    session
-        .title
-        .as_deref()
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .unwrap_or("Untitled session")
-        .to_string()
-}
-
-fn short_session_id(session_id: &str) -> &str {
-    session_id.get(..8).unwrap_or(session_id)
-}
-
-fn selected_session<'a>(
-    sessions: &'a [crate::daemon::session::SessionSummary],
-    rows: &[SessionTreeRow],
-    selected_row: Option<usize>,
-) -> Option<&'a crate::daemon::session::SessionSummary> {
-    let session_index = selected_row
-        .and_then(|row_index| rows.get(row_index))
-        .and_then(|row| match row {
-            SessionTreeRow::Session { session_index, .. } => Some(*session_index),
-            SessionTreeRow::Section { .. }
-            | SessionTreeRow::Project { .. }
-            | SessionTreeRow::Create { .. } => None,
-        })?;
-    sessions.get(session_index)
-}
-
-fn selected_create_target(
-    rows: &[SessionTreeRow],
-    selected_row: Option<usize>,
-) -> Option<&SessionCreateTarget> {
-    selected_row
-        .and_then(|row_index| rows.get(row_index))
-        .and_then(|row| match row {
-            SessionTreeRow::Create { target, .. } => Some(target),
-            SessionTreeRow::Section { .. }
-            | SessionTreeRow::Project { .. }
-            | SessionTreeRow::Session { .. } => None,
-        })
-}
-
-fn select_first_action_row(state: &mut ListState, rows: &[SessionTreeRow]) {
-    state.select(first_action_row(rows));
-}
-
-fn restore_session_tree_selection(
-    state: &mut ListState,
-    sessions: &[crate::daemon::session::SessionSummary],
-    rows: &[SessionTreeRow],
-    preferred_session_id: Option<&str>,
-) {
-    if let Some(session_id) = preferred_session_id
-        && select_session_row_by_id(state, sessions, rows, session_id)
-    {
-        return;
-    }
-
-    normalize_session_tree_selection(state, rows);
-}
-
-fn normalize_session_tree_selection(state: &mut ListState, rows: &[SessionTreeRow]) {
-    let Some(selected) = state.selected() else {
-        select_first_action_row(state, rows);
-        return;
-    };
-    if is_action_row(rows, selected) {
-        return;
-    }
-
-    let next = (selected..rows.len())
-        .find(|row_index| is_action_row(rows, *row_index))
-        .or_else(|| {
-            (0..selected)
-                .rev()
-                .find(|row_index| is_action_row(rows, *row_index))
-        });
-    state.select(next);
-}
-
-fn select_session_row_by_id(
-    state: &mut ListState,
-    sessions: &[crate::daemon::session::SessionSummary],
-    rows: &[SessionTreeRow],
-    session_id: &str,
-) -> bool {
-    let Some(row_index) = rows.iter().position(|row| match row {
-        SessionTreeRow::Session { session_index, .. } => sessions
-            .get(*session_index)
-            .is_some_and(|session| session.session_id.as_str() == session_id),
-        SessionTreeRow::Section { .. }
-        | SessionTreeRow::Project { .. }
-        | SessionTreeRow::Create { .. } => false,
-    }) else {
-        return false;
-    };
-    state.select(Some(row_index));
-    true
-}
-
-fn first_action_row(rows: &[SessionTreeRow]) -> Option<usize> {
-    rows.iter().position(|row| {
-        matches!(
-            row,
-            SessionTreeRow::Create { .. } | SessionTreeRow::Session { .. }
-        )
-    })
-}
-
-fn is_action_row(rows: &[SessionTreeRow], row_index: usize) -> bool {
-    matches!(
-        rows.get(row_index),
-        Some(SessionTreeRow::Create { .. } | SessionTreeRow::Session { .. })
-    )
-}
-
-fn select_next_session_row(state: &mut ListState, rows: &[SessionTreeRow]) {
-    let Some(first) = first_action_row(rows) else {
-        state.select(None);
-        return;
-    };
-    let current = state.selected().unwrap_or(first);
-    let next = ((current + 1)..rows.len())
-        .find(|row_index| is_action_row(rows, *row_index))
-        .unwrap_or(first);
-    state.select(Some(next));
-}
-
-fn select_previous_session_row(state: &mut ListState, rows: &[SessionTreeRow]) {
-    let Some(first) = first_action_row(rows) else {
-        state.select(None);
-        return;
-    };
-    let current = state.selected().unwrap_or(first);
-    let previous = (0..current)
-        .rev()
-        .find(|row_index| is_action_row(rows, *row_index))
-        .or_else(|| {
-            (first..rows.len())
-                .rev()
-                .find(|row_index| is_action_row(rows, *row_index))
-        })
-        .unwrap_or(first);
-    state.select(Some(previous));
-}
-
-async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
-    match target {
-        None => config_wizard::run_config_menu().await,
-        Some(ConfigTarget::Show) => config_wizard::show_config().await,
-    }
-}
-
-fn print_config_schema() -> Result<()> {
-    let schema = schemars::schema_for!(crate::config::Config);
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&schema).map_err(|e| miette!(e))?
-    );
-    Ok(())
-}
-
-async fn run_daemon_status_command() -> Result<()> {
-    let client = connect_daemon_status().await?;
-    let status = client.status().await?;
-    println!("{}", status_summary(&status));
-    Ok(())
-}
-
-async fn run_daemon_token_command(target: &DaemonTokenTarget) -> Result<()> {
-    match target {
-        DaemonTokenTarget::Create { name } => {
-            let token = create_daemon_token(name).await?;
-            print_created_daemon_token("Created daemon token", &token);
-        }
-        DaemonTokenTarget::List => {
-            let tokens = list_daemon_tokens().await?;
-            print_daemon_token_list(&tokens);
-        }
-        DaemonTokenTarget::Revoke { selector } => {
-            let token = revoke_daemon_token(selector).await?;
-            println!("Revoked daemon token {} ({})", token.name, token.id);
-        }
-        DaemonTokenTarget::Rotate { selector } => {
-            let token = rotate_daemon_token(selector).await?;
-            print_created_daemon_token("Rotated daemon token", &token);
-        }
-    }
-    Ok(())
-}
-
-fn print_created_daemon_token(label: &str, token: &CreatedDaemonToken) {
-    println!("{label}:");
-    println!("  id: {}", token.id);
-    println!("  name: {}", token.name);
-    println!("  token: {}", token.token);
-    println!("Store this token now; it will not be shown again.");
-}
-
-fn print_daemon_token_list(tokens: &[DaemonTokenListEntry]) {
-    println!("{:<36}  {:<20}  {:<25}  LAST USED", "ID", "NAME", "CREATED");
-    for token in tokens {
-        println!(
-            "{:<36}  {:<20}  {:<25}  {}",
-            token.id,
-            token.name,
-            format_timestamp_ms(token.created_at_ms),
-            token
-                .last_used_at_ms
-                .map_or_else(|| "-".to_string(), format_timestamp_ms)
-        );
-    }
-}
-
-fn format_timestamp_ms(timestamp_ms: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms).map_or_else(
-        || timestamp_ms.to_string(),
-        |timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    )
-}
-
-async fn run_daemon_stop_command() -> Result<()> {
-    let locale = configured_locale().await;
-    let client = connect_existing_daemon().await?;
-    let port = client.port();
-    client.shutdown().await?;
-    wait_for_daemon_shutdown(port).await?;
-    println!("{}", crate::tr!(locale, "daemon.stopped"));
-    Ok(())
-}
-
-async fn run_daemon_restart_command() -> Result<()> {
-    let locale = configured_locale().await;
-    let status = if let Ok(client) = connect_existing_daemon().await {
-        let previous = client.status().await?;
-        client.restart().await?;
-        wait_for_daemon_restarted(&previous).await?
-    } else {
-        spawn_detached_daemon_process().await?;
-        wait_for_daemon_ready().await?
-    };
-    println!(
-        "{}",
-        crate::tr!(locale, "daemon.restarted", status = status_summary(&status))
-    );
-    Ok(())
-}
-
-async fn configured_locale() -> Locale {
-    load_config()
-        .await
-        .map(|config| config.locale)
-        .unwrap_or_default()
-}
-
-async fn attach_to_daemon(client: DaemonClient) -> Result<()> {
-    let initial = client.snapshot().await?;
-    let (tx, mut rx) = tokio::sync::watch::channel(initial);
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-    let stream_client = client.clone();
-    let stream_task = tokio::spawn(async move {
-        let _ = stream_client.stream_to(tx, stop_rx).await;
-    });
-    run_tui_dashboard(&mut rx, &client, Some(Arc::new(client.clone())))
-        .await
-        .map_err(|err| miette!("dashboard attach failed: {err}"))?;
-    let _ = stop_tx.send(());
-    let _ = stream_task.await;
-    Ok(())
-}
-
-#[cfg(test)]
-mod session_selector_tests {
-    use super::*;
-    use crate::daemon::session::{SessionId, SessionScope, SessionSummary};
-    use std::path::PathBuf;
-
-    #[test]
-    fn session_tree_groups_general_and_coding_projects() {
-        let project_a = PathBuf::from("/tmp/project-a");
-        let project_b = PathBuf::from("/tmp/project-b");
-        let sessions = vec![
-            summary("general-1", SessionScope::General, "General"),
-            summary(
-                "project-a-1",
-                SessionScope::Project {
-                    project_dir: project_a.clone(),
-                },
-                "Project A",
-            ),
-            summary(
-                "project-b-1",
-                SessionScope::Project {
-                    project_dir: project_b.clone(),
-                },
-                "Project B",
-            ),
-        ];
-
-        let rows = build_session_tree_rows(&sessions, None);
-
-        assert_eq!(
-            rows,
+    fn account_maintenance_requires_stdin_password_and_preserves_profile_selection() {
+        for args in [
             vec![
-                SessionTreeRow::Section {
-                    label: "General".to_string(),
-                    count: 1,
-                },
-                SessionTreeRow::Create {
-                    target: SessionCreateTarget::General,
-                    label: "New general session".to_string(),
-                    depth: 1,
-                },
-                SessionTreeRow::Session {
-                    session_index: 0,
-                    depth: 1,
-                },
-                SessionTreeRow::Section {
-                    label: "Coding".to_string(),
-                    count: 2,
-                },
-                SessionTreeRow::Project {
-                    label: "project-a".to_string(),
-                    path: project_a.display().to_string(),
-                    count: 1,
-                },
-                SessionTreeRow::Create {
-                    target: SessionCreateTarget::Project {
-                        project_dir: project_a.clone(),
-                    },
-                    label: "New coding session".to_string(),
-                    depth: 2,
-                },
-                SessionTreeRow::Session {
-                    session_index: 1,
-                    depth: 2,
-                },
-                SessionTreeRow::Project {
-                    label: "project-b".to_string(),
-                    path: project_b.display().to_string(),
-                    count: 1,
-                },
-                SessionTreeRow::Create {
-                    target: SessionCreateTarget::Project {
-                        project_dir: project_b.clone(),
-                    },
-                    label: "New coding session".to_string(),
-                    depth: 2,
-                },
-                SessionTreeRow::Session {
-                    session_index: 2,
-                    depth: 2,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn code_session_tree_starts_at_coding_project_hierarchy() {
-        let project = PathBuf::from("/tmp/project-a");
-        let sessions = vec![summary(
-            "project-a-1",
-            SessionScope::Project {
-                project_dir: project.clone(),
-            },
-            "Project A",
-        )];
-
-        let rows = build_session_tree_rows(&sessions, Some(project.as_path()));
-
-        assert_eq!(
-            rows,
+                "daat-locus",
+                "--profile",
+                "work_1",
+                "account",
+                "create",
+                "alice",
+                "--password-stdin",
+            ],
             vec![
-                SessionTreeRow::Section {
-                    label: "Coding".to_string(),
-                    count: 1,
-                },
-                SessionTreeRow::Project {
-                    label: "project-a".to_string(),
-                    path: project.display().to_string(),
-                    count: 1,
-                },
-                SessionTreeRow::Create {
-                    target: SessionCreateTarget::Project {
-                        project_dir: project.clone(),
-                    },
-                    label: "New coding session".to_string(),
-                    depth: 2,
-                },
-                SessionTreeRow::Session {
-                    session_index: 0,
-                    depth: 2,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn code_session_tree_keeps_create_row_when_project_has_no_sessions() {
-        let project = PathBuf::from("/tmp/project-a");
-
-        let rows = build_session_tree_rows(&[], Some(project.as_path()));
-
-        assert_eq!(
-            rows,
+                "daat-locus",
+                "account",
+                "create",
+                "alice",
+                "--password-stdin",
+                "--profile",
+                "work_1",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(cli.service.profile.as_deref(), Some("work_1"));
+            assert!(matches!(
+                cli.command,
+                Some(Command::Account {
+                    action: AccountCommand::Create {
+                        password_stdin: true,
+                        ..
+                    }
+                })
+            ));
+        }
+        for args in [
+            vec!["daat-locus", "account", "create", "alice"],
             vec![
-                SessionTreeRow::Section {
-                    label: "Coding".to_string(),
-                    count: 0,
-                },
-                SessionTreeRow::Project {
-                    label: "project-a".to_string(),
-                    path: project.display().to_string(),
-                    count: 0,
-                },
-                SessionTreeRow::Create {
-                    target: SessionCreateTarget::Project {
-                        project_dir: project.clone(),
-                    },
-                    label: "New coding session".to_string(),
-                    depth: 2,
-                },
-            ]
-        );
+                "daat-locus",
+                "account",
+                "create",
+                "alice",
+                "--password",
+                "secret",
+            ],
+            vec!["daat-locus", "account", "join"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        assert!(Cli::try_parse_from(["daat-locus", "account", "request"]).is_err());
     }
 
     #[test]
-    fn session_prefix_resolution_requires_unique_match() {
-        let sessions = vec![
-            summary("abcdef01-general", SessionScope::General, "First"),
-            summary("abcdef02-general", SessionScope::General, "Second"),
-            summary("12345678-general", SessionScope::General, "Third"),
-        ];
-
-        assert_eq!(
-            resolve_session_id_prefix(&sessions, "1234").expect("unique match"),
-            "12345678-general"
-        );
+    fn current_options_work_before_and_after_serve_and_without_a_subcommand() {
+        for args in [
+            vec![
+                "daat-locus",
+                "--profile",
+                "work_1",
+                "serve",
+                "--listen",
+                "[::1]:45825",
+            ],
+            vec![
+                "daat-locus",
+                "serve",
+                "--profile",
+                "work_1",
+                "--listen",
+                "[::1]:45825",
+            ],
+            vec![
+                "daat-locus",
+                "--profile",
+                "work_1",
+                "--listen",
+                "[::1]:45825",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(cli.service.profile.as_deref(), Some("work_1"));
+            assert_eq!(cli.service.listen, Some("[::1]:45825".parse().unwrap()));
+        }
+        let workspace = std::env::current_dir().unwrap().join("目录 with spaces");
+        let cli = Cli::try_parse_from([
+            std::ffi::OsString::from("daat-locus"),
+            "serve".into(),
+            "--workspace".into(),
+            workspace.as_os_str().to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(cli.service.workspace, Some(workspace));
         assert!(
-            resolve_session_id_prefix(&sessions, "abcdef")
-                .expect_err("ambiguous prefix")
-                .to_string()
-                .contains("ambiguous")
-        );
-        assert!(
-            resolve_session_id_prefix(&sessions, "missing")
-                .expect_err("missing prefix")
-                .to_string()
-                .contains("no session id starts")
+            Cli::try_parse_from(["daat-locus"])
+                .unwrap()
+                .command
+                .is_none()
         );
     }
 
     #[test]
-    fn session_list_text_includes_ids_scopes_titles_and_projects() {
-        let project = PathBuf::from("/tmp/project-a");
-        let sessions = vec![
-            summary("general-session", SessionScope::General, "General"),
-            summary(
-                "project-session",
-                SessionScope::Project {
-                    project_dir: project.clone(),
-                },
-                "Project A",
-            ),
-        ];
-
-        let output = session_list_text(&sessions);
-
-        assert!(output.contains("SESSION ID"));
-        assert!(output.contains("general-session"));
-        assert!(output.contains("general"));
-        assert!(output.contains("General"));
-        assert!(output.contains("project-session"));
-        assert!(output.contains("project"));
-        assert!(output.contains("Project A"));
-        assert!(output.contains(project.to_string_lossy().as_ref()));
+    fn invalid_input_is_rejected_before_service_startup() {
+        for args in [
+            vec!["daat-locus", "serve", "--listen"],
+            vec!["daat-locus", "--profile", "../escape"],
+            vec!["daat-locus", "--profile", ""],
+            vec!["daat-locus", "--profile", "工作"],
+            vec!["daat-locus", "--workspace", "relative/path"],
+            vec!["daat-locus", "--listen", "invalid"],
+            vec!["daat-locus", "--profile", "one", "--profile", "two"],
+            vec!["daat-locus", "serve", "--unknown"],
+            vec!["daat-locus", "workflow"],
+        ] {
+            assert!(
+                Cli::try_parse_from(args.clone()).is_err(),
+                "accepted {args:?}"
+            );
+        }
+        assert!(parse_profile(&"a".repeat(65)).is_err());
+    }
+    #[test]
+    fn daemon_commands_keep_profile_and_launch_arguments() {
+        let start = Cli::try_parse_from([
+            "daat-locus",
+            "--profile",
+            "work",
+            "start",
+            "--open",
+            "--listen",
+            "127.0.0.1:0",
+        ])
+        .unwrap();
+        assert!(matches!(start.command, Some(Command::Start { open: true })));
+        assert_eq!(start.service.profile.as_deref(), Some("work"));
+        assert!(matches!(
+            Cli::try_parse_from(["daat-locus", "status", "--json", "--profile", "work"])
+                .unwrap()
+                .command,
+            Some(Command::Status { json: true })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["daat-locus", "stop"]).unwrap().command,
+            Some(Command::Stop)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["daat-locus", "restart"])
+                .unwrap()
+                .command,
+            Some(Command::Restart { open: false })
+        ));
     }
 
-    fn summary(id: &str, scope: SessionScope, title: &str) -> SessionSummary {
-        let project_dir = match &scope {
-            SessionScope::General | SessionScope::Study => None,
-            SessionScope::Project { project_dir } => Some(project_dir.clone()),
-        };
-        SessionSummary {
-            session_id: SessionId::from_string(id).expect("test session id"),
-            scope,
-            project_dir,
-            title: Some(title.to_string()),
-            started_at_ms: 0,
-            last_seen_at_ms: None,
+    #[test]
+    fn help_and_version_are_clap_early_exits() {
+        for args in [
+            vec!["daat-locus", "-h"],
+            vec!["daat-locus", "--help"],
+            vec!["daat-locus", "help"],
+            vec!["daat-locus", "serve", "--help"],
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(args).unwrap_err().kind(),
+                ErrorKind::DisplayHelp
+            );
         }
+        assert_eq!(
+            Cli::try_parse_from(["daat-locus", "--version"])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::DisplayVersion
+        );
     }
 }
