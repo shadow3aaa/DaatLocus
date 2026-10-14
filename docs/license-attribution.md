@@ -1,71 +1,26 @@
 # License And Attribution Notes
 
-Daat Locus is distributed under the project license in `LICENSE`.
+The project license is [Apache-2.0](../LICENSE). This note describes attribution
+sources in the retained repository; it is not a completed distribution audit.
 
-This document tracks the release-time license and attribution checks for
-third-party dependencies. It is a maintenance note, not legal advice.
+The [model schema macros](../crates/daat-locus-macros/Cargo.toml) declare Apache-2.0.
+The shared [account authentication crate](../crates/daat-locus-auth/Cargo.toml)
+also declares Apache-2.0. Its browser WASM contains `opaque-ke 4.0.1` (MIT OR
+Apache-2.0), with the same protocol dependencies recorded in Cargo.lock.
+Device execution coordination uses `openraft 0.9.21` (MIT OR Apache-2.0).
+Its native storage/network integration lives in `src/stage/coordination`; it is
+not included in CF Worker, which has no execution-coordination state machine.
+The desktop client uses Tauri and its native window/tray dependencies (MIT OR
+Apache-2.0), plus the single-instance and native-dialog plugins. Build-time icon
+generation rasterizes the existing project Logo using `resvg`. Exact versions
+and dependency/license information are recorded in Cargo.lock.
 
-## Release Audit
+Rust dependency manifests and lockfiles, WebUI's package manifest and lockfile,
+and any browser/runtime assets actually included in a future distribution are
+the inputs to the next attribution review. Do not assume that deleting an old
+packaging path constitutes that review.
 
-Before a release:
-
-1. Review direct and transitive Rust dependencies from `Cargo.lock`.
-2. Check dependency license expressions against the intended release channel.
-3. Review bundled or downloaded runtime components separately from Rust crates.
-4. Record any attribution-sensitive dependency in release notes or a project
-   `NOTICE` file when required.
-
-Useful commands:
-
-```sh
-cargo tree
-cargo metadata --format-version 1
-```
-
-Update this document when a dependency introduces a new attribution-sensitive
-license.
-
-## Watch List
-
-Treat these license families as requiring explicit review before release:
-
-- GPL
-- LGPL
-- AGPL
-- MPL
-- EPL
-- CDDL
-- SSPL
-- custom source-available licenses
-- dependencies that require attribution notices beyond preserving license text
-
-Permissive licenses such as MIT, Apache-2.0, BSD, and ISC still require license
-text preservation when redistributing covered code or binaries.
-
-## Runtime Downloads
-
-Managed downloads are not the same as Rust crate dependencies. Review these
-separately:
-
-- managed `uv` downloads
-- browser runtime downloads
-
-The supply-chain pinning TODOs cover version and integrity verification. This
-document covers only license and attribution tracking.
-
-## NOTICE Threshold
-
-Add a project-level `NOTICE` file when any shipped dependency or bundled runtime
-requires attribution text that is not already satisfied by preserving its
-license file.
-
-Also add or update `NOTICE` when:
-
-- a dependency explicitly requires prominent attribution
-- a binary/runtime artifact is redistributed with its own notice file
-- release packaging copies third-party source, assets, models, or data files
-- a license checker flags an attribution obligation that is not covered
-  elsewhere
-
-If no dependency requires a separate notice, keep this document as the audit
-record and do not create an empty `NOTICE` file.
+Windows/macOS archives and installers include the service, Tauri client and embedded WebUI.
+Audit the actual bundled dependencies and preserve their required license/notice
+text before distributing them. Create or update NOTICE only when required;
+do not create an empty notice file.

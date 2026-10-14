@@ -1,215 +1,156 @@
 # Contributing
 
-Daat Locus is a runtime project, not a prompt collection. Contributions should
-preserve the boundaries that make state explicit, actions auditable, and
-experience reusable.
+[简体中文](CONTRIBUTING_zh-CN.md)
 
-Read [Architecture](docs/architecture.md) first if you are changing runtime
-objects, tools, Apps, workflows, memory, sleep, daemon behavior, sessions,
-dashboard clients, or persistence. Coding-agent-facing constraints live in
-[AGENTS.md](AGENTS.md).
+Read [AGENTS.md](AGENTS.md) and the
+[architecture](docs/architecture.md) before changing product boundaries.
+Actor and App are the only core concepts. Preserve identities, durable routing,
+permissions and incremental client contracts. Do not restore retired Session,
+TUI, Dashboard, Sleep, Workflow, SCOPE/LSP or sharing interfaces.
 
-## Design Rules
+## Build and run
 
-- Plain assistant text must not cause external side effects.
-- Prefer explicit ids and freshness guards over hidden selected cursors.
-- Keep `Event`, `PendingWork`, `App`, `Plan`, `Workflow`, `Memory`, `Sleep`,
-  `Manager`, and `Session` as separate concepts.
-- App tools are called directly through their namespace. Do not reintroduce app
-  focus or activation as a tool-exposure gate.
-- Telegram is a transport and event source, not an App.
-- Static file tools are `read_file` and `edit_file`; they are runtime tools, not
-  an App namespace.
-- Let code handle mechanical work such as lookup, deduplication, freshness
-  checks, persistence, delivery bookkeeping, schema validation, and evidence
-  recording.
-- Keep AfterClaim Context, PreTurn Context, capability docs, App state, and
-  memory as separate layers.
-- Keep runtime error correction separate from workflow improvement.
-- Treat workflow changes as changes to reusable SOP skill assets, not as
+Install Rust, Bun and wasm-pack, then:
 
-## Quality Gates
+```sh
+rustup target add wasm32-unknown-unknown
+cd webui
+bun install --frozen-lockfile
+cd ..
+cargo run -- serve
+```
 
-CI currently runs:
+Normal Cargo builds compile and embed the WebUI and shared authentication WASM.
+Open the printed service address; browser authentication and mutations use that
+same origin. For frontend iterations, run `bun run build` in `webui` and rebuild
+the embedded service. The retired simulated `webui_fixture` is not a development
+entry point. Use a separate profile and temporary workspace for manual checks;
+never substitute real user data for fixtures.
 
-```bash
+For backend-only checks set `DAAT_LOCUS_BUILD_WEBUI=0`. These builds require
+neither Bun nor wasm-pack. `DAAT_LOCUS_MODEL_CATALOG_PATH` can supply a validated
+models.dev JSON snapshot for offline builds; Cargo `--offline` does not disable
+build-script network requests. See [model catalog](docs/model-catalog.md).
+
+## Source and tests
+
+- `src/actors`: execution, persistence, permissions and approval.
+- `src/*_app` and `src/app_instructions`: domain tools and all built-in App instructions.
+- `src/accounts`, `src/stage`, `src/resources`: account authentication, device coordination and resources.
+- `src/service`: bounded HTTP operations and resumable streams.
+- `webui/src/components`: reusable UI, settings, IM and work presentations.
+- `webui/src/locales`: matching Chinese/English catalogs; add keys to both files.
+- `tests/http_api.rs`, `tests/http`, `tests/support`: one actual loopback HTTP
+  harness, suites by contract, isolated real OPAQUE accounts and temporary stores.
+- `workers/signaling`: optional public P2P signaling only; no business execution or password authority.
+- `xtask`: native archives and installers. No Git submodules are required.
+
+Relevant checks:
+
+```sh
 cargo fmt --all -- --check
-cd webui && bun install --frozen-lockfile && bun run test
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+# With DAAT_LOCUS_BUILD_WEBUI=0:
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+# In webui:
+bun run typecheck
+bun test
+bun run build
+# In workers/signaling, when signaling changes:
+bun install --frozen-lockfile
+bun test
 ```
 
-Run the relevant subset locally before submitting changes. For high-risk
-runtime changes, add focused tests or include a clear manual verification note.
+Tests must not contact real model providers. Keep useful positive/negative OS
+sandbox checks and HTTP authorization, CSRF, queue freshness, resource and
+stream-reconnection coverage. Tests depending on external services stay opt-in;
+report prerequisites and failures explicitly. Do not weaken isolation or private
+ACL checks to accommodate a restricted environment. Library checks do not prove
+full product usability or cross-platform isolation.
 
-The same checks are available as a local pre-commit hook:
+Public signaling and account-sync checks use disposable identities and mock models.
+Set `DAAT_LOCUS_TEST_STAGE_SIGNALING` to an explicitly chosen WSS origin, then run
+`cargo test --locked --lib public_ -- --ignored --nocapture`. These opt-in checks
+exercise SDP forwarding, authenticated P2P connections, message replication and
+private model-configuration sync; they do not establish reachability through every NAT.
 
-```bash
-scripts/install-git-hooks.sh
+Keep browser preferences local and account configuration private. UI strings
+use translation keys; language switching must update existing views without
+translating user/source content. Test catalog parity, browser defaults and
+explicit language choices. Do not add inline bilingual selectors.
+
+The Windows/macOS Tauri application is `clients/app/src-tauri`, package
+`daat-locus-app`. Build it alongside `daat-locus`; the service embeds the shared
+WebUI and has no GUI dependencies. Client-only checks need no Bun/WASM build.
+Run `cargo test -p daat-locus-app` and its strict Clippy checks; native CI covers
+both platforms. Verify account login, attachments, resource popups, duplicate
+launch, hide/reopen, independent client exit and orderly service stop on a desktop.
+Native code uses fixed companion CLI operations and validates profile, executable
+and loopback origin. Keep WebView process/filesystem/shell capabilities disabled.
+
+## Process management and packaging
+
+`start --open`, `status --json`, `stop` and `restart` address the selected
+`--profile` through local OS-owner IPC. Test process identity, profile isolation,
+restart options and history preservation using temporary profiles.
+
+```sh
+cargo xtask package binary --target <triple>
+cargo xtask package windows --target x86_64-pc-windows-msvc
+cargo xtask package macos --target <macOS-triple>
+cargo xtask package android --target aarch64
 ```
 
-## TUI Performance Command
+All package commands print Cargo-style progress and clickable artifact URLs (plain URLs in redirected logs). Use `--out-dir` to choose the destination.
 
-`tui-perf-cmd` enables a hidden developer command for deterministic dashboard
-render checks. It is a non-default feature and is not part of the normal CLI
-surface.
+Windows installers require WiX; macOS installers require macOS tools.
+`--skip-build --release-dir <directory>` packages an existing verified embedded
+binary and, on Windows/macOS, its desktop client. Packaging rejects backend-only builds. Release CI builds each platform
+natively. Keep generated archives and installers under ignored `target` paths.
+Review dependency attribution before distribution; see
+[license notes](docs/license-attribution.md).
 
-Run the default mixed scenario:
+## Changes and review
 
-```bash
-cargo run --features tui-perf-cmd -- dev tui-perf \
-  --scenario mixed --frames 120 --warmup 10 --width 120 --height 40
+Inspect Git status first. Preserve unrelated edits, dirty submodule work,
+credentials and persistent Actor data. Resolve deletion targets and verify their
+location before removing anything; use native PowerShell `-LiteralPath` on Windows.
+
+Explain the concrete behavior, purpose, checks and material limits. Keep source,
+interfaces, configuration, tests and documentation consistent. Useful contracts
+belong in architecture/contribution documents; do not add task journals, screenshot
+handoff records, changing test counts or progress checklists as permanent docs.
+Keep release changelogs. Commit titles use English and identify the change.
+Do not commit caches, generated artifacts, runtime logs, credentials or experiments.
+
+## Android builds
+
+Use JDK 17+, Android SDK 36 / NDK 27, Bun, wasm-pack and Rust Android targets.
+The maintained Gradle project is `clients/app/src-tauri/gen/android`; generated
+JNI sources, native libraries and build outputs are ignored. Run `bun install
+--frozen-lockfile` in `clients/app`, then `bun run android:dev` or
+`DAAT_LOCUS_ANDROID_SIGNING=/private/release.properties cargo xtask package android`
+from the repository root for packaging. ARM64 is the default; use `--target x86_64`
+for an emulator or `--debug` for debug signing. APKs are copied to
+`target/<Android-triple>/<release|debug>/package`, or `--out-dir`.
+`--skip-build` checks and copies existing Gradle output; `--apk-dir` can select
+another directory containing `output-metadata.json`. Version, ABI and embedded
+WebUI are checked before reporting success. The existing Bun build script remains
+the shared Tauri/Gradle implementation.
+The signing properties and keystore stay outside the repository; see
+[the native client guide](clients/app/README.md#android). Verify release APKs with
+Android build-tools `apksigner verify --verbose --print-certs`, and check 16 KiB
+ELF page alignment on the native library. Do not commit signing credentials.
+
+Validate the signed, minified release APK on a device; a debug launch does not
+exercise R8. The `ReleaseStartupTest` instrumentation test loads the embedded
+account login without creating an account. Use a dedicated test installation.
+After building a release APK for that device's ABI, run from the Gradle directory:
+
+```sh
+DAAT_LOCUS_ANDROID_SIGNING=/private/release.properties DAAT_LOCUS_ANDROID_ABI=arm64-v8a ./gradlew :app:connectedUniversalReleaseAndroidTest -x :app:rustBuildUniversalRelease
 ```
 
-Emit JSON for scripts:
-
-```bash
-cargo run --features tui-perf-cmd -- dev tui-perf \
-  --scenario long-history --frames 240 --warmup 20 --width 140 --height 48 --json
-```
-
-Available scenarios:
-
-- `mixed`: committed activity, live cells, skills toggle panel, markdown, diffs,
-  browser, terminal, and reply cells.
-- `long-history`: many committed activity cells with an explicit scroll offset.
-- `scrolling`: deterministic scroll movement through a large activity list.
-- `live-activity`: active runtime status and live activity cells.
-- `command-panels`: skills list panel and command-bar rendering.
-
-The command renders through the same dashboard frame function used by the real
-TUI, but it uses `ratatui::backend::TestBackend` instead of entering the
-terminal alternate screen. Reported metrics include frame, prep, draw, activity,
-and command timing, plus activity render-cache hit/miss counts.
-
-Use this command when a TUI change might affect render cost or frame scheduling.
-Treat absolute milliseconds as local-machine data; compare scenarios across
-nearby revisions instead of relying on tight cross-machine thresholds.
-
-## Commit Messages
-
-Commit messages must be in English. Use a title that names the real behavior or
-boundary being changed, for example:
-
-- `Fix Telegram event completion retry`
-- `Add workspace app notice polling tests`
-- `Document workflow sleep evidence model`
-
-Avoid vague titles such as `fix`, `update`, `misc`, `wip`, or `cleanup`.
-
-## Adding Or Changing Tools
-
-When adding or changing a model-facing tool:
-
-- state what world state it reads or mutates
-- require explicit identifiers where stale state can exist
-- validate schemas at declaration and execution time
-- use the conservative model-facing JSON Schema dialect
-- do not create a turn stop reason outside `Finished`, `Error`, `Compacted`,
-  or `Interrupt`
-- test invalid arguments and tool availability
-- add runtime error evidence only when misuse is code-detectable
-
-Do not rely on hidden UI state when a concrete id or freshness guard is
-available.
-
-## Adding Or Changing Apps
-
-An App is a stateful capability domain, not a focus gate.
-
-When changing an App:
-
-- keep `state` and `docs` separate
-- expose model-facing tools through the App namespace
-- keep the generated `appid__get_state` surface accurate and cheap
-- keep app notices explicit and resolvable
-- bind operations to explicit ids such as page ids, terminal session ids, paths,
-  or app-specific object ids
-- do not put reusable task procedures into App prompt docs
-- do not add focus/blur requirements unless the runtime contract is explicitly
-  redesigned
-
-Transports such as Telegram are not Apps by default. If code already receives a
-structured external fact, model it as an event source rather than an interface
-the model must navigate.
-
-Workspace Apps currently use one Lua 5.4 module loaded from `runtime/app.lua`.
-The supported hook surface is `config`, `init`, `render_state`, `list_tools`,
-`call_tool`, and `poll_notices`; do not document or depend on removed
-`on_focus` / `on_blur` hooks.
-
-## Changing Coding Or File Tools
-
-Coding source operations use `path + line#hash` anchors:
-
-- `coding__search_code` returns matched source lines.
-- `coding__read_code` accepts a path plus anchor and `around` or `full` mode.
-- `coding__edit_code` applies structured edits with SCOPE validation and review.
-- `read_file` handles explicit file/range reads.
-- `edit_file` handles non-SCOPE ordinary file edits.
-
-When a Coding project is open, `edit_file` must not edit SCOPE-owned source
-files. Use `coding__edit_code` so propagation review is available.
-
-## Changing Manager, Sessions, Or Transports
-
-The Manager is the only public server. Session processes are private runtime
-workers reached through Manager-owned IPC.
-
-When changing this area:
-
-- keep public clients connected to the Manager, not direct Session endpoints
-- keep runtime `Context`, `EventStore`, `PendingWorkQueue`, `Plan`, memory, apps,
-  and model loop inside one Session
-- keep the Manager responsible for public auth, session registry, lifecycle,
-  routing, and Telegram default-session mapping
-- do not expose IPC names, tokens, process ids, or lifecycle internals as normal
-  WebUI/TUI/API state
-- keep `daat-locus code <project-dir>` as a multi-session project selector, not
-  a project-to-single-session mapping
-
-## Changing Dashboard Clients
-
-`DashboardState` is shared session/runtime state. `TuiViewState` is local to one
-TUI client. Do not solve local TUI behavior by mutating shared dashboard state.
-
-TUI rendering should stay a pure full-frame projection scheduled by
-`FrameRequester`. Input handling should reduce input into local view-state
-changes or explicit `DashboardAction` effects; it should not render directly.
-
-WebUI session rendering should use structured dashboard and activity-cell data.
-Do not parse rendered TUI strings, prose, or command output into web structure
-when a typed contract should exist instead.
-
-## Changing Workflows Or Sleep
-
-When changing workflow or sleep behavior:
-
-- declare the evidence type consumed
-- declare the persistent artifact produced
-- keep runtime protocol correction and workflow process improvement separate
-- do not feed raw full conversations into runtime error correction
-- do not patch workflows from runtime protocol errors
-- do not let sleep mutate builtin workflows
-- do not persist temporary skill compositions as new skill specs by
-
-Runtime error correction changes global tool and protocol contracts. Workflow
-improvement changes reusable SOP skill specs for task classes.
-
-## High-Risk Areas
-
-Treat these areas as high risk:
-
-- daemon authentication and lifecycle
-- Manager/Session IPC and session registry
-- runtime turn scheduling, context compaction, and pending work
-- event completion and Telegram delivery
-- terminal process management
-- browser reference freshness
-- filesystem sandboxing
-- Coding/SCOPE edit and propagation review boundaries
-- provider credentials and OAuth storage
-- sleep-time contract and workflow evolution
-
-High-risk changes should be small, reviewable, and covered by targeted tests
-where possible.
+Use `x86_64` for an x86 emulator and build with `cargo xtask package android --target
+x86_64` first. The excluded Rust task uses the already-built native library;
+do not run this against stale native output.

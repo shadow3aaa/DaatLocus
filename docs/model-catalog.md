@@ -1,64 +1,40 @@
-# Model Catalog
+# Model Catalog Infrastructure
 
-Daat Locus uses the [models.dev](https://models.dev) catalog as a local fallback
-for model context windows, maximum completion tokens, vision/tool-call
-capability, and reasoning options.
+The retained [catalog loader](../src/model_catalog.rs) supplies fallback model
+capacity and capability metadata. Live provider discovery remains in
+[model_discovery.rs](../src/model_discovery.rs); provider clients remain in
+[providers.rs](../src/providers.rs).
 
-The catalog is not the source of truth for live provider capabilities. It is a
-fallback used when provider model discovery does not return capacity metadata.
-Values returned by a provider API during setup take precedence over this
-catalog.
+- A valid local models.dev cache takes precedence over compiled catalog data.
+- Missing catalog entries use conservative capacity defaults.
+- Catalog lookups use model/provider identifiers and configured API URLs; do not
+  infer capacities by fuzzy matching similar model names.
+- Context/output limits, input modalities, tool-call support, and reasoning
+  options are metadata, not guarantees that a live provider will accept a request.
 
-## Source
+The provider settings page opens secondary provider/model editors within the
+settings dialog. Entering model selection automatically queries the selected
+provider. Discovery refreshes models.dev at most daily, retries failed refreshes
+after five minutes, and publishes a validated snapshot immediately after an
+atomic cache write. Failed or malformed updates retain the previous snapshot;
+missing or invalid caches fall back to the compiled catalog.
 
-- `build.rs` downloads `https://models.dev/api.json` into `OUT_DIR` and embeds
-  it into the binary through `include_str!` in `src/model_catalog.rs`.
-- At runtime, `~/.daat-locus/cache/models-dev-api.json` takes precedence over
-  the embedded snapshot.
-- The Manager refreshes that cache in the background on startup through
-  `model_catalog::refresh_models_dev_cache()`.
+Live model IDs receive catalog capacity and reasoning metadata. If the provider
+query is unavailable or empty, the API identifies its suggestions as catalog
+results, not live availability. Model selection supplies capacity/vision defaults;
+reasoning and capacity controls accept directory options or custom values.
+Token-budget reasoning metadata preserves its range rather than discarding it.
+Provider/model edits retain explicit Save; other preferences auto-save. The old
+Manager lifecycle is not retained.
 
-Fields used:
+For an offline library check, set `DAAT_LOCUS_MODEL_CATALOG_PATH` to an existing,
+valid models.dev JSON snapshot, then run
+`cargo check --locked --offline --lib`. The catalog path supplies the compiled
+snapshot without downloading it. Backend-only checks do not build/install the
+frontend when `DAAT_LOCUS_BUILD_WEBUI=0` is explicitly set. Normal builds embed it. Cargo's `--offline`
+alone does not prevent a build script from making
+network requests. Without the catalog path, the build script fetches the catalog.
 
-- `limit.context`: total context window used for budgeting.
-- `limit.output`: maximum output budget used for conservative setup.
-- `modalities.input`: whether the model accepts image/vision input.
-- `tool_call`: whether the model supports tool calls.
-- `reasoning_options`: reasoning controls offered by the model.
-- provider `api` URL: maps configured provider base URLs to catalog sections.
-
-Unknown models fall back to conservative capacity defaults. Do not add substring
-matching for similar known model names.
-
-## Refresh Process
-
-Catalog refresh is automatic:
-
-1. Building the crate re-runs `build.rs`, which downloads a fresh snapshot when
-   the build script re-runs.
-2. Manager startup refreshes `~/.daat-locus/cache/models-dev-api.json` in the
-   background.
-
-To force a refresh manually:
-
-1. Re-run the build script by touching `build.rs` and rebuilding, or delete the
-   build script output under `target/`.
-2. Optionally refresh the runtime cache by replacing
-   `~/.daat-locus/cache/models-dev-api.json` with a fresh
-   `https://models.dev/api.json` response.
-
-Validate with:
-
-```sh
-cargo test --bin daat-locus model_catalog
-cargo test --bin daat-locus config_wizard
-```
-
-## Boundary
-
-`src/model_catalog.rs` should remain a catalog loader plus minimal lookup
-helpers. Do not add provider API calls, fuzzy matching, setup wizard logic, or
-runtime selection state to it.
-
-Provider discovery belongs in `src/config_wizard.rs`. Runtime provider clients
-belong in `src/providers.rs`.
+Keep catalog loading and lookup independent of Actor state, setup UI, and
+provider network protocols. Record catalog changes and validate the relevant
+loader/discovery tests when those modules change.

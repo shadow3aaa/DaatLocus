@@ -1,172 +1,135 @@
 # 贡献指南
 
-Daat Locus 是 runtime 项目，不是 prompt 集合。贡献应当保留那些让状态明确、行动可审计、经验可复用的边界。
+[English](CONTRIBUTING.md)
 
-如果你要修改 runtime 对象、工具、App、workflow、memory、sleep、daemon 行为、sessions、dashboard clients 或持久化，请先阅读 [架构说明](docs/architecture_zh-CN.md)。面向 coding agent 的约束见 [AGENTS.md](AGENTS.md)。
+先阅读 [AGENTS.md](AGENTS.md) 和[架构文档](docs/architecture.md)。
+Actor 和 App 是唯一核心概念；保留身份、持久消息、权限和增量接口。
+不要恢复已删除的 Session、TUI、Dashboard、Sleep、Workflow、SCOPE/LSP 或分享入口。
 
-## 设计规则
+## 构建与运行
 
-- 普通 assistant 文本不能产生外部副作用。
-- 优先使用显式 id 和 freshness guard，而不是隐藏的当前选中游标。
-- 保持 `Event`、`PendingWork`、`App`、`Plan`、`Workflow`、`Memory`、`Sleep`、`Manager` 和 `Session` 的概念分离。
-- App 工具直接通过 namespace 调用。不要重新引入 app focus 或 activation 作为工具暴露 gate。
-- Telegram 是 transport 和 event source，不是 App。
-- 静态文件工具是 `read_file` 和 `edit_file`；它们是 runtime tools，不属于某个 App namespace。
-- 让代码负责查找、去重、freshness 检查、持久化、delivery bookkeeping、schema validation 和 evidence recording 等机械工作。
-- 保持 AfterClaim Context、PreTurn Context、capability docs、App state 和 memory 分层。
-- 保持 runtime error correction 与 workflow improvement 分离。
-- Workflow 变更应当视为对可复用 SOP skill assets 的变更，而不是 prompt 编辑或聊天记忆。
+安装 Rust、Bun、wasm-pack：
 
-## 质量门禁
+```powershell
+rustup target add wasm32-unknown-unknown
+cd webui
+bun install --frozen-lockfile
+cd ..
+cargo run -- serve
+```
 
-当前 CI 会运行：
+默认 Cargo 构建会编译并内置 WebUI 和认证 WASM。打开服务输出的地址，登录和写操作
+使用同源地址。前端迭代在 `webui` 中执行 `bun run build`，再构建内置客户端的服务。
+`webui_fixture` 已删除。手动验证使用独立 profile 和临时工作目录，不能使用真实用户
+数据替代测试夹具。
 
-```bash
+后台检查设置 `$env:DAAT_LOCUS_BUILD_WEBUI='0'`，无需 Bun 或 wasm-pack。
+离线构建可用 `DAAT_LOCUS_MODEL_CATALOG_PATH` 指定有效 models.dev JSON；
+Cargo `--offline` 本身不会禁止构建脚本联网。详见[模型目录](docs/model-catalog.md)。
+
+## 代码与测试
+
+| 位置 | 职责 |
+| --- | --- |
+| `src/actors` | 执行、持久化、权限与审批 |
+| `src/*_app`、`src/app_instructions` | 领域工具及全部内置 App 指令 |
+| `src/accounts`、`src/stage`、`src/resources` | 账号、设备协调与统一资源 |
+| `src/service` | 有界 HTTP 操作及可续传事件流 |
+| `webui/src/components` | 可组合界面、设置与两种固定对话呈现 |
+| `webui/src/locales` | 中文、英文资源，新增文案同步维护两份 |
+| `tests/http_api.rs`、`tests/http`、`tests/support` | 单一真实 HTTP 测试入口、分领域用例、隔离 OPAQUE 账号与临时存储 |
+| `workers/signaling` | 可选公网 P2P 会合与信令，不掌握执行或密码授权 |
+| `xtask` | 原生归档与安装包，无需 Git 子模块 |
+
+按改动运行相应检查：
+
+```powershell
 cargo fmt --all -- --check
-cd webui && bun install --frozen-lockfile && bun run test
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+$env:DAAT_LOCUS_BUILD_WEBUI='0'
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cd webui
+bun run typecheck
+bun test
+bun run build
 ```
 
-提交修改前，请在本地运行相关检查。对于高风险 runtime 变更，应增加聚焦测试，或写清楚人工验证结果。
+信令修改另在 `workers/signaling` 执行 `bun install --frozen-lockfile`、`bun test`。
+测试不能调用真实模型。保留有效的操作系统隔离正反例、HTTP 认证、CSRF、队列版本、
+资源授权与断线续传用例。外部环境测试保持显式启用，报告前提和实际失败；不能通过
+弱化隔离或私有 ACL 让受限环境的检查通过。库测试不证明完整产品或所有平台可用。
 
-同样的检查也提供了本地 pre-commit hook：
+公网信令与账号同步检查使用临时身份和模拟模型。显式设置
+`DAAT_LOCUS_TEST_STAGE_SIGNALING` 为待验证的 WSS 地址，再执行
+`cargo test --locked --lib public_ -- --ignored --nocapture`，验证 SDP 转发、
+认证 P2P 连接、消息复制和私密模型配置同步。这些检查不能证明所有 NAT 下都能直连。
 
-```bash
-scripts/install-git-hooks.sh
+浏览器偏好留在客户端，账号配置私密同步。界面文案使用翻译键，不内联双语选择函数；
+语言切换即时刷新已有界面，用户消息、文件和命令原文保持不变。验证语言资源一致、
+浏览器默认语言和手动选择。
+
+Windows/macOS 共用 `clients/app/src-tauri` 中的 `daat-locus-app`，与 `daat-locus`
+一起构建。后台内置共用 WebUI，不依赖 GUI；客户端单独检查不需要 Bun/WASM。
+运行 `cargo test -p daat-locus-app` 和严格 Clippy，原生 CI 覆盖两个平台。
+桌面验证账号登录、附件、资源预览、重复启动、隐藏/重开、独立退出客户端与正常停止。
+原生代码使用固定的配套 CLI 操作，核对 profile、可执行文件与 loopback origin；
+不给 WebView JavaScript 文件、进程或 shell 能力。
+
+## 后台进程与打包
+
+`start --open`、`status --json`、`stop`、`restart` 用本机 OS-owner IPC 管理选定
+`--profile`。用临时 profile 验证进程身份、隔离、重启参数与历史保留。
+
+```powershell
+cargo xtask package binary --target <triple>
+cargo xtask package windows --target x86_64-pc-windows-msvc
+cargo xtask package macos --target <macOS-triple>
+cargo xtask package android --target aarch64
 ```
 
-## TUI 性能命令
+所有打包命令输出 Cargo 风格的状态和可点击产物路径；重定向日志保留纯文本 URL。
+`--out-dir` 可自定义产物目录。
 
-`tui-perf-cmd` 会启用一个隐藏的开发者命令，用于确定性地检查 dashboard 渲染性能。它是非默认 feature，不属于普通 CLI 功能面。
+Windows 安装包需要 WiX，macOS 安装包需要原生系统工具。
+`--skip-build --release-dir <directory>` 打包既有、已核实内置 WebUI 的二进制，
+Windows/macOS 同时需要配套桌面客户端。后台专用构建会被拒绝。
+Release CI 在各平台原生构建；产物放进忽略的 `target`。
+分发前检查依赖归属与许可证，见[归属说明](docs/license-attribution.md)。
 
-运行默认 mixed 场景：
+## 修改与评审
 
-```bash
-cargo run --features tui-perf-cmd -- dev tui-perf \
-  --scenario mixed --frames 120 --warmup 10 --width 120 --height 40
+编辑前检查 Git 状态；保留无关改动、脏子模块工作、凭据和持久 Actor 数据。
+删除前解析并验证目标位置；Windows 使用原生 PowerShell 的 `-LiteralPath`。
+
+说明具体行为、目的、验证和实际限制，保持代码、接口、配置、测试与文档一致。
+稳定契约归入架构或贡献文档，不新增任务日志、截图交接记录、浮动测试计数或进度
+清单；保留版本更新日志。提交标题使用英文并指出实际改动。不提交缓存、构建产物、
+运行日志、凭据或未确认实验。
+
+## Android 构建
+
+需要 JDK 17+、Android SDK 36 / NDK 27、Bun、wasm-pack 和 Rust Android targets。
+`clients/app/src-tauri/gen/android` 是维护中的 Gradle 源码；生成的 JNI 源码、原生库
+和构建输出均已忽略。在 `clients/app` 执行 `bun install --frozen-lockfile`，然后使用
+`bun run android:dev` 或设置 `DAAT_LOCUS_ANDROID_SIGNING=/私有路径/release.properties`
+后在仓库根目录运行 `cargo xtask package android`。默认构建 ARM64 release APK；
+模拟器使用 `--target x86_64`，调试签名使用 `--debug`。产物放在
+`target/<Android-triple>/<release|debug>/package`，也可通过 `--out-dir` 指定。
+`--skip-build` 校验并复制现有 Gradle 产物；`--apk-dir` 可指定包含
+`output-metadata.json` 的其他目录。校验版本、ABI 和内嵌 WebUI 后才报告成功。
+底层继续复用现有 Bun 脚本的 Tauri/Gradle 构建与签名流程。
+
+签名配置和 keystore 必须留在仓库外，参见[客户端构建说明](clients/app/README.md#android)。
+使用 Android build-tools 的 `apksigner verify --verbose --print-certs` 验证签名，并检查
+原生库的 16 KiB ELF 页对齐。禁止提交签名凭据。
+
+必须在设备上验证签名并混淆后的发布 APK，调试包启动无法覆盖 R8。
+`ReleaseStartupTest` 仪器测试验证内置登录页加载，不创建账号；请使用独立测试实例。
+先构建对应设备 ABI 的发布包，再从 Gradle 目录执行：
+
+```sh
+DAAT_LOCUS_ANDROID_SIGNING=/私有路径/release.properties DAAT_LOCUS_ANDROID_ABI=arm64-v8a ./gradlew :app:connectedUniversalReleaseAndroidTest -x :app:rustBuildUniversalRelease
 ```
 
-为脚本输出 JSON：
-
-```bash
-cargo run --features tui-perf-cmd -- dev tui-perf \
-  --scenario long-history --frames 240 --warmup 20 --width 140 --height 48 --json
-```
-
-可用场景：
-
-- `mixed`：committed activity、live cells、skills toggle panel、markdown、diff、browser、terminal 和 reply cells。
-- `long-history`：大量 committed activity cells，并设置显式滚动位置。
-- `scrolling`：在大型 activity list 上执行确定性滚动。
-- `live-activity`：活跃 runtime status 和 live activity cells。
-- `command-panels`：skills list panel 和 command bar 渲染。
-
-该命令使用真实 TUI 的 dashboard frame 渲染函数，但通过 `ratatui::backend::TestBackend` 运行，不进入真实 terminal alternate screen。报告包含 frame、prep、draw、activity、command timing，以及 activity render cache 的 hit/miss 计数。
-
-当 TUI 改动可能影响渲染成本或 frame scheduling 时使用这个命令。绝对毫秒数只适合作为本机数据；更可靠的方式是在相邻 revision 之间比较同一场景的指标，而不是设置很紧的跨机器阈值。
-
-## Commit Message
-
-Commit message 必须使用英文。标题应当说明真实改变的行为或边界，例如：
-
-- `Fix Telegram event completion retry`
-- `Add workspace app notice polling tests`
-- `Document workflow sleep evidence model`
-
-避免使用 `fix`、`update`、`misc`、`wip`、`cleanup` 这类含糊标题。
-
-## 添加或修改工具
-
-添加或修改 model-facing tool 时：
-
-- 说明它读取或改变什么 world state；
-- 在可能存在 stale state 的地方要求显式标识符；
-- 在声明和执行阶段都校验 schema；
-- 使用保守 model-facing JSON Schema dialect；
-- 不要引入 `Finished`、`Error`、`Compacted`、`Interrupt` 之外的 turn stop reason；
-- 测试非法参数和工具可见性；
-- 只有当误用可以被代码检测时，才加入 runtime error evidence。
-
-当可以使用具体 id 或 freshness guard 时，不要依赖隐藏 UI 状态。
-
-## 添加或修改 App
-
-App 是有状态能力域，不是 focus gate。
-
-修改 App 时：
-
-- 保持 `state` 和 `docs` 分离；
-- 通过 App namespace 暴露 model-facing tools；
-- 保持生成的 `appid__get_state` surface 准确且便宜；
-- 保持 app notice 显式且可 resolution；
-- 让操作绑定 page id、terminal session id、path 或 app-specific object id 等显式标识符；
-- 不要把可复用任务流程写进 App prompt docs；
-- 除非明确重设计 runtime contract，否则不要加入 focus/blur 要求。
-
-Telegram 这类 transport 默认不是 App。如果代码已经收到了结构化外部事实，应把它建模成 event source，而不是要求模型去导航的界面。
-
-Workspace Apps 当前从 `runtime/app.lua` 加载一个 Lua 5.4 module。支持的 hook surface 是 `config`、`init`、`render_state`、`list_tools`、`call_tool` 和 `poll_notices`；不要记录或依赖已经移除的 `on_focus` / `on_blur` hooks。
-
-## 修改 Coding 或文件工具
-
-Coding source operations 使用 `path + line#hash` anchors：
-
-- `coding__search_code` 返回 matched source lines。
-- `coding__read_code` 接受 path plus anchor，以及 `around` 或 `full` mode。
-- `coding__edit_code` 通过 SCOPE validation 和 review 应用 structured edits。
-- `read_file` 处理显式 file/range reads。
-- `edit_file` 处理非 SCOPE 的 ordinary file edits。
-
-当 Coding project 已打开时，`edit_file` 不应编辑 SCOPE-owned source files。请使用 `coding__edit_code`，以便保留 propagation review。
-
-## 修改 Manager、Sessions 或 Transports
-
-Manager 是唯一 public server。Session processes 是私有 runtime workers，只能通过 Manager-owned IPC 访问。
-
-修改这一区域时：
-
-- 保持 public clients 连接 Manager，而不是直连 Session endpoints；
-- 保持 runtime `Context`、`EventStore`、`PendingWorkQueue`、`Plan`、memory、apps 和 model loop 位于一个 Session 内；
-- 保持 Manager 负责 public auth、session registry、lifecycle、routing 和 Telegram default-session mapping；
-- 不要把 IPC names、tokens、process ids 或 lifecycle internals 作为普通 WebUI/TUI/API state 暴露；
-- 保持 `daat-locus code <project-dir>` 是 multi-session project selector，而不是 project-to-single-session mapping。
-
-## 修改 Dashboard Clients
-
-`DashboardState` 是共享 session/runtime state。`TuiViewState` 是单个 TUI client 的本地状态。不要通过修改共享 dashboard state 来解决本地 TUI 行为。
-
-TUI rendering 应保持由 `FrameRequester` 调度的纯 full-frame projection。Input handling 应把输入规约成本地 view-state 变化或显式 `DashboardAction` effect；它不应直接 render。
-
-WebUI session rendering 应使用结构化 dashboard 和 activity-cell 数据。当应该存在 typed contract 时，不要把渲染后的 TUI 字符串、prose 或 command output 解析成 web structure。
-
-## 修改 Workflow 或 Sleep
-
-修改 workflow 或 sleep 行为时：
-
-- 声明消费的 evidence 类型；
-- 声明产生的持久化 artifact；
-- 保持 runtime protocol correction 与 workflow process improvement 分离；
-- 不要把完整原始对话流喂给 runtime error correction；
-- 不要用 runtime protocol error 直接 patch workflow；
-- 不要让 sleep 修改 builtin workflow；
-- 默认不要把临时 skill compositions 持久化为新的 skill specs。
-
-Runtime error correction 改的是全局工具和协议约束。Workflow improvement 改的是某类任务的可复用 SOP skill specs。
-
-## 高风险区域
-
-以下区域视为高风险：
-
-- daemon auth 与生命周期；
-- Manager/Session IPC 与 session registry；
-- runtime turn scheduling、context compaction 和 pending work；
-- event completion 与 Telegram delivery；
-- terminal process management；
-- browser reference freshness；
-- filesystem sandbox；
-- Coding/SCOPE edit 与 propagation review 边界；
-- provider credentials 与 OAuth storage；
-- sleep-time contract 与 workflow evolution。
-
-高风险修改应当尽量小、可审查，并在可行时加入针对性测试。
+x86 模拟器使用 `x86_64`，先运行 `cargo xtask package android --target x86_64`。
+排除的 Rust 任务使用刚构建好的原生库，不得使用过期产物运行测试。

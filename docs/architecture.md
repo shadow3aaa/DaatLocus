@@ -1,471 +1,313 @@
-# Daat Locus Architecture
+# 架构与接口
 
-> This is the public architecture document for users and contributors. It
-> describes the current implementation boundaries. For stricter coding rules,
-> agent-facing constraints, and contribution policy, see `AGENTS.md` and
-> `CONTRIBUTING.md`.
+本文定义 Actor/App 系统的产品结构、执行与恢复策略，以及账号、设备和客户端接口契约。
+工程约束见 [AGENTS.md](../AGENTS.md)；构建、测试与发布流程见[贡献指南](../CONTRIBUTING_zh-CN.md)。
 
-Daat Locus is a long-running local, tool-driven agent runtime. The runtime owns
-durable state, claims structured work, injects structured context, exposes
-explicit tools, executes tool calls, and records the resulting evidence. The
-model's natural-language output is recorded as explanation; external effects are
-produced by explicit tools and completion actions.
+## Actor 与 App
 
-Its architecture is organized around explicit tool calls, stateful capability
-domains, structured runtime context, isolated Sessions, and auditable evidence
-for memory, skills, and sleep-time improvement.
+`Actor = Agent 核心 + 安装的 App 实例`。`src/actors` 负责串行收件箱、
+模型执行、持久上下文、审批与回复；不同 Actor 并行推进。App 是唯一工具抽象，
+各领域自行定义查询与操作，不要求统一 `get_state`。
 
-## Design Goals
+`src/builtin_apps.rs` 安装 Actors、Files/Skills、Terminal、Browser、Artifacts、
+Study。各 App 的指令统一维护在 `src/app_instructions`，工具描述和可移植输入
+schema 留在所属 App。Skills 是可发现、读取的指令资源，不拥有独立执行引擎。
 
-Daat Locus is built for work that improves through repeated practice:
-maintaining projects over time, handling recurring task classes, remembering
-practical experience, and turning that experience into auditable runtime assets.
+Actor 的创建、工作目录、App、只读身份和授权是内部状态。客户端只能切换
+模型偏好与 Full access / Ask / Auto；模型不能修改批准模式。所有 Actor 持续
+保留身份、配置、上下文与历史，没有删除入口。完成任务、退出账号、停止进程
+或释放 App 资源不删除 Actor。
 
-The main design goals are:
+Actor 的持久身份与 worker 驻留分离。启动、账号激活和恢复执行只查询有可执行
+输入的收件箱；创建 Actor 和读取对话不会启动 worker。入队后按需激活，同一
+Actor 仍只有一个串行 worker。没有输入持续 60 秒后，可安全重建的 App 关闭，
+worker 与注册表条目释放；再次入队从 SQLite 加载配置、上下文锚点与历史。
+空唤醒不延长空闲期限。收件箱的部分索引只包含排队输入，避免启动时扫描全部历史。
 
-1. **Tools produce external effects**
+App 默认不允许空闲回收，必须明确声明自身可安全重建。Actors、Files、Artifacts、
+Study 和只读 HTTP 缓存允许回收；终端保留会话或输出、浏览器保留上下文时阻止
+回收，不杀进程、不丢页面或会话数据。终端使用随机唯一会话 ID，重建后不复用旧引用。
+这些资源仍通过已有关闭操作或显式生命周期停止释放，空闲回收不重放 App 操作。
+App 关闭期间 worker 仍占据注册表位置，关闭完成后移除并重查持久收件箱，避免
+并行实例与丢失唤醒；暂停、重配置和退出在同一注册表锁下阻止新 worker。
+共享 Core 的激活继续检查设备执行授权，无租约时保留输入而不驻留等待 worker。
+Actor 列表在 SQLite 内按 ID 游标分页；容量、模型引用校验和私有目录边界查询
+只读取计数、模型名或 ID，不加载全部配置。历史分页加载时直接借用消息计算预算，
+只为通过预算检查的模型请求复制工作窗口，不为每页构造临时完整请求。
 
-   Natural-language output provides explanations and records. Event completion,
-   file edits, terminal commands, browser interaction, code edits, plan updates,
-   skill binding, and other effects happen through explicit tools.
+## 执行与恢复
 
-2. **State is explicit**
+SQLite 的事务同时提交消息变化和语义事件，稳定 ID 标识输入、工具调用、资源
+和审批；全局事件游标单调递增。委派立即排队，结果关联原请求、原来源和交付
+引用。入队时保存权限上限，接收者之后新增的权限不能被旧委派使用。
 
-   The runtime stores events, pending work, app state, memory, plans, skill run
-   bindings, session metadata, dashboard state, and delivery state. Code stores
-   or renders mechanical state directly so model attention stays on semantic
-   judgment.
+核心使用同一个串行 inbox 和 Agent 循环，以短回合协调。Actors App 的 `deliver`
+创建独立的 `delivery` 消息，其来源与收件人从当前输入构造，模型只能提供正文与
+`finish_turn`。交付 ID 由 Actor、输入和调用 ID 确定，相同调用不会重复发送；
+核心先保存交付记录并提交账号账本，再幂等发布消息事件和远端交付；未提交记录不进入会话查询，也不能作为恢复成功的凭据。`finish_turn=true` 在
+整个工具协议组写完观察后关闭当前输入，无需再调用模型；不结束任何被委派工作。
+已有显式交付时，最后的模型文字只关闭回合，避免重复用户消息。没有显式交付的
+直接最终回答仍沿原收件人交付。普通 Actor 的 `report` 将重要进展关联原请求，
+作为 `progress` 输入唤起请求方，而不修改执行中任务的状态。Core 自行选择汇报内容。
 
-3. **Capabilities stay in their domains**
+模型执行不限制消息数、ReAct 轮数或工具批次数。输入预算包含消息、工具定义、
+参数、观察和输出预留。完整协议组保持平衡；上下文满时清空工作窗口，插入
+读取归档历史的恢复提示，不压缩、不滑动裁剪。`read_history`、`read_resource`
+只读取自身 Actor 的原请求、指导、观察和资源；历史是证据，不能成为新授权。
 
-   Browser, Terminal, and Coding are separate stateful capability domains. Their
-   tools are namespaced and operate on explicit identifiers. The model calls
-   each tool directly through its domain namespace.
+窗口清空锚点与按模型绑定的 token 校准持久化。每次成功请求使用新鲜的实际
+input usage 保守校准；低观测值不降低估算，缺失 usage 不复用旧观测。
+Commentary、仅 reasoning 的继续响应和多工具协议保持完整。请求重试有退避与
+取消检查；连续无内容响应的错误保护不构成正常任务轮数上限。
 
-4. **Mechanical work belongs to code**
+取消中断模型和工具等待，不承诺回滚已经发生的外部效果。重启记录中断状态；
+不能在取消、重启或接管后自动重放不明确的 App 效果。诊断保存到 Actor 私有
+目录，凭据经过脱敏，客户端只收到安全错误码。
 
-   Queue enumeration, deduplication, freshness checks, delivery bookkeeping,
-   schema validation, and evidence recording belong in code. The model spends
-   attention on semantic judgment.
+用户输入执行中继续排队。修改、撤回与引导检查消息所属 Actor、用户来源、
+当前状态和 `expected_updated_at_ms`，事务内拒绝过期操作。引导绑定确切的
+运行请求；目标结束时未应用的指导恢复为普通输入。清空只处理尚未执行的用户输入。
 
-5. **Experience becomes auditable assets**
+## 账号与设备
 
-   Memory keeps continuity, but reusable procedures live in skill specs (SKILL.md files).
-   Runtime errors and skill run evidence feed separate sleep-time improvement
-   paths.
+账号身份来自持久信任根公钥的指纹，账号名是登录名；同名不是同一身份的证明。
+`--profile` 隔离本机账号、Stage 身份、凭据、配置与 Actor 数据。
 
-6. **Sessions are isolated runtimes**
+浏览器和 Rust 使用同一 `daat-locus-auth` 实现 OPAQUE，采用 Ristretto255 /
+SHA-512 / TripleDH / Argon2id。密码留在客户端，没有 Owner Token、Bearer
+认证入口、配对码或人工设备加入界面。首台设备注册和空设备身份安装必须验证
+本地 OS 所有者连接；loopback、Origin、Host 或 Forwarded 不能代替此验证。
 
-   The public daemon is a Manager. Each Session process owns one runtime and is
-   reached only through private local IPC from the Manager.
+空设备登录会寻找在线账号设备，经 OPAQUE 双向验证取得加密加入记录。上下文
+绑定账号、来源、目标设备、公钥/TLS 指纹/一次性证明、Origin 与连接边界；
+LAN 使用 TLS exporter，公网交换使用本次 nonce。HKDF / AES-256-GCM 使用
+单次登录密钥保护身份和私有注册记录。本机安装校验成员链、账号命名空间和
+凭据修订，再完成本机登录。Apps 不可读取这些记录。
+公网会合挑战的客户端预检容忍最多 30 秒时钟偏差；签名保留服务端给出的原始截止时间，
+Worker 仍按自己的时钟、原始 nonce 和截止时间拒绝过期或重放请求。
 
-## Runtime Loop
+浏览器使用随机 HttpOnly / SameSite=Strict cookie，HTTPS 附加 Secure。
+Cookie 绑定确切 profile、账号公钥命名空间和凭据修订；最长 12 小时。退出、
+到期与已知撤销使会话失效，每次 HTTP 操作、SSE 输出与心跳重新验证。
+登录或退出不会改变 Actor 生命周期。没有访客分享、PIN、公开隧道或分享会话。
 
-The current high-level flow is:
+账号设备自动发现、连接、同步与重连。LAN 使用 mDNS 和认证 TLS；SSH 需要
+明确目标；可选 CF Worker/DO 仅提供公网会合和 P2P 信令。LAN、SSH 和直连
+不依赖 CF。发现提示只能提供候选，不能授予信任。设备名默认使用系统 hostname API。
+公网 WebSocket 在 Android 上使用 WebPKI 与 Mozilla 公共根证书验证证书链、域名和有效期，
+避免 JVM 验证库将缺少 OCSP 响应地址误判为证书吊销；其他平台使用 OS 证书验证。
+设备间 TLS 仍按设备身份固定证书指纹，两种信任边界独立。
+公网在线提示只有在本地成员账本验证后才触发自动连接；初次连接不依赖模型已配置、
+执行 worker 已取得租约或新设备已加入投票成员，避免连接与同步相互等待。
+启用公网 WSS 连接后，P2P 默认通过 Cloudflare STUN 获取 NAT 地址候选；显式配置的
+STUN 地址优先使用。LAN/SSH 不依赖 STUN。P2P 协商与连接失败进入有界退避并保留
+诊断原因，不因一次设备连接失败终止所有公网信令；直连受网络限制时仍可能无法建立。
+公网同步信令注册总等待不超过 10 秒，发送不超过 5 秒；每 15 秒主动发送带随机
+nonce 的 WebSocket Ping，只接受匹配 Pong，30 秒未确认则关闭并重新注册。登录发布
+连接和同步信令分别验证存活；业务同步仍只走认证的设备直连。LAN 失败转交公网
+协商时先释放 LAN 的连接中状态，由公网尝试负责失败退避，不能提前将其设为退避。
+监督器先注册唤醒再读取候选，避免新设备加入或信令恢复时丢失连接通知。私密登录
+导入后立即保存已验证来源的名称并请求连接；对端名称随后经认证通道传播。未知
+名称显示为未命名设备及 ID 前缀；设备列表仅返回固定连接错误码，不公开底层诊断。
+RTC 协商签名采用 90 秒有效期，在验证端 120 秒未来上限内预留 30 秒时钟偏差空间；
+过期、来源、目标、nonce、连接代数和 DTLS 指纹检查保持强制。
+`workers/signaling` 是独立的可选部署单元，不是 quick-tunnel 子模块。
 
-1. A client or transport sends input to the Manager daemon.
-2. The Manager chooses or creates the target Session and routes the input over
-   private local IPC.
-3. The Session registers an event or app notice and enqueues `PendingWork`.
-4. The runtime claims one work item.
-5. Newly claimed input and available skill context are injected once as AfterClaim
-   Context.
-6. Before every model turn, current execution state is injected as PreTurn
-   Context.
-7. The model makes semantic judgments and calls explicit tools.
-8. Tools mutate state, apps, files, processes, events, plans, or skill run
-   bindings.
-9. Claimed work finishes through the appropriate completion tool.
-10. The runtime records evidence needed by dashboard history, memory, skill run
-    runs, and sleep-time improvement.
+模型、提供商定义和可移植凭据在同账号内私密同步，拒绝回滚和同修订不同内容。
+环境变量实际值、OAuth 文件路径、监听地址、公网连接地址和 SSH 目标保持
+设备本地；语言、外观、草稿与展开状态是客户端偏好。配置页固定显示本机和账号设备
+的名称及连接状态，使用有界分页自动刷新，不提供手动加入设备控件。离线设备在恢复连接后
+补齐修订，无法即时获知离线期间的撤销。
+
+## 共享账号 Actor
+
+账号的默认入口为 `core` Actor。其身份、收件箱、模型上下文和对话属于账号，
+不属于某一设备；设备提供 App 实例并临时承载 worker。普通 Actor 仍有宿主。
+旧本地 root 数据保留，不靠合并独立 root 来模拟共享 Actor。
+
+核心直接工具固定为一个便携 Actors App：设备发现、分页 Actor 列表、创建、委派、
+请求状态与取消，以及自身历史、资源和对话交付。模型使用明确的 `stage_id` 指定
+普通 Actor 的宿主；原生 Core Invoke 仅允许 Actors 协作操作，不能转调 Files、
+Terminal 或 Browser。构建模型工具不依赖逐设备网络目录查询；实际操作时重新检查
+目标设备的目录修订、执行代际、权限与审批。设备离线时不更换操作目标。
+
+`ActorPermissions.delegation_apps` 是可创建、委派的 App 上限；空值继承直接安装
+集合。Core 直接安装 `actors`，其委派上限与目标设备能力取交集；普通子 Actor
+默认将继续委派限制在自己的安装集合内。只读、工具、目录和批准模式仍向下约束。
+旧 Core 安装集合迁移为委派上限，不删除身份、历史或既有普通 Actor。项目 AGENTS
+和 Skills 由普通 Actor 在其权限范围读取，不自动注入账号 Core 的模型上下文。
 
 ```mermaid
-flowchart LR
-    Client[WebUI / TUI / CLI / Telegram]
-    Manager[Manager daemon<br/>public API and routing]
-    Session[Session process<br/>one runtime]
-    Pending[PendingWork]
-    After[AfterClaim Context]
-    Pre[PreTurn Context]
-    Model[Model judgment]
-    Tools[Explicit tools]
-    State[Events / apps / plan / memory / skills]
-    Sleep[Sleep improvement]
-
-    Client --> Manager --> Session --> Pending --> After --> Pre --> Model --> Tools
-    Tools --> State
-    State --> Pre
-    Tools --> Pending
-    State --> Sleep
-    Sleep --> State
+flowchart TB
+    UI[WebUI] --> Core[账号 Actor]
+    Core --> Devices[认证设备通道]
+    Devices --> A[设备 A：App 与临时 worker]
+    Devices --> B[设备 B：App 与普通 Actor]
+    A <--> B
+    Relay[可选 CF 会合与信令] -.-> Devices
 ```
 
-The important invariant is that tool results and persisted state are first-class
-sources of truth alongside model judgment. They decide whether an action
-actually happened.
-
-## Runtime Context Model
-
-Runtime context is split by lifetime in the current implementation.
-
-### AfterClaim Context
-
-AfterClaim Context is injected after work is claimed. It is one-shot context for
-that claimed work:
-
-- claimed events and claimed app notices;
-- source metadata needed to handle them;
-- the skill directory listing: available skill names, descriptions, and paths,
-  so the model can discover and read skill content on demand.
-
-It is one-shot claimed-work context. Event input lives here as part of the
-claimed input record.
-
-### PreTurn Context
-
-PreTurn Context is injected before each model turn. It contains current
-execution state that can change after tools run:
-
-- sensory information such as current time and machine status;
-- project instruction context when a coding project is in scope;
-- the current plan;
-- current skill run records and active skill context.
-
-App state is read on demand through the generated `appid__get_state` tool for
-Browser, Terminal, or Coding.
-
-### Capability Docs Are Separate
-
-Keep app docs, project instructions, event completion rules, and skill
-routing as separate instruction layers with their own responsibilities.
-
-## Core Runtime Objects
-
-### Event
-
-An `Event` is a structured external fact already received by the system. Current
-Session code stores Telegram input and terminal/client user input as event
-payloads. It represents work that needs semantic judgment and an explicit
-disposition. Chat windows, selected conversations, and app cursors belong to
-client or app state surfaces.
-
-A claimed event ends through `finish_and_send`. `resolved` and `failed` require
-a `reply_message` with content; `dismissed` is the silent completion path. Reply
-delivery and event resolution happen through explicit completion tools.
-
-### PendingWork
-
-`PendingWork` is the scheduling unit for the next runtime turn. Current variants
-are event work and app notice work. Events have priority over app notices.
-
-The queue remains a scheduling layer that claims, releases, consumes, and
-requeues work. Semantic judgment remains with the model and explicit tools.
-
-### Plan
-
-`Plan` is the short-term execution plan for the current task. Durable backlogs
-and knowledge bases live in separate storage. An active plan with steps must have
-exactly one `in_progress` step; completed plans are cleared after completion.
-
-### Memory
-
-Memory provides continuity and long-term recall. Runtime state and tool results
-hold immediate facts for events, delivery, app state, and skill run records.
-
-### Skills
-
-A `Skill` is a reusable SOP specification stored as a `SKILL.md` file. Unlike
-the old workflow/primitive system — which required explicit binding steps,
-composition tools, and an evolution pipeline — the skill model is content-addressable
-and discovery-based:
-
-- The system prompt lists available skill names, descriptions, and file paths.
-- The model reads a skill's `SKILL.md` through `read_file`, understands its
-  instructions, and applies them directly.
-- No explicit binding or composition tools exist. Skills are just markdown files
-  the model reads and follows.
-- Sleep self-improvement tracks which `SKILL.md` files the model has read and
-  appends improvement patches under `## Sleep Improvements` sections.
-
-Skill files live under `~/.agents/skills/` (builtin) and
-`~/.daat-locus-workspace/skills/` (evolvable workspace skills). Builtin skills
-are compiled into the binary and serve as read-only defaults.
-
-## App Model
-
-An `App` is a stateful capability domain with its own tools, state, lifecycle,
-and prompt docs.
-
-The current built-in Apps are:
-
-- **Browser**: persistent page sessions, loading, semantic page snapshots,
-  element refs, navigation, and page interaction.
-- **Terminal**: persistent command sessions, unread output, stdin continuation,
-  process lifecycle, and working directories.
-- **Coding**: project-aware source operations backed by SCOPE — Semantic Code
-  Operation & Propagation Engine (`scope-engine`), including semantic search,
-  hash-anchored reads and edits, and propagation review.
-
-### App Tool Exposure
-
-An App is a direct namespaced tool domain. Runtime tool construction exposes
-every installed App's valid tool specs directly under the App namespace, plus a
-generated state tool:
-
-```text
-browser__get_state
-browser__browser_open_page
-terminal__get_state
-terminal__terminal_exec
-coding__get_state
-coding__open_project
-coding__search_code
-```
-
-The App still owns its state and lifecycle internally. Tool ownership is visible
-in the tool name, and operations use explicit identifiers and visible runtime
-selection inputs.
-
-### State And Docs
-
-Every App exposes two separate layers:
-
-- `state`: current structured facts, returned by `appid__get_state` and rendered
-  in app-status surfaces;
-- `docs`: stable system-prompt documentation for operating the App's tools and
-  understanding its capability boundary.
-
-Keep these layers separate: state reports current facts, while docs explain
-capability boundaries and safe operation. Only `state` belongs in runtime state
-surfaces; `docs` are system prompt material. App docs are plain markdown, not a
-frontmatter metadata layer; do not add app-level `description` or `when_to_use`
-fields.
-
-### Static File Tools Are Runtime Tools
-
-`read_file` and `edit_file` are ordinary runtime tools. They handle explicit
-path/range reads and hash-anchored edits for Markdown, TOML, YAML, JSON, shell
-scripts, generated files, and paths outside SCOPE.
-
-When a Coding project is open, source files owned by SCOPE require
-`coding__edit_code` so parse validation and propagation review can run.
-
-### Telegram Is A Transport
-
-Telegram is a transport and event source. The Manager polls or receives
-Telegram input, resolves access and default-session mapping, routes normal
-messages to a Session, drains Session outboxes, and records delivery results.
-
-The model receives the structured facts and event id from runtime, judges the
-event, and completes it with `finish_and_send`.
-
-## Tool And Action Boundaries
-
-### Prefer Explicit Identifiers
-
-Tool calls should bind to concrete identifiers or freshness guards:
-
-- event completion binds to the claimed event;
-- Browser calls bind to `page_id` and, for interactions, `element_ref`;
-- Terminal continuation binds to `session_id`;
-- Coding reads and edits bind to `path + line#hash`;
-- session APIs bind to opaque `session_id` values;
-- skill reading uses named skill paths.
-
-Explicit identifiers make stale-state mistakes auditable.
-
-### Coding And File Editing Boundary
-
-Coding uses one visible source-location vocabulary: `path + line#hash`.
-
-- `coding__search_code` returns matched source lines with path-scoped anchors.
-- `coding__read_code` reads a path plus anchor in `around` or `full` mode.
-- `coding__edit_code` applies structured hash-anchored edits and returns
-  propagation results.
-- `coding__next_review` exposes pending impact review events after edits.
-
-Explicit path/range reads belong to `read_file`; `read_code` handles path plus
-anchor. Configuration, generated, and outside-SCOPE edits belong to `edit_file`;
-SCOPE source edits belong to `edit_code`.
-
-### Model-Facing Schema Dialect
-
-Runtime tools, App tools, and structured model outputs use a conservative JSON
-Schema dialect. Schemas are root objects, object properties are required and
-closed with `additionalProperties: false`, optional values are nullable required
-fields, and correctness comes from generated and validated schemas at the
-provider boundary.
-
-The normal Rust entry point is `#[model_schema]` plus `model_schema_for::<T>()`.
-Dynamic workflow schemas are validated when loaded.
-
-## Multi-Session Architecture
-
-Daat Locus is a client-server multi-session system.
-
-```text
-WebUI / TUI / CLI / Telegram control
-  -> Manager daemon public API
-  -> Session process over private local IPC
-```
-
-Clients connect only to the Manager daemon. Session processes are private
-runtime workers; the Manager is the public client target.
-
-### Manager Responsibilities
-
-The Manager owns:
-
-- public HTTP/WebSocket endpoints and embedded WebUI serving;
-- daemon authentication and token validation;
-- session registry and lifecycle;
-- spawning, stopping, restarting, deleting, and health-checking sessions;
-- routing `/send`, dashboard requests, command requests, and Telegram input;
-- Telegram ACL, default-session mapping, outbox delivery, and Telegram-only
-  session control commands;
-- dashboard snapshot/history/stream proxying from target Sessions.
-
-The Manager stays at public API, auth, routing, lifecycle, and compact status
-summary boundaries. Runtime `Context` creation, model loop execution, and
-per-session memory/event/app/plan ownership belong to Session processes.
-
-### Session Responsibilities
-
-Each Session process owns exactly one runtime:
-
-- one `Context`;
-- one `EventStore` and `PendingWorkQueue`;
-- one conversation and memory state;
-- one `Plan`;
-- one `AppManager` and app instance set;
-- one dashboard state stream;
-- one model loop.
-
-A Session exposes private IPC handlers to the Manager. Public HTTP serving,
-global session registry loading, multi-session management, and Telegram polling
-belong to the Manager.
-
-### Session Registry And Code Mode
-
-The Manager persists session metadata, including an opaque `session_id`, scope,
-process status, IPC metadata, optional project directory, title, and timestamps.
-Public session lists expose only user-facing identity, title, scope, and basic
-summary fields; IPC tokens and process internals remain Manager-private.
-
-`daat-locus run` works with general sessions. `daat-locus code <project-dir>`
-canonicalizes the project directory and shows only project-scoped sessions for
-that path. Creating a code session creates a new opaque `session_id`; a project
-directory can have multiple code sessions.
-
-### Manager-Session IPC
-
-Manager and Session communicate with `interprocess` Tokio local sockets. The
-protocol uses framed JSON envelopes with protocol version, request id, session
-id, IPC token, and request body. Requests include status, user input submission,
-dashboard snapshot/history/stream, dashboard commands/actions, Telegram event
-queueing, Telegram outbox draining, delivery recording, requeueing, and
-shutdown.
-
-This IPC is a local implementation boundary for Manager/Session coordination.
-
-### Telegram Routing
-
-Approved Telegram chats are mapped by the Manager to a default Session. If a
-chat lacks a valid mapping, the first ordinary message creates a new general
-Session and stores the mapping. Telegram-only session commands such as
-`/session_list`, `/session_new`, `/session_attach`, and `/session_delete` are
-handled by the Manager before Session event registration. Ordinary chat messages
-are routed to Session event stores as runtime events.
-
-## Dashboard And Interactive Clients
-
-`DashboardState` is the shared cross-client session/runtime snapshot produced by
-the Session and consumed by TUI, WebUI, and other clients. It includes activity
-cells, live activity, runtime status, plan summaries, app status output, skills,
-Telegram access requests, token usage, and context/optimization summaries.
-
-TUI local interaction state belongs to `TuiViewState`: command input, slash
-completion, panels, scroll offsets, local feedback, expanded display choices,
-history paging state, and render caches. Multiple TUI clients can show the same
-`DashboardState` with different `TuiViewState` values.
-
-The TUI architecture is:
-
-```text
-DashboardState + TuiViewState
-  -> input_controller reducer
-  -> optional DashboardCommandRunner effect
-  -> FrameRequester schedule
-  -> pure full-frame render
-```
-
-`FrameRequester` is the draw scheduler. The TUI uses full-frame renders,
-coalesced draw requests, and animation scheduling through `FrameRequester`.
-
-Slash commands are top-level product entry points. Commands such as `/skills`,
-`/debug`, `/app-status`, and `/status` should open panels or one obvious action.
-Large typed CLI trees stay in internal, remote-control, or test surfaces.
-
-WebUI session rendering reads structured `DashboardState`, `WebActivityItem`,
-and `ActivityCell` data directly while mirroring the TUI session activity
-hierarchy.
-
-## Sleep And Self-Improvement
-
-Sleep is evidence-driven improvement with two independent paths:
-
-- **Runtime Error Correction** consumes code-detected runtime/protocol error
-  cases and produces small global runtime contract corrections.
-- **Skill Improvement** consumes skill run records and patches the skill's
-  SKILL.md with improvement suggestions.
-
-Keep these paths separate: runtime protocol errors feed contract corrections;
-skill run quality evidence feeds skill patch decisions.
-
-## Persistence Boundaries
-
-Protected runtime state includes configuration, daemon auth tokens, Telegram
-ACL/default-session mapping, session registry, events, pending work, runtime
-conversation and memory, plans, dashboard history, app-local state, and sleep
-artifacts.
-
-Editable workspace assets include project files and skill specs. Builtin skill
-specs are repository assets compiled into the binary and are read-only at
-runtime.
-
-This boundary separates runtime-owned state from project-file edits while still
-allowing agent-maintained workspace assets to evolve through controlled
-processes.
-
-## Current Architecture Shape
-
-### Work Queue Runtime
-
-Daat Locus can expose chat-like interfaces, while its core is pending work,
-structured context, explicit tools, persisted state, and evidence.
-
-### Domain-Owned Tools
-
-Tools are exposed by domain ownership. App tool names show their owner namespace,
-and stateful domains expose `get_state` with explicit identifiers.
-
-### Evidence-Driven Improvement
-
-Self-improvement requires evidence, an ownership layer, persistent artifacts,
-and auditable changes.
-
-## Summary
-
-Daat Locus can be summarized by a few current invariants:
-
-- external effects flow through explicit tools and completion actions;
-- Apps are stateful capability domains with direct namespaced tools;
-- Events and PendingWork are separate from Apps;
-- runtime context is split into AfterClaim and PreTurn layers;
-- Manager is the only public server, and Sessions are private runtime workers;
-- skills are reusable SOP specifications discovered and read as markdown files;
-- sleep consumes explicit evidence through separate runtime-error and skill
-  improvement paths.
-
-The goal is a local agent runtime that can act, verify, remember, and improve
-while remaining auditable and shaped by human judgment.
+执行协调属于账号设备。OpenRaft 持久化投票、日志、快照与联合成员变更，确认
+执行代际、租约和共享提交头，正文走认证设备通道。新账号初始化一个授权节点，
+后续设备为 learner；旧的多投票者成员通过原有 quorum 收束。同步副本不增加
+日常运行的永久投票依赖。成员维护在独立循环中使用截止时间，不阻塞 worker 续租。
+正常退出暂停并同步当前执行，再通过联合成员变更把授权节点交给已同步设备。
+健康且可执行的 worker 保持亲和；不再具备执行条件时释放租约。状态查询返回后
+重新读取本机提交头，不能因并发检查点让旧查询结果撤销健康 worker。输入就绪
+门禁与已开始推理的执行权限分离，后者仍严格检查租约、代际、暂停和退出。worker 完全
+停止后，残留的运行中输入必须先恢复推理与不完整工具协议，再开放串行 inbox；
+Actor 的暂时空闲状态不能绕过运行中输入。
+
+异常失联时，已同步、授权和模型配置有效的设备无法取得账号仲裁确认时，在既有授权
+失效后进入持久的本地恢复分支。副本之间仍在线不代表仲裁可用。分支有独立标识、
+起始提交头和递增代际，不改写 Raft 投票者，也不宣称取得多数提交。个人账号选择
+可用性优先，因此网络分区中各侧可能分别推理。
+重连后，由现有账号授权节点暂停各侧执行，按检查点序号降序、StageID 升序选择
+完整的推理上下文；后返回的旧代际分支仍参与恢复。替换前把原分支保存在同一个
+私有数据库中，按分支分别映射消息和操作引用，把用户消息、完成结果与只读操作
+记录自动合并到活动对话。相同输入的不同结果使用稳定标识保留，合并可重复执行；
+不拼接有分叉的模型工具协议、不导入待批准操作。旧版尚未合并的归档也通过有界
+原生分页自动补回。共享头由原有 quorum 确认后恢复执行并标记归档已合并；同步
+期间续期暂停状态。未开始的输入保留约束并继续交付；其他分支中已开始或结果未知
+的工作只保留已取消记录，不自动重放。客户端直接呈现合并后的正常对话，不提供
+额外的恢复历史按钮。配置就绪查询读取当前生效配置；共享 Core 的模型定义就绪
+与本机凭据可执行性分开，账号配置修订触发客户端模型列表刷新。
+重启不恢复缓存租约，本地分支代际也递增。CF 不拥有租约、代际或业务提交权。
+
+LAN 地址候选有过期时间并处理服务撤销，最多四路同时验证 TCP/TLS，整次拨号
+有截止时间。失败记录原因、安排重试并唤醒调度，新发现可打断退避。连接静默
+判定为六秒，写入也有截止时间；WebRTC 关闭和失败直接结束通道。公网 ICE 协商
+在独立任务中进行，在线通知与心跳保持可处理。客户端区分连接、同步、恢复、
+本地运行及恢复阻塞。等待使用原有居中环形加载与模糊遮罩，保持消息和草稿组件
+挂载，暂时禁止对话交互；可用的本地恢复不额外显示提示条。完成分支合并后从
+语义事件重新读取有界对话页面。
+
+工具意图先复制提交，目标设备再检查代际、授权、审批和 sandbox。工具结果和
+最终回复进入持久账本；可读取已确认结果，不重放 Unknown 效果。原 App 设备
+离线不能把文件或终端操作静默改投另一设备。输入使用已提交逻辑顺序，检查点
+保留窗口锚点、token 校准、上下文和资源引用，接管不重新填充已清空的窗口。
+
+## 权限与资源
+
+Auto 的独立模型请求无 worker 历史和执行工具，只能 approve/deny；超时、
+错误和无效响应拒绝，不转人工。Ask 等待 Owner 审批不可修改的参数与请求范围。
+Full access 省去审查并使用本次请求的额外文件范围，仍受身份、只读、工具、
+框架凭据与其他 Actor 私有数据等硬边界约束。额外授权只作用于一次操作，
+不能永久改写 Actor 配置；取消、停止和重配置使等待审批失效。
+
+文件操作在实际打开目标时验证策略，不依赖提前 canonicalize 后的字符串检查；
+写入用 SHA256 版本校验。受限原生进程隔离不可用时必须拒绝，不能退回宿主执行。
+只读 Browser 使用有界 HTTP GET，验证 DNS、重定向与地址目标，不运行 Chrome /
+页面 JavaScript、不继承环境凭据。私有存储写入前建立 OS-owner 权限并传播失败。
+
+`src/resources.rs` 为本地与多设备使用统一资源描述：稳定 ID、版本、媒体类型、
+哈希、长度和内容块引用，跨设备不传本地路径。资源通过所属 Actor 账本授权、
+打开路径检查和哈希验证后读取。工具图片先捕获为持久资源，仅模型请求临时
+解析成图片内容；模型接口不会重新打开未经验证的路径。完整输出同样归档为
+资源，按 UTF-8 字节分页，保留原始内容。多设备 App 结果转交资源描述和内容块。
+
+浏览器上传只提交资源 ID；服务端构造来源、回复与权限元数据。下载执行 Actor
+授权与账本路径检查，HTML/SVG 使用无 same-origin 权限的 sandbox CSP。
+签名与链接不能替代授权，凭据不能进入观察、同步公开内容或客户端诊断。
+
+公网登录发布与 Core 执行独立。注册握手总时限 10 秒，发送时限 5 秒；
+发布连接每 15 秒发送带随机标识的 WebSocket Ping，仅匹配的 Pong 确认保活，
+30 秒未确认即关闭失活通道，按有界退避自动重新注册。网络变化、账号凭据变化
+和公网地址修改唤醒重查，不复用旧注册状态。注册失败与 TLS、协议、授权、
+心跳超时分别记录固定错误码；不记录账号私密材料或底层响应原文。
+设置页显示实际公网登录状态，地址已保存不代表注册成功；状态查询失败显示未知。
+这些状态是本机易失诊断事实，不进入 Actor 业务日志、模型上下文或复制账本。
+
+登录失败使用固定的 `login_*` 错误码和不含凭据的短原因。发现层区分未配置
+公网连接、公网服务不可达、未找到在线设备、设备连接失败和超时；认证层区分
+账号或密码错误、尝试过期、设备撤销、凭据变化以及无法验证登录/加入信息。
+账号名不存在与密码错误保持相同认证结果。HTTP 与原生账号桥保留相同错误码；
+WebUI 根据中英文目录显示简短提示和可反馈的错误码，不显示底层诊断原文。
+拒绝密码证明后只在候选耗尽时显示凭据错误，不能把后续网络失败改写为密码错误。
+
+模型请求失败将固定错误码写入消息，底层 HTTP/TLS 原因、地址、请求计数和 token
+预算只保存在受 OS Owner 权限保护且脱敏的诊断文件中。认证拒绝与证书吊销/验证
+失败分别分类，永久失败不自动重试，也不降低证书验证。客户端只显示简短本地化
+原因；旧消息的诊断原文不作为对话错误提示展示。共享 Core 消息由同一复制流传输，
+不能再通过设备限定的普通 Actor 通知创建重复身份。
+
+## HTTP 与 WebUI
+
+`src/service` 提供有界 Actor、消息、搜索、队列、工具结果、审批、资源、
+配置和账号查询；`/v1/stages/{stage}/actors/{actor}` 经认证设备通道访问宿主。
+对话链接只是定位符，Owner 可以直接访问任意 Actor。Cookie 写操作要求受信
+Origin 和 `X-Daat-Request: 1`，不信任 Host/Forwarded，不使用宽泛 CORS。
+
+`/v1/stage/status` 仅返回当前 Core 同步、执行就绪与公网登录发布状态，每次查询重新认证。
+WebUI 串行查询该小型状态；同步完成且存在有效 worker 时才开放 Core 输入，
+并在同步完成后刷新模型选项。服务端对未就绪的 Core 发送返回 `503 core_not_ready`，
+客户端保留草稿；已经接收的持久输入不丢弃。设备连接失败即显示离线，重试时间
+独立保留；收到对端数据的等待超过 45 秒（3 个心跳周期）关闭失效通道。
+
+`/v1/event-stream` 和 Actor 的 `event-stream` 发送小型语义事实与引用。
+客户端从最后已消费游标恢复 SSE，先等待消费者接收事件再推进游标；注册唤醒
+早于查询，每次输出与心跳重新认证，尊重背压。同步缺口触发有界重查；重连
+不会反复传完整 runtime snapshot。工具正文和重资源仅在展开时获取。
+
+Root/Core 固定采用 IM，只显示明确用户交付、任务链接、决策与成果。其他 Actor
+固定采用工作呈现，在弹窗和主窗口均使用同一种身份样式：普通正文、静默耗时
+展开、细分活动与独立成果。活动按时间穿插在对话中，不使用嵌套滚动框。工具
+参数用只读标记字段呈现；不以原始 JSON 或模型协议作为产品兜底。
+
+左上浮动菜单为账号与设置入口，右上仅保留对话搜索，没有常驻侧栏。设置复用
+行、组、选单和二级页面；提供商/模型编辑明确保存，其他设置串行窄 PATCH
+自动保存。失败输入与待发送草稿保留。排队消息位于圆角输入框上方，附带附件、
+修改、撤回和引导入口。模型与批准模式是输入偏好，不是 Actor 管理面板。
+
+WebUI 文案维护在 `webui/src/locales/{zh-CN,en-US}.json`，使用 i18next /
+react-i18next；默认选浏览器首个受支持语言，其他语言回退英文。个性化可选择
+跟随浏览器、中文、英文，自动保存并即时刷新。用户消息、文件与命令原文不翻译。
+
+普通 Cargo 构建通过 Bun、wasm-pack 构建并内置 WebUI；显式
+`DAAT_LOCUS_BUILD_WEBUI=0` 为后台检查跳过前端。静态资源只来自编译时清单，
+SPA 只匹配确切对话路径，未知 API 不返回 index.html。维护 CLI 用 clap 提前
+解析参数；`serve` 前台运行，`start/status/stop/restart` 通过 profile 本地
+OS-owner IPC 管理后台进程，不借用浏览器认证、不删除 Actor 数据。
+
+
+Windows/macOS 的共用 Tauri 客户端位于 `clients/app/src-tauri`。窗口从配套 CLI
+的 OS-owner IPC 状态取得并核对 profile、可执行文件与确切 loopback origin，
+使用后台内置的同一套 WebUI、账号 cookie、HTTP 查询和 SSE，不重复维护业务桥接。
+WebView 不授予 JavaScript 文件、进程或 shell 能力；外部链接打开系统浏览器，
+授权资源在继承 opener 环境的原生窗口预览，继续受资源权限与 HTML/SVG CSP 限制。
+Windows 和 macOS 14+ 使用 profile 独立 WebView 存储；更早 macOS 仍由服务端的
+profile 与账号凭据版本绑定保证会话权限。
+
+首次注册与未登录设备的账号接入使用有限的原生命令，经本机 OS-owner IPC 到同一
+认证处理逻辑。原生权限只授予该 profile 的主窗口与确切 loopback origin 的对话路径，
+资源预览无权调用。IPC 只处理未建立账号的 bootstrap，不能创建浏览器会话或修改已有
+账号；普通 OPAQUE 登录仍由 HTTP 写入 HttpOnly cookie。公开 HTTP 不接受 native
+标记、额外 Owner token 或仅凭 loopback 的注册权限。
+
+客户端拥有原生窗口、托盘与主线程事件循环，后台不依赖 GUI。关窗仅隐藏，
+退出客户端保留后台，停止并退出通过固定 CLI 命令请求正常关闭。重复启动恢复
+同一 profile 的窗口；后台重启后重连已核实的本机服务。CLI 与可选浏览器入口保留。
+Android 将同一服务与 Actor/App 核心编译为 APK 内的 Rust 原生库，使用 OS 私有目录，
+不启动桌面 daemon、CLI 子进程或独立 root。它可以创建账号并独立推理，也可以成为
+同账号共享核心的执行设备。设备可为普通 Actor 提供 Actors、Files、HTTP Browser、Artifacts、Study；账号 Core 直接仅用 Actors；
+终端不安装，未实现的进程隔离始终拒绝。Files 使用目录句柄与实际打开 FD 校验，
+Android 上以 O_PATH 遍历不可列举的系统祖先目录，仅在授权目标读取目录内容；
+创建文件用 renameat2 的 RENAME_NOREPLACE 原子提交，避免 SELinux 禁止的硬链接，
+并保持目标已存在时不能覆盖的保证。服务与工作目录相邻分开，WebView 的账号存储
+也属于 Apps 不可访问的私有基础设施。
+账号 bootstrap 只授予确切 loopback origin 主 WebView，普通登录仍写 HttpOnly cookie。
+资源预览留在认证 WebView 的 sandbox dialog，外部链接交给系统浏览器。
+
+Android 与其他设备使用同样的执行、同步和投票规则，无移动设备专用成员类型。
+新设备同步为 learner；投票权只在授权节点交接时通过 joint membership 转移。
+离线设备不能实际投票；修改仲裁成员仍须一致性提交，不能各自按在线列表重算法定人数。
+新建的单手机账号初始化持久化单节点仲裁；已有仲裁仍需原有 quorum，不能因设备
+断线自行缩成单节点；失联恢复使用明确的本地分支。后台生命周期暂停推理并释放
+执行租约，保留输入和中断记录，前台重新参与执行。消息通道保持独立，进程被
+Android 回收后按持久化游标重连，不重放未知
+App 效果。没有常驻后台服务保证，也不以关闭 sandbox 为代价嵌入 shell。
+
+主窗口标题区与内容融为一体，不显示应用名或状态占位。Windows 使用无系统装饰的
+窗口和共用界面中的窗口按钮、拖动区；macOS 使用透明覆盖标题栏与原生红黄绿按钮。
+原生窗口命令只操作调用者的主窗口，权限绑定确切对话 origin/路径，不开放任意窗口
+定位、文件或进程控制。浏览器入口不渲染窗口控制，关窗仍只隐藏，不停止 Actor。

@@ -1,86 +1,86 @@
-<div align="center">
-
-<img src="assets/logo.svg" alt="Daat Locus Logo" style="width:220px; height:auto;" />
-
 # Daat Locus
 
-<p align="center">
-  <img src="assets/preview-tui.png" alt="preview-tui" width="45%" />
-  <img src="assets/preview-webui.png" alt="preview-webui" width="45%" />
-</p>
+[简体中文](README_zh-CN.md)
 
-[![简体中文][readme-cn-badge]][readme-cn-url]
-[![Crates.io][crates-badge]][crates-url]
-[![CI][ci-badge]][ci-url]
-[![License][license-badge]][license-url]
+Daat Locus is an Actor system with one conversation interface:
 
-</div>
-
-[readme-cn-badge]: https://img.shields.io/badge/README-简体中文-blue.svg?style=for-the-badge
-[readme-cn-url]: README_zh-CN.md
-[crates-badge]: https://img.shields.io/crates/v/daat-locus?style=for-the-badge
-[crates-url]: https://crates.io/crates/daat-locus
-[ci-badge]: https://img.shields.io/github/actions/workflow/status/shadow3aaa/DaatLocus/ci.yml?style=for-the-badge&label=CI
-[ci-url]: https://github.com/shadow3aaa/DaatLocus/actions/workflows/ci.yml
-[license-badge]: https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge
-[license-url]: LICENSE
-
-## What Is This?
-
-Daat Locus is a long-running local agent runtime.
-
-## Quick Start
-
-The recommended install path is `cargo-binstall`, which installs the prebuilt
-GitHub Release binary for your platform.
-
-For now daat-locus is only tested on Windows and MacOS, but Linux should work as well.
-
-```bash
-cargo install cargo-binstall
-cargo binstall daat-locus
-
-# OR use cargo install directly, which builds from source and requires Bun
-cargo install
-
-daat-locus
+```text
+Actor = Agent core + installed App instances
 ```
 
-On first launch, Daat Locus opens an interactive setup flow.
+The account Actor accepts requests and delegates to persistent Actors. Devices
+share its conversation and model context, provide tools, and can take over its
+worker. Ordinary Actors keep their own host. Follow Actor links to open work
+conversations; no permanent sidebar, TUI, Workflow or Sleep framework is needed.
 
-### Source Builds
+The WebUI supplies messages, attachments, queue guidance, compact activity and
+results. Account/settings live in a floating menu, conversation search in the
+opposite corner. Chinese and English are supported; language follows the browser
+by default and can be selected in Appearance. Guest sharing and public tunnels
+are removed; same-account devices connect through authenticated P2P channels.
 
-Source builds require Bun because `build.rs` builds and embeds the WebUI.
+## Run
 
-Install Bun from <https://bun.sh/> and make sure it's in your `PATH` before building.
+Install Rust, Bun and wasm-pack:
 
-```bash
-git clone https://github.com/shadow3aaa/DaatLocus
-cd DaatLocus
-cargo run
+```sh
+rustup target add wasm32-unknown-unknown
+cd webui
+bun install --frozen-lockfile
+cd ..
+cargo run -- serve
 ```
 
-## Common Entry Points
+Normal builds compile and embed the WebUI, including authentication WASM. Open
+the printed address and create an account locally, or sign in with the same
+account name and password on another device. OPAQUE keeps passwords in the client;
+browser sessions use HttpOnly cookies. `--profile NAME` isolates local accounts.
+Discovery and synchronization are automatic. LAN and SSH need no external relay;
+CF Worker/DO is an optional public rendezvous/signaling transport.
 
-```bash
-daat-locus help                # show the help message
-daat-locus run                 # open the foreground runtime flow
-daat-locus code <project-dir>  # select or create a project-scoped session
-daat-locus attach              # attach to an existing daemon
-daat-locus send "..."          # send one message and wait for a reply
-daat-locus config              # open the interactive config menu
-```
+Use `daat-locus --help` for clap help and the original character logo.
+`serve` runs in the foreground; `start --open`, `status --json`, `stop` and
+`restart` manage the selected profile through local OS-owner IPC. Stopping or
+restarting keeps Actor identity and history. Headless first-account creation is
+`account create NAME --password-stdin`; never pass passwords as command arguments.
 
-## Documentation
+Windows and macOS use the [Tauri desktop client](clients/app/README.md), sharing
+the same WebUI and account interfaces. Build with
+`cargo build -p daat-locus -p daat-locus-app`, then run `daat-locus-app` next to the
+service executable. `start --open` prefers the installed client. Closing its
+window hides it; Quit client preserves background tasks; Stop and exit shuts the
+service down normally. The independent backend has no GUI dependencies. Linux
+retains the service and browser entry. Android embeds the same core and WebUI in an APK;
+a terminal is not required. See [native client builds](clients/app/README.md#android).
 
-- [简体中文 README](README_zh-CN.md)
-- [Architecture](docs/architecture.md)
-- [Configuration](docs/configuration.md)
-- [Lua Workflows](docs/workflows.md)
-- [Semantic Code Operation & Propagation Engine](crates/scope-engine/README.md)
-- [Contributing](CONTRIBUTING.md)
-- [Skills](skills/) — Reusable skill SKILL.md files for task automation
+## Permissions and recovery
 
-## License
+| Mode | Behavior |
+| --- | --- |
+| Auto | Independent model review approves or denies; errors deny, without human fallback. |
+| Ask | Owner reviews the immutable action and requested access. |
+| Full access | Runs without approval review, within hard identity and access boundaries. |
 
-Daat Locus is licensed under the [Apache License 2.0](LICENSE).
+Extra filesystem access applies to one action. Read-only identity, tool grants,
+framework credentials and other Actors' private data remain protected. Native
+sandbox requirements fail closed. Files use SHA256 freshness checks; resources
+are authorized by Actor and have stable pathless descriptions across devices.
+
+Execution has no fixed message, ReAct-round or tool-batch limit. A full context
+window is cleared with an archive-recovery prompt rather than summarized or
+slid. Original history persists; interrupted or uncertain effects are not replayed.
+The account's worker keeps healthy affinity and hands off to a synchronized device.
+New devices join as replicas without adding permanent voting dependencies. If
+account authority becomes unreachable, an eligible synchronized device continues
+in a durable local recovery branch. Reconnection merges the conversation while
+retaining original branches and never replaying uncertain App effects.
+
+## Develop and package
+
+See [contribution instructions](CONTRIBUTING.md), [architecture](docs/architecture.md),
+[model catalog](docs/model-catalog.md) and [license notes](docs/license-attribution.md).
+Explicit `DAAT_LOCUS_BUILD_WEBUI=0` skips frontend toolchains for backend-only checks.
+
+`cargo xtask package binary --target <triple>` creates a binstall archive.
+`package windows` and `package macos` create native installers on their respective
+platforms. Packages require an embedded WebUI binary. No Git submodules are needed.

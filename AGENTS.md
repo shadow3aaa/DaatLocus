@@ -1,2476 +1,289 @@
 # Daat Locus Agent Guidelines
 
-This document defines the agent-facing boundaries that match the current Daat Locus implementation.
+This file defines the repository's product and engineering boundaries.
+[docs/architecture.md](docs/architecture.md) records architecture and interface
+contracts; the contribution guides cover development, validation and packaging.
 
-The goal is not to write abstract slogans. The goal is to give future changes to `app`, `events`, `runtime_tools`, `runtime_context`, `preturn_state`, `telegram_transport`, `skill`, `memory`, `sleep`, and related modules a set of design constraints that match how the code actually works.
+## System Boundaries
 
-## Project Reality
+The shared WebUI runs in the Windows/macOS Tauri client and optional browser entry.
+The Actor/App backend, durable routing, incremental HTTP API and conversation
+client are connected.
 
-- Daat Locus is a long-running, tool-driven agent.
-- Its main loop is not a chat app where a user sends one message and the model sends one answer. It is a runtime where structured context is injected, the model decides what to do, and tools mutate the world.
-- External input enters the current turn primarily through `Event`, `PendingWork`, background app notices, and automatic memory recall.
-- Plain assistant text is normally an explanation or intermediate record inside the runtime. It is not automatically sent to Telegram or any other external system.
-- Real-world changes must happen through explicit tool calls.
+- Root has the fixed IM presentation; every other Actor has the work presentation,
+  including when opened in the main window. Reuse data/control hooks, not a
+  container-dependent rendering mode. Account/settings live in the top-left
+  floating menu, conversation search in the top-right floating button.
+  Actor references open a conversation dialog; never restore a permanent sidebar.
+- Use a rounded multiline composer with attachments, approval/model selectors
+  and send/cancel controls. Preserve drafts when a send or upload fails.
+- Derive local message/activity views from semantic events. Fetch heavy details
+  on expansion and reconnect streams from the last consumed event cursor.
+- Client interfaces use bounded queries and resumable incremental event streams,
+  never repeated full-runtime snapshots.
+- The desktop client owns its window and tray. Close hides the window; Quit client
+  leaves the independent service running; Stop and exit uses OS-owner CLI control.
+  Keep the native loop on the main thread and the backend free of GUI dependencies.
+  Reuse the existing Logo and account HTTP/SSE contracts. Native WebViews grant no
+  JavaScript shell/filesystem/process capabilities; external links stay in the browser.
+- The maintenance CLI uses clap for argument parsing, validation, help and version
+  exits. Preserve the original terminal character logo and help palette. Parse
+  arguments before opening storage or starting the runtime. Android embeds the same
+  core with app-private Files and HTTP Browser. Terminal and broader native Apps
+  remain future work.
+- Enforce account Owner and Actor permissions at every operation. Delegation
+  cannot increase capability grants. Restrictive process isolation must fail
+  closed when the platform cannot enforce it.
+- Do not restore deleted modules merely to make the old product run or compile.
+- Do not recreate the old Session, RuntimeTool, Dashboard, Sleep, or Workflow
+  architecture through aliases, adapters, compatibility bridges, or renamed
+  Apps. Git history preserves the former implementation.
+- SCOPE/LSP and Coding wrappers are removed. Files/Skills are ordinary scoped App
+  operations, including SHA256 freshness checks. Do not restore the engine or
+  retain its build, hooks, dependency or documentation requirements.
+- Preserve independently useful code; remove interfaces, state, dependencies,
+  tests, and documentation that exist only to support the deleted system.
 
-## Non-Negotiables
+## Product Boundaries
 
-- Telegram is not an `App`; it is a transport and event source.
-- Normal event completion must not be plain text only. It must explicitly call `finish_and_send`.
-- Browser, Terminal, and Coding are built-in `App`s because they represent stateful capability domains with their own tools, state, and lifecycle.
-- `App` and `Event` are parallel concepts. Do not collapse one into the other.
-- Let the model make semantic judgments. Do not make the model perform mechanical enumeration, lookup, deduplication, or freshness checks that code can already perform.
+- Actor = Agent core + installed App instances. The core is the Actor's execution
+  mechanism, not a parallel business management system.
+- App is a domain state machine exposing tools. It is the only tool abstraction.
+  Do not require a common `get_state` tool or a separate App workspace UI.
+- One fixed root Actor is the default entry. Owner can directly access any Actor
+  through its stable conversation link. Creation/ownership is an internal
+  permission relationship, not a user-visible access level.
+- Ownership determines hierarchy; delegation does not change ownership or
+  access. Results remain associated with the originating request.
+- The account Core directly exposes only the portable Actors App. Hosted Actors
+  perform research and filesystem/process/browser work. Keep the delegation App
+  ceiling distinct from installed Apps and intersect it with device capability;
+  never increase read-only, filesystem, tool or approval grants through delegation.
+- Actor configuration is internal creation/persistence state, not a user management
+  surface. Do not expose editors or client/native RPCs that rewrite Apps, workspace,
+  instructions, read-only identity, filesystem roots, recipients or tool allowlists.
+  User permission controls only switch Full access / Ask / Auto; model selection
+  stays a composer preference. Actor creation happens through the Actors App,
+  with inherited creation constraints. Actors cannot be deleted by users or models.
+- All Actors retain identity, configuration, context, and history. Do not expose
+  Actor deletion in the client, HTTP API, native protocol or model tools.
+  Completion, idleness, restart or worker shutdown must not recycle an Actor.
+- Project, read-only investigation, and general Actors use the same core with
+  different Apps and access constraints. Enforce read-only and folder scope in
+  tools, not only in prompts.
+- Guest conversation sharing, PIN sessions and quick-tunnel publication are removed.
+  Retain optional CF P2P signaling; it is not a conversation-sharing service.
+- Keep one shared WebUI for native and browser clients. Root shows explicit user deliveries,
+  compact task links, decisions and outcomes; it excludes intermediate model
+  text and tool pipelines. Other Actors use plain work prose, chronological
+  collapsible activity and independent outcomes. Use a muted elapsed-time disclosure
+  with a thin separator, followed by interleaved prose and compact icon/text tool
+  groups. Activity lists flow in the conversation, without a nested scrolling box
+  or fade mask. Actor popups never change this
+  identity-based presentation. Keep no permanent sidebar or multi-page Dashboard.
+  Show outcomes and failures in their conversation; keep no separate new-update
+  notification widget. Private provider diagnostics are not conversation prose.
+- Keep Skills as discoverable instruction resources accessed through Apps. Keep
+  authentication, configuration, persistence, delivery, diagnostics, and access
+  control as infrastructure. Do not introduce another skill execution engine.
 
-## Model-Facing JSON Schema Design
+Keep implementation contracts in [docs/architecture.md](docs/architecture.md)
+consistent with these boundaries. Resource lifecycle, distribution and
+profile-local daemon management are infrastructure, not separate business systems.
 
-Model-facing schemas are an engineering contract, not a provider-specific
-cleanup target. This section applies to runtime tool inputs, app tool inputs,
-structured model outputs, and fallback schemas for freeform tools.
+## Execution And Approval
 
-Daat uses a conservative portable schema dialect. The
-`daat-locus-macros::model_schema` attribute macro is the normal compile-time
-entry point for Rust model-facing input and output types. The dialect is the
-source of truth, and the macro must implement it exactly. Runtime normalization
-must not be relied on for correctness. Provider boundaries should receive
-already-valid schemas. Dynamic schemas from workflows or other external
-sources cannot be compile-time checked, so they must be validated at load time
-instead of silently rewritten.
+The account's core Actor is shared across devices. Devices share its identity,
+inbox, model context and conversation,
+provide App instances, and temporarily host its worker. Keep healthy affinity;
+automatically hand off in stable order to a synchronized eligible device on loss.
+Execution coordination belongs to account devices and must work over LAN or SSH
+without external services. Worker/DO is optional public rendezvous and signaling;
+it must not own execution leases, fencing epochs or business commits. Device
+OpenRaft metadata uses persistent votes and joint membership, with authenticated
+native RPCs. New devices remain learners rather than permanent voting dependencies.
+Normal shutdown synchronizes and transfers authority through the existing quorum.
+Loss cannot invent a singleton quorum. A previously synchronized eligible device
+without reachable account authority automatically uses an explicit local recovery
+branch, retaining inputs and uncertain effects. Reconnection freezes execution,
+selects one valid inference context and transparently merges conversation messages
+and observations before committing a shared head. Private archives preserve the
+original branches; no manual history recovery UI is required. Never replay started
+work from a losing branch.
+A fresh single-device account runs locally. Availability during partition takes
+precedence over a global single-writer guarantee; local branches are not Raft commits.
+Ordinary Actors remain hosted. Never approximate the core
+by merging independent roots. Resume inference, never replay uncertain App effects.
+Every effect still requires device-side epoch, authorization, approval and sandbox checks.
 
-Rules:
+- Actor inboxes are serial; Actors advance concurrently. Preserve durable input,
+  tool protocol groups, origin, replies and delivery references across delegation.
+- Core handles short coordination turns. Explicit durable deliveries can precede
+  turn completion; yielding waits for the current tool protocol group to settle.
+  Completing an input does not complete its delegated work. Progress and results
+  return as correlated inputs; Core chooses meaningful user updates without polling
+  or a second fast-response model. Do not load device project instructions into Core.
+- The Agent loop has no fixed message, ReAct-step or tool-batch count limit. On
+  input-budget exhaustion clear the working window and inject an archive recovery
+  instruction; never summarize or slide away history. Actors App history reads
+  remain scoped and paginated. Persist and replicate reset anchors and model-bound
+  actual-usage calibration, without reusing stale usage or replaying uncertain effects.
+- Record interrupted executions. Do not automatically replay App effects after
+  restart, cancellation, configuration changes or resource shutdown.
+- Auto uses an independent model request without worker history or execution
+  tools. Its only decisions are approve/deny. Errors, timeouts and invalid
+  responses deny the operation; Auto cannot fall back to human approval.
+- Ask waits for Owner approval of immutable arguments and requested scope. None
+  omits review and can use the operation's requested extra filesystem scope.
+- A grant is limited to one proposed action. Never mutate permanent Actor grants
+  from a model review. Read-only identity, tool restrictions,
+  framework credentials and other Actors' private data remain hard constraints.
+- Models cannot set their approval mode or change a child's inherited mode.
+  Only Owner configuration changes mode. Cancellation/reconfiguration must
+  invalidate waiting approvals. Owner HTTP resolution is only for Ask Pending.
+- Opened filesystem targets must stay within the effective policy; an earlier
+  canonical-path check alone does not justify unsafe symlink-following I/O.
+- Restrictive native process isolation needs platform-specific positive and
+  negative tests. Never replace an unavailable sandbox with host execution.
+- Read-only Browser uses bounded HTTP GET without Chrome/page JavaScript,
+  validates DNS/redirect destinations and does not inherit ambient credentials.
 
-- Root schemas must be JSON objects.
-- Every object schema must contain `properties`, `required`, and
-  `additionalProperties: false`.
-- Every property listed in `properties` must also be listed in `required`.
-- Optional model-visible values are represented as nullable required fields,
-  such as `type: ["string", "null"]`. Do not represent optionality by omitting a
-  required entry.
-- Rust deserializers may accept missing fields for backward compatibility, but
-  the model-facing schema must not advertise missing fields as valid input.
-- Do not emit JSON Schema `default`. Defaults are local deserialization or
-  implementation behavior, not part of the model contract.
-- Do not use `skip_serializing_if`, serde defaults, or provider normalization to
-  define model-visible optionality.
-- Use simple scalar types only: string, integer, number, boolean, object,
-  homogeneous array, and null unions.
-- Use string enums for finite choices. Avoid tagged, untagged, adjacently
-  tagged, or payload-carrying enums in model-facing schemas.
-- Avoid maps, dictionaries, dynamic object keys, tuple arrays, `prefixItems`,
+## Client Service Contract
+
+- Use bounded Actor/message/result/approval queries and monotonic event cursors.
+  Stream small semantic facts and references; fetch heavy details on expansion.
+- Re-check authorization for every live-stream emission and heartbeat, including
+  expired/revoked account sessions. Register wakes before queries and
+  respect consumer backpressure. No repeated full-runtime snapshots.
+- Owner accesses any Actor; only approval mode and conversation model
+  preferences are user-editable. Root is the default entry; no Actor has a deletion
+  control. Conversation URLs locate an Actor and never grant access.
+  Global Owner approvals aggregate action controls. No guest share authorization exists.
+- Construct source/reply/authority metadata on the server. Accept only opaque
+  attachment IDs; a client path or forged source cannot grant access.
+- Cookie writes require a trusted Origin and the request header; don't trust
+  Host/Forwarded or add broad CORS. Keep private credentials out of observations.
+- Resource bytes require Actor authorization and a controlled ledger path.
+  HTML/SVG must use a sandbox CSP without same-origin privileges. Signatures
+  cannot replace Actor access checks.
+- Private persistence must establish OS Owner permissions before writing secret
+  bytes and propagate permission failures, including on Windows.
+- Configuration changes prepare a complete candidate, validate every existing
+  Actor model reference and hold the lifecycle lock over worker stop, persistence
+  and publication. Persist the exact candidate, not a request rebuilt later.
+- Normal builds compile and embed the WebUI, including the shared authentication
+  WASM. Explicit `DAAT_LOCUS_BUILD_WEBUI=0` supports backend-only development checks;
+  distribution must reject binaries without the embedded WebUI.
+- Browser account login uses OPAQUE (RFC 9807) with the shared Rust/WASM suite and
+  Argon2id. Passwords stay in the client; Worker/DO never stores or validates them.
+  Remove the former Owner Token registry, Bearer path and token endpoints completely.
+  Bind sessions to the account public-key namespace, exact profile and credential
+  revision; use opaque HttpOnly cookies, never JavaScript/URL credential storage.
+  First registration needs a verified local OS-owner connection, not loopback alone.
+  New devices join through OPAQUE account login without pairing codes or manual
+  enrollment interfaces. Discovery hints cannot grant trust. Bind bootstrap to
+  account, source, target, immutable device proof, Origin and transport context;
+  encrypt private enrollment records with the one-login key. Verify local OS-owner
+  installation and exact namespace before importing. Protect these records from Apps
+  and observations. Local preferences remain separate from account authority.
+  Account activation resumes gated workers; login/logout is not an Actor lifecycle.
+  Browser builds compile the shared authentication crate to WASM with wasm-pack;
+  backend-only builds must not invoke this toolchain.
+
+- Same-account device discovery/sync is automatic, with no enabled/LAN/public/core
+  toggles. Keep an optional public connection origin and explicit SSH targets.
+  Default device labels come from OS APIs. Non-model settings auto-save through
+  serialized narrow patches; keep failed input and pending edits. Model/provider
+  edits retain Save. UI text states fields, actual status and actions, without
+  descriptions of architecture, implementation features or redundant guidance.
+- Provider settings use list/detail pages within the same dialog. Adding a model
+  automatically discovers it; keep no discovery button. Use models.dev metadata
+  for defaults and capability choices with custom values, validated cache updates
+  and compiled fallback. Translate provider labels in the Chinese UI.
+
+## Tools And Access
+
+- External effects require actual tool calls. Assistant text alone does not
+  execute commands, edit files, send messages, or complete a delivery.
+- Check paths and access at execution time. UI visibility and model instructions
+  cannot substitute for filesystem or tool permissions.
+- Preserve explicit identifiers and freshness checks where stale state could
+  cause an operation to target the wrong resource.
+- Let code perform mechanical lookup, enumeration, deduplication, validation,
+  persistence, and delivery bookkeeping. Let the model make semantic choices.
+- Keep provider credentials and authorization tokens out of logs, results,
+  observations, and client-visible diagnostics.
+
+## Model-Facing JSON Schemas
+
+The portable schema contract applies to App tool inputs, structured model
+outputs, and freeform fallback schemas. Provider boundaries must receive valid
+schemas; do not silently repair them through provider-specific normalization.
+
+- Use `daat_locus_macros::model_schema` and `model_schema_for::<Type>()` for Rust
+  model-facing types. Use a narrow schema-only mirror when necessary, rather
+  than handwritten provider JSON.
+- Root schemas are objects. Every object has `properties`, `required`, and
+  `additionalProperties: false`; every property is required.
+- Represent optional model-visible values as required nullable fields. Missing
+  field tolerance in local deserialization does not change this contract.
+- Do not emit JSON Schema `default`; serde defaults and `skip_serializing_if`
+  must not define model-visible optionality.
+- Use scalars, homogeneous arrays, objects, nullable unions, and string enums.
+  Avoid dynamic keys/maps, tuple arrays, payload-carrying enums, `prefixItems`,
   and schema-valued `additionalProperties`.
-- Avoid composition and conditional keywords: `oneOf`, `allOf`, `anyOf`, `not`,
-  `if`, `then`, `else`, `dependentRequired`, and `dependentSchemas`.
-- Avoid validation keywords that are not consistently supported across strict
-  structured-output implementations: string `minLength`, `maxLength`,
-  `pattern`, `format`; numeric `minimum`, `maximum`, `multipleOf`; array
-  `minItems`, `maxItems`, `uniqueItems`, `contains`.
-- Prefer inlined schemas over `$defs`/`$ref` for model-facing tool schemas. If a
-  provider-specific path later allows references, a `$ref` schema must not have
-  sibling keywords such as `default` or `description` next to the `$ref`.
-- Keep schema names, property names, enum values, and descriptions concise.
-  Large schemas cost context and can hit provider schema limits.
-- Schema generation tests must inspect the final model-facing JSON, not only
-  Rust type definitions.
-
-When adding a model-facing Rust input/output type:
-
-- Use `#[model_schema]` on the Rust type and call
-  `model_schema_for::<Type>()`.
-- Do not expose raw `schemars` output directly unless the test proves it already
-  conforms to this section.
-- Do not add provider-specific normalization to make a bad schema pass. Fix the
-  type shape or the schema macro instead.
-- If the type cannot express the model contract directly, add a narrow
-  schema-only mirror type with `#[model_schema]`; do not hand-build provider
-  JSON in runtime or provider code.
-
-## Slash Command Design
-
-Slash commands in interactive clients are entry points, not miniature CLIs.
-When a TUI user types a slash command, the preferred behavior is to open a
-bottom interactive surface where the next step is selected, searched, toggled,
-or inspected.
-
-Rules:
-
-- Prefer one memorable top-level slash command over a tree of user-visible
-  subcommands.
-- Use bottom panels for selection, search, toggles, and detail inspection.
-- Do not require users to type object names, ids, or paths when code can present
-  a picker.
-- Query flows should be list/detail views, not `show <target>` commands.
-- State refresh flows should normally be internal behavior, not visible
-  `reload` commands.
-- Keep action menus short and stable. For example, `/skills` should expose only
-  high-level actions such as `List skills` and `Enable/Disable Skills`.
-- Slash completion should show only commands that users should remember as
-  product-level entry points.
-- Internal verbs may exist for manager APIs, tests, remote command execution, or
-  Telegram text control, but interactive TUI completion must not expose them as
-  the primary UX.
-- Normal successful flows should stay inside panels. Use short feedback only for
-  errors, unavailable actions, invalid input, or fire-and-forget operations.
-
-Examples:
-
-```text
-/skills     -> action menu -> skill list or enable/disable toggle view
-/debug      -> action menu -> readonly detail views
-/app-status -> app picker -> app detail view
-/status     -> readonly detail view
-```
-
-If the user's next step is to choose, browse, toggle, or inspect something, it
-belongs in a bottom panel rather than in a visible slash subcommand.
-
-## Session Activity Event Protocol
-
-Session activity is a shared semantic event stream. It is not a shared rendered
-cell model, not a tool-specific UI protocol, and not a generic text log.
-
-In this section, `Event` means a session activity event: a typed fact that the
-session wants clients to render in the activity feed, transcript, or history.
-This is separate from the external-input `Event` stored in `EventStore`, but the
-same design rule applies: the payload describes what happened, not how a client
-should draw it.
-
-The public Manager/Session/dashboard contract should expose session activity as
-typed events. Tools, model output, runtime status changes, and other
-client-visible session activity all enter the same semantic event stream. The
-TUI, WebUI, transcript overlay, history views, and future clients each derive
-their own local view models from that event stream.
-
-The desired flow is:
-
-```text
-runtime / tools / model
-  -> session activity Event
-  -> TUI derives a local render view model
-  -> WebUI derives AgentChatActivityItem or another React-local view model
-  -> transcript derives raw/copyable text
-```
-
-Rules:
-
-- Activity payloads describe the data itself, not how that data should be
-  displayed. Do not store titles, preview lines, expanded/collapsed state,
-  detail indentation, UI hints, markdown truncation, colors, icons, bullets, or
-  layout markers in the shared activity contract.
-- Do not force every activity into a generic payload. Preserve the natural
-  structure of each domain event: terminal executions have commands, status,
-  cwd, stdout/stderr, exit code, and timing; patches have files and diff lines;
-  plans have steps; browser snapshots have URLs and captured content; model
-  reasoning has source text.
-- If an event's source data is text, keep it as source text. For example,
-  thinking/reasoning should be `Thinking { content: String }`, not
-  `title/body_lines/full_body/expanded`.
-- Labels such as `Thinking`, `Ran`, `Updated Plan`, bullet markers, glyphs,
-  folding affordances, preview limits, and markdown rendering choices belong to
-  clients.
-- Local interaction state belongs to clients. Expanded thinking, scroll
-  offsets, selected rows, active detail panes, copied transcript selection, and
-  similar state must not be stored in the shared activity event.
-- Tool execution must not emit a tool-specific UI protocol. It should emit
-  semantic activity events or domain tool observations; renderers then decide
-  how to display them.
-- TUI render cells are local view models derived from activity events. They must
-  not be the Manager/Session/WebUI protocol, persistence format, or history
-  source of truth.
-- WebUI-local view models, such as `AgentChatActivityItem`, are derived from
-  activity events. They must not be produced by parsing TUI cells or stored as
-  the source of truth for history.
-- Raw text fallback is acceptable only for unknown/debug events or genuinely
-  unstructured output. A supported activity type should have a typed semantic
-  payload.
-- Do not add compatibility layers that normalize old tool-UI, TUI-cell, or
-  WebUI item contracts back into shared activity data. Delete or replace old
-  render-shaped contracts when touching those paths.
-
-Examples:
-
-```text
-Thinking { content }
-AssistantMessage { content }
-UserInput { content, attachments }
-TerminalExecution { command, cwd, status, stdout, stderr, exit_code, duration }
-BrowserSnapshot { url, content, line_count, ref_count }
-WebSearch { query, url, summary }
-PlanUpdated { kind, explanation, steps }
-PatchApplied { files }
-SkillRead { skill_name }
-ReplySent { disposition, subject, message }
-```
-
-## WebUI Session Rendering
-
-These rules apply to session conversation and activity rendering only: the
-Agent session message list, live activity, transcript-like views, and slash
-command surfaces inside the session. Other WebUI pages such as navigation,
-login, settings, logs, global status, and sidebars are normal web product
-surfaces and do not need to mirror the TUI.
-
-The WebUI session surface should stay close to the TUI in information hierarchy,
-density, naming, and runtime semantics, but it must not consume TUI rendered
-structures as its data source. WebUI should derive web-native markup and
-interaction from the shared session activity event payloads.
-
-Rules:
-
-- Render from structured semantic activity events in `DashboardState`. Do not
-  parse rendered TUI strings, bullet lists, status prose, command output, or
-  legacy cells back into web structure.
-- If WebUI needs structure that does not exist yet, add it to the
-  Manager/Session/dashboard activity event contract. Do not add frontend
-  regexes or string split heuristics as the normal path.
-- Slash command output and interaction inside the session follow the same rule:
-  use web-native controls, lists, toggles, buttons, and detail surfaces backed
-  by semantic data. Plain preformatted output is only acceptable for explicit
-  debug/raw views or unknown fallback content.
-- Keep visual parity with the TUI through spacing, ordering, labels, status
-  semantics, and progressive disclosure derived from the same semantic events.
-  Do not copy TUI implementation structures such as render cells, wrapped
-  lines, or cached render output.
-- The old per-kind TUI glyph icon system is deprecated for product UI. Do not
-  revive glyphs such as app-specific symbols for Browser, Coding, Patch, or
-  Primitive, or Workflow. The standard current TUI layout markers such as `•`, `›`, and
-  detail indentation are layout markers, not a per-kind icon system; mirror
-  them only when the current TUI renderer uses them.
-- Avoid nested cards in the session message list. Use flat activity rows,
-  sections, lists, tables, collapsibles, separators, and inline controls.
-
-## TUI Dashboard Architecture
-
-The TUI dashboard is an immediate-mode, full-frame terminal renderer driven by
-explicit draw requests. It is not a retained UI tree, and it must not grow a
-parallel invalidation system, partial-paint system, or permanent 60fps render
-loop.
-
-The architectural boundary is:
-
-```text
-DashboardState
-  cross-client session/runtime snapshot
-
-TuiViewState
-  one terminal client's local interaction state
-
-dashboard/input_controller.rs
-  pure-ish input reducer that mutates TuiViewState and returns local outcomes
-
-DashboardCommandRunner / Manager API
-  async side effects for real runtime actions
-
-FrameRequester
-  the only scheduler for future full-frame draws
-
-render(DashboardState, TuiViewState)
-  pure full-frame rendering, with performance caches only
-```
-
-All TUI dataflow should follow one direction:
-
-```text
-external state/input
-  -> local state mutation or explicit async effect
-  -> FrameRequester draw request
-  -> pure full-frame render
-```
-
-Do not add a second hidden state path where rendering, command parsing, or async
-callbacks mutate session/runtime state directly.
-
-### TUI State Ownership
-
-`DashboardState` is the shared runtime snapshot produced by the Manager/Session
-side and consumed by WebUI, TUI, and other clients. It may contain session-visible
-facts such as activity events, live activity events, runtime status, token usage,
-skills, Telegram access requests, status text, and errors.
-
-`DashboardState` must not contain state that belongs to one terminal client:
-
-- command input text or cursor position
-- slash-command popup selection or scroll
-- bottom-panel selection, search query, or local detail view
-- activity scroll offset or auto-scroll flag
-- expanded/collapsed local display choices
-- pending paste placeholders
-- local command feedback
-- history paging request state
-- render caches
-- animation scheduler state
-
-`TuiViewState` owns all local interaction state for one TUI instance:
-
-- command input text, cursor position, and pending pasted text
-- slash-command completion popup state
-- bottom command panel state, search, selection, and scroll
-- activity scroll offset, max scroll, page height, and auto-scroll flag
-- local display expansion state such as expanded thinking cells
-- local command feedback for errors, unavailable actions, and invalid input
-- activity history pagination cursors and in-flight load state
-- render caches tied to terminal dimensions and visible content
-
-Multiple TUI clients attached to the same session may have different
-`TuiViewState` values while reading the same `DashboardState`. Do not solve local
-TUI behavior by mutating shared dashboard state.
-
-### TUI Input Controller
-
-Terminal input should be handled as a reducer over current `DashboardState` and
-`TuiViewState`. The reducer may mutate `TuiViewState` and return a small set of
-local outcomes; it must not render directly.
-
-Allowed outcome categories:
-
-```text
-Continue
-Exit
-SubmitText { text }
-RunDashboardAction { action, quiet_success }
-RunPanelAction { action, keep_panel }
-```
-
-Rules:
-
-- Typing, cursor movement, popup movement, panel movement, and local scrolling
-  only mutate `TuiViewState`. The event loop schedules the follow-up frame.
-- Selecting an action may produce a Manager/API effect only when it represents a
-  real runtime action, such as sending user text, clearing runtime state,
-  reloading skills, approving Telegram access, or changing skill auto-use state.
-- Panel key handling should return `CommandPanelAction`; input handling converts
-  it into local panel changes or one of the action outcomes above.
-- Normal successful interactive actions should usually be silent. Use local
-  feedback for errors, unavailable actions, invalid input, or fire-and-forget
-  operations whose result will not immediately appear in `DashboardState`.
-- Do not expose implementation verbs as primary slash-command UX. If the next
-  step is choosing, searching, toggling, or inspecting, use a panel.
-
-### TUI Slash Command Surface
-
-The slash command surface has three separate layers:
-
-```text
-command registry
-  stable user-facing command vocabulary and completion metadata
-
-command parser / input controller
-  maps current input and key events into local panel changes or explicit actions
-
-command panels
-  local interactive state for selection, search, toggles, detail views, and
-  short feedback
-```
-
-Rules:
-
-- Slash commands are product entry points. They should open panels or invoke one
-  obvious action; they should not become a typed subcommand tree.
-- Completion must show only memorable top-level commands and short command
-  forms that users are expected to type.
-- Hidden or compatibility command strings may exist for remote command execution
-  and tests, but they must not leak into normal TUI completion.
-- Command parsing may produce local feedback for invalid input, unavailable
-  actions, or destructive confirmations. Successful panel-local actions should
-  usually stay silent.
-- Command panels own only local UI state: selection, scroll, search text,
-  detail-view scroll, toggle feedback, and picker position.
-- Command panels must not call Manager APIs, mutate `DashboardState`, read or
-  write persistent config, or render themselves.
-- Panel key handling returns a `CommandPanelAction`; the input controller decides
-  whether that action only changes local state or starts a Manager/API side
-  effect.
-- Manager/API effects belong behind `DashboardCommandRunner` and
-  `DashboardAction`, not inside panel structs or render functions.
-- Rendering a command panel is a pure projection of the current panel model.
-
-Example command flow:
-
-```text
-user types /skills
-  -> registry recognizes /skills
-  -> parser opens a Skills action panel
-  -> panel key handling selects List or Enable/Disable
-  -> input controller replaces the local panel or runs an explicit action
-  -> render draws the new local panel state
-```
-
-### TUI Event Loop
-
-The main TUI loop consumes external events and draw notifications. Non-draw
-branches only update state, start side effects, and request a frame. The draw
-branch is the only branch that calls terminal rendering.
-
-Required flow:
-
-```text
-terminal input
-  -> dashboard/input_controller.rs mutates TuiViewState
-  -> optional async effect
-  -> FrameRequester::schedule_frame()
-  -> continue loop
-
-DashboardState stream update
-  -> replace or merge latest DashboardState snapshot
-  -> FrameRequester::schedule_frame()
-  -> continue loop
-
-async side-effect completion, such as history load
-  -> update TuiViewState or receive new DashboardState through normal stream
-  -> FrameRequester::schedule_frame()
-  -> continue loop
-
-draw_rx receives Draw
-  -> terminal.draw(|frame| render(DashboardState, TuiViewState))
-  -> if animation is still needed, FrameRequester::schedule_frame_in(...)
-```
-
-Rules:
-
-- Render the whole frame when drawing.
-- Do not render from terminal input, dashboard stream updates, command
-  execution, history load completion, or resize handling.
-- Do not keep a `needs_render` flag in the main loop when a draw scheduler
-  already exists.
-- Do not keep a second scheduled-draw path such as `TuiEvent::Draw` when
-  `FrameRequester` already emits draw notifications.
-- The initial frame is a normal `FrameRequester::schedule_frame()` request.
-- Shutdown and exit handling may break the loop directly, but must not create a
-  separate render path.
-
-### FrameRequester
-
-`FrameRequester` is the single draw scheduler. It accepts immediate and delayed
-frame requests, coalesces them, applies frame-rate limiting, and emits draw
-notifications through one channel consumed by the TUI loop.
-
-Rules:
-
-- `schedule_frame()` requests the next allowed frame.
-- `schedule_frame_in(duration)` requests a future frame for animation or delayed
-  UI work.
-- When several requests are pending, the earliest allowed deadline wins and
-  produces one draw notification.
-- The scheduler may use a frame-rate limiter to avoid busy redraws, but the main
-  loop must not run a fixed `16ms` interval.
-- Do not maintain a user-visible or architectural taxonomy of redraw reasons.
-  Profiling can record timings and cell counts, but reason labels must not
-  become state or product behavior.
-
-### TUI Animation
-
-Animation is time-dependent render output plus a scheduled future frame. It is
-not a separate render loop.
-
-Rules:
-
-- Render output derives animated visuals from current time or stable timestamps.
-- After a draw, if visible state still needs animation, schedule the next frame
-  with `FrameRequester::schedule_frame_in(animation_interval)`.
-- When runtime/local state no longer needs animation, stop scheduling animation
-  frames.
-- Reduced-motion mode should stop animation scheduling or render static
-  indicators.
-
-Examples of animation-worthy state:
-
-- runtime status such as `Working`
-- visible live activity with spinner or progress affordances
-- explicitly time-based local UI effects
-
-### TUI Rendering
-
-Rendering is a pure projection of `DashboardState` plus `TuiViewState` into one
-terminal frame, except for performance caches updated by the render layer.
-
-Rules:
-
-- Render functions may read shared runtime state and local view state.
-- Render functions must not call Manager APIs, mutate runtime/session state,
-  spawn tasks, or execute commands.
-- Render functions must not decide semantic behavior such as skill enablement,
-  Telegram approval, session routing, or history pagination.
-- Layout should be derived from the current terminal area and current state.
-- Cursor placement is render output; the cursor position source of truth remains
-  local input state.
-
-### TUI History Paging
-
-Activity history paging is a side effect triggered by local view state, usually
-scrolling near the top of the currently loaded activity range.
-
-Rules:
-
-- Paging cursors and in-flight load state belong to `TuiViewState`.
-- The async load request may call the Manager dashboard history API.
-- Completion updates local loaded history state or receives new shared state
-  through the normal dashboard stream, then schedules a frame.
-- History paging must not call render directly from the async task.
-- Paging state must not become global session state unless it represents real
-  session-visible activity.
-
-### Render Caches
-
-Render caches are allowed only as performance caches for pure render products,
-not as semantic state.
-
-Allowed examples:
-
-- cached rendered activity cell lines
-- cached wrapped height for a cell at a specific terminal width
-- cached syntax/markdown render output tied to source content and width
-
-Rules:
-
-- Cache keys must include source content and terminal width, plus any other input
-  needed for correctness.
-- Cache invalidation must follow source state changes and terminal dimension
-  changes.
-- Caches must not decide command behavior, runtime state, session state, manager
-  routing, or animation scheduling.
-- Clearing a render cache should only make rendering slower, not change product
-  behavior.
-
-### TUI Performance Work
-
-When TUI performance is unclear, use a controlled mock-frame harness before
-guessing from an interactive session:
-
-1. Build a representative `DashboardState` and `TuiViewState`.
-2. Run a fixed number of frames with known terminal dimensions and cell counts.
-3. Measure total frame time, preparation time, activity rendering time, command
-   bar rendering time, and cache hit behavior.
-4. Fix the bottleneck.
-5. Remove temporary commands and harnesses unless they become stable tests or an
-   explicitly supported benchmark.
-
-The stable harness is the hidden `dev tui-perf` command behind the non-default
-`tui-perf-cmd` feature:
-
-```bash
-cargo run --features tui-perf-cmd -- dev tui-perf \
-  --scenario mixed --frames 120 --warmup 10 --width 120 --height 40
-```
-
-Rules:
-
-- Keep `tui-perf-cmd` non-default. The command is a developer tool, not product
-  CLI surface, and it must not appear in normal help or completion.
-- Keep scenarios deterministic. A scenario should construct fixed
-  `DashboardState` and `TuiViewState` values, use `TestBackend`, and render the
-  real dashboard frame path.
-- Prefer comparing reported metrics across revisions over hard portable
-  millisecond gates. Absolute timing differs across machines.
-- Use `--json` when collecting machine-readable output in scripts or CI.
-- Add or update scenarios when a TUI regression depends on a specific visible
-  state, such as long history, live activity, command panels, or wide markdown.
-
-Permanent profiling should be low-noise and opt-in or warning-based. It may log
-frame rate, slow frame count, average/max frame time, activity cell counts, live
-cell counts, and cache timing. It must not expose internal redraw reasons as
-product state.
-
-### TUI Refactor Direction
-
-The desired module shape is:
-
-```text
-dashboard/mod.rs
-  orchestration, stream wiring, lifecycle, and high-level loop
-
-dashboard/view_state.rs
-  TuiViewState and local-only state transitions
-
-dashboard/input_controller.rs
-  terminal key/paste/resize handling and returned local outcomes
-
-dashboard/frame_requester.rs
-  draw scheduling, coalescing, and frame-rate limiting
-
-dashboard/command_input.rs
-  command-line text wrapping, cursor projection, paste placeholders, and display
-  text only
-
-dashboard/command_registry.rs
-  stable slash command vocabulary, completion metadata, and accepted command
-  forms only
-
-dashboard/command_flow.rs
-  slash input parsing, command-to-panel construction, command-to-action
-  invocation, live command feedback, remote control command text handling, and
-  popup selection helpers; no ratatui rendering
-
-dashboard/command_panels.rs
-  command panel data models, panel-local state transitions, and panel actions;
-  no ratatui rendering and no Manager/API calls
-
-dashboard/command_text.rs
-  readonly command detail text formatting and truncation helpers
-
-dashboard/commands.rs
-  DashboardAction, DashboardControlCommand, DashboardCommandRunner, and
-  Manager/API-facing command effects
-
-dashboard/render*.rs and dashboard/cells/*
-  pure frame projection and render caches
-
-dashboard/tui_animation.rs
-  time-based animation policy that only schedules future frames
-```
-
-Do not split modules merely to move lines around. Split when it enforces one of
-these boundaries: local view state, input-to-effect reduction, async runtime
-effects, frame scheduling, or pure rendering.
-
-`dashboard/mod.rs` should not remain the permanent home for command parsing,
-panel models, panel key handling, command text formatting, and ratatui rendering
-all at once. It may temporarily contain glue during a refactor, but the stable
-shape should make each boundary easy to audit:
-
-- state models do not render
-- render functions do not execute effects
-- input reducers do not call `terminal.draw`
-- command registry does not perform parsing side effects
-- command panels do not own Manager/session state
-- async command execution does not mutate local view state except through the
-  input-controller result path or normal dashboard stream updates
-
-## Multi-Session Architecture
-
-Daat Locus uses a client-server multi-session architecture.
-
-The public client-server boundary is:
-
-```text
-WebUI / TUI / CLI / Telegram control
-  -> Manager daemon on the boot-configured public port
-  -> Session processes over local IPC
-```
-
-Clients connect only to the Manager daemon's boot-configured port. Session
-processes are never client connection targets. Session process identifiers, IPC
-names, socket paths, process ids, and local implementation details must not
-appear in WebUI state, TUI state, CLI arguments, dashboard URLs, or public API
-contracts except as opaque diagnostic summaries when explicitly requested.
-
-The Manager is the only public server. A Session process is a local runtime
-worker owned and controlled by the Manager.
-
-### Manager Responsibilities
-
-The Manager daemon owns:
-
-- public HTTP/WebSocket API endpoints
-- embedded WebUI serving
-- daemon authentication and token validation
-- config readiness classification and setup/configuration endpoints
-- session registry and lifecycle management
-- session spawning, stopping, deletion, restart, and health checks
-- routing for `/send`, `/commands/run`, dashboard requests, and Telegram input
-- Telegram polling/input transport, default-session mapping, and Telegram-only session control commands
-- dashboard snapshot/history/stream proxying from target sessions
-- session list and status aggregation for WebUI, TUI, and CLI clients
-
-The Manager must not:
-
-- create a runtime `Context`
-- run `daat_locus_loop`
-- own per-session `EventStore`, `PendingWorkQueue`, `Memory`, `Plan`, or app instances
-- interpret session-local runtime state beyond routing, lifecycle, and compact status summaries
-
-### Manager Boot And Config Readiness
-
-Manager startup must not depend on complete agent/runtime configuration.
-
-The Manager is the product shell and public control plane. It must be able to
-start, serve WebUI, authenticate requests, expose logs/status, and guide
-configuration even when agent configuration is missing, incomplete, or damaged.
-Configuration readiness controls whether Session workers and agent operations
-are allowed; it does not decide whether the Manager can bind its port.
-
-The only config value needed for Manager boot is the daemon port. Read it
-through a lightweight boot reader, not full agent config validation:
-
-```text
-read_manager_boot_config()
-  -> read daemon.port from config.toml if possible
-  -> if current config is damaged, try config.toml.bak
-  -> if both are unavailable or damaged, use default port 45825
-```
-
-Do not call full `load_config()` to decide whether the Manager can start. The
-port belongs to Manager boot config; provider/model configuration belongs to
-agent runtime readiness.
-
-Config readiness distinguishes these cases:
-
-```text
-damaged       config.toml cannot be parsed or deserialized reliably
-unconfigured no real agent config exists, including only-port config
-incomplete   partial agent config exists but cannot run an agent
-complete     config parses and validates as runnable agent config
-```
-
-Only `unconfigured`, `incomplete`, and `complete` are durable public readiness
-states. `damaged` is a recovery path, not a long-term operating mode. Public
-readiness responses should surface it as a recovery note and then report the
-post-recovery state. On startup or readiness refresh:
-
-1. Move damaged `config.toml` to a timestamped `.corrupt-*` file.
-2. Try restoring `config.toml.bak`.
-3. If the restored backup parses, classify readiness from it.
-4. If the backup is missing or damaged, move the bad backup aside and write a
-   setup-safe default config.
-
-The setup-safe default config must not be `Config::default()` if that contains
-fake providers, fake API keys, or fake model entries. It should contain only
-Manager boot-safe values such as the default daemon port. Fake provider/model
-placeholders must never make readiness look `complete`.
-
-`unconfigured` means no real agent config exists. This includes no
-`config.toml`, an only-port config, or the setup-safe default written during
-recovery. WebUI and TUI route to initialization. Agent/session creation,
-`/send`, runtime dashboard commands, and Session worker startup are disabled
-with a clear config-not-ready error.
-
-`incomplete` means the config parses and contains some agent configuration
-intent, but cannot run the agent. Examples include provider without valid model
-roles, model references to missing providers, missing `main_model` or
-`efficient_model`, or empty required credential/base URL fields. WebUI routes
-to settings/configuration completion, TUI routes to interactive config repair,
-and agent operations remain disabled.
-
-`complete` means provider/model/main/efficient references are valid and the
-runtime can construct model providers. Only this state enables agent operations.
-
-`config.toml.bak` is the latest successfully parsed config:
-
-- every successful config parse updates `.bak` atomically
-- every successful config write updates `.bak` atomically
-- recovery preserves damaged files as `.corrupt-*`
-- if both current config and backup are damaged, write setup-safe defaults and
-  classify readiness as `unconfigured`
-
-The Manager may serve these regardless of readiness:
-
-- embedded WebUI
-- auth/token endpoints
-- `/health` and `/status`
-- config readiness and setup endpoints
-- logs
-- settings/setup pages
-
-These require `complete` readiness:
-
-- creating sessions
-- Session worker startup
-- `/send`
-- `/commands/run`
-- runtime dashboard actions
-- any operation that needs provider/model config
-
-If config is deleted, damaged, or changed after Manager startup, readiness must
-be recomputed. New agent operations must be rejected until readiness returns to
-`complete`. A stricter implementation may stop or pause existing Session
-workers when readiness degrades.
-
-WebUI startup reads readiness before normal routing:
-
-```text
-damaged/recovered -> show recovery note, then route by final state
-unconfigured      -> setup wizard
-incomplete        -> settings/configuration completion
-complete          -> normal app
-```
-
-TUI startup follows the same state:
-
-```text
-unconfigured -> initialization wizard
-incomplete   -> interactive config repair
-complete     -> normal session selector
-```
-
-WebUI must not duplicate TUI setup/probing logic. Extract shared Rust setup
-logic, for example a `config_setup` module, to own setup-safe defaults,
-provider/model input normalization, probing, readiness classification,
-validation, atomic writes, and backup updates. TUI and WebUI are frontends over
-that shared layer only.
-
-### Session Responsibilities
-
-Each Session process owns exactly one runtime:
-
-- one `Context`
-- one `EventStore`
-- one `PendingWorkQueue`
-- one runtime conversation and memory state
-- one `Plan`
-- one `AppManager` and app instance set
-- one dashboard state stream
-- one model loop
-
-A Session process exposes only private IPC handlers to the Manager. It must not:
-
-- serve public HTTP or WebUI
-- expose `/sessions`
-- load, mutate, or persist the global session registry
-- manage any other session
-- poll Telegram
-- require direct client access
-
-### Session Registry
-
-The Manager owns a persisted registry of session metadata. Registry entries
-should include:
-
-```text
-session_id
-scope
-pid
-status
-ipc_name
-ipc_token_hash
-project_dir
-title
-started_at_ms
-last_seen_at_ms
-```
-
-`session_id` is an opaque stable identifier assigned by the Manager. It must not
-be derived from project paths just to force uniqueness.
-
-`scope` defines where the session is shown and what workspace it uses:
-
-```text
-General
-Project { project_dir }
-```
-
-General sessions are shown in `daat-locus run`. Project-scoped sessions are
-shown in `daat-locus code <project-dir>` only when the canonical project
-directory matches. A single project directory may have multiple sessions.
-
-### Session Titles
-
-`session_id` is an operation handle, not the normal user-facing label.
-Non-command clients should display a session title and avoid falling back to
-raw session ids.
-
-Title generation belongs to the Session process because only the Session owns
-its event store, memory, and runtime context. Before a generated title exists,
-the Session should publish a placeholder title derived from the first external
-user/event sentence.
-
-Generated titles should use the configured efficient model. Do not use the main
-runtime model or judge model for routine title refreshes. Trigger regeneration
-after each completed turn (finish_and_send) when conversation activity has
-changed since the last generated title. If activity has not changed, skip
-regeneration.
-
-The Manager may cache the latest title in `SessionRegistry` from session
-status/dashboard snapshots. It must not inspect per-session memory or event
-files to compute titles.
-
-Command surfaces may expose `session_id` or a unique id prefix when the user
-needs an explicit operation handle, such as attach, switch, delete, or
-debugging.
-
-### Code Mode
-
-`daat-locus code <project-dir>` is a project-scoped session selector, not a
-project-to-single-session mapping.
-
-Rules:
-
-- canonicalize `<project-dir>` before querying or creating project-scoped sessions
-- show only sessions with `scope = Project { project_dir: canonical_project_dir }`
-- creating a new code session creates a new opaque `session_id`
-- the code session workspace is the canonical project directory itself
-- the Coding app project root is the canonical project directory
-- Terminal default cwd for that session is the canonical project directory
-- sandbox writable roots must include the canonical project directory
-- do not map code session workspaces to `~/daat-locus-workspace`
-
-### Manager-Session IPC
-
-Manager-to-Session communication uses `interprocess` Tokio local sockets. This
-IPC layer is private to the local machine. It is not a public network protocol
-and must not be exposed as a client integration surface.
-
-The IPC transport is a local socket byte stream with explicit message framing.
-Version 1 should use length-prefixed JSON messages because they are inspectable
-and easy to debug. The framing and protocol types should be isolated behind
-`SessionIpcClient` and `SessionIpcServer` so the encoding can evolve without
-changing Manager or Session runtime boundaries.
-
-Every IPC request carries:
-
-```text
-protocol_version
-request_id
-session_id
-ipc_token
-body
-```
-
-`ipc_token` is generated by the Manager when spawning a session and is included
-in every Manager-to-Session request. This is defense in depth for local IPC; it
-does not replace public daemon authentication, which belongs only to the
-Manager.
-
-Required IPC request bodies:
-
-```text
-Status
-StatusSummary
-SubmitUserInput { origin, text, attachments, wait_for_reply }
-EnqueueTelegramEvent { event }
-DashboardSnapshot
-DashboardHistoryPage { before, after, limit }
-DrainTelegramOutbox
-RecordTelegramDelivery { event_id, status, note }
-RequeueTelegramOutbound { message }
-SubscribeDashboard
-Shutdown { reason }
-```
-
-Required user input origins:
-
-```text
-WebUi
-Tui
-CliSend
-```
-
-Required IPC response bodies:
-
-```text
-Status { runtime_status }
-StatusSummary { summary }
-Submitted { event_id, reply_message, terminal_status }
-DashboardSnapshot { state }
-DashboardHistoryPage { page }
-TelegramOutbox { messages }
-DeliveryRecorded
-TelegramOutboundRequeued
-ShutdownAccepted
-Error { code, message, retryable }
-```
-
-Dashboard subscriptions are long-lived IPC streams. Required stream events:
-
-```text
-DashboardSnapshot { state }
-DashboardClosed { reason }
-Error { code, message, retryable }
-```
-
-Public API mapping:
-
-- `/send` maps to `SubmitUserInput { wait_for_reply: true }`
-- dashboard/TUI text input maps to `SubmitUserInput { wait_for_reply: false }`
-- Telegram input maps to `EnqueueTelegramEvent`
-- Telegram output maps to `DrainTelegramOutbox`, Manager delivery, then
-  `RecordTelegramDelivery` or `RequeueTelegramOutbound`
-- dashboard websocket maps to `SubscribeDashboard`
-
-The Session remains responsible for event registration, pending work, model
-turns, tool calls, event completion, and dashboard state production. The Manager
-only routes input and proxies output.
-
-### Session Lifecycle
-
-1. Manager creates an opaque `session_id`.
-2. Manager creates a private IPC name and IPC token.
-3. Manager spawns a Session child process with `--session-id`, `--ipc-name`,
-   `--ipc-token`, and optional workspace/scope arguments.
-4. Session binds its local socket and initializes its runtime.
-5. Manager polls `StatusSummary` over IPC until the Session is ready or failed.
-6. Manager routes all client work to the target Session over IPC.
-7. On delete, Manager sends `Shutdown`, waits for process exit, removes registry
-   metadata, and deletes session state only when explicitly requested by the
-   delete operation.
-8. On Manager restart, Manager reloads the registry and attempts to reconnect to
-   live session IPC endpoints. Unreachable sessions become dormant or dead based
-   on health-check policy.
-
-### Public API Shape
-
-Clients use only Manager endpoints:
-
-```text
-GET    /sessions
-POST   /sessions
-DELETE /sessions/{session_id}
-POST   /sessions/{session_id}/title
-
-GET    /config/readiness
-POST   /config/setup
-POST   /config/probe
-
-POST   /send
-POST   /commands/run
-
-GET    /status/summary
-GET    /dashboard/snapshot?session_id=...
-GET    /dashboard/activity-history?session_id=...
-GET    /dashboard/stream?session_id=...
-```
-
-`GET /sessions` returns session identity, title, and scope only. It must not
-expose Manager-internal process lifecycle states such as dormant, starting,
-dead, pid, IPC name, or IPC token metadata. Clients should select a session and
-send normal Manager requests; the Manager transparently starts or reconnects the
-target Session when needed.
-
-`GET /status/summary` may include compact per-session runtime summaries, but
-those summaries are user-facing runtime facts such as ready, active surface,
-pending work count, active turn, dashboard metrics, and errors. They must not
-leak registry lifecycle status or force clients to perform session process
-management.
-
-The Manager chooses the target session from an explicit `session_id`, active TUI
-selection, Telegram default-session mapping, or the project scope selected by
-`daat-locus code <project-dir>`.
-
-### Persistence Boundary
-
-Shared/global state:
-
-- Manager boot config and agent config readiness
-- config file, config backup, and setup/recovery metadata
-- daemon auth tokens
-- Telegram ACL
-- Telegram default-session mapping
-- session registry
-- builtin skills
-- workspace skills when they are intentionally global assets
-
-Per-session state:
-
-- events
-- pending work
-- runtime conversation and memory
-- plan
-- dashboard activity history
-- app instances and app-local runtime state
-- context compaction state
-
-Sleep status and skill run evidence must be explicitly classified as either
-global optimization input or session-scoped evidence. Do not let those records
-become accidentally mixed because Manager and Session code share helper paths.
-
-### Maintenance Rules
-
-- Keep `SessionIpcClient` and `SessionIpcServer` as the only Manager-Session IPC
-  boundary.
-- Keep Manager serve and Session serve separate. Runtime initialization belongs
-  wholly to Session serve.
-- Keep Manager boot independent from complete agent config. Missing,
-  incomplete, or damaged agent config must disable agent operations, not WebUI
-  or Manager startup.
-- Keep Manager handlers as public API, auth, session registry, lifecycle, and
-  routing/proxy code only.
-- Route send, command, dashboard snapshot/history, dashboard stream, and Telegram
-  work through the target Session over IPC.
-- Keep project-scoped `code <project-dir>` as a multi-session selector.
-- Do not reintroduce any client direct-session connection path.
-
-## Study Mode
-
-Study Mode is a second agent mode that helps the user learn knowledge. It is not
-an `App`, not a work-session feature, and not a chat skin over the same
-workspace. It is a separate runtime surface with its own agent contract, its
-own capability domain, and its own client tab.
-
-### Study Goal
-
-Daat Locus maintains one unified, continuously growing knowledge graph. Knowledge
-is expressed as modules, nodes, and typed relations. The user learns by walking
-the graph or by extending it toward a learning goal, and the graph persists
-across time instead of being regenerated per conversation.
-
-The graph is visualized as a knowledge network in a 3D space. The layout is a
-projection of the stored graph, never the storage model:
-
-- nodes: knowledge points placed by a deterministic 3D force layout, projected
-  with a fixed perspective camera; closer points render larger
-- color: an emphasis gradient built from shadcn theme tokens, driven smoothly
-  by each node's understanding percentage (`--primary` near 100%, mixing
-  through `--muted-foreground`/`--border` toward 0%), so the graph follows
-  light/dark themes without custom colors
-- edges: one line per stored relation, colored with `color-mix` of its two
-  endpoint colors
-- labels: node titles appear only when the viewport is zoomed in far enough,
-  or on hover/selection; there are no axes, rings, or scale markers
-- focus: selecting a node animates the network into a flat focus projection
-  centered on that node, with other nodes ordered by neighbor barycenter
-  (Sugiyama-style sweeps) and spread evenly on relational hop rings so
-  relations radiate outward without crossing; the camera zooms into the
-  focused node's immediate neighborhood. Exiting (pane click, re-click, or the
-  panel close action) animates back to the 3D cloud
-- search: the sidebar search query rotates the network so the matched set is
-  recentered, highlights matching nodes and labels them, and dims everything
-  else in both the sidebar and the graph
-
-### Three Responsibilities
-
-The study agent owns exactly three responsibilities:
-
-1. **Organize (整理)**: maintain relations between knowledge nodes. The agent
-   judges identity, relation type, and prerequisite order; code performs
-   mechanical validation and mutation. The user may request organization work.
-2. **Understand (了解)**: maintain the per-node question bank and the user's
-   understanding level as a percentage. The agent generates questions, grades
-   attempts, and records progress. The user may ask for an assessment, or
-   directly declare an understanding percentage and have the agent record it.
-3. **Extrapolate (外推)**: add new knowledge nodes, either as a new core
-   (a new module or field) or extended from existing frontier nodes. The user
-   may give a learning goal; the agent grows the graph toward it.
-
-### Architecture
-
-```text
-Study App
-  capability domain: graph + question bank + progress storage
-  tools: study__* plus generated study__get_state
-  docs: prompts/apps/study.md carries the mode contract
-  render_state: graph counts, progress distribution, review queue, maintenance
-
-Study agent mode
-  independent persona contract, tool surface, and context assembly
-  singleton scope: SessionScope::Study, created on demand via POST /study/ensure
-  tool surface: study__* + finish_and_send + update_plan + read_history
-  work tools (read_file, edit_file, browser, terminal, coding, workflows) are
-  denied in this mode
-
-WebUI Study tab
-  the only client surface for study mode; TUI, CLI, and Telegram stay work-only
-```
-
-Rules:
-
-- The Study App is installed only in study sessions. Work sessions keep
-  Browser, Terminal, and Coding. Do not expose study tools to the work agent.
-- Study mode is single and unique: at most one study session exists in the
-  registry. `GET /sessions` must not list study sessions; clients resolve the
-  study session through `/study/ensure` only.
-- The study session is a normal session process with a normal event loop. User
-  messages in the Study tab go through the standard `POST /send` path and the
-  agent completes turns with `finish_and_send`.
-- The Study App follows the standard App contract (`render_state`, `docs`,
-  `tool_specs`, `execute_tool`). Do not add a parallel tool protocol.
-- Storage is the existing SQLite stack (rusqlite), at
-  `~/.daat-locus/study/graph.sqlite3` under `DAAT_LOCUS_HOME`.
-- Manager study endpoints are routing/proxy only:
-  `/study/ensure`, `/study/graph`, `/study/node`, `/study/progress`, and the
-  Obsidian transfer endpoints `/study/import/preview`, `/study/import/commit`,
-  `/study/export`, `/study/export/download`.
-
-### Study Data Model
-
-```text
-study_modules   id, title, description, created_at_ms, updated_at_ms
-study_nodes     id, module_id, title, summary, body, aliases, tags, sources,
-                content_version, created_at_ms, updated_at_ms
-study_edges     id, from_node_id, to_node_id, relation, note, created_at_ms
-study_progress  node_id, understanding, evidence, updated_by, updated_at_ms
-study_questions id, node_id, question, answer, difficulty,
-                node_content_version, created_at_ms
-study_attempts  id, question_id, node_id, outcome, note, created_at_ms
-```
-
-Enforced invariants:
-
-- `prerequisite` edges must stay acyclic; code rejects cycle-forming links.
-- Edge endpoints and node module references must exist.
-- Node identity is `id` plus aliases; merging duplicates is a code-executed
-  operation after the model judges that two nodes are the same concept.
-- New nodes require at least one source entry.
-- Updating node content bumps `content_version`; questions store the content
-  version they were generated from and become stale when it changes.
-- Understanding is one integer percentage per node in `0..=100`, with
-  `evidence` and `updated_by` (`user` or `agent`) recorded on every write;
-  `90` and above counts as mastered for aggregate stats.
-- The user can declare an understanding percentage directly; quiz evidence is
-  recorded but is not a hard gate.
-
-### Study Tools
-
-Model-facing tool names are `study__<action>`. The model decides semantics; code
-performs lookup, validation, and storage:
-
-```text
-study__list_modules      module overview with node counts and progress
-study__search_nodes      FTS plus alias search, optionally module-scoped
-study__read_node         node body plus neighbors grouped by relation
-study__create_node       create a node with sources, tags, aliases
-study__update_node       update content, aliases, tags, or sources
-study__link_nodes        create a typed relation edge
-study__unlink_nodes      remove a relation edge
-study__merge_nodes       merge a duplicate node into a canonical node
-study__find_similar      return duplicate candidates for a title or node
-study__add_questions     append questions for a node
-study__record_attempt    record an attempt outcome for a question
-study__update_progress   set a node's understanding percentage with evidence
-study__maintenance_report  orphans, duplicate candidates, dangling links
-```
-
-### Study Mode Completion
-
-Study turns are normal runtime turns. The agent answers the user in the
-Study tab only through `finish_and_send` with `event_id` and `reply_message`.
-Plain assistant text remains an internal record. Question generation, grading,
-graph edits, and progress updates must happen through study tools before the
-event completes.
-
-Study tool calls do not emit conversation activity rows. Graph and progress
-changes are visualized in the Study tab's network, sidebar list, and panels,
-so the chat shows only user input, thinking, plans, and the final reply.
-
-### Study Mode Surface Boundaries
-
-Work clients stay work-only. The study session is not reachable from the TUI,
-CLI, or Telegram:
-
-- `GET /sessions` excludes study sessions, so TUI/CLI selectors and
-  `send --session` prefix resolution cannot target them.
-- Telegram `/session_list` hides the study session, and `/session_attach` and
-  `/session_delete` refuse it. The Telegram default-session routing also
-  ignores stale study mappings.
-- The work slash-command surface does not apply to study. Study sessions
-  accept only `/status` and `/clear`; other dashboard commands and work-mode
-  dashboard actions (skills, workflows, app status, sleep, debug views) are
-  rejected with a study-mode message.
-- The Study tab chat disables slash-command completion and panels entirely.
-  User messages, including ones that start with `/`, flow through the normal
-  send path, and the session-side gate answers for anything reserved.
-
-### Study WebUI
-
-- The sidebar exposes an explicit mode switch between the work agent and study.
-  In study mode it shows a node search box plus a module-grouped node list in
-  the same row style as the session list.
-- The study chat composer's `+` menu also exposes graph file actions: an
-  Obsidian vault import with a dry-run preview report and an export dialog that
-  downloads an Obsidian vault or JSON backup archive. Work sessions use the
-  same menu to attach files. Import and export are code-executed adapters:
-  notes become nodes, folders are ignored, wikilinks import as `related`,
-  understanding starts at 0, duplicates are matched by title/alias, and
-  re-import is idempotent.
-- Attached files are staged into `<session workspace>/attachments/` before the
-  event is registered, so the claimed input carries readable paths; images
-  remain multimodal parts read directly by the model provider.
-- The Study tab has no session list. It renders the knowledge network plus an
-  overview panel (description and relations only) and a chat that uses the
-  study session dashboard stream.
-- Study graph mutations bump the study app's state revision, which the session
-  publishes in `DashboardState.app_state_revisions`. The Study tab refetches
-  the network when the revision changes (and again when the turn ends), so the
-  graph grows live while the agent works instead of only after a manual
-  refresh.
-- Node writes publish a study focus hint in `DashboardState.app_focus`.
-  Creating, updating, or merging nodes moves the client view to that node
-  (flat focus projection plus overview panel). Read-only operations such as
-  search intentionally leave the client view untouched.
-- The network is rendered with the existing React Flow stack (`@xyflow/react`):
-  a deterministic 3D force layout projects points through a fixed perspective
-  camera, React Flow provides pan, zoom, hover, and selection, and the relation
-  lines are drawn by a custom SVG layer that follows the viewport and uses the
-  average color of both endpoints. Do not add a second graph-rendering
-  dependency for the same surface.
-- A `?mock=study` route renders the Study tab from fixed mock data so visual
-  verification does not require a live daemon. Mock query parameters: `node`,
-  `tab`, and `q`.
-
-## Commit History
-
-Commit history is a long-term engineering interface, not a temporary chat log. When rewriting history or adding commits, follow these rules:
-
-- Commit messages must be in English. The title should use imperative mood or a clear action phrase, such as `Add ...`, `Fix ...`, `Refactor ...`, `Remove ...`, `Split ...`, or `Document ...`.
-- The title must state the real subject and purpose of the change. Avoid uninformative titles such as `update`, `fix`, `u`, `misc`, `wip`, or `cleanup`.
-- One commit should represent one logical concern. Split behavior changes, refactors, formatting, documentation, tests, and dependency updates unless they cannot compile or cannot be explained independently.
-- Large refactor commits must name the boundary being split, such as `Split runtime turn scheduling modules`; do not write only `Refactor runtime`.
-- Bug-fix commit titles should describe the fixed behavior rather than only the symptom, such as `Retry Telegram delivery instead of failing events`.
-- Pure mechanical formatting should be its own commit, such as `Format Rust sources after refactor`.
-- Do not commit local research directories, generated caches, runtime logs, or unconfirmed experiments.
-- Before rewriting already-pushed history, create a local backup branch. Push rewritten `main` with `--force-with-lease`.
-
-## Static Checks And Autofix
-
-Static checks should not turn the model into a manual formatter.
-
-- When a configured tool can mechanically fix the reported issue, use that tool
-  rather than editing the mechanical change by hand. Examples include
-  `cargo fmt`, formatter commands, and safe project-specific autofix commands.
-- For lint tools with autofix modes, prefer the autofix path only when the tool
-  is already part of the project workflow and the resulting diff can be
-  inspected.
-- Manual edits are for semantic fixes, unsafe autofix output, unavailable
-  autofix support, or cases where the tool reports a real design problem rather
-  than a mechanical rewrite.
-- After any automatic fix, inspect the diff and run the relevant verification
-  again.
-
-## Runtime Model
-
-A runtime turn usually contains these layers:
-
-1. System prompt contract
-2. Memory and history messages
-3. One-shot `afterclaim_context` for newly claimed work
-4. Repeated `preturn_context` for current execution state
-5. Model text output or tool calls
-6. Tool results written back into history
-7. Another tool cycle when needed
-
-Runtime context is split by lifetime:
-
-- `afterclaim_context`: claimed event/app-notice input and skill routing catalog
-- `preturn_context`: memory recall, sensory state, plan, and project instruction context
-
-Therefore, when adding an agent-facing interface, first decide which layer it belongs to. Do not directly pile prompt instructions, routing catalogs, or durable task state into app-local state.
-
-### Workflow
-
-`Workflow` is a first-class executable orchestration program for multiple
-isolated agent workers. It is not an `App`, `Event`, `PendingWork`, `Skill`, or
-the removed workflow/primitive mechanism. A workflow may use skills as
-instructions and host-provided App tools, but neither relationship changes the
-object boundary.
-
-User-authored workflows are Lua 5.4 source files in the global workflow directory:
-
-```text
-~/.daat-locus/workflows/<name>.lua
-```
-
-When `DAAT_LOCUS_HOME` is set, the directory is `$DAAT_LOCUS_HOME/workflows`.
-Built-in workflows are compiled into the binary and loaded from memory; they
-are never written into the global workflow directory. A same-id Lua file in
-that directory explicitly overrides the built-in definition. When upgrading
-from the older automatic installer, an untouched legacy `goal.lua` or
-`search.lua` copy is moved into `legacy-builtin-workflows/` on reload so it
-does not silently override the current built-in; non-matching files remain
-user overrides. All Sessions load this shared catalog, while each invocation
-still uses its Session workspace and sandbox.
-
-The filename stem is the workflow id. There is no `workflow.toml`, manifest,
-sidecar metadata, profile catalog, or predeclared job/task vocabulary. The Lua
-file itself declares its input/output schemas, worker instructions, local tools,
-and control flow. The host automatically provides allowed App operations to
-workers. Dynamic schemas from a workflow are external model-facing schemas:
-validate them when the workflow is loaded against the portable schema rules in
-this document, rather than silently rewriting them.
-
-### Workflow Entry Points
-
-Both interactive users and the Session main agent start the same
-`WorkflowInvocation`:
-
-```text
-/workflows picker or form -> WorkflowInvocation -> <name>.lua
-workflow__<name>(typed input) -> WorkflowInvocation -> <name>.lua
-```
-
-`/workflows` is a picker/form surface, not a family of miniature CLI
-subcommands. When a workflow is loaded, expose one stable, typed main-agent
-tool per workflow, such as `workflow__investigate(...)`. Its input schema comes
-from the Lua definition. Do not expose a universal
-`workflow__start({ workflow_id, arbitrary_json })` tool, and do not make the
-model mechanically enumerate workflow ids or construct arbitrary JSON when a
-loaded schema can express the call.
-
-The Session main agent is outside the workflow graph. It remains the caller and
-result consumer, with its stable system prompt, tool directory, and
-`finish_and_send` contract unchanged for the invocation. A completed workflow
-returns a normal `ToolResult` to the original `workflow__<name>` call in main
-history. The main agent may call workflows again during an ordinary main turn.
-
-There is no `workflow.main()` node, main actor, main lease, Context reuse, or
-main-in-workflow re-entry protocol. `model = "main"` in a worker definition
-selects the main model provider for an isolated worker; it does not mean the
-Session main agent and grants neither its full `Context` nor its history.
-Changing the main agent's per-node output schema or tool surface would break its
-stable request prefix and provider prefix-cache behavior; keep that variability
-inside isolated workers instead.
-
-### Lua Workflow Runtime
-
-The workflow file owns ordinary Lua control flow. Functions, local state,
-conditions, loops, recursion, result-driven retries and branches, concurrency
-handles, `await`, and `await_all` are normal Lua behavior. The actual execution
-graph is created dynamically as workers are spawned and awaited; do not reduce
-workflows to a static DAG, declarative configuration language, fixed stage
-sequence, or a special `branch()` DSL.
-
-The intended small Lua surface is:
-
-```lua
-workflow.define({ input = InputSchema, output = OutputSchema,
-  run = function(input, ctx) ... end })
-workflow.agent({ role, model, input, output, instruction, extra_tools })
-workflow.await(handle[, transition])
-workflow.await_all(handles[, transition])
-workflow.tool({ name, input, output, run })
--- every returned actor also supports actor:reset()
-```
-
-`role` is required and must be a non-empty string. It identifies a visible
-worker attempt in the inspector rather than selecting a hidden host profile;
-repeated executions of the same role remain separate attempts.
-
-The optional `transition` marks edges from the prior non-empty awaited group to
-the newly awaited group. It defaults to `"await"`; use `"verify"`,
-`"revision"`, or `"retry"` when they describe the handoff. `await_all` starts
-its workers concurrently, retains result ordering by handle, stops the group on
-any failure or interruption, and gives every worker separate runtime and App
-instances. Concurrent groups produce all-to-all barrier edges.
-
-`workflow.agent(...)` creates one isolated worker actor for the current
-workflow invocation. Calling that actor's `run(...)` again preserves its
-worker-local conversation history, isolated App instances, plan, and other
-worker runtime state; it does not reset after completion. Actors created by
-separate `workflow.agent(...)` calls, including those with the same role, and
-actors from separate workflow invocations are isolated. Call `actor:reset()`
-explicitly when a fresh worker-local conversation, App instances, plan, and
-runtime state are required. `actor:reset()` yields like `await`, returns no
-worker output, and must not be used while one of that actor's handles is
-running. The script passes the actual task input to a `run(...)` handle; worker
-outputs are validated against the declared output schema before Lua receives
-them. The host automatically exposes allowed installed App operations to each
-actor; the script does not enumerate App tool names. `workflow.tool(...)`
-defines a local workflow tool with declared schemas; it is available only where
-the workflow explicitly grants it through `extra_tools`. The host owns
-validation, routing, lifecycle, cancellation, result transport, and all
-unavoidable policy enforcement; it must not substitute hidden role profiles,
-task ids, node ids, budgets, thinking levels, timeouts, retries, or
-pre-enumerated jobs for script decisions. Opaque run/node identifiers may exist
-internally for scheduling and journaling but are not script-visible API.
-
-Lua workflows are deliberately side-effectful: ordinary I/O, file operations,
-and shell execution such as `io.popen` or `os.execute` are permitted. This does
-not bypass the Session's non-bypassable `RuntimeSandboxPolicy`, workspace,
-writable-root, or process-sandbox boundaries. A script can choose its own
-control flow and local-tool grants, not escape host policy.
-
-Because arbitrary Lua can cause side effects, do not automatically replay a
-journal or restart a workflow from its beginning after interruption. Mark an
-interrupted invocation `Interrupted`. Script authors own checkpoints,
-idempotence, and any explicit recovery behavior. Journals are for observation,
-debugging, attribution, and result correlation, not automatic recovery.
-
-### Workflow Worker Boundaries
-
-A workflow worker actor is isolated from the Session main agent. It receives
-only its declared instruction, the typed input for each `run(...)`,
-host-provided App tools, explicitly granted workflow-local tools, and its own
-worker-local message history. It must not inherit the Session main agent's full
-`Context`, claimed event ids, event-completion authority, or conversation
-history. The actor's own history, isolated App state, and worker-local plan
-persist between its sequential `run(...)` calls until `actor:reset()` is called
-explicitly.
-
-Worker tools are ordinary named, schema-validated tools. The host automatically
-provides `read_file`, `edit_file`, `update_plan`, and, when the selected model
-supports vision, `view_image`; `update_plan` changes only the worker-local plan.
-It also provides allowed App operations, including generated `appid__get_state`
-tools and `coding__next_review`, through isolated App instances, plus
-workflow-local tools explicitly named in `extra_tools`. Workflow entry tools
-(`workflow__<id>`) and the main-agent event-completion `finish_and_send` are
-unavailable. The worker instead receives a same-named completion tool whose
-input is its declared output schema; it returns typed output to the workflow
-runner and never resolves or sends an event. Do not reuse an App's
-`render_state`/`call_tool` protocol to implement workers. Build a worker-specific
-`AgentTurnRequest { messages, tools }` and route tool calls through a worker
-runtime boundary.
-
-A worker completes by calling its worker completion tool with declared output or
-by producing a structured failure. If it needs an externally visible action,
-that action must be represented by an available App operation or an explicitly
-granted workflow-local tool and routed through a host-owned completion/effect
-sink; do not give it a claimed event id or let it resolve the caller's event
-directly. Worker completion, progress, and failures must be returned to the
-workflow runner, then to the Session owner through an explicit result channel
-before any Session state or event disposition changes.
-
-## Core Objects
-
-### App
-
-An `App` is a stateful capability domain. It owns a coherent set of tools,
-state, lifecycle hooks, and UI status for one interactive surface or long-lived
-runtime subsystem.
-
-The current built-in apps are:
-
-- `Browser`
-- `Terminal`
-- `Coding`
-
-Something should be modeled as an `App` only if it satisfies all of these
-conditions:
-
-- Its tools and state belong to a stable domain such as browsing, terminal
-  sessions, project-aware code operations, or a workspace extension surface.
-- It owns local runtime state that persists across tool calls.
-- Operations have temporal semantics, such as waiting for loading, continuing a
-  process, handling a page/session, or reading state after it stabilizes.
-
-An `App` is not a permission gate. The model must not be required to activate,
-select, or switch to an app before calling that app's namespaced tools. App
-tools are exposed by domain namespace, such as:
-
-```text
-browser__browser_open_page
-browser__get_state
-terminal__terminal_exec
-terminal__get_state
-coding__open_project
-coding__get_state
-```
-
-Every `App` must expose two separate layers:
-
-- `state`: current structured domain facts, returned by the app's generated
-  `appid__get_state` tool and rendered in TUI/WebUI app-status surfaces
-- `docs`: stable system-prompt documentation for operating the app's tools and
-  understanding the app's capability boundary
-
-Do not mix these layers.
-
-- `state` is not an operating manual.
-- `docs` are system prompt material only. They must not be returned
-  by `appid__get_state`, app-status surfaces, preturn state, or any other
-  runtime state channel.
-- App docs are not a routing or focus metadata layer. Do not add app prompt
-  frontmatter such as `description` or `when_to_use`; if the model needs stable
-  capability guidance, write it in the app docs markdown itself.
-- Project or workspace instructions such as `AGENTS.md` are instruction context,
-  not app state.
-
-In code, keep this separation visible through `App::render_state`, `docs()`,
-and the generated `appid__get_state` surface. Do not put
-self-optimizable task execution procedures into an app's supplemental
-instruction layer. Reusable methods across tasks should be modeled as `Skill`
-documents, not as app-local explanatory text.
-
-### Event
-
-An `Event` is a structured external fact that the system has already received and that now requires the model to make a semantic judgment.
-
-In the current implementation, the only payload that truly enters `EventStore` is:
-
-- `TelegramIncoming`
-
-An event answers these questions:
-
-- What just happened?
-- Does it require a response?
-- With what disposition should it end?
-
-An event is not a conversation cursor, an app-internal selected item, or a navigation process.
-
-### PendingWork
-
-`PendingWork` is the scheduling unit that drives the main loop. It is not the same thing as `Event`.
-
-The current implementation has two variants:
-
-- `PendingWork::Event { event_id }`
-- `PendingWork::AppNotice { app, reason }`
-
-Rules:
-
-- Events have higher priority than app notices.
-- The queue handles scheduling, not semantic judgment.
-- The queue may claim, release, consume, or requeue work at the front.
-
-Do not turn the queue into another business state machine. It is only the entry point that drives the next runtime turn.
-
-### Plan
-
-`Plan` is the latest step-by-step execution plan for the current task. It is not a backlog database.
-
-The current implementation requires:
-
-- A non-empty plan that is not fully completed must have exactly one `in_progress` step.
-- When all steps are complete, the plan should be cleared directly instead of retaining a set of completed steps.
-- Each `update_plan` submits the complete plan, not an incremental patch.
-
-Do not use the plan as:
-
-- a long-term knowledge base
-- a mirror of the event list
-- an implicit cursor
-
-### Skill
-
-`Skill` is the runtime discovery and injection layer for reusable operational
-guidance. A skill is a named Markdown document placed under
-`~/.daat-locus/skills/<name>/SKILL.md` that the model can discover through the
-system prompt skill list and read via `read_file`.
-
-Skills replaced the removed workflow/primitive mechanism. Key differences:
-
-- No explicit bind step. The model discovers available skills in the system
-  prompt skill list (name + description + path) and reads the SKILL.md content
-  through `read_file`.
-- No composition tools (`activate_composed_primitive`, etc.). The model simply
-  reads the skill content and applies it.
-- Sleep self-improvement tracks which SKILL.md files the model reads and
-  appends improvement patches under `## Sleep Improvements` sections.
-
-Persistence:
-
-- Builtin skills are compiled from `skills/*/SKILL.md` by `build.rs` and written
-  to `~/.daat-locus/skills/` on startup via `ensure_builtin_skills_on_disk()`.
-- Builtin skills are overwritten on each startup if the compiled content changed.
-- Workspace skills from `~/.agents/skills/` are loaded by the
-  `OpenSkillsCatalog` scanner and are not overwritten.
-- Skill run evidence is accumulated automatically in
-  `SkillRunRecord` (JSONL) by code at the work-completion boundary.
-  The model must not manually write skill outcome logs.
-
-Skill read tracking (`maybe_record_skill_read`):
-
-- Called after each tool execution in the turn loop.
-- Detects `read_file` or `coding__read_code` calls targeting a SKILL.md path.
-- Opens an `ActiveSkillRunSession` in Context, tracking the skill name.
-- At turn finalization (`record_skill_run_evidence`), the session is closed
-  with accumulated turn/action/failure evidence and flushed to
-  `SkillRunRecord` JSONL.
-
-Sleep self-improvement for skills:
-
-- Sleep is called periodically by the runtime.
-- `run_skill_improvement_pipeline()` groups unread `SkillRunRecord` entries by
-  skill name.
-- For each skill with evidence, it calls `SkillImprovementPlannerProgram` — a
-  new LLM program that analyzes the records and the current SKILL.md content.
-- The planner proposes targeted additions (not removals or rewrites).
-- The selected patch is appended under `## Sleep Improvements` in the skill's
-  SKILL.md.
-- At most one patch per skill per sleep cycle.
-
-Do not use skill as:
-
-- a long-term mirror of the plan
-- an implicit runtime state slot
-- a set of auto-generated default templates for blind model use
-- a performance ledger that the model has to maintain manually
-
-### Memory
-
-`Memory` holds the runtime conversation: the current thread context and its compacted history records.
-
-Memory serves thread continuity. It does not serve mechanical state synchronization.
-
-### Sleep / Self-Improvement
-
-Daat Locus has an explicit self-improvement loop:
-
-- runtime error cases
-- sleep
-- runtime error correction compile
-- compiled runtime contract additions
-
-This means runtime design is not disposable. Any agent-facing interface that systematically induces bad behavior will pollute error cases and skill run evidence, and then affect later compilation.
-
-Agent-facing interfaces should therefore be stable, explicit, and reviewable. Do not rely on vague conventions.
-
-Sleep internals must be separated into two independent pipelines:
-
-- `Runtime Error Correction Pipeline`
-- `Skill Improvement Pipeline`
-
-They may run in parallel during the same sleep cycle, but neither pipeline may depend on the other as input.
-
-The `Runtime Error Correction Pipeline` is responsible for:
-
-- fixing global runtime contract and tool protocol errors based only on code-detected daytime runtime error cases
-- directly producing small compiled runtime contract additions
-- clarifying existing invariants when the model violates them, such as event completion, app notice completion, tool argument shape, plan contract, terminal session continuation, browser reference freshness, and retry/overflow recovery
-
-The `Runtime Error Correction Pipeline` must not:
-
-- consume raw complete message streams as its primary input
-- consume sleep-internal program traces as daytime evidence
-- consume skill run records directly
-- infer successful task patterns from positive examples
-- generate task procedures, skill steps, style preferences, or domain tactics
-- decide whether an arbitrary failure belongs to skill optimization or prompt correction through semantic guessing
-
-Its input unit should be a `RuntimeErrorCase`: one code-detected runtime or protocol error plus the minimum diagnostic context needed to correct the global contract. If one turn contains multiple errors, split them into multiple cases that share the same turn id.
-
-A `RuntimeErrorCase` may include:
-
-- `case_id`, `turn_id`, `occurred_at_ms`
-- `error_kind`, `severity`, and `detected_by`
-- task context: origin, event source, user request summary, claimed ids, active skill id, event/app notice source
-- runtime context: phase, available tool names, active surface, plan summary, compact context summary
-- action context: assistant text summary, tool call summaries, tool result summaries, and a short previous-action window
-- error observation: expected behavior, actual behavior, evidence, recoverability, retry counts, and terminal status
-- relevant existing runtime contract references or hashes
-
-Allowed `error_kind` values should be an explicit code-owned whitelist. Examples include:
-
-- `missing_finish_and_send`
-- `missing_notice_resolved`
-- `invalid_tool_args`
-- `tool_schema_error`
-- `stale_browser_ref`
-- `wrong_terminal_session_continuation`
-- `plan_contract_violation`
-- `event_id_missing_or_stale`
-- `repeated_identical_tool_error`
-- `context_overflow_after_recovery`
-- `claimed_input_left_unresolved`
-- `transport_completion_violation`
-
-Do not feed ordinary task quality problems into runtime error correction, such as slow news search, weak source choice, incomplete summaries, missed code-review findings, or unclear task steps. Those are task-quality issues, not prompt correction targets.
-
-The `Skill Improvement Pipeline` is responsible for:
-
-- fixing skill SKILL.md content by analyzing `SkillRunRecord` evidence
-- producing targeted additions appended under `## Sleep Improvements` sections
-
-Builtin skills belong to the base capability layer:
-
-- They are compiled from repository `skills/*/SKILL.md` by `build.rs`.
-- They are writable (placed in `~/.daat-locus/skills/`), but may be overwritten
-  on startup if the compiled content changed.
-- Sleep may apply patches to builtin skill files.
-
-Explicitly forbidden:
-
-- driving skill patches from runtime error cases, error demos, or failure patterns
-- using skill improvement results as evidence for runtime error correction compile
-
-Keep these two object classes separate:
-
-- Runtime error correction compile changes global tool/protocol constraints.
-- Skill improvement evolves the skill guidance library used during task-time.
-
-## Current App Semantics
-
-### Terminal
-
-`Terminal` is the interface for local command execution and persistent process interaction.
-
-It is an `App` not because the command line is important, but because:
-
-- sessions persist
-- output may need to be awaited
-- stdin may need further writes
-- unread output and process lifecycle need structured state
-
-Operational constraints:
-
-- Operate only through the Terminal app tools, exposed with the `terminal__`
-  namespace.
-- Do not treat interactive full-screen programs as the normal path.
-- Do not hand interactive login or authentication flows to the model.
-- Sessions are explicitly addressed; there is no hidden selected session.
-
-### Static Runtime File Tools
-
-Plain file reading and plain file editing are static runtime tools, not an
-`App` and not a `global::*` namespace. They do not represent an app-owned
-interactive surface. They are exposed as ordinary runtime tools:
-
-```text
-read_file
-edit_file
-```
-
-`read_file` is the model-visible primitive for explicit file/range reads:
-
-```text
-read_file({
-  path: "src/dashboard/mod.rs",
-  start_line: 1268,
-  line_count: 53
-})
--> 1268#7a|fn run_tui_dashboard(...) {
-   1269#c1|    ...
-```
-
-Rules:
-
-- `read_file` accepts a path plus optional `start_line` and `line_count`.
-- Paths may be workspace-relative or absolute paths allowed by the sandbox.
-- `read_file` output lines use the same `line#hash|source line` format used by
-  Coding reads. Repeated visible `read_file` or Coding source lines may be
-  elided as `line#hash~` or `start_line#hash...end_line#hash~`; these anchors
-  remain valid and mean the full source line was already visible in current
-  context.
-- Line hashes are stale-edit guards. They are not long-term identities and
-  should stay short.
-- `read_file` is the fallback for imports, top-level code, search misses,
-  user-specified locations, and non-source/config/document files.
-- Do not put arbitrary path/range read compatibility into `read_code`; that
-  belongs here. `read_code` accepts only a path plus a line-hash anchor and an
-  `around`/`full` mode.
-
-`edit_file` is the model-visible primitive for plain file edits:
-
-```text
-edit_file({
-  edits: [{
-    path: "AGENTS.md",
-    op: "replace",
-    start: "708#4b",
-    end: "724#d1",
-    content: "..."
-  }]
-})
-```
-
-Rules:
-
-- `edit_file` uses the same structured edit schema and `line#hash` anchors as
-  `edit_code`.
-- `edit_file` verifies line hashes before writing.
-- The model-visible edit schema should be flat and must not use JSON Schema
-  `oneOf`/`anyOf`. Expose edit `content` as a string field; implementation may
-  accept legacy array content, but the schema should not advertise it.
-- `edit_file` handles ordinary non-SCOPE files such as Markdown, TOML, YAML,
-  JSON, shell scripts, and unsupported file types.
-- `edit_file` does not run SCOPE propagation analysis and does not produce
-  propagation review events.
-- When a project scope is open and the target is a SCOPE-owned source file,
-  `edit_file` must be rejected with an instruction to use `coding__edit_code`.
-
-`apply_patch` must not be a normal model-facing editing API. Patch-envelope or
-unified-diff parsing may remain as an internal implementation detail or
-migration aid, but the agent-facing path is `read_file` plus `edit_file`, or
-`search_code` plus `read_code` plus `edit_code` for SCOPE-owned source files.
-
-### Browser
-
-`Browser` is the interface for viewing and interacting with web pages.
-
-It is an `App` because:
-
-- page content is naturally local and time-dependent
-- loading may need to be awaited
-- interactions require reading a semantic snapshot before using `element_ref`
-- later interactions depend on a persistent page session
-
-Operational constraints:
-
-- Operate only through browser tools.
-- Interactions must explicitly provide `page_id + element_ref`.
-- If a page change invalidates refs, reread the page instead of blindly retrying old refs.
-- Search result pages are usually leads for locating sources, not final facts.
-
-### Coding
-
-`Coding` is the interface for semantic code operations powered by SCOPE —
-Semantic Code Operation & Propagation Engine (`scope-engine`).
-
-It is an `App` because:
-
-- project state (open project, LSP connections) persists across tool calls
-- symbol lookups and propagation analysis require an open project context
-- the model needs to see propagation status to decide whether to continue editing
-
-Opening a project establishes the Coding project root/CWD, persistent state, and
-optional LSP connection state. It does not discover or freeze a smaller set of
-files that `search_code` or `read_code` may use. Those tools operate under the
-project root and their explicit path/filter arguments.
-
-**State rendering design:**
-
-Coding must render its key state into `AppStateRender` so that:
-
-1. **State is available on demand** — the model can call `coding__get_state` to
-   read the current project, LSP status, and pending propagation events without
-   relying on conversation history.
-2. **Tool return values carry immediate feedback** — `search_code` returns
-   path-scoped line-hash hits, `read_code` verifies a path plus line anchor and
-   returns hash-anchored source lines, and `edit_code` returns propagation
-   results so the model sees impact scope mid-turn.
-3. **Notice is NOT for propagation review** — Coding uses `notice_reason()` only
-   for background events like "LSP server crashed" or "project index ready".
-   Propagation review is handled through tool return values and state rendering,
-   not through notice-triggered turn interrupts.
-
-Operational constraints:
-
-- Coding tools (`coding__search_code`, `coding__read_code`,
-  `coding__edit_code`, and review tools) are app-domain tools and must be
-  called directly through the `coding__` namespace.
-- Use `read_file` for explicit path/range reads. Do not make `read_code`
-  support arbitrary path/range compatibility.
-- Prefer `edit_file` for non-SCOPE files, but `coding__edit_code` also accepts
-  them and transparently falls back to the same plain structured-edit semantics.
-  When the current project scope is open, `edit_file` must reject SCOPE-owned
-  source files and require `coding__edit_code`.
-- Coding `render_state()` must include: project_root, open_languages,
-  lsp_status, propagation_pending_count, and up to N recent propagation events.
-- LSP process lifecycle (start, crash recovery, shutdown) belongs to Coding
-  internals, not to tool return values.
-- Missing LSP affects only LSP-backed references in `coding__next_review`
-  propagation auditing. It must not be presented or interpreted as affecting
-  other Coding tool behavior.
-
-### Coding Search / Read / Edit Protocol
-
-The Coding tool protocol uses one source-location vocabulary:
-`path + line#hash`. A `line#hash` anchor is meaningful only inside one file.
-Do not introduce a second model-facing target identity or session-local target
-registry for search/read flows.
-
-Line-hash source records rendered by Coding and `read_file` have these model-visible forms:
-
-```text
-line#hash|source line
-line#hash~
-start_line#hash...end_line#hash~
-```
-
-For `search_code`, prefix the same record with the path:
-
-```text
-path|line#hash|source line
-path|line#hash~
-path|start_line#hash...end_line#hash~
-```
-
-The `~` forms mean the exact same `path + line#hash` source line, or every line
-in the contiguous `start...end` span, was already shown earlier in the currently
-visible model context. These omitted anchors remain valid for follow-up reads
-and edits, but the model must re-read the range if it needs source text that is
-not visible nearby. Do not use `~` for stale, unavailable, hidden, or
-permission-denied content. A real empty source line is still rendered as
-`line#hash|`, not `line#hash~`.
-
-When assembling tool results, elide repeated code greedily and only when the
-runtime can prove the earlier full source record is still visible in the current
-assembled prompt. The visibility key is `path + line#hash`; do not match on raw
-source text alone. `search_code` hits, `read_code` lines, and `read_file` lines
-all add full source records to the same visible-line set. Collapse adjacent
-omitted records only when they are in the same path and their line numbers are
-consecutive.
-
-`search_code` is the model-visible search primitive. It replaces separate
-model-visible `grep` and `glob` tools while staying aligned with `rg`
-semantics. Inputs should cover the useful `rg` shape: `query`, `path`, `mode`,
-`case`, `word`, `whole_line`, `include`, `exclude`, `types`, `type_not`, `hidden`,
-`respect_ignore`, `follow`, and `limit`.
-
-Search output is an array of hits:
-
-```json
-{
-  "matches": [
-    {
-      "path": "src/foo.rs",
-      "hit": "42#ab|    call_target();"
-    }
-  ]
-}
-```
-
-Rules:
-
-- Return one match object per matched line.
-- `hit` must be exactly one coding source record: normally
-  `line#hash|source line`, or `line#hash~` when that exact `path + line#hash`
-  line was already shown earlier in the visible context.
-- Return the actual matched line. If a match is inside a function, method, type,
-  or other AST symbol, the search hit is still the matched line, not the
-  enclosing declaration line.
-- Do not split or repeat `line_number`, `hash`, `text`, `label`, `enclosing`,
-  or other metadata already encoded by the line anchor and source line.
-- `path + line#hash` is the target identity for follow-up reads. `line#hash`
-  alone is file-local and not globally unique.
-- Search may use ASTs internally for ranking, filtering, or presentation, but
-  it must not replace the visible hit with an enclosing symbol target.
-
-`read_code` reads a path-scoped line anchor:
-
-```json
-{
-  "path": "src/foo.rs",
-  "anchor": "42#ab",
-  "mode": "full"
-}
-```
-
-Rules:
-
-- `read_code` accepts any syntactically valid `line#hash` anchor with a path. It
-  must not require the anchor to have been produced by a prior `search_code`
-  call.
-- Before reading, verify that the current file line still matches the supplied
-  hash. On mismatch, return a stale-anchor error and tell the model to search or
-  read again.
-- `mode` has exactly two values: `around` and `full`.
-- `around` returns a fixed local window around the anchor, roughly a dozen lines
-  above and below. It does not perform AST expansion and has no tunable context
-  parameters.
-- `full` automatically returns the enclosing AST symbol when the anchor is
-  inside a recognizable symbol. If no enclosing symbol is recognizable, it
-  falls back to `around`.
-- Do not add manual `enclosing`, `selector`, `context_before`,
-  `context_after`, path/range, or other compatibility fields to `read_code`.
-- `read_code` output should be minimal: `{ "content": "..." }`.
-- `content` lines use coding source records: normally `line#hash|source line`,
-  or `line#hash~` / `start_line#hash...end_line#hash~` when those exact
-  `path + line#hash` lines were already shown earlier in the visible context.
-  Do not repeat `path`, `mode`, resolved range, enclosing symbol metadata, or
-  other values the caller already supplied or that are implementation detail.
-- Line hashes stay short. They are stale-edit guards, not long-term identities.
-
-`edit_code` uses the same structured edit schema as `edit_file`, but with SCOPE
-propagation analysis and review:
-
-```text
-code::edit({
-  edits: [{
-    path: "src/dashboard/mod.rs",
-    op: "replace",
-    start: "1268#7a",
-    end: "1320#d4",
-    content: "..."
-  }]
-})
-```
-
-The model copies `path` from the search hit and copies `start`/`end` line
-anchors from `read_code.content`. Existing replace/append/prepend semantics,
-line hash verification, parse validation, and propagation analysis remain
-unchanged. `edit_code` must not accept opaque target handles or search result
-objects as edit targets.
-Like `edit_file`, `edit_code` must expose a flat structured-edit schema without
-JSON Schema `oneOf`/`anyOf`.
-
-### App Tool Domains
-
-All app tools are model-facing through explicit app namespaces. Runtime tool
-spec construction should expose every installed app's valid tool specs, plus the
-generated `appid__get_state` tool for that app.
-
-Examples:
-
-- Coding tools: `coding__open_project`, `coding__search_code`,
-  `coding__read_code`, `coding__edit_code`, `coding__next_review`
-- Terminal tools: `terminal__terminal_exec`,
-  `terminal__terminal_write_stdin`, `terminal__terminal_terminate`
-- Browser tools: `browser__browser_open_page`, `browser__browser_snapshot`,
-  `browser__browser_click`
-- State tools: `coding__get_state`, `terminal__get_state`,
-  `browser__get_state`
-
-Static runtime file tools such as `read_file` and `edit_file` are not owned by
-any app. Their availability is governed by runtime policy and the SCOPE
-boundary, not by app tool domains.
-
-Do not reintroduce app composition as a tool-exposure mechanism. Cross-domain
-work should simply call the correct namespaced tool directly.
-
-### SCOPE Current Boundary and Static File Tool Boundary
-
-SCOPE — Semantic Code Operation & Propagation Engine (`scope-engine`) provides
-semantic code reading, searching, hash-anchored editing, and propagation review.
-Do not document unimplemented refactoring features as expected model-facing
-capabilities.
-
-`search_code` is project-root text search plus explicit filters. It is not
-affected by LSP availability, tree-sitter parser coverage, or any guessed
-"opened" file set. A type filter such as `types: ["typescript"]` is only a file
-extension filter; it should include all registered extensions for that language
-name, such as `.ts` and `.tsx`.
-
-| Capability | SCOPE Status | Boundary |
-|---|---|---|
-| Target discovery | ✅ `search_code` | Content search returns path-scoped matched-line hits in `line#hash|source line` form. |
-| Read code | ✅ `read_code` | Reads a path plus line-hash anchor in `around` or `full` mode and returns hash-anchored source lines. Explicit path/range reads belong to `read_file`. |
-| Edit code | ✅ `edit_code` | Applies structured hash-anchored edits. SCOPE-owned source files receive parse validation and propagation review; unsupported files fall back to `edit_file` semantics. |
-| Propagation review | ✅ review tools | Edit impact is surfaced through propagation results and review events. |
-| New source files | ⚠️ explicit supported creation paths | Use supported creation/edit paths; SCOPE has no template system. |
-| Non-source/config files | Transparent fallback | Prefer `read_file` and `edit_file` for `.toml`, `.yaml`, `.md`, `.json`, `.sh`, and other non-source files; `edit_code` still applies them without semantic validation or propagation review. |
-
-**Static file edit boundary:**
-
-When a project scope is open and `edit_file` targets a source-code file that
-SCOPE owns (for example `.rs`, `.py`, `.go`, `.ts`, `.js`, `.java`, `.c`,
-`.cpp`, `.rb`, `.php`), the runtime rejects the call and requires
-`coding__edit_code` instead.
-
-For non-source-code files (`.toml`, `.yaml`, `.md`, `.json`, `.sh`, etc.) or
-unsupported cases outside SCOPE responsibility, `edit_file` is allowed and
-`coding__edit_code` transparently falls back to the same structured-edit
-implementation. These fallback edits do not receive parse validation or
-propagation review; semantic analysis remains limited to SCOPE-owned source
-files.
-
-## Current Event Semantics
-
-### Telegram
-
-In the current code, Telegram is:
-
-- input side: `TelegramTransport` polls the Bot API and registers incoming events
-- manager side: approved messages are routed through the per-chat default session mapping
-- session side: each target Session owns its own Telegram event queue and outbound queue
-- send side: completing an event enqueues a message into the session outbox; the Manager drains session outboxes and delivers them through the Bot API
-
-Telegram is not an `App`.
-
-Reasons:
-
-- When a new message arrives, code already knows enough structured facts.
-- Normal handling is "judge and respond", not "first navigate to a chat UI and explore".
-- Standard runtime actions should bind `event_id` and explicit `chat_id`, not rely on hidden cursors.
-- Session selection for Telegram is Manager routing state, not an agent-facing app cursor.
-
-For approved Telegram chats, the Manager maintains a default session mapping:
-
-- If `chat_id -> session_id` exists and the session still exists, ordinary messages route to that session.
-- If no valid mapping exists, the first ordinary message creates a new `General` session, stores it as the chat default, and routes the event there.
-- This automatic default is per Telegram chat. It is not a global main session.
-
-Telegram-only session control commands are Manager-level commands. They must not
-enter any session's `EventStore` as ordinary user events:
-
-- `/session_list` lists sessions and marks the current chat attachment.
-- `/session_new [title]` creates a new `General` session and attaches the current chat to it.
-- `/session_attach <session_id_or_unique_prefix>` attaches the current chat to an existing session.
-- `/session_delete <session_id_or_unique_prefix>` deletes the target session through Manager lifecycle deletion and removes Telegram default mappings that pointed to it.
-
-These commands may accept a unique `session_id` prefix for Telegram usability.
-If the prefix is ambiguous, code must ask for more characters instead of
-guessing. `/session_attach` changes only the Manager's Telegram default mapping;
-it does not inject an event into the target Session.
-
-The standard path for an approved Telegram message:
-
-1. The transport receives the message.
-2. If the message is a Manager-level command, the Manager handles it directly and replies without creating a runtime event.
-3. Otherwise, the Manager resolves or creates the chat's default session.
-4. The Manager sends `EnqueueTelegramEvent` to the target Session over local IPC.
-5. The Session registers the event in its own `EventStore`.
-6. The Session enqueues `PendingWork::Event`.
-7. The runtime claims the event.
-8. The model judges and calls tools.
-9. It ends the event with `finish_and_send`.
-10. The Session writes the reply into its Telegram outbox.
-11. The Manager drains the outbox, delivers through the Bot API, and records delivery back to the Session.
-
-Unknown Telegram chats do not enter the normal event-processing path. They enter the ACL pending flow.
-
-## Resolution Rules
-
-All resolutions must bind to a specific event, not to a container.
-
-Current minimum requirements:
-
-- Operate on events through `event_id`.
-- Disposition must be explicit: `resolved`, `dismissed`, or `failed`.
-- `resolved` or `failed` must provide a non-empty `reply_message`.
-
-Current event states include:
-
-- `Pending`
-- `Claimed`
-- `AwaitingDelivery`
-- `Resolved`
-- `Dismissed`
-- `Failed`
-
-When designing a new event type, follow these principles:
-
-- If stale/new event conflicts can exist in the world, actions must bind to a concrete version or equivalent freshness guard.
-- Do not resolve only by container ids such as `chat_id`, `thread_id`, or `page_id`.
-- Failure states should allow retry or revalidation rather than silently swallowing the problem.
-
-## Tool Design Rules
-
-### General
-
-- Tools should explicitly mutate the world.
-- Plain text must not implicitly trigger side effects.
-- Tool parameters should use explicit identifiers as much as possible instead of hidden prior selection.
-- A normal operation should complete in one explicit call when feasible.
-
-### App Domain Tools
-
-App domain tools are exposed directly through namespaced tool names. The app id
-is part of the tool name and is the operation scope.
-
-Rules:
-
-- Do not require a separate activation or selection tool before calling an app
-  domain tool.
-- Do not hide app operations behind global aliases when the app namespace makes
-  ownership clearer.
-- Every app should have a generated `appid__get_state` tool that returns its
-  current structured state.
-- State tools should be cheap, inspectable, and side-effect free except for
-  harmless cache refresh needed to report current state.
-- Operations should bind to explicit ids such as `page_id`, `session_id`,
-  project root, path plus line anchor, or app-specific object id. Do not rely on hidden
-  selected objects.
-
-### Event Tools
-
-Event completion tools must:
-
-- explicitly receive `event_id`
-- explicitly receive `reply_message` when a final answer needs to be sent to the user
-- use `dismissed` only for silent completion; `failed` should still send a failure explanation to the user
-
-Do not design the final reply as assistant text itself.
-
-### Plan Tools
-
-`update_plan` maintains only the complete current plan.
-
-Do not add tools such as `append_plan_step` or `select_plan_step` that introduce hidden cursors and incremental synchronization complexity unless there is strong evidence that the current contract is insufficient.
-
-## What Code Should Do
-
-Code is responsible for:
-
-- polling and receiving Telegram updates
-- deduplicating events
-- persisting state
-- loading builtin skills and workspace skills
-- writing `SkillRunRecord` directly at the work-completion boundary
-- claiming, releasing, and requeueing pending work
-- maintaining the outbox
-- loading structured runtime context
-- enforcing tool availability policy and app namespace collisions
-- recording traces
-- running prompt compile and skill improvement separately
-
-Do not push these responsibilities onto the model.
-
-In particular, do not make the model repeatedly perform:
-
-- list
-- select
-- open
-- read latest state
-- dedupe
-- freshness check
-- delivery bookkeeping
-
-## What The Model Should Do
-
-The model is responsible for:
-
-- understanding event semantics
-- judging whether a response is needed
-- choosing the right tool domain
-- calling `appid__get_state` when current app state is needed
-- judging whether to load and apply relevant skills
-- planning steps
-- choosing tools
-- calling `deep_recall` when needed
-- producing the final `reply_message`
-
-If a new interface mainly makes the model perform mechanical lookup, it is probably designed incorrectly.
-
-## Runtime Context Rules
-
-The old unified `snapshot` concept is too broad. Do not treat it as the long-term context model.
-
-Future context assembly should split the old snapshot responsibilities into two structured injection hooks:
-
-- `AfterClaim Context`
-- `PreTurn Context`
-
-This does not mean deleting structured rendering. The structured unit rendering model must remain. Keep using document/part/block-style assembly such as `PromptDocument`, `PromptNode`, `PromptGroupDoc`, `PromptStateDoc`, `PromptUnitDoc`, `PromptBlock`, and `LlmPromptRenderer`. The goal is to replace one monolithic snapshot assembler with separate structured context assemblers, not to return to ad hoc string concatenation.
-
-### AfterClaim Context
-
-`AfterClaim Context` is injected after runtime work has been claimed.
-
-It contains one-shot context for the currently claimed work:
-
-- claimed event input
-- claimed app notice input
-- event/app notice source metadata needed to handle the claimed work
-- skill routing catalog needed for the model to discover operational guidance
-
-It is not a per-turn status dump.
-
-Rules:
-
-- Inject it when new work is claimed.
-- Runtime history compaction is a `Compacted` turn stop reason. If compaction
-  happens while claimed work is still in progress, release/reclaim the work and
-  inject `AfterClaim Context` in the new turn instead of trying to restore it
-  inside the old turn.
-- Do not repeat it every turn unless compaction made reinjection necessary.
-- Event input belongs here, not in a generic world snapshot.
-- Skill routing catalog belongs here, not in per-turn execution state.
-- It should enter runtime history as structured context so later tool calls and assistant messages can build on a stable prefix.
-
-### Runtime Turn Stop Reasons
-
-Keep runtime turn termination reasons minimal. A turn should stop only for one
-of these reasons:
-
-- `Finished`: the work is complete. This includes ordinary assistant final text
-  when no external input is claimed, `finish_and_send` for claimed events, and
-  `notice_resolved` for claimed app notices.
-- `Error`: the runtime cannot safely continue the current turn because of a
-  preflight failure, unrecoverable model/tool failure, fuse trip, or dead-loop
-  protection.
-- `Compacted`: runtime history was compacted and the next model request must be
-  built from the compacted history.
-- `Interrupt`: the active turn was interrupted by the user or client. This is
-  the spelling to use. It covers TUI `Esc`, TUI `Ctrl-C`, WebUI
-  `interrupt_runtime`, and process-level interrupt signals routed through the
-  runtime interrupt path.
-
-Do not introduce new turn stop reasons for ordinary context changes. If a tool
-changes what the model needs to know next, return the new facts in the tool
-result or insert a structured context-refresh message before the next model
-request. Context refresh is not itself a turn stop reason.
-
-### PreTurn Context
-
-`PreTurn Context` is injected before each model turn, using the same broad trigger point that the old snapshot used.
-
-It contains current execution state that may change after tools run:
-
-- memory recall for the turn
-- sensory state such as current time and machine status
-- current plan state
-- current project instruction context when the session has a project scope
-
-Rules:
-
-- Inject it before every model turn.
-- Operations that change the next context view, such as project instruction
-  reloads, should continue the current turn by returning structured tool output
-  or inserting a structured context-refresh message before the next model
-  request. They should not end the turn unless they also satisfy `Finished`,
-  `Error`, `Compacted`, or `Interrupt`.
-- Treat runtime history compaction as a `Compacted` stop reason: compact, end
-  the current turn, and build a fresh `PreTurn Context` for the next turn.
-- It should enter runtime history as structured context, rather than being appended as a transient final user message outside history.
-- Keep it concise and structurally compressible; do not persist full raw app
-  screens, huge memory excerpts, or repeated low-value status dumps.
-- Do not inject app state automatically. App state is read explicitly through
-  `appid__get_state` and displayed in client app-status surfaces.
-
-### Capability Docs
-
-Do not mix capability manuals into state when a stable instruction layer is better.
-
-Examples:
-
-- event completion rules belong in system/tool contract or a small event contract block
-- app docs are capability docs, not app state
-- project instructions such as `AGENTS.md` belong to project instruction
-  context, not Coding app state
-- skill routing catalog rules belong in skill contract / AfterClaim routing context
-
-### Skill Context Split
-
-Skill discovery has two distinct roles:
-
-- `SkillRouting`: skill catalog shown in system prompt for the currently claimed work; belongs in `AfterClaim Context`
-- `SkillHistoryMetadata`: which skill a past task used; belongs in turn metadata/history, not in operational guidance
-
-Do not make the model infer past task skill ownership from adjacent tool logs if code can record it directly.
-
-### Historical Metadata
-
-When context needs to support future edits to past task skill usage, preserve a small structured turn metadata record rather than saving full snapshots.
-
-Turn metadata should be able to record facts such as:
-
-- turn id
-- claimed event or app notice ids
-- user request summary
-- bound skill id and origin when applicable
-- skill run id when available
-- last active app surface when useful for UI or diagnostics
-- final disposition or outcome
-- completed event ids
-- concise tool summary
-
-This metadata should enter runtime history and be compressible. It is separate from sleep-only `SkillRunRecord` evidence, which may be consumed by sleep and must not be the only source of daytime historical skill attribution.
-
-### Legacy Snapshot Mapping
-
-When refactoring old snapshot parts, use this mapping:
-
-- old `recall_memories` -> `PreTurn.Recall`
-- old `sensory` -> `PreTurn.Environment`
-- old `plan` -> `PreTurn.TaskState`
-- old app surface dump -> explicit `appid__get_state` tool result or dashboard app-status output
-- old app usage / how-to-use / docs -> `AppDocs`
-- old claimed events -> `AfterClaim.ClaimedInput`
-- old event queue summary -> `AfterClaim.EventQueueContext`
-- old delivery reminder -> `EventContract`
-- old skill list and selection hint -> `AfterClaim.SkillRouting`
-- old bound skill id -> skill history metadata
-
-Avoid these designs:
-
-- persisting the full old snapshot on every turn
-- using one context blob to carry state, routing, manuals, memory recall, and history metadata
-- repeatedly injecting event input or the skill routing catalog every turn when no compaction occurred
-- dropping structured rendering in favor of hand-built strings
-
-## Anti-Patterns
-
-Avoid these designs:
-
-- Modeling transports such as Telegram, email, or notification centers as `App`s by default.
-- Forcing the model to "open a chat" before handling a known new message.
-- Storing transport cursors such as `selected_chat`, `selected_thread`, or
-  `opened_message` in app state.
-- Making send or resolve depend on hidden viewport state.
-- Binding events only to container ids instead of event ids.
-- Designing skill as app-local supplemental instruction or innate model capability.
-- Forcing the model to perform skill semantic search before continuing.
-- Auto-generating generic default skill templates for blind model use.
-- Persisting composite skills for every recurring combination of basic operations.
-- Treating `when_to_use` text as the primary skill runtime interface.
-- Writing the current skill binding back into the skill spec itself.
-- Making the model manually submit skill result logs.
-- Treating long-term memory as an immediate state cache.
-- Treating plan as a backlog database.
-- Letting the model implicitly submit final send actions through plain text.
-
-## Design Checklist
-
-Before adding an agent-facing interface, ask:
-
-1. Is this an interactive surface or a structured fact that has already arrived?
-2. Would a human describe it as "go operate that interface" or as "something happened; decide how to handle it"?
-3. Does code already have the facts the model needs?
-4. Does the action bind to a concrete object and freshness guard?
-5. Will this interface induce mechanical enumeration by the model?
-6. Is it compatible with the trace, skill-run-record, and sleep evaluation loop?
-
-If the answer leans toward a stateful capability domain with namespaced tools,
-model it as an `App`.
-
-If the answer leans toward arrived fact and resolution, model it as an `Event`.
-
-If the answer leans toward driving the next round of processing, it usually belongs to `PendingWork`, not `Event` or `App`.
-
-## In Short
-
-- `App` owns a namespaced tool domain, structured state, lifecycle hooks, and
-  client-visible status.
-- `Event` decides what happened, whether to respond, and how to complete it.
-- `PendingWork` decides what should drive the next turn.
-- `Workflow` composes isolated agent workers through a side-effectful Lua
-  program; it is invoked by users or the main agent and returns a typed result
-  without placing the Session main agent inside its graph.
-- `Plan` decides how the current task continues.
-- `Memory` provides thread continuity and long-term experience.
-- `Sleep` improves behavior from runtime mistakes.
-
-When modifying these boundaries, use the code's real runtime behavior as the source of truth. Do not merge distinct concepts just for superficial uniformity.
+- Avoid composition/conditionals: `oneOf`, `allOf`, `anyOf`, `not`, `if`, `then`,
+  `else`, `dependentRequired`, and `dependentSchemas`.
+- Avoid nonportable validation keywords: string length, pattern, and format;
+  numeric bounds and multiples; array bounds, uniqueness, and contains.
+- Prefer inlined schemas. Do not place sibling keywords beside `$ref`.
+- Keep names and descriptions concise. Validate dynamically supplied schemas
+  when loading them, and test the final model-facing JSON.
+
+## Data And Presentation
+
+- Shared activity and tool observations describe source facts with the natural
+  structure of each domain. They must not contain rendered rows, glyphs,
+  truncation, preview text, layout, colors, or expanded/collapsed state.
+- Preserve original text for unstructured output and typed data for structured
+  domains. Do not reconstruct semantic facts by parsing old render output.
+- Clients own drafts, selection, scrolling, expansion, and local presentation.
+  Such state must not become Actor execution state or persisted source data.
+- Tool activity uses concise rows and domain content views. Never show raw tool
+  payload/argument JSON or model-specific transcripts as a product fallback.
+  Approval parameters remain fully inspectable through readonly labeled values.
+  Actual source files and command output retain their original content.
+
+## Working In This Repository
+
+- Inspect Git status before edits. Preserve unrelated user changes, untracked
+  work, and dirty submodules. Do not reset or overwrite them as part of cleanup.
+- Work within the user's authorized scope. Do not deploy, publish, message
+  others, rewrite pushed history, or delete persistent Actor data without the
+  appropriate user authorization.
+- Before recursive deletion or moving files, resolve absolute target paths and
+  verify each remains inside the intended workspace or explicitly named
+  directory. On Windows use native PowerShell operations with `-LiteralPath`;
+  do not pass enumerated paths to another shell for deletion.
+- Run relevant checks on retained modules. Record passed checks and blocked
+  checks accurately; do not claim product usability from a library check.
+- Use configured formatters for mechanical changes, inspect their output, and
+  keep unrelated formatting out of semantic edits.
+- Commit titles must be in English and identify the actual change. Keep commits
+  coherent. Do not commit research directories, caches, generated artifacts,
+  runtime logs, or unconfirmed experiments.
+
+## Source And Documentation
+
+- All built-in App instructions live in `src/app_instructions`; tool descriptions
+  and schemas stay with each App. Keep no partial root `prompts` directory.
+- WebUI text uses matching `webui/src/locales/en-US.json` and `zh-CN.json` catalogs.
+  Default to the browser's first supported language, with English fallback;
+  Appearance offers browser default, Chinese and English with automatic save.
+  Language changes update existing views. Preserve user text and original source content.
+- Use `tests/http_api.rs` with contract suites in `tests/http` and reusable isolated
+  account/server fixtures in `tests/support`. Do not restore the simulated UI example.
+- Stable implementation contracts belong in `docs/architecture.md`; development,
+  validation and packaging instructions belong in CONTRIBUTING documents.
+  Remove task journals, screenshot handoff records and progress checklists;
+  preserve release changelogs. The repository needs no Git submodules.

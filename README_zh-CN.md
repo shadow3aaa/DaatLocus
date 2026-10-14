@@ -1,85 +1,74 @@
-<div align="center">
-
-<img src="assets/logo.svg" alt="Daat Locus Logo" style="width:220px; height:auto;" />
-
 # Daat Locus
 
-<p align="center">
-  <img src="assets/preview-tui.png" alt="preview-tui" width="45%" />
-  <img src="assets/preview-webui.png" alt="preview-webui" width="45%" />
-</p>
+[English](README.md)
 
-[![English][readme-en-badge]][readme-en-url]
-[![Crates.io][crates-badge]][crates-url]
-[![CI][ci-badge]][ci-url]
-[![License][license-badge]][license-url]
+Daat Locus 是只有一个对话入口的 Actor 系统：
 
-</div>
-
-[readme-en-badge]: https://img.shields.io/badge/README-English-blue.svg?style=for-the-badge
-[readme-en-url]: README.md
-[crates-badge]: https://img.shields.io/crates/v/daat-locus?style=for-the-badge
-[crates-url]: https://crates.io/crates/daat-locus
-[ci-badge]: https://img.shields.io/github/actions/workflow/status/shadow3aaa/DaatLocus/ci.yml?style=for-the-badge&label=CI
-[ci-url]: https://github.com/shadow3aaa/DaatLocus/actions/workflows/ci.yml
-[license-badge]: https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge
-[license-url]: LICENSE
-
-## 这是什么
-
-Daat Locus 是一个长期运行在本地的 agent runtime。
-
-## 快速开始
-
-推荐使用 `cargo-binstall` 安装，它会下载与你的平台匹配的 GitHub Release 预编译二进制。
-
-目前 daat-locus 只在 Windows 和 MacOS 上测试过，不过 Linux 应该也能正常工作。
-
-```bash
-cargo install cargo-binstall
-cargo binstall daat-locus
-
-# 或者直接使用 cargo install，这会从源码构建并需要 Bun
-cargo install
-
-daat-locus
+```text
+Actor = Agent 核心 + 安装的 App 实例
 ```
 
-第一次启动时，Daat Locus 会进入交互式引导流程。
+账号 Actor 接收请求并委派给持久 Actor。设备共享账号对话和模型上下文、提供工具，
+并可接管 worker；普通 Actor 保留宿主。点击 Actor 链接打开工作对话，没有常驻侧栏、
+TUI、Workflow 或 Sleep 框架。
 
-### 源码构建
+WebUI 提供消息、附件、排队引导、紧凑活动与结果。浮动菜单承载账号和设置，另一角
+保留对话搜索。界面支持中英文，默认跟随浏览器，也可在个性化中手动选择。
+访客分享与公开隧道已移除，同账号设备使用认证 P2P 通道。
 
-源码构建需要 Bun，因为 `build.rs` 会构建并嵌入 WebUI。
+## 运行
 
-请从 <https://bun.sh/> 安装 Bun，并确保它位于 `PATH` 中，然后再构建。
+安装 Rust、Bun、wasm-pack：
 
-```bash
-git clone https://github.com/shadow3aaa/DaatLocus
-cd DaatLocus
-cargo run
+```powershell
+rustup target add wasm32-unknown-unknown
+cd webui
+bun install --frozen-lockfile
+cd ..
+cargo run -- serve
 ```
 
-## 常用入口
+默认构建编译并内置 WebUI 及认证 WASM。打开输出地址，在本机创建账号，或在新设备
+使用相同账号名和密码登录。OPAQUE 将密码留在客户端，浏览器使用 HttpOnly cookie。
+`--profile NAME` 隔离本机账号。设备发现、连接和同步自动运行；LAN 与 SSH 不依赖
+外部服务，CF Worker/DO 仅是可选的公网会合与信令途径。
 
-```bash
-daat-locus help                # 显示帮助信息
-daat-locus run                 # 打开前台 runtime flow
-daat-locus code <project-dir>  # 选择或创建项目作用域 session
-daat-locus attach              # attach 到已有 daemon
-daat-locus send "..."          # 发送一次消息并等待回复
-daat-locus config              # 打开交互式配置菜单
-```
+`daat-locus --help` 显示原有字符 Logo 与 clap 帮助。`serve` 前台运行；
+`start --open`、`status --json`、`stop`、`restart` 通过本机 OS-owner IPC 管理
+选定 profile。停止或重启保留 Actor 身份与历史。无界面首次注册使用
+`account create NAME --password-stdin`，密码不能放进命令参数。
 
-## 文档
+Windows/macOS 使用[统一 Tauri 客户端](clients/app/README.md)，复用现有 WebUI
+与账号接口。用 `cargo build -p daat-locus -p daat-locus-app` 构建，将两个可执行文件
+放在同一目录，运行 `daat-locus-app`。`start --open` 优先打开已安装客户端。
+关窗仅隐藏窗口；托盘的“退出客户端”保留后台任务，“停止并退出”正常停止服务。
+后台不依赖 GUI。Linux 保留服务与浏览器入口；Android 将相同核心和 WebUI
+内置到 APK，可独立运行，无需终端。参见[客户端构建](clients/app/README.md#android)。
 
-- [English README](README.md)
-- [架构说明](docs/architecture_zh-CN.md)
-- [配置](docs/configuration_zh-CN.md)
-- [Lua 工作流](docs/workflows_zh-CN.md)
-- [Semantic Code Operation & Propagation Engine](crates/scope-engine/README.md)
-- [贡献指南](CONTRIBUTING_zh-CN.md)
-- [Skills](skills/) — 可复用的任务自动化技能 SKILL.md 文件
+## 权限与恢复
 
-## 许可证
+| 模式 | 行为 |
+| --- | --- |
+| 自动批准 | 独立模型只批准或拒绝，错误拒绝，不转人工 |
+| 请求批准 | Owner 审批不可修改的操作与请求范围 |
+| 完全访问 | 不做审批审查，仍执行身份与访问硬边界 |
 
-Daat Locus 使用 [Apache License 2.0](LICENSE)。
+额外文件范围只作用于一次操作，不能改写 Actor 的只读身份或长期授权。
+工具限制、框架凭据和其他 Actor 私有数据继续受保护；原生隔离不可用时拒绝执行。
+文件编辑使用 SHA256 校验；统一资源描述跨设备不传本地路径，读取仍需 Actor 授权。
+
+执行不设消息条数、ReAct 轮次或工具批次上限。上下文满时清空工作窗口并插入历史
+恢复提示，不生成摘要、不滑动裁剪。完整历史保留，中断或不明确的副作用不自动重放。
+账号 worker 保持健康亲和，由已同步设备接管。新设备作为同步副本加入，不增加永久
+投票依赖。账号授权节点失联时，已同步且可执行的设备在持久的本地恢复分支继续运行；
+重连后自动合并对话并保留原始分支，不重放结果未知的 App 操作。
+
+## 开发与打包
+
+详见[贡献指南](CONTRIBUTING_zh-CN.md)、[架构](docs/architecture.md)、
+[模型目录](docs/model-catalog.md)和[许可证归属](docs/license-attribution.md)。
+显式 `DAAT_LOCUS_BUILD_WEBUI=0` 为后台检查跳过前端工具链。
+
+`cargo xtask package binary --target <triple>` 生成 binstall 归档；
+`package windows`、`package macos` 在对应系统构建安装包。打包要求二进制
+内置 WebUI。项目无需 Git 子模块。
