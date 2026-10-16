@@ -143,5 +143,5 @@ features = [
 [profile.release]
 codegen-units = 1
 lto = "fat"
-opt-level = 's'
-strip = true
+opt-level = 3
+strip = "symbols"
