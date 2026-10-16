@@ -986,12 +986,6 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_stdio_variants_are_stable() {
-        assert_eq!(SandboxStdio::Inherit, SandboxStdio::default());
-        assert_ne!(SandboxStdio::Null, SandboxStdio::Piped);
-    }
-
-    #[test]
     fn default_runtime_policy_protects_private_home_without_locking_machine() {
         let repo_dir = Path::new("/workspace/daat-locus");
         let workspace_dir = Path::new("/Users/test/daat-locus-workspace");
@@ -1040,21 +1034,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_policy_records_strong_filesystem_mode() {
-        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime_with_strong_filesystem(
-            Path::new("/Users/test/.daat-locus"),
-            None,
-            Vec::<String>::new(),
-            StrongFilesystemSandboxMode::Required,
-        );
-
-        assert_eq!(
-            policy.strong_filesystem,
-            StrongFilesystemSandboxMode::Required
-        );
-    }
-
-    #[test]
     fn strong_command_spawn_spec_is_passthrough_when_disabled() {
         let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime_with_strong_filesystem(
             Path::new("/Users/test/.daat-locus"),
@@ -1090,7 +1069,11 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[tokio::test]
-    async fn strong_backend_denies_protected_runtime_paths_when_available() {
+    #[cfg_attr(
+        target_os = "linux",
+        ignore = "requires bwrap and user namespace support"
+    )]
+    async fn strong_backend_denies_protected_runtime_paths() {
         use tokio::io::AsyncReadExt;
 
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -1137,14 +1120,8 @@ mod tests {
             spawn_cancelled: None,
         };
 
-        let mut child = match SandboxAsyncChild::spawn_shell(&policy, &program, args, options) {
-            Ok(child) => child,
-            Err(err) if strong_backend_is_unavailable(&err) => {
-                eprintln!("skipping strong sandbox conformance test: {err}");
-                return;
-            }
-            Err(err) => panic!("failed to spawn conformance probe: {err}"),
-        };
+        let mut child = SandboxAsyncChild::spawn_shell(&policy, &program, args, options)
+            .expect("required native sandbox must be available for this conformance test");
         let mut stdout = child.take_stdout();
         let mut stderr = child.take_stderr();
         let status = wait_for_child(&mut child).await.expect("wait for probe");
@@ -1194,18 +1171,6 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn strong_backend_is_unavailable(error: &std::io::Error) -> bool {
-        error
-            .to_string()
-            .contains("Linux filesystem sandbox requires `bwrap` on PATH")
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn strong_backend_is_unavailable(_error: &std::io::Error) -> bool {
-        false
     }
 
     #[cfg(unix)]

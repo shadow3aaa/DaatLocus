@@ -1774,26 +1774,6 @@ mod tests {
         assert_eq!(access.account_id.as_deref(), Some("configured-account"));
     }
 
-    #[test]
-    fn codex_oauth_client_version_defaults_to_latest_supported_cli() {
-        assert_eq!(codex_oauth_client_version(), "0.162.0");
-    }
-
-    #[test]
-    fn imported_auth_file_uses_source_hash() {
-        let source =
-            br#"{"tokens":{"id_token":"id","access_token":"access","refresh_token":"refresh"}}"#;
-        let destination = imported_codex_oauth_auth_file(source);
-
-        assert_eq!(
-            destination.file_name().and_then(|name| name.to_str()),
-            Some(format!("codex-auth-{}.json", hex::encode(Sha256::digest(source))).as_str())
-        );
-        assert_eq!(
-            destination.file_name(),
-            imported_codex_oauth_auth_file(source).file_name()
-        );
-    }
     #[tokio::test]
     async fn import_codex_cli_auth_file_rejects_a_directory() {
         let temp = tempfile::tempdir().expect("tempdir");

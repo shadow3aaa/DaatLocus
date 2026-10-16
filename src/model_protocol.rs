@@ -696,26 +696,4 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
         assert!(!response.raw_stream_follow_up);
     }
-
-    #[test]
-    fn agent_turn_protocol_falls_back_to_last_nonempty_message() {
-        let response = AgentTurnStreamResult {
-            items: vec![
-                AgentTurnItem::AssistantMessage {
-                    content: "first".to_string(),
-                },
-                AgentTurnItem::AssistantMessage {
-                    content: "second".to_string(),
-                },
-            ],
-            raw_stream_follow_up: true,
-            last_assistant_message: Some(" ".to_string()),
-            last_reasoning_content: None,
-            last_reasoning_signature: None,
-            responses_output: None,
-        }
-        .protocol();
-
-        assert!(response.raw_stream_follow_up);
-    }
 }

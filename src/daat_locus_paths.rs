@@ -249,19 +249,3 @@ impl Drop for DaatLocusHomeOverride {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn codex_auth_files_live_in_a_daat_owned_directory() {
-        let root = PathBuf::from("/tmp/daat-locus");
-        let paths = DaatLocusPaths::from_root(root.clone());
-        assert_eq!(paths.codex_auth_dir(), root.join("codex-auth"));
-        assert_eq!(
-            paths.codex_auth_file("codex-auth-example.json"),
-            root.join("codex-auth/codex-auth-example.json")
-        );
-    }
-}

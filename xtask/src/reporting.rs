@@ -34,20 +34,3 @@ pub fn packaged(label: &str, path: &Path) -> Result<()> {
     status("Packaged", &format!("{label} at {link}"));
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn redirected_status_is_aligned_and_has_no_escape_sequences() {
-        assert_eq!(status_label("Packaged", false), "    Packaged");
-        assert!(status_label("Packaged", true).contains("\x1b[1;92m"));
-    }
-    #[test]
-    fn artifact_urls_escape_spaces_unicode_and_fragment_characters() {
-        let path = std::env::temp_dir().join("打包 #1.apk");
-        let url = reqwest::Url::from_file_path(&path).unwrap();
-        assert!(url.as_str().contains("%20%231.apk"));
-        assert_eq!(url.to_file_path().unwrap(), path);
-    }
-}

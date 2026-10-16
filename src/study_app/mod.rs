@@ -666,7 +666,6 @@ mod tests {
     fn study_tool_schemas_are_portable_model_schemas() {
         let (_dir, app) = test_app();
         let specs = app.tool_specs();
-        assert!(specs.len() >= 13);
         for spec in &specs {
             validate_model_facing_schema(&spec.input_schema)
                 .unwrap_or_else(|err| panic!("tool `{}` schema invalid: {err}", spec.name));
@@ -686,15 +685,6 @@ mod tests {
                 "example_of",
                 "applies_to"
             ])
-        );
-    }
-
-    #[test]
-    fn app_id_study_uses_expected_namespace() {
-        assert_eq!(AppId::study().as_str(), "study");
-        assert_eq!(
-            AppId::study().mangle_tool_name("search_nodes"),
-            "study__search_nodes"
         );
     }
 

@@ -92,35 +92,3 @@ fn render_template_line(out: &mut String, line: &str, tone: LogoTone) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn logo_template_rows_are_aligned() {
-        assert!(same_width(DAAT_LEFT));
-        assert!(same_width(LOCUS_RIGHT));
-    }
-
-    #[test]
-    fn rendered_logo_uses_opencode_style_shadow_markers() {
-        let logo = render_daat_locus_logo();
-
-        assert!(logo.contains("\x1b[38;5;87m"));
-        assert!(logo.contains("\x1b[48;5;24m"));
-        assert!(logo.contains("\x1b[38;5;141m"));
-        assert!(logo.contains("\x1b[48;5;54m"));
-        assert!(!logo.contains('_'));
-        assert!(!logo.contains('^'));
-        assert!(!logo.contains('~'));
-        assert!(!logo.contains(','));
-    }
-
-    fn same_width(rows: &[&str]) -> bool {
-        let Some(width) = rows.first().map(|row| row.chars().count()) else {
-            return true;
-        };
-        rows.iter().all(|row| row.chars().count() == width)
-    }
-}

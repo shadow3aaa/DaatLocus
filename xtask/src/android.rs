@@ -241,15 +241,8 @@ mod tests {
 
     #[test]
     fn apk_validation_rejects_stale_wrong_abi_and_backend_only_artifacts() {
-        let root = std::env::temp_dir().join(format!(
-            "dl-apk-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
         let metadata = root.join("output-metadata.json");
         let write_metadata = |filename: &str| {
             fs::write(

@@ -203,7 +203,7 @@ async fn empty_reasoning_has_a_fuse_and_transient_requests_can_reach_the_fifth_a
         MockReply::Failure("connection reset"),
         MockReply::Answer("Recovered"),
     ]));
-    let (dir, system) = runtime(provider.clone()).await;
+    let (_dir, system) = runtime(provider.clone()).await;
     let input = system
         .send_user("root", "Retry".into(), vec![], None)
         .unwrap();
@@ -219,7 +219,6 @@ async fn empty_reasoning_has_a_fuse_and_transient_requests_can_reach_the_fifth_a
     )
     .unwrap();
     assert!(dump.contains("status=ok") && dump.contains("attempt=5"));
-    assert!(dir.path().exists());
     system.shutdown().await;
 }
 
@@ -1192,7 +1191,6 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
             uri: attachment.uri.clone(),
         })
         .unwrap();
-    let first_started = std::time::Instant::now();
     // User input from a non-worker device joins the same serial inbox.
     let input = b
         .send_user(
@@ -1327,10 +1325,6 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     })
     .await
     .unwrap();
-    let first_effect_ms = first_started.elapsed().as_millis();
-    let a_b = net_a.handle(host_b.local).unwrap().traffic();
-    let a_c = net_a.handle(host_c.local).unwrap().traffic();
-    let takeover_b_started = std::time::Instant::now();
     net_a.stop().await;
     let result = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -1347,7 +1341,6 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
         result.reply.as_deref(),
         Some("Continued on the next device without repeating Actor creation.")
     );
-    let takeover_b_ms = takeover_b_started.elapsed().as_millis();
     assert!(model_a.dropped.load(Ordering::Acquire));
     assert_eq!(model_b.requests.lock().len(), 1);
     for request in model_b.requests.lock().iter() {
@@ -1436,8 +1429,6 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     })
     .await
     .unwrap();
-    let b_c = net_b.handle(host_c.local).unwrap().traffic();
-    let takeover_c_started = std::time::Instant::now();
     net_b.stop().await;
     tokio::time::timeout(Duration::from_secs(20), async {
         while c.store().message(&next.id).unwrap().status != MessageStatus::Completed {
@@ -1495,8 +1486,6 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     );
     let effects=b.store().stage_transaction(|tx|Ok(tx.query_row("SELECT COUNT(*) FROM core_app_effects WHERE state='completed' AND call='one-device-effect'",[],|r|r.get::<_,i64>(0))?)).unwrap();
     assert_eq!(effects, 1);
-    std::fs::create_dir_all("target").unwrap();
-    std::fs::write("target/multi-device-harness.json",serde_json::to_vec_pretty(&json!({"transport":"loopback mutual TLS; device-owned quorum; no cloud service","measurement":"encoded protocol frames, both directions; excludes IP/TLS overhead","first_effect_ms":first_effect_ms,"takeover_b_ms":takeover_b_ms,"takeover_c_ms":takeover_c_started.elapsed().as_millis(),"device_effect_count":effects,"channels":{"a_b":a_b,"a_c":a_c,"b_c":b_c}})).unwrap()).unwrap();
     net_c.stop().await;
     net_a.stop().await;
     a.shutdown().await;

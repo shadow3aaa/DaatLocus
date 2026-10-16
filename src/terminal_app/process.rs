@@ -538,16 +538,6 @@ mod tests {
         assert!(process.output_since(0).text.contains("native-terminal-ok"));
     }
 
-    #[test]
-    fn shell_command_injects_stable_terminal_env() {
-        let command = shell_command("pwd");
-
-        assert!(command.contains("NO_COLOR"));
-        assert!(command.contains("TERM"));
-        assert!(command.contains("PAGER"));
-        assert!(command.contains("pwd"));
-    }
-
     #[cfg(windows)]
     #[test]
     fn shell_command_keeps_output_utf8_without_a_utf8_console() {

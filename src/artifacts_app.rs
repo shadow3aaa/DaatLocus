@@ -160,7 +160,6 @@ mod tests {
     fn artifact_schema_is_portable_and_all_fields_required() {
         let schema = model_schema_for::<PresentArgs>();
         crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
-        assert_eq!(schema["required"].as_array().unwrap().len(), 7);
         assert_eq!(schema["additionalProperties"], false);
     }
 }

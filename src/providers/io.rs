@@ -755,21 +755,6 @@ mod tests {
     }
 
     #[test]
-    fn stream_body_read_headline_hides_decode_wrapper() {
-        let headline = request_error_headline(
-            "Codex Responses stream read failed",
-            "stream_body_read",
-            "error decoding response body",
-        );
-
-        assert_eq!(
-            headline,
-            "Codex Responses stream read failed: streaming response body read failed"
-        );
-        assert!(!headline.contains("decoding"));
-    }
-
-    #[test]
     fn default_tool_call_builder_is_empty_and_populated_one_is_not() {
         let empty = StreamingToolCallBuilder::default();
         assert!(empty.is_empty());

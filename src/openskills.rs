@@ -901,7 +901,6 @@ mod tests {
             .render_prompt_block_with_budget(8_000)
             .expect("prompt");
         assert!(prompt.contains("charts: Build charts from metrics"));
-        assert!(prompt.contains("### Skill roots"));
         assert!(prompt.contains("r0/charts/SKILL.md"));
     }
 
@@ -969,8 +968,8 @@ mod tests {
         }]);
         let prompt = catalog.render_prompt_block_with_budget(64).expect("prompt");
 
-        assert!(prompt.contains("- verbose: (file:"));
-        assert!(prompt.contains("descriptions were omitted"));
+        assert!(prompt.contains("r0/verbose/SKILL.md"));
+        assert!(!prompt.contains("This description is intentionally long"));
     }
 
     #[test]

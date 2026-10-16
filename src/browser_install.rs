@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn parses_gcs_integrity_headers_and_verifies_archive() {
         let archive = b"browser";
-        let md5 = browser_archive_md5_base64(archive);
+        let md5 = "jj8bu3Pw9slS/PhzMy6unw==";
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_LENGTH, HeaderValue::from_static("7"));
         headers.insert(ETAG, HeaderValue::from_static("\"etag-value\""));
@@ -392,7 +392,7 @@ mod tests {
             BrowserArchiveIntegrity::from_headers(&headers).expect("parse integrity headers");
 
         assert_eq!(integrity.content_length, Some(7));
-        assert_eq!(integrity.md5_base64.as_deref(), Some(md5.as_str()));
+        assert_eq!(integrity.md5_base64.as_deref(), Some(md5));
         assert_eq!(integrity.etag.as_deref(), Some("etag-value"));
         verify_browser_archive_integrity(archive, &integrity).expect("verify archive");
     }
@@ -402,7 +402,7 @@ mod tests {
         let archive = b"browser";
         let integrity = BrowserArchiveIntegrity {
             content_length: Some(8),
-            md5_base64: Some(browser_archive_md5_base64(archive)),
+            md5_base64: Some("jj8bu3Pw9slS/PhzMy6unw==".into()),
             etag: None,
         };
 
@@ -416,7 +416,7 @@ mod tests {
     fn rejects_browser_archive_md5_mismatch() {
         let integrity = BrowserArchiveIntegrity {
             content_length: Some(7),
-            md5_base64: Some(browser_archive_md5_base64(b"tampered")),
+            md5_base64: Some("B7IYuSQSDUmnJcNrBlVgAA==".into()),
             etag: None,
         };
 

@@ -291,39 +291,3 @@ fn render_agent_turn_item_dump(item: &AgentTurnItem) -> Vec<String> {
         ],
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use tracing_subscriber::fmt::format::Writer;
-    use tracing_subscriber::fmt::time::FormatTime;
-
-    #[test]
-    fn log_timer_emits_local_timezone_offset() {
-        let timer = tracing_subscriber::fmt::time::ChronoLocal::rfc_3339();
-        let mut out = String::new();
-        timer
-            .format_time(&mut Writer::new(&mut out))
-            .expect("timer should format into the writer");
-
-        let local_minus_utc = chrono::Local::now().offset().local_minus_utc();
-        if local_minus_utc == 0 {
-            // Machine timezone is UTC; RFC3339 may render `Z` or `+00:00`.
-            assert!(
-                out.ends_with('Z') || out.ends_with("+00:00"),
-                "unexpected UTC timestamp format: {out}"
-            );
-        } else {
-            // Machine timezone is not UTC: the timestamp must carry the local offset,
-            // never the UTC `Z` suffix.
-            assert!(
-                !out.ends_with('Z') && !out.ends_with("+00:00"),
-                "log timestamp uses UTC instead of local timezone: {out}"
-            );
-            let local_offset = chrono::Local::now().format("%:z").to_string();
-            assert!(
-                out.ends_with(&local_offset),
-                "log timestamp {out} does not end with local offset {local_offset}"
-            );
-        }
-    }
-}

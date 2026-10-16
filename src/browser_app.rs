@@ -1968,11 +1968,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires DAAT_LOCUS_TEST_BROWSER pointing to a Chromium executable"]
     async fn launch_browser_backend_keeps_connection_runtime_alive() {
-        let executable = daat_locus_paths_sync().browser_executable_path();
-        if !executable.exists() {
-            return;
-        }
+        let executable = std::path::PathBuf::from(
+            std::env::var_os("DAAT_LOCUS_TEST_BROWSER")
+                .expect("set DAAT_LOCUS_TEST_BROWSER to an isolated test Chromium executable"),
+        );
+        assert!(executable.is_absolute() && executable.is_file());
 
         let backend = launch_browser_backend(executable)
             .await

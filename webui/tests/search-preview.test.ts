@@ -11,8 +11,7 @@ test("search previews keep useful text without Markdown scaffolding", () => {
   expect(text).not.toContain("```");
   expect(text).not.toContain("---");
   expect(text).not.toContain("**");
-  expect(text).toContain("File · Value audit_file.ts · 16px");
-  expect(text).not.toContain("· ·");
+  for (const value of ["File", "Value", "audit_file.ts", "16px"]) expect(text).toContain(value);
 });
 
 test("plain identifiers and Chinese search terms remain searchable", () => {

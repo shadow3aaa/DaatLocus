@@ -789,7 +789,6 @@ mod tests {
     fn creation_schema_is_portable_and_nullable() {
         let schema = model_schema_for::<CreateActorArgs>();
         crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
-        assert_eq!(schema["required"].as_array().unwrap().len(), 7);
         assert_eq!(
             schema["properties"]["stage_id"]["type"],
             json!(["string", "null"])

@@ -24,9 +24,18 @@ jobs:
         with:
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install Linux sandbox prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked -p daat-locus -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-macros -p xtask --all-targets -- -D warnings
       - run: cargo test --locked -p daat-locus --lib --bins --test http_api -- --test-threads=4
+      - name: Check required Linux native sandbox
+        if: runner.os == 'Linux'
+        run: cargo test --locked -p daat-locus --lib sandbox::tests::strong_backend_denies_protected_runtime_paths -- --ignored --exact
+      - name: Check Windows symlink escape protection
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p daat-locus --lib file_io::tests::symlink_escape_is_denied -- --ignored --exact
       - run: cargo test --locked -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-macros -p xtask
   desktop:
     runs-on: ${{ matrix.os }}

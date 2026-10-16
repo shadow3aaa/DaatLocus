@@ -114,33 +114,6 @@ mod tests {
     use clap::{CommandFactory, error::ErrorKind};
 
     #[test]
-    fn help_has_the_original_logo_palette_and_current_service_controls() {
-        Cli::command().debug_assert();
-        let mut command = Cli::command();
-        let help = command.render_help().ansi().to_string();
-        for value in [
-            "Usage:",
-            "serve",
-            "start",
-            "status",
-            "stop",
-            "restart",
-            "--listen",
-            "--profile",
-            "--workspace",
-            "--version",
-            "WebUI",
-            "\x1b[38;5;87m",
-            "\x1b[38;5;141m",
-        ] {
-            assert!(help.contains(value), "missing {value:?}");
-        }
-        for value in ["workflow", "sleep", "session-id", "--ipc", "tui"] {
-            assert!(!help.contains(value), "obsolete {value:?}");
-        }
-    }
-
-    #[test]
     fn account_maintenance_requires_stdin_password_and_preserves_profile_selection() {
         for args in [
             vec![
@@ -293,6 +266,7 @@ mod tests {
 
     #[test]
     fn help_and_version_are_clap_early_exits() {
+        Cli::command().debug_assert();
         for args in [
             vec!["daat-locus", "-h"],
             vec!["daat-locus", "--help"],

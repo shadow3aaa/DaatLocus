@@ -384,19 +384,10 @@ mod tests {
         let bounded = bound_tool_model_content(&text, 100, None);
 
         assert!(bounded.contains(PLAIN_TRUNCATION_NOTICE));
-        assert!(bounded.contains("chars omitted"));
-        assert!(bounded.chars().count() < text.chars().count());
-    }
-
-    #[test]
-    fn truncation_reserves_room_for_its_own_marker() {
-        let text = "a".repeat(50_000);
-        let bounded = bound_tool_model_content(&text, 100, None);
-        let max_chars = 100 * APPROX_BYTES_PER_TOKEN;
-
+        assert!(bounded.starts_with('a'));
         assert!(
-            bounded.chars().count() <= max_chars + 200,
-            "result must stay near the budget rather than overshoot by the notice"
+            bounded.len() <= 400,
+            "100-token output must fit its byte budget, including the notice"
         );
     }
 
@@ -471,22 +462,6 @@ mod tests {
             std::fs::read_dir(&pool).expect("read pool").count(),
             0,
             "no spill file may be written for a redirectable result"
-        );
-    }
-
-    #[test]
-    fn continue_target_needs_no_lifetime_caveat() {
-        let bounded = bound_tool_model_content(
-            &"a".repeat(50_000),
-            100,
-            Some(OverflowTarget::Continue {
-                instruction: "Continue with read_file({ \"path\": \"a.rs\" }).".to_string(),
-            }),
-        );
-
-        assert!(
-            !bounded.contains("temporary"),
-            "the source is permanent, so the marker must not warn about expiry"
         );
     }
 

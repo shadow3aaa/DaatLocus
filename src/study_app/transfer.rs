@@ -979,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn vault_export_round_trips_relations_and_understanding() {
+    fn vault_export_includes_relation_targets_and_graph_format() {
         let (dir, store) = store();
         let vault = dir.path().join("Vault");
         write(&vault.join("A.md"), "# A\n\nAlpha.");
@@ -1001,16 +1001,6 @@ mod tests {
     }
 
     #[test]
-    fn writes_zip_archive() {
-        let (dir, _store) = store();
-        let dest = dir.path().join("out/export.zip");
-        let files = vec![("a.md".to_string(), "# A\n".to_string())];
-        let size = write_export_zip(&files, &dest).expect("zip");
-        assert!(size > 0);
-        assert!(dest.exists());
-    }
-
-    #[test]
     fn parses_frontmatter_heading_and_wikilinks() {
         let note = parse_obsidian_note(
             "Algebra/Numbers.md",
@@ -1024,13 +1014,5 @@ mod tests {
         assert_eq!(note.links, vec!["Group", "Escaped|Name"]);
         assert!(!note.body.contains("# Numbers"));
         assert!(note.body.contains("`[[NotALink]]`"));
-    }
-
-    #[test]
-    fn file_url_uses_url_crate() {
-        let url = file_url(Path::new("C:/notes/Algebra/Numbers.md"));
-        assert!(url.starts_with("file://"));
-        assert!(url.contains("Numbers.md"));
-        assert!(!url.contains('\\'));
     }
 }

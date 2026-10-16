@@ -1333,9 +1333,6 @@ mod tests {
         let large = totals[1]["encoded_tcp_frame_bytes"].as_u64().unwrap();
         assert!(large < small * 23 / 10);
         assert!(large < 64 * 1024 * 2);
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/stage-harness");
-        std::fs::create_dir_all(&output).unwrap();
-        std::fs::write(output.join("incremental-traffic.json"),serde_json::to_vec_pretty(&serde_json::json!({"mode":"deterministic_protocol_simulation","measurement":"JSON Stage envelopes plus four-byte TCP frame prefixes; excludes TLS/IP overhead","samples":totals})).unwrap()).unwrap();
     }
     #[test]
     fn snapshot_restores_active_text_then_applies_only_the_incremental_tail() {

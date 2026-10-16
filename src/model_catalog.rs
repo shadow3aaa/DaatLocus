@@ -389,7 +389,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invalid_or_empty_catalog_cannot_replace_the_snapshot() {
+    fn catalog_validation_rejects_invalid_data_and_preserves_model_capabilities() {
         for invalid in [
             "not json",
             "null",
@@ -400,7 +400,12 @@ mod tests {
             assert!(validated_catalog(invalid).is_err());
         }
         assert!(validated_catalog(COMPILED_API_JSON).is_ok());
-        assert!(!catalog_model_ids(&["openai".into()]).is_empty());
+        let catalog = validated_catalog(r#"{"fixture":{"models":{"example":{"limit":{"context":12345,"output":678},"modalities":{"input":["text","image"]},"tool_call":true}}}}"#).unwrap();
+        let capacity = lookup_model_in_json(&catalog, "example").unwrap();
+        assert_eq!(capacity.context_window_tokens, 12345);
+        assert_eq!(capacity.max_completion_tokens, 678);
+        assert!(capacity.supports_vision);
+        assert!(capacity.supports_tool_call);
     }
 
     #[test]
@@ -488,16 +493,5 @@ mod tests {
                     .collect(),
             }]
         );
-    }
-
-    #[test]
-    fn compiled_catalog_parses_typical_openai_model() {
-        let capacity = catalog_model_capacity_for_provider("openai", "gpt-4o")
-            .expect("compiled catalog should contain openai/gpt-4o");
-
-        assert!(capacity.context_window_tokens > 0);
-        assert!(capacity.max_completion_tokens > 0);
-        assert!(capacity.supports_vision);
-        assert!(capacity.supports_tool_call);
     }
 }

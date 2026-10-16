@@ -138,22 +138,17 @@ describe("cookie-only requests", () => {
     expect(JSON.parse(String(requests[1].init.body))).toEqual({ model: null });
     expect(requests[2].url).toBe("/v1/actors/root/messages/message/results?before=24&limit=30");
   });
-  test("error response retains retry information and no raw diagnostic body", async () => {
+  test("error response rejects with a typed code and parsed retry delay", async () => {
     globalThis.fetch = (async () => Response.json({ code: "rate_limited", message: "Too many requests" }, { status: 429, headers: { "Retry-After": "3" } })) as typeof fetch;
-    try {
-      await logoutSession();
-      throw new Error("must reject");
-    }
-    catch (error) {
-      expect(error).toBeInstanceOf(ActorApiError);
-      expect((error as ActorApiError).retryAfterMs).toBe(3000);
-    }
+    await expect(logoutSession()).rejects.toMatchObject({
+      code: "rate_limited", status: 429, retryAfterMs: 3000,
+    });
   });
   test("Unicode attachment names have an ASCII transport representation", async () => {
     let headers = new Headers();
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => { headers = new Headers(init?.headers); return Response.json({ id: "upload" }); }) as typeof fetch;
     await uploadAttachment("root", new File(["内容"], "报告.txt", { type: "text/plain" }));
-    expect(headers.get("X-File-Name")).toBe(encodeURIComponent("报告.txt"));
+    expect(headers.get("X-File-Name")).toBe("%E6%8A%A5%E5%91%8A.txt");
     expect(headers.get("X-File-Name-Encoding")).toBe("utf-8-percent");
   });
 });

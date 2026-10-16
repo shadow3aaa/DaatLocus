@@ -27,15 +27,6 @@ pub fn apply_no_window_with_flags(command: &mut std::process::Command, flags: u3
 #[cfg(not(windows))]
 pub(crate) fn apply_no_window_with_flags(_command: &mut std::process::Command, _flags: u32) {}
 
-#[cfg(all(test, windows))]
-mod tests {
-    use super::WINDOWS_CREATE_NO_WINDOW_FLAG;
-
-    #[test]
-    fn windows_no_window_flag_matches_winapi_value() {
-        assert_eq!(WINDOWS_CREATE_NO_WINDOW_FLAG, 0x0800_0000);
-    }
-}
 /// Coordinate native HANDLE_LIST spawns with ordinary Rust process creation.
 /// Rust's private creation lock cannot protect handles prepared by our native broker.
 #[cfg(windows)]

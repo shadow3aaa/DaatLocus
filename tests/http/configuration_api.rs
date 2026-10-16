@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[tokio::test]
-async fn provider_rename_preserves_live_credentials_without_exposing_them() {
+async fn configuration_preview_accepts_provider_rename_without_disclosing_credentials() {
     let fixture = Fixture::new().await;
     let mut config: Value = fixture
         .owner(reqwest::Method::GET, "/v1/config")
@@ -34,6 +34,11 @@ async fn provider_rename_preserves_live_credentials_without_exposing_them() {
         "{}",
         preview.text().await.unwrap()
     );
+}
+
+#[tokio::test]
+async fn actor_usage_requires_owner_and_starts_with_no_input_tokens() {
+    let fixture = Fixture::new().await;
     let usage = fixture
         .owner(reqwest::Method::GET, "/v1/actors/root/usage")
         .send()

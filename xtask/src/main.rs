@@ -590,8 +590,8 @@ mod tests {
     }
     #[test]
     fn archive_has_expected_binary_and_no_extra_tree() {
-        let root = std::env::temp_dir().join(format!("dl-package-test-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
         let c = Context {
             root: root.clone(),
             meta: Metadata {

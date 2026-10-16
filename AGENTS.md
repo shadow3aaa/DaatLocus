@@ -275,6 +275,64 @@ schemas; do not silently repair them through provider-specific normalization.
   coherent. Do not commit research directories, caches, generated artifacts,
   runtime logs, or unconfirmed experiments.
 
+## Test Design And Maintenance
+
+- Test an observable behavior, failure mode, or stable external contract of this
+  repository. Be able to name a plausible regression that would make the test
+  fail. Test count and coverage percentages are not goals by themselves.
+- Use independent expected results: known vectors, explicit examples, invariants,
+  or externally visible outcomes. Do not copy the implementation into a test,
+  derive the expected result through the same code path, or merely compare two
+  identical calls.
+- Do not test Rust/TypeScript language guarantees, derived traits, enum inequality,
+  trivial field assignment, constant values, path-joining getters, or third-party
+  libraries in isolation. Exercise our integration behavior when it adds a risk.
+- Do not use source-code searches or regular expressions over implementation files
+  as unit tests. Use compiler, type, lint, or architecture checks for static rules;
+  exercise the resulting behavior for runtime contracts.
+- Avoid tests that freeze incidental wording, colors, CSS classes, whitespace,
+  private helper structure, field counts, or arbitrary batching boundaries. Exact
+  assertions are appropriate for wire formats, escaping, accessibility semantics,
+  security boundaries, and other explicit contracts.
+- Assert the claimed outcome. A nonempty file, successful serialization, absence
+  of an exception, or echoed input alone does not establish correct contents,
+  persistence, fallback, authorization, or execution. Mocks must not supply the
+  behavior the test claims to verify.
+- Static rendering can verify initial markup, escaping, and accessibility
+  attributes. It cannot prove clicks, subscriptions, language updates on mounted
+  views, refresh, synchronization, or draft retention across a transition.
+  Exercise that transition through the real controller/component, or remove the
+  claim and the redundant test; wiring the expected state in a fixture proves
+  nothing about the production integration.
+- Do not assert literal translated copy to test localization or business status.
+  Check locale selection and resource integrity separately. UI behavior tests may
+  locate a semantic control through the current resource, and must assert the
+  actual state/action. Preserve exact fixture text when testing user data,
+  original tool output, escaping, or privacy; it is not interface copy.
+- Put each case at the narrowest useful boundary. Unit tests cover nontrivial
+  decisions and transformations; integration tests cover persistence, HTTP,
+  process isolation, and coordination. Repeat a scenario at another layer only
+  when it protects a distinct failure mode. Prefer table cases to copied tests.
+- Keep normal tests deterministic and isolated: temporary storage, controlled
+  inputs and clocks, local fake services, bounded waits, and restored global
+  state. Never depend on a real account, credentials, mutable external catalogs,
+  public network, or a developer's home data. External-environment checks must be
+  explicitly opt-in and report unavailable prerequisites accurately.
+- Await asynchronous assertions and propagate failures. Missing prerequisites
+  must be reported as ignored/opt-in or fail with a clear reason, never return
+  early and report success. Use self-cleaning unique temporary directories;
+  normal tests must not write benchmark reports or fixed paths in the checkout.
+  Provision and explicitly run required native sandbox/privilege cases in their
+  platform CI jobs; marking them opt-in locally must not remove CI coverage.
+- Regression tests must exercise the mechanism that caused the bug and assert
+  the corrected result; where practical, confirm they fail before the fix. Keep
+  authentication, authorization, sandbox positive/negative cases, protocol/schema
+  contracts, data integrity, recovery, and uncertain-effect replay protections.
+- Do not add tests for every reversible cosmetic edit or one-line wrapper.
+  Remove obsolete, tautological, or redundant cases and their unused fixtures;
+  do not weaken meaningful assertions or delete valuable coverage to hide a failure.
+  Report separately which checks ran and which were not run.
+
 ## Source And Documentation
 
 - All built-in App instructions live in `src/app_instructions`; tool descriptions

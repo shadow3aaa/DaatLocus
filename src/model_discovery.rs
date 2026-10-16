@@ -864,35 +864,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_oauth_fallback_models_include_current_gpt_6_and_5_6_variants() {
-        let ids = codex_oauth_fallback_models()
-            .into_iter()
-            .map(|model| model.id)
-            .collect::<Vec<_>>();
-
-        assert!(ids.contains(&"gpt-5.6-sol".to_string()));
-        assert!(ids.contains(&"gpt-5.6-terra".to_string()));
-        assert!(ids.contains(&"gpt-5.6-luna".to_string()));
-        for id in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"] {
-            assert!(ids.contains(&id.to_string()));
-        }
-    }
-
-    #[test]
-    fn codex_oauth_reasoning_defaults_include_xhigh() {
-        let options = codex_oauth_reasoning_options("gpt-6.1-sol");
-        let ReasoningOption::Effort { values } = &options[0] else {
-            panic!("expected Codex reasoning effort options");
-        };
-
-        assert!(values.contains(&"xhigh".to_string()));
-        assert!(values.contains(&"max".to_string()));
-        assert!(values.contains(&"ultra".to_string()));
-        assert!(!values.contains(&"none".to_string()));
-        assert!(!values.contains(&"minimal".to_string()));
-    }
-
-    #[test]
     fn codex_catalog_uses_login_visibility_and_native_capability_fields() {
         let catalog = serde_json::json!({ "models": [
             { "slug": "gpt-6.1-sol", "visibility": "list", "supported_in_api": false,

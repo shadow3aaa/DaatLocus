@@ -1044,6 +1044,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "requires Windows symlink creation privileges")]
     fn symlink_escape_is_denied() {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
@@ -1051,11 +1052,8 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
         #[cfg(windows)]
-        if let Err(err) = std::os::windows::fs::symlink_dir(outside.path(), dir.path().join("link"))
-        {
-            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-            return;
-        }
+        std::os::windows::fs::symlink_dir(outside.path(), dir.path().join("link"))
+            .expect("enable symlink creation privileges before running this test");
         let mut policy = RuntimeSandboxPolicy::disabled();
         policy.filesystem.full_disk_read = false;
         policy.filesystem.readable_roots = vec![dir.path().into()];

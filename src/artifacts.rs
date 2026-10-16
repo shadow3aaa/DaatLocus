@@ -667,15 +667,6 @@ mod tests {
     }
 
     #[test]
-    fn hmac_construction_is_stable() {
-        let secret = signer_secret();
-        let first = sign_artifact_file_name(&secret, &format!("{HEX64}.png"));
-        let second = sign_artifact_file_name(&secret, &format!("{HEX64}.png"));
-        assert_eq!(first, second);
-        assert_eq!(first.len(), HMAC_SHA256_HEX_LEN);
-    }
-
-    #[test]
     fn signature_verification_rejects_tampering_and_wrong_inputs() {
         let secret = signer_secret();
         let file_name = format!("{HEX64}.png");
