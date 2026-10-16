@@ -74,7 +74,11 @@ impl App for AccountActors {
         AppId::new("actors").expect("Actors App")
     }
     fn docs(&self) -> AppDocs {
-        AppDocs::from_markdown(include_str!("../app_instructions/core.md"))
+        AppDocs::from_markdown(concat!(
+            include_str!("../app_instructions/core.md"),
+            "\n\n",
+            include_str!("../app_instructions/orchestration.md")
+        ))
     }
     fn delegates_approval(&self, call: &AgentToolCall) -> bool {
         matches!(

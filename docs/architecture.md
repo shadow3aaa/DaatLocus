@@ -13,6 +13,11 @@
 Study。各 App 的指令统一维护在 `src/app_instructions`，工具描述和可移植输入
 schema 留在所属 App。Skills 是可发现、读取的指令资源，不拥有独立执行引擎。
 
+`src/app_instructions/orchestration.md` 维护通用场景的 Actor 分工、复用、
+工作区协作与结果验收策略，与 Core 和普通管理型 Actors App 的指令共同编译并
+注入模型上下文；仅提供自身历史访问的 Actors App 不加载该策略。它是模型的
+决策指导，不引入固定工作流、调度引擎或额外授权，权限与持久路由仍由代码执行。
+
 Actor 的创建、工作目录、App、只读身份和授权是内部状态。客户端只能切换
 模型偏好与 Full access / Ask / Auto；模型不能修改批准模式。所有 Actor 持续
 保留身份、配置、上下文与历史，没有删除入口。完成任务、退出账号、停止进程

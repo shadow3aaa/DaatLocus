@@ -193,7 +193,11 @@ impl App for ActorApp {
         if !self.management {
             return AppDocs::from_markdown(include_str!("app_instructions/history.md"));
         }
-        AppDocs::from_markdown(include_str!("app_instructions/actors.md"))
+        AppDocs::from_markdown(concat!(
+            include_str!("app_instructions/actors.md"),
+            "\n\n",
+            include_str!("app_instructions/orchestration.md")
+        ))
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         let mut tools = vec![
