@@ -22,7 +22,8 @@ client are connected.
 - Client interfaces use bounded queries and resumable incremental event streams,
   never repeated full-runtime snapshots.
 - The desktop client owns its window and tray. Close hides the window; Quit client
-  leaves the independent service running; Stop and exit uses OS-owner CLI control.
+  leaves the independent service running. The tray exposes only window visibility
+  and client exit; service maintenance uses OS-owner CLI control.
   Keep the native loop on the main thread and the backend free of GUI dependencies.
   Reuse the existing Logo and account HTTP/SSE contracts. Native WebViews grant no
   JavaScript shell/filesystem/process capabilities; external links stay in the browser.

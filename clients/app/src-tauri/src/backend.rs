@@ -112,9 +112,6 @@ impl Backend {
         }
         Ok(status)
     }
-    pub async fn stop(&self) -> Result<()> {
-        self.command(&["stop"]).await.map(|_| ())
-    }
     pub async fn bootstrap(
         &self,
         input: daat_locus_client_protocol::BootstrapRequest,

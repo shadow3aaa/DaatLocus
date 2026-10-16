@@ -41,7 +41,7 @@ cargo run -- serve
 Windows/macOS 使用[统一 Tauri 客户端](clients/app/README.md)，复用现有 WebUI
 与账号接口。用 `cargo build -p daat-locus -p daat-locus-app` 构建，将两个可执行文件
 放在同一目录，运行 `daat-locus-app`。`start --open` 优先打开已安装客户端。
-关窗仅隐藏窗口；托盘的“退出客户端”保留后台任务，“停止并退出”正常停止服务。
+关窗仅隐藏窗口；托盘的“退出客户端”保留后台任务，服务维护通过 CLI 完成。
 后台不依赖 GUI。Linux 保留服务与浏览器入口；Android 将相同核心和 WebUI
 内置到 APK，可独立运行，无需终端。参见[客户端构建](clients/app/README.md#android)。
 

@@ -26,11 +26,19 @@ before loading the window. Duplicate launches raise that profile's existing
 window. Each profile uses separate WebView storage on Windows and on macOS 14+;
 on older macOS, server-side profile/session binding still enforces authorization.
 
-Closing the window hides it and preserves execution. The tray offers Open,
-Quit client, and Stop and exit. Quitting only the client leaves the independent
-service running; Stop and exit uses the CLI's OS-owner IPC and waits for orderly
-shutdown. CLI stop eventually exits the client; restart reconnects it to the
+Closing the window hides it and preserves execution. The Windows tray offers
+Minimize to tray (or Open Daat Locus when hidden) and Quit Daat Locus, in a native
+menu with larger rows and system keyboard/accessibility support. The macOS menu
+keeps Open, Minimize to tray and Quit. Quitting leaves the independent service
+running. Service maintenance uses the CLI's OS-owner IPC. CLI stop eventually
+exits the client; restart reconnects it to the
 verified service. Actor data is never removed by these operations.
+
+The Windows menu has an opt-in native interaction check:
+`cargo test -p daat-locus-app native_popup_keyboard_and_dismissal -- --ignored`.
+Activate its isolated test window, then press Escape, Down/Enter, Down/Down/Enter,
+and Escape as each menu appears. It checks light/dark rendering, cancellation and
+both selections without starting a service or accessing an account.
 
 The main window blends its title area into the shared UI: Windows uses custom
 minimize/maximize/close controls and a drag area; macOS uses an overlay titlebar

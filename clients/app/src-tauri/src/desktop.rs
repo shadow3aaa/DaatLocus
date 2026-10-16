@@ -1,29 +1,27 @@
 use crate::backend::{self, Backend, Options};
 use std::sync::{
     Arc, RwLock,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
+#[cfg(target_os = "macos")]
+use tauri::menu::{Menu, MenuItem};
 use tauri::{
     Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
     image::Image,
-    menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     webview::NewWindowResponse,
 };
-use tauri_plugin_dialog::DialogExt;
 use url::Url;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/app.png"));
 const OPEN: &str = "open-client";
 const QUIT: &str = "quit-client";
-const STOP: &str = "stop-service";
+const HIDE: &str = "hide-client";
 static PREVIEW: AtomicU64 = AtomicU64::new(0);
 
 struct Client {
     backend: Backend,
     origin: Arc<RwLock<Url>>,
-    stopping: AtomicBool,
-    stop_item: MenuItem<tauri::Wry>,
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,27 +102,21 @@ fn bootstrap_capability(app: &tauri::AppHandle, origin: &Url) -> tauri::Result<(
 struct Labels {
     open: &'static str,
     quit: &'static str,
-    stop: &'static str,
-    stopping: &'static str,
-    failure: &'static str,
+    hide: &'static str,
 }
 fn labels() -> Labels {
     if sys_locale::get_locale().is_some_and(|locale| locale.to_ascii_lowercase().starts_with("zh"))
     {
         Labels {
             open: "打开 Daat Locus",
-            quit: "退出客户端",
-            stop: "停止并退出",
-            stopping: "正在停止…",
-            failure: "无法停止服务，请重试。",
+            quit: "退出 Daat Locus",
+            hide: "最小化到托盘",
         }
     } else {
         Labels {
             open: "Open Daat Locus",
-            quit: "Quit client",
-            stop: "Stop and exit",
-            stopping: "Stopping…",
-            failure: "Unable to stop the service. Please try again.",
+            quit: "Quit Daat Locus",
+            hide: "Minimize to tray",
         }
     }
 }
@@ -147,30 +139,10 @@ fn action(app: &tauri::AppHandle, id: &str) {
     match id {
         OPEN => show(app),
         QUIT => app.exit(0),
-        STOP => {
-            let state = app.state::<Client>();
-            if state.stopping.swap(true, Ordering::AcqRel) {
-                return;
+        HIDE => {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
             }
-            let _ = state.stop_item.set_text(labels().stopping);
-            let _ = state.stop_item.set_enabled(false);
-            let backend = state.backend.clone();
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                if backend.stop().await.is_ok() {
-                    app.exit(0);
-                } else {
-                    let state = app.state::<Client>();
-                    state.stopping.store(false, Ordering::Release);
-                    let _ = state.stop_item.set_text(labels().stop);
-                    let _ = state.stop_item.set_enabled(true);
-                    app.dialog()
-                        .message(labels().failure)
-                        .title("Daat Locus")
-                        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
-                        .show(|_| {});
-                }
-            });
         }
         _ => {}
     }
@@ -193,16 +165,20 @@ pub fn run(options: Options) -> Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![desktop_account, desktop_window])
         .setup(move |app| {
+            #[cfg(target_os = "macos")]
             let text = labels();
-            let open = MenuItem::with_id(app, OPEN, text.open, true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, QUIT, text.quit, true, None::<&str>)?;
-            let stop = MenuItem::with_id(app, STOP, text.stop, true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit, &stop])?;
+            #[cfg(target_os = "macos")]
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &MenuItem::with_id(app, OPEN, text.open, true, None::<&str>)?,
+                    &MenuItem::with_id(app, HIDE, text.hide, true, None::<&str>)?,
+                    &MenuItem::with_id(app, QUIT, text.quit, true, None::<&str>)?,
+                ],
+            )?;
             app.manage(Client {
                 backend: backend.clone(),
                 origin: origin.clone(),
-                stopping: AtomicBool::new(false),
-                stop_item: stop,
             });
             bootstrap_capability(app.handle(), &origin.read().unwrap())?;
             let navigation_origin = origin.clone();
@@ -306,14 +282,51 @@ pub fn run(options: Options) -> Result<()> {
                 )?;
                 app.set_menu(Menu::with_items(app, &[&application, &edit])?)?;
             }
-            TrayIconBuilder::with_id("client")
+            let tray = TrayIconBuilder::with_id("client")
                 .icon(Image::from_bytes(ICON)?)
                 .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("Daat Locus")
-                .menu(&menu)
                 .show_menu_on_left_click(!cfg!(windows))
-                .on_menu_event(|app, event| action(app, event.id.as_ref()))
                 .on_tray_icon_event(|tray, event| {
+                    #[cfg(windows)]
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Right,
+                        button_state: MouseButtonState::Up,
+                        position,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle().clone();
+                        let handle = app.clone();
+                        let _ = app.run_on_main_thread(move || {
+                            if let Some(window) = handle.get_webview_window("main") {
+                                let visible = window.is_visible().unwrap_or(false)
+                                    && !window.is_minimized().unwrap_or(false);
+                                let text = labels();
+                                if let Ok(owner) = window.hwnd() {
+                                    let choice = crate::windows_tray::show(
+                                        owner.0 as _,
+                                        windows_sys::Win32::Foundation::POINT {
+                                            x: position.x as i32,
+                                            y: position.y as i32,
+                                        },
+                                        if visible { text.hide } else { text.open },
+                                        text.quit,
+                                        window.theme().ok() == Some(tauri::Theme::Dark),
+                                    );
+                                    match choice {
+                                        Some(crate::windows_tray::Action::Toggle) => {
+                                            action(&handle, if visible { HIDE } else { OPEN })
+                                        }
+                                        Some(crate::windows_tray::Action::Quit) => {
+                                            action(&handle, QUIT)
+                                        }
+                                        None => {}
+                                    }
+                                }
+                            }
+                        });
+                    }
                     if matches!(
                         event,
                         TrayIconEvent::DoubleClick {
@@ -332,16 +345,17 @@ pub fn run(options: Options) -> Result<()> {
                     {
                         show(tray.app_handle());
                     }
-                })
-                .build(app)?;
+                });
+            #[cfg(target_os = "macos")]
+            let tray = tray
+                .menu(&menu)
+                .on_menu_event(|app, event| action(app, event.id.as_ref()));
+            tray.build(app)?;
             let app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut missing = 0;
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    if app.state::<Client>().stopping.load(Ordering::Acquire) {
-                        continue;
-                    }
                     match backend.status().await {
                         Ok(Some(status)) => {
                             missing = 0;

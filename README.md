@@ -48,8 +48,8 @@ Windows and macOS use the [Tauri desktop client](clients/app/README.md), sharing
 the same WebUI and account interfaces. Build with
 `cargo build -p daat-locus -p daat-locus-app`, then run `daat-locus-app` next to the
 service executable. `start --open` prefers the installed client. Closing its
-window hides it; Quit client preserves background tasks; Stop and exit shuts the
-service down normally. The independent backend has no GUI dependencies. Linux
+window hides it; Quit client preserves background tasks; service maintenance uses
+the CLI. The independent backend has no GUI dependencies. Linux
 retains the service and browser entry. Android embeds the same core and WebUI in an APK;
 a terminal is not required. See [native client builds](clients/app/README.md#android).
 
