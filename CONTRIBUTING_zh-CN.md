@@ -23,6 +23,16 @@ cargo run -- serve
 `webui_fixture` 已删除。手动验证使用独立 profile 和临时工作目录，不能使用真实用户
 数据替代测试夹具。
 
+独立视觉预览：在 `webui` 运行 `bun run dev:mock`，打开
+`http://127.0.0.1:5173/__mock`（端口以 Vite 输出为准）。一个 Vite 进程即可运行
+实际共享 WebUI 和内存 HTTP/SSE mock，无需后台服务、账号、wasm-pack 或 Rust
+编译器。场景选择器包含对话、活动、审批、队列、附件、长内容、登录和连接状态。
+每个场景同时提供 320px 和 390px 的窄屏预览。
+设置和 Actor 弹窗转到主窗口使用实际界面的入口。切换场景只重置 mock 数据。
+预览不提供真实认证；发行构建保留 OPAQUE/WASM，并排除预览路由。验证夹具使用
+`bun run typecheck:mock` 和 `bun test tests/mock-preview.test.ts`；后台行为仍以
+服务契约测试为准。
+
 后台检查设置 `$env:DAAT_LOCUS_BUILD_WEBUI='0'`，无需 Bun 或 wasm-pack。
 离线构建可用 `DAAT_LOCUS_MODEL_CATALOG_PATH` 指定有效 models.dev JSON；
 Cargo `--offline` 本身不会禁止构建脚本联网。详见[模型目录](docs/model-catalog.md)。

@@ -28,8 +28,8 @@ import type { DeviceSettings } from "../src/lib/stage-api";
 
 export const STAGE_ID = "4f9c1a5e-8b2d-4e6f-9a3c-7d5e1f0b2a4c";
 export const ACCOUNT_ID = "mock-account";
-export const ACCOUNT_NAME = "Mock Account";
-export const ROOT_ACTOR_ID = "root";
+export const ACCOUNT_NAME = "林";
+export const ROOT_ACTOR_ID = "core";
 /** Listen port; env DAAT_LOCUS_MOCK_PORT overrides the 45826 default. */
 export const MOCK_PORT = Number(process.env.DAAT_LOCUS_MOCK_PORT) || 45826;
 /** Stream key of the catalog event stream (all actors). */

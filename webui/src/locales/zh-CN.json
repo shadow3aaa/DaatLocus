@@ -38,10 +38,6 @@
     "models": "模型",
     "use_default_model": "跟随默认模型",
     "manage_models_and_connections": "在设置中管理模型与连接",
-    "stop_dictation": "停止听写",
-    "dictate": "语音输入",
-    "dictating_click_to_stop": "正在听写，点击结束",
-    "dictation_is_unavailable_in_this_browser": "当前浏览器不支持语音输入",
     "stop_task": "停止当前任务",
     "queue_message": "加入队列",
     "send_message": "发送消息"

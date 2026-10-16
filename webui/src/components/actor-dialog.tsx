@@ -1,6 +1,6 @@
 import { t } from "@/lib/i18n";
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeftIcon, ArrowUpRightIcon, SearchIcon } from "lucide-react";
+import { ArrowLeftIcon, Maximize2Icon, SearchIcon } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { ConversationPane } from "@/components/conversation-pane";
@@ -18,7 +18,7 @@ export function ActorDialog({ connectionMessage, actorId, open, onClose, onActor
   const title = actor?.id === actorId ? actor.config?.name || actor.name || t("actor_dialog.actor_conversation") : t("actor_dialog.actor_conversation");
   return <Dialog open={open} onOpenChange={value => { if (!value) onClose(); }}><DialogContent className="dl-actor-dialog" showCloseButton aria-describedby={undefined}>
     <DialogHeader className="dl-actor-dialog-heading"><div className="dl-actor-dialog-title">{onBack && <Button size="icon-sm" variant="ghost" onClick={onBack} aria-label={t("actor_dialog.back_to_previous_actor")}><ArrowLeftIcon /></Button>}<ActorAvatar name={title} className="size-9" /><div><DialogTitle>{title}</DialogTitle></div></div>
-      {actorId && <div className="dl-actor-dialog-actions"><Button variant="ghost" size="icon-sm" aria-label={t("actor_dialog.search_this_conversation")} disabled={actor?.id !== actorId} onClick={() => setSearching(true)}><SearchIcon /></Button><Button variant="ghost" size="icon-sm" aria-label={t("actor_dialog.open_in_main_window")} disabled={actor?.id !== actorId} onClick={() => onMain(actorId, targetMessage?.id)}><ArrowUpRightIcon /></Button></div>}
+      {actorId && <div className="dl-actor-dialog-actions"><Button variant="ghost" size="icon-sm" aria-label={t("actor_dialog.search_this_conversation")} disabled={actor?.id !== actorId} onClick={() => setSearching(true)}><SearchIcon /></Button><Button variant="ghost" size="icon-sm" aria-label={t("actor_dialog.open_in_main_window")} title={t("actor_dialog.open_in_main_window")} disabled={actor?.id !== actorId} onClick={() => onMain(actorId, targetMessage?.id)}><Maximize2Icon /></Button></div>}
     </DialogHeader>
     {actorId && <ConversationPane key={actorId} actorId={actorId} connectionMessage={connectionMessage} access={access} onActor={onActor} onAccessRevoked={onAccessRevoked} models={models} ready={ready} compact refreshVersion={refreshVersion} targetMessage={targetMessage} onActorLoaded={loaded} />}
     {actorId && <SearchDialog open={searching} onOpenChange={setSearching} actorId={actorId} onSelect={message => setTargetMessage(old => ({ id: message.id, revision: (old?.revision || 0) + 1 }))} />}

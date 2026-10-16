@@ -14,6 +14,7 @@ import {
   emitEvent,
   newId,
   now,
+  ROOT_ACTOR_ID,
   stageSettings,
   store,
   touchMessage,
@@ -63,8 +64,8 @@ export function registerRunClearer(clear: () => void): void {
 
 function seed(): void {
   const root = createActor({
-    id: "root",
-    name: "Root",
+    id: ROOT_ACTOR_ID,
+    name: "Daat Locus",
     parent_id: null,
     apps: ["actors"],
     model: "mock-large",
@@ -79,15 +80,15 @@ function seed(): void {
   });
   const research = createActor({
     id: "research",
-    name: "Research",
-    parent_id: "root",
+    name: "检查消息滚动与输入框布局",
+    parent_id: ROOT_ACTOR_ID,
     apps: ["files", "browser"],
     model: "mock-mini",
     approval_mode: "none",
     read_only: true,
     readable_roots: ["~/research"],
     writable_roots: [],
-    message_targets: ["root"],
+    message_targets: [ROOT_ACTOR_ID],
     allow_children: false,
     workspace: "~/research",
     instructions: "Read-only investigation Actor seeded by the mock server.",
@@ -95,16 +96,13 @@ function seed(): void {
 
   seedHistory(root, [
     {
-      user: "Welcome to the DaatLocus mock server. What can you do here?",
+      user: "帮我检查一下消息滚动和输入框布局。",
       reply:
-        "This conversation is served entirely by the local mock daemon in `webui/mock`.\n\n" +
-        "- Send a message and watch the streaming timeline, thinking view and a simulated **files__list_directory** tool round.\n" +
-        "- This Actor uses approval mode `ask`, so the tool call pauses for your approval.\n" +
-        "- Reset everything with `POST /__mock/reset`.\n",
+        "已经交给工作对话检查，完成后会把结果发到这里。",
       tool: {
-        name: "files__list_directory",
-        summary: "Listed 3 entries in .",
-        arguments: { path: "." },
+        name: "actors__send",
+        summary: "检查消息滚动与输入框布局",
+        arguments: { actor_id: "research", content: "检查消息滚动与输入框布局。" },
         payload: {
           path: ".",
           entries: [
@@ -115,24 +113,25 @@ function seed(): void {
           next_cursor: null,
         },
         model_content: "README.md\nsrc/\npackage.json",
-        outcome: { path: ".", entries: 3 },
+        outcome: { actor_id: "research", name: "检查消息滚动与输入框布局" },
       },
     },
     {
-      user: "How do approvals work in the mock?",
+      user: "手机上的长消息也一起看看，输入框不要挡住最后一句。",
       reply:
-        "When an Actor is configured with approval mode `ask`, the engine pauses before a tool call and emits an `approval_requested` event. Resolve it from the approval card (or `POST /v1/approvals/{id}`) and the run continues; denying it finishes the tool round with an error instead.\n",
+        "会一起检查。重点看窄屏换行、输入框展开后的留白，以及历史消息的位置是否保持稳定。",
     },
   ]);
 
   seedHistory(research, [
     {
-      user: "Summarize the notes in the research folder.",
+      user: "检查消息滚动与输入框布局，包含桌面和手机。",
       reply:
-        "I scanned `~/research` (read-only) and found two notes:\n\n" +
-        "1. `sse-protocol.md` — event cursor and replay rules.\n" +
-        "2. `fixtures.md` — seed data checklist for the mock.\n\n" +
-        "Both look up to date.\n",
+        "消息区现在铺满整个对话区域，输入框悬浮在底部。\n\n" +
+        "- 展开输入框时，正在阅读的历史消息位置保持不变。\n" +
+        "- 滚动到底部后，最后一句始终留在输入框上方。\n" +
+        "- 390px 窄屏下，代码、表格和长链接可以独立横向滚动。\n\n" +
+        "桌面和手机布局都已检查。",
       tool: {
         name: "files__list_directory",
         summary: "Listed 2 entries in ~/research",
@@ -172,14 +171,7 @@ function seedHistory(actor: ActorStore, exchanges: Exchange[]): void {
     emitEvent(actorId, { type: "message_added", message_id: user.id });
 
     const replyStarted = ts + 1_000;
-    const reply = addMessage(actor, {
-      kind: "result",
-      source: { kind: "actor", actor_id: actorId },
-      reply_to: { kind: "user" },
-      in_reply_to: user.id,
-      content: "",
-      status: "completed",
-    });
+    const reply = user;
     touchMessage(reply, {
       created_at_ms: replyStarted,
       started_at_ms: replyStarted,

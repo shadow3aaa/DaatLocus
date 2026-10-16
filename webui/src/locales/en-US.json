@@ -38,10 +38,6 @@
     "models": "Models",
     "use_default_model": "Use default model",
     "manage_models_and_connections": "Manage models and connections",
-    "stop_dictation": "Stop dictation",
-    "dictate": "Dictate",
-    "dictating_click_to_stop": "Dictating. Click to stop.",
-    "dictation_is_unavailable_in_this_browser": "Dictation is unavailable in this browser",
     "stop_task": "Stop task",
     "queue_message": "Queue message",
     "send_message": "Send message"

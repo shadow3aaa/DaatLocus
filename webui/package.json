@@ -13,10 +13,9 @@
     "typecheck": "bun run build:auth && tsc -p tsconfig.json --noEmit",
     "typecheck:mock": "tsc -p tsconfig.mock.json --noEmit",
     "mock": "bun mock/server.ts",
-    "dev:mock": "DAAT_LOCUS_DAEMON_URL=http://127.0.0.1:45826 bun run dev"
+    "dev:mock": "DAAT_LOCUS_MOCK=1 vite"
   },
   "dependencies": {
-    "@fontsource-variable/geist": "^5.2.9",
     "@tauri-apps/api": "^2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

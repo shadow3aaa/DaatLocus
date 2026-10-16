@@ -27,6 +27,18 @@ the embedded service. The retired simulated `webui_fixture` is not a development
 entry point. Use a separate profile and temporary workspace for manual checks;
 never substitute real user data for fixtures.
 
+For an independent visual preview, run `bun run dev:mock` in `webui` and open
+`http://127.0.0.1:5173/__mock` (use the port Vite prints). One Vite process serves
+the actual shared WebUI and an in-memory HTTP/SSE mock; no daemon, account,
+wasm-pack or Rust compiler is needed. The scene picker covers conversations,
+activity, approvals, queue, attachments, long content, login and connection states.
+Each scene also has 320px and 390px frame previews for responsive checks.
+Use the regular UI to open settings or move an Actor dialog to the main window.
+Switching scenes resets only mock data. Authentication is deliberately unavailable
+in this preview; production builds retain the real OPAQUE/WASM path and omit the
+preview routes. Validate fixtures with `bun run typecheck:mock` and
+`bun test tests/mock-preview.test.ts`; use service contract tests for backend behavior.
+
 For backend-only checks set `DAAT_LOCUS_BUILD_WEBUI=0`. These builds require
 neither Bun nor wasm-pack. `DAAT_LOCUS_MODEL_CATALOG_PATH` can supply a validated
 models.dev JSON snapshot for offline builds; Cargo `--offline` does not disable

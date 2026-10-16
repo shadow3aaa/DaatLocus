@@ -1,7 +1,6 @@
 /**
- * HTTP routing for the mock daemon. Implements the exact client contract of
- * `src/lib/actor-api.ts` and `src/lib/stage-api.ts`: JSON bodies, `{message,
- * code}` errors, cursor pages and the SSE event streams.
+ * Development fixtures for the client HTTP/SSE wire shapes. Authentication,
+ * permissions and actual execution remain the real service's responsibility.
  */
 import type {
   Access,
@@ -15,7 +14,7 @@ import type {
 } from "../src/lib/actor-api";
 import type { CoreStatus, Device, DeviceSettings, PublicLoginStatus, StageInfo } from "../src/lib/stage-api";
 import { cancelTurn, isActorBusy, submitTurn } from "./engine";
-import { resetStore } from "./fixtures";
+import { activateScenario, previewState, scenarios } from "./scenarios";
 import { sseResponse } from "./sse";
 import {
   ACCOUNT_ID,
@@ -115,16 +114,7 @@ async function jsonBody(req: Request): Promise<Record<string, unknown> | null> {
 }
 
 function coreStatus(): CoreStatus {
-  return {
-    worker_stage_id: STAGE_ID,
-    epoch: 1,
-    synchronized: true,
-    ready: true,
-    model_ready: true,
-    state: "ready",
-    error_code: null,
-    config_revision: "1",
-  };
+  return {...previewState.core};
 }
 
 function publicLogin(): PublicLoginStatus {
@@ -132,7 +122,8 @@ function publicLogin(): PublicLoginStatus {
 }
 
 function readiness(): ConfigReadiness {
-  return { kind: "complete", port: MOCK_PORT, recovered: false, ready: true };
+  const ready=configHolder.current.models.length>0;
+  return { kind: ready?"complete":"unconfigured", port: MOCK_PORT, recovered: false, ready };
 }
 
 function decodeSegment(value: string): string {
@@ -199,18 +190,40 @@ export async function handle(req: Request): Promise<Response> {
 async function route(method: string, path: string, url: URL, req: Request): Promise<Response | null> {
   let match: RegExpMatchArray | null;
 
+  if (RE_MESSAGES.test(path) && method === "GET") {
+    if(previewState.id==="loading") await new Promise(resolve=>setTimeout(resolve,2000));
+    if(previewState.id==="request-error") return json({message:"Service unavailable",code:"unavailable"},503);
+  }
+  if(previewState.id==="reconnecting" && (path==="/v1/event-stream"||RE_ACTOR_STREAM.test(path))) return json({message:"Stream unavailable",code:"unavailable"},503);
+
   // ---- mock control -------------------------------------------------------
+  if(path==="/__mock/frame" && method==="GET") {
+    const id=url.searchParams.get("scene")??"conversation";
+    const scene=scenarios.find(item=>item.id===id);
+    if(!scene) return invalidRequest("Unknown preview scenario");
+    const width=url.searchParams.get("width")==="320"?320:390;
+    return new Response(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${scene.label} · ${width}px</title><style>body{margin:0;background:#e9e9e9;font:14px/1.5 system-ui,sans-serif}nav{padding:12px;text-align:center}a{color:#333;margin:0 12px}iframe{display:block;border:0;margin:0 auto;width:${width}px;height:calc(100dvh - 45px);max-height:844px;max-width:100%;background:#fcfcfc}</style><nav><a href="/__mock">所有场景</a><a href="/__mock/frame?scene=${scene.id}&width=320">320px</a><a href="/__mock/frame?scene=${scene.id}&width=390">390px</a></nav><iframe title="${scene.label}" src="/__mock/open?scene=${scene.id}"></iframe></html>`,{headers:{"Content-Type":"text/html; charset=utf-8"}});
+  }
+  if(path==="/__mock" && method==="GET") return new Response(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Daat Locus · UI 预览</title><style>body{font:15px/1.5 system-ui,sans-serif;margin:0;background:#fafafa;color:#222}main{max-width:800px;margin:48px auto;padding:0 24px}h1{font-size:24px;margin-bottom:8px}p{color:#666}nav{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:28px}article{padding:16px;border:1px solid #ddd;border-radius:12px;background:white}article>a{display:block}article>span{display:flex;gap:16px;margin-top:12px}article>span a{font-size:13px;color:#666}a{color:inherit;text-decoration:none;padding:0;border:1px solid #ddd;border-radius:12px;background:white}a:hover{border-color:#999}small{display:block;margin-top:6px;color:#777}</style><main><h1>WebUI 场景预览</h1><p>使用实际 WebUI 组件和内存数据。切换场景会清除本次预览的草稿以外的数据；不会连接真实账号或设备。</p><nav>${scenarios.map(scene=>`<article><a href="/__mock/open?scene=${scene.id}">${scene.label}<small>${scene.id}</small></a><span><a href="/__mock/frame?scene=${scene.id}&width=390">手机 390px</a><a href="/__mock/frame?scene=${scene.id}&width=320">窄屏 320px</a></span></article>`).join("")}</nav></main></html>`,{headers:{"Content-Type":"text/html; charset=utf-8"}});
+  if(path==="/__mock/scenarios" && method==="GET") return json({items:scenarios,current:previewState.id});
+  if(path==="/__mock/open" && method==="GET") {
+    const id=url.searchParams.get("scene")??"conversation";
+    if(!activateScenario(id)) return invalidRequest("Unknown preview scenario");
+    const scene=scenarios.find(item=>item.id===id)!;
+    return new Response(null,{status:303,headers:{Location:scene.actor===ROOT_ACTOR_ID?"/":`/actors/${scene.actor}`}});
+  }
+  if(path==="/__mock/scenario" && method==="POST") {const body=await jsonBody(req);if(typeof body?.id!=="string"||!activateScenario(body.id))return invalidRequest("Unknown preview scenario");return json({id:previewState.id});}
   if (path === "/__mock/health" && method === "GET") return json({ ok: true });
   if (path === "/__mock/reset" && method === "POST") {
-    resetStore();
+    activateScenario("conversation");
     return json({ ok: true, reset: true });
   }
 
   // ---- account / access ---------------------------------------------------
-  if (path === "/v1/access" && method === "GET") return json(ACCESS);
+  if (path === "/v1/access" && method === "GET") return previewState.authenticated?json(ACCESS):json({message:"Sign in required",code:"unauthorized"},401);
   if (path === "/v1/account" && method === "GET") {
     const account: AccountInfo = {
-      registered: true,
+      registered: previewState.registered,
       account_id: ACCOUNT_ID,
       name: ACCOUNT_NAME,
       can_create: true,
@@ -226,7 +239,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     const stage: StageInfo = {
       stage_id: STAGE_ID,
       account_id: ACCOUNT_ID,
-      name: "Mock Stage",
+      name: ACCOUNT_NAME,
       settings: { ...stageSettings },
       address: `127.0.0.1:${MOCK_PORT}`,
       primary_actor_id: ROOT_ACTOR_ID,
@@ -245,7 +258,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
       error_code: null,
       connection: { status: "online", route: null, generation: 1, retry_at_ms: 0 },
     };
-    return json({ items: [device], next_cursor: null } satisfies Page<Device, string>);
+    return json({ items: [device,...previewState.devices], next_cursor: null } satisfies Page<Device, string>);
   }
   if (path === "/v1/stage/settings" && method === "PATCH") {
     const body = await jsonBody(req);

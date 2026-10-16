@@ -1,16 +1,13 @@
-import { getCurrentWebUiLanguage, t } from "@/lib/i18n";
+import { t } from "@/lib/i18n";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { isAndroid } from "@/lib/mobile";
-import { ArrowUpIcon, ChevronDownIcon, FileIcon, FolderIcon, HandIcon, MicIcon, PaperclipIcon, PlusIcon, ShieldCheckIcon, ShieldIcon, SquareIcon, XIcon } from "lucide-react";
+import { ArrowUpIcon, ChevronDownIcon, FileIcon, FolderIcon, HandIcon, PaperclipIcon, PlusIcon, ShieldCheckIcon, ShieldIcon, SquareIcon, XIcon } from "lucide-react";
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Spinner } from "@/components/ui/spinner";
 import type { ApprovalMode, Attachment } from "@/lib/actor-api";
 import { cn } from "@/lib/utils";
 
-type Recognition = { lang: string; interimResults: boolean; continuous: boolean; start(): void; stop(): void; onresult: ((event: { results: { isFinal: boolean; 0: { transcript: string } }[]; resultIndex: number }) => void) | null; onend: (() => void) | null; onerror: (() => void) | null };
-type SpeechWindow = Window & { SpeechRecognition?: new () => Recognition; webkitSpeechRecognition?: new () => Recognition };
 export type ComposerModel = { name: string; label: string; effort?: string; isDefault?: boolean };
 export function modeLabel(mode: ApprovalMode): string {
   return t({auto:"composer.auto_approval", ask:"composer.ask_for_approval", none:"composer.full_access"}[mode]);
@@ -18,50 +15,34 @@ export function modeLabel(mode: ApprovalMode): string {
 function effortLabel(value?: string): string { return value && ["none","minimal","low","medium","high","xhigh","max"].includes(value) ? t(`effort.${value}`) : value || ""; }
 const ModeIcons = { auto: ShieldCheckIcon, ask: HandIcon, none: ShieldIcon };
 
-export function Composer({ value, onValueChange, onSubmit, attachments, onFiles, onRemoveAttachment, uploading, busy, working, onStop, disabled, submissionDisabled, canManage, mode, onModeChange, models, modelName, onModelChange, placeholder = t("composer.message"), language = getCurrentWebUiLanguage(), compact = false, presentation = "work" }: {
+export function Composer({ value, onValueChange, onSubmit, attachments, onFiles, onRemoveAttachment, uploading, busy, working, onStop, disabled, submissionDisabled, canManage, mode, onModeChange, models, modelName, onModelChange, placeholder = t("composer.message"), compact = false, presentation = "work" }: {
   value: string; onValueChange(value: string): void; onSubmit(): void; attachments: Attachment[]; onFiles(files: File[]): void;
   onRemoveAttachment(id: string): void; uploading: boolean; busy: boolean; working: boolean; onStop(): void;
   disabled?: boolean; submissionDisabled?: boolean; canManage: boolean; mode: ApprovalMode; onModeChange(mode: ApprovalMode): void;
-  models: ComposerModel[]; modelName: string; onModelChange(name: string): void; placeholder?: string; language?: string; compact?: boolean; presentation?: "primary" | "work";
+  models: ComposerModel[]; modelName: string; onModelChange(name: string): void; placeholder?: string; compact?: boolean; presentation?: "primary" | "work";
 }) {
   const text = useRef<HTMLTextAreaElement>(null);
   const file = useRef<HTMLInputElement>(null);
   const folder = useRef<HTMLInputElement>(null);
-  const recognizer = useRef<Recognition | null>(null);
-  const currentValue = useRef(value);
-  const [listening, setListening] = useState(false);
   const [dragging, setDragging] = useState(false);
   const ModeIcon = ModeIcons[mode];
   const preference = models.some(model => model.name === modelName) ? modelName : "";
   const selected = models.find(model => model.name === preference) || models.find(model => model.isDefault);
   const canSend = !disabled && !submissionDisabled && !busy && !uploading && (Boolean(value.trim()) || attachments.length > 0);
-  const speech = typeof window !== "undefined" ? (window as SpeechWindow).SpeechRecognition ?? (window as SpeechWindow).webkitSpeechRecognition : undefined;
-  currentValue.current = value;
   useEffect(() => {
     const element = text.current;
     if (!element) return;
-    const resize = () => { element.style.height = "auto"; const height = element.scrollHeight; element.style.height = `${Math.min(height, 240)}px`; element.style.overflowY = height > 240 ? "auto" : "hidden"; };
+    const resize = () => { element.style.height = "auto"; const height = element.scrollHeight; const limit = Math.min(240, window.innerHeight / 4); element.style.height = `${Math.min(height, limit)}px`; element.style.overflowY = height > limit ? "auto" : "hidden"; };
     resize();
     let width = element.clientWidth;
     const observer = new ResizeObserver(() => { if (element.clientWidth !== width) { width = element.clientWidth; resize(); } });
     observer.observe(element);
-    return () => observer.disconnect();
+    window.addEventListener("resize", resize);
+    return () => { observer.disconnect(); window.removeEventListener("resize", resize); };
   }, [value]);
-  useEffect(() => { if (disabled) { recognizer.current?.stop(); setListening(false); } }, [disabled]);
-  useEffect(() => () => { const recognition = recognizer.current; if (recognition) { recognition.onresult = null; recognition.onend = null; recognition.onerror = null; recognition.stop(); } }, []);
   useEffect(() => { folder.current?.setAttribute("webkitdirectory", ""); }, []);
   function keyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); if (canSend) onSubmit(); }
-  }
-  function dictation() {
-    if (listening) { recognizer.current?.stop(); return; }
-    if (!speech || disabled) return;
-    const recognition = new speech();
-    recognition.lang = language; recognition.interimResults = false; recognition.continuous = true;
-    recognition.onresult = event => { const result = Array.from(event.results).slice(event.resultIndex).filter(result => result.isFinal).map(result => result[0].transcript).join(""); if (result) onValueChange(currentValue.current + result); };
-    recognition.onend = recognition.onerror = () => setListening(false);
-    recognizer.current = recognition;
-    try { recognition.start(); setListening(true); } catch { setListening(false); }
   }
   return <div className={cn("dl-composer-wrap", compact && "dl-composer-compact", presentation === "primary" && "dl-primary-composer")}>
     <InputGroup className={cn("dl-composer", dragging && "dl-composer-dragging")} onDragOver={event => { if (!disabled && !uploading && event.dataTransfer.types.includes("Files")) { event.preventDefault(); setDragging(true); } }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); if (!disabled && !uploading) onFiles(Array.from(event.dataTransfer.files)); }}>
@@ -91,7 +72,6 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
             {models.map(model => <DropdownMenuRadioItem value={model.name} key={model.name}><span className="dl-menu-choice"><span>{model.label}</span>{(model.effort || model.name !== model.label) && <small>{effortLabel(model.effort) || model.name}</small>}</span></DropdownMenuRadioItem>)}
           </DropdownMenuRadioGroup></DropdownMenuContent>
         </DropdownMenu>}
-        <Tooltip><TooltipTrigger asChild><InputGroupButton size="icon-sm" aria-label={listening ? t("composer.stop_dictation") : t("composer.dictate")} aria-pressed={listening} disabled={disabled || !speech} onClick={dictation} className={cn("dl-mic-button", listening && "dl-mic-active")}><MicIcon /></InputGroupButton></TooltipTrigger><TooltipContent>{speech ? listening ? t("composer.dictating_click_to_stop") : t("composer.dictate") : t("composer.dictation_is_unavailable_in_this_browser")}</TooltipContent></Tooltip>
         {working && <InputGroupButton size="icon-sm" variant="default" className="dl-send-button dl-stop-button" aria-label={t("composer.stop_task")} disabled={busy} onClick={onStop}><SquareIcon /></InputGroupButton>}{(!working || canSend) && <InputGroupButton size="icon-sm" variant="default" className="dl-send-button" aria-label={working && presentation !== "primary" ? t("composer.queue_message") : t("composer.send_message")} disabled={!canSend} onClick={onSubmit}>{busy ? <Spinner /> : <ArrowUpIcon />}</InputGroupButton>}
       </InputGroupAddon>
     </InputGroup>

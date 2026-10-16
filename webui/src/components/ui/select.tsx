@@ -2,6 +2,7 @@ import * as React from "react"
 import { Select as SelectPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
+import { DialogLayerContext, dismissDialogPopup } from "@/components/ui/dialog-layer"
 import { ChevronDownIcon, CheckIcon } from "lucide-react"
 
 function Select({
@@ -60,8 +61,10 @@ function SelectContent({
   children,
   position = "item-aligned",
   align = "center",
+  onPointerDownOutside,
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Content>) {
+  const dialog = React.useContext(DialogLayerContext)
   return (
     <SelectPrimitive.Portal>
       <SelectPrimitive.Content
@@ -71,6 +74,10 @@ function SelectContent({
         position={position}
         align={align}
         {...props}
+        onPointerDownOutside={event => {
+          dismissDialogPopup(dialog, event.detail.originalEvent)
+          onPointerDownOutside?.(event)
+        }}
       >
         <SelectPrimitive.Viewport
           data-slot="select-viewport"

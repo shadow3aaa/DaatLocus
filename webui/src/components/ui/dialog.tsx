@@ -3,6 +3,7 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { DialogLayerContext } from "@/components/ui/dialog-layer"
 import { XIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
@@ -50,13 +51,16 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  onPointerDownOutside,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
 }) {
   const { t } = useTranslation()
+  const parent = React.useContext(DialogLayerContext)
+  const layer = React.useMemo(() => ({ parent, childDismissals: new WeakSet<Event>() }), [parent])
   return (
-    <DialogPortal>
+    <DialogLayerContext.Provider value={layer}><DialogPortal>
       <DialogOverlay />
       <DialogPrimitive.Content
         data-slot="dialog-content"
@@ -65,6 +69,10 @@ function DialogContent({
           className
         )}
         {...props}
+        onPointerDownOutside={event => {
+          if (layer.childDismissals.has(event.detail.originalEvent)) event.preventDefault()
+          onPointerDownOutside?.(event)
+        }}
       >
         {children}
         {showCloseButton && (
@@ -81,7 +89,7 @@ function DialogContent({
           </DialogPrimitive.Close>
         )}
       </DialogPrimitive.Content>
-    </DialogPortal>
+    </DialogPortal></DialogLayerContext.Provider>
   )
 }
 

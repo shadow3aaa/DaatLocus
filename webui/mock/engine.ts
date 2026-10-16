@@ -8,12 +8,12 @@ import type { ApprovalDecision, JsonValue, MessageRecord } from "../src/lib/acto
 import { registerRunClearer } from "./fixtures";
 import {
   addApproval,
-  addMessage,
   addTool,
   emitEvent,
   getActor,
   newId,
   now,
+  ROOT_ACTOR_ID,
   resolveApprovalRecord,
   setActorStatus,
   store,
@@ -34,7 +34,10 @@ const runsByReply = new Map<string, Run>();
 const activeActors = new Set<string>();
 
 registerRunClearer(() => {
-  for (const run of runsByUserMessage.values()) run.cancelled = true;
+  for (const run of runsByUserMessage.values()) {
+    run.cancelled = true;
+    run.wake?.();
+  }
   runsByUserMessage.clear();
   runsByReply.clear();
   activeActors.clear();
@@ -100,22 +103,15 @@ async function rest(run: Run, ms: number): Promise<boolean> {
 }
 
 function compose(actorName: string, input: string): { reasoning: string[]; assistant: string[] } {
-  const topic = input.trim().replace(/\s+/g, " ").slice(0, 120) || "(an empty message)";
+  const topic = input.trim().replace(/\s+/g, " ").slice(0, 120);
   return {
     reasoning: [
-      `The Owner asked ${actorName}: "${topic}". `,
-      "Check the workspace with the files__list_directory tool first, then answer with a short markdown summary.",
+      `${actorName} 需要处理：${topic}。`,
+      "先查看相关文件，再核对修改后的布局。",
     ],
     assistant: [
-      `You asked: **${topic}**\n\n`,
-      "This reply is produced by the local development mock server. ",
-      "It streams in small chunks so the live draft, ",
-      "the thinking view and the tool round all render.\n\n",
-      "### What the mock did\n",
-      "1. Streamed a `reasoning` channel before this answer.\n",
-      "2. Ran one simulated **files__list_directory** tool call with a fetchable result.\n",
-      "3. Completed the message with this text as the final `reply`.\n\n",
-      "> Tip: `POST /__mock/reset` re-seeds the fixtures at any time.\n",
+      "我会先查看对话区域和输入框的布局。\n\n",
+      "重点检查滚动范围、窄屏换行，以及输入框展开后历史消息的位置。\n\n",
     ],
   };
 }
@@ -137,29 +133,33 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
       return;
     }
 
-    const reply = addMessage(actor, {
-      kind: "result",
-      source: { kind: "actor", actor_id: actorId },
-      reply_to: { kind: "user" },
-      in_reply_to: user.id,
-      content: "",
-      status: "running",
-    });
+    const reply = user;
     run.replyId = reply.id;
     runsByReply.set(reply.id, run);
     touchMessage(user, { status: "running" });
     emitEvent(actorId, { type: "message_added", message_id: reply.id });
     emitEvent(actorId, { type: "generation_started", message_id: reply.id, generation: 1 });
 
+    if (actorId === ROOT_ACTOR_ID) {
+      const callId = newId(), resultId = newId(), started = now();
+      const text = "已经交给工作对话检查，完成后会把结果发到这里。";
+      emitEvent(actorId, { type: "tool_started", message_id: reply.id, call_id: callId, name: "actors__send" });
+      if (!(await rest(run, 250))) return cancelRun(actor, user, reply, "");
+      addTool(actor, { id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__send", summary: "检查消息滚动与输入框布局", error: null, started_at_ms: started, finished_at_ms: now(), arguments: { actor_id: "research", content: user.content }, model_content: "请求已送达。", outcome: { actor_id: "research", name: "检查消息滚动与输入框布局" }, payload: null });
+      emitEvent(actorId, { type: "tool_finished", message_id: reply.id, call_id: callId, name: "actors__send", result_id: resultId, summary: "检查消息滚动与输入框布局", error: null, outcome: { actor_id: "research", name: "检查消息滚动与输入框布局" } });
+      completeRun(actor, user, reply, text);
+      return;
+    }
+
     const composed = compose(actorName, user.content);
     let assistantText = "";
 
     for (const chunk of composed.reasoning) {
-      if (!(await rest(run, 30 + Math.floor(Math.random() * 20)))) return cancelRun(actor, user, reply, assistantText);
+      if (!(await rest(run, 40))) return cancelRun(actor, user, reply, assistantText);
       emitEvent(actorId, { type: "generation_delta", message_id: reply.id, generation: 1, channel: "reasoning", text: chunk });
     }
     for (const chunk of composed.assistant) {
-      if (!(await rest(run, 20 + Math.floor(Math.random() * 20)))) return cancelRun(actor, user, reply, assistantText);
+      if (!(await rest(run, 30))) return cancelRun(actor, user, reply, assistantText);
       assistantText += chunk;
       emitEvent(actorId, { type: "generation_delta", message_id: reply.id, generation: 1, channel: "assistant", text: chunk });
     }
@@ -180,7 +180,9 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
         });
         const decision = await new Promise<ApprovalDecision>(resolve => {
           store.approvalWakers.set(record.id, resolve);
+          run.wake = () => resolve("cancelled");
         });
+        run.wake = null;
         if (run.cancelled) return cancelRun(actor, user, reply, assistantText);
         denied = decision !== "approved";
       }
@@ -232,10 +234,10 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
     });
 
     const closing = denied
-      ? "\nThe files__list_directory call was **denied**, so I skipped the listing.\n"
-      : "\nThe listing above came from the simulated `files__list_directory` tool round.\n";
+      ? "\n这次文件访问没有获批，任务已停止，之前的检查记录仍然保留。\n"
+      : "\n已经找到相关文件，可以继续检查具体的布局规则。\n";
     for (const chunk of chunkAround(closing, 24)) {
-      if (!(await rest(run, 20 + Math.floor(Math.random() * 20)))) return cancelRun(actor, user, reply, assistantText);
+      if (!(await rest(run, 30))) return cancelRun(actor, user, reply, assistantText);
       assistantText += chunk;
       emitEvent(actorId, { type: "generation_delta", message_id: reply.id, generation: 1, channel: "assistant", text: chunk });
     }
@@ -243,10 +245,13 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
     if (!(await rest(run, 50))) return cancelRun(actor, user, reply, assistantText);
     completeRun(actor, user, reply, assistantText);
   } finally {
-    if (run.replyId) runsByReply.delete(run.replyId);
-    runsByUserMessage.delete(run.userMessageId);
-    activeActors.delete(actorId);
-    drainQueue(actor);
+    if (store.actors.get(actorId) === actor) {
+      if (run.replyId) runsByReply.delete(run.replyId);
+      runsByUserMessage.delete(run.userMessageId);
+      activeActors.delete(actorId);
+      drainQueue(actor);
+      if (!activeActors.has(actorId)) setActorStatus(actor, "idle");
+    }
   }
 }
 
@@ -267,6 +272,7 @@ function addApprovalSafe(actor: ActorStore, messageId: string, callId: string) {
 
 
 function completeRun(actor: ActorStore, user: MessageRecord, reply: MessageRecord, text: string): void {
+  if (store.actors.get(actor.summary.id) !== actor) return;
   const finished = now();
   touchMessage(reply, {
     status: "completed",
@@ -275,11 +281,14 @@ function completeRun(actor: ActorStore, user: MessageRecord, reply: MessageRecor
     finished_at_ms: finished,
   });
   emitEvent(actor.summary.id, { type: "message_updated", message_id: reply.id, status: "completed" });
-  touchMessage(user, { status: "completed", finished_at_ms: finished });
-  emitEvent(actor.summary.id, { type: "message_updated", message_id: user.id, status: "completed" });
+  if (user.id !== reply.id) {
+    touchMessage(user, { status: "completed", finished_at_ms: finished });
+    emitEvent(actor.summary.id, { type: "message_updated", message_id: user.id, status: "completed" });
+  }
 }
 
 function cancelRun(actor: ActorStore, user: MessageRecord, reply: MessageRecord, partial: string): void {
+  if (store.actors.get(actor.summary.id) !== actor) return;
   touchMessage(reply, {
     status: "cancelled",
     cancel_requested: true,
@@ -287,11 +296,14 @@ function cancelRun(actor: ActorStore, user: MessageRecord, reply: MessageRecord,
     finished_at_ms: now(),
   });
   emitEvent(actor.summary.id, { type: "message_updated", message_id: reply.id, status: "cancelled" });
-  touchMessage(user, { status: "completed", finished_at_ms: now() });
-  emitEvent(actor.summary.id, { type: "message_updated", message_id: user.id, status: "completed" });
+  if (user.id !== reply.id) {
+    touchMessage(user, { status: "completed", finished_at_ms: now() });
+    emitEvent(actor.summary.id, { type: "message_updated", message_id: user.id, status: "completed" });
+  }
 }
 
 function cancelUserOnly(actor: ActorStore, user: MessageRecord): void {
+  if (store.actors.get(actor.summary.id) !== actor) return;
   touchMessage(user, { status: "cancelled", cancel_requested: true, finished_at_ms: now() });
   emitEvent(actor.summary.id, { type: "message_updated", message_id: user.id, status: "cancelled" });
 }
