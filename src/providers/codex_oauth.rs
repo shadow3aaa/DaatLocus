@@ -553,9 +553,11 @@ impl CodexResponsesClient {
         let mut last_assistant_progress_emit_at = Instant::now();
         let mut assistant_char_len = 0usize;
         let mut last_assistant_progress_char_len = 0usize;
+        let mut last_assistant_progress_byte_len = 0usize;
         let mut last_reasoning_progress_emit_at = Instant::now();
         let mut reasoning_char_len = 0usize;
         let mut last_reasoning_progress_char_len = 0usize;
+        let mut last_reasoning_progress_byte_len = 0usize;
         let mut stream = response.bytes_stream();
         let stream_request_context = [
             format!("model={}", self.model),
@@ -619,10 +621,13 @@ impl CodexResponsesClient {
                                         >= Duration::from_millis(800);
                                 if should_emit && !delta_content.trim().is_empty() {
                                     if let Some(progress) = progress {
-                                        progress.emit_assistant_content(delta_content.clone());
+                                        progress.emit_assistant_delta(
+                                            &delta_content[last_assistant_progress_byte_len..],
+                                        );
                                     }
                                     last_assistant_progress_emit_at = Instant::now();
                                     last_assistant_progress_char_len = assistant_char_len;
+                                    last_assistant_progress_byte_len = delta_content.len();
                                 }
                             }
                         }
@@ -641,10 +646,13 @@ impl CodexResponsesClient {
                                         >= Duration::from_millis(800);
                                 if should_emit && !reasoning_content.trim().is_empty() {
                                     if let Some(progress) = progress {
-                                        progress.emit_reasoning_content(reasoning_content.clone());
+                                        progress.emit_reasoning_delta(
+                                            &reasoning_content[last_reasoning_progress_byte_len..],
+                                        );
                                     }
                                     last_reasoning_progress_emit_at = Instant::now();
                                     last_reasoning_progress_char_len = reasoning_char_len;
+                                    last_reasoning_progress_byte_len = reasoning_content.len();
                                 }
                             }
                         }
@@ -727,14 +735,14 @@ impl CodexResponsesClient {
             && reasoning_char_len != last_reasoning_progress_char_len
             && let Some(progress) = progress
         {
-            progress.emit_reasoning_content(reasoning_content.clone());
+            progress.emit_reasoning_delta(&reasoning_content[last_reasoning_progress_byte_len..]);
         }
         if emit_progress
             && !delta_content.trim().is_empty()
             && assistant_char_len != last_assistant_progress_char_len
             && let Some(progress) = progress
         {
-            progress.emit_assistant_content(delta_content.clone());
+            progress.emit_assistant_delta(&delta_content[last_assistant_progress_byte_len..]);
         }
 
         let content = if output_messages.is_empty() {
@@ -2480,6 +2488,44 @@ mod tests {
         assert_eq!(usage.reasoning_output_tokens, 2);
         assert_eq!(usage.total_tokens, 15);
     }
+    #[tokio::test]
+    async fn responses_progress_emits_only_unsent_utf8_text_and_flushes_the_tail() {
+        use crate::core::ModelProgressEvent;
+        let client = test_client();
+        for tail in [" 尾\n", ""] {
+            let assistant = "段🙂".repeat(32);
+            let reasoning = "思🙂".repeat(32);
+            let mut events = vec![];
+            for (text, thinking) in [assistant.as_str(), assistant.as_str(), tail]
+                .into_iter()
+                .zip([reasoning.as_str(), reasoning.as_str(), tail])
+            {
+                events.push(json!({"type":"response.output_text.delta","delta":text}));
+                events.push(json!({"type":"response.reasoning_text.delta","delta":thinking}));
+            }
+            events.push(json!({"type":"response.completed","response":{"output":[]}}));
+            let response = super::super::responses_protocol::test_sse_response(&events, true).await;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let progress = ModelProgressSink::new(tx);
+            client
+                .parse_responses_stream(Some(&progress), response, true)
+                .await
+                .unwrap();
+            let mut actual_assistant = vec![];
+            let mut actual_reasoning = vec![];
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    ModelProgressEvent::AssistantDelta { text } => actual_assistant.push(text),
+                    ModelProgressEvent::ReasoningDelta { text } => actual_reasoning.push(text),
+                    other => panic!("unexpected progress: {other:?}"),
+                }
+            }
+            for (actual, chunk) in [(actual_assistant, assistant), (actual_reasoning, reasoning)] {
+                assert_eq!(actual.concat(), format!("{chunk}{chunk}{tail}"));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn responses_stream_preserves_final_output_and_rejects_missing_completion() {
         let client = test_client();

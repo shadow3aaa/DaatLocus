@@ -290,7 +290,7 @@ impl ActorStore {
         }
         let mut db = sql(Connection::open(path))?;
         sql(db.busy_timeout(std::time::Duration::from_secs(5)))?;
-        sql(db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA max_page_count=262144; PRAGMA journal_size_limit=67108864;
+        sql(db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA journal_size_limit=67108864;
           CREATE TABLE IF NOT EXISTS stage_public_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS actors(id TEXT PRIMARY KEY,parent_id TEXT,depth INTEGER NOT NULL,record TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,status TEXT NOT NULL,record TEXT NOT NULL);
@@ -1950,6 +1950,23 @@ impl ActorStore {
 #[cfg(test)]
 mod outcome_tests {
     use super::*;
+
+    #[test]
+    fn database_capacity_is_not_capped_at_one_gibibyte_on_open_or_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("actors.sqlite3");
+        for _ in 0..2 {
+            let store = ActorStore::open(&path).unwrap();
+            let db = store.db.lock();
+            let pages: u64 = db
+                .query_row("PRAGMA max_page_count", [], |row| row.get(0))
+                .unwrap();
+            let page_size: u64 = db
+                .query_row("PRAGMA page_size", [], |row| row.get(0))
+                .unwrap();
+            assert!(pages * page_size > 1024 * 1024 * 1024);
+        }
+    }
 
     #[test]
     fn legacy_delegation_outcome_keeps_the_original_device_after_sync() {

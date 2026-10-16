@@ -248,6 +248,121 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[tokio::test]
+    async fn streaming_protocols_emit_each_text_fragment_once_across_requests() {
+        use crate::core::{ModelProgressEvent, ModelProgressSink};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().fallback(post(|uri: axum::http::Uri| async move {
+            let mut events = vec![];
+            let assistant = "段🙂".repeat(32);
+            let reasoning = "思🙂".repeat(32);
+            let tail = if uri.path().contains("aligned") { "" } else { " 尾\n" };
+            let chunks = [assistant.as_str(), assistant.as_str(), tail];
+            let thoughts = [reasoning.as_str(), reasoning.as_str(), tail];
+            if uri.path().ends_with("/messages") {
+                events.push(serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}));
+                events.push(serde_json::json!({"type":"content_block_start","index":1,"content_block":{"type":"text"}}));
+                for (text, thinking) in chunks.iter().zip(thoughts) {
+                    events.push(serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":thinking}}));
+                    events.push(serde_json::json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":text}}));
+                }
+                events.push(serde_json::json!({"type":"message_stop"}));
+            } else if uri.path().ends_with("/responses") {
+                for (text, thinking) in chunks.iter().zip(thoughts) {
+                    events.push(serde_json::json!({"type":"response.reasoning_text.delta","delta":thinking}));
+                    events.push(serde_json::json!({"type":"response.output_text.delta","delta":text}));
+                }
+                events.push(serde_json::json!({"type":"response.completed","response":{"output":[]}}));
+            } else if uri.path().ends_with("/api/chat") {
+                for (text, thinking) in chunks.iter().zip(thoughts) {
+                    events.push(serde_json::json!({"message":{"content":text,"thinking":thinking},"done":false}));
+                }
+                events.push(serde_json::json!({"done":true}));
+                return ([("content-type", "application/x-ndjson")], events.iter().map(|event| format!("{event}\n")).collect::<String>());
+            } else {
+                for (text, thinking) in chunks.iter().zip(thoughts) {
+                    events.push(serde_json::json!({"choices":[{"delta":{"content":text,"reasoning_content":thinking}}]}));
+                }
+                events.push(serde_json::json!({"choices":[{"delta":{},"finish_reason":"stop"}]}));
+            }
+            let mut body = events.iter().map(|event| format!("data: {event}\n\n")).collect::<String>();
+            body.push_str("data: [DONE]\n\n");
+            ([("content-type", "text/event-stream")], body)
+        }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        for path in ["zen/v1", "go/v1", "aligned/v1"] {
+            let base = format!("http://opencode.ai:{}/{path}", address.port());
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .resolve("opencode.ai", address)
+                .build()
+                .unwrap();
+            let model = ModelConfig::default();
+            let mut chat = super::super::OpenAIClient::from_parts("fixture-key", &base, &model);
+            chat.transport.client = client.clone();
+            let mut responses = super::super::responses_compat::ResponsesCompatibleClient::new(
+                "fixture-key",
+                &base,
+                &model,
+            );
+            responses.set_test_client(client.clone());
+            let mut anthropic = super::super::anthropic_compat::AnthropicCompatibleClient::new(
+                "fixture-key",
+                &base,
+                &model,
+            );
+            anthropic.set_test_client(client);
+            let ollama_host = format!("http://{address}/{path}");
+            let ollama =
+                super::super::OllamaClient::from_parts(Some(&ollama_host), &model, None, None);
+            let providers: Vec<Box<dyn ModelProvider>> = vec![
+                Box::new(chat),
+                Box::new(responses),
+                Box::new(anthropic),
+                Box::new(ollama),
+            ];
+            for provider in providers {
+                for _ in 0..2 {
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                    let request = AgentTurnRequest {
+                        messages: vec![AgentMessage::user("Test streaming")],
+                        tools: vec![],
+                    };
+                    let options =
+                        ModelRequestOptions::for_agent_turn(provider.as_ref(), &request, None)
+                            .unwrap()
+                            .with_progress(Some(ModelProgressSink::new(tx)));
+                    provider
+                        .complete_agent_turn(request, options)
+                        .await
+                        .unwrap();
+                    let mut assistant = vec![];
+                    let mut reasoning = vec![];
+                    while let Ok(event) = rx.try_recv() {
+                        match event {
+                            ModelProgressEvent::AssistantDelta { text } => assistant.push(text),
+                            ModelProgressEvent::ReasoningDelta { text } => reasoning.push(text),
+                            other => panic!("unexpected progress: {other:?}"),
+                        }
+                    }
+                    let tail = if path.starts_with("aligned") {
+                        ""
+                    } else {
+                        " 尾\n"
+                    };
+                    for (actual, token) in [(assistant, "段🙂"), (reasoning, "思🙂")] {
+                        let expected = format!("{}{tail}", token.repeat(64));
+                        assert_eq!(actual.concat(), expected, "protocol progress at {path}");
+                    }
+                }
+            }
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn rejected_credentials_are_failure_facts_without_retrying_the_request() {
         use crate::providers::{ModelFailureKind, ModelRequestFailure};
         for (status, expected) in [

@@ -213,13 +213,13 @@ impl AnthropicCompatibleClient {
                 };
                 state.apply_event(&value)?;
                 if emit_progress {
-                    state.emit_progress(progress);
+                    state.emit_progress(progress, false);
                 }
             }
         }
 
         if emit_progress {
-            state.emit_progress(progress);
+            state.emit_progress(progress, true);
         }
 
         let usage = state.token_usage();
@@ -1162,6 +1162,8 @@ struct AnthropicStreamState {
     completed: bool,
     assistant_char_len: usize,
     reasoning_char_len: usize,
+    pending_assistant: String,
+    pending_reasoning: String,
     last_assistant_progress_emit_at: Option<Instant>,
     last_assistant_progress_char_len: usize,
     last_reasoning_progress_emit_at: Option<Instant>,
@@ -1221,6 +1223,7 @@ impl AnthropicStreamState {
                             if let Some(text) = delta.get("text").and_then(Value::as_str) {
                                 let entry = self.blocks.entry(index).or_default();
                                 entry.text.push_str(text);
+                                self.pending_assistant.push_str(text);
                                 self.assistant_char_len += text.chars().count();
                             }
                         }
@@ -1228,6 +1231,7 @@ impl AnthropicStreamState {
                             if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
                                 let entry = self.blocks.entry(index).or_default();
                                 entry.thinking.push_str(text);
+                                self.pending_reasoning.push_str(text);
                                 self.reasoning_char_len += text.chars().count();
                             }
                         }
@@ -1291,29 +1295,31 @@ impl AnthropicStreamState {
             .join("")
     }
 
-    fn emit_progress(&mut self, progress: Option<&ModelProgressSink>) {
+    fn emit_progress(&mut self, progress: Option<&ModelProgressSink>, force: bool) {
         let Some(progress) = progress else {
             return;
         };
         let text_len = self.assistant_char_len;
         let should_emit_text = text_len > self.last_assistant_progress_char_len
-            && (text_len.saturating_sub(self.last_assistant_progress_char_len) >= 64
+            && (force
+                || text_len.saturating_sub(self.last_assistant_progress_char_len) >= 64
                 || self
                     .last_assistant_progress_emit_at
                     .is_none_or(|at| at.elapsed() >= Duration::from_millis(800)));
         if should_emit_text {
-            progress.emit_assistant_content(self.assistant_text());
+            progress.emit_assistant_delta(std::mem::take(&mut self.pending_assistant));
             self.last_assistant_progress_emit_at = Some(Instant::now());
             self.last_assistant_progress_char_len = text_len;
         }
         let reasoning_len = self.reasoning_char_len;
         let should_emit_reasoning = reasoning_len > self.last_reasoning_progress_char_len
-            && (reasoning_len.saturating_sub(self.last_reasoning_progress_char_len) >= 64
+            && (force
+                || reasoning_len.saturating_sub(self.last_reasoning_progress_char_len) >= 64
                 || self
                     .last_reasoning_progress_emit_at
                     .is_none_or(|at| at.elapsed() >= Duration::from_millis(800)));
         if should_emit_reasoning {
-            progress.emit_reasoning_content(self.reasoning_text());
+            progress.emit_reasoning_delta(std::mem::take(&mut self.pending_reasoning));
             self.last_reasoning_progress_emit_at = Some(Instant::now());
             self.last_reasoning_progress_char_len = reasoning_len;
         }

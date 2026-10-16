@@ -663,9 +663,13 @@ impl OpenAIClient {
         let mut tool_calls: Vec<StreamingToolCallBuilder> = Vec::new();
         let mut last_usage = None;
         let mut last_assistant_progress_emit_at = Instant::now();
+        let mut assistant_char_len = 0usize;
         let mut last_assistant_progress_char_len = 0usize;
+        let mut last_assistant_progress_byte_len = 0usize;
         let mut last_reasoning_progress_emit_at = Instant::now();
+        let mut reasoning_char_len = 0usize;
         let mut last_reasoning_progress_char_len = 0usize;
+        let mut last_reasoning_progress_byte_len = 0usize;
         let mut stream = response.bytes_stream();
         let stream_request_context = [
             format!("model={}", self.model),
@@ -747,34 +751,37 @@ impl OpenAIClient {
                 let delta = &choice["delta"];
                 if let Some(delta_content) = delta["content"].as_str() {
                     content.push_str(delta_content);
-                    let should_emit = content
-                        .chars()
-                        .count()
+                    assistant_char_len += delta_content.chars().count();
+                    let should_emit = assistant_char_len
                         .saturating_sub(last_assistant_progress_char_len)
                         >= 64
                         || last_assistant_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !content.trim().is_empty() {
                         if let Some(progress) = options.progress.as_ref() {
-                            progress.emit_assistant_content(content.clone());
+                            progress
+                                .emit_assistant_delta(&content[last_assistant_progress_byte_len..]);
                         }
                         last_assistant_progress_emit_at = Instant::now();
-                        last_assistant_progress_char_len = content.chars().count();
+                        last_assistant_progress_char_len = assistant_char_len;
+                        last_assistant_progress_byte_len = content.len();
                     }
                 }
                 if let Some(delta_reasoning_content) = delta["reasoning_content"].as_str() {
                     reasoning_content.push_str(delta_reasoning_content);
-                    let should_emit = reasoning_content
-                        .chars()
-                        .count()
+                    reasoning_char_len += delta_reasoning_content.chars().count();
+                    let should_emit = reasoning_char_len
                         .saturating_sub(last_reasoning_progress_char_len)
                         >= 64
                         || last_reasoning_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !reasoning_content.trim().is_empty() {
                         if let Some(progress) = options.progress.as_ref() {
-                            progress.emit_reasoning_content(reasoning_content.clone());
+                            progress.emit_reasoning_delta(
+                                &reasoning_content[last_reasoning_progress_byte_len..],
+                            );
                         }
                         last_reasoning_progress_emit_at = Instant::now();
-                        last_reasoning_progress_char_len = reasoning_content.chars().count();
+                        last_reasoning_progress_char_len = reasoning_char_len;
+                        last_reasoning_progress_byte_len = reasoning_content.len();
                     }
                 }
                 if let Some(delta_tool_calls) = delta["tool_calls"].as_array() {
@@ -794,16 +801,16 @@ impl OpenAIClient {
             }
         }
         if !reasoning_content.trim().is_empty()
-            && reasoning_content.chars().count() != last_reasoning_progress_char_len
+            && reasoning_content.len() != last_reasoning_progress_byte_len
             && let Some(progress) = options.progress.as_ref()
         {
-            progress.emit_reasoning_content(reasoning_content.clone());
+            progress.emit_reasoning_delta(&reasoning_content[last_reasoning_progress_byte_len..]);
         }
         if !content.trim().is_empty()
-            && content.chars().count() != last_assistant_progress_char_len
+            && content.len() != last_assistant_progress_byte_len
             && let Some(progress) = options.progress.as_ref()
         {
-            progress.emit_assistant_content(content.clone());
+            progress.emit_assistant_delta(&content[last_assistant_progress_byte_len..]);
         }
         if let Some(usage) = last_usage {
             self.record_last_usage(usage);

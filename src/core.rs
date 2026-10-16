@@ -288,12 +288,13 @@ impl TokenUsageInfo {
 /// Model providers may report model output through this sink, but they never
 /// receive mutable execution state.
 /// Model output observations, independent of clients and transports.
+/// Text events contain only newly generated text, never cumulative snapshots.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModelProgressEvent {
     GenerationStarted,
     DraftReset,
-    AssistantContent { content: String },
-    ReasoningContent { content: String },
+    AssistantDelta { text: String },
+    ReasoningDelta { text: String },
 }
 
 #[derive(Clone)]
@@ -306,16 +307,22 @@ impl ModelProgressSink {
         Self { sender }
     }
 
-    pub fn emit_assistant_content(&self, content: impl Into<String>) {
-        let _ = self.sender.send(ModelProgressEvent::AssistantContent {
-            content: content.into(),
-        });
+    pub fn emit_assistant_delta(&self, text: impl Into<String>) {
+        let text = text.into();
+        if !text.is_empty() {
+            let _ = self
+                .sender
+                .send(ModelProgressEvent::AssistantDelta { text });
+        }
     }
 
-    pub fn emit_reasoning_content(&self, content: impl Into<String>) {
-        let _ = self.sender.send(ModelProgressEvent::ReasoningContent {
-            content: content.into(),
-        });
+    pub fn emit_reasoning_delta(&self, text: impl Into<String>) {
+        let text = text.into();
+        if !text.is_empty() {
+            let _ = self
+                .sender
+                .send(ModelProgressEvent::ReasoningDelta { text });
+        }
     }
 
     /// Drop buffered draft output because the runtime committed it.

@@ -374,7 +374,7 @@ impl ModelProvider for ReplayProvider {
         }
         if let Some(progress) = options.progress {
             for _ in 0..50 {
-                progress.emit_assistant_content("small delta ");
+                progress.emit_assistant_delta("small delta ");
             }
         }
         match reply {
@@ -2162,14 +2162,21 @@ async fn actor_executes_serial_inbox_and_retains_context_across_requests() {
     ));
     }
     let events = system.store().events(0, Some("root"), false, 100).unwrap();
-    let deltas = events
-        .iter()
-        .filter(|event| matches!(event.event, ActorEvent::GenerationDelta { .. }))
-        .count();
-    assert!(
-        deltas > 0 && deltas < 100,
-        "small chunks must be coalesced before persistence"
-    );
+    for input in [&first, &second] {
+        let streamed: String = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                ActorEvent::GenerationDelta {
+                    message_id,
+                    channel,
+                    text,
+                    ..
+                } if message_id == &input.id && channel == "assistant" => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(streamed, "small delta ".repeat(50));
+    }
     system.shutdown().await;
 }
 

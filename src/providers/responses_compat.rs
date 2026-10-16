@@ -142,9 +142,11 @@ impl ResponsesCompatibleClient {
         let mut last_assistant_progress_emit_at = Instant::now();
         let mut assistant_char_len = 0usize;
         let mut last_assistant_progress_char_len = 0usize;
+        let mut last_assistant_progress_byte_len = 0usize;
         let mut last_reasoning_progress_emit_at = Instant::now();
         let mut reasoning_char_len = 0usize;
         let mut last_reasoning_progress_char_len = 0usize;
+        let mut last_reasoning_progress_byte_len = 0usize;
         let mut stream = response.bytes_stream();
         let stream_request_context = [
             format!("model={}", self.model),
@@ -211,10 +213,13 @@ impl ResponsesCompatibleClient {
                                         >= Duration::from_millis(800);
                                 if should_emit && !delta_content.trim().is_empty() {
                                     if let Some(progress) = progress {
-                                        progress.emit_assistant_content(delta_content.clone());
+                                        progress.emit_assistant_delta(
+                                            &delta_content[last_assistant_progress_byte_len..],
+                                        );
                                     }
                                     last_assistant_progress_emit_at = Instant::now();
                                     last_assistant_progress_char_len = assistant_char_len;
+                                    last_assistant_progress_byte_len = delta_content.len();
                                 }
                             }
                         }
@@ -233,10 +238,13 @@ impl ResponsesCompatibleClient {
                                         >= Duration::from_millis(800);
                                 if should_emit && !reasoning_content.trim().is_empty() {
                                     if let Some(progress) = progress {
-                                        progress.emit_reasoning_content(reasoning_content.clone());
+                                        progress.emit_reasoning_delta(
+                                            &reasoning_content[last_reasoning_progress_byte_len..],
+                                        );
                                     }
                                     last_reasoning_progress_emit_at = Instant::now();
                                     last_reasoning_progress_char_len = reasoning_char_len;
+                                    last_reasoning_progress_byte_len = reasoning_content.len();
                                 }
                             }
                         }
@@ -319,14 +327,14 @@ impl ResponsesCompatibleClient {
             && reasoning_char_len != last_reasoning_progress_char_len
             && let Some(progress) = progress
         {
-            progress.emit_reasoning_content(reasoning_content.clone());
+            progress.emit_reasoning_delta(&reasoning_content[last_reasoning_progress_byte_len..]);
         }
         if emit_progress
             && !delta_content.trim().is_empty()
             && assistant_char_len != last_assistant_progress_char_len
             && let Some(progress) = progress
         {
-            progress.emit_assistant_content(delta_content.clone());
+            progress.emit_assistant_delta(&delta_content[last_assistant_progress_byte_len..]);
         }
 
         let content = if output_messages.is_empty() {

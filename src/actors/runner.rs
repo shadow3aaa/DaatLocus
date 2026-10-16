@@ -1087,8 +1087,8 @@ fn handle_progress(
                 },
             )?;
         }
-        ModelProgressEvent::AssistantContent { content } => pending.assistant.push_str(&content),
-        ModelProgressEvent::ReasoningContent { content } => pending.reasoning.push_str(&content),
+        ModelProgressEvent::AssistantDelta { text } => pending.assistant.push_str(&text),
+        ModelProgressEvent::ReasoningDelta { text } => pending.reasoning.push_str(&text),
     }
     if pending.assistant.len() + pending.reasoning.len() >= PROGRESS_CHUNK_BYTES {
         pending.flush(system, actor, message, *generation)?;

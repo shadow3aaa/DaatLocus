@@ -677,9 +677,11 @@ impl OllamaClient {
         let mut last_assistant_progress_emit_at = Instant::now();
         let mut assistant_char_len = 0usize;
         let mut last_assistant_progress_char_len = 0usize;
+        let mut last_assistant_progress_byte_len = 0usize;
         let mut last_reasoning_progress_emit_at = Instant::now();
         let mut reasoning_char_len = 0usize;
         let mut last_reasoning_progress_char_len = 0usize;
+        let mut last_reasoning_progress_byte_len = 0usize;
         let mut buffer = Vec::new();
         let url = self.chat_url();
         let stream_request_context = [
@@ -750,10 +752,12 @@ impl OllamaClient {
                         || last_assistant_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !content.trim().is_empty() {
                         if let Some(progress) = progress {
-                            progress.emit_assistant_content(content.clone());
+                            progress
+                                .emit_assistant_delta(&content[last_assistant_progress_byte_len..]);
                         }
                         last_assistant_progress_emit_at = Instant::now();
                         last_assistant_progress_char_len = assistant_char_len;
+                        last_assistant_progress_byte_len = content.len();
                     }
                 }
 
@@ -766,10 +770,13 @@ impl OllamaClient {
                         || last_reasoning_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !thinking.trim().is_empty() {
                         if let Some(progress) = progress {
-                            progress.emit_reasoning_content(thinking.clone());
+                            progress.emit_reasoning_delta(
+                                &thinking[last_reasoning_progress_byte_len..],
+                            );
                         }
                         last_reasoning_progress_emit_at = Instant::now();
                         last_reasoning_progress_char_len = reasoning_char_len;
+                        last_reasoning_progress_byte_len = thinking.len();
                     }
                 }
 
@@ -807,8 +814,8 @@ impl OllamaClient {
         }
 
         if let Some(progress) = progress {
-            progress.emit_reasoning_content(thinking.clone());
-            progress.emit_assistant_content(content.clone());
+            progress.emit_reasoning_delta(&thinking[last_reasoning_progress_byte_len..]);
+            progress.emit_assistant_delta(&content[last_assistant_progress_byte_len..]);
         }
         if let Some(usage) = last_usage {
             self.record_usage(Some(usage));
