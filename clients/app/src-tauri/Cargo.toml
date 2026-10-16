@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["process", "time", "rt-multi-thread", "macr
 url = "2"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+mimalloc = { workspace = true }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
@@ -38,6 +39,7 @@ png = "0.18"
 serde_json = "1"
 
 [target.'cfg(target_os = "android")'.dependencies]
+mimalloc = { workspace = true, features = ["local_dynamic_tls"] }
 tauri = { version = "2", features = ["image-png"] }
 daat-locus = { path = "../../.." }
 axum = "0.8"

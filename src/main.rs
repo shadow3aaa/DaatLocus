@@ -11,6 +11,10 @@ use std::{net::SocketAddr, path::PathBuf};
 mod cli;
 mod terminal_logo;
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let (command, arguments) = cli::parse_args();
     let profile_base = std::env::var_os("DAAT_LOCUS_HOME")

@@ -3,6 +3,10 @@ mod backend;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod desktop;
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     use clap::Parser;
     let options = backend::Options::parse();
