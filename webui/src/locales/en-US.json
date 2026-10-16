@@ -17,8 +17,7 @@
   "actor_dialog": {
     "actor_conversation": "Actor conversation",
     "back_to_previous_actor": "Back to previous Actor",
-    "search_this_conversation": "Search this conversation",
-    "open_in_main_window": "Open in main window"
+    "search_this_conversation": "Search this conversation"
   },
   "composer": {
     "auto_approval": "Auto approval",

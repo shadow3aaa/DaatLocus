@@ -17,8 +17,7 @@
   "actor_dialog": {
     "actor_conversation": "Actor 对话",
     "back_to_previous_actor": "返回上一个 Actor",
-    "search_this_conversation": "搜索这个对话",
-    "open_in_main_window": "在主窗口打开"
+    "search_this_conversation": "搜索这个对话"
   },
   "composer": {
     "auto_approval": "自动批准",

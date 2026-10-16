@@ -316,6 +316,7 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
 .dl-actor-dialog-title [data-slot=dialog-title] { font-size: 16px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dl-actor-dialog-title [data-slot=dialog-description] { font-size: 13px; margin-top: 3px; }
 .dl-actor-dialog-actions { flex-shrink: 0; display: flex; gap: 3px; }
+.dl-actor-mobile-back { display: none; }
 .dl-actor-dialog>[data-slot=dialog-close] { top: 22px; right: 14px; z-index: 4; background: transparent; box-shadow: none; }
 .dl-actor-dialog>[data-slot=dialog-close]:hover { background: var(--muted); }
 .dark .dl-actor-dialog>[data-slot=dialog-close]:hover { background: color-mix(in oklab, var(--muted) 50%, transparent); }
@@ -507,10 +508,14 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
   .dl-message-turn { margin-bottom: 22px; } .dl-conversation-footer { padding: 7px 12px max(8px,env(safe-area-inset-bottom)); }
   .dl-composer [data-slot=input-group-control] { font-size: 16px; } .dl-composer-toolbar { gap: 2px; } .dl-model-trigger { font-size: 13px; max-width: 135px; } .dl-model-effort { display: none; }
   .dl-mode-trigger { font-size: 13px; padding: 0 5px; } .dl-history-rail { display: none; } .dl-reference-action { font-size: 13px; padding-left: 7px; }
-  .dl-actor-reference { min-width: 0; font-size: 13px; } .dl-actor-dialog { width: calc(100vw - 16px); max-width: none; height: calc(100dvh - 24px); border-radius: 20px; }
-  .dl-actor-dialog-heading { padding: 15px 48px 15px 17px; } .dl-actor-dialog-title { gap: 9px; } .dl-conversation-compact { --dl-header-space: 60px; }
-  .dl-actor-dialog>[data-slot=dialog-close] { top: 15px; right: 12px; }
-  .dl-conversation-compact .dl-message-list { padding: calc(var(--dl-header-space) + 18px) 13px calc(var(--dl-footer-space) + 18px); } .dl-conversation-compact .dl-conversation-footer { padding: 6px 11px 12px; }
+  .dl-actor-reference { min-width: 0; font-size: 13px; }
+  .dl-actor-dialog { inset: var(--dl-window-bar) 0 0; translate: none; transform: none; width: 100%; max-width: none; height: calc(100dvh - var(--dl-window-bar)); max-height: none; border-radius: 0; box-shadow: none; animation: none; background: var(--background); }
+  .dl-actor-dialog-heading { padding: calc(12px + env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 12px max(14px,env(safe-area-inset-left)); }
+  .dl-actor-dialog-heading>div { background: var(--background); }
+  .dl-actor-dialog-title { gap: 9px; } .dl-conversation-compact { --dl-header-space: 60px; }
+  .dl-actor-mobile-back { display: inline-flex; }
+  .dl-actor-dialog-title [data-slot=avatar], .dl-actor-dialog>[data-slot=dialog-close] { display: none; }
+  .dl-conversation-compact .dl-message-list { padding: calc(var(--dl-header-space) + 18px) 13px calc(var(--dl-footer-space) + 18px); } .dl-conversation-compact .dl-conversation-footer { padding: 6px 12px max(12px,env(safe-area-inset-bottom)); }
   .dl-search-dialog, .dl-settings-dialog { padding: 21px; border-radius: 20px; } .dl-settings-scroll { max-height: 61dvh; }
 }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation: none!important; scroll-behavior: auto!important; transition-duration: 0s!important; } }
@@ -654,8 +659,7 @@ html[data-mobile-platform=android] .dl-floating-account, html[data-mobile-platfo
   .dl-composer-wrap:not(.dl-primary-composer) .dl-mode-label { display: none; }
   .dl-composer-wrap:not(.dl-primary-composer) .dl-model-trigger { min-width: 0; max-width: 160px; flex-shrink: 1; font-size: 13px; }
   .dl-composer-wrap:not(.dl-primary-composer) .dl-send-button { margin-left: 0; }
-  .dl-actor-dialog-heading { gap: 8px; padding-left: 14px; }
-  .dl-actor-dialog-title [data-slot=avatar] { display: none; }
+  .dl-actor-dialog-heading { gap: 8px; }
 }
 @media (max-width: 480px) {
   .dl-settings-tabs>[data-slot=tabs-list] { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); height: auto; overflow: visible; }
