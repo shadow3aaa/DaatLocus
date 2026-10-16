@@ -139,17 +139,24 @@ fn push_deny_write_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPoli
 }
 
 fn push_deny_read_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolicy) {
+    let mut read_only_masks = Vec::new();
     for path in policy_paths_with_resolved(&policy.deny_read_paths) {
         if path.is_dir() {
             args.push("--tmpfs".to_string());
             args.push(path_to_arg(&path));
             if path_is_denied(&path, &policy.deny_write_paths) {
-                args.push("--remount-ro".to_string());
-                args.push(path_to_arg(&path));
+                read_only_masks.push(path);
             }
         } else if path.is_file() {
             push_mount(args, "--ro-bind", Path::new("/dev/null"), &path);
         }
+    }
+    // A parent tmpfs hides the original child mountpoints. Let bwrap create all
+    // nested masks before sealing them; sealing a parent alone would also leave
+    // its child tmpfs mounts writable.
+    for path in read_only_masks.into_iter().rev() {
+        args.push("--remount-ro".to_string());
+        args.push(path_to_arg(&path));
     }
 }
 
@@ -211,16 +218,23 @@ mod tests {
     }
 
     #[test]
-    fn bwrap_args_hide_read_and_write_denied_directories_as_read_only() {
+    fn bwrap_args_create_nested_masks_before_sealing_each_directory() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let protected_home = tempdir.path().join(".daat-locus");
-        std::fs::create_dir_all(&protected_home).expect("create protected home");
+        let protected_config = protected_home.join("config");
+        let secret = protected_config.join("secret.txt");
+        std::fs::create_dir_all(&protected_config).expect("create protected config");
+        std::fs::write(&secret, "secret").expect("write secret");
         let policy = FileSystemSandboxPolicy {
             full_disk_read: true,
             full_disk_write: true,
             readable_roots: Vec::new(),
             writable_roots: Vec::new(),
-            deny_read_paths: vec![protected_home.clone()],
+            deny_read_paths: vec![
+                protected_config.clone(),
+                protected_home.clone(),
+                secret.clone(),
+            ],
             private_delivery: None,
             bound_roots: Vec::new(),
             deny_write_paths: vec![protected_home.clone()],
@@ -228,13 +242,30 @@ mod tests {
 
         let args = create_bwrap_args(&policy, vec!["sh".to_string()]);
 
-        let protected_home = protected_home.to_string_lossy();
-        assert!(contains_pair(&args, "--tmpfs", protected_home.as_ref()));
-        assert!(contains_pair(
-            &args,
-            "--remount-ro",
-            protected_home.as_ref()
-        ));
+        let first_seal = args.iter().position(|arg| arg == "--remount-ro").unwrap();
+        for directory in [&protected_home, &protected_config] {
+            let path = path_to_arg(directory);
+            let mount = args
+                .windows(2)
+                .position(|pair| pair == ["--tmpfs", &path])
+                .unwrap();
+            assert!(
+                mount < first_seal,
+                "nested mountpoint must exist before sealing"
+            );
+            assert!(
+                contains_pair(&args, "--remount-ro", &path),
+                "every nested tmpfs must deny writes"
+            );
+        }
+        let file_mask = args
+            .windows(3)
+            .position(|triple| triple == ["--ro-bind", "/dev/null", &path_to_arg(&secret)])
+            .unwrap();
+        assert!(
+            file_mask < first_seal,
+            "file mountpoint must exist before sealing"
+        );
     }
 
     #[test]

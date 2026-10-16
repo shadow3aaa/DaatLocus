@@ -917,7 +917,11 @@ fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, process::ExitStatus, time::Duration};
+    use std::{
+        path::{Path, PathBuf},
+        process::ExitStatus,
+        time::Duration,
+    };
 
     use super::{
         FileSystemSandboxPolicy, RuntimeSandboxPolicy, SandboxAsyncChild, SandboxProcessOptions,
@@ -1083,7 +1087,10 @@ mod tests {
         std::fs::create_dir_all(&protected_config).expect("create protected config");
         std::fs::create_dir_all(&workspace).expect("create workspace");
         let secret_file = protected_config.join("secret.txt");
-        let protected_write_file = protected_home.join("created-by-sandbox.txt");
+        let protected_write_files = [
+            protected_home.join("created-by-sandbox.txt"),
+            protected_config.join("created-by-sandbox.txt"),
+        ];
         let public_file = workspace.join("public.txt");
         let workspace_output = workspace.join("output.txt");
         std::fs::write(&secret_file, "secret").expect("write protected secret");
@@ -1098,20 +1105,24 @@ mod tests {
                     root: workspace.clone(),
                     read_only_subpaths: Vec::new(),
                 }],
-                deny_read_paths: vec![protected_home.clone()],
-                deny_write_paths: vec![protected_home.clone()],
+                // Include redundant, unsorted directory and file boundaries:
+                // native setup must handle them before starting the command.
+                deny_read_paths: vec![
+                    protected_config.clone(),
+                    protected_home.clone(),
+                    secret_file.clone(),
+                ],
+                deny_write_paths: vec![protected_config, protected_home, secret_file.clone()],
                 private_delivery: None,
                 bound_roots: Vec::new(),
             },
             protected_env_vars: Vec::new(),
             strong_filesystem: StrongFilesystemSandboxMode::Required,
         };
-        let (program, args) = conformance_probe_command(
-            &secret_file,
-            &protected_write_file,
-            &public_file,
-            &workspace_output,
-        );
+        let mut write_probes = protected_write_files.to_vec();
+        write_probes.push(secret_file.clone());
+        let (program, args) =
+            conformance_probe_command(&secret_file, &write_probes, &public_file, &workspace_output);
         let options = SandboxProcessOptions {
             current_dir: Some(workspace.clone()),
             stdin: SandboxStdio::Null,
@@ -1145,10 +1156,14 @@ mod tests {
             status.success(),
             "conformance probe failed with {status}; stdout={stdout_text:?}; stderr={stderr_text:?}"
         );
-        assert!(
-            !protected_write_file.exists(),
-            "sandboxed child wrote into protected runtime path"
-        );
+        for path in protected_write_files {
+            assert!(
+                !path.exists(),
+                "sandboxed child wrote into {}",
+                path.display()
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&secret_file).unwrap(), "secret");
         assert_eq!(
             std::fs::read_to_string(&workspace_output).expect("read workspace output"),
             "ok"
@@ -1176,19 +1191,25 @@ mod tests {
     #[cfg(unix)]
     fn conformance_probe_command(
         secret_file: &Path,
-        protected_write_file: &Path,
+        protected_write_files: &[PathBuf],
         public_file: &Path,
         workspace_output: &Path,
     ) -> (String, Vec<String>) {
+        let protected_writes = protected_write_files
+            .iter()
+            .map(|path| sh_quote(path))
+            .collect::<Vec<_>>()
+            .join(" ");
         let script = format!(
             r#"secret={secret}
-protected_write={protected_write}
 public_file={public_file}
 workspace_output={workspace_output}
 read_denied=0
-cat "$secret" >/dev/null 2>&1 || read_denied=1
-write_denied=0
-printf bad > "$protected_write" 2>/dev/null || write_denied=1
+[ "$(cat "$secret" 2>/dev/null)" != secret ] && read_denied=1
+write_denied=1
+for protected_write in {protected_writes}; do
+    if printf bad 2>/dev/null > "$protected_write"; then write_denied=0; fi
+done
 public_ok=0
 [ "$(cat "$public_file")" = public ] && public_ok=1
 write_ok=0
@@ -1200,7 +1221,6 @@ printf 'read_denied=%s write_denied=%s public_ok=%s write_ok=%s\n' "$read_denied
 exit 42
 "#,
             secret = sh_quote(secret_file),
-            protected_write = sh_quote(protected_write_file),
             public_file = sh_quote(public_file),
             workspace_output = sh_quote(workspace_output),
         );
@@ -1216,7 +1236,7 @@ exit 42
     #[cfg(target_os = "windows")]
     fn conformance_probe_command(
         secret_file: &Path,
-        protected_write_file: &Path,
+        protected_write_files: &[PathBuf],
         public_file: &Path,
         workspace_output: &Path,
     ) -> (String, Vec<String>) {
@@ -1231,13 +1251,12 @@ exit 42
             .join("powershell.exe");
         let script = [
             format!("$secret = {}", ps_quote(secret_file)),
-            format!("$protectedWrite = {}", ps_quote(protected_write_file)),
             format!("$publicFile = {}", ps_quote(public_file)),
             format!("$workspaceOutput = {}", ps_quote(workspace_output)),
             "$readDenied = $false".to_string(),
-            "try { Get-Content -Raw -LiteralPath $secret -ErrorAction Stop | Out-Null } catch { $readDenied = $true }".to_string(),
-            "$writeDenied = $false".to_string(),
-            "try { Set-Content -LiteralPath $protectedWrite -Value 'bad' -NoNewline -ErrorAction Stop } catch { $writeDenied = $true }".to_string(),
+            "try { $readDenied = (Get-Content -Raw -LiteralPath $secret -ErrorAction Stop) -ne 'secret' } catch { $readDenied = $true }".to_string(),
+            "$writeDenied = $true".to_string(),
+            format!("foreach ($protectedWrite in @({})) {{ try {{ Set-Content -LiteralPath $protectedWrite -Value 'bad' -NoNewline -ErrorAction Stop; $writeDenied = $false }} catch {{ }} }}", protected_write_files.iter().map(|path| ps_quote(path)).collect::<Vec<_>>().join(",")),
             "$publicOk = $false".to_string(),
             "try { $publicOk = (Get-Content -Raw -LiteralPath $publicFile -ErrorAction Stop) -eq 'public' } catch { }".to_string(),
             "$writeOk = $false".to_string(),
