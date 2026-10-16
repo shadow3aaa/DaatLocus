@@ -32,7 +32,9 @@ jobs:
       - run: cargo test --locked -p daat-locus --lib --bins --test http_api -- --test-threads=4
       - name: Check required Linux native sandbox
         if: runner.os == 'Linux'
-        run: cargo test --locked -p daat-locus --lib sandbox::tests::strong_backend_denies_protected_runtime_paths -- --ignored --exact
+        run: |
+          cargo test --locked -p daat-locus --lib sandbox::tests::strong_backend_denies_protected_runtime_paths -- --ignored --exact
+          cargo test --locked -p daat-locus --lib sandbox::linux::tests::writable_root_preserves_private_devices_and_pid_namespace -- --ignored --exact
       - name: Check Windows symlink escape protection
         if: runner.os == 'Windows'
         run: cargo test --locked -p daat-locus --lib file_io::tests::symlink_escape_is_denied -- --ignored --exact

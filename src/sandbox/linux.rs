@@ -94,6 +94,10 @@ fn create_bwrap_args(policy: &FileSystemSandboxPolicy, command: Vec<String>) -> 
 
     push_root_mounts(&mut args, policy);
     push_writable_root_mounts(&mut args, policy);
+    // A later host bind (especially a writable `/`) would hide these mounts
+    // and restore host devices/procfs inside the new PID namespace.
+    args.extend(["--dev", "/dev", "--proc", "/proc"].map(String::from));
+    push_read_only_subpath_mounts(&mut args, policy);
     push_deny_write_mounts(&mut args, policy);
     push_deny_read_mounts(&mut args, policy);
 
@@ -114,11 +118,6 @@ fn push_root_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolicy) {
             push_existing_mount(args, "--ro-bind", &root);
         }
     }
-
-    args.push("--dev".to_string());
-    args.push("/dev".to_string());
-    args.push("--proc".to_string());
-    args.push("/proc".to_string());
 }
 
 fn push_writable_root_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolicy) {
@@ -126,6 +125,11 @@ fn push_writable_root_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxP
         for root in policy_paths_with_resolved(std::slice::from_ref(&writable_root.root)) {
             push_existing_mount(args, "--bind", &root);
         }
+    }
+}
+
+fn push_read_only_subpath_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolicy) {
+    for writable_root in &policy.writable_roots {
         for subpath in policy_paths_with_resolved(&writable_root.read_only_subpaths) {
             push_existing_mount(args, "--ro-bind", &subpath);
         }
@@ -303,6 +307,130 @@ mod tests {
             git_dir.to_string_lossy().as_ref(),
             git_dir.to_string_lossy().as_ref()
         ));
+    }
+
+    #[test]
+    fn bwrap_args_keep_private_devices_and_proc_after_writable_root_grants() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let read_only = tempdir.path().join("read-only");
+        std::fs::create_dir(&read_only).expect("create read-only directory");
+        // A later ancestor grant must neither hide the virtual filesystems nor
+        // discard a previous root's read-only exceptions.
+        let mut policy = FileSystemSandboxPolicy::unrestricted();
+        policy.full_disk_write = false;
+        policy.writable_roots = vec![
+            WritableRoot {
+                root: tempdir.path().to_owned(),
+                read_only_subpaths: vec![read_only.clone()],
+            },
+            WritableRoot {
+                root: PathBuf::from("/"),
+                read_only_subpaths: vec![],
+            },
+        ];
+        let args = create_bwrap_args(&policy, vec!["sh".to_string()]);
+        let root_grant = args
+            .windows(3)
+            .rposition(|triple| triple == ["--bind", "/", "/"])
+            .unwrap();
+        let devices = args
+            .windows(2)
+            .position(|pair| pair == ["--dev", "/dev"])
+            .unwrap();
+        let proc = args
+            .windows(2)
+            .position(|pair| pair == ["--proc", "/proc"])
+            .unwrap();
+        let restriction = args
+            .windows(3)
+            .position(|triple| {
+                triple
+                    == [
+                        "--ro-bind",
+                        &path_to_arg(&read_only),
+                        &path_to_arg(&read_only),
+                    ]
+            })
+            .unwrap();
+        assert!(
+            root_grant < devices,
+            "root grant must not hide private devices"
+        );
+        assert!(root_grant < proc, "root grant must not expose host procfs");
+        assert!(
+            devices < restriction && proc < restriction,
+            "explicit restrictions must remain effective"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires bwrap and user namespace support"]
+    async fn writable_root_preserves_private_devices_and_pid_namespace() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let read_only = tempdir.path().join("read-only");
+        let private = tempdir.path().join("private");
+        let allowed = tempdir.path().join("allowed.txt");
+        std::fs::create_dir(&read_only).unwrap();
+        std::fs::create_dir(&private).unwrap();
+        std::fs::write(read_only.join("visible.txt"), "readable").unwrap();
+        std::fs::write(private.join("secret.txt"), "secret").unwrap();
+        let mut filesystem = FileSystemSandboxPolicy::unrestricted();
+        filesystem.full_disk_write = false;
+        filesystem.writable_roots = vec![
+            WritableRoot {
+                root: tempdir.path().to_owned(),
+                read_only_subpaths: vec![read_only.clone()],
+            },
+            WritableRoot {
+                root: PathBuf::from("/"),
+                read_only_subpaths: vec![],
+            },
+        ];
+        filesystem.deny_read_paths = vec![private.clone()];
+        filesystem.deny_write_paths = vec![private.clone()];
+        let policy = RuntimeSandboxPolicy {
+            filesystem,
+            protected_env_vars: vec![],
+            strong_filesystem: StrongFilesystemSandboxMode::Required,
+        };
+        let script = r#"set -eu
+[ -c /dev/null ]
+printf device-probe > /dev/null
+cat /dev/null
+# The shell builtin opens procfs itself, so its reported PID must equal $$.
+# A host procfs bind instead reports the shell's outer namespace PID.
+read proc_pid rest < /proc/self/stat
+[ "$proc_pid" = "$$" ]
+[ "$(cat "$READ_ONLY/visible.txt")" = readable ]
+if printf forbidden 2>/dev/null > "$READ_ONLY/created.txt"; then exit 21; fi
+if cat "$PRIVATE/secret.txt" >/dev/null 2>&1; then exit 22; fi
+if printf forbidden 2>/dev/null > "$PRIVATE/created.txt"; then exit 23; fi
+printf ok > "$ALLOWED"
+"#;
+        let spawn = wrap_shell_command(&policy, "/bin/sh", vec!["-c".into(), script.into()])
+            .expect("required bwrap backend must be available");
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            tokio::process::Command::new(spawn.program)
+                .args(spawn.args)
+                .current_dir(tempdir.path())
+                .env("READ_ONLY", &read_only)
+                .env("PRIVATE", &private)
+                .env("ALLOWED", &allowed)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("sandbox probe timed out")
+        .expect("start sandbox probe");
+        assert!(output.status.success(), "sandbox probe failed: {output:?}");
+        assert_eq!(std::fs::read_to_string(allowed).unwrap(), "ok");
+        assert!(!read_only.join("created.txt").exists());
+        assert!(!private.join("created.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(private.join("secret.txt")).unwrap(),
+            "secret"
+        );
     }
 
     #[test]
