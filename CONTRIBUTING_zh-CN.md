@@ -37,6 +37,75 @@ cargo run -- serve
 离线构建可用 `DAAT_LOCUS_MODEL_CATALOG_PATH` 指定有效 models.dev JSON；
 Cargo `--offline` 本身不会禁止构建脚本联网。详见[模型目录](docs/model-catalog.md)。
 
+## 后端资源压力测试
+
+单文件脚本 `scripts/perf.rs` 通过 `rust-script scripts/perf.rs` 直接运行，
+包含构建、模拟服务、负载、采样和清理，启动实际的 `daat-locus serve`，
+以一次性账号、profile、home 和工作区进行测试。模型服务是本机 OpenAI 兼容流式
+模拟端点；驱动通过真实 OPAQUE 登录和 HTTP 接口，让多个 Actor 并发处理消息，
+每个 Actor 内部串行执行。Actor 仅在启动前通过内部接口植入，不增加产品接口。
+
+```sh
+# 首次安装脚本运行器。
+cargo install rust-script --locked
+# 默认 release：64 个 Actor，各 50 条消息，每次回复 16 KiB，冷却 90 秒。
+rust-script scripts/perf.rs
+# 保持每个 Actor 的工作量一致，提高并发（也可分别运行 --actors 32 或 64）。
+rust-script scripts/perf.rs --actors 128 --rounds 50 --timeout-seconds 3600
+# 快速验证；debug 数据不能作为 release 基线。
+rust-script scripts/perf.rs --debug-build --actors 2 --rounds 2 --idle-seconds 2 --cooldown-seconds 2
+```
+
+需要 Rust 和 rust-script。内嵌 manifest 引用本地 DL/auth crate；rust-script 管理自己的
+依赖锁文件和编译缓存。被测 CLI 使用仓库锁文件构建并关闭 WebUI 嵌入。
+若也要跳过脚本依赖的 DL 库的 WebUI/WASM 编译，应在运行 rust-script 前设置
+`DAAT_LOCUS_BUILD_WEBUI=0`（PowerShell：`$env:DAAT_LOCUS_BUILD_WEBUI='0'`；
+POSIX：`export DAAT_LOCUS_BUILD_WEBUI=0`），否则库编译需要正常的 Bun/wasm-pack 环境。
+`--skip-build` 复用对应 CLI 产物，源码变化后应重建；`--debug-build` 控制被测 CLI，
+rust-script 自身的 `--debug` 仅控制脚本的编译模式。脚本使用默认
+`target/<profile>` 输出路径。`--model-delay-ms`、`--sample-ms`、`--timeout-seconds`
+分别控制模拟响应延迟、采样周期和测量阶段总超时，初始化子进程各有 60 秒超时。
+构建不计入测量。比较结果时应减少其他负载，并重复运行。
+默认总超时为 1800 秒，支持 1–256 个并发 Actor；每个 Actor 跨轮保留对话，
+增加轮数也会增加历史与持久化开销。默认冷却 90 秒，超过 worker 的 60 秒闲置
+回收窗口。负载阶段每 10 秒输出完成进度。
+
+报告位于 `target/perf/<唯一标识>/`，包含 `charts.svg`、`summary.json`、`samples.csv`、
+`latencies.csv` 和模拟服务的标准输出/错误。Rust 脚本通过 Plotters 直接生成独立 SVG，
+可离线用浏览器或图片查看器打开。图表包含按阶段着色的内存 footprint/CPU 时间曲线，以及
+带 P95 标线的已完成消息延迟直方图。CPU 使用累计时间差计算区间平均值，合并阶段
+边界的过短区间，避免计数精度造成尖峰。失败、超时或中断时仍保留部分采样并生成
+明确标记的部分图表（前提是测量已启动且报告写入成功）。`latencies.csv` 保存已排序
+的完成消息延迟，不含未完成消息；图表标注完成数与预期数。
+报告记录二进制 SHA256、当前 Git 版本/脏状态、参数、平台、完成
+消息数、吞吐量、P95 延迟，以及启动、登录、空闲、负载、冷却各阶段的 footprint/CPU，
+RSS 作为辅助数据保留。报告 schema v2 在 CSV 中增加 `footprint_bytes`，阶段统计增加
+`footprint_*_bytes`；`footprint_metric` 明确记录各平台的统计口径：
+
+- Windows：Private Bytes（`PROCESS_MEMORY_COUNTERS_EX.PrivateUsage`），进程私有
+  提交量，包括已换出的页，不包含尚未提交的地址空间预留和共享分配。这是提交成本，
+  不是物理驻留量，也不等同于 macOS 的 `phys_footprint`。
+- macOS：`proc_pid_rusage().ri_phys_footprint`，包含压缩内存。
+- Linux：`/proc/<pid>/smaps_rollup` 的 PSS + SwapPss，按比例分摊的驻留及交换内存
+  估计值；要求两个字段均存在，并有权限读取目标进程的映射统计。
+
+主图始终使用 footprint；采样失败则报告错误，不回退到 RSS 或虚拟地址空间大小。
+应在相同系统、相同口径下比较；旧 schema v1 报告只有 RSS，不能换算为 footprint。
+当前 Git 版本不能证明复用的二进制来自该版本。没有 Git 元数据的源码包会将
+`git_revision`、`git_dirty` 记为 null，应随报告保留源码包哈希和清单。
+辅助 RSS 是驻留内存，Windows 上为
+Working Set；两种内存指标的峰值/P95 均来自采样，可能漏掉短暂尖峰。CPU 为进程用户态与内核态
+累计时间，100% 表示占满一个逻辑 CPU，多核工作可超过 100%。端到端延迟包含
+驱动每 100ms 对单条消息状态的有界查询。脚本验证完成回复和模拟请求总数，失败、
+超时或强制终止均不会生成成功结论。
+
+仅测量 CLI 进程，排除驱动、模拟服务和账号初始化；覆盖单设备后端持久化、模型流式
+处理和 HTTP 开销，不代表真实模型推理、App 工具执行、桌面 WebView、远程同步或
+浏览器 SSE 扇出开销。测试期间 Actor 身份和历史仍持久保留，冷却后 footprint 或 RSS 不下降本身
+不能证明泄漏。结束时先尝试 OS-owner 正常停止，失败则回收所持子进程句柄；
+随后校验路径并删除所持 `TempDir`（账号、数据库和工作区），只在被 Git 忽略的 `target`
+中保留报告。不可捕获的强制杀进程或断电可能中断清理。不要传入现有用户 profile。
+
 ## 代码与测试
 
 | 位置 | 职责 |
