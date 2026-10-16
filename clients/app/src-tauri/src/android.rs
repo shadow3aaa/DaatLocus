@@ -10,14 +10,7 @@ async fn desktop_account(
     state: tauri::State<'_, Client>,
     input: daat_locus_client_protocol::BootstrapRequest,
 ) -> Result<daat_locus_client_protocol::BootstrapReply, String> {
-    let current = window.url().map_err(|_| "Window unavailable")?;
-    let expected = url::Url::parse(&state.0.origin).map_err(|_| "Service unavailable")?;
-    if window.label() != "main"
-        || current.origin() != expected.origin()
-        || current.path().starts_with("/v1")
-    {
-        return Err("Account operation unavailable".into());
-    }
+    crate::transport::authorize(&window)?;
     state
         .0
         .bootstrap(input)
@@ -38,39 +31,64 @@ fn platform_tls() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn run() {
-    let app = tauri::Builder::default()
+    let app = crate::transport::resources(tauri::Builder::default())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![desktop_account])
+        .invoke_handler(tauri::generate_handler![
+            desktop_account,
+            crate::transport::native_http_start,
+            crate::transport::native_http_write,
+            crate::transport::native_http_send,
+            crate::transport::native_http_read,
+            crate::transport::native_http_cancel,
+            crate::transport::native_resource_download
+        ])
         .setup(|app| {
             platform_tls()?;
-            let service = tauri::async_runtime::block_on(MobileService::start(app.path().app_data_dir()?))
-                .map_err(|_| "Cannot start Daat Locus")?;
+            let service =
+                tauri::async_runtime::block_on(MobileService::start(app.path().app_data_dir()?))
+                    .map_err(|_| "Cannot start Daat Locus")?;
             let origin = url::Url::parse(&service.origin)?;
-            let capability = serde_json::json!({
-                "identifier":"mobile-account", "windows":["main"], "local":false,
-                "remote":{"urls":[format!("{}/",service.origin),format!("{}/actors/*",service.origin),format!("{}/stages/*",service.origin)]},
-                "permissions":["allow-desktop-account"]
-            });
-            app.add_capability(capability.to_string())?;
+            crate::transport::capability(app.handle())?;
+            app.manage(crate::transport::Transport::new(Arc::new(
+                std::sync::RwLock::new(origin),
+            ))?);
             app.manage(Client(service));
-            let navigation_origin = origin.clone();
             let handle = app.handle().clone();
             let popup_handle = handle.clone();
-            WebviewWindowBuilder::new(app,"main",WebviewUrl::External(origin))
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Daat Locus")
-                .initialization_script("Object.defineProperty(window,'__DAAT_LOCUS_MOBILE__',{value:'android'});")
+                .initialization_script(
+                    "Object.defineProperty(window,'__DAAT_LOCUS_MOBILE__',{value:'android'});",
+                )
+                .on_page_load(|window, payload| {
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+                        && crate::transport::navigation(window.app_handle(), payload.url())
+                    {
+                        window.state::<crate::transport::Transport>().clear();
+                    }
+                })
                 .on_navigation(move |url| {
-                    if url.origin() == navigation_origin.origin() { return true; }
-                    if matches!(url.scheme(),"http"|"https") { let _ = handle.opener().open_url(url.as_str(),None::<&str>); }
+                    if crate::transport::navigation(&handle, url)
+                        || crate::transport::resource_url(url)
+                    {
+                        return true;
+                    }
+                    if matches!(url.scheme(), "http" | "https") {
+                        let _ = handle.opener().open_url(url.as_str(), None::<&str>);
+                    }
                     false
                 })
-                .on_new_window(move |url,_| {
-                    if matches!(url.scheme(),"http"|"https") { let _ = popup_handle.opener().open_url(url.as_str(),None::<&str>); }
+                .on_new_window(move |url, _| {
+                    if matches!(url.scheme(), "http" | "https") {
+                        let _ = popup_handle.opener().open_url(url.as_str(), None::<&str>);
+                    }
                     tauri::webview::NewWindowResponse::Deny
                 })
                 .build()?;
             Ok(())
-        }).build(tauri::generate_context!()).expect("Cannot initialize Daat Locus");
+        })
+        .build(tauri::generate_context!())
+        .expect("Cannot initialize Daat Locus");
     app.run(|handle, event| {
         let active = match event {
             tauri::RunEvent::WindowEvent {

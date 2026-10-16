@@ -1,3 +1,4 @@
+import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { memo, useEffect, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
@@ -33,7 +34,7 @@ function textOf(children: ReactNode): string {
 }
 
 export const Markdown = memo(function Markdown({ content, onActor, className }: { content: string; onActor?: (id: string) => void; className?: string }) {
-  const origin = typeof location === "undefined" ? "http://localhost" : location.origin;
+  const origin = typeof location === "undefined" ? "http://localhost" : location.href;
   return <div className={["dl-markdown", className].filter(Boolean).join(" ")}><ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
     a({ href, children }) {
       const actor = href && actorIdFromUrl(href, origin);
@@ -43,7 +44,7 @@ export const Markdown = memo(function Markdown({ content, onActor, className }: 
     },
     img({ src, alt }) {
       // No arbitrary remote image requests or local filesystem paths from text.
-      return typeof src === "string" && resourceActorId(src, origin) ? <a href={src} target="_blank" rel="noreferrer"><img src={src} alt={alt || t("markdown.image")} loading="lazy" /></a> : <span className="dl-image-fallback">{alt || t("markdown.image")}</span>;
+      return typeof src === "string" && resourceActorId(src, origin) ? <a href={src} target="_blank" rel="noreferrer"><img src={resourceSource(src)} alt={alt || t("markdown.image")} loading="lazy" /></a> : <span className="dl-image-fallback">{alt || t("markdown.image")}</span>;
     },
     pre({ children }) { return <>{children}</>; },
     code({ className: codeClass, children, node }) {

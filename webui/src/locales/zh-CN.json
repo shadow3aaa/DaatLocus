@@ -573,6 +573,8 @@
     "close": "关闭窗口"
   },
   "mobile": {
+    "saving": "正在保存文件",
+    "save_failed": "文件保存失败",
     "resource": "资源"
   }
 }

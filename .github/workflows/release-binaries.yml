@@ -46,10 +46,10 @@ jobs:
           & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add WixToolset.BootstrapperApplications.wixext/6.0.0
       - name: Package Windows installers
         if: runner.os == 'Windows'
-        run: cargo xtask package windows --skip-build --target "${{ steps.host.outputs.target }}"
+        run: cargo xtask package windows --target "${{ steps.host.outputs.target }}"
       - name: Package macOS app and installer
         if: runner.os == 'macOS'
-        run: cargo xtask package macos --skip-build --target "${{ steps.host.outputs.target }}"
+        run: cargo xtask package macos --target "${{ steps.host.outputs.target }}"
       - uses: actions/upload-artifact@v4
         with:
           name: daat-locus-${{ steps.host.outputs.target }}

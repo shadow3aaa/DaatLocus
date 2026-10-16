@@ -573,6 +573,8 @@
     "close": "Close window"
   },
   "mobile": {
+    "saving": "Saving file",
+    "save_failed": "Could not save file",
     "resource": "Resource"
   }
 }

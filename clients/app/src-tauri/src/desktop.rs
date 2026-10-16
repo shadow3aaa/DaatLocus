@@ -1,8 +1,5 @@
 use crate::backend::{self, Backend, Options};
-use std::sync::{
-    Arc, RwLock,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::{Arc, RwLock};
 #[cfg(target_os = "macos")]
 use tauri::menu::{Menu, MenuItem};
 use tauri::{
@@ -11,17 +8,14 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     webview::NewWindowResponse,
 };
-use url::Url;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/app.png"));
 const OPEN: &str = "open-client";
 const QUIT: &str = "quit-client";
 const HIDE: &str = "hide-client";
-static PREVIEW: AtomicU64 = AtomicU64::new(0);
 
 struct Client {
     backend: Backend,
-    origin: Arc<RwLock<Url>>,
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,16 +34,9 @@ struct WindowState {
 #[tauri::command]
 fn desktop_window(
     window: tauri::WebviewWindow,
-    state: tauri::State<'_, Client>,
     action: WindowAction,
 ) -> std::result::Result<WindowState, String> {
-    let url = window.url().map_err(|_| "Window unavailable")?;
-    if window.label() != "main"
-        || !backend::same_origin(&state.origin.read().unwrap(), &url)
-        || url.path().starts_with("/v1/")
-    {
-        return Err("Window action forbidden".into());
-    }
+    crate::transport::authorize(&window)?;
     let result = match action {
         WindowAction::State => Ok(()),
         WindowAction::Drag => window.start_dragging(),
@@ -77,28 +64,14 @@ async fn desktop_account(
     state: tauri::State<'_, Client>,
     input: daat_locus_client_protocol::BootstrapRequest,
 ) -> std::result::Result<daat_locus_client_protocol::BootstrapReply, String> {
-    let url = window.url().map_err(|_| "Account request unavailable")?;
-    if window.label() != "main"
-        || !backend::same_origin(&state.origin.read().unwrap(), &url)
-        || url.path().starts_with("/v1/")
-    {
-        return Err("Account request forbidden".into());
-    }
+    crate::transport::authorize(&window)?;
     state
         .backend
         .bootstrap(input)
         .await
         .map_err(|_| "Account request failed".into())
 }
-fn bootstrap_capability(app: &tauri::AppHandle, origin: &Url) -> tauri::Result<()> {
-    let base = origin.origin().ascii_serialization();
-    app.add_capability(serde_json::json!({
-        "identifier":format!("desktop-bootstrap-{}",origin.port_or_known_default().unwrap_or_default()),
-        "windows":["main"],"local":false,
-        "remote":{"urls":[format!("{base}/"),format!("{base}/actors/*"),format!("{base}/stages/*")]},
-        "permissions":["allow-desktop-account","allow-desktop-window"]
-    }).to_string())
-}
+
 struct Labels {
     open: &'static str,
     quit: &'static str,
@@ -156,14 +129,22 @@ pub fn run(options: Options) -> Result<()> {
     // Single-instance identity is profile-local, including separately installed OS users.
     let profile = backend::profile_id(&backend.root);
     context.config_mut().identifier = format!("io.daat-locus.app.p{profile}");
-    let app = tauri::Builder::default()
+    let app = crate::transport::resources(tauri::Builder::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if !args.iter().any(|arg| arg == "--background") {
                 show(app);
             }
         }))
-        .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![desktop_account, desktop_window])
+        .invoke_handler(tauri::generate_handler![
+            desktop_account,
+            desktop_window,
+            crate::transport::native_http_start,
+            crate::transport::native_http_write,
+            crate::transport::native_http_send,
+            crate::transport::native_http_read,
+            crate::transport::native_http_cancel,
+            crate::transport::native_resource_download
+        ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             let text = labels();
@@ -178,67 +159,46 @@ pub fn run(options: Options) -> Result<()> {
             )?;
             app.manage(Client {
                 backend: backend.clone(),
-                origin: origin.clone(),
             });
-            bootstrap_capability(app.handle(), &origin.read().unwrap())?;
-            let navigation_origin = origin.clone();
-            let popup_origin = origin.clone();
-            let handle = app.handle().clone();
+            app.manage(crate::transport::Transport::new(origin.clone())?);
+            crate::transport::capability(app.handle())?;
+            let navigation_app = app.handle().clone();
             let data = backend.root.join("runtime/client-webview");
-            let mut builder = WebviewWindowBuilder::new(
-                app,
-                "main",
-                WebviewUrl::External(origin.read().unwrap().clone()),
-            )
-            .title("Daat Locus")
-            .visible(!background)
-            .inner_size(1100.0, 820.0)
-            .min_inner_size(640.0, 480.0)
-            .icon(Image::from_bytes(ICON)?)?
-            .data_directory(data)
-            .disable_drag_drop_handler()
-            .initialization_script(if cfg!(windows) {
-                "Object.defineProperty(window,'__DAAT_LOCUS_DESKTOP__',{value:'windows'});"
-            } else {
-                "Object.defineProperty(window,'__DAAT_LOCUS_DESKTOP__',{value:'macos'});"
-            })
-            .on_navigation(move |url| {
-                if backend::same_origin(&navigation_origin.read().unwrap(), url) {
-                    true
-                } else {
-                    external(url);
-                    false
-                }
-            })
-            .on_new_window(move |url, features| {
-                let base = popup_origin.read().unwrap().clone();
-                if !backend::resource(&base, &url) {
-                    if !backend::same_origin(&base, &url) {
+            let mut builder =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .title("Daat Locus")
+                    .visible(!background)
+                    .inner_size(1100.0, 820.0)
+                    .min_inner_size(640.0, 480.0)
+                    .icon(Image::from_bytes(ICON)?)?
+                    .data_directory(data)
+                    .disable_drag_drop_handler()
+                    .initialization_script(if cfg!(windows) {
+                        "Object.defineProperty(window,'__DAAT_LOCUS_DESKTOP__',{value:'windows'});"
+                    } else {
+                        "Object.defineProperty(window,'__DAAT_LOCUS_DESKTOP__',{value:'macos'});"
+                    })
+                    .on_page_load(|window, payload| {
+                        if matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+                            && crate::transport::navigation(window.app_handle(), payload.url())
+                        {
+                            window.state::<crate::transport::Transport>().clear();
+                        }
+                    })
+                    .on_navigation(move |url| {
+                        if crate::transport::navigation(&navigation_app, url)
+                            || crate::transport::resource_url(url)
+                        {
+                            true
+                        } else {
+                            external(url);
+                            false
+                        }
+                    })
+                    .on_new_window(move |url, _| {
                         external(&url);
-                    }
-                    return NewWindowResponse::Deny;
-                }
-                if handle.webview_windows().len() >= 16 {
-                    return NewWindowResponse::Deny;
-                }
-                let label = format!("resource-{}", PREVIEW.fetch_add(1, Ordering::Relaxed));
-                let preview = WebviewWindowBuilder::new(
-                    &handle,
-                    label,
-                    WebviewUrl::External("about:blank".parse().unwrap()),
-                )
-                .window_features(features)
-                .title("Daat Locus")
-                .inner_size(900.0, 700.0)
-                .on_navigation(move |url| {
-                    url.as_str() == "about:blank" || backend::resource(&base, url)
-                })
-                .build();
-                match preview {
-                    Ok(window) => NewWindowResponse::Create { window },
-                    Err(_) => NewWindowResponse::Deny,
-                }
-            });
+                        NewWindowResponse::Deny
+                    });
             #[cfg(target_os = "macos")]
             {
                 builder = builder
@@ -362,18 +322,7 @@ pub fn run(options: Options) -> Result<()> {
                             if let Ok(url) = backend::local_origin(&status.url) {
                                 let changed = origin.read().unwrap().as_str() != url.as_str();
                                 if changed {
-                                    if bootstrap_capability(&app, &url).is_err() {
-                                        continue;
-                                    }
-                                    *origin.write().unwrap() = url.clone();
-                                    for (label, window) in app.webview_windows() {
-                                        if label != "main" {
-                                            let _ = window.close();
-                                        }
-                                    }
-                                    if let Some(window) = app.get_webview_window("main") {
-                                        let _ = window.navigate(url);
-                                    }
+                                    app.state::<crate::transport::Transport>().set_origin(url);
                                 }
                             }
                         }

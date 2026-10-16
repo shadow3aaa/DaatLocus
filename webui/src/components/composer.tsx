@@ -1,3 +1,4 @@
+import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { isAndroid } from "@/lib/mobile";
@@ -48,7 +49,7 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
     <InputGroup className={cn("dl-composer", dragging && "dl-composer-dragging")} onDragOver={event => { if (!disabled && !uploading && event.dataTransfer.types.includes("Files")) { event.preventDefault(); setDragging(true); } }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); if (!disabled && !uploading) onFiles(Array.from(event.dataTransfer.files)); }}>
       {(attachments.length > 0 || uploading) && <InputGroupAddon align="block-start" className="dl-composer-attachments">
         {attachments.map(item => <div className="dl-attachment" key={item.id}>
-          {item.media_type.startsWith("image/") ? <img src={item.uri} alt={item.name} /> : <div className="dl-attachment-file" title={item.name}><FileIcon aria-hidden="true" /><span>{item.name}</span></div>}
+          {item.media_type.startsWith("image/") ? <img src={resourceSource(item.uri)} alt={item.name} /> : <div className="dl-attachment-file" title={item.name}><FileIcon aria-hidden="true" /><span>{item.name}</span></div>}
           <InputGroupButton size="icon-xs" aria-label={t("composer.remove_value0", {value0: item.name})} className="dl-attachment-remove" onClick={() => onRemoveAttachment(item.id)}><XIcon /></InputGroupButton>
         </div>)}
         {uploading && <span className="dl-upload-indicator"><Spinner />{t("composer.uploading")}</span>}

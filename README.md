@@ -25,13 +25,13 @@ Install Rust, Bun and wasm-pack:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cd webui
-bun install --frozen-lockfile
-cd ..
+bun scripts/build-webui.ts
 cargo run -- serve
 ```
 
-Normal builds compile and embed the WebUI, including authentication WASM. Open
+Build the shared WebUI/authentication WASM once, then Cargo embeds the dist with
+zstd for the standalone browser service. Rust build scripts do not run frontend
+toolchains. Use `--no-default-features` for a headless service. Open
 the printed address and create an account locally, or sign in with the same
 account name and password on another device. OPAQUE keeps passwords in the client;
 browser sessions use HttpOnly cookies. `--profile NAME` isolates local accounts.
@@ -45,9 +45,9 @@ restarting keeps Actor identity and history. Headless first-account creation is
 `account create NAME --password-stdin`; never pass passwords as command arguments.
 
 Windows and macOS use the [Tauri desktop client](clients/app/README.md), sharing
-the same WebUI and account interfaces. Build with
-`cargo build -p daat-locus -p daat-locus-app`, then run `daat-locus-app` next to the
-service executable. `start --open` prefers the installed client. Closing its
+the same WebUI and account interfaces. Tauri owns the native assets and compression;
+its companion service excludes embedded-webui. Follow the native build guide,
+then run `daat-locus-app` next to the service executable. `start --open` prefers the installed client. Closing its
 window hides it; Quit client preserves background tasks; service maintenance uses
 the CLI. The independent backend has no GUI dependencies. Linux
 retains the service and browser entry. Android embeds the same core and WebUI in an APK;
@@ -79,8 +79,9 @@ retaining original branches and never replaying uncertain App effects.
 
 See [contribution instructions](CONTRIBUTING.md), [architecture](docs/architecture.md),
 [model catalog](docs/model-catalog.md) and [license notes](docs/license-attribution.md).
-Explicit `DAAT_LOCUS_BUILD_WEBUI=0` skips frontend toolchains for backend-only checks.
+Explicit `DAAT_LOCUS_BUILD_WEBUI=0` omits WebUI assets for backend-only checks.
 
 `cargo xtask package binary --target <triple>` creates a binstall archive.
 `package windows` and `package macos` create native installers on their respective
-platforms. Packages require an embedded WebUI binary. No Git submodules are needed.
+platforms. Binary archives carry the embedded browser service; native installers
+carry the Tauri UI and an API-only companion service, avoiding duplicate assets. No Git submodules are needed.

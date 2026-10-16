@@ -6,6 +6,14 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-z,max-page-size=16384");
     }
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../../..");
+    if env::var_os("CARGO_FEATURE_CUSTOM_PROTOCOL").is_some() {
+        let dist = root.join("webui/dist");
+        println!("cargo:rerun-if-changed={}", dist.display());
+        assert!(
+            dist.join("index.html").is_file(),
+            "Build the shared WebUI before the native client: bun scripts/build-webui.ts"
+        );
+    }
     let logo = root.join(if android {
         "assets/logo-mark.svg"
     } else {
@@ -63,9 +71,16 @@ fn main() {
     println!("cargo:rustc-env=TAURI_CONFIG={config}");
     tauri_build::try_build(
         tauri_build::Attributes::new()
-            .app_manifest(
-                tauri_build::AppManifest::new().commands(&["desktop_account", "desktop_window"]),
-            )
+            .app_manifest(tauri_build::AppManifest::new().commands(&[
+                "desktop_account",
+                "desktop_window",
+                "native_http_start",
+                "native_http_write",
+                "native_http_send",
+                "native_http_read",
+                "native_http_cancel",
+                "native_resource_download",
+            ]))
             .windows_attributes(tauri_build::WindowsAttributes::new().window_icon_path(icon_path)),
     )
     .unwrap();

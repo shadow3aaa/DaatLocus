@@ -1,4 +1,4 @@
-//! Distribution builds ship the desktop client and independent embedded-WebUI service.
+//! Distribution builds select native assets or an independently embedded browser UI.
 mod android;
 mod reporting;
 
@@ -12,6 +12,7 @@ use std::{
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const UI_MARKER: &[u8] = b"DaatLocus.EmbeddedWebUI.v1";
+const NATIVE_UI_MARKER: &[u8] = b"DaatLocus.NativeWebUI.v1";
 #[derive(Parser)]
 #[command(name = "xtask", about = "Build and package Daat Locus.")]
 struct Cli {
@@ -125,7 +126,13 @@ fn run() -> Result<()> {
             meta.package.name, meta.package.version
         ),
     );
+    let native = kind != "binary";
     if !args.skip_build {
+        command(
+            Command::new("bun")
+                .current_dir(&root)
+                .arg("scripts/build-webui.ts"),
+        )?;
         let mut build = Command::new("cargo");
         build
             .current_dir(&root)
@@ -139,10 +146,23 @@ fn run() -> Result<()> {
                 "daat-locus",
             ])
             .env_remove("DAAT_LOCUS_BUILD_WEBUI");
-        if desktop_target(&target) {
-            build.args(["-p", "daat-locus-app"]);
+        if native {
+            build.arg("--no-default-features");
         }
         command(&mut build)?;
+        if native {
+            command(Command::new("cargo").current_dir(&root).args([
+                "build",
+                "--release",
+                "--locked",
+                "--target",
+                &target,
+                "-p",
+                "daat-locus-app",
+                "--features",
+                "custom-protocol",
+            ]))?;
+        }
     }
     let release = args
         .release_dir
@@ -161,9 +181,13 @@ fn run() -> Result<()> {
         output,
     };
     let binary = context.binary("daat-locus");
-    require_embedded(&binary)?;
-    if desktop_target(&context.target) && !context.binary("daat-locus-app").is_file() {
-        return Err("Desktop client is missing; build daat-locus-app".into());
+    if native {
+        require_native(&context.binary("daat-locus-app"))?;
+        if contains_ui_marker(fs::File::open(&binary)?)? {
+            return Err("Native companion service must be built with --no-default-features to avoid duplicate WebUI assets".into());
+        }
+    } else {
+        require_embedded(&binary)?;
     }
     match kind {
         "binary" => archive(&context)?,
@@ -194,9 +218,7 @@ fn validate_target(target: &str) -> Result<()> {
     }
     Ok(())
 }
-fn desktop_target(target: &str) -> bool {
-    target.contains("windows-msvc") || target.contains("apple-darwin")
-}
+
 impl Context {
     fn binary(&self, name: &str) -> PathBuf {
         self.release.join(format!(
@@ -236,10 +258,25 @@ fn require_embedded(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn contains_ui_marker(mut reader: impl std::io::Read) -> std::io::Result<bool> {
+fn require_native(path: &Path) -> Result<()> {
+    if !contains_native_ui_marker(fs::File::open(path)?)? {
+        return Err(
+            "Native WebUI client is missing; build daat-locus-app with --features custom-protocol"
+                .into(),
+        );
+    }
+    Ok(())
+}
+fn contains_ui_marker(reader: impl std::io::Read) -> std::io::Result<bool> {
+    contains_marker(reader, UI_MARKER)
+}
+fn contains_native_ui_marker(reader: impl std::io::Read) -> std::io::Result<bool> {
+    contains_marker(reader, NATIVE_UI_MARKER)
+}
+fn contains_marker(mut reader: impl std::io::Read, marker: &[u8]) -> std::io::Result<bool> {
     // Android debug libraries can exceed a gigabyte. Scan without buffering the
     // whole library and retain the overlap when the marker spans two reads.
-    let mut buffer = vec![0; 64 * 1024 + UI_MARKER.len()];
+    let mut buffer = vec![0; 64 * 1024 + marker.len()];
     let mut retained = 0;
     loop {
         let read = reader.read(&mut buffer[retained..])?;
@@ -248,12 +285,12 @@ fn contains_ui_marker(mut reader: impl std::io::Read) -> std::io::Result<bool> {
         }
         let length = retained + read;
         if buffer[..length]
-            .windows(UI_MARKER.len())
-            .any(|part| part == UI_MARKER)
+            .windows(marker.len())
+            .any(|part| part == marker)
         {
             return Ok(true);
         }
-        retained = length.min(UI_MARKER.len() - 1);
+        retained = length.min(marker.len() - 1);
         buffer.copy_within(length - retained..length, 0);
     }
 }
@@ -266,22 +303,10 @@ fn archive(context: &Context) -> Result<()> {
         &binary,
         PathBuf::from(context.stem()).join(binary.file_name().unwrap()),
     )?;
-    if desktop_target(&context.target) {
-        let client = context.binary("daat-locus-app");
-        tar.append_path_with_name(
-            &client,
-            PathBuf::from(context.stem()).join(client.file_name().unwrap()),
-        )?;
-    }
+
     tar.into_inner()?.finish()?;
     let reader = zstd::Decoder::new(fs::File::open(&path)?)?;
-    if tar::Archive::new(reader).entries()?.count()
-        != if desktop_target(&context.target) {
-            2
-        } else {
-            1
-        }
-    {
+    if tar::Archive::new(reader).entries()?.count() != 1 {
         return Err("Archive verification failed".into());
     }
     packaged("binary archive", &path)?;
@@ -619,10 +644,9 @@ mod tests {
             .collect();
         assert_eq!(
             paths,
-            vec![
-                PathBuf::from("daat-locus-0.5.0-x86_64-pc-windows-msvc/daat-locus.exe"),
-                PathBuf::from("daat-locus-0.5.0-x86_64-pc-windows-msvc/daat-locus-app.exe")
-            ]
+            vec![PathBuf::from(
+                "daat-locus-0.5.0-x86_64-pc-windows-msvc/daat-locus.exe"
+            ),]
         );
     }
 }

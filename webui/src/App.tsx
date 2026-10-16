@@ -8,7 +8,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem,
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { AccessGate } from "@/components/access-gate";
 import { DesktopTitlebar } from "@/components/desktop-titlebar";
-import { MobileResourcePreview } from "@/components/mobile-resource-preview";
+import { NativeResourcePreview } from "@/components/native-resource-preview";
 import { ActorDialog } from "@/components/actor-dialog";
 import { ConversationPane } from "@/components/conversation-pane";
 import { SearchDialog } from "@/components/search-dialog";
@@ -69,7 +69,7 @@ export default function App() {
   const configure = useCallback(async () => {
     const epoch = ++authEpoch.current;
     const result = await getAccess(); if (epoch !== authEpoch.current) return;
-    const linked = actorIdFromUrl(location.href, location.origin);
+    const linked = actorIdFromUrl(location.href, location.href);
       const stage = await getStage();
       if (epoch !== authEpoch.current) return;
       configureConversationDevice(stage?.stage_id ?? null);
@@ -82,7 +82,7 @@ export default function App() {
       setAccess(result);
   }, []);
   useEffect(() => { let live = true; setChecking(true); void configure().catch(error => { if (!live) return; if (error instanceof ActorApiError && [401,403,410].includes(error.status)) revoked(); else setAccess(null); }).finally(() => { if (live) setChecking(false); }); return () => { live = false; authEpoch.current++; }; }, [configure, revoked]);
-  useEffect(() => { function pop() { const linked = actorIdFromUrl(location.href, location.origin); const id = linked ? localActorId(linked) : null; setActorStack(id && id !== entry ? [id] : []); } window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, [entry]);
+  useEffect(() => { function pop() { const linked = actorIdFromUrl(location.href, location.href); const id = linked ? localActorId(linked) : null; setActorStack(id && id !== entry ? [id] : []); } window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, [entry]);
   useEffect(() => { function shortcut(event: KeyboardEvent) { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k" && access && !peek && !settings) { event.preventDefault(); setSearching(true); } } window.addEventListener("keydown", shortcut); return () => window.removeEventListener("keydown", shortcut); }, [access, peek, settings]);
   function openActor(address: string, messageId?: string) { const id = localActorId(address); setActorTarget(messageId ? {actorId:id,id:messageId,revision:Date.now()} : null); if (id === entry && !peek) { if (messageId) setTargetMessage(old => ({id: messageId, revision: (old?.revision || 0) + 1})); return; } setActorStack(old => old.at(-1) === id ? old : [...old, id]); history.pushState(null, "", conversationUrl(address)); }
   function closeActor() { setActorStack([]); history.replaceState(null, "", "/"); }
@@ -109,7 +109,7 @@ export default function App() {
   async function logout() { setLogoutError(false); try { await logoutSession(); revoked(); history.replaceState(null, "", "/"); } catch { setLogoutError(true); } }
   return <TooltipProvider delayDuration={250}><main className="dl-app">
     <DesktopTitlebar />
-    <MobileResourcePreview />
+    <NativeResourcePreview />
     {access && logoutError && <div className="dl-action-error" role="alert"><span>{t("app.could_not_sign_out_try_again")}</span><Button variant="ghost" size="sm" onClick={() => { void logout(); }}>{t("app.retry")}</Button></div>}
     {checking ? <div className="dl-app-loading" role="status"><span className="dl-loading-orbit" />{t("app.connecting")}</div> : !access ? <AccessGate onAuthenticated={configure} /> : <>
       <div className="dl-floating-account"><DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline" size="icon-lg" className="dl-profile-button" aria-label={t("app.configuration_and_settings")}><Avatar><AvatarFallback>{Array.from(access.account?.name || t("app.account")).slice(0, 2).join("")}</AvatarFallback></Avatar></Button></DropdownMenuTrigger>

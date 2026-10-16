@@ -4,5 +4,8 @@
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">127.0.0.1</domain>
         <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">tauri.localhost</domain>
+        <domain includeSubdomains="false">ipc.localhost</domain>
+        <domain includeSubdomains="false">dl-resource.localhost</domain>
     </domain-config>
 </network-security-config>

@@ -88,7 +88,7 @@ public final class ReleaseStartupTest extends Instrumentation {
         long deadline = SystemClock.elapsedRealtime() + 120000;
         JSONObject state = new JSONObject();
         while (SystemClock.elapsedRealtime() < deadline) {
-            evaluate(activity, "window.__dlSyncCheck=null;fetch('/v1/stage/status').then(async r=>{let d=await r.json();window.__dlSyncCheck={http:r.status,core:d.core||null};}).catch(()=>{window.__dlSyncCheck={http:0};});null");
+            evaluate(activity, "window.__dlSyncCheck=null;" + nativeFetch() + "('/v1/stage/status').then(async r=>{let d=await r.json();window.__dlSyncCheck={http:r.status,core:d.core||null};}).catch(()=>{window.__dlSyncCheck={http:0};});null");
             SystemClock.sleep(500);
             Object value = evaluate(activity, "JSON.stringify(window.__dlSyncCheck)");
             if (value instanceof String && !"null".equals(value)) {
@@ -100,7 +100,7 @@ public final class ReleaseStartupTest extends Instrumentation {
         }
         if (!state.has("core") || state.isNull("core") || !state.getJSONObject("core").optBoolean("ready")) return state.toString();
         String key = "sync-device-test-" + java.util.UUID.randomUUID();
-        evaluate(activity, "window.__dlSyncInput=null;fetch('/v1/actors/core/messages',{method:'POST',headers:{'Content-Type':'application/json','X-Daat-Request':'1','Idempotency-Key':'"+key+"'},body:JSON.stringify({content:'设备同步实测：请仅回复收到，不要委派任务或执行其他操作。',attachments:[]})}).then(async r=>{let d=await r.json();window.__dlSyncInput={http:r.status,id:d.id||null,status:d.status||null,code:d.code||null};}).catch(()=>{window.__dlSyncInput={http:0};});null");
+        evaluate(activity, "window.__dlSyncInput=null;" + nativeFetch() + "('/v1/actors/core/messages',{method:'POST',headers:{'Content-Type':'application/json','X-Daat-Request':'1','Idempotency-Key':'"+key+"'},body:JSON.stringify({content:'设备同步实测：请仅回复收到，不要委派任务或执行其他操作。',attachments:[]})}).then(async r=>{let d=await r.json();window.__dlSyncInput={http:r.status,id:d.id||null,status:d.status||null,code:d.code||null};}).catch(()=>{window.__dlSyncInput={http:0};});null");
         long inputDeadline = SystemClock.elapsedRealtime() + 30000;
         while (SystemClock.elapsedRealtime() < inputDeadline) {
             Object value = evaluate(activity, "JSON.stringify(window.__dlSyncInput)");
@@ -112,6 +112,23 @@ public final class ReleaseStartupTest extends Instrumentation {
         }
         SystemClock.sleep(5000);
         return state.toString();
+    }
+
+    // Invoke the actual native transport from the main WebView. Diagnostic HTTP
+    // calls must not accidentally target the Tauri static-asset protocol.
+    private static String nativeFetch() {
+        return "(async function(path,options={}){"
+            + "const call=window.__TAURI_INTERNALS__.invoke;"
+            + "const headers=Object.entries(options.headers||{}).filter(([k])=>k.toLowerCase()!=='x-daat-request');"
+            + "const id=await call('native_http_start',new Uint8Array(),"
+            + "{headers:{'x-daat-http':JSON.stringify({path,method:options.method||'GET',headers})}});"
+            + "try{if(options.body)await call('native_http_write',new TextEncoder().encode(options.body),{headers:{'x-daat-http-id':String(id)}});"
+            + "const reply=await call('native_http_send',{id});const chunks=[];let size=0;"
+            + "if(![204,205,304].includes(reply.status)){for(;;){const raw=await call('native_http_read',{id});"
+            + "const chunk=new Uint8Array(raw);if(!chunk.length)break;size+=chunk.length;"
+            + "if(size>65536)throw new Error('Diagnostic response too large');chunks.push(chunk);}}"
+            + "return new Response([204,205,304].includes(reply.status)?null:new Blob(chunks),reply);"
+            + "}finally{await call('native_http_cancel',{id});}})";
     }
 
     private Object evaluate(Activity activity, String script) throws Exception {

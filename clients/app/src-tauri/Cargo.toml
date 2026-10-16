@@ -10,6 +10,9 @@ license = "Apache-2.0"
 name = "daat_locus_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 clap = { version = "4.5.38", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -17,14 +20,20 @@ serde_json = "1"
 hex = "0.4"
 daat-locus-client-protocol = { path = "../../../crates/daat-locus-client-protocol" }
 sha2 = "0.11.0"
-tokio = { version = "1", features = ["process", "time", "rt-multi-thread", "macros", "io-util"] }
+tokio = { version = "1", features = ["process", "time", "rt-multi-thread", "macros", "io-util", "sync"] }
 url = "2"
+reqwest = { version = "0.13.2", default-features = false, features = ["stream"] }
+cookie = "0.18"
+bytes = "1"
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "android"))'.dependencies]
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 mimalloc = { workspace = true }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
-tauri-plugin-dialog = "2"
 open = "5"
 sys-locale = "0.3"
 
@@ -41,7 +50,7 @@ serde_json = "1"
 [target.'cfg(target_os = "android")'.dependencies]
 mimalloc = { workspace = true, features = ["local_dynamic_tls"] }
 tauri = { version = "2", features = ["image-png"] }
-daat-locus = { path = "../../.." }
+daat-locus = { path = "../../..", default-features = false }
 axum = "0.8"
 tracing = "0.1"
 jni = "0.22"

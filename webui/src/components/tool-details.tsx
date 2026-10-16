@@ -1,3 +1,4 @@
+import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { useState } from "react";
 import { ExternalLinkIcon, TerminalIcon } from "lucide-react";
@@ -23,12 +24,12 @@ function ArtifactView({ result }: { result: ToolResult }) {
   const title = asText(payload.title) || t("tool_details.deliver_result");
   const kind = asText(payload.kind);
   const [expanded, setExpanded] = useState(false);
-  const local = Boolean(resourceActorId(uri, location.origin));
+  const local = Boolean(resourceActorId(uri, location.href));
   const safe = local ? uri : safeLink(uri);
   if (!safe) return <p className="dl-tool-note">{t("tool_details.could_not_open_the_result")}</p>;
   return <section className="dl-artifact"><div className="dl-artifact-header"><span>{title}</span><a href={safe} target="_blank" rel="noreferrer" aria-label={t("tool_details.open_value0", {value0: title})}><ExternalLinkIcon /></a></div>
-    {local && (kind === "image" || kind === "svg") && <img src={uri} alt={title} loading="lazy" />}
-    {local && kind === "html" && <><iframe src={uri} sandbox="allow-scripts" referrerPolicy="no-referrer" title={title} className={expanded ? "dl-artifact-frame-expanded" : undefined} /><Button variant="ghost" size="sm" onClick={() => setExpanded(!expanded)}>{expanded ? t("tool_details.collapse_preview") : t("tool_details.expand_preview")}</Button></>}
+    {local && (kind === "image" || kind === "svg") && <img src={resourceSource(uri)} alt={title} loading="lazy" />}
+    {local && kind === "html" && <><iframe src={resourceSource(uri)} sandbox="allow-scripts" referrerPolicy="no-referrer" title={title} className={expanded ? "dl-artifact-frame-expanded" : undefined} /><Button variant="ghost" size="sm" onClick={() => setExpanded(!expanded)}>{expanded ? t("tool_details.collapse_preview") : t("tool_details.expand_preview")}</Button></>}
     {readableSummary(asText(payload.description)) && <p>{readableSummary(asText(payload.description))}</p>}
   </section>;
 }

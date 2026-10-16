@@ -1,4 +1,5 @@
 import type { EventRecord } from "./actor-api";
+import { serviceFetch } from "./transport";
 
 export type StreamStatus = "connecting" | "connected" | "reconnecting" | "closed";
 export type StreamOptions = {
@@ -65,7 +66,7 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
 export async function subscribe(path: string, options: StreamOptions): Promise<void> {
   let cursor = options.after ?? 0;
   let retry = options.retryMs ?? 1000;
-  const fetcher = options.fetcher ?? fetch;
+  const fetcher = options.fetcher ?? serviceFetch;
   while (!options.signal?.aborted) {
     options.onStatus?.(cursor ? "reconnecting" : "connecting");
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;

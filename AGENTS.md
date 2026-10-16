@@ -174,9 +174,18 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   and their models can always be removed; an empty model setup keeps input queued.
   Hold the lifecycle lock over worker stop, persistence and publication. Persist
   the exact candidate in the service profile, not a request rebuilt later.
-- Normal builds compile and embed the WebUI, including the shared authentication
-  WASM. Explicit `DAAT_LOCUS_BUILD_WEBUI=0` supports backend-only development checks;
-  distribution must reject binaries without the embedded WebUI.
+- Build the shared WebUI/authentication WASM independently before its consumers.
+  Tauri owns native assets through frontendDist and its built-in compression;
+  native companion services and Android core disable embedded-webui. Standalone
+  browser-serving binaries enable embedded-webui and embed the same dist with zstd;
+  headless builds use --no-default-features. DAAT_LOCUS_BUILD_WEBUI=0 remains a
+  backend-check override. Rust build scripts never invoke Bun or wasm-pack.
+  Packaging validates the appropriate UI host and rejects duplicate native assets.
+- Native transport targets only the verified profile-local service, retains
+  session cookies in the profile's WebView store and never returns them to JS.
+  Preserve HTTP authorization, OPAQUE, bounded pull-based SSE/cancellation and
+  resource access checks. Native resource previews have no native command grants;
+  do not introduce broad CORS, arbitrary HTTP proxies or business-command replicas.
 - Browser account login uses OPAQUE (RFC 9807) with the shared Rust/WASM suite and
   Argon2id. Passwords stay in the client; Worker/DO never stores or validates them.
   Remove the former Owner Token registry, Bearer path and token endpoints completely.

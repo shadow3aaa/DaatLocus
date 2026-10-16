@@ -10,7 +10,8 @@ use crate::daat_locus_paths::daat_locus_paths;
 #[cfg(not(test))]
 use crate::daat_locus_paths::daat_locus_paths_sync;
 
-const COMPILED_API_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/models-dev-api.json"));
+const COMPILED_API_ZSTD: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/models-dev-api.json.zst"));
 
 const CONSERVATIVE_CONTEXT_WINDOW_TOKENS: usize = 32_768;
 const CONSERVATIVE_MAX_COMPLETION_TOKENS: usize =
@@ -49,9 +50,7 @@ fn catalog_store() -> &'static RwLock<Arc<serde_json::Value>> {
                 return RwLock::new(Arc::new(root));
             }
         }
-        RwLock::new(Arc::new(
-            validated_catalog(COMPILED_API_JSON).expect("valid compiled models.dev catalog"),
-        ))
+        RwLock::new(Arc::new(compiled_catalog()))
     })
 }
 
@@ -62,6 +61,17 @@ fn load_catalog_json() -> Arc<serde_json::Value> {
 fn validated_catalog(text: &str) -> Result<serde_json::Value, String> {
     let root: serde_json::Value =
         serde_json::from_str(text).map_err(|_| "Invalid model catalog")?;
+    validate_catalog(root)
+}
+
+fn compiled_catalog() -> serde_json::Value {
+    let decoder = zstd::Decoder::new(COMPILED_API_ZSTD).expect("open compiled models.dev catalog");
+    let root = serde_json::from_reader(std::io::BufReader::new(decoder))
+        .expect("decode compiled models.dev catalog");
+    validate_catalog(root).expect("valid compiled models.dev catalog")
+}
+
+fn validate_catalog(root: serde_json::Value) -> Result<serde_json::Value, String> {
     if !root.as_object().is_some_and(|providers| {
         providers.values().any(|provider| {
             provider["models"].as_object().is_some_and(|models| {
@@ -399,7 +409,6 @@ mod tests {
         ] {
             assert!(validated_catalog(invalid).is_err());
         }
-        assert!(validated_catalog(COMPILED_API_JSON).is_ok());
         let catalog = validated_catalog(r#"{"fixture":{"models":{"example":{"limit":{"context":12345,"output":678},"modalities":{"input":["text","image"]},"tool_call":true}}}}"#).unwrap();
         let capacity = lookup_model_in_json(&catalog, "example").unwrap();
         assert_eq!(capacity.context_window_tokens, 12345);

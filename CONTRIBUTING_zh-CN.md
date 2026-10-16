@@ -12,14 +12,17 @@ Actor 和 App 是唯一核心概念；保留身份、持久消息、权限和增
 
 ```powershell
 rustup target add wasm32-unknown-unknown
-cd webui
-bun install --frozen-lockfile
-cd ..
+bun scripts/build-webui.ts
 cargo run -- serve
 ```
 
-默认 Cargo 构建会编译并内置 WebUI 和认证 WASM。打开服务输出的地址，登录和写操作
-使用同源地址。前端迭代在 `webui` 中执行 `bun run build`，再构建内置客户端的服务。
+`bun scripts/build-webui.ts` 独立构建共享 WebUI 和认证 WASM，输出 `webui/dist`。
+Cargo 只消费产物，构建脚本不调用 Bun 或 wasm-pack。默认 `embedded-webui` feature
+将资源以 zstd 压缩后嵌入独立网页服务；`DAAT_LOCUS_WEBUI_DIST` 可指定产物目录。
+打开服务输出的地址，登录和写操作仍然同源。前端变化后先重建 dist，再构建服务。
+Tauri 使用同一 dist，通过 frontendDist 和框架内置压缩管理原生资源；配套后台使用
+`--no-default-features`，Android 核心也关闭默认 feature，避免重复嵌入。
+Tauri/xtask 打包会先准备前端；纯无头服务使用 `cargo run --no-default-features -- serve`。
 `webui_fixture` 已删除。手动验证使用独立 profile 和临时工作目录，不能使用真实用户
 数据替代测试夹具。
 
@@ -28,7 +31,8 @@ cargo run -- serve
 实际共享 WebUI 和内存 HTTP/SSE mock，无需后台服务、账号、wasm-pack 或 Rust
 编译器。场景选择器包含对话、活动、审批、队列、附件、长内容、登录和连接状态。
 每个场景同时提供 320px 和 390px 的窄屏预览。
-设置和 Actor 弹窗转到主窗口使用实际界面的入口。切换场景只重置 mock 数据。
+设置使用实际界面的入口。Actor 链接在桌面打开对话框，在窄屏打开带返回按钮的
+全屏对话。切换场景只重置 mock 数据。
 预览不提供真实认证；发行构建保留 OPAQUE/WASM，并排除预览路由。验证夹具使用
 `bun run typecheck:mock` 和 `bun test tests/mock-preview.test.ts`；后台行为仍以
 服务契约测试为准。
@@ -36,6 +40,25 @@ cargo run -- serve
 后台检查设置 `$env:DAAT_LOCUS_BUILD_WEBUI='0'`，无需 Bun 或 wasm-pack。
 离线构建可用 `DAAT_LOCUS_MODEL_CATALOG_PATH` 指定有效 models.dev JSON；
 Cargo `--offline` 本身不会禁止构建脚本联网。详见[模型目录](docs/model-catalog.md)。
+
+## Actor 编排评测
+
+通用模型指令维护在 `src/app_instructions/orchestration.md`。Core 和安装管理型
+Actors App 的 hosted Actor 自动加载它；修改后重新构建后台。场景指导应保持
+通用，区分编排失误与工具、环境、权限、运行时故障，在对应层修复问题，不能为
+每个失败都追加提示词规则。
+
+模型能力 benchmark 应比较基线与单项策略修改，固定任务版本、模型与提供商设置、
+工具、审批模式、环境，以及总时间和 token 预算。成本统计包含全部协作者和自动
+审批。使用一次性账号、profile 和获准的隔离任务工作区；独立样本之间不复用
+Actor 历史或已修改的代码目录，同一样本内保留相关 Actor 上下文以评估复用。
+真实模型评测必须显式运行，不进入普通测试。
+
+记录源码版本及未提交差异、策略哈希、任务 ID、结果、耗时、用量和委派／验证
+失败，保留失败与超时样本。采用规则前，比较重复运行和留出任务集的逐任务结果；
+不把题目专用解法、隐藏测试预期或 benchmark 身份写入模型指令。生成报告放在
+被忽略的输出目录，不提交源码。当前仓库没有 DeepSWE／模型能力评测适配器；
+下方模拟负载脚本测量后台资源开销，不能衡量解题能力。
 
 ## 后端资源压力测试
 
@@ -58,9 +81,7 @@ rust-script scripts/perf.rs --debug-build --actors 2 --rounds 2 --idle-seconds 2
 
 需要 Rust 和 rust-script。内嵌 manifest 引用本地 DL/auth crate；rust-script 管理自己的
 依赖锁文件和编译缓存。被测 CLI 使用仓库锁文件构建并关闭 WebUI 嵌入。
-若也要跳过脚本依赖的 DL 库的 WebUI/WASM 编译，应在运行 rust-script 前设置
-`DAAT_LOCUS_BUILD_WEBUI=0`（PowerShell：`$env:DAAT_LOCUS_BUILD_WEBUI='0'`；
-POSIX：`export DAAT_LOCUS_BUILD_WEBUI=0`），否则库编译需要正常的 Bun/wasm-pack 环境。
+脚本依赖的 DL 库与被测 CLI 都关闭默认 feature，无需前端 dist、Bun 或 wasm-pack。
 `--skip-build` 复用对应 CLI 产物，源码变化后应重建；`--debug-build` 控制被测 CLI，
 rust-script 自身的 `--debug` 仅控制脚本的编译模式。脚本使用默认
 `target/<profile>` 输出路径。`--model-delay-ms`、`--sample-ms`、`--timeout-seconds`
@@ -148,7 +169,8 @@ bun run build
 浏览器默认语言和手动选择。
 
 Windows/macOS 共用 `clients/app/src-tauri` 中的 `daat-locus-app`，与 `daat-locus`
-一起构建。后台内置共用 WebUI，不依赖 GUI；客户端单独检查不需要 Bun/WASM。
+一起构建。先准备共享 dist，原生客户端启用 `custom-protocol`，配套后台使用
+`--no-default-features`，不依赖 GUI，也不重复嵌入资源；客户端开发检查可使用 devUrl。
 运行 `cargo test -p daat-locus-app` 和严格 Clippy，原生 CI 覆盖两个平台。
 桌面验证账号登录、附件、资源预览、重复启动、隐藏/重开、独立退出客户端与正常停止。
 原生代码使用固定的配套 CLI 操作，核对 profile、可执行文件与 loopback origin；
@@ -170,8 +192,9 @@ cargo xtask package android --target aarch64
 `--out-dir` 可自定义产物目录。
 
 Windows 安装包需要 WiX，macOS 安装包需要原生系统工具。
-`--skip-build --release-dir <directory>` 打包既有、已核实内置 WebUI 的二进制，
-Windows/macOS 同时需要配套桌面客户端。后台专用构建会被拒绝。
+`--skip-build --release-dir <directory>` 打包既有、已核实的产物：binary 归档需要
+内置 WebUI 的独立服务；Windows/macOS 安装包需要带原生资源的客户端和不重复
+嵌入页面的配套后台。缺失客户端或重复资源都会被拒绝。
 Release CI 在各平台原生构建；产物放进忽略的 `target`。
 分发前检查依赖归属与许可证，见[归属说明](docs/license-attribution.md)。
 

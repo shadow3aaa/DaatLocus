@@ -178,14 +178,6 @@ pub fn local_origin(value: &str) -> Result<Url> {
     }
     Ok(url)
 }
-pub fn same_origin(base: &Url, candidate: &Url) -> bool {
-    candidate.username().is_empty()
-        && candidate.password().is_none()
-        && base.origin() == candidate.origin()
-}
-pub fn resource(base: &Url, url: &Url) -> bool {
-    same_origin(base, url) && url.path().starts_with("/v1/") && url.path().contains("/resources/")
-}
 pub fn profile_id(root: &Path) -> String {
     use sha2::{Digest, Sha256};
     let path = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
@@ -213,22 +205,6 @@ mod tests {
         ] {
             assert!(local_origin(bad).is_err(), "{bad}");
         }
-    }
-    #[test]
-    fn navigation_and_previews_never_cross_the_service_origin() {
-        let base = local_origin("http://127.0.0.1:45825").unwrap();
-        assert!(resource(
-            &base,
-            &base.join("/v1/actors/root/resources/image").unwrap()
-        ));
-        for url in [
-            "http://127.0.0.1:45826/v1/actors/root/resources/x",
-            "https://example.com/v1/resources/x",
-            "http://user@127.0.0.1:45825/v1/resources/x",
-        ] {
-            assert!(!resource(&base, &Url::parse(url).unwrap()));
-        }
-        assert!(!resource(&base, &base.join("/v1/account").unwrap()));
     }
     #[test]
     fn profile_arguments_cannot_escape_the_namespace() {

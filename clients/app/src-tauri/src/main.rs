@@ -2,6 +2,8 @@
 mod backend;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod desktop;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod transport;
 #[cfg(windows)]
 mod windows_tray;
 

@@ -303,8 +303,13 @@ WebUI 文案维护在 `webui/src/locales/{zh-CN,en-US}.json`，使用 i18next /
 react-i18next；默认选浏览器首个受支持语言，其他语言回退英文。个性化可选择
 跟随浏览器、中文、英文，自动保存并即时刷新。用户消息、文件与命令原文不翻译。
 
-普通 Cargo 构建通过 Bun、wasm-pack 构建并内置 WebUI；显式
-`DAAT_LOCUS_BUILD_WEBUI=0` 为后台检查跳过前端。静态资源只来自编译时清单，
+WebUI 与共享认证 WASM 独立构建到同一 `webui/dist`，Rust 构建脚本只消费产物。
+Tauri 通过 frontendDist、本地资源协议与框架内置压缩提供原生页面；配套后台和
+Android 核心关闭 embedded-webui，避免同一安装包重复携带资源。独立网页服务默认
+启用 embedded-webui，按文件以 zstd 压缩嵌入，HTTP 按请求有界解压并返回原始字节；
+HEAD 直接返回原始长度。无头服务关闭默认 feature，显式 `DAAT_LOCUS_BUILD_WEBUI=0`
+仍可用于后台检查。模型目录以 zstd 嵌入，仅在首次需要编译时回退时流式解压解析，
+优先使用已验证的运行时缓存，不保留一份完整解压文本。静态资源只来自编译时清单，
 SPA 只匹配确切对话路径，未知 API 不返回 index.html。维护 CLI 用 clap 提前
 解析参数；`serve` 前台运行，`start/status/stop/restart` 通过 profile 本地
 OS-owner IPC 管理后台进程，不借用浏览器认证、不删除 Actor 数据。
@@ -312,14 +317,22 @@ OS-owner IPC 管理后台进程，不借用浏览器认证、不删除 Actor 数
 
 Windows/macOS 的共用 Tauri 客户端位于 `clients/app/src-tauri`。窗口从配套 CLI
 的 OS-owner IPC 状态取得并核对 profile、可执行文件与确切 loopback origin，
-使用后台内置的同一套 WebUI、账号 cookie、HTTP 查询和 SSE，不重复维护业务桥接。
+加载本地共享 WebUI，以受限原生传输复用后台 HTTP 查询和 SSE，不复制业务接口。
+会话 cookie 保存在 profile 的 WebView cookie 存储，原生代码读写 HttpOnly cookie；
+Android 使用系统 CookieManager。JS 无权选择服务 origin、注入 Cookie/Origin 或读取
+Set-Cookie。上传和响应的 IPC 块均有界，避免 Android 的 JSON 二进制回退放大内存；
+读块由消费者推进，取消会关闭请求，页面重载或后台 origin 变化使旧请求失效。
 WebView 不授予 JavaScript 文件、进程或 shell 能力；外部链接打开系统浏览器，
-授权资源在继承 opener 环境的原生窗口预览，继续受资源权限与 HTML/SVG CSP 限制。
+授权资源经只允许 GET/HEAD 的 dl-resource 本地协议读取，仅接受 Actor 资源路径，
+保持服务端逐块授权检查、响应大小上限和 HTML/SVG sandbox CSP，在无同源权限的
+对话框中预览；该协议不代理其他 API，不向活动资源暴露会话或原生命令。
+下载由 Rust 调用系统保存对话框（Android SAF），仅写入用户选择的目标；JS 只提交
+已授权资源路径及建议名称，不接收目标路径，也没有通用文件系统/对话框权限。
 Windows 和 macOS 14+ 使用 profile 独立 WebView 存储；更早 macOS 仍由服务端的
 profile 与账号凭据版本绑定保证会话权限。
 
 首次注册与未登录设备的账号接入使用有限的原生命令，经本机 OS-owner IPC 到同一
-认证处理逻辑。原生权限只授予该 profile 的主窗口与确切 loopback origin 的对话路径，
+认证处理逻辑。原生权限只授予该 profile 的主窗口及本地应用页面，
 资源预览无权调用。IPC 只处理未建立账号的 bootstrap，不能创建浏览器会话或修改已有
 账号；普通 OPAQUE 登录仍由 HTTP 写入 HttpOnly cookie。公开 HTTP 不接受 native
 标记、额外 Owner token 或仅凭 loopback 的注册权限。

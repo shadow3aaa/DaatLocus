@@ -31,10 +31,14 @@ For an offline library check, set `DAAT_LOCUS_MODEL_CATALOG_PATH` to an existing
 valid models.dev JSON snapshot, then run
 `cargo check --locked --offline --lib`. The catalog path supplies the compiled
 snapshot without downloading it. Backend-only checks do not build/install the
-frontend when `DAAT_LOCUS_BUILD_WEBUI=0` is explicitly set. Normal builds embed it. Cargo's `--offline`
+frontend when `DAAT_LOCUS_BUILD_WEBUI=0` is explicitly set. Standalone builds embed a prebuilt WebUI dist; native builds use Tauri assets instead. Cargo's `--offline`
 alone does not prevent a build script from making
 network requests. Without the catalog path, the build script fetches the catalog.
 
 Keep catalog loading and lookup independent of Actor state, setup UI, and
 provider network protocols. Record catalog changes and validate the relevant
 loader/discovery tests when those modules change.
+
+Compiled catalog snapshots are stored as zstd data, decoded directly into the
+validated JSON tree only when no valid runtime cache exists. Runtime cache files
+retain their original JSON format.

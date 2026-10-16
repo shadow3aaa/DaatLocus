@@ -22,13 +22,12 @@ WebUI 提供消息、附件、排队引导、紧凑活动与结果。浮动菜�
 
 ```powershell
 rustup target add wasm32-unknown-unknown
-cd webui
-bun install --frozen-lockfile
-cd ..
+bun scripts/build-webui.ts
 cargo run -- serve
 ```
 
-默认构建编译并内置 WebUI 及认证 WASM。打开输出地址，在本机创建账号，或在新设备
+先独立构建共享 WebUI 及认证 WASM，Cargo 再以 zstd 压缩嵌入 dist；Rust 构建脚本
+不调用前端工具链。纯无头服务关闭默认 feature。打开输出地址，在本机创建账号，或在新设备
 使用相同账号名和密码登录。OPAQUE 将密码留在客户端，浏览器使用 HttpOnly cookie。
 `--profile NAME` 隔离本机账号。设备发现、连接和同步自动运行；LAN 与 SSH 不依赖
 外部服务，CF Worker/DO 仅是可选的公网会合与信令途径。
@@ -39,8 +38,8 @@ cargo run -- serve
 `account create NAME --password-stdin`，密码不能放进命令参数。
 
 Windows/macOS 使用[统一 Tauri 客户端](clients/app/README.md)，复用现有 WebUI
-与账号接口。用 `cargo build -p daat-locus -p daat-locus-app` 构建，将两个可执行文件
-放在同一目录，运行 `daat-locus-app`。`start --open` 优先打开已安装客户端。
+与账号接口。Tauri 管理原生资源及压缩，配套后台关闭 embedded-webui；按客户端
+指南构建后，将两个可执行文件放在同一目录，运行 `daat-locus-app`。`start --open` 优先打开已安装客户端。
 关窗仅隐藏窗口；托盘的“退出客户端”保留后台任务，服务维护通过 CLI 完成。
 后台不依赖 GUI。Linux 保留服务与浏览器入口；Android 将相同核心和 WebUI
 内置到 APK，可独立运行，无需终端。参见[客户端构建](clients/app/README.md#android)。
@@ -67,8 +66,8 @@ Windows/macOS 使用[统一 Tauri 客户端](clients/app/README.md)，复用现�
 
 详见[贡献指南](CONTRIBUTING_zh-CN.md)、[架构](docs/architecture.md)、
 [模型目录](docs/model-catalog.md)和[许可证归属](docs/license-attribution.md)。
-显式 `DAAT_LOCUS_BUILD_WEBUI=0` 为后台检查跳过前端工具链。
+显式 `DAAT_LOCUS_BUILD_WEBUI=0` 为后台检查跳过 WebUI 资源嵌入。
 
 `cargo xtask package binary --target <triple>` 生成 binstall 归档；
-`package windows`、`package macos` 在对应系统构建安装包。打包要求二进制
-内置 WebUI。项目无需 Git 子模块。
+`package windows`、`package macos` 在对应系统构建安装包。binary 归档包含内置
+网页的独立服务；原生安装包包含 Tauri WebUI 与不重复嵌入页面的配套后台。项目无需 Git 子模块。

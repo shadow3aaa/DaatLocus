@@ -14,16 +14,21 @@ Install Rust, Bun and wasm-pack, then:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cd webui
-bun install --frozen-lockfile
-cd ..
+bun scripts/build-webui.ts
 cargo run -- serve
 ```
 
-Normal Cargo builds compile and embed the WebUI and shared authentication WASM.
-Open the printed service address; browser authentication and mutations use that
-same origin. For frontend iterations, run `bun run build` in `webui` and rebuild
-the embedded service. The retired simulated `webui_fixture` is not a development
+`bun scripts/build-webui.ts` builds the one shared WebUI/authentication WASM
+bundle in `webui/dist`. Cargo consumes that bundle; build scripts never invoke
+Bun or wasm-pack. The default `embedded-webui` feature zstd-compresses the assets
+into a standalone browser-serving binary. `DAAT_LOCUS_WEBUI_DIST` can override
+the input directory. Open the printed service address; browser authentication
+and mutations use the same origin. Rebuild the frontend before rebuilding the
+embedded service after UI changes. Tauri uses that same dist through frontendDist
+and its own built-in compression. Native companion services use
+`--no-default-features`, and Android's core disables default features so the APK
+contains only one WebUI. Tauri/xtask packaging prepares the frontend automatically.
+Use `cargo run --no-default-features -- serve` for a headless API service. The retired simulated `webui_fixture` is not a development
 entry point. Use a separate profile and temporary workspace for manual checks;
 never substitute real user data for fixtures.
 
@@ -33,14 +38,15 @@ the actual shared WebUI and an in-memory HTTP/SSE mock; no daemon, account,
 wasm-pack or Rust compiler is needed. The scene picker covers conversations,
 activity, approvals, queue, attachments, long content, login and connection states.
 Each scene also has 320px and 390px frame previews for responsive checks.
-Use the regular UI to open settings or move an Actor dialog to the main window.
+Use the regular UI to open settings. Actor links open a dialog on desktop and a
+full-screen conversation with a back button on narrow screens.
 Switching scenes resets only mock data. Authentication is deliberately unavailable
 in this preview; production builds retain the real OPAQUE/WASM path and omit the
 preview routes. Validate fixtures with `bun run typecheck:mock` and
 `bun test tests/mock-preview.test.ts`; use service contract tests for backend behavior.
 
 For backend-only checks set `DAAT_LOCUS_BUILD_WEBUI=0`. These builds require
-neither Bun nor wasm-pack. `DAAT_LOCUS_MODEL_CATALOG_PATH` can supply a validated
+neither a dist bundle, Bun nor wasm-pack. `DAAT_LOCUS_MODEL_CATALOG_PATH` can supply a validated
 models.dev JSON snapshot for offline builds; Cargo `--offline` does not disable
 build-script network requests. See [model catalog](docs/model-catalog.md).
 
@@ -96,13 +102,40 @@ translating user/source content. Test catalog parity, browser defaults and
 explicit language choices. Do not add inline bilingual selectors.
 
 The Windows/macOS Tauri application is `clients/app/src-tauri`, package
-`daat-locus-app`. Build it alongside `daat-locus`; the service embeds the shared
-WebUI and has no GUI dependencies. Client-only checks need no Bun/WASM build.
+`daat-locus-app`. Prepare the shared dist first, then build the native client
+with `--features custom-protocol` and its companion service with
+`--no-default-features`. The service has no GUI dependencies or duplicate assets.
+Client-only development checks can omit custom-protocol and use the dev URL.
 Run `cargo test -p daat-locus-app` and its strict Clippy checks; native CI covers
 both platforms. Verify account login, attachments, resource popups, duplicate
 launch, hide/reopen, independent client exit and orderly service stop on a desktop.
 Native code uses fixed companion CLI operations and validates profile, executable
 and loopback origin. Keep WebView process/filesystem/shell capabilities disabled.
+
+## Actor orchestration evaluations
+
+The shared model-facing policy is `src/app_instructions/orchestration.md`.
+Core and hosted Actors with the management Actors App receive it automatically;
+rebuild the backend after edits. Keep scenario guidance general and distinguish
+orchestration mistakes from tool, environment, permission or runtime failures.
+Fix the responsible layer rather than adding a prompt rule for every failure.
+
+For model-quality benchmarks, compare a baseline and one policy change with the
+same task revisions, model/provider settings, tools, approval mode, environment,
+and total time/token budget. Include all collaborators and automatic reviews in
+costs. Use disposable accounts/profiles and authorized isolated task workspaces;
+do not reuse Actor history or modified checkouts across independent samples.
+Within one sample, preserve related Actor context to exercise reuse. Real-model
+runs are explicitly invoked external evaluations, never normal tests.
+
+Record the source revision and dirty diff, policy hash, task IDs, outcomes,
+elapsed time, usage, and delegation/verification failures. Retain failed and
+timed-out samples. Compare task-level results over repeated runs and a held-out
+task set before adopting a rule; do not put task-specific solutions, hidden test
+expectations or benchmark identities into the model instructions. Keep generated
+reports in an ignored output location, outside source commits. The repository
+currently has no DeepSWE/model-quality evaluation adapter; the mock resource
+harness below measures backend costs, not problem-solving quality.
 
 ## Backend resource stress measurements
 
@@ -127,10 +160,8 @@ rust-script scripts/perf.rs --debug-build --actors 2 --rounds 2 --idle-seconds 2
 Requires Rust and rust-script. The script's embedded manifest references the local
 DL/auth crates; rust-script manages its own dependency lockfile and build cache.
 The CLI is built with the repository's lockfile and WebUI embedding disabled.
-To also skip WebUI/WASM compilation when rust-script builds the DL library, set
-`DAAT_LOCUS_BUILD_WEBUI=0` before invoking rust-script (PowerShell:
-`$env:DAAT_LOCUS_BUILD_WEBUI='0'`; POSIX: `export DAAT_LOCUS_BUILD_WEBUI=0`).
-Otherwise the normal Bun/wasm-pack prerequisites apply to that library build.
+The script and measured CLI both disable default features; no frontend dist,
+Bun or wasm-pack is needed for the stress driver.
 `--skip-build` reuses the selected CLI binary; rebuild after source changes.
 `--debug-build` selects the measured CLI profile; rust-script's own `--debug` flag
 only changes how the script is compiled. The script currently expects
@@ -205,9 +236,11 @@ cargo xtask package android --target aarch64
 All package commands print Cargo-style progress and clickable artifact URLs (plain URLs in redirected logs). Use `--out-dir` to choose the destination.
 
 Windows installers require WiX; macOS installers require macOS tools.
-`--skip-build --release-dir <directory>` packages an existing verified embedded
-binary and, on Windows/macOS, its desktop client. Packaging rejects backend-only builds. Release CI builds each platform
-natively. Keep generated archives and installers under ignored `target` paths.
+`--skip-build --release-dir <directory>` packages existing verified artifacts.
+Binary archives require the standalone embedded WebUI service. Windows/macOS
+installers require a native WebUI client and an API-only companion service;
+packaging rejects duplicate service assets or a missing native UI. Release CI
+builds each platform natively. Keep generated archives and installers under ignored `target` paths.
 Review dependency attribution before distribution; see
 [license notes](docs/license-attribution.md).
 
@@ -235,8 +268,8 @@ from the repository root for packaging. ARM64 is the default; use `--target x86_
 for an emulator or `--debug` for debug signing. APKs are copied to
 `target/<Android-triple>/<release|debug>/package`, or `--out-dir`.
 `--skip-build` checks and copies existing Gradle output; `--apk-dir` can select
-another directory containing `output-metadata.json`. Version, ABI and embedded
-WebUI are checked before reporting success. The existing Bun build script remains
+another directory containing `output-metadata.json`. Version, ABI, native WebUI
+and absence of duplicate backend assets are checked before reporting success. The existing Bun build script remains
 the shared Tauri/Gradle implementation.
 The signing properties and keystore stay outside the repository; see
 [the native client guide](clients/app/README.md#android). Verify release APKs with

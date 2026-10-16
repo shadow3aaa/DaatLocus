@@ -8,6 +8,6 @@ if (!debug && (!process.env.DAAT_LOCUS_ANDROID_SIGNING || !existsSync(process.en
   throw new Error("DAAT_LOCUS_ANDROID_SIGNING must reference private release signing properties");
 }
 const child = Bun.spawn([process.execPath, "run", "tauri", "android", "build", "--target", target, "--apk", ...(debug ? ["--debug"] : [])], {
-  cwd: resolve(import.meta.dir, ".."), env: { ...process.env, DAAT_LOCUS_BUILD_WEBUI: "1", DAAT_LOCUS_ANDROID_ABI: target === "aarch64" ? "arm64-v8a" : "x86_64" }, stdin: "inherit", stdout: "inherit", stderr: "inherit",
+  cwd: resolve(import.meta.dir, ".."), env: { ...process.env, DAAT_LOCUS_BUILD_WEBUI: "0", DAAT_LOCUS_ANDROID_ABI: target === "aarch64" ? "arm64-v8a" : "x86_64" }, stdin: "inherit", stdout: "inherit", stderr: "inherit",
 });
 process.exit(await child.exited);

@@ -10,7 +10,7 @@ export function localActorId(id: string, device = localDeviceId): string {
 export function actorIdFromUrl(href: string, origin = "http://localhost"): string | null {
   try {
     const url = new URL(href, origin);
-    if (url.origin !== new URL(origin).origin || url.search || url.hash) return null;
+    if (url.protocol !== new URL(origin).protocol || url.host !== new URL(origin).host || url.search || url.hash) return null;
     const match = /^\/actors\/([a-zA-Z0-9_-]+)\/?$/.exec(url.pathname);
     if (match) return match[1];
     const remote = /^\/stages\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/actors\/([a-zA-Z0-9_-]+)\/?$/.exec(url.pathname);
@@ -21,7 +21,7 @@ export function actorIdFromUrl(href: string, origin = "http://localhost"): strin
 export function resourceActorId(href: string, origin = "http://localhost"): string | null {
   try {
     const url = new URL(href, origin);
-    if (url.origin !== new URL(origin).origin || url.search || url.hash) return null;
+    if (url.protocol !== new URL(origin).protocol || url.host !== new URL(origin).host || url.search || url.hash) return null;
     const local = /^\/v1\/actors\/([a-zA-Z0-9_-]+)\/resources\/[^/]+$/.exec(url.pathname);
     if (local) return local[1];
     const remote = /^\/v1\/stages\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/actors\/([a-zA-Z0-9_-]+)\/resources\/[^/]+$/.exec(url.pathname);

@@ -1,3 +1,4 @@
+import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { useEffect, useRef, useState } from "react";
 import { CornerDownRightIcon, EllipsisIcon, FileIcon, ListEndIcon, PencilIcon, CopyIcon, Trash2Icon } from "lucide-react";
@@ -26,7 +27,7 @@ function QueueMessage({ message, active, chat, access }: {message: MessageRecord
   }
   return <li className="dl-queue-item" aria-label={t("message_queue.queued_message_value0", {value0: summary})}><div className="dl-queue-row">
     <ListEndIcon className="dl-queue-symbol" aria-hidden="true" />
-    {message.attachments.slice(0, 2).map(item => <a key={item.id} className="dl-queue-thumbnail" href={resourceUrl(message.actor_id, item.id)} target="_blank" rel="noreferrer" title={item.name}>{item.media_type.startsWith("image/") ? <img src={resourceUrl(message.actor_id, item.id)} alt={item.name} loading="lazy" /> : <FileIcon aria-label={item.name} />}</a>)}
+    {message.attachments.slice(0, 2).map(item => <a key={item.id} className="dl-queue-thumbnail" href={resourceUrl(message.actor_id, item.id)} target="_blank" rel="noreferrer" title={item.name}>{item.media_type.startsWith("image/") ? <img src={resourceSource(resourceUrl(message.actor_id, item.id))} alt={item.name} loading="lazy" /> : <FileIcon aria-label={item.name} />}</a>)}
     <span className="dl-queue-text" title={summary}>{summary}</span>
     {pendingGuide ? <span className="dl-queue-wait" role="status">{t("message_queue.applying_guidance")}</span> : controls && <div className="dl-queue-actions">
       <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm" disabled={busy || !canGuide} aria-label={t("message_queue.guide_task_value0", {value0: summary})} onClick={() => { if (active) void run(() => chat.steer(message, active.id)); }}><CornerDownRightIcon /><span>{t("message_queue.guide")}</span></Button></TooltipTrigger><TooltipContent>{active ? t("message_queue.add_this_message_to_the_current_task") : t("message_queue.no_task_is_running")}</TooltipContent></Tooltip>

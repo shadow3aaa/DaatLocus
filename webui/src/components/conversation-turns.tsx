@@ -28,7 +28,7 @@ export function PrimaryTurn({ message, chat, access, onActor, typing }: Props & 
   const user = isUserSource(message);
   const tools = chat.tools.filter(tool => tool.message_id === message.id);
   const tasks = tools.filter(tool => !tool.error && ["actors__create", "actors__send"].includes(domainToolName(tool.name)) && tool.outcome);
-  const taskTarget = (tool: typeof tasks[number]) => { const info = asObject(tool.outcome); return actorIdFromUrl(asText(info.conversation_url), typeof location === "undefined" ? undefined : location.origin) || asText(info.actor_id) || asText(info.id); };
+  const taskTarget = (tool: typeof tasks[number]) => { const info = asObject(tool.outcome); return actorIdFromUrl(asText(info.conversation_url), typeof location === "undefined" ? undefined : location.href) || asText(info.actor_id) || asText(info.id); };
   const delegated = new Set(tasks.filter(tool => domainToolName(tool.name) === "actors__send").map(taskTarget));
   const references = tasks.filter(tool => domainToolName(tool.name) !== "actors__create" || !delegated.has(taskTarget(tool)));
   if (!user && message.reply_to.kind !== "user" && !(message.reply_to.kind === "remote" && message.reply_to.user)) return null;

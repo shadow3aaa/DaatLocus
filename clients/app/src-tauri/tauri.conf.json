@@ -3,12 +3,19 @@
   "productName": "Daat Locus",
   "version": "0.5.0",
   "identifier": "io.daat-locus.app",
-  "build": {},
+  "build": {
+    "beforeBuildCommand": "bun ../../scripts/build-webui.ts",
+    "beforeDevCommand": "bun --cwd ../../webui run dev --port 5173 --strictPort --host 127.0.0.1",
+    "devUrl": "http://127.0.0.1:5173",
+    "frontendDist": "../../../webui/dist"
+  },
   "app": {
     "windows": [],
     "withGlobalTauri": false,
     "security": {
-      "capabilities": []
+      "capabilities": [],
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: dl-resource: http://dl-resource.localhost https://dl-resource.localhost; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; frame-src dl-resource: http://dl-resource.localhost https://dl-resource.localhost; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "devCsp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: dl-resource: http://dl-resource.localhost https://dl-resource.localhost; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:5173; frame-src dl-resource: http://dl-resource.localhost https://dl-resource.localhost; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {

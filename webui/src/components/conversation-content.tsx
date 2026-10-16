@@ -1,3 +1,4 @@
+import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { useEffect, useRef, useState } from "react";
 import { CheckIcon, ChevronRightIcon, CopyIcon, DownloadIcon, MessageCircleIcon, ShieldCheckIcon } from "lucide-react";
@@ -43,7 +44,7 @@ export function ActorReference({ actorId, label, onOpen, detail, messageId }: { 
 }
 
 export function AttachmentList({ items }: { items: Attachment[] }) {
-  return <div className="dl-message-attachments">{items.map(item => item.media_type.startsWith("image/") ? <a href={item.uri} target="_blank" rel="noreferrer" key={item.id}><img src={item.uri} alt={item.name} loading="lazy" /></a> : <a className="dl-file-reference" href={item.uri} download={item.name} key={item.id}><DownloadIcon aria-hidden="true" /><span>{item.name}</span><small>{formatBytes(item.size_bytes)}</small></a>)}</div>;
+  return <div className="dl-message-attachments">{items.map(item => item.media_type.startsWith("image/") ? <a href={item.uri} target="_blank" rel="noreferrer" key={item.id}><img src={resourceSource(item.uri)} alt={item.name} loading="lazy" /></a> : <a className="dl-file-reference" href={item.uri} download={item.name} key={item.id}><DownloadIcon aria-hidden="true" /><span>{item.name}</span><small>{formatBytes(item.size_bytes)}</small></a>)}</div>;
 }
 function formatBytes(bytes: number) { return bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`; }
 

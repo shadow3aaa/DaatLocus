@@ -1,5 +1,6 @@
 import { apiErrorText } from "./i18n";
 import { subscribe, type StreamOptions } from "./event-stream";
+import { serviceFetch } from "./transport";
 export type { StreamStatus } from "./event-stream";
 export type JsonValue = null | boolean | number | string | JsonValue[] | {
   [key: string]: JsonValue;
@@ -327,7 +328,7 @@ export async function request<T>(path: string, options: FetchOptions & {
   headers.set("X-Daat-Request", "1");
   if (options.body !== undefined)
     headers.set("Content-Type", "application/json");
-  const response = await fetch(path, { method: options.method || "GET", credentials: "same-origin", cache: "no-store", headers,
+  const response = await serviceFetch(path, { method: options.method || "GET", credentials: "same-origin", cache: "no-store", headers,
     signal: options.signal, body: options.raw ?? (options.body !== undefined ? JSON.stringify(options.body) : undefined) }).catch(error => { if (options.signal?.aborted) throw error; throw new ActorApiError(apiErrorText("connection_failed"), 0, "connection_failed"); });
   if (!response.ok)
     throw await responseError(response);
@@ -363,7 +364,7 @@ export const steerQueuedMessage = (actor: string, message: MessageRecord, target
 export const listMessageActivity = (actor: string, message: string, options: FetchOptions & { after?: number; limit?: number } = {}) => request<Page<EventRecord>>(query(`${actorPath(actor)}/messages/${segment(message)}/activity`, { after: options.after, limit: options.limit ?? 100 }), options);
 export const validateAttachment = async (actor: string, item: Attachment, options?: FetchOptions) => {
   const uri = resourceUrl(actor, item.id);
-  const response = await fetch(uri, { method: "HEAD", credentials: "same-origin", cache: "no-store", signal: options?.signal });
+  const response = await serviceFetch(uri, { method: "HEAD", credentials: "same-origin", cache: "no-store", signal: options?.signal });
   if ([403,404,410].includes(response.status)) return false;
   if (!response.ok) throw await responseError(response);
   return true;

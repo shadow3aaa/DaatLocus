@@ -11,7 +11,7 @@
 //! debug = 0
 //! incremental = false
 //! [dependencies]
-//! daat-locus = { path = ".." }
+//! daat-locus = { path = "..", default-features = false }
 //! daat-locus-auth = { path = "../crates/daat-locus-auth" }
 //! axum = "0.8"
 //! base64 = "0.22"
@@ -1074,7 +1074,13 @@ async fn main() -> Result<()> {
         build
             .current_dir(&repo)
             .env("DAAT_LOCUS_BUILD_WEBUI", "0")
-            .args(["build", "--locked", "--bin", "daat-locus"])
+            .args([
+                "build",
+                "--locked",
+                "--no-default-features",
+                "--bin",
+                "daat-locus",
+            ])
             .kill_on_drop(true);
         if !args.debug_build {
             build.arg("--release");

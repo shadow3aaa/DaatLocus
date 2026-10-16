@@ -1,5 +1,5 @@
 use crate::{
-    Metadata, Result, absolute, command, contains_ui_marker,
+    Metadata, Result, absolute, command, contains_native_ui_marker, contains_ui_marker,
     reporting::{packaged, status},
 };
 use clap::{Args, ValueEnum};
@@ -125,7 +125,7 @@ fn build_command(root: &Path, target: Target, debug: bool) -> Command {
     build
         .current_dir(root.join("clients/app"))
         .args(["run", "android:build", "--target", target.name()])
-        .env("DAAT_LOCUS_BUILD_WEBUI", "1");
+        .env("DAAT_LOCUS_BUILD_WEBUI", "0");
     if debug {
         build.arg("--debug");
     }
@@ -182,8 +182,15 @@ fn artifact(directory: &Path, version: &str, target: Target, debug: bool) -> Res
     if libraries != [expected.as_str()] {
         return Err("APK ABI does not match --target; rebuild the requested architecture".into());
     }
-    if !contains_ui_marker(archive.by_name(&expected)?)? {
-        return Err("Android APK has no embedded WebUI; rebuild with default settings".into());
+    if !contains_native_ui_marker(archive.by_name(&expected)?)? {
+        return Err(
+            "Android APK has no native WebUI; rebuild through the Tauri build pipeline".into(),
+        );
+    }
+    if contains_ui_marker(archive.by_name(&expected)?)? {
+        return Err(
+            "Android backend duplicates native WebUI assets; disable embedded-webui".into(),
+        );
     }
     Ok(path)
 }
@@ -191,7 +198,7 @@ fn artifact(directory: &Path, version: &str, target: Target, debug: bool) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::UI_MARKER;
+    use crate::NATIVE_UI_MARKER;
     use clap::Parser;
     use std::io::Write;
 
@@ -235,7 +242,7 @@ mod tests {
             build
                 .get_envs()
                 .any(|(key, value)| key == "DAAT_LOCUS_BUILD_WEBUI"
-                    && value == Some(std::ffi::OsStr::new("1")))
+                    && value == Some(std::ffi::OsStr::new("0")))
         );
     }
 
@@ -267,12 +274,14 @@ mod tests {
             zip.write_all(body).unwrap();
             zip.finish().unwrap();
         };
-        write_apk(UI_MARKER);
+        write_apk(NATIVE_UI_MARKER);
         assert_eq!(artifact(&root, "0.5.0", Target::X86_64, true).unwrap(), apk);
         assert!(artifact(&root, "0.5.1", Target::X86_64, true).is_err());
         assert!(artifact(&root, "0.5.0", Target::Arm64, true).is_err());
         assert!(artifact(&root, "0.5.0", Target::X86_64, false).is_err());
         write_apk(b"backend only");
+        assert!(artifact(&root, "0.5.0", Target::X86_64, true).is_err());
+        write_apk(&[NATIVE_UI_MARKER, crate::UI_MARKER].concat());
         assert!(artifact(&root, "0.5.0", Target::X86_64, true).is_err());
         for invalid in ["../app.apk", "C:app.apk", "app-unsigned.apk"] {
             write_metadata(invalid);
