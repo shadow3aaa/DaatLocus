@@ -13,7 +13,7 @@ use std::{
 };
 
 use uuid::Uuid;
-static ACL_UPDATES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ACL_UPDATES: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 use windows_sys::Win32::{
     Foundation::{
         CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, GENERIC_ALL, GetLastError, HANDLE,
@@ -291,9 +291,11 @@ fn spawn_restricted_async_inner(
 ) -> io::Result<WindowsSandboxAsyncChild> {
     check_spawn_cancelled(&input.options)?;
     let policy = bounded_acl_policy(input.policy, input.program, &input.options)?;
-    let acl_lock = ACL_UPDATES.try_lock().map_err(|_| io::Error::new(
-        io::ErrorKind::WouldBlock, "Windows sandbox permissions are being prepared by another process; retry after it settles",
-    ))?;
+    let acl_lock = lock_acl_updates(
+        &ACL_UPDATES,
+        &input.options,
+        std::time::Duration::from_secs(5),
+    )?;
     // Protect exact credential files as well as framework directories so an
     // ancestor grant cannot be inherited, while keeping broker access.
     for root in policy_paths_with_resolved(&policy.filesystem.deny_read_paths) {
@@ -436,6 +438,32 @@ fn spawn_restricted_async_inner(
         stdout: child_stdout,
         stderr: child_stderr,
     })
+}
+
+fn lock_acl_updates<'a>(
+    updates: &'a parking_lot::Mutex<()>,
+    options: &SandboxProcessOptions,
+    max_wait: std::time::Duration,
+) -> io::Result<parking_lot::MutexGuard<'a, ()>> {
+    let deadline = std::time::Instant::now() + max_wait;
+    loop {
+        check_spawn_cancelled(options)?;
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timed out waiting to prepare Windows sandbox permissions; no command was started",
+            ));
+        }
+        // Terminal invokes this on a blocking worker. Park between cancellation
+        // checks instead of rejecting ordinary concurrent starts or spinning.
+        if let Some(guard) =
+            updates.try_lock_for(remaining.min(std::time::Duration::from_millis(25)))
+        {
+            check_spawn_cancelled(options)?;
+            return Ok(guard);
+        }
+    }
 }
 
 fn check_spawn_cancelled(options: &SandboxProcessOptions) -> io::Result<()> {
@@ -920,9 +948,10 @@ fn add_explicit_aces(path: &Path, entries: &[(PSID, u32, i32)]) -> io::Result<()
 }
 
 fn restore_acl_guards(guards: &[AclGuard]) {
-    let Ok(_lock) = ACL_UPDATES.lock() else {
+    if guards.is_empty() {
         return;
-    };
+    }
+    let _lock = ACL_UPDATES.lock();
     for guard in guards.iter().rev() {
         let _ = restore_acl_guard(guard);
     }
@@ -1711,6 +1740,65 @@ mod tests {
     use crate::sandbox::{FileSystemSandboxPolicy, StrongFilesystemSandboxMode, WritableRoot};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[test]
+    fn acl_preparation_waits_for_release_and_remains_cancellable_and_bounded() {
+        use std::{sync::mpsc, time::Duration};
+
+        for outcome in ["released", "cancelled", "timed_out"] {
+            let updates = parking_lot::Mutex::new(());
+            let held = updates.lock();
+            let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let options = SandboxProcessOptions {
+                spawn_cancelled: Some(cancelled.clone()),
+                ..Default::default()
+            };
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    started_tx.send(()).unwrap();
+                    let wait = if outcome == "timed_out" {
+                        Duration::from_millis(100)
+                    } else {
+                        Duration::from_secs(5)
+                    };
+                    let result = lock_acl_updates(&updates, &options, wait).map(|_| ());
+                    finished_tx.send(result).unwrap();
+                });
+                started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                let result = if outcome != "timed_out" {
+                    let pending = finished_rx.recv_timeout(Duration::from_millis(100));
+                    if pending.is_ok() {
+                        drop(held);
+                        panic!("ACL wait completed before release or cancellation: {pending:?}");
+                    }
+                    assert!(matches!(pending, Err(mpsc::RecvTimeoutError::Timeout)));
+                    if outcome == "cancelled" {
+                        cancelled.store(true, std::sync::atomic::Ordering::Release);
+                        let result = finished_rx.recv_timeout(Duration::from_secs(2));
+                        drop(held);
+                        result.unwrap()
+                    } else {
+                        drop(held);
+                        finished_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+                    }
+                } else {
+                    let result = finished_rx.recv_timeout(Duration::from_secs(2));
+                    drop(held);
+                    result.unwrap()
+                };
+                match outcome {
+                    "released" => result.unwrap(),
+                    "cancelled" => {
+                        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted)
+                    }
+                    "timed_out" => assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut),
+                    _ => unreachable!(),
+                }
+            });
+        }
+    }
+
     fn quote(path: &Path) -> String {
         format!("'{}'", path.to_string_lossy().replace('\'', "''"))
     }
@@ -1862,16 +1950,28 @@ mod tests {
         let mut policy = RuntimeSandboxPolicy::disabled();
         policy.filesystem.readable_roots = vec![temp.path().to_owned()];
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let result = spawn_restricted_async(
-            &policy,
-            &PathBuf::from("nonexistent.exe"),
-            vec![],
-            SandboxProcessOptions {
-                spawn_cancelled: Some(flag),
-                ..Default::default()
-            },
-        );
-        assert!(matches!(result, Err(ref error) if error.kind() == io::ErrorKind::Interrupted));
+        // Cancellation before any ACL mutation must not wait for an unrelated
+        // preparation or cleanup, even though the spawn error takes rollback.
+        let updates = ACL_UPDATES.lock();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let result = spawn_restricted_async(
+                    &policy,
+                    &PathBuf::from("nonexistent.exe"),
+                    vec![],
+                    SandboxProcessOptions {
+                        spawn_cancelled: Some(flag),
+                        ..Default::default()
+                    },
+                );
+                finished_tx.send(result.map(|_| ())).unwrap();
+            });
+            let result = finished_rx.recv_timeout(std::time::Duration::from_secs(2));
+            drop(updates);
+            let result = result.expect("cancelled startup waited for unrelated ACL updates");
+            assert!(matches!(result, Err(ref error) if error.kind() == io::ErrorKind::Interrupted));
+        });
         assert_eq!(capture_dacl(temp.path()).unwrap(), before);
     }
     async fn collect(mut child: WindowsSandboxAsyncChild) -> (ExitStatus, String, String) {
