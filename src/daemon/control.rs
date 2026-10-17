@@ -64,8 +64,12 @@ fn process_identity(pid: u32) -> Option<(u64, PathBuf)> {
     Some((process.start_time(), process.exe()?.to_path_buf()))
 }
 fn alive(record: &Status) -> bool {
-    process_identity(record.pid)
-        .is_some_and(|(started, exe)| started == record.process_started && exe == record.executable)
+    // Installers can move a live image into rollback storage. Its path is not a
+    // stable process identity; IPC separately verifies the peer's OS owner and PID.
+    let system = sysinfo::System::new_all();
+    system
+        .process(sysinfo::Pid::from_u32(record.pid))
+        .is_some_and(|process| process.start_time() == record.process_started)
 }
 pub fn load(root: &Path) -> Result<Option<Status>> {
     let path = metadata(root);

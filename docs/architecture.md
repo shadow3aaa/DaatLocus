@@ -325,7 +325,9 @@ HEAD 直接返回原始长度。无头服务关闭默认 feature，显式 `DAAT_
 优先使用已验证的运行时缓存，不保留一份完整解压文本。静态资源只来自编译时清单，
 SPA 只匹配确切对话路径，未知 API 不返回 index.html。维护 CLI 用 clap 提前
 解析参数；`serve` 前台运行，`start/status/stop/restart` 通过 profile 本地
-OS-owner IPC 管理后台进程，不借用浏览器认证、不删除 Actor 数据。
+OS-owner IPC 管理后台进程，不借用浏览器认证、不删除 Actor 数据。后台存活按 PID 与
+进程启动时间识别，不依赖安装升级时可能被移动的映像路径；IPC 仍校验 OS Owner、
+端点进程与实例身份。
 
 
 Windows/macOS 的共用 Tauri 客户端位于 `clients/app/src-tauri`。窗口从配套 CLI
