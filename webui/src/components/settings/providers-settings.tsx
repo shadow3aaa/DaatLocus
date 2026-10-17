@@ -88,7 +88,7 @@ export function ProvidersSettings({config, onChange, onSave, pending, dirty = fa
       </FieldGroup> : null}
     </> : page.type === "provider" && provider ? <>
       <ProviderEditor key={page.index} provider={provider} onChange={editProvider} disabled={pending} />
-      <Button variant="outline" disabled={pending || !provider.name.trim()} onClick={() => addModel(provider.name)}><PlusIcon data-icon="inline-start" />{t("providers_settings.add_model")}</Button>
+      {!page.adding && <Button variant="outline" disabled={pending || !provider.name.trim()} onClick={() => addModel(provider.name)}><PlusIcon data-icon="inline-start" />{t("providers_settings.add_model")}</Button>}
     </> : page.type === "model" && model ? <>
       <FieldGroup><Picker id="dl-model-provider" label={t("providers_settings.providers")} value={model.provider_name} disabled={pending} options={config.providers.filter(provider => provider.name).map(provider => ({value: provider.name, label: provider.name}))} onChange={provider_name => {editModel({...model, name: model.name === model.model_id ? "" : model.name, provider_name, model_id: "", context_window_tokens: null, max_completion_tokens: null, supports_vision: null, thinking_budget: null});setPage({...page, choosing: true});}} /></FieldGroup>
       {page.choosing ? <ModelDiscovery key={model.provider_name} state={discovery} disabled={pending} onSelect={selectModel} onCustom={() => setPage({...page, choosing: false})} /> : <ModelEditor key={`${page.index}:${model.provider_name}`} model={model} metadata={discovery.models.find(found => found.id === model.model_id)} onChange={editModel} disabled={pending} onChoose={() => setPage({...page, choosing: true})} />}
