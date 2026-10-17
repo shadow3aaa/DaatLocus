@@ -12,7 +12,7 @@ client are connected.
 
 - Core has the fixed IM presentation; every other Actor has the work presentation,
   including when opened in the main window. Reuse data/control hooks, not a
-  container-dependent rendering mode. A narrow app navigation rail contains Home
+  container-dependent rendering mode. A narrow app navigation rail contains Home, Apps
   and the account menu; mobile uses a modal navigation drawer. There is one Core
   entry, no session/chat catalog or permanent Actor sidebar. Actor references
   open a conversation dialog. Settings use full-page categories.
@@ -51,6 +51,12 @@ client are connected.
 - Actor = Agent core + installed App instances. The core is the Actor's execution
   mechanism, not a parallel business management system.
 - App is a domain state machine exposing tools. It is the only tool abstraction.
+- Standard MCP servers install as device-local App instances through AppsManager or
+  the Owner Apps page. Adapt nonportable schemas inside DL; never require a custom
+  MCP protocol. List/inspect/refresh skip review but retain hard permissions;
+  install/enable/close require existing approval. Refresh only at settled tool-group
+  boundaries or the next input, preserving Actor identity/history and unchanged Apps.
+  Core still exposes only Actors. Installation never expands explicit Actor grants.
   Do not require a common `get_state` tool or a separate App workspace UI.
 - Core is the only preset Actor and the default entry. Every other Actor is
   created and named by its creating Actor; never preset a device executor.

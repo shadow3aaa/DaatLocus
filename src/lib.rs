@@ -22,6 +22,7 @@ pub mod files_app;
 pub mod http_client;
 pub mod i18n;
 pub mod logging;
+pub mod mcp;
 #[cfg(target_os = "android")]
 pub mod mobile;
 pub mod model_catalog;

@@ -303,3 +303,14 @@ DAAT_LOCUS_ANDROID_SIGNING=/private/release.properties DAAT_LOCUS_ANDROID_ABI=ar
 Use `x86_64` for an x86 emulator and build with `cargo xtask package android --target
 x86_64` first. The excluded Rust task uses the already-built native library;
 do not run this against stale native output.
+
+## MCP validation
+
+Use isolated local MCP servers for protocol, schema, credential, revision and
+uncertain-effect tests. Run `cargo test --lib mcp::tests` and
+`cargo test --test http_api apps::`, alongside Actor permission/runner checks.
+Windows also runs the native stdio sandbox test, including allowed workspace reads,
+denied private storage, explicit environment and child cleanup. No real account or
+public MCP server is required. The WebUI mock gallery includes Apps list, empty,
+loading and failure scenes; its installation form can simulate connection failure
+with `https://unavailable.example/mcp`. Mock installation never contacts that URL.

@@ -37,6 +37,15 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
         })
         .and_then(|name| name.get(13..))
         .unwrap_or(&result.name);
+    if domain_name
+        .split_once("__")
+        .is_some_and(|(app, _)| crate::mcp::is_mcp_id(app))
+    {
+        return payload
+            .get("app")
+            .cloned()
+            .map(|app| serde_json::json!({"app":app}));
+    }
     if domain_name == "terminal__terminal_exec" {
         let command = payload
             .get("session")

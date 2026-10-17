@@ -55,6 +55,7 @@ struct Worker {
     task: JoinHandle<()>,
 }
 struct Inner {
+    app_registry: Arc<crate::mcp::Registry>,
     workspace: PathBuf,
     store: ActorStore,
     config: RwLock<Config>,
@@ -127,7 +128,11 @@ impl ActorSystem {
                 .as_deref()
                 .unwrap_or(&actor.config.apps)
                 .iter()
-                .filter(|app| crate::builtin_apps::DEVICE_APPS.contains(&app.as_str()))
+                .filter(|app| {
+                    app.as_str() == "*"
+                        || crate::builtin_apps::DEVICE_APPS.contains(&app.as_str())
+                        || crate::mcp::is_mcp_id(app)
+                })
                 .cloned()
                 .collect(),
         );
@@ -242,12 +247,10 @@ impl ActorSystem {
                 .app_access
                 .as_deref()
                 .unwrap_or(&ceiling.apps);
-            let allowed = super::permissions::direct_apps(&actor.config)
-                .iter()
-                .filter(|app| ceiling.apps.contains(app) && bound_apps.contains(app))
-                .cloned()
-                .collect();
-            actor.config.permissions.app_access = Some(allowed);
+            actor.config.permissions.app_access = Some(super::permissions::intersect_app_grants(
+                super::permissions::direct_apps(&actor.config),
+                bound_apps,
+            ));
             let permission = &mut actor.config.permissions;
             permission.read_only |= ceiling.permissions.read_only
                 || granted.as_ref().is_some_and(|grant| grant.read_only);
@@ -291,7 +294,7 @@ impl ActorSystem {
                     .delegation_apps
                     .as_ref()
                     .unwrap_or(&ceiling.apps);
-                apps.retain(|app| bound.contains(app));
+                *apps = super::permissions::intersect_app_grants(apps, bound);
             }
             permission
                 .message_targets
@@ -414,6 +417,7 @@ impl ActorSystem {
         store.recover()?;
         let system = Self {
             inner: Arc::new(Inner {
+                app_registry: crate::mcp::Registry::open(data_dir.join("apps.json"))?,
                 workspace,
                 store,
                 config: RwLock::new(config),
@@ -451,6 +455,27 @@ impl ActorSystem {
                 &mut actor.config.permissions.delegation_apps,
                 &mut actor.config.permissions.tools,
             );
+            // The former Core default enumerated builtins. Make its device-wide
+            // default explicit; retain all narrower persisted ceilings.
+            if actor.id == crate::stage::shared::ACTOR_ID
+                && actor
+                    .config
+                    .permissions
+                    .delegation_apps
+                    .as_ref()
+                    .is_some_and(|apps| {
+                        let baseline = crate::builtin_apps::DEVICE_APPS
+                            .iter()
+                            .filter(|name| **name != "apps_manager")
+                            .collect::<Vec<_>>();
+                        apps.len() == baseline.len()
+                            && baseline
+                                .iter()
+                                .all(|name| apps.iter().any(|app| app == **name))
+                    })
+            {
+                actor.config.permissions.delegation_apps = Some(vec!["*".into()]);
+            }
             if actor.id != crate::stage::shared::ACTOR_ID {
                 actor.config = system.hosted_config(actor.config)?;
             }
@@ -463,6 +488,9 @@ impl ActorSystem {
     }
     pub fn store(&self) -> &ActorStore {
         &self.inner.store
+    }
+    pub fn app_registry(&self) -> Arc<crate::mcp::Registry> {
+        self.inner.app_registry.clone()
     }
     pub fn device_workspace(&self) -> &Path {
         &self.inner.workspace
@@ -506,7 +534,9 @@ impl ActorSystem {
             if config.permissions.app_access.is_none() {
                 config.permissions.app_access = Some(config.apps.clone());
             } else if let Some(access) = &mut config.permissions.app_access {
-                access.retain(|app| config.apps.contains(app));
+                access.retain(|app| {
+                    app == "*" || config.apps.contains(app) || crate::mcp::is_mcp_id(app)
+                });
             }
             if config.permissions.delegation_apps.is_none() {
                 config.permissions.delegation_apps = Some(config.apps.clone());
@@ -652,12 +682,7 @@ impl ActorSystem {
         let workspace = self.inner.workspace.clone();
         let mut permissions = self.device_permissions()?;
         permissions.approval_mode = ApprovalMode::Auto;
-        permissions.delegation_apps = Some(
-            crate::builtin_apps::DEVICE_APPS
-                .iter()
-                .map(|app| (*app).to_owned())
-                .collect(),
-        );
+        permissions.delegation_apps = Some(vec!["*".into()]);
         let root = ActorRecord {
             id: crate::stage::shared::ACTOR_ID.into(),
             parent_id: None,
@@ -1240,9 +1265,28 @@ impl ActorSystem {
                 .delegation_grant
                 .as_mut()
                 .ok_or_else(|| forbidden("Missing delegation ceiling"))?;
-            ceiling
-                .apps
-                .retain(|app| super::permissions::delegation_apps(&source.config).contains(app));
+            ceiling.apps.retain(|app| {
+                super::permissions::app_granted(
+                    super::permissions::delegation_apps(&source.config),
+                    app,
+                )
+            });
+            ceiling.permissions.app_access = Some(super::permissions::intersect_app_grants(
+                ceiling
+                    .permissions
+                    .app_access
+                    .as_deref()
+                    .unwrap_or(&ceiling.apps),
+                super::permissions::delegation_apps(&source.config),
+            ));
+            ceiling.permissions.delegation_apps = Some(super::permissions::intersect_app_grants(
+                ceiling
+                    .permissions
+                    .delegation_apps
+                    .as_deref()
+                    .unwrap_or(&ceiling.apps),
+                super::permissions::delegation_apps(&source.config),
+            ));
             ceiling.permissions.read_only |= source.config.permissions.read_only;
             ceiling.permissions.allow_children = false;
             ceiling.permissions.readable_roots.retain(|root| {
@@ -1627,6 +1671,18 @@ impl ActorSystem {
                 device_policy: device_policy.clone(),
             },
         )?;
+        self.build_app_context(actor, &message.id, message.seq as u64, device_policy)
+    }
+    pub(crate) fn owner_app_context(&self) -> Result<AppToolExecutionContext> {
+        self.build_app_context(self.core_device_actor()?, "owner-app-installation", 0, None)
+    }
+    fn build_app_context(
+        &self,
+        actor: ActorRecord,
+        message_id: &str,
+        turn_epoch: u64,
+        device_policy: Option<ActorConfig>,
+    ) -> Result<AppToolExecutionContext> {
         let config = self.config();
         let paths = daat_locus_paths_sync();
         let mut denied = vec![
@@ -1739,10 +1795,10 @@ impl ActorSystem {
             execution_cwd: actor.config.workspace.clone(),
             sandbox_policy,
             tool_output_max_tokens,
-            turn_epoch: message.seq as u64,
+            turn_epoch,
             actor_call: Some(ActorCallContext {
                 actor_id: actor.id,
-                message_id: message.id.clone(),
+                message_id: message_id.into(),
                 private_roots,
                 device_policy: device_policy.clone(),
             }),
@@ -2240,6 +2296,65 @@ mod tests {
         assert!(!tools.iter().any(|tool| tool.name.starts_with("study__")));
         assert!(!tools.iter().any(|tool| tool.name == "files__write_file"));
         reopened.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_installations_respect_core_readonly_and_explicit_app_and_tool_grants() {
+        let (_directory, system) = fixture().await;
+        let server = crate::mcp::tests::server().await;
+        let entry = system
+            .app_registry()
+            .install(
+                "Example".into(),
+                String::new(),
+                crate::mcp::Source::Http {
+                    url: server.url.clone(),
+                    bearer_token: None,
+                },
+                &system.owner_app_context().unwrap(),
+            )
+            .await
+            .unwrap();
+        let core = system.core_device_actor().unwrap();
+        let tools = crate::builtin_apps::create_apps(&core, system.clone(), &system.config())
+            .unwrap()
+            .model_tool_specs()
+            .unwrap();
+        assert!(tools.iter().all(|tool| tool.name.starts_with("actors__")));
+        let mut actor = system.actor(FIXTURE_ACTOR_ID).unwrap();
+        actor.config.permissions.app_access = Some(vec!["*".into()]);
+        let tools = |actor: &ActorRecord| {
+            crate::builtin_apps::create_apps(actor, system.clone(), &system.config())
+                .unwrap()
+                .model_tool_specs()
+                .unwrap()
+        };
+        assert!(
+            tools(&actor)
+                .iter()
+                .any(|tool| tool.name.starts_with(&entry.id))
+        );
+        actor.config.permissions.read_only = true;
+        assert!(
+            !tools(&actor)
+                .iter()
+                .any(|tool| tool.name.starts_with(&entry.id))
+        );
+        actor.config.permissions.read_only = false;
+        actor.config.permissions.app_access = Some(vec!["files".into()]);
+        assert!(
+            !tools(&actor)
+                .iter()
+                .any(|tool| tool.name.starts_with(&entry.id))
+        );
+        actor.config.permissions.app_access = Some(vec!["*".into()]);
+        actor.config.permissions.tools = Some(vec!["files__read_file".into()]);
+        assert!(
+            !tools(&actor)
+                .iter()
+                .any(|tool| tool.name.starts_with(&entry.id))
+        );
+        system.shutdown().await;
     }
 
     #[tokio::test]

@@ -208,6 +208,35 @@ fn check_interruption(
     }
 }
 
+async fn refresh_apps(
+    system: &ActorSystem,
+    actor: &ActorRecord,
+    apps: &mut AppManager,
+    context: &AppToolExecutionContext,
+    refresh: bool,
+) -> Result<()> {
+    apps.prepare_managed(context, refresh).await?;
+    let registry = system.app_registry();
+    let replacements = registry
+        .entries()
+        .into_iter()
+        .filter(|entry| entry.enabled)
+        .map(|entry| {
+            Box::new(builtin_apps::RestrictedApp::new(
+                Box::new(crate::mcp::McpApp::new(
+                    entry,
+                    registry.clone(),
+                    system.clone(),
+                )),
+                actor,
+            )) as Box<dyn crate::app::App>
+        })
+        .collect();
+    apps.reconcile_managed(replacements).await?;
+    registry.record_loaded(&actor.id, apps.managed_versions());
+    Ok(())
+}
+
 async fn execute_message(
     system: &ActorSystem,
     actor: &ActorRecord,
@@ -218,7 +247,10 @@ async fn execute_message(
     check_interruption(system, control, message)?;
     let context = system.execution_context(actor, message)?;
     let provider = system.provider(actor)?;
-    let tools = apps.model_tool_specs_for_context(&context)?;
+    if actor.id != crate::stage::shared::ACTOR_ID {
+        refresh_apps(system, actor, apps, &context, false).await?;
+    }
+    let mut tools = apps.model_tool_specs_for_context(&context)?;
     let resuming = actor.id == crate::stage::shared::ACTOR_ID
         && system
             .store()
@@ -229,7 +261,7 @@ async fn execute_message(
             .store()
             .append_history(&actor.id, &message.id, &[input])?;
     }
-    let prompt = format!(
+    let mut prompt = format!(
         "{}\nCurrent request ID: {}. Archived inputs are historical evidence; the current request's authority and grants always apply.",
         system_prompt(actor, apps, &context).await?,
         message.id
@@ -280,6 +312,17 @@ async fn execute_message(
     let mut empty_reasoning_responses = 0;
     loop {
         check_interruption(system, control, message)?;
+        if actor.id != crate::stage::shared::ACTOR_ID
+            && system.app_registry().take_refresh(&actor.id)
+        {
+            refresh_apps(system, actor, apps, &context, true).await?;
+            tools = apps.model_tool_specs_for_context(&context)?;
+            prompt = format!(
+                "{}\nCurrent request ID: {}. Archived inputs are historical evidence; the current request's authority and grants always apply.",
+                system_prompt(actor, apps, &context).await?,
+                message.id
+            );
+        }
         if actor.id == crate::stage::shared::ACTOR_ID
             && system.store().core_turn_delivered(&message.id)?
         {
@@ -558,7 +601,8 @@ async fn execute_call(
             return Ok(Vec::new());
         }
     };
-    if !apps.delegates_approval(call, &context)?
+    if !apps.review_exempt(call)?
+        && !apps.delegates_approval(call, &context)?
         && let Err(error) = super::approval::authorize(
             system,
             &current_actor,
@@ -670,7 +714,7 @@ async fn execute_call(
                 result.payload,
                 &model_content,
                 &result.summary,
-                None,
+                result.failure.as_deref(),
             )?;
             let tool = AgentMessage::tool(&call.id, &call.name, model_content);
             history.push(tool);

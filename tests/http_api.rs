@@ -3,6 +3,8 @@
 mod account;
 #[path = "http/approvals_api.rs"]
 mod approvals;
+#[path = "http/apps_api.rs"]
+mod apps;
 #[path = "http/configuration_api.rs"]
 mod configuration;
 #[path = "http/conversation_api.rs"]

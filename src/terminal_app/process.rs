@@ -102,6 +102,7 @@ impl TerminalProcess {
             &shell_program,
             shell_args,
             SandboxProcessOptions {
+                environment: Vec::new(),
                 current_dir: workdir.map(PathBuf::from),
                 stdin: SandboxStdio::Piped,
                 stdout: SandboxStdio::Piped,

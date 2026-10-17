@@ -795,3 +795,74 @@ html[data-full-width=true] .dl-message-list, html[data-full-width=true] .dl-conv
  .dl-appearance-advanced .dl-setting-control { flex-basis: auto; }
  .dl-appearance-advanced .dl-setting-label { overflow-wrap: anywhere; }
 }
+/* App directory uses the same compact rail and page geometry as the reference. */
+.dl-navigation-rail { gap: 8px; }
+.dl-navigation-rail>button[aria-current=page] { background: var(--muted); color: var(--foreground); }
+.dl-apps-page { height: 100%; min-width: 0; overflow: auto; border-radius: 16px 0 0 16px; background: var(--background); }
+.dl-apps-content { padding: 28px 28px 40px 20px; max-width: 1440px; margin-inline: auto; }
+.dl-apps-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; min-height: 36px; }
+.dl-apps-title { display: flex; align-items: center; gap: 8px; flex: none; }
+.dl-apps-title h1 { font-size: 24px; line-height: 32px; font-weight: 500; }
+.dl-apps-mobile-navigation { display: none; }
+.dl-apps-actions { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.dl-apps-search { width: 240px; height: 36px; border-radius: 999px; box-shadow: none; }
+.dl-apps-add { border-radius: 999px; height: 36px; padding-inline: 16px; }
+.dl-apps-subtitle { margin-top: 7px; font-size: 16px; line-height: 24px; color: var(--muted-foreground); }
+.dl-apps-filters { display: flex; width: fit-content; gap: 4px; margin-top: 18px; }
+.dl-apps-filters [data-slot=toggle-group-item] { flex: none; height: 36px; border-radius: 999px; padding-inline: 16px; font-size: 14px; }
+.dl-apps-section-title { margin: 28px 0 12px; font-size: 18px; line-height: 28px; font-weight: 500; }
+.dl-apps-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); column-gap: 24px; row-gap: 8px; margin-inline: -8px; }
+.dl-installed-app { min-width: 0; min-height: 65px; padding: 8px; display: flex; align-items: center; gap: 10px; border-radius: 16px; }
+.dl-installed-app:hover, .dl-installed-app:focus-within { background: var(--muted); }
+.dl-installed-app-main { display: flex; flex: 1; align-items: center; min-width: 0; gap: 10px; text-align: start; border-radius: 8px; }
+.dl-installed-app-icon { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border-radius: 10px; background: var(--muted); font-size: 20px; font-weight: 600; }
+.dl-installed-app-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 1px; }
+.dl-installed-app-name { font-size: 16px; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-installed-app-description { font-size: 14px; line-height: 20px; color: var(--muted-foreground); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.dl-installed-app>button:not(.dl-installed-app-main) { flex: none; border-radius: 999px; }
+.dl-apps-empty { border: 0; padding-top: 28px; gap: 16px; }
+.dl-apps-empty [data-slot=empty-title] { font-size: 18px; font-weight: 400; }
+.dl-apps-load-more { display: flex; margin: 20px auto 0; }
+.dl-apps-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-block: 16px; color: var(--destructive); }
+.dl-add-app-dialog, .dl-app-detail-dialog { width: min(600px,calc(100vw - 32px)); max-width: 600px; max-height: calc(100dvh - 32px); overflow: auto; border-radius: 24px; padding: 20px; gap: 20px; }
+.dl-add-app-dialog [data-slot=dialog-title] { font-size: 22px; line-height: 28px; font-weight: 600; padding-right: 28px; }
+.dl-add-app-form { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.dl-add-app-form [data-slot=field-group] { gap: 16px; }
+.dl-add-app-form [data-slot=field] { gap: 8px; min-width: 0; }
+.dl-add-app-form [data-slot=input], .dl-add-app-form [data-slot=select-trigger] { height: 36px; min-height: 36px; border-radius: 8px; width: 100%; box-shadow: none; }
+.dl-app-connection-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dl-app-connection-label [data-slot=toggle-group] { background: var(--muted); border-radius: 8px; padding: 2px; gap: 0; }
+.dl-app-connection-label [data-slot=toggle-group-item] { height: 28px; border-radius: 6px; padding-inline: 10px; }
+.dl-app-connection-label [data-state=on] { background: var(--background); }
+.dl-app-environment-row { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) auto; gap: 8px; }
+.dl-app-add-variable { align-self: flex-start; }
+.dl-add-app-footer { display: flex; justify-content: flex-end; gap: 12px; padding-top: 4px; }
+.dl-add-app-footer button { border-radius: 999px; height: 36px; }
+.dl-app-detail-header { display: flex; align-items: flex-start; gap: 14px; padding-right: 28px; min-width: 0; }
+.dl-app-detail-header .dl-installed-app-icon { width: 52px; height: 52px; border-radius: 14px; font-size: 28px; }
+.dl-app-detail-header h2 { font-size: 22px; line-height: 28px; font-weight: 600; overflow-wrap: anywhere; }
+.dl-app-detail-header p { color: var(--muted-foreground); font-size: 14px; margin-top: 4px; overflow-wrap: anywhere; }
+.dl-app-detail-actions { display: flex; align-items: center; gap: 8px; }
+.dl-app-detail-actions>button { border-radius: 999px; }
+.dl-app-connection-details { border-block: 1px solid var(--border); padding-block: 16px; }
+.dl-app-connection-details>div { display: flex; flex-direction: column; gap: 6px; }
+.dl-app-connection-details dt { color: var(--muted-foreground); font-size: 14px; }
+.dl-app-connection-details dd { overflow-wrap: anywhere; }
+.dl-app-tools { display: flex; flex-direction: column; gap: 16px; }
+.dl-app-tools h3 { font-size: 16px; font-weight: 600; }
+.dl-app-tool h4 { font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+.dl-app-tool p { color: var(--muted-foreground); font-size: 14px; line-height: 20px; margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dl-app-detail-loading { display: flex; justify-content: center; align-items: center; gap: 8px; min-height: 160px; }
+@media(max-width:767px) {
+  .dl-apps-page { border-radius: 0; }
+  .dl-apps-content { padding: 16px 20px 32px; }
+  .dl-apps-header { flex-wrap: wrap; gap: 16px; }
+  .dl-apps-title { flex: 1; }
+  .dl-apps-mobile-navigation { display: inline-flex; margin-left: -8px; }
+  .dl-apps-actions { display: contents; }
+  .dl-apps-search { order: 2; width: 100%; }
+  .dl-apps-subtitle { margin-top: 12px; }
+  .dl-apps-grid { grid-template-columns: minmax(0,1fr); }
+  .dl-apps-title h1 { font-size: 22px; }
+  .dl-app-connection-label { align-items: flex-start; flex-direction: column; }
+}

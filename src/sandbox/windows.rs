@@ -324,7 +324,7 @@ fn spawn_restricted_async_inner(
     // The worker may access its workspace but cannot enumerate those parents;
     // resolve the OS spelling in the broker before entering the AppContainer.
     let current_dir_wide = working_directory_wide(&current_dir)?;
-    let env_block = environment_block(input.policy);
+    let env_block = environment_block(input.policy, &input.options.environment);
     let creation = crate::process_spawn::creation_lock()?;
     let (stdio, parent_pipes) = StartupHandles::new_with_parent_pipes(&input.options)?;
     let mut attributes = StartupAttributes::new()?;
@@ -1629,7 +1629,7 @@ fn command_argv(program: &Path, args: Vec<String>) -> Vec<String> {
     command_line
 }
 
-fn environment_block(policy: &RuntimeSandboxPolicy) -> Vec<u16> {
+fn environment_block(policy: &RuntimeSandboxPolicy, explicit: &[(String, String)]) -> Vec<u16> {
     let mut env = BTreeMap::<OsString, OsString>::new();
     for (name, value) in std::env::vars_os() {
         if os_env_name_is_protected(policy, &name) {
@@ -1638,6 +1638,10 @@ fn environment_block(policy: &RuntimeSandboxPolicy) -> Vec<u16> {
         env.insert(name, value);
     }
 
+    for (name, value) in explicit {
+        env.retain(|key, _| !key.to_string_lossy().eq_ignore_ascii_case(name));
+        env.insert(name.into(), value.into());
+    }
     let mut block = Vec::new();
     for (name, value) in env {
         let mut item = to_wide(name);
@@ -2061,6 +2065,7 @@ mod tests {
             spawn.args,
             SandboxProcessOptions {
                 current_dir: Some(workspace.clone()),
+                environment: Vec::new(),
                 stdin: SandboxStdio::Null,
                 stdout: SandboxStdio::Piped,
                 stderr: SandboxStdio::Piped,
@@ -2107,6 +2112,7 @@ mod tests {
             spawn.args,
             SandboxProcessOptions {
                 current_dir: Some(workspace),
+                environment: Vec::new(),
                 stdin: SandboxStdio::Piped,
                 stdout: SandboxStdio::Piped,
                 stderr: SandboxStdio::Piped,

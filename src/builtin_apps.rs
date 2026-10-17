@@ -25,6 +25,7 @@ use crate::{
 };
 
 pub const DEVICE_APPS: &[&str] = &[
+    "apps_manager",
     "actors",
     "files",
     #[cfg(not(target_os = "android"))]
@@ -32,7 +33,14 @@ pub const DEVICE_APPS: &[&str] = &[
     "browser",
     "artifacts",
 ];
-pub(crate) const ALL_APPS: &[&str] = &["actors", "files", "terminal", "browser", "artifacts"];
+pub(crate) const ALL_APPS: &[&str] = &[
+    "actors",
+    "files",
+    "terminal",
+    "browser",
+    "artifacts",
+    "apps_manager",
+];
 
 pub(crate) fn history_app(actor: &ActorRecord, system: ActorSystem) -> Box<dyn App> {
     Box::new(RestrictedApp::new(
@@ -49,6 +57,18 @@ pub fn validate_app_names(names: &[String], _read_only: bool) -> Result<()> {
         }
         if !seen.insert(name) {
             return Err(miette!("duplicated App `{name}`"));
+        }
+    }
+    Ok(())
+}
+pub fn validate_app_grants(names: &[String], _read_only: bool) -> Result<()> {
+    let mut seen = HashSet::new();
+    for name in names {
+        if name != "*" && !ALL_APPS.contains(&name.as_str()) && !crate::mcp::is_mcp_id(name) {
+            return Err(miette!("Unknown App grant"));
+        }
+        if !seen.insert(name) {
+            return Err(miette!("Duplicated App grant"));
         }
     }
     Ok(())
@@ -73,6 +93,10 @@ pub fn create_apps(
     for name in &actor.config.apps {
         let inner: Box<dyn App> = match name.as_str() {
             "actors" => Box::new(ActorApp::new(actor.id.clone(), system.clone())),
+            "apps_manager" => Box::new(crate::mcp::AppsManager::new(
+                system.app_registry(),
+                actor.id.clone(),
+            )),
             "files" => Box::new(FilesApp::new(state_dir.join("images"), supports_vision)),
             "terminal" if !cfg!(target_os = "android") => Box::new(TerminalApp::new()),
             "browser" if cfg!(target_os = "android") || actor.config.permissions.read_only => {
@@ -88,7 +112,22 @@ pub fn create_apps(
     // Every Actor can recover its own execution archive. This adds no Actor
     // management tools and preserves explicit tool allowlists and identity checks.
     if !actor.config.apps.iter().any(|app| app == "actors") {
-        apps.push(history_app(actor, system));
+        apps.push(history_app(actor, system.clone()));
+    }
+    for entry in system
+        .app_registry()
+        .entries()
+        .into_iter()
+        .filter(|entry| entry.enabled && actor.id != crate::stage::shared::ACTOR_ID)
+    {
+        apps.push(Box::new(RestrictedApp::new(
+            Box::new(crate::mcp::McpApp::new(
+                entry,
+                system.app_registry(),
+                system.clone(),
+            )),
+            actor,
+        )));
     }
     AppManager::new(apps)
 }
@@ -97,10 +136,10 @@ pub fn prompt_resources(
     actor: &ActorRecord,
     context: &AppToolExecutionContext,
 ) -> Result<Vec<String>> {
-    if !crate::actors::permissions::direct_apps(&actor.config)
-        .iter()
-        .any(|app| app == "files")
-    {
+    if !crate::actors::permissions::app_granted(
+        crate::actors::permissions::direct_apps(&actor.config),
+        "files",
+    ) {
         return Ok(Vec::new());
     }
     if let Some(tools) = &actor.config.permissions.tools
@@ -126,12 +165,10 @@ pub(crate) struct RestrictedApp {
 
 impl RestrictedApp {
     pub(crate) fn new(inner: Box<dyn App>, actor: &ActorRecord) -> Self {
-        let app_allowed = actor
-            .config
-            .permissions
-            .app_access
-            .as_ref()
-            .is_none_or(|apps| apps.iter().any(|app| app == inner.id().as_str()));
+        let app_allowed = crate::actors::permissions::app_granted(
+            crate::actors::permissions::direct_apps(&actor.config),
+            inner.id().as_str(),
+        );
         Self {
             inner,
             actor_id: actor.id.clone(),
@@ -154,7 +191,9 @@ impl RestrictedApp {
             .is_none_or(|tools| tools.contains(&id.mangle_tool_name(name)));
         let own_history =
             id.as_str() == "actors" && matches!(name, "read_history" | "read_resource" | "report");
-        (self.app_allowed || own_history)
+        let introspection =
+            id.as_str() == "apps_manager" && matches!(name, "list" | "inspect" | "refresh");
+        (self.app_allowed || own_history || introspection)
             && granted
             && (!self.read_only || read_only_tool(id.as_str(), name))
     }
@@ -176,6 +215,7 @@ impl RestrictedApp {
 
 pub(crate) fn read_only_tool(app: &str, tool: &str) -> bool {
     match app {
+        "apps_manager" => matches!(tool, "list" | "inspect" | "refresh"),
         "files" => matches!(
             tool,
             "read_file" | "view_image" | "list_skills" | "list_directory" | "search_text"
@@ -201,6 +241,19 @@ pub(crate) fn read_only_tool(app: &str, tool: &str) -> bool {
 
 #[async_trait]
 impl App for RestrictedApp {
+    fn review_exempt(&self, call: &AgentToolCall) -> bool {
+        self.inner.review_exempt(call)
+    }
+    fn managed_revision(&self) -> Option<u64> {
+        self.inner.managed_revision()
+    }
+    async fn prepare_turn(
+        &mut self,
+        context: &AppToolExecutionContext,
+        refresh: bool,
+    ) -> Result<()> {
+        self.inner.prepare_turn(context, refresh).await
+    }
     fn can_passivate(&self) -> bool {
         self.inner.can_passivate()
     }

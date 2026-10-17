@@ -16,6 +16,103 @@ enum MockReply {
     Failure(&'static str),
 }
 
+#[tokio::test]
+async fn app_installation_refreshes_tools_between_protocol_groups_without_replaying_input() {
+    let server = crate::mcp::tests::server().await;
+    let provider = Arc::new(ReplayProvider::new(vec![
+        MockReply::Calls(vec![AgentToolCall {
+            id: "install-app".into(),
+            name: "apps_manager__install".into(),
+            arguments: json!({"name":"Example","description":null,"transport":"http","url":server.url,"command":null,"arguments":[]}),
+        }]),
+        MockReply::Answer("Ready"),
+    ]));
+    let (_dir, system) = runtime(provider.clone()).await;
+    let mut actor = system.actor("root").unwrap();
+    actor.config.permissions.app_access = Some(vec!["*".into()]);
+    system.store().save_actor(&actor).unwrap();
+    let input = system
+        .send_user("root", "Install the requested App".into(), vec![], None)
+        .unwrap();
+    let done = wait_completed(&system, &input.id).await;
+    assert_eq!(done.status, MessageStatus::Completed);
+    assert_eq!(done.reply.as_deref(), Some("Ready"));
+    {
+        let requests = provider.requests.lock();
+        assert!(
+            !requests[0]
+                .tools
+                .iter()
+                .any(|tool| tool.name.starts_with("mcp_"))
+        );
+        assert!(
+            requests[1]
+                .tools
+                .iter()
+                .any(|tool| tool.name.starts_with("mcp_"))
+        );
+        assert_eq!(
+            system
+                .store()
+                .messages("root", None, 10)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+    }
+
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn apps_manager_queries_and_refresh_complete_in_ask_mode_without_approval() {
+    let provider = Arc::new(ReplayProvider::new(vec![
+        MockReply::Calls(vec![
+            AgentToolCall {
+                id: "list-apps".into(),
+                name: "apps_manager__list".into(),
+                arguments: json!({}),
+            },
+            AgentToolCall {
+                id: "refresh-apps".into(),
+                name: "apps_manager__refresh".into(),
+                arguments: json!({}),
+            },
+        ]),
+        MockReply::Answer("Done"),
+    ]));
+    let (_dir, system) = runtime(provider).await;
+    let mut actor = system.actor("root").unwrap();
+    actor.config.permissions.approval_mode = super::super::ApprovalMode::Ask;
+    system.store().save_actor(&actor).unwrap();
+    let input = system
+        .send_user("root", "Inspect available Apps".into(), vec![], None)
+        .unwrap();
+    assert_eq!(
+        wait_completed(&system, &input.id).await.status,
+        MessageStatus::Completed
+    );
+    assert!(
+        system
+            .store()
+            .approvals(Some("root"), None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert_eq!(
+        system
+            .store()
+            .tool_summaries("root", &input.id, None, 10)
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    system.shutdown().await;
+}
+
 async fn wait_passivated(system: &ActorSystem) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while system.resident_workers() != 0 {
@@ -3649,10 +3746,10 @@ async fn core_yields_after_delegating_and_receives_progress_while_worker_runs() 
     );
     assert!(progress.content.contains("repair is still running"));
     assert_eq!(system.actor("core").unwrap().config.apps, vec!["actors"]);
-    assert!(
-        crate::actors::permissions::delegation_apps(&system.core_device_actor().unwrap().config)
-            .contains(&"files".into())
-    );
+    assert!(crate::actors::permissions::app_granted(
+        crate::actors::permissions::delegation_apps(&system.core_device_actor().unwrap().config),
+        "files",
+    ));
     network.stop().await;
     system.shutdown().await;
 }

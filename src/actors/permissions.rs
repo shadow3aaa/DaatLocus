@@ -40,10 +40,10 @@ pub fn normalize_config(mut config: ActorConfig) -> Result<ActorConfig> {
     crate::builtin_apps::validate_app_names(&config.apps, config.permissions.read_only)
         .map_err(|_| ActorError::Invalid("Invalid or unavailable App configuration".into()))?;
     if let Some(apps) = &config.permissions.app_access {
-        crate::builtin_apps::validate_app_names(apps, config.permissions.read_only)?;
+        crate::builtin_apps::validate_app_grants(apps, config.permissions.read_only)?;
     }
     if let Some(apps) = &config.permissions.delegation_apps {
-        crate::builtin_apps::validate_app_names(apps, config.permissions.read_only)
+        crate::builtin_apps::validate_app_grants(apps, config.permissions.read_only)
             .map_err(|_| ActorError::Invalid("Invalid delegation App ceiling".into()))?;
     }
     config.workspace = canonical_path(&config.workspace)?;
@@ -95,6 +95,18 @@ pub fn direct_apps(config: &ActorConfig) -> &[String] {
         .as_deref()
         .unwrap_or(&config.apps)
 }
+pub fn app_granted(grants: &[String], app: &str) -> bool {
+    grants.iter().any(|grant| grant == "*" || grant == app)
+}
+pub fn intersect_app_grants(a: &[String], b: &[String]) -> Vec<String> {
+    if a.iter().any(|value| value == "*") {
+        return b.to_vec();
+    }
+    if b.iter().any(|value| value == "*") {
+        return a.to_vec();
+    }
+    a.iter().filter(|app| b.contains(app)).cloned().collect()
+}
 pub fn check_child(parent: &ActorConfig, child: &ActorConfig) -> Result<()> {
     let p = &parent.permissions;
     let c = &child.permissions;
@@ -104,10 +116,10 @@ pub fn check_child(parent: &ActorConfig, child: &ActorConfig) -> Result<()> {
         || approval_strength(c.approval_mode) < approval_strength(p.approval_mode)
         || direct_apps(child)
             .iter()
-            .any(|app| !delegation_apps(parent).contains(app))
+            .any(|app| !app_granted(delegation_apps(parent), app))
         || delegation_apps(child)
             .iter()
-            .any(|app| !delegation_apps(parent).contains(app))
+            .any(|app| !app_granted(delegation_apps(parent), app))
         || c.readable_roots
             .iter()
             .any(|root| !covered(root, &p.readable_roots))
@@ -312,6 +324,27 @@ fn windows_private_acl(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod delegation_tests {
     use super::*;
+    #[test]
+    fn wildcard_delegation_intersection_never_expands_a_specific_ceiling() {
+        for (a, b, expected) in [
+            (vec!["*"], vec!["files"], vec!["files"]),
+            (vec!["files"], vec!["*"], vec!["files"]),
+            (vec!["*"], vec![], vec![]),
+            (
+                vec!["files", "browser"],
+                vec!["browser", "terminal"],
+                vec!["browser"],
+            ),
+            (vec!["*"], vec!["*"], vec!["*"]),
+        ] {
+            let values =
+                |items: Vec<&str>| items.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(
+                intersect_app_grants(&values(a), &values(b)),
+                values(expected)
+            );
+        }
+    }
     #[test]
     fn portable_core_delegates_only_inside_its_separate_ceiling() {
         let directory = tempfile::tempdir().unwrap();

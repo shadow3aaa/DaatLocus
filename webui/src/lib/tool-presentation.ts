@@ -11,6 +11,7 @@ const labels: Record<string, string> = {
   files__read_file: "tool_presentation.read_file", files__write_file: "tool_presentation.write_file", files__edit_file: "tool_presentation.edit_file", files__copy_file: "tool_presentation.copy_file", files__list_directory: "tool_presentation.browse_folder", files__search_text: "tool_presentation.search_files", files__read_skill: "tool_presentation.read_skill", files__list_skills: "tool_presentation.view_skills", files__view_image: "tool_presentation.view_image",
   terminal__terminal_exec: "tool_presentation.run_command", terminal__terminal_write_stdin: "tool_presentation.terminal_input", terminal__terminal_terminate: "tool_presentation.stop_process",
   browser__browser_snapshot: "tool_presentation.view_page", browser__browser_open_page: "tool_presentation.open_page", browser__browser_wait: "tool_presentation.wait_for_page", browser__browser_click: "tool_presentation.click_page", browser__browser_fill: "tool_presentation.fill_page", browser__browser_back: "tool_presentation.go_back", browser__browser_forward: "tool_presentation.go_forward", browser__browser_reload: "tool_presentation.reload_page", browser__browser_close_page: "tool_presentation.close_page", browser__read_url: "tool_presentation.read_page",
+  apps_manager__list: "apps.list_action", apps_manager__inspect: "apps.inspect_action", apps_manager__refresh: "apps.refresh_action", apps_manager__install: "apps.install_action", apps_manager__enable: "apps.enable", apps_manager__close: "apps.close",
   artifacts__present: "tool_details.deliver_result",
   actors__read_resource: "tool_presentation.read_attachment_or_output",
 };
@@ -25,7 +26,7 @@ const fieldLabels: Record<string, string> = {
 
 function words(value: string) { return value.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_+/g, " "); }
 export function domainToolName(name: string) { return name.replace(/^d_[0-9a-f]{12}_/, ""); }
-export function toolLabel(name: string) { const domain=domainToolName(name); return labels[domain] ? t(labels[domain]) : domain.split("__").map(words).join(" · "); }
+export function toolLabel(name: string) { const domain=domainToolName(name); return /^mcp_[a-f0-9]{32}__/.test(domain) ? t("apps.tool_action") : labels[domain] ? t(labels[domain]) : domain.split("__").map(words).join(" · "); }
 export function fieldLabel(name: string) { return fieldLabels[name] ? t(fieldLabels[name]) : words(name); }
 export function toolIcon(name: string, outcome?: JsonValue | null) {
   name = domainToolName(name);
@@ -64,6 +65,8 @@ export function activityLabel(tool: ToolSummary & { status?: "running" | "comple
   const active = tool.status === "running";
   const outcome = asObject(tool.outcome ?? undefined);
   const summary = readableSummary(tool.summary);
+  if (name.startsWith("apps_manager__")) return {label:toolLabel(name),detail:active?t("tool_presentation.running_2"):""};
+  if (/^mcp_[a-f0-9]{32}__/.test(name)) { const app=asObject(outcome.app); return {label:asText(app.name) || t("apps.tool_action"),detail:asText(app.tool) || (active?t("tool_presentation.running_2"):"")}; }
   if (name === "terminal__terminal_exec") return {
     label: active ? t("tool_presentation.running") : tool.error ? t("tool_presentation.command_failed") : t("tool_presentation.ran"),
     detail: asText(outcome.command) || summary || t("tool_presentation.command"),

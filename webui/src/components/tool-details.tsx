@@ -39,6 +39,21 @@ export function ToolDetail({ result, onActor }: { result: ToolResult; onActor?(i
   const payload = asObject(result.payload);
   const args = asObject(result.arguments);
   const path = asText(payload.path) || asText(args.path);
+  if (/^mcp_[a-f0-9]{32}__/.test(result.name)) {
+    const resources = asRows(payload.resources);
+    return <div className="dl-tool-details dl-mcp-details">
+      {result.error && <p className="dl-operation-error">{t("tool_details.action_failed")}</p>}
+      {asRows(payload.content).filter(part=>part.type === "text").map((part,index)=><pre key={index}>{asText(part.text)}</pre>)}
+      {asRows(payload.content).filter(part=>part.type === "resource_link").map((part,index)=>{const uri=safeLink(asText(part.uri));return uri?<a href={uri} target="_blank" rel="noreferrer" key={index}>{asText(part.name)||uri}<ExternalLinkIcon aria-hidden="true"/></a>:null;})}
+      {payload.structuredContent != null && <ToolParameters value={payload.structuredContent}/>}
+      {resources.map(resource=>{const uri=asText(resource.uri);return resourceActorId(uri,location.href)?<a key={uri} href={uri} target="_blank" rel="noreferrer">{asText(resource.name)}<ExternalLinkIcon aria-hidden="true"/></a>:null;})}
+    </div>;
+  }
+  if (result.name.startsWith("apps_manager__") && !result.error) {
+    const apps=Array.isArray(payload.apps)?asRows(payload.apps):[asObject(payload.app ?? payload)];
+    if (result.name === "apps_manager__refresh") return <p className="dl-tool-note">{t("apps.refresh_action")}</p>;
+    return <ul className="dl-tool-result-list">{apps.filter(app=>asText(app.name)).map((app,index)=><li key={index}><strong>{asText(app.name)}</strong>{asText(app.description)&&<p>{asText(app.description)}</p>}<small>{app.enabled?t("apps.enabled"):t("apps.disabled")}</small></li>)}</ul>;
+  }
   if (result.error) return <p className="dl-operation-error">{readableSummary(result.error) || t("tool_details.action_failed")}</p>;
   if (result.name.startsWith("terminal__")) {
     const session = asObject(payload.session);
@@ -76,5 +91,10 @@ export function ToolDetail({ result, onActor }: { result: ToolResult; onActor?(i
 }
 
 export function ApprovalDetails({ result, requested }: { result: ToolResult["arguments"]; requested: { readable_roots: string[]; writable_roots: string[]; operation_details?: ToolResult["arguments"] } }) {
-  return <div className="dl-approval-details"><ToolParameters value={result} />{requested.readable_roots.length > 0 && <section className="dl-permission-roots"><h4>{t("tool_details.additional_read_access")}</h4><ul>{requested.readable_roots.map(path => <li key={path}><code>{path}</code></li>)}</ul></section>}{requested.writable_roots.length > 0 && <section className="dl-permission-roots"><h4>{t("tool_details.additional_write_access")}</h4><ul>{requested.writable_roots.map(path => <li key={path}><code>{path}</code></li>)}</ul></section>}{requested.operation_details != null && <section className="dl-permission-roots"><h4>{t("tool_details.execution_details")}</h4><ToolParameters value={requested.operation_details} /></section>}</div>;
+  const operation=asObject(requested.operation_details ?? undefined);
+  const app=asObject(operation.app);
+  const source=asObject(app.source);
+  const connection=asText(source.url)||asText(source.command);
+  const mcp=/^mcp_[a-f0-9]{32}$/.test(asText(app.id)) && operation.parameters != null;
+  return <div className="dl-approval-details">{mcp && <><p>{asText(app.name)} · {asText(operation.tool)}</p>{connection&&<p className="dl-parameter-text">{t("apps.connection")}: {connection}</p>}</>}<ToolParameters value={mcp?operation.parameters:result} />{requested.readable_roots.length > 0 && <section className="dl-permission-roots"><h4>{t("tool_details.additional_read_access")}</h4><ul>{requested.readable_roots.map(path => <li key={path}><code>{path}</code></li>)}</ul></section>}{requested.writable_roots.length > 0 && <section className="dl-permission-roots"><h4>{t("tool_details.additional_write_access")}</h4><ul>{requested.writable_roots.map(path => <li key={path}><code>{path}</code></li>)}</ul></section>}{requested.operation_details != null && !mcp && <section className="dl-permission-roots"><h4>{t("tool_details.execution_details")}</h4><ToolParameters value={requested.operation_details} /></section>}</div>;
 }

@@ -241,3 +241,12 @@ DAAT_LOCUS_ANDROID_SIGNING=/私有路径/release.properties DAAT_LOCUS_ANDROID_A
 
 x86 模拟器使用 `x86_64`，先运行 `cargo xtask package android --target x86_64`。
 排除的 Rust 任务使用刚构建好的原生库，不得使用过期产物运行测试。
+
+## MCP 验证
+
+使用隔离的本地 MCP 服务器验证协议、schema、凭据、修订和不确定效果。
+运行 `cargo test --lib mcp::tests`、`cargo test --test http_api apps::`，并运行
+Actor 权限与执行循环的相关测试。Windows 原生 stdio 测试同时验证工作区读取、
+私有存储拒绝、显式环境变量和子进程回收，无需真实账号或公网 MCP 服务器。
+WebUI mock 场景包含应用列表、空列表、加载中和加载失败；连接表单使用
+`https://unavailable.example/mcp` 模拟连接失败，mock 不会访问这个地址。

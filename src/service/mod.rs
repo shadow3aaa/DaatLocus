@@ -1,6 +1,7 @@
 //! Actor-scoped HTTP queries and resumable semantic event streams.
 mod admin;
 mod approvals;
+mod apps;
 mod auth;
 mod conversation;
 mod remote;
@@ -129,6 +130,7 @@ pub fn router(state: ServiceState) -> Router {
             )),
         )
         .merge(admin::routes())
+        .merge(apps::routes())
         .merge(stages::routes())
         .merge(remote::routes())
         .merge(approvals::routes())

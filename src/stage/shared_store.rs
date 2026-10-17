@@ -439,8 +439,8 @@ pub(crate) fn apply(
                 &mut configuration.tools,
             );
             if configuration.app_access.as_ref().is_some_and(|apps| {
-                crate::builtin_apps::validate_app_names(apps, configuration.read_only).is_err()
-            }) || crate::builtin_apps::validate_app_names(
+                crate::builtin_apps::validate_app_grants(apps, configuration.read_only).is_err()
+            }) || crate::builtin_apps::validate_app_grants(
                 configuration
                     .delegation_apps
                     .as_ref()

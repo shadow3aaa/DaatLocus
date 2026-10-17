@@ -117,6 +117,8 @@ pub struct EmptyAppArgs {}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppToolExecutionResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
     pub summary: String,
     pub payload: Value,
     pub model_content: Option<String>,
@@ -131,6 +133,7 @@ pub struct AppToolExecutionResult {
 impl AppToolExecutionResult {
     pub fn new(summary: impl Into<String>, payload: Value, model_content: Option<String>) -> Self {
         Self {
+            failure: None,
             summary: summary.into(),
             payload,
             model_content,
@@ -168,6 +171,19 @@ impl AppToolExecutionContext {
 
 #[async_trait]
 pub trait App: Send + Sync {
+    fn review_exempt(&self, _call: &AgentToolCall) -> bool {
+        false
+    }
+    fn managed_revision(&self) -> Option<u64> {
+        None
+    }
+    async fn prepare_turn(
+        &mut self,
+        _context: &AppToolExecutionContext,
+        _refresh: bool,
+    ) -> Result<()> {
+        Ok(())
+    }
     /// True only when dropping and reconstructing this instance loses no domain
     /// state or live resources. Unknown Apps conservatively keep their worker.
     fn can_passivate(&self) -> bool {
@@ -225,6 +241,67 @@ pub struct AppManager {
 }
 
 impl AppManager {
+    pub fn managed_versions(&self) -> std::collections::BTreeMap<String, u64> {
+        self.apps
+            .iter()
+            .filter_map(|(id, app)| {
+                app.managed_revision()
+                    .map(|revision| (id.as_str().to_owned(), revision))
+            })
+            .collect()
+    }
+    pub fn review_exempt(&self, call: &AgentToolCall) -> Result<bool> {
+        let (id, call) = self.dispatch(call)?;
+        Ok(self
+            .apps
+            .get(&id)
+            .is_some_and(|app| app.review_exempt(&call)))
+    }
+    pub async fn prepare_managed(
+        &mut self,
+        context: &AppToolExecutionContext,
+        refresh: bool,
+    ) -> Result<()> {
+        for app in self.apps.values_mut() {
+            if app.managed_revision().is_some() {
+                app.prepare_turn(context, refresh).await?;
+            }
+        }
+        Ok(())
+    }
+    /// Validate additions before replacing anything; unchanged instances keep their resources.
+    pub async fn reconcile_managed(&mut self, replacements: Vec<Box<dyn App>>) -> Result<()> {
+        let mut candidate = Self::new(replacements)?;
+        let remove = self
+            .order
+            .iter()
+            .filter(|id| {
+                self.apps
+                    .get(*id)
+                    .is_some_and(|app| app.managed_revision().is_some())
+                    && self.apps.get(*id).and_then(|app| app.managed_revision())
+                        != candidate
+                            .apps
+                            .get(*id)
+                            .and_then(|app| app.managed_revision())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in remove {
+            if let Some(mut app) = self.apps.remove(&id) {
+                app.shutdown().await?;
+            }
+            self.order.retain(|current| current != &id);
+        }
+        for id in candidate.order {
+            if !self.apps.contains_key(&id) {
+                self.order.push(id.clone());
+                self.apps
+                    .insert(id.clone(), candidate.apps.remove(&id).unwrap());
+            }
+        }
+        Ok(())
+    }
     pub fn can_passivate(&self) -> bool {
         self.apps.values().all(|app| app.can_passivate())
     }

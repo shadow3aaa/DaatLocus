@@ -1,8 +1,13 @@
+import { resetApps } from "./apps";
 import type { CoreStatus, Device } from "../src/lib/stage-api";
 import { resetStore } from "./fixtures";
 import { addApproval, addMessage, addTool, configHolder, emitEvent, newId, now, ROOT_ACTOR_ID, setActorStatus, STAGE_ID, store, touchMessage, type ActorStore } from "./state";
 
 export const scenarios = [
+  {id:"apps", label:"应用 · 列表与连接管理", actor:ROOT_ACTOR_ID},
+  {id:"apps-empty", label:"应用 · 空列表", actor:ROOT_ACTOR_ID},
+  {id:"apps-loading", label:"应用 · 加载中", actor:ROOT_ACTOR_ID},
+  {id:"apps-error", label:"应用 · 加载失败", actor:ROOT_ACTOR_ID},
   {id:"conversation", label:"主会话", actor:ROOT_ACTOR_ID},
   {id:"long-core", label:"主对话 · 长历史与长回复", actor:ROOT_ACTOR_ID},
   {id:"empty", label:"空对话", actor:ROOT_ACTOR_ID},
@@ -47,6 +52,7 @@ function message(actor: ActorStore, content: string, running = false) {
 export function activateScenario(id: string): boolean {
   if (!scenarios.some(scene=>scene.id===id)) return false;
   resetStore();
+  resetApps(id === "apps-empty");
   Object.assign(previewState,{id,authenticated:id!=="login"&&id!=="registration",registered:id!=="registration",devices:[],
     core:{worker_stage_id:STAGE_ID,epoch:1,synchronized:true,ready:true,model_ready:true,state:"replica",config_revision:"1"}});
   const core=store.actors.get(ROOT_ACTOR_ID)!;

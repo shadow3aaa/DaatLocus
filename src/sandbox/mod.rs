@@ -81,6 +81,8 @@ pub enum SandboxStdio {
 
 #[derive(Clone, Debug, Default)]
 pub struct SandboxProcessOptions {
+    /// Explicit credentials supplied for this process, never ambient service secrets.
+    pub environment: Vec<(String, String)>,
     pub current_dir: Option<PathBuf>,
     pub stdin: SandboxStdio,
     pub stdout: SandboxStdio,
@@ -92,6 +94,7 @@ pub struct SandboxProcessOptions {
 impl PartialEq for SandboxProcessOptions {
     fn eq(&self, other: &Self) -> bool {
         self.current_dir == other.current_dir
+            && self.environment == other.environment
             && self.stdin == other.stdin
             && self.stdout == other.stdout
             && self.stderr == other.stderr
@@ -412,6 +415,7 @@ fn apply_tokio_command_options(
     options: SandboxProcessOptions,
 ) {
     strip_protected_env_from_tokio_command(policy, command);
+    command.envs(options.environment);
     if let Some(current_dir) = options.current_dir {
         command.current_dir(current_dir);
     }
@@ -1124,6 +1128,7 @@ mod tests {
         let (program, args) =
             conformance_probe_command(&secret_file, &write_probes, &public_file, &workspace_output);
         let options = SandboxProcessOptions {
+            environment: Vec::new(),
             current_dir: Some(workspace.clone()),
             stdin: SandboxStdio::Null,
             stdout: SandboxStdio::Piped,

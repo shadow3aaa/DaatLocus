@@ -10,6 +10,20 @@ import type { ToolResult } from "../src/lib/actor-api";
 const result = (patch: Partial<ToolResult>): ToolResult => ({ id: "private-result-id", actor_id: "root", message_id: "message", call_id: "call", name: "extension__inspect", arguments: {}, payload: { private_metadata: "HIDDEN_PAYLOAD" }, model_content: '{"internal":"HIDDEN_MODEL_PROTOCOL"}', summary: "检查已完成", error: null, ...patch });
 
 describe("tool observations are product content, never protocol dumps", () => {
+  test("MCP errors preserve source text without exposing binary or protocol fields", () => {
+    const name="mcp_00000000000000000000000000000001__t1234567890";
+    const html=renderToStaticMarkup(<ToolDetail result={result({name,error:"remote_error",payload:{content:[{type:"text",text:"<script>record rejected</script>"},{type:"image",data:"BINARY_SENTINEL",mimeType:"image/png"}],app:{name:"Example",tool:"lookup"},private_metadata:"PRIVATE_SENTINEL"}})}/>);
+    expect(html).toContain("&lt;script&gt;record rejected&lt;/script&gt;");
+    for(const hidden of ["BINARY_SENTINEL","PRIVATE_SENTINEL","HIDDEN_MODEL_PROTOCOL","remote_error"]) expect(html).not.toContain(hidden);
+    const label=activityLabel({seq:1,...result({name,outcome:{app:{name:"Example",tool:"lookup.with space"}}})});
+    expect(label.label).toBe("Example");expect(label.detail).toBe("lookup.with space");
+  });
+  test("MCP approval inspects decoded original parameters rather than the JSON adapter", () => {
+    const html=renderToStaticMarkup(<ApprovalDetails result={{arguments_json:'{"path":"exact <file>","value":null}'}} requested={{readable_roots:[],writable_roots:[],operation_details:{app:{id:"mcp_00000000000000000000000000000001",name:"Records"},tool:"lookup",parameters:{path:"exact <file>",value:null}}}}/>);
+    expect(html).toContain("Records");expect(html).toContain("lookup");expect(html).toContain("exact &lt;file&gt;");
+    expect(html).not.toContain("arguments_json");expect(html).not.toContain("&quot;path&quot;");
+    expect(html).toContain(i18n.t("tool_parameters.not_specified"));
+  });
   test("resource readers do not expose serialized tool output", () => {
     const html = renderToStaticMarkup(<ToolDetail result={result({name:"actors__read_resource",payload:{content:'{"internal":"HIDDEN_COMPLETE_OUTPUT"}',resource_id:"opaque-id"}})} />);
     expect(html).not.toContain("HIDDEN_COMPLETE_OUTPUT");

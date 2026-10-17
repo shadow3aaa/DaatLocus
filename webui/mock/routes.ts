@@ -1,3 +1,4 @@
+import { appsRoute } from "./apps";
 /**
  * Development fixtures for the client HTTP/SSE wire shapes. Authentication,
  * permissions and actual execution remain the real service's responsibility.
@@ -213,13 +214,20 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     const id=url.searchParams.get("scene")??"conversation";
     if(!activateScenario(id)) return invalidRequest("Unknown preview scenario");
     const scene=scenarios.find(item=>item.id===id)!;
-    return new Response(null,{status:303,headers:{Location:scene.actor===ROOT_ACTOR_ID?"/":`/actors/${scene.actor}`}});
+    return new Response(null,{status:303,headers:{Location:scene.id.startsWith("apps")?"/apps":scene.actor===ROOT_ACTOR_ID?"/":`/actors/${scene.actor}`}});
   }
   if(path==="/__mock/scenario" && method==="POST") {const body=await jsonBody(req);if(typeof body?.id!=="string"||!activateScenario(body.id))return invalidRequest("Unknown preview scenario");return json({id:previewState.id});}
   if (path === "/__mock/health" && method === "GET") return json({ ok: true });
   if (path === "/__mock/reset" && method === "POST") {
     activateScenario("conversation");
     return json({ ok: true, reset: true });
+  }
+
+  if (path.startsWith("/v1/apps")) {
+    if (!previewState.authenticated) return json({code:"unauthorized"},401);
+    if (method === "GET" && previewState.id === "apps-loading") await new Promise(resolve => setTimeout(resolve, 2000));
+    if (method === "GET" && previewState.id === "apps-error") return json({code:"unavailable"},503);
+    return appsRoute(method, path, url, req);
   }
 
   // ---- account / access ---------------------------------------------------
