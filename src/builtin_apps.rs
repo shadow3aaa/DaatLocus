@@ -21,7 +21,6 @@ use crate::{
     model_catalog::catalog_model_capacity,
     model_protocol::AgentToolCall,
     openskills::load_openskills_with_policy,
-    study_app::{StudyApp, store::StudyStore},
     terminal_app::TerminalApp,
 };
 
@@ -32,16 +31,8 @@ pub const DEVICE_APPS: &[&str] = &[
     "terminal",
     "browser",
     "artifacts",
-    "study",
 ];
-pub(crate) const ALL_APPS: &[&str] = &[
-    "actors",
-    "files",
-    "terminal",
-    "browser",
-    "artifacts",
-    "study",
-];
+pub(crate) const ALL_APPS: &[&str] = &["actors", "files", "terminal", "browser", "artifacts"];
 
 pub(crate) fn history_app(actor: &ActorRecord, system: ActorSystem) -> Box<dyn App> {
     Box::new(RestrictedApp::new(
@@ -90,9 +81,6 @@ pub fn create_apps(
             #[cfg(not(target_os = "android"))]
             "browser" => Box::new(BrowserApp::new()),
             "artifacts" => Box::new(ArtifactsApp::new(actor.id.clone(), system.clone())),
-            "study" => Box::new(StudyApp::new(StudyStore::open_at(
-                state_dir.join("study.sqlite"),
-            )?)),
             _ => return Err(miette!("unknown App `{name}`")),
         };
         apps.push(Box::new(RestrictedApp::new(inner, actor)));
@@ -193,10 +181,6 @@ pub(crate) fn read_only_tool(app: &str, tool: &str) -> bool {
             "read_file" | "view_image" | "list_skills" | "list_directory" | "search_text"
         ),
         "browser" => tool == "read_url",
-        "study" => matches!(
-            tool,
-            "list_modules" | "search_nodes" | "read_node" | "find_similar" | "maintenance_report"
-        ),
         "actors" => matches!(
             tool,
             "devices"

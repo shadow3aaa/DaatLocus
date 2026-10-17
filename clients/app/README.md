@@ -75,7 +75,7 @@ Platform prerequisites: [Tauri prerequisites](https://v2.tauri.app/start/prerequ
 The APK contains the same Actor core and account transport, with the WebUI
 embedded once by Tauri. Its backend disables embedded-webui.
 A phone can create an account and infer independently with Actors, app-private
-Files, HTTP Browser, Artifacts and Study. Terminal and Chrome are unavailable.
+Files, HTTP Browser and Artifacts. Terminal and Chrome are unavailable.
 Joining an existing account shares its core Actor. Android uses the same
 execution and recovery rules as other devices, without a phone-specific role.
 New devices join as synchronized replicas; voting authority transfers through

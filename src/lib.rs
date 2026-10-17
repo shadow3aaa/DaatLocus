@@ -37,7 +37,6 @@ pub mod sandbox;
 pub mod schema_utils;
 pub mod service;
 pub mod stage;
-pub mod study_app;
 pub mod system_info;
 pub mod terminal_app;
 pub mod tool_output_spill;

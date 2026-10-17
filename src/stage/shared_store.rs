@@ -424,7 +424,7 @@ pub(crate) fn apply(
             Ok(change.key.clone())
         }
         Entity::Configuration => {
-            let configuration: super::core_wire::Configuration = serde_json::from_value(value)
+            let mut configuration: super::core_wire::Configuration = serde_json::from_value(value)
                 .map_err(|_| StageError::Invalid("Invalid shared configuration"))?;
             if change.key != "core"
                 || configuration.name.len() > 100
@@ -439,19 +439,29 @@ pub(crate) fn apply(
                     .tools
                     .as_ref()
                     .is_some_and(|tools| tools.len() > 256)
-                || configuration.app_access.as_ref().is_some_and(|apps| {
-                    apps.len() > 16
-                        || crate::builtin_apps::validate_app_names(apps, configuration.read_only)
-                            .is_err()
-                })
-                || crate::builtin_apps::validate_app_names(
-                    configuration
-                        .delegation_apps
-                        .as_ref()
-                        .unwrap_or(&configuration.apps),
-                    configuration.read_only,
-                )
-                .is_err()
+                || configuration
+                    .app_access
+                    .as_ref()
+                    .is_some_and(|apps| apps.len() > 16)
+            {
+                return Err(StageError::Invalid("Invalid shared configuration"));
+            }
+            crate::actors::migrations::retire_study_grants(
+                &mut configuration.apps,
+                &mut configuration.app_access,
+                &mut configuration.delegation_apps,
+                &mut configuration.tools,
+            );
+            if configuration.app_access.as_ref().is_some_and(|apps| {
+                crate::builtin_apps::validate_app_names(apps, configuration.read_only).is_err()
+            }) || crate::builtin_apps::validate_app_names(
+                configuration
+                    .delegation_apps
+                    .as_ref()
+                    .unwrap_or(&configuration.apps),
+                configuration.read_only,
+            )
+            .is_err()
             {
                 return Err(StageError::Invalid("Invalid shared configuration"));
             }
@@ -608,6 +618,43 @@ fn require_message(tx: &Transaction<'_>, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn older_checkpoints_drop_retired_study_grants_and_still_reject_unknown_apps() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let source = store(source_dir.path());
+        let target = store(target_dir.path());
+        let leader = StageId::new();
+        let follower = StageId::new();
+        let mut actor = source.actor(ACTOR_ID).unwrap();
+        actor.config.apps = vec!["actors".into()];
+        actor.config.permissions.app_access = Some(vec!["study".into()]);
+        actor.config.permissions.delegation_apps = Some(vec!["files".into(), "study".into()]);
+        actor.config.permissions.tools =
+            Some(vec!["actors__create".into(), "study__create_node".into()]);
+        source.save_actor(&actor).unwrap();
+        let batch = capture(&source, "account-a", leader, 1).unwrap().unwrap();
+        copy(&source, &target, &batch);
+        commit(&target, &batch, follower).unwrap();
+        commit(&source, &batch, leader).unwrap();
+        let imported = target.actor(ACTOR_ID).unwrap();
+        assert_eq!(imported.config.permissions.app_access, Some(vec![]));
+        assert_eq!(
+            imported.config.permissions.delegation_apps,
+            Some(vec!["files".into()])
+        );
+        assert_eq!(
+            imported.config.permissions.tools,
+            Some(vec!["actors__create".into()])
+        );
+        actor.config.permissions.delegation_apps = Some(vec!["unknown-app".into()]);
+        source.save_actor(&actor).unwrap();
+        let invalid = capture(&source, "account-a", leader, 1).unwrap().unwrap();
+        copy(&source, &target, &invalid);
+        assert!(commit(&target, &invalid, follower).is_err());
+        assert_eq!(target.actor(ACTOR_ID).unwrap().config, imported.config);
+    }
+
     #[test]
     fn a_shared_core_failure_never_creates_a_remote_actor_notice() {
         let directory = tempfile::tempdir().unwrap();

@@ -444,12 +444,18 @@ impl ActorSystem {
         // Retain existing identities/history while moving installation to the
         // device. Former installation restrictions remain explicit action grants.
         for mut actor in system.store().actors()? {
+            let previous = actor.config.clone();
+            super::migrations::retire_study_grants(
+                &mut actor.config.apps,
+                &mut actor.config.permissions.app_access,
+                &mut actor.config.permissions.delegation_apps,
+                &mut actor.config.permissions.tools,
+            );
             if actor.id != crate::stage::shared::ACTOR_ID {
-                let config = system.hosted_config(actor.config.clone())?;
-                if config != actor.config {
-                    actor.config = config;
-                    system.store().save_actor(&actor)?;
-                }
+                actor.config = system.hosted_config(actor.config)?;
+            }
+            if actor.config != previous {
+                system.store().save_actor(&actor)?;
             }
         }
         system.start_queued_workers()?;
@@ -2150,6 +2156,72 @@ mod tests {
                 .is_ok()
         );
         system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retired_study_grants_are_removed_on_reopen_without_expanding_permissions() {
+        let (directory, system) = fixture().await;
+        let mut actor = system.actor(FIXTURE_ACTOR_ID).unwrap();
+        actor.config.apps = vec!["files".into(), "study".into()];
+        actor.config.permissions.app_access = Some(vec!["files".into(), "study".into()]);
+        actor.config.permissions.delegation_apps = Some(vec!["study".into()]);
+        actor.config.permissions.tools =
+            Some(vec!["files__read_file".into(), "study__create_node".into()]);
+        system.store().save_actor(&actor).unwrap();
+        let queued = system
+            .send_user(&actor.id, "Retain this request".into(), vec![], None)
+            .unwrap();
+        let history = crate::model_protocol::AgentMessage::user("Retain the original history");
+        system
+            .store()
+            .append_history(&actor.id, &queued.id, std::slice::from_ref(&history))
+            .unwrap();
+        let mut core = system.actor("core").unwrap();
+        core.config.permissions.delegation_apps = Some(vec!["study".into()]);
+        system.store().save_actor(&core).unwrap();
+        let config = system.config();
+        system.shutdown().await;
+
+        let reopened = ActorSystem::open_paused_with_factory(
+            directory.path().join("data"),
+            directory.path().join("workspace"),
+            config,
+            Arc::new(NoModels),
+        )
+        .await
+        .unwrap();
+        let retained = reopened.actor(&actor.id).unwrap();
+        assert_eq!(retained.id, actor.id);
+        assert_eq!(
+            retained.config.permissions.app_access,
+            Some(vec!["files".into()])
+        );
+        assert_eq!(retained.config.permissions.delegation_apps, Some(vec![]));
+        assert_eq!(
+            retained.config.permissions.tools,
+            Some(vec!["files__read_file".into()])
+        );
+        assert_eq!(
+            reopened
+                .actor("core")
+                .unwrap()
+                .config
+                .permissions
+                .delegation_apps,
+            Some(vec![])
+        );
+        assert!(reopened.store().history(&actor.id, 10).unwrap() == vec![history]);
+        let request = reopened.store().message(&queued.id).unwrap();
+        assert_eq!(request.content, "Retain this request");
+        assert_eq!(request.status, MessageStatus::Queued);
+        let apps =
+            crate::builtin_apps::create_apps(&retained, reopened.clone(), &reopened.config())
+                .unwrap();
+        let tools = apps.model_tool_specs().unwrap();
+        assert!(tools.iter().any(|tool| tool.name == "files__read_file"));
+        assert!(!tools.iter().any(|tool| tool.name.starts_with("study__")));
+        assert!(!tools.iter().any(|tool| tool.name == "files__write_file"));
+        reopened.shutdown().await;
     }
 
     #[tokio::test]

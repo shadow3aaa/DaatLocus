@@ -1,5 +1,5 @@
 mod context;
-mod migrations;
+pub(crate) mod migrations;
 mod types;
 pub use context::{AgentContext, HistoryAnchor};
 pub use types::*;

@@ -9,9 +9,12 @@
 模型执行、持久上下文、审批与回复；不同 Actor 并行推进。App 是唯一工具抽象，
 各领域自行定义查询与操作，不要求统一 `get_state`。
 
-`src/builtin_apps.rs` 安装 Actors、Files/Skills、Terminal、Browser、Artifacts、
-Study。各 App 的指令统一维护在 `src/app_instructions`，工具描述和可移植输入
+`src/builtin_apps.rs` 安装 Actors、Files/Skills、Terminal、Browser、Artifacts。
+各 App 的指令统一维护在 `src/app_instructions`，工具描述和可移植输入
 schema 留在所属 App。Skills 是可发现、读取的指令资源，不拥有独立执行引擎。
+
+Study 已移除；加载持久 Actor 配置或导入共享 Core 配置时，仅剔除其旧 App 与
+工具授权，保留显式空授权、Actor 身份与历史，不恢复旧应用或扩大其他能力。
 
 `src/app_instructions/orchestration.md` 维护通用场景的 Actor 分工、复用、
 工作区协作与结果验收策略，与 Core 和普通管理型 Actors App 的指令共同编译并
@@ -54,8 +57,8 @@ Actor 仍只有一个串行 worker。没有输入持续 60 秒后，可安全重
 worker 与注册表条目释放；再次入队从 SQLite 加载配置、上下文锚点与历史。
 空唤醒不延长空闲期限。收件箱的部分索引只包含排队输入，避免启动时扫描全部历史。
 
-App 默认不允许空闲回收，必须明确声明自身可安全重建。Actors、Files、Artifacts、
-Study 和只读 HTTP 缓存允许回收；终端保留会话或输出、浏览器保留上下文时阻止
+App 默认不允许空闲回收，必须明确声明自身可安全重建。Actors、Files、Artifacts
+和只读 HTTP 缓存允许回收；终端保留会话或输出、浏览器保留上下文时阻止
 回收，不杀进程、不丢页面或会话数据。终端使用随机唯一会话 ID，重建后不复用旧引用。
 这些资源仍通过已有关闭操作或显式生命周期停止释放，空闲回收不重放 App 操作。
 App 关闭期间 worker 仍占据注册表位置，关闭完成后移除并重查持久收件箱，避免
@@ -380,7 +383,7 @@ profile 与账号凭据版本绑定保证会话权限。
 同一 profile 的窗口；后台重启后重连已核实的本机服务。CLI 与可选浏览器入口保留。
 Android 将同一服务与 Actor/App 核心编译为 APK 内的 Rust 原生库，使用 OS 私有目录，
 不启动桌面 daemon、CLI 子进程或独立 root。它可以创建账号并独立推理，也可以成为
-同账号共享核心的执行设备。设备可为普通 Actor 提供 Actors、Files、HTTP Browser、Artifacts、Study；账号 Core 直接仅用 Actors；
+同账号共享核心的执行设备。设备可为普通 Actor 提供 Actors、Files、HTTP Browser、Artifacts；账号 Core 直接仅用 Actors；
 终端不安装，未实现的进程隔离始终拒绝。Files 使用目录句柄与实际打开 FD 校验，
 Android 上以 O_PATH 遍历不可列举的系统祖先目录，仅在授权目标读取目录内容；
 创建文件用 renameat2 的 RENAME_NOREPLACE 原子提交，避免 SELinux 禁止的硬链接，

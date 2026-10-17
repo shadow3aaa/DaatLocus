@@ -38,10 +38,6 @@ impl AppId {
         Self("terminal".to_string())
     }
 
-    pub fn study() -> Self {
-        Self("study".to_string())
-    }
-
     pub fn is_valid_name(name: &str) -> bool {
         let Some(first) = name.chars().next() else {
             return false;

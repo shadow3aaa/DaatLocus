@@ -1,5 +1,22 @@
-//! Persistent format transitions must not turn retired guest inputs into Owner authority.
+//! Persistent format transitions preserve history without reviving retired capabilities.
 use rusqlite::{Transaction, params};
+
+/// Strip retired capabilities from persisted or replicated configuration only.
+/// Keep explicit empty grants: converting them to None would expand authority.
+pub(crate) fn retire_study_grants(
+    apps: &mut Vec<String>,
+    app_access: &mut Option<Vec<String>>,
+    delegation_apps: &mut Option<Vec<String>>,
+    tools: &mut Option<Vec<String>>,
+) {
+    apps.retain(|app| app != "study");
+    for grants in [app_access, delegation_apps].into_iter().flatten() {
+        grants.retain(|app| app != "study");
+    }
+    if let Some(tools) = tools {
+        tools.retain(|tool| !tool.starts_with("study__"));
+    }
+}
 
 pub(super) fn retire_guest_execution(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<()> {
     if tx.query_row(
