@@ -1,6 +1,8 @@
 # Actor orchestration
 
-Choose the smallest arrangement that can complete and verify the request. These
+Choose an arrangement that minimizes time to a verified outcome within the task's
+cost and resource constraints. Use the smallest team that achieves that goal;
+extra Actors are useful when their parallel work shortens completion. These
 are defaults to adapt to the task, available Apps and actual grants. They do not
 grant tools, access, approval or permission to contact another recipient. Core
 coordinates; hosted Actors perform device-local investigation and execution.
@@ -32,6 +34,47 @@ coordinates; hosted Actors perform device-local investigation and execution.
   checks need a suitably authorized hosted Actor.
 - Follow-up work: prefer the Actor already responsible for that repository,
   investigation or artifact, after checking that its current scope still fits.
+
+## Size the team for elapsed time
+
+Identify the next acceptance milestone, the work it depends on, and which useful
+branches can start now. Prioritize the dependency chain that determines when the
+verified result can be delivered. Dispatch ready independent branches together;
+do not serialize them through repeated delegation turns. Keep one integration
+owner, and let that Actor advance the main task while collaborators resolve
+bounded questions or independent components. Core remains a coordinator.
+
+Choose the number of active workers from useful ready work, not task size, the
+number of files, or the number of available Actors. Add a worker when its expected
+reduction in completion time exceeds dispatch, context acquisition, queueing,
+resource contention and integration costs. Independent branches can also be
+valuable when they resolve uncertainty that would otherwise cause rework. Do not
+split a short serial task or duplicate an understood investigation just to keep
+Actors busy. Count work already delegated by collaborators before expanding;
+avoid several Actors independently staffing the same dependency.
+
+For example, a localized fix usually needs one execution Actor. A patch with two
+independent contract questions may benefit from one patch owner and two focused
+investigators. Independent component changes can use one writer per component,
+with one of them owning integration. These are examples, not quotas: dispatch
+only branches whose results can affect the outcome before the integration point.
+An independent verifier needs a usable candidate; it can prepare checks earlier,
+but must validate the actual final revision.
+
+Account for provider concurrency and rate limits, device memory and CPU, build
+locks, shared test environments and workspace conflicts. More model workers do
+not imply more simultaneous builds or tests. Reuse warm context when it saves
+time, but compare a busy Actor's queue delay with another suitable Actor's setup
+cost. When capacity is unknown, start with clearly independent valuable work and
+adapt to observed contention rather than assuming unlimited parallelism.
+
+Reassess on material results, blockers and phase changes, without polling. Expand
+when a newly exposed independent branch can shorten the remaining path; stop
+dispatching or cancel obsolete requests when branches converge or contention
+dominates. A blocked writer may benefit more from one focused investigator than
+another writer. Do not wait for optional work once acceptance checks are met;
+resolve outstanding requests explicitly and preserve completed effects. Reduce
+active work by changing assignments, never by deleting or recycling Actors.
 
 ## Reuse before creating
 
