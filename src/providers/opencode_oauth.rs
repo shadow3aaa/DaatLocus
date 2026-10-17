@@ -219,7 +219,7 @@ async fn opencode_fetch_org_id(
 }
 
 fn auth_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    crate::http_client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|err| miette!("failed to build OpenCode auth http client: {err}"))

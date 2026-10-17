@@ -4,6 +4,9 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use miette::{Result, miette};
 
+#[cfg(not(target_os = "android"))]
+use crate::browser_app::BrowserApp;
+
 use crate::{
     actor_app::ActorApp,
     actors::{ActorRecord, ActorSystem, ToolPermissionRequest},
@@ -12,7 +15,7 @@ use crate::{
         AppToolSpec,
     },
     artifacts_app::ArtifactsApp,
-    browser_app::{BrowserApp, ReadOnlyBrowserApp},
+    browser_app::ReadOnlyBrowserApp,
     config::Config,
     files_app::FilesApp,
     model_catalog::catalog_model_capacity,
@@ -87,6 +90,7 @@ pub fn create_apps(
             "browser" if cfg!(target_os = "android") || actor.config.permissions.read_only => {
                 Box::new(ReadOnlyBrowserApp::new())
             }
+            #[cfg(not(target_os = "android"))]
             "browser" => Box::new(BrowserApp::new()),
             "artifacts" => Box::new(ArtifactsApp::new(actor.id.clone(), system.clone())),
             "study" => Box::new(StudyApp::new(StudyStore::open_at(

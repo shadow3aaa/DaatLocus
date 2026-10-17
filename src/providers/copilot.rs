@@ -34,7 +34,7 @@ pub struct CopilotClient {
 
 impl CopilotClient {
     pub fn new(github_token: &str, model_config: &ModelConfig) -> Self {
-        let auth_client = reqwest::Client::builder()
+        let auth_client = crate::http_client::builder()
             .timeout(Duration::from_secs(15))
             .build()
             .expect("failed to build copilot auth http client");

@@ -137,9 +137,13 @@ fn response_headers(headers: &HeaderMap) -> Vec<(String, String)> {
 }
 impl Transport {
     pub fn new(origin: Arc<RwLock<Url>>) -> Result<Self> {
+        #[cfg(target_os = "android")]
+        let builder = daat_locus::http_client::builder();
+        #[cfg(not(target_os = "android"))]
+        let builder = Client::builder();
         Ok(Self {
             origin,
-            client: Client::builder()
+            client: builder
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(5))

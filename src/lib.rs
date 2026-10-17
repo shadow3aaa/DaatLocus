@@ -7,6 +7,7 @@ pub mod app;
 pub mod artifacts;
 pub mod artifacts_app;
 pub mod browser_app;
+#[cfg(not(target_os = "android"))]
 pub mod browser_install;
 pub mod builtin_apps;
 pub mod config;
@@ -18,6 +19,7 @@ pub mod daemon;
 pub mod dsml_repair;
 pub mod file_io;
 pub mod files_app;
+pub mod http_client;
 pub mod i18n;
 pub mod logging;
 #[cfg(target_os = "android")]

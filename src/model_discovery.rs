@@ -242,7 +242,7 @@ async fn discover_copilot_models(github_token: &str) -> Result<Vec<DiscoveredMod
         return Err(miette!("copilot model discovery: github token is empty"));
     }
 
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| miette!("copilot model discovery: http client error: {err}"))?;
@@ -310,7 +310,7 @@ async fn fetch_openai_models(base_url: &str, api_key: &str) -> Result<Vec<Discov
 
 async fn fetch_openai_models_path(url: &str, api_key: &str) -> Result<Vec<DiscoveredModel>> {
     let url = url.to_string();
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| miette!("fetch_openai_models: failed to build http client: {err}"))?;
@@ -352,7 +352,7 @@ async fn fetch_opencode_console_models(
     let base =
         normalize_provider_base_url(base_url.unwrap_or(crate::providers::OPENCODE_ZEN_BASE_URL));
     let url = format!("{}/api/config", server.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| {
@@ -435,7 +435,7 @@ async fn fetch_anthropic_models(base_url: &str, api_key: &str) -> Result<Vec<Dis
     } else {
         format!("{base}/v1/models")
     };
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| miette!("fetch_anthropic_models: failed to build http client: {err}"))?;
@@ -463,7 +463,7 @@ async fn fetch_anthropic_models(base_url: &str, api_key: &str) -> Result<Vec<Dis
 }
 
 async fn fetch_ollama_models(host: &str) -> Result<Vec<DiscoveredModel>> {
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| miette!("fetch_ollama_models: failed to build http client: {err}"))?;
@@ -499,7 +499,7 @@ async fn fetch_ollama_models(host: &str) -> Result<Vec<DiscoveredModel>> {
         })
         .collect();
 
-    let Ok(show_client) = reqwest::Client::builder()
+    let Ok(show_client) = crate::http_client::builder()
         .timeout(Duration::from_secs(30))
         .build()
     else {
@@ -609,7 +609,7 @@ async fn fetch_codex_oauth_models(auth_file: &str, base_url: &str) -> Result<Vec
         })?;
     let client_version = codex_oauth_client_version();
     let url = format!("{}/models", normalize_provider_base_url(base_url));
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| {

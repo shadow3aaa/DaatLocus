@@ -88,7 +88,7 @@ fn validate_catalog(root: serde_json::Value) -> Result<serde_json::Value, String
 
 /// Refresh the local cache from models.dev. Returns Ok if cache was written.
 pub async fn refresh_models_dev_cache() -> Result<(), String> {
-    let mut response = reqwest::Client::builder()
+    let mut response = crate::http_client::builder()
         .timeout(Duration::from_secs(6))
         .build()
         .map_err(|_| "Cannot create catalog client")?

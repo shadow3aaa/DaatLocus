@@ -426,7 +426,7 @@ mod tests {
             .await
             .unwrap();
         });
-        let client = reqwest::Client::new();
+        let client = crate::http_client::builder().build().expect("HTTP client");
         let public: serde_json::Value = client
             .get(format!("{url}/v1/account"))
             .send()

@@ -6,7 +6,7 @@ use crate::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use md5::{Digest as _, Md5};
-use miette::{Result, miette};
+use miette::{IntoDiagnostic, Result, miette};
 use reqwest::header::{CONTENT_LENGTH, ETAG, HeaderMap};
 use serde::{Deserialize, Serialize};
 
@@ -94,7 +94,11 @@ async fn run_browser_runtime_setup() -> Result<()> {
         runtime_dir.display()
     );
 
-    let manifest = reqwest::get(MANIFEST_URL)
+    let manifest = crate::http_client::builder()
+        .build()
+        .into_diagnostic()?
+        .get(MANIFEST_URL)
+        .send()
         .await
         .map_err(|err| miette!("failed to fetch Chrome for Testing manifest: {err}"))?
         .error_for_status()
@@ -122,7 +126,11 @@ async fn run_browser_runtime_setup() -> Result<()> {
         download.url
     );
 
-    let response = reqwest::get(&download.url)
+    let response = crate::http_client::builder()
+        .build()
+        .into_diagnostic()?
+        .get(&download.url)
+        .send()
         .await
         .map_err(|err| miette!("failed to download browser runtime: {err}"))?
         .error_for_status()
@@ -167,7 +175,7 @@ async fn run_browser_runtime_setup() -> Result<()> {
                 .ok_or_else(|| miette!("browser runtime archive contained unsafe path"))?
                 .clone();
             let destination = runtime_dir_for_extract.join(enclosed);
-            if file.name().ends_with('/') {
+            if file.is_dir() {
                 std::fs::create_dir_all(&destination).map_err(|err| {
                     miette!(
                         "failed to create extracted dir {}: {err}",

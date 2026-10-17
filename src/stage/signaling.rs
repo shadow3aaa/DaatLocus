@@ -153,7 +153,7 @@ async fn connected(runtime: Arc<Runtime>, mut socket: SignalSocket) -> Result<()
                         let value:Negotiation=proof.verify("rtc-negotiation",&record.device.public_key)?;
                         let attempt=Attempt{generation:value.generation,nonce:value.nonce};
                         verify_signal(&proof,&record.device,&runtime.host.enrollment()?.root,runtime.host.local,attempt,chrono::Utc::now().timestamp_millis())?;
-                        if value.description.sdp_type==webrtc::peer_connection::sdp::sdp_type::RTCSdpType::Offer {
+                        if value.description.sdp_type==webrtc::peer_connection::RTCSdpType::Offer {
                             if runtime.connected(source)||runtime.host.settings().ssh.contains_key(&source)||super::connection::automatic_dialer(runtime.host.local,source)||negotiating.contains_key(&source)||negotiating.len()+candidates.len()>=8||runtime.begin_p2p(source).is_err() { continue; }
                             let owner=runtime.clone();
                             let abort=jobs.spawn(async move {

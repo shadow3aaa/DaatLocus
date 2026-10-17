@@ -1022,7 +1022,7 @@ mod tests {
             .await
             .unwrap();
         });
-        let client = reqwest::Client::new();
+        let client = crate::http_client::builder().build().expect("HTTP client");
         let start = |request: Vec<u8>| {
             client
                 .post(format!("{url}/v1/account/login/start"))

@@ -123,7 +123,7 @@ impl OllamaClient {
         let host = parse_host(host);
         let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
         let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::builder()
             .connect_timeout(Duration::from_secs(15))
             .build()
             .expect("failed to build ollama http client");

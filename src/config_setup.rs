@@ -1016,7 +1016,7 @@ async fn run_codex_setup_provider_auth(
 
 async fn start_github_device_auth()
 -> Result<(SetupProviderAuthStartResponse, PendingSetupProviderAuthFlow)> {
-    let http = reqwest::Client::builder()
+    let http = crate::http_client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|err| miette!("GitHub HTTP client failed: {err}"))?;
@@ -1070,7 +1070,7 @@ async fn start_github_device_auth()
 }
 
 async fn complete_github_device_auth(device_code: String) -> Result<SetupProviderAuthResponse> {
-    let http = reqwest::Client::builder()
+    let http = crate::http_client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|err| miette!("GitHub HTTP client failed: {err}"))?;
@@ -1126,7 +1126,7 @@ async fn complete_github_device_auth(device_code: String) -> Result<SetupProvide
 
 async fn start_codex_device_auth()
 -> Result<(SetupProviderAuthStartResponse, PendingSetupProviderAuthFlow)> {
-    let http = reqwest::Client::builder()
+    let http = crate::http_client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|err| miette!("OpenAI Codex HTTP client failed: {err}"))?;
@@ -1178,7 +1178,7 @@ async fn complete_codex_device_auth(
     device_auth_id: String,
     user_code: String,
 ) -> Result<SetupProviderAuthResponse> {
-    let http = reqwest::Client::builder()
+    let http = crate::http_client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|err| miette!("OpenAI Codex HTTP client failed: {err}"))?;
@@ -1993,7 +1993,7 @@ struct CodexOAuthCallbackQuery {
 }
 
 async fn run_codex_oauth_browser_flow() -> Result<CodexOAuthTokens> {
-    let http = reqwest::Client::builder()
+    let http = crate::http_client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| miette!("OpenAI Codex HTTP client failed: {e}"))?;

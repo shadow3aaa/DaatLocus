@@ -794,7 +794,7 @@ impl CodexResponsesClient {
 }
 
 fn codex_http_client_builder(timeout: Duration) -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
+    crate::http_client::builder()
         .timeout(timeout)
         .pool_idle_timeout(Duration::from_secs(CODEX_HTTP_POOL_IDLE_TIMEOUT_SECS))
         .pool_max_idle_per_host(CODEX_HTTP_POOL_MAX_IDLE_PER_HOST)
@@ -802,7 +802,7 @@ fn codex_http_client_builder(timeout: Duration) -> reqwest::ClientBuilder {
 }
 
 fn codex_responses_http_client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
+    crate::http_client::builder()
         .connect_timeout(Duration::from_secs(15))
         .pool_idle_timeout(Duration::from_secs(CODEX_HTTP_POOL_IDLE_TIMEOUT_SECS))
         .pool_max_idle_per_host(CODEX_HTTP_POOL_MAX_IDLE_PER_HOST)
@@ -1388,7 +1388,7 @@ pub async fn write_codex_oauth_tokens(auth_file: &Path, tokens: &CodexOAuthToken
 }
 
 pub async fn codex_oauth_access_from_file(auth_file: &Path) -> Result<CodexOAuthAccess> {
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|err| miette!("failed to build OpenAI Codex auth http client: {err}"))?;
@@ -1906,7 +1906,7 @@ mod tests {
         });
         let _refresh_endpoint = EnvOverride::set(CODEX_OAUTH_REFRESH_URL_OVERRIDE_ENV, &endpoint);
         // The disposable loopback server must never inherit a machine proxy.
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = crate::http_client::builder().no_proxy().build().unwrap();
         let access = codex_oauth_access_from_file_with_client(&destination, &client)
             .await
             .expect("refresh imported provider auth");

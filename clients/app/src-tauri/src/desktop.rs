@@ -8,6 +8,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     webview::NewWindowResponse,
 };
+use url::Url;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/app.png"));
 const OPEN: &str = "open-client";

@@ -163,7 +163,7 @@ pub(super) async fn test_sse_response(events: &[Value], done: bool) -> reqwest::
         socket.write_all(response.as_bytes()).await.unwrap();
         socket.shutdown().await.unwrap();
     });
-    reqwest::Client::builder()
+    crate::http_client::builder()
         .no_proxy()
         .build()
         .unwrap()

@@ -202,7 +202,7 @@ impl Fixture {
             system,
             url,
             auth,
-            client: Client::new(),
+            client: daat_locus::http_client::builder().build().unwrap(),
             server,
             cookie: parking_lot::RwLock::new(String::new()),
             password: parking_lot::RwLock::new("isolated fixture password".into()),

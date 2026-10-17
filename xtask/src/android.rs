@@ -175,9 +175,13 @@ fn artifact(directory: &Path, version: &str, target: Target, debug: bool) -> Res
     }
     let mut archive = zip::ZipArchive::new(fs::File::open(&path)?)?;
     let expected = format!("lib/{}/libdaat_locus_app_lib.so", target.abi());
-    let libraries = archive
+    let names = archive
         .file_names()
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let libraries = names
+        .iter()
         .filter(|name| name.ends_with("/libdaat_locus_app_lib.so"))
+        .map(|name| name.as_ref())
         .collect::<Vec<_>>();
     if libraries != [expected.as_str()] {
         return Err("APK ABI does not match --target; rebuild the requested architecture".into());

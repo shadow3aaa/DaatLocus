@@ -39,7 +39,7 @@ impl BackendHttp {
     }
     pub(super) fn new(base_url: &str, model: &ModelConfig) -> Self {
         Self {
-            client: reqwest::Client::builder()
+            client: crate::http_client::builder()
                 .connect_timeout(Duration::from_secs(15))
                 .build()
                 .expect("failed to build model HTTP client"),
@@ -294,7 +294,7 @@ mod tests {
         });
         for path in ["zen/v1", "go/v1", "aligned/v1"] {
             let base = format!("http://opencode.ai:{}/{path}", address.port());
-            let client = reqwest::Client::builder()
+            let client = crate::http_client::builder()
                 .no_proxy()
                 .resolve("opencode.ai", address)
                 .build()
@@ -397,7 +397,7 @@ mod tests {
                 &format!("http://{address}/v1"),
                 &ModelConfig::default(),
             );
-            provider.transport.client = reqwest::Client::builder().no_proxy().build().unwrap();
+            provider.transport.client = crate::http_client::builder().no_proxy().build().unwrap();
             let request = AgentTurnRequest {
                 messages: vec![AgentMessage::user("Test identity")],
                 tools: vec![],
@@ -447,7 +447,7 @@ mod tests {
                 &format!("http://{address}/v1"),
                 &ModelConfig::default(),
             );
-            provider.transport.client = reqwest::Client::builder().no_proxy().build().unwrap();
+            provider.transport.client = crate::http_client::builder().no_proxy().build().unwrap();
             let request = AgentTurnRequest {
                 messages: vec![AgentMessage::user("Test completion")],
                 tools: if tool_call {
@@ -508,7 +508,7 @@ mod tests {
             stream_idle_timeout_secs: 1,
             ..Default::default()
         };
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = crate::http_client::builder().no_proxy().build().unwrap();
         let mut chat = super::super::OpenAIClient::from_parts("fixture-key", &base, &model);
         chat.transport.client = client.clone();
         let mut responses = super::super::responses_compat::ResponsesCompatibleClient::new(
@@ -619,7 +619,7 @@ mod tests {
             });
             for path in ["zen/v1", "go/v1"] {
                 let base = format!("http://opencode.ai:{}/{path}", address.port());
-                let client = reqwest::Client::builder()
+                let client = crate::http_client::builder()
                     .no_proxy()
                     .resolve("opencode.ai", address)
                     .build()
@@ -749,7 +749,7 @@ mod tests {
             ..Default::default()
         };
         let mut provider = super::super::OpenAIClient::from_parts("fixture-secret", &base, &model);
-        provider.transport.client = reqwest::Client::builder()
+        provider.transport.client = crate::http_client::builder()
             .no_proxy()
             .resolve("opencode.ai", address)
             .build()

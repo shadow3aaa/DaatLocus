@@ -10,16 +10,11 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 use webrtc::{
-    api::{APIBuilder, setting_engine::SettingEngine},
-    data_channel::{
-        RTCDataChannel, data_channel_init::RTCDataChannelInit,
-        data_channel_state::RTCDataChannelState,
-    },
-    ice_transport::ice_server::RTCIceServer,
+    data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit, RTCDataChannelState},
     peer_connection::{
-        RTCPeerConnection,
-        configuration::RTCConfiguration,
-        sdp::{sdp_type::RTCSdpType, session_description::RTCSessionDescription},
+        PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
+        RTCIceGatheringState, RTCIceServer, RTCPeerConnectionState, RTCSdpType,
+        RTCSessionDescription, SettingEngineBuilder,
     },
 };
 
@@ -93,22 +88,24 @@ fn fingerprint(sdp: &str) -> Result<String> {
     }
     Ok(first.to_string())
 }
-fn rtc_error(_: webrtc::Error) -> StageError {
+fn rtc_error(_: webrtc::error::Error) -> StageError {
     StageError::Unavailable("RTC transport operation failed")
 }
 pub struct P2pChannel {
-    pc: Arc<RTCPeerConnection>,
-    control: Arc<RTCDataChannel>,
-    bulk: Arc<RTCDataChannel>,
+    pc: Arc<dyn PeerConnection>,
+    control: Arc<dyn DataChannel>,
+    bulk: Arc<dyn DataChannel>,
     incoming_control: mpsc::Receiver<Result<Vec<u8>>>,
     incoming_bulk: mpsc::Receiver<Result<Vec<u8>>>,
     ready: watch::Receiver<u8>,
     closed: watch::Receiver<bool>,
     peer: Option<DeviceProfile>,
+    gathered: watch::Receiver<bool>,
+    readers: Vec<tokio::task::JoinHandle<()>>,
 }
 impl P2pChannel {
     pub fn verified_peer(&self) -> Result<super::tls::VerifiedPeer> {
-        if *self.ready.borrow() != 3 {
+        if *self.ready.borrow() != 3 || *self.closed.borrow() {
             return Err(StageError::Forbidden(
                 "DTLS channel is not authenticated and open",
             ));
@@ -127,11 +124,6 @@ impl P2pChannel {
         }
     }
     pub async fn new(stun_urls: Vec<String>, loopback_only: bool) -> Result<Self> {
-        // The retained HTTP stack and WebRTC DTLS dependency enable different
-        // rustls backends. Select a single process provider before DTLS starts.
-        if rustls::crypto::CryptoProvider::get_default().is_none() {
-            let _ = rustls::crypto::ring::default_provider().install_default();
-        }
         if stun_urls.len() > 4
             || stun_urls
                 .iter()
@@ -141,31 +133,47 @@ impl P2pChannel {
                 "Only explicitly configured STUN endpoints are supported",
             ));
         }
-        let mut setting = SettingEngine::default();
+        let mut setting = SettingEngineBuilder::default();
         if loopback_only {
-            setting.set_include_loopback_candidate(true);
-            setting.set_ip_filter(Box::new(|ip| ip.is_loopback()));
+            // The driver binds only 127.0.0.1 below, so no other interface is gathered.
+            setting = setting.with_include_loopback_candidate(true);
         }
-        let api = APIBuilder::new().with_setting_engine(setting).build();
-        let pc = Arc::new(
-            api.new_peer_connection(RTCConfiguration {
-                ice_servers: if stun_urls.is_empty() {
-                    vec![]
+        let (ready_tx, ready) = watch::channel(0u8);
+        let (closed_tx, closed) = watch::channel(false);
+        let (gathered_tx, gathered) = watch::channel(false);
+        let pc: Arc<dyn PeerConnection> = Arc::new(
+            PeerConnectionBuilder::new()
+                .with_setting_engine(setting.build())
+                .with_configuration(
+                    RTCConfigurationBuilder::default()
+                        .with_ice_servers(if stun_urls.is_empty() {
+                            vec![]
+                        } else {
+                            vec![RTCIceServer {
+                                urls: stun_urls,
+                                ..Default::default()
+                            }]
+                        })
+                        .build(),
+                )
+                .with_handler(Arc::new(ConnectionEvents {
+                    closed: closed_tx.clone(),
+                    gathered: gathered_tx,
+                }))
+                .with_udp_addrs(if loopback_only {
+                    vec!["127.0.0.1:0"]
                 } else {
-                    vec![RTCIceServer {
-                        urls: stun_urls,
-                        ..Default::default()
-                    }]
-                },
-                ..Default::default()
-            })
-            .await
-            .map_err(rtc_error)?,
+                    vec!["0.0.0.0:0", "[::]:0"]
+                })
+                .with_data_channel_send_buffer_limit(256 * 1024)
+                .build()
+                .await
+                .map_err(rtc_error)?,
         );
-        let options = |id| RTCDataChannelInit {
-            ordered: Some(true),
+        let options = |id: u16| RTCDataChannelInit {
+            ordered: true,
             negotiated: Some(id),
-            protocol: Some("daat-locus-stage/1".into()),
+            protocol: "daat-locus-stage/1".into(),
             ..Default::default()
         };
         let control = pc
@@ -176,57 +184,54 @@ impl P2pChannel {
             .create_data_channel("content", Some(options(2)))
             .await
             .map_err(rtc_error)?;
-        let (ready_tx, ready) = watch::channel(0u8);
-        let (closed_tx, closed) = watch::channel(false);
-        let connection_closed = closed_tx.clone();
-        pc.on_peer_connection_state_change(Box::new(move |state| {
-            let closed = connection_closed.clone();
-            Box::pin(async move {
-                use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-                if matches!(
-                    state,
-                    RTCPeerConnectionState::Disconnected
-                        | RTCPeerConnectionState::Failed
-                        | RTCPeerConnectionState::Closed
-                ) {
-                    closed.send_replace(true);
-                }
-            })
-        }));
         let (control_tx, incoming_control) = mpsc::channel(8);
         let (bulk_tx, incoming_bulk) = mpsc::channel(4);
+        let mut readers = Vec::new();
         for (channel, tx, bit) in [
             (control.clone(), control_tx, 1u8),
             (bulk.clone(), bulk_tx, 2u8),
         ] {
-            let closed = closed_tx.clone();
-            channel.on_close(Box::new(move || {
-                let closed = closed.clone();
-                Box::pin(async move {
-                    closed.send_replace(true);
-                })
-            }));
+            let closed_tx = closed_tx.clone();
+            let mut closed = closed.clone();
             let ready_tx = ready_tx.clone();
-            channel.on_open(Box::new(move || {
-                let ready_tx = ready_tx.clone();
-                Box::pin(async move {
-                    ready_tx.send_modify(|value| *value |= bit);
-                })
-            }));
-            channel.on_message(Box::new(move |message| {
-                let tx = tx.clone();
-                Box::pin(async move {
-                    let value = if message.is_string
-                        || message.data.is_empty()
-                        || message.data.len() > MAX_FRAME
-                    {
-                        Err(StageError::Invalid("RTC message exceeds protocol budget"))
-                    } else {
-                        Ok(message.data.to_vec())
+            readers.push(tokio::spawn(async move {
+                loop {
+                    if *closed.borrow() {
+                        break;
+                    }
+                    let event = tokio::select! {
+                        _ = closed.changed() => break,
+                        event = channel.poll() => event,
                     };
-                    // Bounded channel backpressure; reliable messages are never replaced.
-                    let _ = tx.send(value).await;
-                })
+                    match event {
+                        Some(DataChannelEvent::OnOpen) => {
+                            ready_tx.send_modify(|value| *value |= bit);
+                        }
+                        Some(DataChannelEvent::OnMessage(message)) => {
+                            let value = if message.is_string
+                                || message.data.is_empty()
+                                || message.data.len() > MAX_FRAME
+                            {
+                                Err(StageError::Invalid("RTC message exceeds protocol budget"))
+                            } else {
+                                Ok(message.data.to_vec())
+                            };
+                            // Each channel has bounded backpressure and wakes on connection shutdown.
+                            tokio::select! {
+                                _ = closed.changed() => break,
+                                result = tx.send(value) => if result.is_err() { break; },
+                            }
+                        }
+                        None
+                        | Some(
+                            DataChannelEvent::OnClosing
+                            | DataChannelEvent::OnClose
+                            | DataChannelEvent::OnError,
+                        ) => break,
+                        _ => {}
+                    }
+                }
+                closed_tx.send_replace(true);
             }));
         }
         Ok(Self {
@@ -238,8 +243,11 @@ impl P2pChannel {
             ready,
             closed,
             peer: None,
+            gathered,
+            readers,
         })
     }
+
     async fn local_signal(
         &self,
         identity: &DeviceIdentity,
@@ -249,7 +257,7 @@ impl P2pChannel {
         offer: bool,
         now: i64,
     ) -> Result<SignedProof> {
-        let mut gathered = self.pc.gathering_complete_promise().await;
+        let mut gathered = self.gathered.clone();
         let description = if offer {
             self.pc.create_offer(None).await
         } else {
@@ -260,9 +268,13 @@ impl P2pChannel {
             .set_local_description(description)
             .await
             .map_err(rtc_error)?;
-        tokio::time::timeout(std::time::Duration::from_secs(10), gathered.recv())
-            .await
-            .map_err(|_| StageError::Unavailable("RTC gathering timed out"))?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            gathered.wait_for(|complete| *complete),
+        )
+        .await
+        .map_err(|_| StageError::Unavailable("RTC gathering timed out"))?
+        .map_err(|_| StageError::Unavailable("RTC gathering stopped"))?;
         let description = self
             .pc
             .local_description()
@@ -351,15 +363,9 @@ impl P2pChannel {
             return Err(StageError::Forbidden("RTC peer has not authenticated"));
         }
         let channel = if bulk { &self.bulk } else { &self.control };
-        if channel.ready_state() != RTCDataChannelState::Open {
-            return Err(StageError::Unavailable("RTC channel is not open"));
-        }
-        let bytes = frame.encode()?;
-        if channel.buffered_amount().await.saturating_add(bytes.len()) > 256 * 1024 {
-            return Err(StageError::Capacity("RTC send backlog is full"));
-        }
-        channel.send(&bytes.into()).await.map_err(rtc_error)
+        send_frame(channel, frame).await
     }
+
     pub async fn receive(&mut self) -> Result<(Envelope, usize)> {
         if *self.closed.borrow() {
             return Err(StageError::Unavailable("RTC channel closed"));
@@ -381,12 +387,15 @@ impl P2pChannel {
 }
 #[derive(Clone)]
 pub struct P2pSender {
-    control: Arc<RTCDataChannel>,
-    bulk: Arc<RTCDataChannel>,
-    pc: Arc<RTCPeerConnection>,
+    control: Arc<dyn DataChannel>,
+    bulk: Arc<dyn DataChannel>,
+    pc: Arc<dyn PeerConnection>,
 }
 impl Drop for P2pChannel {
     fn drop(&mut self) {
+        for reader in &self.readers {
+            reader.abort();
+        }
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let pc = self.pc.clone();
             runtime.spawn(async move {
@@ -398,21 +407,53 @@ impl Drop for P2pChannel {
 impl P2pSender {
     pub async fn send(&self, frame: &Envelope, bulk: bool) -> Result<usize> {
         let channel = if bulk { &self.bulk } else { &self.control };
-        if channel.ready_state() != RTCDataChannelState::Open {
-            return Err(StageError::Unavailable("RTC channel is not open"));
-        }
-        let bytes = frame.encode()?;
-        if channel.buffered_amount().await.saturating_add(bytes.len()) > 256 * 1024 {
-            return Err(StageError::Capacity("RTC send backlog is full"));
-        }
-        channel.send(&bytes.into()).await.map_err(rtc_error)
+        send_frame(channel, frame).await
     }
+
     pub async fn close(&self) -> Result<()> {
         tokio::time::timeout(std::time::Duration::from_secs(5), self.pc.close())
             .await
             .map_err(|_| StageError::Unavailable("RTC close timed out"))?
             .map_err(rtc_error)
     }
+}
+struct ConnectionEvents {
+    closed: watch::Sender<bool>,
+    gathered: watch::Sender<bool>,
+}
+#[async_trait::async_trait]
+impl PeerConnectionEventHandler for ConnectionEvents {
+    async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        if matches!(
+            state,
+            RTCPeerConnectionState::Disconnected
+                | RTCPeerConnectionState::Failed
+                | RTCPeerConnectionState::Closed
+        ) {
+            self.closed.send_replace(true);
+        }
+    }
+    async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
+        self.gathered
+            .send_replace(state == RTCIceGatheringState::Complete);
+    }
+}
+async fn send_frame(channel: &Arc<dyn DataChannel>, frame: &Envelope) -> Result<usize> {
+    if channel.ready_state().await.map_err(rtc_error)? != RTCDataChannelState::Open {
+        return Err(StageError::Unavailable("RTC channel is not open"));
+    }
+    let bytes = frame.encode()?;
+    channel
+        .try_send(bytes.as_slice().into())
+        .await
+        .map_err(|error| {
+            if matches!(error, webrtc::error::Error::ErrSendBufferFull) {
+                StageError::Capacity("RTC send backlog is full")
+            } else {
+                rtc_error(error)
+            }
+        })?;
+    Ok(bytes.len())
 }
 #[cfg(test)]
 mod tests {
@@ -531,8 +572,42 @@ mod tests {
                 .unwrap();
         assert_eq!(received.message_id, frame.message_id);
         assert_eq!(sent, count);
-        right.send(&frame, true).await.unwrap();
-        left.receive().await.unwrap();
+        let payload: Vec<u8> = (0..crate::stage::protocol::CHUNK_BYTES)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let mut content = frame.clone();
+        let hash = crate::stage::digest(&payload);
+        content.body = Body::BlobChunk {
+            content: crate::stage::protocol::BlobRef {
+                hash: hash.clone(),
+                size: payload.len() as u64,
+                version: 1,
+            },
+            chunk: 0,
+            chunk_hash: hash,
+            bytes: payload.clone(),
+        };
+        let sent = right.sender().send(&content, true).await.unwrap();
+        let (received, count) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), left.receive())
+                .await
+                .unwrap()
+                .unwrap();
+        let Body::BlobChunk { bytes, .. } = received.body else {
+            panic!("expected bulk content")
+        };
+        assert_eq!(bytes, payload);
+        assert_eq!(sent, count);
+        left.control
+            .send_text("not a binary protocol frame")
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), right.receive(),)
+                .await
+                .unwrap(),
+            Err(StageError::Invalid(_))
+        ));
         left.close().await.unwrap();
         let disconnected = tokio::time::timeout(std::time::Duration::from_secs(2), right.receive())
             .await

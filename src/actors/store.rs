@@ -1958,10 +1958,10 @@ mod outcome_tests {
         for _ in 0..2 {
             let store = ActorStore::open(&path).unwrap();
             let db = store.db.lock();
-            let pages: u64 = db
+            let pages: i64 = db
                 .query_row("PRAGMA max_page_count", [], |row| row.get(0))
                 .unwrap();
-            let page_size: u64 = db
+            let page_size: i64 = db
                 .query_row("PRAGMA page_size", [], |row| row.get(0))
                 .unwrap();
             assert!(pages * page_size > 1024 * 1024 * 1024);
