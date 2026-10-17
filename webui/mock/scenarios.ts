@@ -4,6 +4,7 @@ import { addApproval, addMessage, addTool, configHolder, emitEvent, newId, now, 
 
 export const scenarios = [
   {id:"conversation", label:"主会话", actor:ROOT_ACTOR_ID},
+  {id:"long-core", label:"主对话 · 长历史与长回复", actor:ROOT_ACTOR_ID},
   {id:"empty", label:"空对话", actor:ROOT_ACTOR_ID},
   {id:"work", label:"工作对话", actor:"research"},
   {id:"loading", label:"消息加载中", actor:ROOT_ACTOR_ID},
@@ -14,6 +15,7 @@ export const scenarios = [
   {id:"queue", label:"排队与引导", actor:"research"},
   {id:"attachments", label:"图片与文件附件", actor:ROOT_ACTOR_ID},
   {id:"long-content", label:"长历史、代码、表格与差异", actor:"research"},
+  {id:"history", label:"历史刻度与悬停预览", actor:"research"},
   {id:"many-approvals", label:"跨对话审批分页", actor:ROOT_ACTOR_ID},
   {id:"connecting", label:"正在连接", actor:ROOT_ACTOR_ID},
   {id:"reconnecting", label:"事件流断线重连", actor:ROOT_ACTOR_ID},
@@ -83,6 +85,23 @@ export function activateScenario(id: string): boolean {
     }
     if(id==="failure") touchMessage(active,{status:"failed",reply:null,error:"provider_unavailable"});
     if(id==="queue") for(const content of ["再检查一下 320px 宽度。","把长代码和表格也加入检查。","记得保留输入框里的草稿。"]){const queued=addMessage(work,{kind:"request",source:{kind:"user"},reply_to:{kind:"user"},content,status:"queued"});emitEvent(work.summary.id,{type:"message_added",message_id:queued.id});}
+  }
+  if(id==="long-core") {
+    for(let i=0;i<36;i++) {
+      const record=message(core,`检查记录 ${i+1}：请继续检查桌面与手机的消息布局。`);
+      touchMessage(record,{reply:`第 ${i+1} 项已检查，消息区和输入框的位置保持一致。`});
+    }
+    const record=message(core,"把本次检查的结论整理一下。");
+    touchMessage(record,{reply:"已完成界面检查，结果如下。\n\n"+Array.from({length:6},(_,i)=>`### ${i+1}. ${["窗口与边界","消息阅读","长内容","输入框","页面导航","窄屏布局"][i]}\n\n消息在主区域内自然滚动，标题和输入框悬浮在其上方。较长的段落会随窗口宽度换行，最后一段内容仍能完整读到。\n\n- 检查了桌面和手机布局。\n- 保留正在阅读的位置和未发送的草稿。`).join("\n\n")+"\n\n所有检查已完成。"});
+  }
+  if(id==="history") {
+    clear(work);
+    for(let i=0;i<49;i++) {
+      const record=message(work,`第 ${i+1} 轮：${["检查消息滚动时的位置。","看看输入框展开后的留白。","检查窄屏换行和返回按钮。"][i%3]}`);
+      touchMessage(record,{reply:i%3===0 ? "已检查这部分布局。\n\n- 消息保持原有阅读位置。\n- 输入框展开后仍能读到末尾。\n- 手机和桌面使用相同的消息内容。" : "这部分已经检查完成，窗口变化时可以继续阅读。"});
+    }
+    const record=message(work,"把这轮界面检查的结果整理一下。");
+    touchMessage(record,{reply:"这轮布局检查已完成。\n\n- 保留历史消息的阅读位置。\n- 输入框展开时，末尾仍然完整可见。\n- 窄屏使用全屏对话和返回按钮。\n\n还检查了长段落、列表和代码的换行。"});
   }
   if(id==="long-content") {
     for(let i=0;i<44;i++) message(work,`第 ${i+1} 项检查：消息区、标题和输入框在改变窗口尺寸时保持稳定。`);

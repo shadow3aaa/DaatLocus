@@ -3,7 +3,6 @@ import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { useEffect, useRef, useState } from "react";
 import { CheckIcon, ChevronRightIcon, CopyIcon, DownloadIcon, MessageCircleIcon, ShieldCheckIcon } from "lucide-react";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { localActorId } from "@/lib/conversation-links";
@@ -119,5 +118,3 @@ export function CopyMessage({ content }: { content: string }) {
     void navigator.clipboard.writeText(content).then(() => setCopied(true)).catch(() => setFailed(true));
   }}>{copied ? <CheckIcon /> : <CopyIcon />}{failed && <span role="status">{t("conversation_content.copy_failed")}</span>}</Button>;
 }
-
-export function ActorAvatar({ name, className }: { name: string; className?: string }) { return <Avatar className={className}><AvatarFallback>{name === "Daat Locus" ? "DL" : Array.from(name.trim()).slice(0, 1).join("").toUpperCase() || "A"}</AvatarFallback></Avatar>; }

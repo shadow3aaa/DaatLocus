@@ -1,16 +1,16 @@
 import { motionScrollBehavior } from "@/lib/appearance";
 import { t } from "@/lib/i18n";
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowDownIcon, RefreshCwIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "@/components/ui/empty";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Composer, type ComposerModel } from "@/components/composer";
 import { ConversationConnection } from "@/components/conversation-connection";
+import { ConversationHistory } from "@/components/conversation-history";
 import { PrimaryTurn, WorkTurn } from "@/components/conversation-turns";
 import { MessageQueue, queuedUserInput } from "@/components/message-queue";
-import { isPrimaryActor, isUserDelivery } from "@/lib/work-timeline";
+import { isPrimaryActor } from "@/lib/work-timeline";
 import { OwnerApprovalNotice } from "@/components/owner-approval-notice";
 import { useActorConversation } from "@/hooks/use-actor-conversation";
 import { accessKey, actorModelReady, patchActorPreferences, type Access, type ApprovalMode, type ActorDetail } from "@/lib/actor-api";
@@ -34,7 +34,6 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const initialized = useRef(false);
   const olderHeight = useRef<number | null>(null);
   const [atBottom, setAtBottom] = useState(true);
-  const [activeHistory, setActiveHistory] = useState<string | null>(null);
   const [changing, setChanging] = useState(false);
   const [localError, setLocalError] = useState("");
   const [preparingFiles, setPreparingFiles] = useState(false);
@@ -52,8 +51,6 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const queue = primaryView ? [] : chat.messages.filter(queuedUserInput);
   const visibleMessages = chat.messages.filter(message => (primaryView || !queuedUserInput(message)) && !(message.status === "cancelled" && message.started_at_ms == null && ["user", "remote_user"].includes(message.source.kind)) && !(message.kind === "steering" && message.status === "completed" && chat.messages.some(parent => parent.id === message.in_reply_to)));
   const typingId = primaryView ? [...visibleMessages].reverse().find(message => message.status === "running")?.id : undefined;
-  const historyMessages = visibleMessages.filter(message => !primaryView || message.source.kind === "user" || isUserDelivery(message));
-  const historyText = (message: typeof chat.messages[number]) => primaryView && message.source.kind !== "user" ? message.reply || t("conversation_pane.collaboration_result") : message.content;
   useEffect(() => { initialized.current = false; follow.current = true; setAtBottom(true); setLocalError(""); filePreparation.current = { actorId, busy: false }; setPreparingFiles(false); }, [actorId]);
   useEffect(() => { if (actor) onActorLoaded?.(actor); }, [actor, onActorLoaded]);
   useEffect(() => { if (refreshVersion) void chat.refresh(); }, [refreshVersion]);
@@ -139,7 +136,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   return <section ref={pane} className={cn("dl-conversation", primaryView ? "dl-primary-conversation" : "dl-work-conversation", compact && "dl-conversation-compact")} aria-label={t("conversation_pane.value0_conversation", {value0: name})}>
     <ConversationConnection message={waitingMessage}>
       {!compact && !primaryView && <header className="dl-conversation-heading"><span>{name}</span><span className={cn("dl-status-dot", active && "dl-status-working")} /><small>{chat.streamStatus === "reconnecting" ? t("conversation_pane.reconnecting") : active ? t("conversation_pane.working") : t("conversation_pane.ready")}</small></header>}
-      <div className="dl-conversation-scroll" ref={scroll} onScroll={() => { const area = scroll.current; if (!area) return; const near = area.scrollHeight - area.scrollTop - area.clientHeight < 110; follow.current = near; setAtBottom(near); const midpoint = area.getBoundingClientRect().top + area.clientHeight / 2; const nearest = Array.from(area.querySelectorAll<HTMLElement>(".dl-message-turn")).reduce<HTMLElement | null>((best, node) => !best || Math.abs(node.getBoundingClientRect().top - midpoint) < Math.abs(best.getBoundingClientRect().top - midpoint) ? node : best, null); if (nearest) setActiveHistory(nearest.id); }}>
+      <div className="dl-conversation-scroll" ref={scroll} onScroll={() => { const area = scroll.current; if (!area) return; const near = area.scrollHeight - area.scrollTop - area.clientHeight < 110; follow.current = near; setAtBottom(near); }}>
         <div className="dl-message-list" aria-live="polite" aria-relevant="additions">
           {!chat.loading && actor && !chat.messages.length && !errors && <Empty className="dl-conversation-empty"><EmptyHeader>
             {primaryView && <img src="/logo-mark.svg" alt="" className="dl-empty-logo dl-brand-mark" />}
@@ -152,7 +149,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
           <div className="dl-conversation-bottom" />
         </div>
       </div>
-      {historyMessages.length > 2 && <nav className="dl-history-rail" aria-label={t("conversation_pane.conversation_location")}>{historyMessages.slice(-32).map(message => <Tooltip key={message.id}><TooltipTrigger asChild><button type="button" aria-current={activeHistory === `message-${actorId}-${message.id}` ? "location" : undefined} style={{ "--dl-tick-width": `${Math.min(18,6+Math.floor(historyText(message).length / 35))}px` } as CSSProperties} aria-label={t("conversation_pane.located_message_value0", {value0: historyText(message).slice(0, 25)})} onClick={() => { follow.current = false; scroll.current?.querySelector<HTMLElement>(`#${CSS.escape(`message-${actorId}-${message.id}`)}`)?.scrollIntoView({ behavior: "instant", block: "center" }); }} /></TooltipTrigger><TooltipContent side="right" className="dl-history-preview"><strong>{historyText(message).slice(0, 75)}</strong><p>{(message.reply || t("conversation_pane.no_reply_yet")).slice(0, 145)}</p></TooltipContent></Tooltip>)}</nav>}
+      {!primaryView && <ConversationHistory messages={visibleMessages} scroll={scroll} onNavigate={() => {follow.current = false;}} />}
       <div ref={footer} className="dl-conversation-footer">
         {!connecting && !ready && chat.messages.length > 0 && onConfigureModels && <div className="dl-model-required"><span>{t("conversation_pane.model_required")}</span><Button variant="outline" size="sm" onClick={onConfigureModels}>{t("app.settings")}</Button></div>}
         {!compact && canManage && <OwnerApprovalNotice actorId={actorId} onActor={onActor} onAccessRevoked={onAccessRevoked} />}

@@ -4,7 +4,6 @@ import { ArrowLeftIcon, SearchIcon } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { ConversationPane } from "@/components/conversation-pane";
-import { ActorAvatar } from "@/components/conversation-content";
 import { SearchDialog } from "@/components/search-dialog";
 import type { ComposerModel } from "@/components/composer";
 import type { Access, ActorDetail } from "@/lib/actor-api";
@@ -17,7 +16,7 @@ export function ActorDialog({ connectionMessage, actorId, open, onClose, onActor
   const loaded = useCallback((value: ActorDetail) => setActor(value), []);
   const title = actor?.id === actorId ? actor.config?.name || actor.name || t("actor_dialog.actor_conversation") : t("actor_dialog.actor_conversation");
   return <Dialog open={open} onOpenChange={value => { if (!value) onClose(); }}><DialogContent className="dl-actor-dialog" showCloseButton aria-describedby={undefined}>
-    <DialogHeader className="dl-actor-dialog-heading"><div className="dl-actor-dialog-title"><Button size="icon-sm" variant="ghost" className={onBack ? undefined : "dl-actor-mobile-back"} onClick={onBack || onClose} aria-label={t(onBack ? "actor_dialog.back_to_previous_actor" : "app.back_to_main_conversation")}><ArrowLeftIcon /></Button><ActorAvatar name={title} className="size-9" /><div><DialogTitle>{title}</DialogTitle></div></div>
+    <DialogHeader className="dl-actor-dialog-heading"><div className="dl-actor-dialog-title"><Button size="icon-sm" variant="ghost" className={onBack ? undefined : "dl-actor-mobile-back"} onClick={onBack || onClose} aria-label={t(onBack ? "actor_dialog.back_to_previous_actor" : "app.back_to_main_conversation")}><ArrowLeftIcon /></Button><div><DialogTitle>{title}</DialogTitle></div></div>
       {actorId && <div className="dl-actor-dialog-actions"><Button variant="ghost" size="icon-sm" aria-label={t("actor_dialog.search_this_conversation")} disabled={actor?.id !== actorId} onClick={() => setSearching(true)}><SearchIcon /></Button></div>}
     </DialogHeader>
     {actorId && <ConversationPane key={actorId} actorId={actorId} connectionMessage={connectionMessage} access={access} onActor={onActor} onAccessRevoked={onAccessRevoked} models={models} ready={ready} compact refreshVersion={refreshVersion} targetMessage={targetMessage} onActorLoaded={loaded} />}
