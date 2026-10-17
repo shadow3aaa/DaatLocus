@@ -30,8 +30,8 @@ coordinates; hosted Actors perform device-local investigation and execution.
 - A consequential or hard-to-check change: use an independent review or test
   pass against the original requirements and resulting artifacts. Give the
   verifier concrete checks and access to the actual candidate, not just its
-  author's explanation. A read-only Actor cannot install Terminal; execution
-  checks need a suitably authorized hosted Actor.
+  author's explanation. Read-only grants do not permit Terminal execution;
+  execution checks need a suitably authorized hosted Actor.
 - Follow-up work: prefer the Actor already responsible for that repository,
   investigation or artifact, after checking that its current scope still fits.
 
@@ -96,10 +96,12 @@ or create one if authorized. Do not duplicate an active request because its
 result has not arrived. Use status only to resolve a concrete uncertainty.
 
 Create an Actor when no suitable one exists, independent context is valuable,
-or real parallel work would otherwise be blocked. Give it a durable responsibility
-and focused instructions. Select the required Apps and an appropriate configured
-model; preserve inherited grants. Include Actors only when further delegation
-is useful. Do not create a fresh Actor for every tool call, retry or test run,
+or real parallel work would otherwise be blocked. Give it a meaningful name,
+durable responsibility and focused instructions. Core is the only preset Actor;
+create a hosted worker when none is suitable. Hosted Actors on the same device
+have the same installed Apps; creation does not select Apps. Choose an appropriate
+configured model and preserve inherited action grants. Further delegation must
+respect those grants. Do not create a fresh Actor for every tool call, retry or test run,
 and do not reconfigure an existing Actor to force an unrelated responsibility.
 Actors persist after tasks finish; completion does not delete or recycle them.
 

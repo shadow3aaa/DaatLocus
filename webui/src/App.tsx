@@ -29,7 +29,7 @@ export default function App() {
   const [preferences, setPreferences] = useState<Preferences>(readPreferences);
   const [access, setAccess] = useState<Access | null>(null);
   const [checking, setChecking] = useState(true);
-  const [entry, setEntry] = useState("root");
+  const [entry, setEntry] = useState("core");
   const [actorStack, setActorStack] = useState<string[]>([]);
   const [actorTarget, setActorTarget] = useState<{actorId:string; id:string; revision:number} | null>(null);
   const [models, setModels] = useState<ComposerModel[]>([]);
@@ -77,7 +77,7 @@ export default function App() {
       const stage = await getStage();
       if (epoch !== authEpoch.current) return;
       configureConversationDevice(stage?.stage_id ?? null);
-      const entry = stage?.primary_actor_id ?? "root";
+      const entry = stage?.primary_actor_id ?? "core";
       setEntry(entry); configurePrimaryActor(entry); setActorStack(linked && localActorId(linked) !== entry ? [localActorId(linked)] : []);
       const [configuration, readiness] = await Promise.allSettled([getConfig(), getConfigReadiness()]);
       if (epoch !== authEpoch.current) return;

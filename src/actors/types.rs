@@ -16,8 +16,6 @@ pub enum ActorError {
     Unavailable(String),
 }
 
-pub const ROOT_ACTOR_ID: &str = "root";
-
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
@@ -73,6 +71,9 @@ pub struct ActorPermissions {
     /// Extra recipients beyond this Actor's parent and children.
     pub message_targets: Vec<String>,
     pub allow_children: bool,
+    /// Action grants over the device's installed Apps; never an installation list.
+    #[serde(default)]
+    pub app_access: Option<Vec<String>>,
     /// Creation/delegation ceiling, independent of directly installed Apps.
     /// None restricts delegation to the Actor's own installed Apps.
     #[serde(default)]
@@ -90,6 +91,7 @@ impl ActorPermissions {
             writable_roots: if read_only { vec![] } else { vec![workspace] },
             message_targets: vec![],
             allow_children: true,
+            app_access: None,
             delegation_apps: None,
             tools: None,
         }

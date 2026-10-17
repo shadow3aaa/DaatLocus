@@ -31,7 +31,6 @@ struct CreateArgs {
     name: String,
     workspace: Option<String>,
     read_only: bool,
-    apps: Vec<String>,
     instructions: Option<String>,
     model: Option<String>,
 }
@@ -229,10 +228,14 @@ pub fn manager(
     actor: ActorRecord,
     system: ActorSystem,
 ) -> miette::Result<AppManager> {
-    AppManager::new(vec![Box::new(AccountActors {
-        controller,
-        local: ActorApp::new(shared::ACTOR_ID.into(), system.clone()),
-        actor,
-        system,
-    })])
+    let policy = actor.clone();
+    AppManager::new(vec![Box::new(crate::builtin_apps::RestrictedApp::new(
+        Box::new(AccountActors {
+            controller,
+            local: ActorApp::new(shared::ACTOR_ID.into(), system.clone()),
+            actor,
+            system,
+        }),
+        &policy,
+    ))])
 }

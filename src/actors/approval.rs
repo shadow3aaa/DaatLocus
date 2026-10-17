@@ -489,6 +489,7 @@ mod tests {
         )
         .await
         .unwrap();
+        system.seed_test_actor("root");
         let mut actor = system.store().actor("root").unwrap();
         actor.config.permissions.approval_mode = mode;
         system.store().save_actor(&actor).unwrap();

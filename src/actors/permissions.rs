@@ -43,6 +43,12 @@ pub fn normalize_config(mut config: ActorConfig) -> Result<ActorConfig> {
     }
     crate::builtin_apps::validate_app_names(&config.apps, config.permissions.read_only)
         .map_err(|_| ActorError::Invalid("Invalid or unavailable App configuration".into()))?;
+    if let Some(apps) = &config.permissions.app_access {
+        if apps.len() > 16 {
+            return Err(ActorError::Invalid("Too many App action grants".into()).into());
+        }
+        crate::builtin_apps::validate_app_names(apps, config.permissions.read_only)?;
+    }
     if let Some(apps) = &config.permissions.delegation_apps {
         if apps.len() > 16 {
             return Err(ActorError::Invalid("Too many delegation Apps".into()).into());
@@ -101,6 +107,13 @@ pub fn delegation_apps(config: &ActorConfig) -> &[String] {
         .permissions
         .delegation_apps
         .as_deref()
+        .unwrap_or_else(|| direct_apps(config))
+}
+pub fn direct_apps(config: &ActorConfig) -> &[String] {
+    config
+        .permissions
+        .app_access
+        .as_deref()
         .unwrap_or(&config.apps)
 }
 pub fn check_child(parent: &ActorConfig, child: &ActorConfig) -> Result<()> {
@@ -110,8 +123,7 @@ pub fn check_child(parent: &ActorConfig, child: &ActorConfig) -> Result<()> {
         || (p.read_only && !c.read_only)
         || (c.allow_children && !p.allow_children)
         || approval_strength(c.approval_mode) < approval_strength(p.approval_mode)
-        || child
-            .apps
+        || direct_apps(child)
             .iter()
             .any(|app| !delegation_apps(parent).contains(app))
         || delegation_apps(child)

@@ -62,7 +62,7 @@ async fn info(State(state): State<ServiceState>, headers: HeaderMap) -> ApiResul
     let host = &runtime.host;
     let public_login = runtime.public_login_status().await;
     Ok(Json(
-        json!({"stage_id":host.local,"account_id":host.account_id(),"name":host.accounts.current().ok().flatten().map(|record|record.name.clone()),"profile":host.profile(),"settings":host.settings(),"address":*runtime.address.read(),"primary_actor_id":if host.account_id().is_some() {crate::stage::shared::ACTOR_ID}else{"root"},"core":runtime.core.read().as_ref().map(|core|core.status()),"public_login":public_login}),
+        json!({"stage_id":host.local,"account_id":host.account_id(),"name":host.accounts.current().ok().flatten().map(|record|record.name.clone()),"profile":host.profile(),"settings":host.settings(),"address":*runtime.address.read(),"primary_actor_id":crate::stage::shared::ACTOR_ID,"core":runtime.core.read().as_ref().map(|core|core.status()),"public_login":public_login}),
     ))
 }
 // A bounded volatile status query; no configuration or conversation snapshots.

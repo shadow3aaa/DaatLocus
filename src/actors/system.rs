@@ -16,7 +16,7 @@ use miette::{IntoDiagnostic, Result};
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -55,6 +55,7 @@ struct Worker {
     task: JoinHandle<()>,
 }
 struct Inner {
+    workspace: PathBuf,
     store: ActorStore,
     config: RwLock<Config>,
     factory: Arc<dyn ModelFactory>,
@@ -99,24 +100,7 @@ impl ActorSystem {
     }
     pub(crate) fn ensure_core_actor(&self) -> Result<()> {
         if self.store().actor(crate::stage::shared::ACTOR_ID).is_err() {
-            let mut actor = self.actor(ROOT_ACTOR_ID)?;
-            actor.id = crate::stage::shared::ACTOR_ID.into();
-            actor.context = Default::default();
-            actor.parent_id = None;
-            actor.depth = 0;
-            actor.config.name = "Daat Locus".into();
-            // Delegation eligibility is shared. Direct execution stays portable.
-            actor.config.permissions.delegation_apps = Some(
-                crate::builtin_apps::ALL_APPS
-                    .iter()
-                    .map(|app| (*app).to_owned())
-                    .collect(),
-            );
-            actor.config.apps = vec!["actors".into()];
-            actor.config.permissions.read_only = false;
-            actor.status = ActorStatus::Idle;
-            actor.created_at_ms = now();
-            actor.updated_at_ms = now();
+            let actor = self.initial_core()?;
             self.prepare_dirs(&actor.id)?;
             self.store().save_actor(&actor)?;
         }
@@ -132,26 +116,18 @@ impl ActorSystem {
     /// policy belongs to the device exposing the instance.
     pub(crate) fn core_device_actor(&self) -> Result<ActorRecord> {
         let mut actor = self.actor(crate::stage::shared::ACTOR_ID)?;
-        let device = self.actor(ROOT_ACTOR_ID)?;
         let identity = actor.config.permissions.clone();
-        actor.config.workspace = device.config.workspace.clone();
-        actor
-            .config
-            .apps
-            .retain(|app| device.config.apps.contains(app));
-        let device_apps = super::permissions::delegation_apps(&device.config).to_vec();
-        actor.config.permissions = device.config.permissions;
+        actor.config.workspace = self.device_workspace().to_owned();
+        actor.config.apps = vec!["actors".into()];
+        actor.config.permissions = self.device_permissions()?;
+        actor.config.permissions.app_access = identity.app_access.clone();
         actor.config.permissions.delegation_apps = Some(
             identity
                 .delegation_apps
                 .as_deref()
                 .unwrap_or(&actor.config.apps)
                 .iter()
-                .filter(|app| {
-                    device.config.apps.contains(app)
-                        && device_apps.contains(app)
-                        && (!identity.read_only || app.as_str() != "terminal")
-                })
+                .filter(|app| crate::builtin_apps::DEVICE_APPS.contains(&app.as_str()))
                 .cloned()
                 .collect(),
         );
@@ -261,7 +237,17 @@ impl ActorSystem {
                 .delegation_grant
                 .as_ref()
                 .ok_or_else(|| forbidden("Remote request has no immutable capability ceiling"))?;
-            actor.config.apps.retain(|app| ceiling.apps.contains(app));
+            let bound_apps = ceiling
+                .permissions
+                .app_access
+                .as_deref()
+                .unwrap_or(&ceiling.apps);
+            let allowed = super::permissions::direct_apps(&actor.config)
+                .iter()
+                .filter(|app| ceiling.apps.contains(app) && bound_apps.contains(app))
+                .cloned()
+                .collect();
+            actor.config.permissions.app_access = Some(allowed);
             let permission = &mut actor.config.permissions;
             permission.read_only |= ceiling.permissions.read_only
                 || granted.as_ref().is_some_and(|grant| grant.read_only);
@@ -305,9 +291,7 @@ impl ActorSystem {
                     .delegation_apps
                     .as_ref()
                     .unwrap_or(&ceiling.apps);
-                apps.retain(|app| {
-                    bound.contains(app) && (!permission.read_only || app != "terminal")
-                });
+                apps.retain(|app| bound.contains(app));
             }
             permission
                 .message_targets
@@ -320,11 +304,10 @@ impl ActorSystem {
                 (Some(a), None) => Some(a.clone()),
                 (None, None) => None,
             };
-            if granted.is_some_and(|grant| !grant.delegate) {
-                actor.config.apps.retain(|app| app != "actors");
-            }
-            if permission.read_only {
-                actor.config.apps.retain(|app| app != "terminal");
+            if granted.is_some_and(|grant| !grant.delegate)
+                && let Some(apps) = &mut permission.app_access
+            {
+                apps.retain(|app| app != "actors");
             }
             actor.config = normalize_config(actor.config)?;
         }
@@ -417,6 +400,7 @@ impl ActorSystem {
         factory: Arc<dyn ModelFactory>,
         paused: bool,
     ) -> Result<Self> {
+        let workspace = canonical_path(&workspace)?;
         let data_dir = canonical_path(&data_dir)?;
         std::fs::create_dir_all(&data_dir).into_diagnostic()?;
         protect_private_path(&data_dir)?;
@@ -430,6 +414,7 @@ impl ActorSystem {
         store.recover()?;
         let system = Self {
             inner: Arc::new(Inner {
+                workspace,
                 store,
                 config: RwLock::new(config),
                 factory,
@@ -447,16 +432,82 @@ impl ActorSystem {
                 core: RwLock::new(None),
             }),
         };
-        if system.store().actor(ROOT_ACTOR_ID).is_err() {
-            let record = system.initial_root(workspace)?;
+        if system
+            .store()
+            .actor(crate::stage::shared::ACTOR_ID)
+            .is_err()
+        {
+            let record = system.initial_core()?;
             system.prepare_dirs(&record.id)?;
             system.store().save_actor(&record)?;
+        }
+        // Retain existing identities/history while moving installation to the
+        // device. Former installation restrictions remain explicit action grants.
+        for mut actor in system.store().actors()? {
+            if actor.id != crate::stage::shared::ACTOR_ID {
+                let config = system.hosted_config(actor.config.clone())?;
+                if config != actor.config {
+                    actor.config = config;
+                    system.store().save_actor(&actor)?;
+                }
+            }
         }
         system.start_queued_workers()?;
         Ok(system)
     }
     pub fn store(&self) -> &ActorStore {
         &self.inner.store
+    }
+    pub fn device_workspace(&self) -> &Path {
+        &self.inner.workspace
+    }
+    #[cfg(test)]
+    pub(crate) fn seed_test_actor(&self, id: &str) {
+        let mut actor = self.actor(crate::stage::shared::ACTOR_ID).unwrap();
+        actor.id = id.to_owned();
+        actor.parent_id = Some(crate::stage::shared::ACTOR_ID.into());
+        actor.depth = 1;
+        actor.config.name = format!("Fixture {id}");
+        actor.config.apps = crate::builtin_apps::DEVICE_APPS
+            .iter()
+            .map(|app| (*app).to_owned())
+            .collect();
+        actor.config.permissions = self.device_permissions().unwrap();
+        self.prepare_dirs(id).unwrap();
+        self.store().save_actor(&actor).unwrap();
+    }
+    fn device_permissions(&self) -> Result<ActorPermissions> {
+        let mut permissions = ActorPermissions::workspace(self.inner.workspace.clone(), false);
+        // This is a device ceiling; the Owner's persisted Actor mode supplies review.
+        permissions.approval_mode = ApprovalMode::None;
+        if let Some(home) = std::env::home_dir() {
+            let skills = home.join(".agents/skills");
+            if skills.is_dir() {
+                permissions.readable_roots.push(canonical_path(&skills)?);
+            }
+        }
+        permissions.readable_roots.sort();
+        permissions.readable_roots.dedup();
+        Ok(permissions)
+    }
+    fn hosted_config(&self, mut config: ActorConfig) -> Result<ActorConfig> {
+        let apps: Vec<String> = crate::builtin_apps::DEVICE_APPS
+            .iter()
+            .map(|app| (*app).to_owned())
+            .collect();
+        if config.apps != apps {
+            // Preserve the old grant boundary, not a separate App installation.
+            if config.permissions.app_access.is_none() {
+                config.permissions.app_access = Some(config.apps.clone());
+            } else if let Some(access) = &mut config.permissions.app_access {
+                access.retain(|app| config.apps.contains(app));
+            }
+            if config.permissions.delegation_apps.is_none() {
+                config.permissions.delegation_apps = Some(config.apps.clone());
+            }
+            config.apps = apps;
+        }
+        normalize_config(config)
     }
     pub fn infrastructure_dir(&self) -> PathBuf {
         self.inner.data_dir.clone()
@@ -487,7 +538,7 @@ impl ActorSystem {
             .map_err(|error| miette::miette!("{error}"))?;
         crate::stage::delivery::Deliveries::new(self.store(), local)
             .queue(
-                &self.actor(ROOT_ACTOR_ID)?,
+                &self.core_device_actor()?,
                 None,
                 target,
                 (content, attachments),
@@ -512,7 +563,7 @@ impl ActorSystem {
             return Err(forbidden("Actor message authority is not valid"));
         }
         let source = self.execution_actor(&current)?;
-        let owner = source.id == ROOT_ACTOR_ID
+        let owner = source.id == crate::stage::shared::ACTOR_ID
             && matches!(current.reply_to, ReplyTarget::User)
             && current.remote_authority.is_none()
             && !source.config.permissions.read_only;
@@ -568,7 +619,7 @@ impl ActorSystem {
                 Err(error) => return Err(error).into_diagnostic(),
             }
         }
-        self.prepare_dirs(ROOT_ACTOR_ID)
+        self.prepare_dirs(crate::stage::shared::ACTOR_ID)
     }
     pub(crate) async fn reset_account_work(
         &self,
@@ -576,7 +627,7 @@ impl ActorSystem {
     ) -> Result<()> {
         let _lifecycle = self.inner.lifecycle.lock().await;
         let pause = Reconfiguration::begin(&self.inner.reconfiguring, &self.inner.metadata);
-        let root = self.initial_root(self.actor(ROOT_ACTOR_ID)?.config.workspace)?;
+        let root = self.initial_core()?;
         let workers: Vec<_> = self.inner.workers.lock().drain().collect();
         for (_, worker) in &workers {
             worker.control.stop.store(true, Ordering::Release);
@@ -591,26 +642,24 @@ impl ActorSystem {
         drop(pause);
         Ok(())
     }
-    fn initial_root(&self, workspace: PathBuf) -> Result<ActorRecord> {
-        let workspace = canonical_path(&workspace)?;
-        let mut permissions = ActorPermissions::workspace(workspace.clone(), false);
-        if let Some(home) = std::env::home_dir() {
-            let skills = home.join(".agents/skills");
-            if skills.is_dir() {
-                permissions.readable_roots.push(canonical_path(&skills)?);
-            }
-        }
+    fn initial_core(&self) -> Result<ActorRecord> {
+        let workspace = self.inner.workspace.clone();
+        let mut permissions = self.device_permissions()?;
+        permissions.approval_mode = ApprovalMode::Auto;
+        permissions.delegation_apps = Some(
+            crate::builtin_apps::DEVICE_APPS
+                .iter()
+                .map(|app| (*app).to_owned())
+                .collect(),
+        );
         let root = ActorRecord {
-            id: ROOT_ACTOR_ID.into(),
+            id: crate::stage::shared::ACTOR_ID.into(),
             parent_id: None,
             depth: 0,
             config: normalize_config(ActorConfig {
                 name: "Daat Locus".into(),
                 workspace,
-                apps: crate::builtin_apps::DEFAULT_APPS
-                    .iter()
-                    .map(|app| (*app).into())
-                    .collect(),
+                apps: vec!["actors".into()],
                 model: None,
                 instructions: String::new(),
                 permissions,
@@ -917,7 +966,7 @@ impl ActorSystem {
         if self.store().actor_count()? >= 512 || parent.depth >= 8 {
             return Err(ActorError::Unavailable("Actor capacity reached".into()).into());
         }
-        let config = normalize_config(config)?;
+        let config = self.hosted_config(config)?;
         self.validate_config(&config)?;
         crate::file_io::ensure_directory(
             workspace_policy.unwrap_or(&crate::sandbox::RuntimeSandboxPolicy::disabled()),
@@ -954,7 +1003,7 @@ impl ActorSystem {
             .current_message(sender)?
             .ok_or_else(|| forbidden("Actor operations require an active request"))?;
 
-        let config = normalize_config(config)?;
+        let config = self.hosted_config(config)?;
         let call = context
             .actor_call
             .as_ref()
@@ -1006,10 +1055,8 @@ impl ActorSystem {
     }
     fn can_message(&self, sender: &ActorRecord, target: &ActorRecord) -> bool {
         sender.id == target.id
-            || (matches!(
-                sender.id.as_str(),
-                ROOT_ACTOR_ID | crate::stage::shared::ACTOR_ID
-            ) && !sender.config.permissions.read_only
+            || (sender.id == crate::stage::shared::ACTOR_ID
+                && !sender.config.permissions.read_only
                 && self
                     .store()
                     .current_message(&sender.id)
@@ -1163,7 +1210,7 @@ impl ActorSystem {
         if content.is_empty() || content.len() > 64 * 1024 {
             return Err(invalid("Invalid Actor message size"));
         }
-        let owner_routing = source.id == ROOT_ACTOR_ID
+        let owner_routing = source.id == crate::stage::shared::ACTOR_ID
             && matches!(current.reply_to, ReplyTarget::User)
             && !source.config.permissions.read_only;
         if !owner_routing && current.remote_authority.is_none() {
@@ -1444,6 +1491,11 @@ impl ActorSystem {
         let _lifecycle = self.inner.lifecycle.lock().await;
         let mut actor = self.actor(id)?;
         let config = update(actor.config.clone())?;
+        let config = if id == crate::stage::shared::ACTOR_ID {
+            config
+        } else {
+            self.hosted_config(config)?
+        };
         self.validate_config(&config)?;
         // All fallible preparation precedes interruption. A bad path must not
         // remove the live worker or leave a previously valid Actor stranded.
@@ -1874,6 +1926,7 @@ async fn stop_worker(mut worker: Worker) {
 
 #[cfg(test)]
 mod tests {
+    const FIXTURE_ACTOR_ID: &str = "root";
     use super::*;
 
     struct NoModels;
@@ -1911,6 +1964,7 @@ mod tests {
         )
         .await
         .unwrap();
+        system.seed_test_actor(FIXTURE_ACTOR_ID);
         (directory, system)
     }
 
@@ -1920,31 +1974,33 @@ mod tests {
         system.inner.paused.store(false, Ordering::Release);
         let retiring = Arc::new(ActorControl::default());
         system.inner.workers.lock().insert(
-            ROOT_ACTOR_ID.into(),
+            FIXTURE_ACTOR_ID.into(),
             Worker {
                 control: retiring.clone(),
                 task: tokio::spawn(async {}),
             },
         );
         let input = system
-            .send_user(ROOT_ACTOR_ID, "during cleanup".into(), vec![], None)
+            .send_user(FIXTURE_ACTOR_ID, "during cleanup".into(), vec![], None)
             .unwrap();
         assert!(Arc::ptr_eq(
-            &system.inner.workers.lock()[ROOT_ACTOR_ID].control,
+            &system.inner.workers.lock()[FIXTURE_ACTOR_ID].control,
             &retiring
         ));
-        system.worker_finished(ROOT_ACTOR_ID, &retiring, true);
-        let replacement = system.inner.workers.lock()[ROOT_ACTOR_ID].control.clone();
+        system.worker_finished(FIXTURE_ACTOR_ID, &retiring, true);
+        let replacement = system.inner.workers.lock()[FIXTURE_ACTOR_ID]
+            .control
+            .clone();
         assert!(!Arc::ptr_eq(&replacement, &retiring));
         // An old generation's completion must not remove the replacement.
-        system.worker_finished(ROOT_ACTOR_ID, &retiring, true);
+        system.worker_finished(FIXTURE_ACTOR_ID, &retiring, true);
         assert!(Arc::ptr_eq(
-            &system.inner.workers.lock()[ROOT_ACTOR_ID].control,
+            &system.inner.workers.lock()[FIXTURE_ACTOR_ID].control,
             &replacement
         ));
         system.suspend_execution().await.unwrap();
-        system.worker_finished(ROOT_ACTOR_ID, &replacement, true);
-        system.wake(ROOT_ACTOR_ID);
+        system.worker_finished(FIXTURE_ACTOR_ID, &replacement, true);
+        system.wake(FIXTURE_ACTOR_ID);
         assert_eq!(system.resident_workers(), 0);
         assert_eq!(
             system.store().message(&input.id).unwrap().status,
@@ -1958,7 +2014,7 @@ mod tests {
         let (_directory, system) = fixture().await;
         let control = Arc::new(ActorControl::default());
         system.inner.workers.lock().insert(
-            ROOT_ACTOR_ID.into(),
+            FIXTURE_ACTOR_ID.into(),
             Worker {
                 control: control.clone(),
                 task: tokio::spawn(async {}),
@@ -1966,9 +2022,9 @@ mod tests {
         );
         for _ in 0..16 {
             let input = system
-                .send_user(ROOT_ACTOR_ID, "queued".into(), vec![], None)
+                .send_user(FIXTURE_ACTOR_ID, "queued".into(), vec![], None)
                 .unwrap();
-            system.cancel(ROOT_ACTOR_ID, &input.id).unwrap();
+            system.cancel(FIXTURE_ACTOR_ID, &input.id).unwrap();
             assert_eq!(
                 system.store().message(&input.id).unwrap().status,
                 MessageStatus::Cancelled
@@ -1983,7 +2039,7 @@ mod tests {
         let (_directory, system) = fixture().await;
         system.inner.account_gated.store(true, Ordering::Release);
         let input = system
-            .send_user(ROOT_ACTOR_ID, "retained".into(), vec![], None)
+            .send_user(FIXTURE_ACTOR_ID, "retained".into(), vec![], None)
             .unwrap();
         system.suspend_execution().await.unwrap();
         system.activate_account_workers().await.unwrap();
@@ -2006,9 +2062,9 @@ mod tests {
             .models
             .insert("custom".into(), config.models["mock"].clone());
         system.update_config(config).await.unwrap();
-        let mut actor = system.actor(ROOT_ACTOR_ID).unwrap().config;
+        let mut actor = system.actor(FIXTURE_ACTOR_ID).unwrap().config;
         actor.model = Some("custom".into());
-        let child = system.create_owned(ROOT_ACTOR_ID, actor).unwrap();
+        let child = system.create_owned(FIXTURE_ACTOR_ID, actor).unwrap();
         let mut candidate = system.config();
         candidate.models.remove("custom");
         let persisted = AtomicBool::new(false);
@@ -2031,7 +2087,12 @@ mod tests {
     async fn removing_all_models_keeps_queued_input_without_starting_a_worker() {
         let (_directory, system) = fixture().await;
         let queued = system
-            .send_user(ROOT_ACTOR_ID, "Keep the queued input".into(), vec![], None)
+            .send_user(
+                FIXTURE_ACTOR_ID,
+                "Keep the queued input".into(),
+                vec![],
+                None,
+            )
             .unwrap();
         let mut empty = system.config();
         empty.providers.clear();
@@ -2056,11 +2117,11 @@ mod tests {
             .models
             .insert("custom".into(), original.models["mock"].clone());
         system.update_config(original).await.unwrap();
-        let mut actor = system.actor(ROOT_ACTOR_ID).unwrap().config;
+        let mut actor = system.actor(FIXTURE_ACTOR_ID).unwrap().config;
         actor.model = Some("custom".into());
-        let child = system.create_owned(ROOT_ACTOR_ID, actor).unwrap();
+        let child = system.create_owned(FIXTURE_ACTOR_ID, actor).unwrap();
         let request = system
-            .send_user(ROOT_ACTOR_ID, "queued work".into(), vec![], None)
+            .send_user(FIXTURE_ACTOR_ID, "queued work".into(), vec![], None)
             .unwrap();
         let mut candidate = system.config();
         candidate.models.remove("custom");
@@ -2085,24 +2146,185 @@ mod tests {
         );
         assert!(
             system
-                .send_user(ROOT_ACTOR_ID, "still available".into(), vec![], None)
+                .send_user(FIXTURE_ACTOR_ID, "still available".into(), vec![], None)
                 .is_ok()
         );
         system.shutdown().await;
     }
 
     #[tokio::test]
+    async fn legacy_actor_installation_becomes_an_action_grant_without_losing_history() {
+        let (directory, system) = fixture().await;
+        let mut actor = system.actor(FIXTURE_ACTOR_ID).unwrap();
+        actor.config.name = "Existing investigation".into();
+        actor.config.apps = vec!["files".into()];
+        actor.config.permissions.app_access = None;
+        actor.config.permissions.delegation_apps = None;
+        system.store().save_actor(&actor).unwrap();
+        let queued = system
+            .send_user(&actor.id, "Preserve this input".into(), vec![], None)
+            .unwrap();
+        let config = system.config();
+        system.shutdown().await;
+        let reopened = ActorSystem::open_paused_with_factory(
+            directory.path().join("data"),
+            directory.path().join("workspace"),
+            config,
+            Arc::new(NoModels),
+        )
+        .await
+        .unwrap();
+        let retained = reopened.actor(&actor.id).unwrap();
+        assert_eq!(retained.config.name, "Existing investigation");
+        assert_eq!(
+            reopened.store().message(&queued.id).unwrap().content,
+            "Preserve this input"
+        );
+        assert_eq!(
+            retained.config.permissions.app_access,
+            Some(vec!["files".into()])
+        );
+        let apps =
+            crate::builtin_apps::create_apps(&retained, reopened.clone(), &reopened.config())
+                .unwrap();
+        let tools = apps.model_tool_specs().unwrap();
+        assert!(tools.iter().any(|tool| tool.name == "files__write_file"));
+        assert!(!tools.iter().any(|tool| tool.name.starts_with("terminal__")));
+        assert!(!tools.iter().any(|tool| tool.name == "actors__create"));
+        assert!(tools.iter().any(|tool| tool.name == "actors__read_history"));
+        let mut candidate = retained.config.clone();
+        candidate.permissions.app_access = None;
+        assert!(check_child(&retained.config, &candidate).is_err());
+    }
+
+    #[tokio::test]
+    async fn only_core_is_preset_and_creators_name_workers_with_uniform_apps() {
+        use crate::app::App;
+        let (directory, template) = fixture().await;
+        let system = ActorSystem::open_paused_with_factory(
+            directory.path().join("fresh-state"),
+            directory.path().join("fresh-workspace"),
+            template.config(),
+            Arc::new(NoModels),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            system
+                .list_visible()
+                .unwrap()
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            ["core"]
+        );
+        let input = system
+            .send_user("core", "Create workers".into(), vec![], None)
+            .unwrap();
+        system.store().claim_next("core").unwrap().unwrap();
+        let context = system
+            .execution_context(&system.actor("core").unwrap(), &input)
+            .unwrap();
+        let mut app = crate::actor_app::ActorApp::new("core".into(), system.clone());
+        let mut created = Vec::new();
+        for (name, read_only) in [("Parser repair", false), ("Contract investigation", true)] {
+            let result = app
+                .execute_tool(
+                    &crate::model_protocol::AgentToolCall {
+                        id: name.into(),
+                        name: "create".into(),
+                        arguments: serde_json::json!({
+                            "stage_id":null,"name":name,"workspace":null,"read_only":read_only,
+                            "instructions":null,"model":null
+                        }),
+                    },
+                    &context,
+                )
+                .await
+                .unwrap();
+            let actor = system
+                .actor(result.payload["id"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(actor.config.name, name);
+            assert_eq!(actor.parent_id.as_deref(), Some("core"));
+            assert_eq!(actor.config.permissions.read_only, read_only);
+            created.push(actor);
+        }
+        assert_eq!(created[0].config.apps, created[1].config.apps);
+        #[cfg(not(target_os = "android"))]
+        assert!(created[1].config.apps.iter().any(|app| app == "terminal"));
+        let mut apps =
+            crate::builtin_apps::create_apps(&created[1], system.clone(), &system.config())
+                .unwrap();
+        assert!(
+            !apps
+                .model_tool_specs()
+                .unwrap()
+                .iter()
+                .any(|tool| tool.name.starts_with("terminal__"))
+        );
+        let readonly_input = system
+            .send_user(&created[1].id, "Inspect".into(), vec![], None)
+            .unwrap();
+        system.store().claim_next(&created[1].id).unwrap().unwrap();
+        let readonly_context = system
+            .execution_context(&created[1], &readonly_input)
+            .unwrap();
+        assert!(apps.execute_tool(&crate::model_protocol::AgentToolCall {
+            id: "forbidden-process".into(), name: "terminal__terminal_exec".into(),
+            arguments: serde_json::json!({"command":"echo forbidden","session_id":null,"workdir":null,
+                "additional_read_roots":null,"additional_write_roots":null,"yield_time_ms":null,"max_chars":null}),
+        }, &readonly_context).await.is_err());
+        assert!(
+            app.execute_tool(
+                &crate::model_protocol::AgentToolCall {
+                    id: "select-apps".into(),
+                    name: "create".into(),
+                    arguments: serde_json::json!({
+                        "stage_id":null,"name":"Extra","workspace":null,"read_only":false,
+                        "instructions":null,"model":null,"apps":["files"]
+                    }),
+                },
+                &context
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(system.store().actor_count().unwrap(), 3);
+        system.shutdown().await;
+        let reopened = ActorSystem::open_paused_with_factory(
+            directory.path().join("fresh-state"),
+            directory.path().join("fresh-workspace"),
+            template.config(),
+            Arc::new(NoModels),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reopened.store().actor_count().unwrap(), 3);
+        for actor in created {
+            let retained = reopened.actor(&actor.id).unwrap();
+            assert_eq!(retained.config.name, actor.config.name);
+            assert_eq!(retained.config.apps, actor.config.apps);
+        }
+    }
+
+    #[tokio::test]
     async fn failed_workspace_preparation_does_not_change_actor_configuration() {
         let (directory, system) = fixture().await;
-        let old = system.actor(ROOT_ACTOR_ID).unwrap().config;
+        let old = system.actor(FIXTURE_ACTOR_ID).unwrap().config;
         let blocked = directory.path().join("existing-file");
         std::fs::write(&blocked, "not a directory").unwrap();
         let mut proposed = old.clone();
         proposed.workspace = blocked.join("child");
         proposed.permissions.readable_roots = vec![proposed.workspace.clone()];
         proposed.permissions.writable_roots = vec![proposed.workspace.clone()];
-        assert!(system.update_owned(ROOT_ACTOR_ID, proposed).await.is_err());
-        assert_eq!(system.actor(ROOT_ACTOR_ID).unwrap().config, old);
+        assert!(
+            system
+                .update_owned(FIXTURE_ACTOR_ID, proposed)
+                .await
+                .is_err()
+        );
+        assert_eq!(system.actor(FIXTURE_ACTOR_ID).unwrap().config, old);
         assert!(!system.inner.reconfiguring.load(Ordering::Acquire));
     }
 }

@@ -257,10 +257,7 @@ async fn serve(
         daemon::control::LaunchOptions {
             profile: arguments.profile,
             listen: actual,
-            workspace: system
-                .actor(daat_locus::actors::ROOT_ACTOR_ID)?
-                .config
-                .workspace,
+            workspace: system.device_workspace().to_owned(),
         },
         format!("http://{url_address}"),
         Some(state.clone()),

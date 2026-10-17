@@ -53,7 +53,7 @@ export function elapsedLabel(start?: number | null, end?: number | null, now = D
   if (seconds < 60) return t("work_timeline.value0_s", {value0: seconds});
   return t("work_timeline.value0_m_value1", {value0: Math.floor(seconds/60), value1: seconds%60 ? ` ${t("work_timeline.value0_s", {value0: seconds%60})}` : ""});
 }
-let primaryActor = "root";
+let primaryActor = "core";
 export function configurePrimaryActor(actorId: string): void { primaryActor = actorId; }
 export const isPrimaryActor = (actorId: string) => actorId === primaryActor || (primaryActor === "core" && actorId.endsWith("~core"));
 export const isUserSource = (message: MessageRecord) => message.source.kind === "user" || message.source.kind === "remote_user";

@@ -39,7 +39,7 @@ async fn idle_actors_activate_on_demand_and_reload_durable_history() {
         system.create_owned("root", root.config.clone()).unwrap();
     }
     assert_eq!(system.resident_workers(), 0);
-    assert_eq!(system.store().actor_count().unwrap(), 65);
+    assert_eq!(system.store().actor_count().unwrap(), 66);
     let first = system
         .send_user("root", "Remember this request".into(), vec![], None)
         .unwrap();
@@ -49,7 +49,7 @@ async fn idle_actors_activate_on_demand_and_reload_durable_history() {
     );
     wait_passivated(&system).await;
     let context = system.actor("root").unwrap().context;
-    assert_eq!(system.store().actor_count().unwrap(), 65);
+    assert_eq!(system.store().actor_count().unwrap(), 66);
     assert_eq!(
         system.store().message(&first.id).unwrap().reply.as_deref(),
         Some("First")
@@ -1150,7 +1150,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     model_a.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {
             id: "one-device-effect".into(), name: "actors__create".into(),
-            arguments: json!({"stage_id":host_b.local,"name":"Hosted project","workspace":null,"read_only":false,"apps":["files"],"instructions":null,"model":null}),
+            arguments: json!({"stage_id":host_b.local,"name":"Hosted project","workspace":null,"read_only":false,"instructions":null,"model":null}),
         }]),
         MockReply::Calls(vec![AgentToolCall {
             id: "remote-image".into(), name: "actors__read_resource".into(),
@@ -1542,6 +1542,7 @@ async fn runtime(provider: Arc<ReplayProvider>) -> (tempfile::TempDir, ActorSyst
     )
     .await
     .unwrap();
+    system.seed_test_actor("root");
     let mut actor = system.store().actor("root").unwrap();
     actor.config.permissions.approval_mode = super::super::ApprovalMode::None;
     system.store().save_actor(&actor).unwrap();
@@ -1729,6 +1730,15 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
     ]));
     let (_caller_dir, a) = runtime(caller_model.clone()).await;
     let a_id = a.store().public_stage_id().unwrap();
+    let mut caller = a.actor("root").unwrap();
+    caller.config.permissions.message_targets.push(
+        crate::stage::ActorAddress {
+            stage_id: b_id,
+            actor_id: "root".into(),
+        }
+        .conversation_url(),
+    );
+    a.store().save_actor(&caller).unwrap();
     let now = chrono::Utc::now().timestamp_millis();
     let mut identity_a = DeviceIdentity::generate_for_stage(a_id).unwrap();
     let identity_b = DeviceIdentity::generate_for_stage(b_id).unwrap();
@@ -2114,7 +2124,7 @@ fn enqueue_root(system: &ActorSystem, content: &str) -> MessageRecord {
             MessageRecord {
                 seq: 0,
                 id: uuid::Uuid::new_v4().to_string(),
-                actor_id: super::super::ROOT_ACTOR_ID.into(),
+                actor_id: "root".into(),
                 source: super::super::MessageSource::User,
                 reply_to: super::super::ReplyTarget::User,
                 kind: super::super::MessageKind::Request,
@@ -2136,7 +2146,7 @@ fn enqueue_root(system: &ActorSystem, content: &str) -> MessageRecord {
             None,
         )
         .unwrap();
-    system.wake(super::super::ROOT_ACTOR_ID);
+    system.wake("root");
     message
 }
 
@@ -2389,6 +2399,7 @@ async fn paused_runtime() -> (tempfile::TempDir, ActorSystem, Arc<ReplayProvider
     )
     .await
     .unwrap();
+    system.seed_test_actor("root");
     let mut root = system.actor("root").unwrap();
     root.config.permissions.approval_mode = super::super::ApprovalMode::None;
     system.store().save_actor(&root).unwrap();
@@ -2840,10 +2851,12 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
     config.workspace = parent.config.workspace.join("report-worker");
     config.permissions = super::super::ActorPermissions::workspace(config.workspace.clone(), false);
     config.permissions.approval_mode = super::super::ApprovalMode::None;
+    config.permissions.app_access = parent.config.permissions.app_access.clone();
+    config.permissions.delegation_apps = parent.config.permissions.delegation_apps.clone();
     let deep = system
         .create_from_actor(&parent.id, config, &parent_context)
         .unwrap();
-    assert_eq!(deep.depth, 2);
+    assert_eq!(deep.parent_id.as_deref(), Some(parent.id.as_str()));
     assert!(
         system
             .list_visible()
@@ -3425,6 +3438,9 @@ async fn history_app_is_own_actor_scoped_paged_and_has_no_provider_reasoning() {
 }
 
 async fn start_core_fixture(system: &ActorSystem) -> Arc<crate::stage::runtime::Runtime> {
+    let mut core = system.actor("core").unwrap();
+    core.config.permissions.approval_mode = super::super::ApprovalMode::None;
+    system.store().save_actor(&core).unwrap();
     let host = crate::stage::host::Host::load(system.clone()).unwrap();
     host.initialize(true).unwrap();
     let mut settings = host.settings();
@@ -3547,6 +3563,9 @@ async fn core_yields_after_delegating_and_receives_progress_while_worker_runs() 
     )
     .await
     .unwrap();
+    if system.actor("root").is_err() {
+        system.seed_test_actor("root");
+    }
     let mut root = system.actor("root").unwrap();
     root.config.permissions.approval_mode = super::super::ApprovalMode::None;
     system.store().save_actor(&root).unwrap();

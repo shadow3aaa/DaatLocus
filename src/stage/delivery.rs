@@ -102,7 +102,7 @@ impl<'a> Deliveries<'a> {
                 request_id: Uuid::parse_str(&request.id)
                     .map_err(|_| StageError::Invalid("Invalid originating request"))?,
                 ceiling: RemoteCeiling {
-                    apps: source.config.apps.clone(),
+                    apps: crate::actors::permissions::delegation_apps(&source.config).to_vec(),
                     tools: source.config.permissions.tools.clone(),
                     read_only: source.config.permissions.read_only,
                     approval_mode: source.config.permissions.approval_mode,
@@ -116,7 +116,7 @@ impl<'a> Deliveries<'a> {
             local_actor: source.id.clone(),
             request_id: request.map(|message| message.id.clone()),
             grant: DelegationGrant {
-                apps: source.config.apps.clone(),
+                apps: crate::actors::permissions::direct_apps(&source.config).to_vec(),
                 permissions: source.config.permissions.clone(),
             },
         };

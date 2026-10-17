@@ -1,9 +1,10 @@
 //! Isolated actual HTTP servers and OPAQUE accounts; never contacts real models.
+const FIXTURE_ACTOR_ID: &str = "root";
 use daat_locus::{
     accounts::AccountStore,
     actors::{
         ActorConfig, ActorPermissions, ActorSystem, ApprovalDecision, ApprovalMode, ApprovalRecord,
-        ModelFactory, ROOT_ACTOR_ID, ToolPermissionRequest,
+        ModelFactory, ToolPermissionRequest,
     },
     config::{Config, ModelConfig, ProviderConfig},
     core::ModelProvider,
@@ -157,10 +158,22 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let mut root_config = system.actor(ROOT_ACTOR_ID).unwrap().config;
+        // This is an explicitly named test fixture, not a service preset.
+        let mut actor = system.actor("core").unwrap();
+        actor.id = "root".into();
+        actor.parent_id = Some("core".into());
+        actor.depth = 1;
+        actor.config.name = "Fixture executor".into();
+        actor.config.apps = daat_locus::builtin_apps::DEVICE_APPS
+            .iter()
+            .map(|app| (*app).to_owned())
+            .collect();
+        actor.config.permissions.delegation_apps = None;
+        system.store().save_actor(&actor).unwrap();
+        let mut root_config = system.actor(FIXTURE_ACTOR_ID).unwrap().config;
         root_config.permissions.approval_mode = ApprovalMode::None;
         system
-            .update_owned(ROOT_ACTOR_ID, root_config)
+            .update_owned(FIXTURE_ACTOR_ID, root_config)
             .await
             .unwrap();
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -208,7 +221,7 @@ impl Fixture {
                     daat_locus::daemon::control::LaunchOptions {
                         profile: None,
                         listen: listener.local_addr().unwrap(),
-                        workspace: system.actor(ROOT_ACTOR_ID).unwrap().config.workspace,
+                        workspace: system.actor(FIXTURE_ACTOR_ID).unwrap().config.workspace,
                     },
                     url.clone(),
                     Some(state.clone()),
@@ -253,7 +266,7 @@ impl Fixture {
     pub async fn child(&self, name: &str) -> String {
         let workspace = self
             .system
-            .actor(ROOT_ACTOR_ID)
+            .actor(FIXTURE_ACTOR_ID)
             .unwrap()
             .config
             .workspace
@@ -268,7 +281,10 @@ impl Fixture {
             permissions: ActorPermissions::workspace(workspace, false),
         };
         config.permissions.approval_mode = ApprovalMode::None;
-        self.system.create_owned(ROOT_ACTOR_ID, config).unwrap().id
+        self.system
+            .create_owned(FIXTURE_ACTOR_ID, config)
+            .unwrap()
+            .id
     }
 
     pub async fn approval(&self, actor: &str, mode: ApprovalMode) -> ApprovalRecord {

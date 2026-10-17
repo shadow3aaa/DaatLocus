@@ -437,6 +437,9 @@ mod tests {
         )
         .await
         .unwrap();
+        if source.actor("root").is_err() {
+            source.seed_test_actor("root");
+        }
         let target = ActorSystem::open(
             b.path().join("state"),
             b.path().join("workspace"),
@@ -444,6 +447,9 @@ mod tests {
         )
         .await
         .unwrap();
+        if target.actor("root").is_err() {
+            target.seed_test_actor("root");
+        }
         let image = b"\x89PNG\r\n\x1a\nportable image bytes";
         let local = source.actor_state_dir("root").join("images/image.png");
         std::fs::create_dir_all(local.parent().unwrap()).unwrap();
@@ -501,6 +507,9 @@ mod tests {
         )
         .await
         .unwrap();
+        if target.actor("root").is_err() {
+            target.seed_test_actor("root");
+        }
         resolve(&target);
         assert!(model_request(&target, "another-actor", request.clone()).is_err());
         let mut changed = resource.clone();
@@ -523,6 +532,9 @@ mod tests {
         )
         .await
         .unwrap();
+        if source.actor("root").is_err() {
+            source.seed_test_actor("root");
+        }
         let target = ActorSystem::open(
             b.path().join("state"),
             b.path().join("workspace"),
@@ -530,6 +542,9 @@ mod tests {
         )
         .await
         .unwrap();
+        if target.actor("root").is_err() {
+            target.seed_test_actor("root");
+        }
         let dir = source.actor_data_dir("root");
         let file = dir.join("image.png");
         std::fs::write(&file, b"immutable attachment").unwrap();

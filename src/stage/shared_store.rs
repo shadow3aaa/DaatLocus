@@ -439,6 +439,11 @@ pub(crate) fn apply(
                     .tools
                     .as_ref()
                     .is_some_and(|tools| tools.len() > 256)
+                || configuration.app_access.as_ref().is_some_and(|apps| {
+                    apps.len() > 16
+                        || crate::builtin_apps::validate_app_names(apps, configuration.read_only)
+                            .is_err()
+                })
                 || crate::builtin_apps::validate_app_names(
                     configuration
                         .delegation_apps

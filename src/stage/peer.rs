@@ -62,6 +62,7 @@ mod backpressure_tests {
         )
         .await
         .unwrap();
+        system.seed_test_actor("root");
         let host = Host::load(system.clone()).unwrap();
         host.initialize(true).unwrap();
         let remote = DeviceIdentity::generate().unwrap();

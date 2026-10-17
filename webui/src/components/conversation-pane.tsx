@@ -44,7 +44,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const waitingMessage = connectionMessage || (chat.streamStatus === "reconnecting" ? "conversation_pane.reconnecting" : null);
   const connecting = connectionBlocks(waitingMessage);
   const canConverse = actor?.access?.converse !== false;
-  const name = actor?.config?.name || actor?.name || (actorId === "root" ? "Daat Locus" : "Actor");
+  const name = actor?.config?.name || actor?.name || (actorId === "core" ? "Daat Locus" : "Actor");
   const workingMessages = chat.messages.filter(message => message.status === "running" || message.status === "queued");
   const active = workingMessages.find(message => message.status === "running");
   const mode = actor?.config?.permissions.approval_mode || "auto";

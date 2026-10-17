@@ -25,7 +25,7 @@ use crate::{
     terminal_app::TerminalApp,
 };
 
-pub const DEFAULT_APPS: &[&str] = &[
+pub const DEVICE_APPS: &[&str] = &[
     "actors",
     "files",
     #[cfg(not(target_os = "android"))]
@@ -50,7 +50,7 @@ pub(crate) fn history_app(actor: &ActorRecord, system: ActorSystem) -> Box<dyn A
     ))
 }
 
-pub fn validate_app_names(names: &[String], read_only: bool) -> Result<()> {
+pub fn validate_app_names(names: &[String], _read_only: bool) -> Result<()> {
     let mut seen = HashSet::new();
     for name in names {
         if !ALL_APPS.contains(&name.as_str()) {
@@ -58,9 +58,6 @@ pub fn validate_app_names(names: &[String], read_only: bool) -> Result<()> {
         }
         if !seen.insert(name) {
             return Err(miette!("duplicated App `{name}`"));
-        }
-        if read_only && name == "terminal" {
-            return Err(miette!("Terminal cannot be installed on a read-only Actor"));
         }
     }
     Ok(())
@@ -112,7 +109,10 @@ pub fn prompt_resources(
     actor: &ActorRecord,
     context: &AppToolExecutionContext,
 ) -> Result<Vec<String>> {
-    if !actor.config.apps.iter().any(|app| app == "files") {
+    if !crate::actors::permissions::direct_apps(&actor.config)
+        .iter()
+        .any(|app| app == "files")
+    {
         return Ok(Vec::new());
     }
     if let Some(tools) = &actor.config.permissions.tools
@@ -128,19 +128,27 @@ pub fn prompt_resources(
     )
 }
 
-struct RestrictedApp {
+pub(crate) struct RestrictedApp {
     inner: Box<dyn App>,
     actor_id: String,
     read_only: bool,
     tools: Option<HashSet<String>>,
+    app_allowed: bool,
 }
 
 impl RestrictedApp {
-    fn new(inner: Box<dyn App>, actor: &ActorRecord) -> Self {
+    pub(crate) fn new(inner: Box<dyn App>, actor: &ActorRecord) -> Self {
+        let app_allowed = actor
+            .config
+            .permissions
+            .app_access
+            .as_ref()
+            .is_none_or(|apps| apps.iter().any(|app| app == inner.id().as_str()));
         Self {
             inner,
             actor_id: actor.id.clone(),
             read_only: actor.config.permissions.read_only,
+            app_allowed,
             tools: actor
                 .config
                 .permissions
@@ -156,7 +164,11 @@ impl RestrictedApp {
             .tools
             .as_ref()
             .is_none_or(|tools| tools.contains(&id.mangle_tool_name(name)));
-        granted && (!self.read_only || read_only_tool(id.as_str(), name))
+        let own_history =
+            id.as_str() == "actors" && matches!(name, "read_history" | "read_resource" | "report");
+        (self.app_allowed || own_history)
+            && granted
+            && (!self.read_only || read_only_tool(id.as_str(), name))
     }
 
     fn check(&self, call: &AgentToolCall, context: &AppToolExecutionContext) -> Result<()> {
@@ -332,9 +344,8 @@ mod tests {
     }
 
     #[test]
-    fn unknown_duplicate_and_read_only_terminal_configs_fail() {
+    fn unknown_and_duplicate_app_configs_fail() {
         assert!(validate_app_names(&["unknown".into()], false).is_err());
         assert!(validate_app_names(&["files".into(), "files".into()], false).is_err());
-        assert!(validate_app_names(&["terminal".into()], true).is_err());
     }
 }

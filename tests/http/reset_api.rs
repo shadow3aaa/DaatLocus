@@ -1,6 +1,6 @@
 //! Explicit account reset removes work, never configuration or user files.
 use crate::support::Fixture;
-use daat_locus::actors::{ApprovalMode, ROOT_ACTOR_ID};
+use daat_locus::actors::ApprovalMode;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
@@ -77,8 +77,8 @@ async fn account_reset_removes_actors_approvals_and_resources_but_preserves_iden
     );
     assert!(fixture.system.actor(&actor).is_err());
     assert!(fixture.system.store().approval(&approval.id).is_err());
-    assert_eq!(fixture.system.store().actors().unwrap().len(), 2);
-    let root = fixture.system.actor(ROOT_ACTOR_ID).unwrap();
+    assert_eq!(fixture.system.store().actors().unwrap().len(), 1);
+    let root = fixture.system.actor("core").unwrap();
     assert_eq!(root.config.permissions.approval_mode, ApprovalMode::Auto);
     assert!(root.config.permissions.message_targets.is_empty());
     assert_eq!(

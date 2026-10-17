@@ -10,7 +10,7 @@ The shared WebUI runs in the Windows/macOS Tauri client and optional browser ent
 The Actor/App backend, durable routing, incremental HTTP API and conversation
 client are connected.
 
-- Root has the fixed IM presentation; every other Actor has the work presentation,
+- Core has the fixed IM presentation; every other Actor has the work presentation,
   including when opened in the main window. Reuse data/control hooks, not a
   container-dependent rendering mode. A narrow app navigation rail contains Home
   and the account menu; mobile uses a modal navigation drawer. There is one Core
@@ -52,13 +52,18 @@ client are connected.
   mechanism, not a parallel business management system.
 - App is a domain state machine exposing tools. It is the only tool abstraction.
   Do not require a common `get_state` tool or a separate App workspace UI.
-- One fixed root Actor is the default entry. Owner can directly access any Actor
+- Core is the only preset Actor and the default entry. Every other Actor is
+  created and named by its creating Actor; never preset a device executor.
+  Owner can directly access any Actor
   through its stable conversation link. Creation/ownership is an internal
   permission relationship, not a user-visible access level.
 - Ownership determines hierarchy; delegation does not change ownership or
   access. Results remain associated with the originating request.
 - The account Core directly exposes only the portable Actors App. Hosted Actors
-  perform research and filesystem/process/browser work. Keep the delegation App
+  on the same device install the same device-provided Apps; creation cannot select
+  Apps. Read-only identity, App action grants, tool allowlists and filesystem scope
+  constrain execution without changing installation. Hosted Actors perform
+  research and filesystem/process/browser work. Keep the delegation App
   ceiling distinct from installed Apps and intersect it with device capability;
   never increase read-only, filesystem, tool or approval grants through delegation.
 - Actor configuration is internal creation/persistence state, not a user management
@@ -76,11 +81,11 @@ client are connected.
   individual Actor deletion in the client, HTTP API or native protocol.
   Completion, idleness, restart or worker shutdown must not recycle an Actor.
 - Project, read-only investigation, and general Actors use the same core with
-  different Apps and access constraints. Enforce read-only and folder scope in
+  the same device Apps and different access constraints. Enforce read-only and folder scope in
   tools, not only in prompts.
 - Guest conversation sharing, PIN sessions and quick-tunnel publication are removed.
   Retain optional CF P2P signaling; it is not a conversation-sharing service.
-- Keep one shared WebUI for native and browser clients. Root shows explicit user deliveries,
+- Keep one shared WebUI for native and browser clients. Core shows explicit user deliveries,
   compact task links, decisions and outcomes; it excludes intermediate model
   text and tool pipelines. Other Actors use plain work prose, chronological
   collapsible activity and independent outcomes. Use a muted elapsed-time disclosure
@@ -163,7 +168,7 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   expired/revoked account sessions. Register wakes before queries and
   respect consumer backpressure. No repeated full-runtime snapshots.
 - Owner accesses any Actor; only approval mode and conversation model
-  preferences are user-editable. Root is the default entry; no Actor has a deletion
+  preferences are user-editable. Core is the default entry; no Actor has a deletion
   control. Conversation URLs locate an Actor and never grant access.
   Global Owner approvals aggregate action controls. No guest share authorization exists.
 - Construct source/reply/authority metadata on the server. Accept only opaque

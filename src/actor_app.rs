@@ -84,7 +84,6 @@ struct CreateActorArgs {
     name: String,
     workspace: Option<String>,
     read_only: bool,
-    apps: Vec<String>,
     instructions: Option<String>,
     model: Option<String>,
 }
@@ -202,7 +201,7 @@ impl App for ActorApp {
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         let mut tools = vec![
             AppToolSpec { name: "list".into(), description: "Read a bounded page of visible Actors and delegation capabilities. Null stage_id selects the current device; null cursor starts the list; null limit uses 25 (maximum 100).".into(), input_schema: model_schema_for::<ListActorArgs>() },
-            AppToolSpec { name: "create".into(), description: "Create a persistent owned Actor. Null stage_id selects the current device. Empty apps inherits the delegation ceiling. Null workspace uses that device's workspace; another workspace requires filesystem authorization.".into(), input_schema: model_schema_for::<CreateActorArgs>() },
+            AppToolSpec { name: "create".into(), description: "Create and name a persistent owned Actor with the device's installed Apps and inherited action grants. Null stage_id selects the current device. Null workspace uses that device's workspace; another workspace requires filesystem authorization.".into(), input_schema: model_schema_for::<CreateActorArgs>() },
             AppToolSpec { name: "send".into(), description: "Queue a request to an authorized Actor. Results stay correlated with the current request.".into(), input_schema: model_schema_for::<SendActorArgs>() },
             AppToolSpec { name: "status".into(), description: "Inspect one request this Actor delegated; never wait or poll for completion. Null stage_id selects the current device.".into(), input_schema: model_schema_for::<RequestArgs>() },
             AppToolSpec { name: "cancel".into(), description: "Cancel one request this Actor delegated. Completed effects remain. Null stage_id selects the current device.".into(), input_schema: model_schema_for::<RequestArgs>() },
@@ -310,7 +309,7 @@ impl App for ActorApp {
                     .system
                     .store()
                     .message(&self.caller(context)?.message_id)?;
-                let owner_routing = source.id == crate::actors::ROOT_ACTOR_ID
+                let owner_routing = source.id == crate::stage::shared::ACTOR_ID
                     && matches!(current.reply_to, crate::actors::ReplyTarget::User)
                     && !source.config.permissions.read_only;
                 if !owner_routing {
@@ -562,7 +561,7 @@ impl App for ActorApp {
                 let start = args.cursor.unwrap_or(0);
                 let next = start.saturating_add(limit);
                 let next_cursor = (next < actors.len()).then_some(next);
-                let actors = actors.iter().skip(start).take(limit).map(|actor| Ok(json!({ "id": actor.id, "name": actor.config.name, "conversation_url": self.conversation_url(&actor.id)?, "workspace": actor.config.workspace, "read_only": actor.config.permissions.read_only, "apps": actor.config.apps, "status": actor.status }))).collect::<Result<Vec<_>>>()?;
+                let actors = actors.iter().skip(start).take(limit).map(|actor| Ok(json!({ "id": actor.id, "name": actor.config.name, "conversation_url": self.conversation_url(&actor.id)?, "workspace": actor.config.workspace, "read_only": actor.config.permissions.read_only, "apps": actor.config.apps, "action_apps": crate::actors::permissions::direct_apps(&actor.config), "tool_allowlist": actor.config.permissions.tools, "status": actor.status }))).collect::<Result<Vec<_>>>()?;
                 let parent = self.system.record_for_tool(&self.actor_id, caller)?;
                 Ok(AppToolExecutionResult::new(
                     format!("listed {} Actors", actors.len()),
@@ -589,15 +588,12 @@ impl App for ActorApp {
                     vec![workspace.clone()]
                 };
                 permissions.message_targets.clear();
-                let apps = if args.apps.is_empty() {
-                    crate::actors::permissions::delegation_apps(&parent.config)
-                        .iter()
-                        .filter(|name| !permissions.read_only || *name != "terminal")
-                        .cloned()
-                        .collect()
-                } else {
-                    args.apps
-                };
+                permissions.app_access =
+                    Some(crate::actors::permissions::delegation_apps(&parent.config).to_vec());
+                let apps = crate::builtin_apps::DEVICE_APPS
+                    .iter()
+                    .map(|app| (*app).to_owned())
+                    .collect();
                 permissions.delegation_apps = None;
                 let config = ActorConfig {
                     name: args.name,
@@ -724,6 +720,7 @@ mod tests {
         )
         .await
         .unwrap();
+        system.seed_test_actor("root");
         let original = "原文🔵\n\"quoted\"\n".repeat(120);
         let resource =
             crate::resources::publish(&system, "root", "output", "text/plain", original.as_bytes())

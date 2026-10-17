@@ -230,7 +230,7 @@ pub(crate) fn replace(store: &ActorStore, record: &Record, root: &ActorRecord) -
                 params![serde_json::to_string(&peer).map_err(|_| StageError::Invalid("Cannot reset device grants"))?, id])?;
         }
         tx.execute("INSERT INTO actors(id,parent_id,depth,record) VALUES(?1,NULL,0,?2)",
-            params![root.id, serde_json::to_string(root).map_err(|_| StageError::Invalid("Cannot reset root Actor"))?])?;
+            params![root.id, serde_json::to_string(root).map_err(|_| StageError::Invalid("Cannot reset Core Actor"))?])?;
         tx.execute("INSERT INTO account_work_reset VALUES(1,?1,1) ON CONFLICT(singleton) DO UPDATE SET record=excluded.record,cleanup_pending=1",
             [serde_json::to_string(record).map_err(|_| StageError::Invalid("Cannot save reset record"))?])?;
         Ok(())
@@ -278,11 +278,7 @@ pub(crate) fn blocked(host: &Host) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        actors::{ActorSystem, ROOT_ACTOR_ID},
-        config::Config,
-        stage::runtime::Runtime,
-    };
+    use crate::{actors::ActorSystem, config::Config, stage::runtime::Runtime};
     use std::{sync::Arc, time::Duration};
 
     async fn hosts(directory: &std::path::Path) -> (Arc<Runtime>, Arc<Runtime>) {
@@ -391,7 +387,7 @@ mod tests {
         let attachment = a
             .host
             .system
-            .actor_data_dir(ROOT_ACTOR_ID)
+            .actor_data_dir(crate::stage::shared::ACTOR_ID)
             .join("old-attachment.txt");
         std::fs::write(&attachment, "discarded attachment").unwrap();
         let record = issue(&a.host).unwrap();
@@ -400,12 +396,17 @@ mod tests {
         replace(
             a.host.system.store(),
             &record,
-            &a.host.system.actor(ROOT_ACTOR_ID).unwrap(),
+            &a.host.system.actor(crate::stage::shared::ACTOR_ID).unwrap(),
         )
         .unwrap();
         let system = ActorSystem::open_account_gated(
             a.host.system.infrastructure_dir(),
-            a.host.system.actor(ROOT_ACTOR_ID).unwrap().config.workspace,
+            a.host
+                .system
+                .actor(crate::stage::shared::ACTOR_ID)
+                .unwrap()
+                .config
+                .workspace,
             Config::default(),
         )
         .await
@@ -422,7 +423,7 @@ mod tests {
         let fresh = reopened
             .host
             .system
-            .actor_data_dir(ROOT_ACTOR_ID)
+            .actor_data_dir(crate::stage::shared::ACTOR_ID)
             .join("fresh.txt");
         std::fs::write(&fresh, "new work").unwrap();
         cleanup(&reopened.host.system).unwrap();
@@ -458,7 +459,7 @@ mod tests {
         replace(
             b.host.system.store(),
             &first,
-            &b.host.system.actor(ROOT_ACTOR_ID).unwrap(),
+            &b.host.system.actor(crate::stage::shared::ACTOR_ID).unwrap(),
         )
         .unwrap();
         initialize(&b.host).unwrap();
@@ -470,7 +471,7 @@ mod tests {
         replace(
             a.host.system.store(),
             &applied,
-            &a.host.system.actor(ROOT_ACTOR_ID).unwrap(),
+            &a.host.system.actor(crate::stage::shared::ACTOR_ID).unwrap(),
         )
         .unwrap();
         initialize(&a.host).unwrap();
@@ -487,7 +488,7 @@ mod tests {
         let file = a
             .host
             .system
-            .actor_data_dir(ROOT_ACTOR_ID)
+            .actor_data_dir(crate::stage::shared::ACTOR_ID)
             .join("new-work.txt");
         std::fs::write(&file, "new data").unwrap();
         offer(&a.host, a.host.local, applied).unwrap();

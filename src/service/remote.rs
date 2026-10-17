@@ -789,7 +789,7 @@ async fn upload(
     manage(&state, &headers).await?;
     authorize(&state, &headers, &target).await?;
     let content = crate::stage::blob::ContentStore::new(state.system.store())
-        .store_source(crate::actors::ROOT_ACTOR_ID, &bytes)
+        .store_source(crate::stage::shared::ACTOR_ID, &bytes)
         .map_err(stages::failure)?
         .content;
     let resource = crate::resources::Resource {

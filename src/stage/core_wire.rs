@@ -24,6 +24,8 @@ pub struct Configuration {
     pub approval_mode: crate::actors::ApprovalMode,
     pub read_only: bool,
     pub tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub app_access: Option<Vec<String>>,
     pub allow_children: bool,
 }
 impl Configuration {
@@ -39,6 +41,7 @@ impl Configuration {
             approval_mode: config.permissions.approval_mode,
             read_only: config.permissions.read_only,
             tools: config.permissions.tools.clone(),
+            app_access: config.permissions.app_access.clone(),
             allow_children: config.permissions.allow_children,
         }
     }
@@ -55,6 +58,7 @@ impl Configuration {
         config.permissions.approval_mode = self.approval_mode;
         config.permissions.read_only = self.read_only;
         config.permissions.tools = self.tools.clone();
+        config.permissions.app_access = self.app_access.clone();
         config.permissions.allow_children = self.allow_children;
     }
 }
