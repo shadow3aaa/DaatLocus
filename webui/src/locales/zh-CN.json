@@ -1,4 +1,16 @@
 {
+  "reset_work": {
+    "section": "重置",
+    "title": "重置账号工作数据",
+    "action": "重置…",
+    "preserved": "保留账号、模型配置和设备连接。",
+    "warning": "永久清空此账号所有设备上的 Actor、会话、历史、附件和权限设置。正在执行的任务和待审批操作将停止。此操作无法撤销。",
+    "offline_devices": "离线设备将在重连时先重置，再参与同步。工作目录中的文件会保留。",
+    "confirm_name": "输入“{{name}}”以确认",
+    "cancel": "取消",
+    "confirm": "重置账号工作数据",
+    "resetting": "正在重置…"
+  },
   "access_gate": {
     "passwords_do_not_match": "两次密码不一致。",
     "incorrect_account_name_or_password": "账号或密码不正确。",

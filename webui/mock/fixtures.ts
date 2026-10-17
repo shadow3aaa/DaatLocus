@@ -18,6 +18,8 @@ import {
   stageSettings,
   store,
   touchMessage,
+  workReset,
+  STAGE_ID,
   type ActorStore,
 } from "./state";
 
@@ -33,6 +35,7 @@ type SeededTool = {
 type Exchange = { user: string; reply: string; tool?: SeededTool };
 
 export function resetStore(): void {
+  workReset.generation = null;
   store.actors.clear();
   store.order.length = 0;
   store.catalog.length = 0;
@@ -53,6 +56,17 @@ export function resetStore(): void {
   });
   clearRuns();
   seed();
+  broadcastResync();
+}
+
+export function resetAccountWork(): void {
+  clearRuns();
+  store.actors.clear(); store.order.length = 0; store.catalog.length = 0;
+  store.attachments.clear(); store.idempotency.clear(); store.approvalWakers.clear();
+  workReset.generation = {revision: (workReset.generation?.revision ?? 0) + 1, writer: STAGE_ID};
+  createActor({id: ROOT_ACTOR_ID, name: "Daat Locus", parent_id: null, apps: ["actors"], model: null,
+    approval_mode: "auto", read_only: false, readable_roots: ["~"], writable_roots: ["~"],
+    message_targets: [], allow_children: true, workspace: "~", instructions: ""});
   broadcastResync();
 }
 

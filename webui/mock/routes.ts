@@ -16,6 +16,7 @@ import type { CoreStatus, Device, DeviceSettings, PublicLoginStatus, StageInfo }
 import { cancelTurn, isActorBusy, submitTurn } from "./engine";
 import { activateScenario, previewState, scenarios } from "./scenarios";
 import { sseResponse } from "./sse";
+import { resetAccountWork } from "./fixtures";
 import {
   ACCOUNT_ID,
   ACCOUNT_NAME,
@@ -36,6 +37,7 @@ import {
   store,
   toolSummary,
   touchMessage,
+  workReset,
   type ActorStore,
 } from "./state";
 
@@ -233,6 +235,17 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     return json(account);
   }
   if (path === "/v1/account/connection" && method === "PUT") return noContent();
+  if (path === "/v1/account/reset") {
+    if (!previewState.authenticated) return json({code: "unauthorized", message: "Sign in required"}, 401);
+    if (method === "GET") return json({account_id: ACCOUNT_ID, name: ACCOUNT_NAME, generation: workReset.generation, resetting: false});
+    if (method === "POST") {
+      const body = await jsonBody(req);
+      if (body?.account_id !== ACCOUNT_ID) return invalidRequest();
+      if (JSON.stringify(body?.expected_generation) !== JSON.stringify(workReset.generation)) return json({code: "conflict", message: "Account work changed"}, 409);
+      resetAccountWork();
+      return noContent();
+    }
+  }
   if (path === "/v1/account/session" && method === "DELETE") return noContent();
 
   // ---- stage --------------------------------------------------------------
@@ -249,7 +262,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     };
     return json(stage);
   }
-  if (path === "/v1/stage/status" && method === "GET") return json({ core: coreStatus(), public_login: publicLogin() });
+  if (path === "/v1/stage/status" && method === "GET") return json({ core: coreStatus(), public_login: publicLogin(), work_generation: workReset.generation });
   if (path === "/v1/stage/devices" && method === "GET") {
     const limit = limitParam(url, "limit", 64, 64);
     if (limit === null) return invalidRequest();

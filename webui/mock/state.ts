@@ -81,6 +81,7 @@ export const store: Store = {
   idempotency: new Map(),
   approvalWakers: new Map(),
 };
+export const workReset: {generation: import("../src/lib/stage-api").WorkGeneration | null} = {generation: null};
 
 export const stageSettings: DeviceSettings = {
   label: "Mock Device",

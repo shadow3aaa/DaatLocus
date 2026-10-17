@@ -10,6 +10,7 @@ import { sshTargets, validConnection, type SshDraft } from "@/lib/device-setting
 import * as api from "@/lib/stage-api";
 import { PublicLoginStatusView } from "./public-login-status";
 import { DeviceList } from "./device-list";
+import { ResetWork } from "./reset-work";
 export function AccountEditor({ onChanged }: {onChanged: () => void}) {
   const [info,setInfo]=useState<api.StageInfo|null>(null);const [devices,setDevices]=useState<api.Device[]>([]);
   const [publication,setPublication]=useState<api.PublicLoginStatus|null>(null);
@@ -86,5 +87,6 @@ export function AccountEditor({ onChanged }: {onChanged: () => void}) {
       </SettingsGroup>)}
       {sshTargets(ssh)===null&&<p className="dl-settings-caption" role="status">{t("account_editor.incomplete_ssh")}</p>}
     </SettingsSection>}
+    {info?.account_id && <ResetWork />}
   </div>;
 }

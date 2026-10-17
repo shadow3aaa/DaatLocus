@@ -5,6 +5,19 @@ import { ROOT_ACTOR_ID, store } from "../mock/state";
 
 const request=(path:string,init?:RequestInit)=>handle(new Request(`http://127.0.0.1${path}`,init));
 describe("standalone WebUI preview",()=>{
+  test("account reset preview preserves model and device settings and rejects stale confirmation",async()=>{
+    activateScenario("work");
+    const before = await (await request("/v1/account/reset")).json();
+    const configuration = await (await request("/v1/config")).json();
+    const stage = await (await request("/v1/stage")).json();
+    const confirmation = {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({account_id:before.account_id,expected_generation:before.generation})};
+    expect((await request("/v1/account/reset",confirmation)).status).toBe(204);
+    expect(store.actors.size).toBe(1);
+    expect(store.actors.get(ROOT_ACTOR_ID)!.messages).toHaveLength(0);
+    expect(await (await request("/v1/config")).json()).toEqual(configuration);
+    expect((await (await request("/v1/stage")).json()).settings).toEqual(stage.settings);
+    expect((await request("/v1/account/reset",confirmation)).status).toBe(409);
+  });
   test("every listed scene is seedable; invalid names do not reset a scene",async()=>{
     for(const scene of scenarios){expect(activateScenario(scene.id)).toBe(true);expect(store.actors.has(scene.actor)).toBe(true);expect(previewState.id).toBe(scene.id);}
     const prior=previewState.id;expect(activateScenario("unknown")).toBe(false);expect(previewState.id).toBe(prior);

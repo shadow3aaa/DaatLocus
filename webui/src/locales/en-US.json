@@ -1,4 +1,16 @@
 {
+  "reset_work": {
+    "section": "Reset",
+    "title": "Reset account work",
+    "action": "Reset…",
+    "preserved": "Keep your account, model configuration and device connections.",
+    "warning": "Permanently delete all Actors, conversations, history, attachments and permission settings on every device in this account. Running tasks and pending approvals will be stopped. This cannot be undone.",
+    "offline_devices": "Offline devices will reset before syncing when they reconnect. Files in your workspaces are kept.",
+    "confirm_name": "Type “{{name}}” to confirm",
+    "cancel": "Cancel",
+    "confirm": "Reset account work",
+    "resetting": "Resetting…"
+  },
   "access_gate": {
     "passwords_do_not_match": "Passwords do not match.",
     "incorrect_account_name_or_password": "Incorrect account name or password.",

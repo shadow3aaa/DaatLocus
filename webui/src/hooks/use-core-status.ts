@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ActorApiError } from "@/lib/actor-api";
 import { getStageStatus, type CoreStatus } from "@/lib/stage-api";
+import { clearConversationDrafts } from "./use-actor-conversation";
 
 /** Only the small readiness fact is polled; conversation data stays on its cursor stream. */
 export function useCoreStatus(session: string | null, onAccessRevoked: () => void) {
@@ -9,9 +10,18 @@ export function useCoreStatus(session: string | null, onAccessRevoked: () => voi
     if (!session) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let generation: string | undefined;
     async function refresh() {
       try {
         const status = await getStageStatus({signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)])});
+        if (controller.signal.aborted) return;
+        const next = JSON.stringify(status.work_generation ?? null);
+        if (generation !== undefined && generation !== next) {
+          clearConversationDrafts();
+          window.location.assign("/");
+          return;
+        }
+        generation = next;
         if (!controller.signal.aborted) setValue({session: session!, core: status.core});
       } catch (error) {
         if (controller.signal.aborted) return;

@@ -103,7 +103,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
     {id: "general" as const, label: t("settings_page.general"), icon: SettingsIcon, keywords: t("common.language")},
     {id: "personal" as const, label: t("settings_dialog.appearance"), icon: SunIcon, keywords: [t("settings_dialog.theme"), t("settings_dialog.light"), t("settings_dialog.dark"), t("settings_dialog.system"), t("appearance.code_theme"), t("appearance.accent"), t("appearance.interface_size"), t("appearance.content_size"), t("appearance.full_width")].join(" ")},
     ...(canManage ? [
-      {id: "account" as const, label: t("settings_dialog.configuration"), icon: MonitorIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), "SSH", t("access_gate.public_connection_service")].join(" ")},
+      {id: "account" as const, label: t("settings_dialog.configuration"), icon: MonitorIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), "SSH", t("access_gate.public_connection_service"), t("reset_work.title")].join(" ")},
       {id: "permissions" as const, label: t("settings_dialog.permissions"), icon: ShieldCheckIcon, keywords: t("settings_dialog.approval_mode")},
       {id: "models" as const, label: t("providers_settings.providers"), icon: SlidersHorizontalIcon, keywords: [t("composer.models"), t("composer.default_model"), t("provider_editor.api_key")].join(" ")},
     ] : []),

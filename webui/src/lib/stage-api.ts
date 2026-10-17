@@ -1,5 +1,9 @@
 import { request, type FetchOptions, type Page } from "./actor-api";
 export type DeviceProfile = { stage_id: string; public_key: string; tls_sha256: string };
+export type WorkGeneration = {revision: number; writer: string};
+export type ResetStatus = {account_id: string; name: string; generation: WorkGeneration | null; resetting: boolean};
+export const getResetStatus = (options?: FetchOptions) => request<ResetStatus>("/v1/account/reset", options);
+export const resetAccountWork = (status: ResetStatus) => request<void>("/v1/account/reset", {method: "POST", body: {account_id: status.account_id, expected_generation: status.generation}});
 export type SshTarget = { host: string; user: string | null; ssh_port: number; stage_port: number };
 export type DeviceSettings = { label: string; listen: string; interfaces: string[]; signaling_origin: string | null; stun: string[]; compute_priority: number; ssh: Record<string,SshTarget> };
 export type DevicePreferences = Partial<Pick<DeviceSettings,"label"|"signaling_origin"|"ssh">>;
@@ -12,7 +16,7 @@ export const getDevices = (options: FetchOptions & { after?: string } = {}) => r
 export const saveDeviceSettings = (preferences: DevicePreferences) => request<DeviceSettings>("/v1/stage/settings", {method:"PATCH",body:preferences});
 
 export type CoreStatus = { worker_stage_id: string | null; epoch: number; synchronized: boolean; ready: boolean; model_ready: boolean; state: string; error_code?: string | null; config_revision?: string | null };
-export const getStageStatus = (options?: FetchOptions) => request<{core: CoreStatus | null; public_login: PublicLoginStatus}>("/v1/stage/status", options);
+export const getStageStatus = (options?: FetchOptions) => request<{core: CoreStatus | null; public_login: PublicLoginStatus; work_generation?: WorkGeneration | null}>("/v1/stage/status", options);
 export type ConversationConnectionMessage = "conversation_pane.synchronizing" | "conversation_pane.reconnecting" | "conversation_pane.recovering" | "conversation_pane.reconciling" | "conversation_pane.offline" | "conversation_pane.recovery_blocked" | "app.connecting";
 export function connectionBlocks(message: ConversationConnectionMessage | null | undefined): boolean { return Boolean(message); }
 export function coreConnectionMessage(core: CoreStatus | null | undefined): ConversationConnectionMessage | null {
