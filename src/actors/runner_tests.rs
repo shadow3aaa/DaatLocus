@@ -738,7 +738,7 @@ async fn device_pair(
     ((a_dir, a, net_a), (b_dir, b, net_b))
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unresponsive_learner_does_not_block_the_existing_worker_renewal_or_inbox() {
     use crate::stage::shared;
     let model_a = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
@@ -774,7 +774,7 @@ async fn an_unresponsive_learner_does_not_block_the_existing_worker_renewal_or_i
     a.shutdown().await;
     b.shutdown().await;
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_device_graceful_exit_transfers_authority_and_keeps_the_remaining_device_usable() {
     use crate::stage::{shared, shared_store};
     let model_a = Arc::new(ReplayProvider::new(vec![]));
@@ -807,9 +807,12 @@ async fn two_device_graceful_exit_transfers_authority_and_keeps_the_remaining_de
     let input = b
         .send_user(shared::ACTOR_ID, "Continue here.".into(), vec![], None)
         .unwrap();
+    let completed = wait_completed(&b, &input.id).await;
     assert_eq!(
-        wait_completed(&b, &input.id).await.reply.as_deref(),
-        Some("Continued after the other device exited.")
+        completed.reply.as_deref(),
+        Some("Continued after the other device exited."),
+        "{:?}",
+        completed.error
     );
     assert!(shared_store::head(b.store()).unwrap().sequence > 0);
     assert_eq!(model_b.requests.lock().len(), 1);
@@ -818,7 +821,7 @@ async fn two_device_graceful_exit_transfers_authority_and_keeps_the_remaining_de
     b.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_device_abrupt_loss_runs_locally_and_reconnects_without_repeating_completed_work() {
     use crate::stage::{shared, shared_store};
     let model_a = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
@@ -837,7 +840,13 @@ async fn two_device_abrupt_loss_runs_locally_and_reconnects_without_repeating_co
             None,
         )
         .unwrap();
-    wait_completed(&a, &first.id).await;
+    let completed = wait_completed(&a, &first.id).await;
+    assert_eq!(
+        completed.reply.as_deref(),
+        Some("Before disconnection."),
+        "{:?}",
+        completed.error
+    );
     tokio::time::timeout(Duration::from_secs(10), async {
         while shared_store::head(a.store()).unwrap() != shared_store::head(b.store()).unwrap() {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -903,7 +912,7 @@ async fn two_device_abrupt_loss_runs_locally_and_reconnects_without_repeating_co
     b.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connected_learners_continue_after_authority_loss_and_rejoin_without_replaying_work() {
     use crate::stage::{host::Host, recovery, runtime::Runtime, shared, shared_store};
     let model_a = Arc::new(ReplayProvider::new(vec![]));
@@ -1043,7 +1052,7 @@ async fn connected_learners_continue_after_authority_loss_and_rejoin_without_rep
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_device_partition_preserves_both_branches_and_does_not_replay_the_losing_branch() {
     use crate::stage::{recovery, shared, shared_store};
     let model_a = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
