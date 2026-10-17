@@ -950,7 +950,9 @@ mod tests {
             accounts::network::{Candidate, lookup},
             actors::ActorSystem,
             config::Config,
+            daemon::control::{self, LaunchOptions, Server},
         };
+        use daat_locus_client_protocol::BootstrapRequest;
         let a_dir = tempfile::tempdir().unwrap();
         let b_dir = tempfile::tempdir().unwrap();
         let a = ActorSystem::open_account_gated(
@@ -980,10 +982,11 @@ mod tests {
         let password = b"automatic device password";
         let setup = daat_locus_auth::new_setup();
         let group = source_runtime.host.account_id().unwrap();
+        let name = format!("fixture-{}", &group[..16]);
         let registration = daat_locus_auth::RegistrationClient::start(password.to_vec()).unwrap();
         let response = daat_locus_auth::registration_response(
             &setup,
-            format!("DaatLocus.Account.v1/{group}/alice").as_bytes(),
+            format!("DaatLocus.Account.v1/{group}/{name}").as_bytes(),
             &registration.request(),
         )
         .unwrap();
@@ -993,7 +996,7 @@ mod tests {
             .host
             .accounts
             .install(
-                CredentialBundle::new(group.clone(), "alice".into(), &setup, &file, None).unwrap(),
+                CredentialBundle::new(group.clone(), name.clone(), &setup, &file, None).unwrap(),
                 &group,
             )
             .unwrap();
@@ -1005,7 +1008,7 @@ mod tests {
         target_network.add_test_candidate(Candidate {
             profile: source_runtime.host.profile().unwrap(),
             account_id: group.clone(),
-            name_hash: lookup("alice"),
+            name_hash: lookup(&name),
             addresses: vec![SocketAddr::new(
                 std::net::Ipv4Addr::LOCALHOST.into(),
                 source_network.address.port(),
@@ -1014,6 +1017,36 @@ mod tests {
             relay: None,
             seen: std::time::Instant::now(),
         });
+        // Initial native login/import uses OS-owner IPC on every desktop OS.
+        // macOS deliberately has no browser TCP owner-proof implementation.
+        let control_root = b_dir.path().canonicalize().unwrap().join("control");
+        let control_server = Server::bind(
+            control_root.clone(),
+            control_root.clone(),
+            LaunchOptions {
+                profile: None,
+                listen: address,
+                workspace: b_dir.path().join("workspace"),
+            },
+            url.clone(),
+            Some(state.clone()),
+        )
+        .await
+        .unwrap();
+        let bootstrap_start = async |request: Vec<u8>| {
+            let reply = control::bootstrap(
+                &control_root,
+                BootstrapRequest::LoginStart {
+                    name: name.clone(),
+                    request: URL_SAFE_NO_PAD.encode(request),
+                    exclude: vec![],
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(reply.status, 200, "native login start: {}", reply.body);
+            reply.body
+        };
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -1028,16 +1061,10 @@ mod tests {
                 .post(format!("{url}/v1/account/login/start"))
                 .header("origin", &url)
                 .header("x-daat-request", "1")
-                .json(&json!({"name":"alice","request":URL_SAFE_NO_PAD.encode(request)}))
+                .json(&json!({"name":name,"request":URL_SAFE_NO_PAD.encode(request)}))
         };
         let wrong = daat_locus_auth::LoginClient::start(b"incorrect password".to_vec()).unwrap();
-        let reply: Value = start(wrong.request())
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let reply = bootstrap_start(wrong.request()).await;
         assert!(
             wrong
                 .authenticate(
@@ -1059,13 +1086,7 @@ mod tests {
                 .is_empty()
         );
         let login = daat_locus_auth::LoginClient::start(password.to_vec()).unwrap();
-        let reply: Value = start(login.request())
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let reply = bootstrap_start(login.request()).await;
         let authenticated = login
             .authenticate(
                 &URL_SAFE_NO_PAD
@@ -1105,15 +1126,16 @@ mod tests {
             .join(partially_persisted.enrollment.clone(), &group)
             .unwrap();
         assert!(target_runtime.host.accounts.current().unwrap().is_none());
-        let response = client
-            .post(format!("{url}/v1/account/login/import"))
-            .header("origin", &url)
-            .header("x-daat-request", "1")
-            .json(&json!({"id":finished["import_id"],"record":URL_SAFE_NO_PAD.encode(&*private)}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let response = control::bootstrap(
+            &control_root,
+            BootstrapRequest::LoginImport {
+                id: finished["import_id"].as_str().unwrap().into(),
+                record: URL_SAFE_NO_PAD.encode(&*private),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, 204, "native import: {}", response.body);
         assert_eq!(
             target_runtime.host.account_id().as_deref(),
             Some(group.as_str())
@@ -1126,7 +1148,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .name,
-            "alice"
+            name
         );
         let login = daat_locus_auth::LoginClient::start(password.to_vec()).unwrap();
         let reply: Value = start(login.request())
@@ -1232,6 +1254,7 @@ mod tests {
                 StatusCode::NOT_FOUND
             );
         }
+        drop(control_server);
         source_runtime.stop().await;
         target_runtime.stop().await;
         a.shutdown().await;

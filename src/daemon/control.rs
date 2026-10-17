@@ -573,7 +573,9 @@ mod tests {
     #[test]
     fn process_lock_is_exclusive_and_release_keeps_the_lock_inode() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("daemon.lock");
+        // macOS temp paths can contain /var -> /private/var. The profile
+        // directory passed to guarded I/O must already be canonical.
+        let path = dir.path().canonicalize().unwrap().join("daemon.lock");
         let mut lock = super::super::DaemonLock::acquire_at_path(&path).unwrap();
         assert!(super::super::DaemonLock::acquire_at_path(&path).is_err());
         lock.release();
