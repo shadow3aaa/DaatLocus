@@ -1084,7 +1084,9 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
         .unwrap();
     for (host, priority) in [(&host_a, 100), (&host_b, 200), (&host_c, 300)] {
         let mut settings = host.settings();
-
+        // This case controls its three links explicitly; ambient discovery
+        // must not race those dials or introduce unrelated LAN traffic.
+        settings.interfaces = vec!["fixture-no-lan-interface".into()];
         settings.compute_priority = priority;
         settings.listen = "127.0.0.1:0".into();
         host.save_settings(settings).unwrap();
@@ -1290,13 +1292,25 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
             .iter()
             .any(|actor| actor.config.name == "Hosted project")
     );
-    tokio::time::timeout(Duration::from_secs(10), async {
+    // This includes replaying multiple journal pages and fetching resource
+    // bytes. Match the bounded convergence budget used after reconnection;
+    // the assertion checks replicated state, not a 10-second performance SLA.
+    let synchronized = tokio::time::timeout(Duration::from_secs(30), async {
         while shared_store::head(a.store()).unwrap() != shared_store::head(b.store()).unwrap() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
-    .await
-    .unwrap();
+    .await;
+    assert!(
+        synchronized.is_ok(),
+        "checkpoint did not replicate: head A {:?}, head B {:?}, A {}, B {}, AB {:?}, BA {:?}",
+        shared_store::head(a.store()).unwrap(),
+        shared_store::head(b.store()).unwrap(),
+        net_a.core.read().as_ref().unwrap().status(),
+        net_b.core.read().as_ref().unwrap().status(),
+        net_a.last_error(host_b.local),
+        net_b.last_error(host_a.local),
+    );
     let guidance = b
         .send_user(
             shared::ACTOR_ID,
