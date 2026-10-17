@@ -1,3 +1,4 @@
+import { codeThemeFor, type CodeTheme } from "./appearance";
 import type {
   BundledLanguage,
   BundledTheme,
@@ -6,10 +7,6 @@ import type {
 
 export type ShikiColorScheme = "light" | "dark";
 
-const SHIKI_THEME_BY_SCHEME: Record<ShikiColorScheme, BundledTheme> = {
-  light: "github-light-default",
-  dark: "github-dark-default",
-};
 const SHIKI_MAX_CODE_CHARS = 200_000;
 const SHIKI_MAX_CODE_LINES = 5_000;
 const SHIKI_MAX_LINE_LENGTH = 2_000;
@@ -41,6 +38,8 @@ export type ShikiHighlightToken = {
 
 export type ShikiHighlightedCode = {
   language: BundledLanguage;
+  background?: string;
+  foreground?: string;
   lines: ShikiHighlightToken[][];
 };
 
@@ -48,13 +47,15 @@ export async function highlightCodeWithShiki(
   code: string,
   languageOrPath: string,
   colorScheme: ShikiColorScheme = "light",
+  codeTheme: CodeTheme = "github",
 ): Promise<ShikiHighlightedCode | null> {
-  const cacheKey = `${colorScheme}\0${languageOrPath}\0${code}`;
+  const theme = codeThemeFor(colorScheme, codeTheme);
+  const cacheKey = `${theme}\0${languageOrPath}\0${code}`;
   const cached = shikiHighlightCache.get(cacheKey);
   if (cached) {
     return cached;
   }
-  const pending = highlightCodeWithShikiUncached(code, languageOrPath, colorScheme);
+  const pending = highlightCodeWithShikiUncached(code, languageOrPath, theme);
   shikiHighlightCache.set(cacheKey, pending);
   if (shikiHighlightCache.size > SHIKI_HIGHLIGHT_CACHE_LIMIT) {
     const oldest = shikiHighlightCache.keys().next().value;
@@ -68,24 +69,26 @@ export async function highlightCodeWithShiki(
 async function highlightCodeWithShikiUncached(
   code: string,
   languageOrPath: string,
-  colorScheme: ShikiColorScheme,
+  theme: BundledTheme,
 ): Promise<ShikiHighlightedCode | null> {
-  const { codeToTokensBase, bundledLanguages } = await import("shiki");
+  const { codeToTokens, bundledLanguages } = await import("shiki");
   const language = resolveShikiLanguage(languageOrPath, bundledLanguages);
   if (!language || !isHighlightableCode(code)) {
     return null;
   }
 
   try {
-    const lines = await codeToTokensBase(code, {
+    const result = await codeToTokens(code, {
       lang: language,
-      theme: SHIKI_THEME_BY_SCHEME[colorScheme],
+      theme,
       tokenizeMaxLineLength: SHIKI_MAX_LINE_LENGTH,
       tokenizeTimeLimit: SHIKI_TOKENIZE_TIME_LIMIT_MS,
     });
-    const filledLines = fillTokenGaps(code, lines);
+    const filledLines = fillTokenGaps(code, result.tokens);
     return {
       language,
+      background: result.bg,
+      foreground: result.fg,
       lines: filledLines.map((line) => line.map(shikiTokenFromThemedToken)),
     };
   } catch {

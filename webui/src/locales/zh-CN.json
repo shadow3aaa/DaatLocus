@@ -594,5 +594,36 @@
     "search_placeholder": "搜索",
     "interface_language": "应用界面语言",
     "detect_language": "自动检测"
+  },
+  "appearance": {
+    "code_theme": "代码主题",
+    "accent": "强调色",
+    "background": "背景",
+    "foreground": "前景",
+    "advanced": "高级",
+    "interface_size": "界面字号",
+    "content_size": "内容字号",
+    "code_size": "代码字号",
+    "reduced_motion": "减少动态效果",
+    "full_width": "全宽显示内容",
+    "preview": "预览",
+    "preview_text": "留一处舒适的空间，阅读、思考，完成手中的事。",
+    "reset": "恢复默认外观",
+    "invalid_color": "请输入颜色，例如 #FCFCFC。",
+    "low_contrast": "文字与背景过于接近，请换一种颜色。",
+    "color_picker": "选择{{label}}颜色",
+    "colors": {
+      "default": "默认",
+      "blue": "蓝色",
+      "green": "绿色",
+      "orange": "橙色",
+      "pink": "粉色",
+      "purple": "紫色"
+    },
+    "motion": {
+      "system": "系统",
+      "reduce": "开启",
+      "full": "关闭"
+    }
   }
 }

@@ -594,5 +594,36 @@
     "search_placeholder": "Search",
     "interface_language": "App interface language",
     "detect_language": "Auto-detect"
+  },
+  "appearance": {
+    "code_theme": "Code theme",
+    "accent": "Accent color",
+    "background": "Background",
+    "foreground": "Foreground",
+    "advanced": "Advanced",
+    "interface_size": "Interface font size",
+    "content_size": "Content font size",
+    "code_size": "Code font size",
+    "reduced_motion": "Reduce motion",
+    "full_width": "Full-width content",
+    "preview": "Preview",
+    "preview_text": "A comfortable place to read, think, and work.",
+    "reset": "Reset appearance",
+    "invalid_color": "Enter a color such as #FCFCFC.",
+    "low_contrast": "Choose a text color with more contrast.",
+    "color_picker": "Choose {{label}} color",
+    "colors": {
+      "default": "Default",
+      "blue": "Blue",
+      "green": "Green",
+      "orange": "Orange",
+      "pink": "Pink",
+      "purple": "Purple"
+    },
+    "motion": {
+      "system": "System",
+      "reduce": "On",
+      "full": "Off"
+    }
   }
 }

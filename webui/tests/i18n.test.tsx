@@ -30,10 +30,10 @@ describe("Chinese and English client preferences", () => {
     try {
       expect(readPreferences().language).toBe("system");
       values.set("daat-locus.preferences",JSON.stringify({theme:"light",language:"zh-CN"}));
-      expect(readPreferences()).toEqual({theme:"light",language:"system"});
-      savePreferences({theme:"dark",language:"zh-CN"});
-      expect(readPreferences()).toEqual({theme:"dark",language:"zh-CN"});
-      savePreferences({theme:"system",language:"system"});
+      expect(readPreferences()).toEqual({...defaultPreferences,theme:"light",language:"system"});
+      savePreferences({...defaultPreferences,theme:"dark",language:"zh-CN"});
+      expect(readPreferences()).toEqual({...defaultPreferences,theme:"dark",language:"zh-CN"});
+      savePreferences({...defaultPreferences,theme:"system",language:"system"});
       expect(readPreferences().language).toBe("system");
     } finally { if(original)Object.defineProperty(globalThis,"localStorage",original);else Reflect.deleteProperty(globalThis,"localStorage"); }
   });

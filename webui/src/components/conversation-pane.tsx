@@ -1,3 +1,4 @@
+import { motionScrollBehavior } from "@/lib/appearance";
 import { t } from "@/lib/i18n";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { ArrowDownIcon, RefreshCwIcon } from "lucide-react";
@@ -133,7 +134,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
     } catch (error) { if (filePreparation.current === preparation) setLocalError(error instanceof Error ? error.message : t("conversation_pane.attachment_upload_failed_try_again")); }
     finally { preparation.busy = false; if (filePreparation.current === preparation) setPreparingFiles(false); }
   }
-  function bottom() { follow.current = true; setAtBottom(true); scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: "smooth" }); }
+  function bottom() { follow.current = true; setAtBottom(true); scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: motionScrollBehavior() }); }
   const errors = localError || chat.error;
   return <section ref={pane} className={cn("dl-conversation", primaryView ? "dl-primary-conversation" : "dl-work-conversation", compact && "dl-conversation-compact")} aria-label={t("conversation_pane.value0_conversation", {value0: name})}>
     <ConversationConnection message={waitingMessage}>

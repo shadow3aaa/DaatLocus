@@ -1,3 +1,4 @@
+import { motionScrollBehavior } from "@/lib/appearance";
 import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { useEffect, useRef, useState } from "react";
@@ -98,7 +99,7 @@ export function Activities({ actorId, tools, onActor, nextCursor, onLoadMore }: 
 export function Approval({ record, canManage, onResolved }: { record: ApprovalRecord; canManage: boolean; onResolved(): void }) {
   const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const [open, setOpen] = useState(false);
   const actionsRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => { if (open) actionsRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }, [open]);
+  useEffect(() => { if (open) actionsRef.current?.scrollIntoView({ block: "nearest", behavior: motionScrollBehavior() }); }, [open]);
   const awaiting = record.decision === "pending" && record.mode === "ask";
   const explanation = record.mode === "ask" ? record.decision === "pending" ? canManage ? t("conversation_content.review_the_action_and_requested_access") : t("conversation_content.waiting_for_the_owner_to_approve") : record.decision === "approved" ? t("conversation_content.this_action_was_approved") : record.decision === "denied" ? t("conversation_content.this_action_was_denied") : t("conversation_content.this_action_was_cancelled") : readableSummary(record.reason) || t("conversation_content.reviewing_this_action");
   async function decide(decision: "approve" | "deny") { setBusy(true); setError(""); try { await resolveApproval(record.id, decision); onResolved(); } catch { setError(t("conversation_content.approval_status_changed_refresh_and_try_again")); } finally { setBusy(false); } }

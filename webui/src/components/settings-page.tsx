@@ -101,7 +101,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
   useImperativeHandle(ref, () => ({close: () => requestClose(false)}));
   const categories = [
     {id: "general" as const, label: t("settings_page.general"), icon: SettingsIcon, keywords: t("common.language")},
-    {id: "personal" as const, label: t("settings_dialog.appearance"), icon: SunIcon, keywords: [t("settings_dialog.theme"), t("settings_dialog.light"), t("settings_dialog.dark"), t("settings_dialog.system")].join(" ")},
+    {id: "personal" as const, label: t("settings_dialog.appearance"), icon: SunIcon, keywords: [t("settings_dialog.theme"), t("settings_dialog.light"), t("settings_dialog.dark"), t("settings_dialog.system"), t("appearance.code_theme"), t("appearance.accent"), t("appearance.interface_size"), t("appearance.content_size"), t("appearance.full_width")].join(" ")},
     ...(canManage ? [
       {id: "account" as const, label: t("settings_dialog.configuration"), icon: MonitorIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), "SSH", t("access_gate.public_connection_service")].join(" ")},
       {id: "permissions" as const, label: t("settings_dialog.permissions"), icon: ShieldCheckIcon, keywords: t("settings_dialog.approval_mode")},

@@ -1,3 +1,4 @@
+import { isCodeTheme } from "@/lib/appearance";
 import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { memo, useEffect, useState, type ReactNode } from "react";
@@ -15,17 +16,17 @@ export function CodeBlock({ code, language, startLine }: { code: string; languag
   useEffect(() => {
     let live = true;
     let revision = 0;
-    const update = () => { const current = ++revision; void highlightCodeWithShiki(code, language, document.documentElement.classList.contains("dark") ? "dark" : "light").then(value => { if (live && current === revision) setHighlight(value); }).catch(() => { if (live && current === revision) setHighlight(null); }); };
+    const update = () => { const current = ++revision; void highlightCodeWithShiki(code, language, document.documentElement.classList.contains("dark") ? "dark" : "light", isCodeTheme(document.documentElement.dataset.codeTheme) ? document.documentElement.dataset.codeTheme : "github").then(value => { if (live && current === revision) setHighlight(value); }).catch(() => { if (live && current === revision) setHighlight(null); }); };
     update();
     const observer = new MutationObserver(update);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "data-code-theme"] });
     return () => { live = false; observer.disconnect(); };
   }, [code, language]);
   useEffect(() => { if (!copied) return; const timer = setTimeout(() => setCopied(false), 1600); return () => clearTimeout(timer); }, [copied]);
   return <div className="dl-code-block">
     <div className="dl-code-heading"><span>{language || t("markdown.code")}</span><Button variant="ghost" size="sm" aria-label={t("markdown.copy_code")} onClick={() => { setCopyFailed(false); void navigator.clipboard.writeText(code).then(() => setCopied(true)).catch(() => setCopyFailed(true)); }}>{copied ? <CheckIcon data-icon="inline-start" /> : <CopyIcon data-icon="inline-start" />}{copied ? t("markdown.copied") : t("markdown.copy")}</Button></div>
     {copyFailed && <p role="alert" className="dl-operation-error">{t("conversation_content.copy_failed")}</p>}
-    <pre className={startLine != null ? "dl-numbered-source" : undefined}><code>{startLine != null ? (code.endsWith("\n") ? code.slice(0,-1) : code).split("\n").map((line,index) => <span className="dl-source-line" key={index}><span className="dl-source-number">{startLine + index}</span><span>{highlight?.lines[index] ? highlight.lines[index].map((token,part) => <span key={part} style={{color:token.color}}>{token.content}</span>) : line}</span></span>) : highlight ? highlight.lines.map((line, index) => <span className="dl-code-line" key={index}>{line.map((token, part) => <span key={part} style={{ color: token.color, fontWeight: token.fontStyle && token.fontStyle & 2 ? 700 : undefined, fontStyle: token.fontStyle && token.fontStyle & 1 ? "italic" : undefined }}>{token.content}</span>)}{index < highlight.lines.length - 1 ? "\n" : ""}</span>) : code}</code></pre>
+    <pre style={{background: highlight?.background, color: highlight?.foreground}} className={startLine != null ? "dl-numbered-source" : undefined}><code>{startLine != null ? (code.endsWith("\n") ? code.slice(0,-1) : code).split("\n").map((line,index) => <span className="dl-source-line" key={index}><span className="dl-source-number">{startLine + index}</span><span>{highlight?.lines[index] ? highlight.lines[index].map((token,part) => <span key={part} style={{color:token.color}}>{token.content}</span>) : line}</span></span>) : highlight ? highlight.lines.map((line, index) => <span className="dl-code-line" key={index}>{line.map((token, part) => <span key={part} style={{ color: token.color, fontWeight: token.fontStyle && token.fontStyle & 2 ? 700 : undefined, fontStyle: token.fontStyle && token.fontStyle & 1 ? "italic" : undefined }}>{token.content}</span>)}{index < highlight.lines.length - 1 ? "\n" : ""}</span>) : code}</code></pre>
   </div>;
 }
 
