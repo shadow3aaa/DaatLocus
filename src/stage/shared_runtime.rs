@@ -45,6 +45,7 @@ pub struct Controller {
     failure: RwLock<Option<&'static str>>,
     last_confirmed: Mutex<Instant>,
 }
+
 impl Controller {
     pub fn new(runtime: &Arc<Runtime>) -> Result<Arc<Self>> {
         let account = runtime
@@ -2538,5 +2539,205 @@ impl Controller {
             self.ready.store(false, Ordering::Release);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{actors::ActorSystem, app::AppToolExecutionContext, config::Config};
+    use serde_json::json;
+
+    async fn running_core() -> (
+        tempfile::TempDir,
+        Arc<Runtime>,
+        Arc<Controller>,
+        AppToolExecutionContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let system = ActorSystem::open_account_gated(
+            directory.path().join("data"),
+            directory.path().join("workspace"),
+            Config::default(),
+        )
+        .await
+        .unwrap();
+        let host = super::super::host::Host::load(system.clone()).unwrap();
+        host.initialize(true).unwrap();
+        let runtime = Runtime::new(host);
+        let core = Controller::new(&runtime).unwrap();
+        system.install_shared_core(&core);
+        grant(&core, runtime.host.local, Instant::now());
+        let input = system
+            .send_user(shared::ACTOR_ID, "Coordinate".into(), vec![], None)
+            .unwrap();
+        let running = system
+            .store()
+            .claim_next(shared::ACTOR_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(running.id, input.id);
+        let context = system
+            .execution_context(&system.actor(shared::ACTOR_ID).unwrap(), &running)
+            .unwrap();
+        (directory, runtime, core, context)
+    }
+
+    fn grant(core: &Controller, leader: StageId, now: Instant) {
+        core.fence
+            .lock()
+            .observe(
+                &shared::Reply {
+                    request_id: uuid::Uuid::new_v4(),
+                    accepted: true,
+                    server_time_ms: 0,
+                    head: Head::default(),
+                    epoch: 1,
+                    lease: Some(shared::Lease {
+                        epoch: 1,
+                        leader,
+                        expires_at_ms: 6000,
+                    }),
+                    peers: vec![],
+                },
+                now,
+                now,
+            )
+            .unwrap();
+        core.epoch.store(1, Ordering::Release);
+        core.recovered_epoch.store(1, Ordering::Release);
+    }
+
+    #[tokio::test]
+    async fn core_tools_remain_authorized_during_sync() {
+        let (_directory, runtime, core, context) = running_core().await;
+        // A head mismatch pauses admission without revoking the current lease.
+        core.ready.store(true, Ordering::Release);
+        let mut apps = core.model_apps().await.unwrap();
+        let call = AgentToolCall {
+            id: "sync-devices".into(),
+            name: "actors__devices".into(),
+            arguments: json!({}),
+        };
+        apps.before_tool_call(&call, &context).unwrap();
+        core.ready.store(false, Ordering::Release);
+        assert!(
+            !core.permitted(),
+            "new input must still wait for synchronization"
+        );
+        let result = apps.execute_tool(&call, &context).await.unwrap();
+        assert!(
+            result.payload["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|device| {
+                    device["stage_id"] == json!(runtime.host.local)
+                        && device["online"] == true
+                        && device["current"] == true
+                })
+        );
+        let system = &runtime.host.system;
+        let input = &context.actor_call.as_ref().unwrap().message_id;
+        assert_eq!(
+            system.store().message(input).unwrap().status,
+            MessageStatus::Running
+        );
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn core_delivery_checks_execution_authority_independently_of_admission() {
+        let (_directory, runtime, core, context) = running_core().await;
+        let system = &runtime.host.system;
+        let input = &context.actor_call.as_ref().unwrap().message_id;
+        assert!(!core.permitted());
+        let receipt = system
+            .deliver_from_actor(shared::ACTOR_ID, input, "direct", "Still authorized")
+            .unwrap();
+        assert_eq!(receipt.reply.as_deref(), Some("Still authorized"));
+        assert_eq!(receipt.in_reply_to.as_deref(), Some(input.as_str()));
+        // This boundary persists locally; the Actors App checkpoints and
+        // publishes the delivery separately before it becomes client-visible.
+        let record: String = system
+            .store()
+            .stage_transaction(|tx| {
+                Ok(tx.query_row(
+                    "SELECT record FROM messages WHERE id=?1",
+                    [&receipt.id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<crate::actors::MessageRecord>(&record).unwrap(),
+            receipt
+        );
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn core_sync_does_not_bypass_revoked_execution_or_input_authority() {
+        let (_directory, runtime, core, context) = running_core().await;
+        let system = &runtime.host.system;
+        let input = &context.actor_call.as_ref().unwrap().message_id;
+        let mut apps = core.model_apps().await.unwrap();
+        for reason in [
+            "expired",
+            "leader",
+            "epoch",
+            "unrecovered",
+            "frozen",
+            "draining",
+            "stopped",
+            "cancelled",
+        ] {
+            grant(&core, runtime.host.local, Instant::now());
+            core.frozen.lock().take();
+            core.draining.store(false, Ordering::Release);
+            core.stopped.store(false, Ordering::Release);
+            match reason {
+                "expired" => grant(
+                    &core,
+                    runtime.host.local,
+                    Instant::now() - Duration::from_secs(7),
+                ),
+                "leader" => grant(&core, StageId::new(), Instant::now()),
+                "epoch" => core.epoch.store(2, Ordering::Release),
+                "unrecovered" => core.recovered_epoch.store(0, Ordering::Release),
+                "frozen" => *core.frozen.lock() = Some((StageId::new(), Instant::now())),
+                "draining" => core.draining.store(true, Ordering::Release),
+                "stopped" => core.stopped.store(true, Ordering::Release),
+                "cancelled" => system.cancel(shared::ACTOR_ID, input).unwrap(),
+                _ => unreachable!(),
+            }
+            let call = AgentToolCall {
+                id: reason.into(),
+                name: "actors__deliver".into(),
+                arguments: json!({"content":"Must not be delivered","finish_turn":false}),
+            };
+            assert!(
+                apps.execute_tool(&call, &context).await.is_err(),
+                "{reason}"
+            );
+            assert!(
+                system
+                    .deliver_from_actor(shared::ACTOR_ID, input, reason, "Forbidden")
+                    .is_err(),
+                "{reason}"
+            );
+        }
+        let deliveries: i64 = system.store().stage_transaction(|tx| {
+            Ok(tx.query_row(
+                "SELECT count(*) FROM messages WHERE actor_id='core' AND json_extract(record,'$.kind')='delivery'",
+                [],
+                |row| row.get(0),
+            )?)
+        }).unwrap();
+        assert_eq!(
+            deliveries, 0,
+            "denied calls must not persist unpublished deliveries"
+        );
+        system.shutdown().await;
     }
 }

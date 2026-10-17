@@ -132,7 +132,7 @@ impl App for AccountActors {
             .as_ref()
             .ok_or_else(|| miette::miette!("Missing Core input"))?;
         if caller.actor_id != shared::ACTOR_ID
-            || !self.controller.permitted()
+            || !self.controller.execution_permitted()
             || !self.tool_specs().iter().any(|spec| spec.name == call.name)
         {
             return Err(miette::miette!(

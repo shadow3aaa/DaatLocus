@@ -1090,7 +1090,9 @@ impl ActorSystem {
         content: &str,
     ) -> Result<MessageRecord> {
         if sender == crate::stage::shared::ACTOR_ID
-            && self.shared_core().is_none_or(|core| !core.permitted())
+            && self
+                .shared_core()
+                .is_none_or(|core| !core.execution_permitted())
         {
             return Err(forbidden("Core worker no longer owns execution"));
         }
