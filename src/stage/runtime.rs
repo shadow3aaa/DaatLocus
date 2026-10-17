@@ -38,6 +38,7 @@ pub struct Runtime {
     account_network: tokio::sync::Mutex<Option<Arc<crate::accounts::network::Network>>>,
     pub(crate) coordination: RwLock<Option<Arc<super::coordination::Coordinator>>>,
     pub(crate) core: RwLock<Option<Arc<super::shared_runtime::Controller>>>,
+    core_task: Mutex<Option<JoinHandle<()>>>,
     errors: RwLock<HashMap<StageId, String>>,
     handles: RwLock<HashMap<StageId, PeerHandle>>,
     states: RwLock<HashMap<StageId, LinkState>>,
@@ -126,6 +127,7 @@ impl Runtime {
             host,
             account_network: tokio::sync::Mutex::new(None),
             core: RwLock::new(None),
+            core_task: Mutex::new(None),
             errors: RwLock::new(HashMap::new()),
             handles: RwLock::new(HashMap::new()),
             states: RwLock::new(HashMap::new()),
@@ -234,6 +236,7 @@ impl Runtime {
         let settings = self.host.settings();
         self.host.identity()?;
         self.host.enrollment()?;
+        super::reset::cleanup(&self.host.system)?;
         if self
             .host
             .configurations
@@ -281,9 +284,7 @@ impl Runtime {
             *self.host.core.write() = Some(Arc::downgrade(&core));
             self.host.system.install_shared_core(&core);
             *self.core.write() = Some(core.clone());
-            self.spawn(async move {
-                core.run().await;
-            });
+            *self.core_task.lock() = Some(tokio::spawn(core.run()));
         }
         let prepared = self.listener.read().clone();
         let listener = if let Some(listener) = prepared {
@@ -747,6 +748,16 @@ impl Runtime {
             let changed = changes.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
+            let reset = self.host.work_reset.record.lock().clone();
+            if let Some(record) = reset {
+                let _lifecycle = self.host.lifecycle.lock().await;
+                match self.apply_account_reset(&record).await {
+                    Ok(()) => {
+                        super::reset::completed(&self.host, &record);
+                    }
+                    Err(error) => tracing::warn!(reason=%error, "Account work reset deferred"),
+                }
+            }
             let peers = self.wanted.read().iter().copied().collect::<Vec<_>>();
             for peer in peers {
                 if let Some(handle) = self
@@ -830,6 +841,88 @@ impl Runtime {
     pub async fn stop(&self) {
         self.stop_inner(true).await;
     }
+    pub async fn reset_account_work(
+        self: &Arc<Self>,
+        expected: Option<super::reset::Generation>,
+    ) -> Result<super::reset::Generation> {
+        let _lifecycle = self.host.lifecycle.lock().await;
+        if super::reset::generation(&self.host)? != expected
+            || self.host.work_reset.record.lock().is_some()
+        {
+            return Err(StageError::Conflict(
+                "Account work changed; refresh before resetting",
+            ));
+        }
+        let record = super::reset::issue(&self.host)?;
+        super::reset::offer(&self.host, self.host.local, record.clone())?;
+        self.apply_account_reset(&record).await?;
+        super::reset::completed(&self.host, &record);
+        super::reset::verify(&self.host, &record)
+    }
+    /// Caller holds the account lifecycle lock. Transport is retained, but all
+    /// existing business channels and execution tasks are retired before deletion.
+    async fn apply_account_reset(self: &Arc<Self>, record: &super::reset::Record) -> Result<()> {
+        let next = super::reset::verify(&self.host, record)?;
+        let current = super::reset::generation(&self.host)?;
+        if current.as_ref().is_some_and(|old| old > &next)
+            || current.as_ref() == Some(&next) && !super::reset::blocked(&self.host)
+        {
+            return Ok(());
+        }
+        self.host.work_reset.active.store(true, Ordering::Release);
+        let peers = self.handles.read().values().cloned().collect::<Vec<_>>();
+        for peer in &peers {
+            peer.disconnect();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(6), async {
+            for peer in peers {
+                peer.closed().await;
+            }
+        })
+        .await
+        .map_err(|_| StageError::Unavailable("Old device operations have not stopped"))?;
+        let core = self.core.write().take();
+        if let Some(core) = core {
+            core.stop().await;
+        }
+        let task = self.core_task.lock().take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        self.host.core.write().take();
+        if current.as_ref() != Some(&next) {
+            let replaced = self.host.system.reset_account_work(record).await;
+            super::reset::initialize(&self.host)?;
+            replaced.map_err(|_| StageError::Unavailable("Cannot reset account work"))?;
+        } else {
+            super::reset::cleanup(&self.host.system)?;
+        }
+        let own = self.host.enrollment()?;
+        let member = super::identity::verify_enrollment(
+            &own.root,
+            &own.chain,
+            chrono::Utc::now().timestamp_millis(),
+            &super::revocation::removed(self.host.system.store())?,
+        )?;
+        let core = member
+            .can_enroll
+            .then(|| super::shared_runtime::Controller::new(self))
+            .transpose()?;
+        if let Some(core) = &core {
+            *self.host.core.write() = Some(Arc::downgrade(core));
+            self.host.system.install_shared_core(core);
+            *self.core.write() = Some(core.clone());
+        }
+        self.host.work_reset.active.store(false, Ordering::Release);
+        if let Some(core) = core
+            && self.running.load(Ordering::Acquire)
+        {
+            *self.core_task.lock() = Some(tokio::spawn(core.run()));
+        }
+        self.host.system.store().changed().notify_waiters();
+        Ok(())
+    }
     #[cfg(test)]
     pub(crate) async fn stop_abruptly(&self) {
         self.stop_inner(false).await;
@@ -862,6 +955,11 @@ impl Runtime {
         self.core.write().take();
         if let Some(core) = core {
             core.stop().await;
+        }
+        let core_task = self.core_task.lock().take();
+        if let Some(task) = core_task {
+            task.abort();
+            let _ = task.await;
         }
         self.coordination.write().take();
         if let Some(coordinator) = coordinator {

@@ -16,6 +16,7 @@ pub mod peer;
 pub mod protocol;
 pub mod receiver;
 pub mod recovery;
+pub mod reset;
 pub mod revocation;
 pub mod runtime;
 pub mod scheduler;

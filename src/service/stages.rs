@@ -71,7 +71,8 @@ async fn status(State(state): State<ServiceState>, headers: HeaderMap) -> ApiRes
     let runtime = runtime(&state)?;
     let core = runtime.core.read().as_ref().map(|core| core.status());
     let public_login = runtime.public_login_status().await;
-    Ok(Json(json!({"core": core,"public_login": public_login})))
+    Ok(Json(json!({"core": core,"public_login": public_login,
+        "work_generation": crate::stage::reset::generation(&runtime.host).map_err(failure)?})))
 }
 async fn settings(
     State(state): State<ServiceState>,

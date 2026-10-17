@@ -127,6 +127,11 @@ mod backpressure_tests {
                 label: "Slow test phone".into(),
             },
         };
+        let reset = Envelope {
+            body: Body::AccountWorkReset { record: None },
+            ..name.clone()
+        };
+        transport::write_frame(&mut writer, &reset).await.unwrap();
         transport::write_frame(&mut writer, &name).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while host
@@ -215,6 +220,9 @@ pub struct PeerHandle {
 impl PeerHandle {
     pub(crate) fn disconnect(&self) {
         self.stop.send_replace(true);
+    }
+    pub(crate) async fn closed(&self) {
+        self.commands.closed().await;
     }
     pub(crate) fn is_connected(&self) -> bool {
         !*self.stop.borrow() && !self.commands.is_closed()
@@ -330,6 +338,7 @@ struct Subscription {
     cursor: Option<Cursor>,
 }
 pub struct PeerLink {
+    work_generation: Option<super::reset::Generation>,
     deferred: VecDeque<(Envelope, Class, SendScope, usize)>,
     deferred_bytes: usize,
     sent_device_name: Option<String>,
@@ -365,6 +374,7 @@ impl PeerLink {
         let metrics = channel.metrics.clone();
         (
             Self {
+                work_generation: None,
                 deferred: VecDeque::new(),
                 deferred_bytes: 0,
                 sent_device_name: None,
@@ -411,6 +421,67 @@ impl PeerLink {
             expires_at_ms: time + 60000,
             body,
         }
+    }
+    fn require_work_generation(&self) -> Result<()> {
+        if super::reset::blocked(&self.host)
+            || super::reset::generation(&self.host)? != self.work_generation
+        {
+            return Err(StageError::Conflict(
+                "Account work was reset; reconnect required",
+            ));
+        }
+        Ok(())
+    }
+    async fn negotiate_reset(&mut self) -> Result<()> {
+        if super::reset::blocked(&self.host) {
+            return Err(StageError::Unavailable("Account work is resetting"));
+        }
+        self.work_generation = super::reset::generation(&self.host)?;
+        let record = super::reset::current(self.host.system.store())?;
+        self.send(
+            self.frame(Body::AccountWorkReset { record }),
+            Class::Control,
+            SendScope::Connection,
+        )?;
+        let incoming = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.channel.incoming.recv(),
+        )
+        .await
+        .map_err(|_| StageError::Unavailable("Account reset negotiation timed out"))?
+        .ok_or(StageError::Unavailable("Reset negotiation disconnected"))??;
+        let frame = incoming.frame;
+        frame.validate(
+            self.channel.peer.stage_id(),
+            self.host.local,
+            self.generation,
+            now(),
+        )?;
+        let Body::AccountWorkReset { record } = frame.body else {
+            return Err(StageError::Forbidden(
+                "Peer must negotiate account work before business traffic",
+            ));
+        };
+        let remote = record
+            .as_ref()
+            .map(|record| super::reset::verify(&self.host, record))
+            .transpose()?;
+        if remote > self.work_generation {
+            super::reset::offer(
+                &self.host,
+                self.channel.peer.stage_id(),
+                record.expect("a newer generation has a signed record"),
+            )?;
+            return Err(StageError::Conflict(
+                "Account reset must be applied before reconnecting",
+            ));
+        }
+        if remote != self.work_generation {
+            return Err(StageError::Conflict(
+                "Peer must apply account reset before reconnecting",
+            ));
+        }
+        self.require_work_generation()
     }
     fn send(&mut self, mut frame: Envelope, class: Class, scope: SendScope) -> Result<()> {
         frame.generation = self.generation;
@@ -461,6 +532,9 @@ impl PeerLink {
         Ok(())
     }
     pub async fn run(mut self) -> Result<()> {
+        // A new link exchanges only signed reset facts until both peers agree
+        // on the work generation. No old snapshot, delivery or effect can cross it.
+        self.negotiate_reset().await?;
         if self.account_credential_authority().is_ok() {
             self.request(
                 Body::AccountCredentialsQuery {
@@ -566,6 +640,7 @@ impl PeerLink {
         };
         for task in self.core_tasks.drain(..) {
             task.abort();
+            let _ = task.await;
         }
         for (_, (_, pending)) in self.pending.drain() {
             if let Pending::Rpc(response) = pending {
@@ -576,6 +651,7 @@ impl PeerLink {
         result
     }
     fn command(&mut self, command: Command) -> Result<()> {
+        self.require_work_generation()?;
         match command {
             Command::FetchExport {
                 export,
@@ -832,6 +908,7 @@ impl PeerLink {
         Ok(())
     }
     fn publish(&mut self) -> Result<()> {
+        self.require_work_generation()?;
         if self.deferred.len() >= 8 {
             return Ok(());
         }
@@ -987,6 +1064,7 @@ impl PeerLink {
         Ok(())
     }
     fn receive(&mut self, frame: Envelope) -> Result<()> {
+        self.require_work_generation()?;
         let current = StageLedger::attach(self.host.system.store(), self.host.local)
             .peer(self.channel.peer.stage_id(), now())?;
         frame.validate(
@@ -1017,6 +1095,9 @@ impl PeerLink {
         }
         let receiver = StageReceiver::new(self.host.system.clone());
         match &frame.body {
+            Body::AccountWorkReset { .. } => {
+                Err(StageError::Conflict("Reset negotiation already completed"))
+            }
             Body::DeviceName { label } => self
                 .host
                 .record_device_label(self.channel.peer.stage_id(), label),

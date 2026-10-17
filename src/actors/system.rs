@@ -448,38 +448,7 @@ impl ActorSystem {
             }),
         };
         if system.store().actor(ROOT_ACTOR_ID).is_err() {
-            let workspace = canonical_path(&workspace)?;
-            let mut permissions = ActorPermissions::workspace(workspace.clone(), false);
-            if let Some(home) = std::env::home_dir() {
-                let skills = home.join(".agents/skills");
-                if skills.is_dir() {
-                    permissions.readable_roots.push(canonical_path(&skills)?);
-                }
-            }
-            let root = ActorConfig {
-                name: "Daat Locus".into(),
-                workspace,
-                apps: crate::builtin_apps::DEFAULT_APPS
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-                model: None,
-                instructions: String::new(),
-                permissions,
-            };
-            let root = normalize_config(root)?;
-            system.validate_config(&root)?;
-            std::fs::create_dir_all(&root.workspace).into_diagnostic()?;
-            let record = ActorRecord {
-                context: Default::default(),
-                id: ROOT_ACTOR_ID.into(),
-                parent_id: None,
-                depth: 0,
-                config: root,
-                status: ActorStatus::Idle,
-                created_at_ms: now(),
-                updated_at_ms: now(),
-            };
+            let record = system.initial_root(workspace)?;
             system.prepare_dirs(&record.id)?;
             system.store().save_actor(&record)?;
         }
@@ -585,6 +554,75 @@ impl ActorSystem {
     }
     pub fn actor_state_dir(&self, id: &str) -> PathBuf {
         self.inner.data_dir.join("apps").join(id)
+    }
+    pub(crate) fn remove_reset_app_data(&self) -> Result<()> {
+        // Both directories are framework-owned, outside all Actor workspaces.
+        // std::fs::remove_dir_all does not follow symlinks/reparse points.
+        for path in [
+            self.inner.data_dir.join("apps"),
+            self.inner.delivery_dir.clone(),
+        ] {
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).into_diagnostic(),
+            }
+        }
+        self.prepare_dirs(ROOT_ACTOR_ID)
+    }
+    pub(crate) async fn reset_account_work(
+        &self,
+        record: &crate::stage::reset::Record,
+    ) -> Result<()> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        let pause = Reconfiguration::begin(&self.inner.reconfiguring, &self.inner.metadata);
+        let root = self.initial_root(self.actor(ROOT_ACTOR_ID)?.config.workspace)?;
+        let workers: Vec<_> = self.inner.workers.lock().drain().collect();
+        for (_, worker) in &workers {
+            worker.control.stop.store(true, Ordering::Release);
+            worker.control.wake.notify_one();
+        }
+        for (id, worker) in workers {
+            self.stop_actor_worker(&id, worker).await?;
+        }
+        crate::stage::reset::replace(self.store(), record, &root)
+            .map_err(|error| miette::miette!("{error}"))?;
+        crate::stage::reset::cleanup(self).map_err(|error| miette::miette!("{error}"))?;
+        drop(pause);
+        Ok(())
+    }
+    fn initial_root(&self, workspace: PathBuf) -> Result<ActorRecord> {
+        let workspace = canonical_path(&workspace)?;
+        let mut permissions = ActorPermissions::workspace(workspace.clone(), false);
+        if let Some(home) = std::env::home_dir() {
+            let skills = home.join(".agents/skills");
+            if skills.is_dir() {
+                permissions.readable_roots.push(canonical_path(&skills)?);
+            }
+        }
+        let root = ActorRecord {
+            id: ROOT_ACTOR_ID.into(),
+            parent_id: None,
+            depth: 0,
+            config: normalize_config(ActorConfig {
+                name: "Daat Locus".into(),
+                workspace,
+                apps: crate::builtin_apps::DEFAULT_APPS
+                    .iter()
+                    .map(|app| (*app).into())
+                    .collect(),
+                model: None,
+                instructions: String::new(),
+                permissions,
+            })?,
+            context: Default::default(),
+            status: ActorStatus::Idle,
+            created_at_ms: now(),
+            updated_at_ms: now(),
+        };
+        self.validate_config(&root.config)?;
+        std::fs::create_dir_all(&root.config.workspace).into_diagnostic()?;
+        Ok(root)
     }
     fn prepare_dirs(&self, id: &str) -> Result<()> {
         for directory in [self.actor_state_dir(id), self.actor_data_dir(id)] {

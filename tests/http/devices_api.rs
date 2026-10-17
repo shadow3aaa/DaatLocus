@@ -660,7 +660,6 @@ async fn core_readiness_rejects_unsynchronized_input_without_queuing_it() {
         .await
         .unwrap();
     assert!(status["core"].is_null());
-    assert_eq!(status.as_object().unwrap().len(), 2);
     assert_eq!(status["public_login"]["state"], "not_configured");
     assert!(status["public_login"]["error_code"].is_null());
     let controller = daat_locus::stage::shared_runtime::Controller::new(&f.stage).unwrap();

@@ -118,6 +118,7 @@ pub struct Host {
     enrollment: RwLock<Option<Enrollment>>,
     settings: RwLock<Settings>,
     pub lifecycle: tokio::sync::Mutex<()>,
+    pub(crate) work_reset: super::reset::Pending,
 }
 impl Host {
     /// Loading preserves the device identity; login/discovery prepares missing keys.
@@ -208,7 +209,7 @@ impl Host {
             }
             StageLedger::initialize(system.store(), local, &own.root)?;
         }
-        Ok(Arc::new(Self {
+        let host = Arc::new(Self {
             configurations: crate::accounts::configuration::ConfigurationStore::open(
                 &system.account_credentials_dir(),
             )
@@ -224,7 +225,10 @@ impl Host {
             enrollment: RwLock::new(enrollment),
             settings: RwLock::new(settings),
             lifecycle: tokio::sync::Mutex::new(()),
-        }))
+            work_reset: Default::default(),
+        });
+        super::reset::initialize(&host)?;
+        Ok(host)
     }
     pub fn identity(&self) -> Result<Arc<DeviceIdentity>> {
         self.identity

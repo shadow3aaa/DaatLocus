@@ -66,9 +66,14 @@ client are connected.
   instructions, read-only identity, filesystem roots, recipients or tool allowlists.
   User permission controls only switch Full access / Ask / Auto; model selection
   stays a composer preference. Actor creation happens through the Actors App,
-  with inherited creation constraints. Actors cannot be deleted by users or models.
-- All Actors retain identity, configuration, context, and history. Do not expose
-  Actor deletion in the client, HTTP API, native protocol or model tools.
+  with inherited creation constraints. Actors have no individual deletion operation.
+- All Actors retain identity, configuration, context, and history outside an
+  explicit Owner account-wide work reset. This settings-only maintenance operation
+  stops execution, clears Actors, history, resources and grants across devices,
+  and recreates the initial Core; it preserves credentials, models, device trust
+  and workspace files. Signed reset generations fence old business traffic before
+  reconnecting replicas synchronize. Never expose reset to models or Apps, or add
+  individual Actor deletion in the client, HTTP API or native protocol.
   Completion, idleness, restart or worker shutdown must not recycle an Actor.
 - Project, read-only investigation, and general Actors use the same core with
   different Apps and access constraints. Enforce read-only and folder scope in

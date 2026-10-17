@@ -41,6 +41,8 @@ openraft::declare_raft_types!(pub Types: D = Proposal, R = Outcome, NodeId = Nod
 pub type DeviceRaft = Raft<Types>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Proposal {
+    #[serde(default)]
+    work_generation: Option<crate::stage::reset::Generation>,
     caller: StageId,
     operation: shared::Operation,
     acknowledgements: Vec<StageId>,
@@ -417,6 +419,7 @@ impl Coordinator {
                 let result = tokio::time::timeout(
                     Duration::from_secs(3),
                     self.raft.client_write(Proposal {
+                        work_generation: crate::stage::reset::generation(&runtime.host)?,
                         caller: peer,
                         operation,
                         acknowledgements,

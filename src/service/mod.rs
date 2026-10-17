@@ -4,6 +4,7 @@ mod approvals;
 mod auth;
 mod conversation;
 mod remote;
+mod reset;
 mod resources;
 mod stages;
 mod stream;
@@ -132,6 +133,7 @@ pub fn router(state: ServiceState) -> Router {
         .merge(remote::routes())
         .merge(approvals::routes())
         .merge(auth::routes())
+        .merge(reset::routes())
         .merge(conversation::routes())
         .fallback(webui::serve)
         .layer(DefaultBodyLimit::max(1024 * 1024))
@@ -292,6 +294,13 @@ pub(crate) async fn mutation_origin(
 
 pub(crate) async fn manage(state: &ServiceState, headers: &HeaderMap) -> ApiResult<()> {
     owner(state, headers).await?;
+    if state
+        .stage
+        .as_ref()
+        .is_some_and(|runtime| crate::stage::reset::blocked(&runtime.host))
+    {
+        return Err(ApiError::unavailable());
+    }
     mutation_origin(state, headers, true).await
 }
 

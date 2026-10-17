@@ -55,6 +55,8 @@ struct Advertised {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct State {
+    #[serde(default)]
+    work_generation: Option<crate::stage::reset::Generation>,
     last: Option<LogId<NodeId>>,
     membership: StoredMembership<NodeId, openraft::EmptyNode>,
     term: u64,
@@ -67,6 +69,18 @@ struct State {
 }
 impl State {
     fn apply(&mut self, id: LogId<NodeId>, proposal: &Proposal) -> Outcome {
+        if proposal.work_generation < self.work_generation {
+            return self.outcome(false, proposal.time);
+        }
+        if proposal.work_generation > self.work_generation {
+            self.work_generation = proposal.work_generation.clone();
+            self.head = Head::default();
+            self.epoch = self.epoch.saturating_add(1);
+            self.lease = None;
+            self.lease_instance = None;
+            self.candidates.clear();
+            self.handoff_after = 0;
+        }
         if self.term != id.leader_id.term {
             self.term = id.leader_id.term;
             self.lease = None;
@@ -227,6 +241,9 @@ impl State {
                 }
             }
         }
+        self.outcome(accepted, now)
+    }
+    fn outcome(&self, accepted: bool, now: i64) -> Outcome {
         Outcome {
             reply: shared::Reply {
                 request_id: uuid::Uuid::nil(),
@@ -566,6 +583,47 @@ mod tests {
     }
 
     #[test]
+    fn reset_retires_old_execution_without_changing_raft_membership() {
+        let device = StageId::default();
+        let instance = uuid::Uuid::new_v4();
+        let mut state = active(device, instance);
+        state.head = Head {
+            sequence: 42,
+            hash: "a".repeat(64),
+        };
+        let membership = serde_json::to_value(&state.membership).unwrap();
+        let old_renewal = Proposal {
+            work_generation: None,
+            caller: device,
+            operation: Operation::Renew {
+                epoch: 7,
+                head: state.head.clone(),
+            },
+            acknowledgements: vec![],
+            time: 1000,
+            claim_ready: true,
+            instance,
+        };
+        assert!(propose(&mut state, old_renewal.clone()).accepted);
+        let reset = Proposal {
+            work_generation: Some(crate::stage::reset::Generation {
+                revision: 1,
+                writer: device,
+            }),
+            operation: Operation::Inspect,
+            ..old_renewal.clone()
+        };
+        let reply = propose(&mut state, reset);
+        assert!(reply.accepted);
+        assert_eq!(reply.head, Head::default());
+        assert!(reply.lease.is_none());
+        assert!(reply.epoch > 7);
+        assert_eq!(serde_json::to_value(&state.membership).unwrap(), membership);
+        assert!(!propose(&mut state, old_renewal).accepted);
+        assert_eq!(state.head, Head::default());
+        assert!(state.lease.is_none());
+    }
+    #[test]
     fn business_commit_requires_distinct_majorities_of_both_joint_configs() {
         let a = StageId::default();
         let b = StageId::default();
@@ -588,6 +646,7 @@ mod tests {
             hash: "a".repeat(64),
         };
         let proposal = Proposal {
+            work_generation: None,
             caller: a,
             operation: Operation::Commit {
                 epoch: 7,
@@ -616,6 +675,7 @@ mod tests {
         let mut restored: State =
             serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
         let mut proposal = Proposal {
+            work_generation: None,
             caller: device,
             operation: Operation::Advertise {
                 head: Head::default(),

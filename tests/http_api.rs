@@ -9,6 +9,8 @@ mod configuration;
 mod conversation;
 #[path = "http/devices_api.rs"]
 mod devices;
+#[path = "http/reset_api.rs"]
+mod reset;
 #[path = "http/resources_api.rs"]
 mod resources;
 #[path = "http/stream_api.rs"]
