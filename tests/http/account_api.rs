@@ -1,5 +1,6 @@
 //! Account HTTP contracts.
 use crate::support::Fixture;
+use daat_locus_client_protocol::BootstrapRequest;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -40,28 +41,51 @@ async fn account_registration_login_replay_and_profile_boundaries_are_enforced()
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "{}",
-        response.text().await.unwrap()
-    );
-    let response: Value = response.json().await.unwrap();
+    let response: Value = if cfg!(target_os = "macos") {
+        // HTTP cannot prove the macOS socket owner. Keep that rejection and
+        // exercise the same native OS-owner channel used by the client.
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let native = fresh
+            .native_bootstrap(BootstrapRequest::RegisterStart {
+                name: "Fresh_Account".into(),
+                request: B64.encode(client.request()),
+            })
+            .await;
+        assert_eq!(native.status, 200, "{}", native.body);
+        native.body
+    } else {
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            response.text().await.unwrap()
+        );
+        response.json().await.unwrap()
+    };
     assert_eq!(response["name"], "fresh_account");
     let upload = client
         .finish(&B64.decode(response["response"].as_str().unwrap()).unwrap())
         .unwrap();
     let finish = json!({"id":response["id"],"message":B64.encode(upload)});
-    assert_eq!(
+    let status = if cfg!(target_os = "macos") {
+        fresh
+            .native_bootstrap(BootstrapRequest::RegisterFinish {
+                id: finish["id"].as_str().unwrap().into(),
+                message: finish["message"].as_str().unwrap().into(),
+            })
+            .await
+            .status
+    } else {
         fresh
             .owner(reqwest::Method::POST, "/v1/account/registration/finish")
             .json(&finish)
             .send()
             .await
             .unwrap()
-            .status(),
-        StatusCode::NO_CONTENT
-    );
+            .status()
+            .as_u16()
+    };
+    assert_eq!(status, 204);
     assert_eq!(
         fresh
             .owner(reqwest::Method::POST, "/v1/account/registration/finish")
@@ -353,28 +377,29 @@ async fn login_errors_distinguish_discovery_failure_and_expired_attempts() {
     settings.listen = "127.0.0.1:0".into();
     f.stage.host.save_settings(settings.clone()).unwrap();
     let client = daat_locus_auth::LoginClient::start(b"never sent in HTTP".to_vec()).unwrap();
-    let input = json!({"name":"absent-account","request":B64.encode(client.request())});
     let response = f
-        .owner(reqwest::Method::POST, "/v1/account/login/start")
-        .json(&input)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let error: Value = response.json().await.unwrap();
+        .native_bootstrap(BootstrapRequest::LoginStart {
+            name: "absent-account".into(),
+            request: B64.encode(client.request()),
+            exclude: vec![],
+        })
+        .await;
+    assert_eq!(response.status, 503);
+    let error = response.body;
     assert_eq!(error["code"], "login_connection_required");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     settings.signaling_origin = Some(format!("wss://{}", listener.local_addr().unwrap()));
     drop(listener);
     f.stage.host.save_settings(settings).unwrap();
     let response = f
-        .owner(reqwest::Method::POST, "/v1/account/login/start")
-        .json(&input)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let error: Value = response.json().await.unwrap();
+        .native_bootstrap(BootstrapRequest::LoginStart {
+            name: "absent-account".into(),
+            request: B64.encode(client.request()),
+            exclude: vec![],
+        })
+        .await;
+    assert_eq!(response.status, 503);
+    let error = response.body;
     assert_eq!(error["code"], "login_relay_unavailable");
     for forbidden in [
         "never sent in HTTP",

@@ -31,6 +31,7 @@ pub struct Fixture {
     pub auth: AccountStore,
     pub client: Client,
     pub server: tokio::task::JoinHandle<()>,
+    control: Option<daat_locus::daemon::control::Server>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -38,6 +39,15 @@ impl Drop for Fixture {
     }
 }
 impl Fixture {
+    pub async fn native_bootstrap(
+        &self,
+        input: daat_locus_client_protocol::BootstrapRequest,
+    ) -> daat_locus_client_protocol::BootstrapReply {
+        let server = self.control.as_ref().expect("fresh account control server");
+        daat_locus::daemon::control::bootstrap(&server.status().root, input)
+            .await
+            .unwrap()
+    }
     pub async fn login_cookie(&self) -> String {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
         let password = self.password.read().clone();
@@ -187,6 +197,26 @@ impl Fixture {
             .unwrap();
             auth.install(bundle, &group).unwrap();
         }
+        let control = if initialize_account {
+            None
+        } else {
+            let root = temp.path().canonicalize().unwrap();
+            Some(
+                daat_locus::daemon::control::Server::bind(
+                    root.clone(),
+                    root,
+                    daat_locus::daemon::control::LaunchOptions {
+                        profile: None,
+                        listen: listener.local_addr().unwrap(),
+                        workspace: system.actor(ROOT_ACTOR_ID).unwrap().config.workspace,
+                    },
+                    url.clone(),
+                    Some(state.clone()),
+                )
+                .await
+                .unwrap(),
+            )
+        };
         let app = router(state);
         let server = tokio::spawn(async move {
             axum::serve(
@@ -204,6 +234,7 @@ impl Fixture {
             auth,
             client: daat_locus::http_client::builder().build().unwrap(),
             server,
+            control,
             cookie: parking_lot::RwLock::new(String::new()),
             password: parking_lot::RwLock::new("isolated fixture password".into()),
         };
