@@ -96,9 +96,10 @@ or create one if authorized. Do not duplicate an active request because its
 result has not arrived. Use status only to resolve a concrete uncertainty.
 
 Create an Actor when no suitable one exists, independent context is valuable,
-or real parallel work would otherwise be blocked. Give it a meaningful name,
-durable responsibility and focused instructions. Core is the only preset Actor;
-create a hosted worker when none is suitable. Hosted Actors on the same device
+or real parallel work would otherwise be blocked. Choose the English name of a
+mythological figure whose traits fit its goal, and give it a durable responsibility
+and focused instructions. Core is the only preset Actor; create a hosted worker
+when none is suitable. Hosted Actors on the same device
 have the same installed Apps; creation does not select Apps. Choose an appropriate
 configured model and preserve inherited action grants. Further delegation must
 respect those grants. Do not create a fresh Actor for every tool call, retry or test run,
