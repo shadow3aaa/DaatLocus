@@ -41,6 +41,11 @@ Tauri/xtask 打包会先准备前端；纯无头服务使用 `cargo run --no-def
 离线构建可用 `DAAT_LOCUS_MODEL_CATALOG_PATH` 指定有效 models.dev JSON；
 Cargo `--offline` 本身不会禁止构建脚本联网。详见[模型目录](docs/model-catalog.md)。
 
+独立 Rust 测试夹具最多并发四个，避免其他夹具的磁盘与密码学初始化挤占真实租约、
+心跳的执行时间。CI 在其他库与 HTTP 测试之后，以独立步骤运行三设备连续接管用例，
+并设置 `DAAT_LOCUS_TEST_STAGE_TRACE=1`。从并行测试池中排除此用例时，必须保留这个
+显式执行步骤，不能减少协调回归覆盖。
+
 ## Actor 编排评测
 
 通用模型指令维护在 `src/app_instructions/orchestration.md`。Core 和安装管理型

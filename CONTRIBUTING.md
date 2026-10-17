@@ -89,6 +89,9 @@ full product usability or cross-platform isolation.
 Limit independent Rust test fixtures to four concurrent cases. Device contract
 cases still run concurrent peer runtimes; this avoids OS I/O and cryptographic
 setup in unrelated fixtures starving the real lease and heartbeat deadlines.
+CI runs the three-device sequential takeover case in a separate step, with
+`DAAT_LOCUS_TEST_STAGE_TRACE=1`, after the other library and HTTP tests. Keep
+this explicit execution when excluding it from the parallel test pool.
 
 Public signaling and account-sync checks use disposable identities and mock models.
 Set `DAAT_LOCUS_TEST_STAGE_SIGNALING` to an explicitly chosen WSS origin, then run
