@@ -276,6 +276,16 @@ The signing properties and keystore stay outside the repository; see
 Android build-tools `apksigner verify --verbose --print-certs`, and check 16 KiB
 ELF page alignment on the native library. Do not commit signing credentials.
 
+Android release keeps the performance-oriented workspace profile and panic
+unwinding. The linker uses API-23-compatible APS2 packed relocations and 16 KiB
+ELF page alignment. Gradle compresses JNI libraries in the APK and extracts them
+at install time; this reduces download size at the cost of retaining an extracted
+library alongside the installed APK. Keep R8 and resource shrinking enabled.
+The Android dependency graph excludes the desktop Chromium/Viewpoint runtime;
+HTTP and device transports share ring while HTTPS retains platform certificate
+verification. Host build dependencies may still use another crypto provider and
+do not count toward the APK's runtime dependency graph.
+
 Validate the signed, minified release APK on a device; a debug launch does not
 exercise R8. The `ReleaseStartupTest` instrumentation test loads the embedded
 account login without creating an account. Use a dedicated test installation.

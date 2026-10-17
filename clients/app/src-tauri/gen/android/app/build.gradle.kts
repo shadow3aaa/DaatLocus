@@ -12,8 +12,15 @@ val signingProperties = Properties().apply {
     if (source != null) file(source).inputStream().use { load(it) }
 }
 
-// Cargo pins the matching JVM verifier implementation; never use an unrelated Maven release.
-val verifierArchive = providers.exec {
+repositories {
+    maven {
+        url = uri("https://github.com/rustls/rustls-platform-verifier/raw/maven-archive/android-release-support/maven/")
+        content { includeModule("org.rustls", "rustls-platform-verifier") }
+    }
+}
+
+// Cargo pins the matching JVM verifier implementation, including its Maven version.
+val verifierVersion = providers.exec {
     workingDir(file("../../../../../../"))
     commandLine("cargo", "metadata", "--manifest-path", file("../../../../../../Cargo.toml").absolutePath, "--format-version", "1", "--locked", "--filter-platform", "aarch64-linux-android")
 }.standardOutput.asText.map { output ->
@@ -21,11 +28,7 @@ val verifierArchive = providers.exec {
     @Suppress("UNCHECKED_CAST")
     val packages = metadata["packages"] as List<Map<*, *>>
     val verifier = packages.single { it["name"] == "rustls-platform-verifier-android" }
-    val manifest = verifier["manifest_path"] as String
-    val version = verifier["version"] as String
-    File(File(manifest).parentFile, "maven/rustls/rustls-platform-verifier/$version/rustls-platform-verifier-$version.aar").also {
-        require(it.isFile) { "Cargo-pinned Android TLS verifier is missing" }
-    }
+    verifier["version"] as String
 }
 
 val tauriProperties = Properties().apply {
@@ -92,6 +95,10 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    packaging {
+        // Compress the distributable APK; Android extracts the library at install time.
+        jniLibs.useLegacyPackaging = true
+    }
 }
 
 kotlin {
@@ -105,12 +112,12 @@ rust {
 }
 
 dependencies {
-    implementation(files(verifierArchive))
-    implementation("androidx.webkit:webkit:1.14.0")
-    implementation("androidx.appcompat:appcompat:1.7.1")
-    implementation("androidx.activity:activity-ktx:1.10.1")
-    implementation("com.google.android.material:material:1.12.0")
-    implementation("androidx.lifecycle:lifecycle-process:2.9.4")
+    implementation(verifierVersion.map { "org.rustls:rustls-platform-verifier:$it" })
+    implementation("androidx.webkit:webkit:1.17.1")
+    implementation("androidx.appcompat:appcompat:1.8.0")
+    implementation("androidx.activity:activity-ktx:1.13.0")
+    implementation("com.google.android.material:material:1.14.0")
+    implementation("androidx.lifecycle:lifecycle-process:2.11.0")
     testImplementation("junit:junit:4.13.2")
 }
 

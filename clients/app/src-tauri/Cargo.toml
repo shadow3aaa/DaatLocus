@@ -49,7 +49,7 @@ serde_json = "1"
 
 [target.'cfg(target_os = "android")'.dependencies]
 mimalloc = { workspace = true, features = ["local_dynamic_tls"] }
-tauri = { version = "2", features = ["image-png"] }
+tauri = { version = "2", features = [] }
 daat-locus = { path = "../../..", default-features = false }
 axum = "0.8"
 tracing = "0.1"

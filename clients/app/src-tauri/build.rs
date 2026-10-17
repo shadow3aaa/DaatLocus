@@ -4,6 +4,8 @@ fn main() {
     if android {
         // NDK 27 needs this opt-in for Android devices with 16 KiB pages.
         println!("cargo:rustc-link-arg=-Wl,-z,max-page-size=16384");
+        // APS2 relocations are supported since API 23 (our minimum is 24).
+        println!("cargo:rustc-link-arg=-Wl,--pack-dyn-relocs=android");
     }
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../../..");
     if env::var_os("CARGO_FEATURE_CUSTOM_PROTOCOL").is_some() {

@@ -7,7 +7,7 @@ if (!target || !["aarch64", "x86_64"].includes(target)) throw new Error("Unsuppo
 if (!debug && (!process.env.DAAT_LOCUS_ANDROID_SIGNING || !existsSync(process.env.DAAT_LOCUS_ANDROID_SIGNING))) {
   throw new Error("DAAT_LOCUS_ANDROID_SIGNING must reference private release signing properties");
 }
-const child = Bun.spawn([process.execPath, "run", "tauri", "android", "build", "--target", target, "--apk", ...(debug ? ["--debug"] : [])], {
+const child = Bun.spawn([process.execPath, "run", "tauri", "android", "build", "--features", "custom-protocol", "--target", target, "--apk", ...(debug ? ["--debug"] : [])], {
   cwd: resolve(import.meta.dir, ".."), env: { ...process.env, DAAT_LOCUS_BUILD_WEBUI: "0", DAAT_LOCUS_ANDROID_ABI: target === "aarch64" ? "arm64-v8a" : "x86_64" }, stdin: "inherit", stdout: "inherit", stderr: "inherit",
 });
 process.exit(await child.exited);
