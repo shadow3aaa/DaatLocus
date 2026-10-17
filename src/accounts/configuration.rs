@@ -179,8 +179,6 @@ impl ConfigurationStore {
             || data.revision == u64::MAX
             || data.account != own_account
             || data.writer != member.device.stage_id
-            || data.models.len() > 256
-            || data.providers.len() > 64
         {
             return Err(miette!("Configuration does not belong to this account"));
         }

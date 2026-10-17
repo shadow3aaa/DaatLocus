@@ -853,12 +853,6 @@ impl ActorSystem {
         base: &AppToolExecutionContext,
         requested: &ToolPermissionRequest,
     ) -> Result<AppToolExecutionContext> {
-        if requested.readable_roots.len() > 32 || requested.writable_roots.len() > 32 {
-            return Err(invalid("Too many operation-scoped permission requests"));
-        }
-        if requested.operation_details.to_string().len() > 16 * 1024 {
-            return Err(invalid("App operation context exceeds the approval limit"));
-        }
         let call = base
             .actor_call
             .as_ref()
@@ -969,9 +963,6 @@ impl ActorSystem {
         {
             return Err(ActorError::Unavailable("Actor configuration is changing".into()).into());
         }
-        if self.store().actor_count()? >= 512 || parent.depth >= 8 {
-            return Err(ActorError::Unavailable("Actor capacity reached".into()).into());
-        }
         let config = self.hosted_config(config)?;
         self.validate_config(&config)?;
         crate::file_io::ensure_directory(
@@ -982,7 +973,10 @@ impl ActorSystem {
             context: Default::default(),
             id: Uuid::new_v4().to_string(),
             parent_id: Some(parent.id.clone()),
-            depth: parent.depth + 1,
+            depth: parent
+                .depth
+                .checked_add(1)
+                .ok_or_else(|| invalid("Actor depth overflow"))?,
             config,
             status: ActorStatus::Idle,
             created_at_ms: now(),
@@ -1344,10 +1338,7 @@ impl ActorSystem {
         {
             return Err(ActorError::Unavailable("Agent configuration is not ready".into()).into());
         }
-        if content.len() > 64 * 1024
-            || attachments.len() > 4
-            || content.trim().is_empty() && attachments.is_empty()
-        {
+        if content.len() > 64 * 1024 || content.trim().is_empty() && attachments.is_empty() {
             return Err(invalid("Invalid message or attachment count"));
         }
         if idempotency_key
@@ -1972,6 +1963,33 @@ mod tests {
         .unwrap();
         system.seed_test_actor(FIXTURE_ACTOR_ID);
         (directory, system)
+    }
+
+    #[tokio::test]
+    async fn actors_remain_creatable_beyond_former_count_and_depth_quotas() {
+        let (_directory, system) = fixture().await;
+        let root = system.actor(FIXTURE_ACTOR_ID).unwrap();
+        for index in 0..512 {
+            let mut actor = root.clone();
+            actor.id = format!("retained-{index}");
+            actor.parent_id = Some(root.id.clone());
+            actor.depth = root.depth + 1;
+            system.store().save_actor(&actor).unwrap();
+        }
+        let before = system.store().actor_count().unwrap();
+        let mut parent = root;
+        for _ in 0..10 {
+            let child = system
+                .create_owned(&parent.id, parent.config.clone())
+                .unwrap();
+            assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+            assert_eq!(child.depth, parent.depth + 1);
+            assert_eq!(child.status, ActorStatus::Idle);
+            parent = child;
+        }
+        assert_eq!(system.store().actor_count().unwrap(), before + 10);
+        assert_eq!(system.resident_workers(), 0);
+        system.shutdown().await;
     }
 
     #[tokio::test]

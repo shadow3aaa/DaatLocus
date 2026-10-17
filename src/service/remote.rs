@@ -694,9 +694,6 @@ async fn send(
     manage(&s, &h).await?;
     let target = address(stage, id)?;
     let handle = authorize(&s, &h, &target).await?;
-    if input.attachments.len() > 4 {
-        return Err(ApiError::invalid());
-    }
     let mut attachments = Vec::new();
     for id in input.attachments {
         let descriptor = read(&s, &h, target.clone(), Read::Resource { id }).await?;

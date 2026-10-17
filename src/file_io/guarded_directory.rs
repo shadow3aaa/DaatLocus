@@ -236,15 +236,12 @@ impl GuardedDirectory {
 
     /// Enumerate the pinned directory itself, never reopen a path that Unix
     /// can rename after authorization. Only names are returned to callers.
-    pub(super) fn names(&self, limit: usize) -> io::Result<Vec<OsString>> {
+    pub(super) fn names(&self) -> io::Result<Vec<OsString>> {
         #[cfg(windows)]
         {
             let mut names = Vec::new();
             for entry in fs::read_dir(&self.path)? {
                 names.push(entry?.file_name());
-                if names.len() > limit {
-                    break;
-                }
             }
             Ok(names)
         }
@@ -298,15 +295,11 @@ impl GuardedDirectory {
                     continue;
                 }
                 names.push(OsStr::from_bytes(name).to_owned());
-                if names.len() > limit {
-                    break;
-                }
             }
             Ok(names)
         }
         #[cfg(not(any(unix, windows)))]
         {
-            let _ = limit;
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "guarded enumeration unavailable",
@@ -596,7 +589,7 @@ mod tests {
         drop(guard.create_new(OsStr::new("new")).unwrap());
         assert!(dir.path().join("moved/new").exists());
         assert!(!outside.path().join("new").exists());
-        let names = guard.names(10).unwrap();
+        let names = guard.names().unwrap();
         assert_eq!(names, [OsString::from("new")]);
     }
     #[test]

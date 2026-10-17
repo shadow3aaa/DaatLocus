@@ -18,7 +18,6 @@ use url::Url;
 
 type Result<T> = std::result::Result<T, String>;
 const UNAVAILABLE: &str = "Native service request unavailable";
-const MAX_BODY: usize = 32 * 1024 * 1024;
 const MAX_CHUNK: usize = 256 * 1024;
 const NATIVE_UI_MARKER: &str = if cfg!(feature = "custom-protocol") {
     "DaatLocus.NativeWebUI.v1"
@@ -184,8 +183,7 @@ impl Transport {
                 | Method::PUT
                 | Method::PATCH
                 | Method::DELETE
-        ) || body.len() > MAX_BODY
-            || metadata.headers.len() > 24
+        ) || metadata.headers.len() > 24
         {
             return Err(UNAVAILABLE.into());
         }
@@ -250,9 +248,6 @@ impl Transport {
         let mut response = response;
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| UNAVAILABLE)? {
-            if body.len() + chunk.len() > MAX_BODY {
-                return Err(UNAVAILABLE.into());
-            }
             body.extend_from_slice(&chunk);
         }
         reply.body(body).map_err(|_| UNAVAILABLE.to_string())
@@ -343,7 +338,7 @@ pub async fn native_http_write(
     let RequestState::Ready(_, body) = &mut *slot else {
         return Err(UNAVAILABLE.into());
     };
-    if *pending.cancel.borrow() || body.len() + chunk.len() > MAX_BODY {
+    if *pending.cancel.borrow() {
         state.cancel(id);
         return Err(UNAVAILABLE.into());
     }

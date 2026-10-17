@@ -86,11 +86,11 @@ struct Args {
     #[arg(long, hide = true, default_value = "", value_parser = clap::builder::OsStringValueParser::new().map(PathBuf::from))]
     output: PathBuf,
     /// Concurrent Actors (each Actor processes its own messages serially).
-    #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..=256))]
+    #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..))]
     actors: u32,
-    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100000))]
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
     rounds: u32,
-    #[arg(long, default_value_t = 16384, value_parser = clap::value_parser!(u32).range(1..=1048576))]
+    #[arg(long, default_value_t = 16384, value_parser = clap::value_parser!(u32).range(1..))]
     response_bytes: u32,
     #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(0..=60000))]
     model_delay_ms: u64,

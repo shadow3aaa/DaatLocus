@@ -58,9 +58,8 @@ fn touch(tx: &Transaction<'_>, hash: &str) -> Result<()> {
     Ok(())
 }
 fn make_room(tx: &Transaction<'_>, additional: u64) -> Result<()> {
-    if additional > CACHE_BYTES {
-        return Err(StageError::Capacity("Content exceeds cache budget"));
-    }
+    // Evict cold content toward the cache target without rejecting a larger
+    // resource or an active transfer. Durable sources can repopulate cold bytes.
     let now = chrono::Utc::now().timestamp_millis();
     let candidates=tx.prepare("SELECT b.hash,length(b.bytes) FROM stage_blobs b LEFT JOIN stage_blob_access a ON a.hash=b.hash WHERE length(b.bytes)>0 AND COALESCE(a.pinned_until,0)<?1 ORDER BY COALESCE(a.last_used,0)")?.query_map([now],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
     let mut used = storage_bytes(tx)?;
@@ -92,11 +91,6 @@ fn make_room(tx: &Transaction<'_>, additional: u64) -> Result<()> {
         }
         tx.execute("UPDATE stage_blobs SET bytes=x'' WHERE hash=?1", [&hash])?;
         used = used.saturating_sub(size as u64);
-    }
-    if used.saturating_add(additional) > CACHE_BYTES {
-        return Err(StageError::Capacity(
-            "Content cache has active pinned transfers",
-        ));
     }
     Ok(())
 }
@@ -342,11 +336,6 @@ impl<'a> ContentStore<'a> {
             if existing.as_ref().is_some_and(|old| old != &record) {
                 return Err(StageError::Conflict("Download manifest changed"));
             }
-            let active: i64 =
-                tx.query_row("SELECT COUNT(*) FROM stage_downloads", [], |row| row.get(0))?;
-            if existing.is_none() && active >= 32 {
-                return Err(StageError::Capacity("Content download limit reached"));
-            }
             let cached: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM stage_blobs WHERE hash=?1 AND size=?2 AND length(bytes)=size)",
                 params![value.content.hash, value.content.size as i64],
@@ -430,6 +419,22 @@ impl<'a> ContentStore<'a> {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+    #[test]
+    fn a_resource_larger_than_the_cache_target_is_stored_without_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ActorStore::open(&dir.path().join("actors.sqlite")).unwrap();
+        let content = ContentStore::new(&store);
+        let bytes = vec![b'x'; 65 * 1024 * 1024];
+        let reference = store
+            .stage_transaction(|tx| {
+                initialize(tx)?;
+                Ok(put(tx, "root", &bytes)?.content)
+            })
+            .unwrap();
+        assert_eq!(reference.size, 65 * 1024 * 1024);
+        assert_eq!(content.verified_bytes(&reference).unwrap(), bytes);
+    }
+
     #[test]
     fn cold_content_is_evicted_and_immutable_bytes_can_repopulate_within_budget() {
         let dir = tempfile::tempdir().unwrap();

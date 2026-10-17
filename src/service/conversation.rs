@@ -115,7 +115,6 @@ async fn edit(
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, true).await?;
     if input.content.len() > 64 * 1024
-        || input.attachments.len() > 4
         || input.content.trim().is_empty() && input.attachments.is_empty()
         || input.expected_updated_at_ms < 0
     {

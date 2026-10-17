@@ -1288,15 +1288,9 @@ impl Controller {
             // A single authority builds and replicates one merged conversation;
             // model context remains the selected, valid tool protocol history.
             let mut branches = vec![];
-            let mut retained_bytes = 0usize;
             for (peer, status) in &frozen {
                 let rows = self
-                    .retained_conversation(
-                        *peer,
-                        status,
-                        *peer != source && status.head != head,
-                        &mut retained_bytes,
-                    )
+                    .retained_conversation(*peer, status, *peer != source && status.head != head)
                     .await?;
                 branches.push((*peer, rows));
             }
@@ -1434,7 +1428,6 @@ impl Controller {
         peer: StageId,
         status: &super::recovery::Status,
         active: bool,
-        retained_bytes: &mut usize,
     ) -> Result<Vec<super::recovery::RetainedRow>> {
         let mut rows = vec![];
         let mut after = None;
@@ -1499,10 +1492,6 @@ impl Controller {
                     continue;
                 }
                 let bytes = self.content(peer, &change.content).await?;
-                *retained_bytes = retained_bytes.saturating_add(bytes.len());
-                if *retained_bytes > 128 * 1024 * 1024 {
-                    return Err(StageError::Capacity("Retained conversation budget reached"));
-                }
                 self.install_resource_change(peer, &change).await?;
                 rows.push(super::recovery::RetainedRow {
                     branch,

@@ -74,12 +74,12 @@ describe("folder attachment archives", () => {
     expect(decoder.decode(entries["folder/b/same"])).toBe("two");
   });
 
-  test("zero or over 2000 entries fail while exactly 2000 extract successfully", async () => {
+  test("empty folders fail and folders with more than 2000 entries extract successfully", async () => {
     await expect(zipFolder([])).rejects.toThrow();
-    const files = Array.from({ length: 2000 }, (_, i) => file(`folder/${i}.txt`));
+    const files = Array.from({ length: 2001 }, (_, i) => file(`folder/${i}.txt`, String(i)));
     const entries = await unpack(await zipFolder(files));
-    expect(Object.keys(entries).length).toBe(2000);
-    await expect(zipFolder([...files, file("folder/2000.txt")])).rejects.toThrow();
+    expect(Object.keys(entries).length).toBe(2001);
+    expect(decoder.decode(entries["folder/2000.txt"])).toBe("2000");
   });
 
   test("the uncompressed size boundary permits 32 MiB and rejects a single extra byte", async () => {

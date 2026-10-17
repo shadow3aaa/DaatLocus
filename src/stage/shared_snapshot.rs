@@ -9,7 +9,6 @@ use crate::actors::store::ActorStore;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 const PAGE: usize = 24;
-const BUDGET: i64 = 128 * 1024 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Page {
@@ -41,9 +40,6 @@ fn entity(value: &str) -> Result<Entity> {
     }
 }
 pub fn produce(store: &ActorStore, head: &Head, token: Option<&str>, page: u32) -> Result<Page> {
-    if page > 100000 {
-        return Err(StageError::Invalid("Snapshot page out of range"));
-    }
     store.stage_transaction(|tx|{
         initialize(tx)?;let now=chrono::Utc::now().timestamp_millis();
         tx.execute("DELETE FROM core_snapshot_rows WHERE token IN (SELECT token FROM core_snapshots WHERE created<?1)",[now-300000])?;
@@ -52,8 +48,6 @@ pub fn produce(store: &ActorStore, head: &Head, token: Option<&str>, page: u32) 
             if page!=0{return Err(StageError::Invalid("Snapshot begins at page zero"));}
             let current:Head=serde_json::from_str(&tx.query_row::<String,_,_>("SELECT value FROM core_meta WHERE key='head'",[],|r|r.get(0))?).map_err(|_|StageError::Invalid("Invalid core head"))?;
             if current!=*head{return Err(StageError::Conflict("Snapshot head changed"));}
-            let used:i64=tx.query_row("SELECT (SELECT COALESCE(SUM(length(record)),0) FROM core_snapshot_rows)+(SELECT COALESCE(SUM(length(record)),0) FROM core_rows)",[],|r|r.get(0))?;
-            if used>BUDGET{return Err(StageError::Capacity("Snapshot storage budget reached"));}
             let token=uuid::Uuid::new_v4().to_string();
             tx.execute("INSERT INTO core_snapshots VALUES(?1,?2,?3)",params![token,serde_json::to_string(head).map_err(|_|StageError::Invalid("Invalid snapshot head"))?,now])?;
             let rows=tx.prepare("SELECT r.entity,r.remote_key,o.ordinal,r.record FROM core_rows r JOIN core_order o ON o.entity=r.entity AND o.remote_key=r.remote_key ORDER BY CASE r.entity WHEN 'resources' THEN 0 WHEN 'configuration' THEN 1 WHEN 'messages' THEN 2 WHEN 'history' THEN 3 WHEN 'tools' THEN 4 WHEN 'approvals' THEN 5 ELSE 6 END,o.ordinal")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,Vec<u8>>(3)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
@@ -105,8 +99,6 @@ fn receive_inner(
         if previous.as_ref().is_some_and(|old|old!=&encoded){return Err(StageError::Conflict("Snapshot retry changed"));}
         let expected:i64=tx.query_row("SELECT COUNT(*) FROM core_snapshot_incoming WHERE token=?1",[&page.token],|r|r.get(0))?;
         if previous.is_none() && page.page as i64!=expected{return Err(StageError::Conflict("Snapshot page gap"));}
-        let used:i64=tx.query_row("SELECT COALESCE(SUM(length(record)),0) FROM core_snapshot_content",[],|r|r.get(0))?;
-        let additional=if previous.is_some(){0}else{page.entries.iter().map(|r|r.content.size).sum::<u64>()};if used as u64+additional>BUDGET as u64{return Err(StageError::Capacity("Incoming snapshot budget reached"));}
         let mut keys=std::collections::HashSet::new();let mut ordinals=std::collections::HashSet::new();
         for change in &page.entries {
             if change.ordinal==0 || change.ordinal>9_007_199_254_740_991 || !keys.insert((change.entity.name(),change.key.clone())) || !ordinals.insert((change.entity.name(),change.ordinal)){return Err(StageError::Conflict("Duplicate or invalid snapshot order"));}

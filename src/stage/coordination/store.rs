@@ -383,8 +383,6 @@ impl RaftLogStorage<Types> for Store {
     {
         let entries = entries.into_iter().collect::<Vec<_>>();
         self.0.store().coordination_transaction(|tx| {
-            let count:i64=tx.query_row("SELECT COUNT(*) FROM device_consensus_log",[],|row|row.get(0))?;
-            if count + entries.len() as i64 > 4096 { return Err(StageError::Capacity("Device log budget exceeded")); }
             for entry in entries {
                 let bytes=serde_json::to_vec(&entry).map_err(|_|StageError::Invalid("Cannot encode device log"))?;
                 if bytes.len()>64*1024 || entry.log_id.index>i64::MAX as u64 {return Err(StageError::Capacity("Device log entry budget exceeded"));}

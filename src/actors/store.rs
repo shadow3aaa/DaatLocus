@@ -411,6 +411,7 @@ impl ActorStore {
             .collect::<rusqlite::Result<_>>()
             .into_diagnostic()
     }
+    #[cfg(test)]
     pub(crate) fn actor_count(&self) -> Result<i64> {
         sql(self
             .db
@@ -677,10 +678,7 @@ impl ActorStore {
             message.error = Some("Queued input withdrawn before execution".into());
             message.finished_at_ms = Some(now());
         } else {
-            if content.len() > 64 * 1024
-                || attachments.len() > 4
-                || content.trim().is_empty() && attachments.is_empty()
-            {
+            if content.len() > 64 * 1024 || content.trim().is_empty() && attachments.is_empty() {
                 return Err(ActorError::Invalid("Invalid queued input".into()).into());
             }
             message.content = content;
@@ -1859,12 +1857,6 @@ impl ActorStore {
         let mut db = self.db.lock();
         let tx = sql(db.transaction())?;
         let mut data = serde_json::to_value(&resource).into_diagnostic()?;
-        let used:i64=sql(tx.query_row("SELECT COALESCE(SUM(json_extract(record,'$.size_bytes')),0) FROM resources WHERE NOT(actor_id=?1 AND id=?2)",params![resource.actor_id,resource.id],|r|r.get(0)))?;
-        if (used as u64).saturating_add(resource.size_bytes) > 512 * 1024 * 1024 {
-            return Err(
-                ActorError::Conflict("Account resource storage budget reached".into()).into(),
-            );
-        }
         data["path"] = serde_json::to_value(&resource.path).into_diagnostic()?;
         data["message_id"] = serde_json::to_value(message_id).into_diagnostic()?;
         sql(tx.execute("INSERT INTO resources(actor_id,id,record) VALUES(?1,?2,?3) ON CONFLICT(actor_id,id) DO UPDATE SET record=excluded.record",params![resource.actor_id,resource.id,encode(&data)?]))?;

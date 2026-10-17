@@ -116,7 +116,7 @@ impl Fence {
     /// Wall-clock skew never lengthens a grant; restart never restores a lease.
     pub fn observe(&mut self, reply: &Reply, sent: Instant, received: Instant) -> Result<()> {
         reply.head.validate()?;
-        if reply.peers.len() > 64 || reply.epoch < self.epoch {
+        if reply.epoch < self.epoch {
             return Err(StageError::Forbidden("Coordinator response is stale"));
         }
         self.epoch = reply.epoch;

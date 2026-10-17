@@ -389,7 +389,7 @@ impl<'a> StageLedger<'a> {
             if root!=enrollment.root { return Err(StageError::Forbidden("Wrong device group")); }
             let revoked = super::revocation::removed_in(tx)?;
             let member=verify_enrollment(&root,&enrollment.chain,now,&revoked)?;
-            if member.device.stage_id==self.local || grants.len()>100 { return Err(StageError::Invalid("Invalid peer or Actor grant count")); }
+            if member.device.stage_id==self.local { return Err(StageError::Invalid("Invalid peer")); }
             let mut names=HashSet::new();
             for grant in &grants {
                 super::ActorAddress {stage_id:self.local,actor_id:grant.actor_id.clone()}.validate()?;
@@ -402,7 +402,6 @@ impl<'a> StageLedger<'a> {
             let records = tx.prepare("SELECT record FROM stage_peers")?
                 .query_map([],|row|row.get::<_,String>(0))?
                 .collect::<std::result::Result<Vec<_>,_>>()?;
-            if old.is_none() && records.len() >= 64 { return Err(StageError::Capacity("Device count limit reached")); }
             for record in records {
                 let record:PeerRecord = decode(record)?;
                 if record.device.stage_id != member.device.stage_id
@@ -438,7 +437,7 @@ impl<'a> StageLedger<'a> {
     pub fn peers(&self, now: i64) -> Result<Vec<PeerRecord>> {
         self.store.stage_transaction(|tx| {
             let ids = tx
-                .prepare("SELECT id FROM stage_peers ORDER BY id LIMIT 64")?
+                .prepare("SELECT id FROM stage_peers ORDER BY id")?
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             let mut values = vec![];
@@ -1686,6 +1685,61 @@ mod tests {
         assert!(content_seen);
         assert!(queue.metrics.queue_peak_bytes <= 1024 * 1024);
     }
+    #[test]
+    fn snapshots_transfer_all_messages_beyond_former_history_and_page_quotas() {
+        use crate::stage::{blob::ContentStore, journal::Journal, sync::Replica};
+        let fixture = Fixture::new();
+        let peer = fixture.remote.profile().stage_id;
+        let receipt = fixture
+            .ledger()
+            .accept_actor_input(peer, &fixture.request(), "request".into(), 2001)
+            .unwrap();
+        let template = fixture.store.message(&receipt.message_id.unwrap()).unwrap();
+        fixture
+            .store
+            .stage_transaction(|tx| {
+                for index in 0..10_201 {
+                    let mut message = template.clone();
+                    message.id = format!("history-{index}");
+                    crate::actors::store::insert_message(tx, message)
+                        .map_err(|_| StageError::Invalid("Cannot seed retained history"))?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        ContentStore::new(&fixture.store)
+            .store_source("root", b"request")
+            .unwrap();
+        let journal = Journal::new(&fixture.store);
+        let replica = Replica::new(&fixture.store);
+        let address = ActorAddress {
+            stage_id: peer,
+            actor_id: "root".into(),
+        };
+        let mut page = journal.create_snapshot(peer, "root", 2002).unwrap();
+        let mut count = 0;
+        loop {
+            count += page.entries.len();
+            let complete = replica.receive_snapshot(&address, &page, 2003).unwrap();
+            assert_eq!(complete, page.last);
+            if page.last {
+                break;
+            }
+            page = journal
+                .snapshot_page(peer, "root", page.token, page.page + 1, 2003)
+                .unwrap();
+        }
+        assert_eq!(count, 10_202);
+        assert!(page.page > 316);
+        let (restored, last): (i64, String) = fixture.store.stage_transaction(|tx| {
+            let restored = tx.query_row("SELECT COUNT(*) FROM stage_replica_messages WHERE stage=?1 AND actor='root'", [peer.to_string()], |row| row.get(0))?;
+            let last = tx.query_row("SELECT json_extract(fact,'$.metadata.id') FROM stage_replica_messages WHERE stage=?1 AND actor='root' AND message='history-10200'", [peer.to_string()], |row| row.get(0))?;
+            Ok((restored, last))
+        }).unwrap();
+        assert_eq!(restored, 10_202);
+        assert_eq!(last, "history-10200");
+    }
+
     #[test]
     fn journal_has_dense_actor_offsets_and_consistent_snapshot_boundary() {
         use crate::actors::ActorEvent;

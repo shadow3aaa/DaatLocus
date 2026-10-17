@@ -959,9 +959,6 @@ impl App for TerminalApp {
                 let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
                 let reads = args.additional_read_roots.unwrap_or_default();
                 let writes = args.additional_write_roots.unwrap_or_default();
-                if reads.len() > 32 || writes.len() > 32 {
-                    return Err(miette!("too many terminal permission roots"));
-                }
                 request.readable_roots = reads
                     .iter()
                     .map(|path| crate::file_io::resolve_file_path(&context.execution_cwd, path))

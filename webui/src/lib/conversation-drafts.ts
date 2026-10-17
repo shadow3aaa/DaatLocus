@@ -9,10 +9,10 @@ export function loadDraft(key: string, actorId: string, store = storage(), now =
   const name = prefix + key;
   try {
     const record = JSON.parse(store.getItem(name) || "null");
-    if (!record || record.version !== 2 || !Number.isFinite(record.expires_at) || record.expires_at <= now || record.actor_id !== actorId || record.subject_key !== key || typeof record.text !== "string" || record.text.length > 64 * 1024 || !Array.isArray(record.attachments) || record.attachments.length > 4) { store.removeItem(name); return; }
+    if (!record || record.version !== 2 || !Number.isFinite(record.expires_at) || record.expires_at <= now || record.actor_id !== actorId || record.subject_key !== key || typeof record.text !== "string" || record.text.length > 64 * 1024 || !Array.isArray(record.attachments)) { store.removeItem(name); return; }
     const attachments: Attachment[] = record.attachments.filter((item: Attachment) => item && opaque(item.id) && typeof item.name === "string" && item.name.length <= 512 && typeof item.media_type === "string" && Number.isFinite(item.size_bytes)).map((item: Attachment) => ({ id: item.id, name: item.name, media_type: item.media_type, size_bytes: item.size_bytes, uri: `/v1/actors/${encodeURIComponent(actorId)}/resources/${encodeURIComponent(item.id)}` }));
     const input = record.pending;
-    const pending = input && typeof input.content === "string" && input.content.length <= 64 * 1024 && Array.isArray(input.attachments) && input.attachments.length <= 4 && input.attachments.every(opaque) && typeof input.key === "string" && /^[!-~]{1,128}$/.test(input.key) ? { content: input.content, attachments: input.attachments, key: input.key } : undefined;
+    const pending = input && typeof input.content === "string" && input.content.length <= 64 * 1024 && Array.isArray(input.attachments) && input.attachments.every(opaque) && typeof input.key === "string" && /^[!-~]{1,128}$/.test(input.key) ? { content: input.content, attachments: input.attachments, key: input.key } : undefined;
     return { text: record.text, attachments, pending };
   } catch { store.removeItem(name); }
 }

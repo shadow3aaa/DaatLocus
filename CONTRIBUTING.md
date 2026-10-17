@@ -174,8 +174,8 @@ the standard `target/<profile>` output location. `--model-delay-ms`, `--sample-m
 `--timeout-seconds` control synthetic response latency, sampling and the measured
 run deadline. Each setup subprocess also has a 60-second deadline. Builds are
 outside the measurements. Use a quiet machine and repeat runs for comparisons.
-The default deadline is 1,800 seconds; concurrency accepts 1–256 Actors. Each
-Actor retains its conversation across rounds, so rounds also increase history
+The default deadline is 1,800 seconds; concurrency accepts any positive Actor count.
+Each Actor retains its conversation across rounds, so rounds also increase history
 and persistence costs. The 90-second cooldown exceeds the 60-second worker idle
 eviction window. Load progress is printed every 10 seconds.
 

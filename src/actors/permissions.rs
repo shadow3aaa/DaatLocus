@@ -34,38 +34,17 @@ pub fn canonical_path(path: &Path) -> Result<PathBuf> {
     Ok(result)
 }
 pub fn normalize_config(mut config: ActorConfig) -> Result<ActorConfig> {
-    if config.name.trim().is_empty()
-        || config.name.len() > 200
-        || config.instructions.len() > 16 * 1024
-        || config.apps.len() > 16
-    {
-        return Err(ActorError::Invalid("Invalid Actor configuration size or name".into()).into());
+    if config.name.trim().is_empty() {
+        return Err(ActorError::Invalid("Invalid Actor name".into()).into());
     }
     crate::builtin_apps::validate_app_names(&config.apps, config.permissions.read_only)
         .map_err(|_| ActorError::Invalid("Invalid or unavailable App configuration".into()))?;
     if let Some(apps) = &config.permissions.app_access {
-        if apps.len() > 16 {
-            return Err(ActorError::Invalid("Too many App action grants".into()).into());
-        }
         crate::builtin_apps::validate_app_names(apps, config.permissions.read_only)?;
     }
     if let Some(apps) = &config.permissions.delegation_apps {
-        if apps.len() > 16 {
-            return Err(ActorError::Invalid("Too many delegation Apps".into()).into());
-        }
         crate::builtin_apps::validate_app_names(apps, config.permissions.read_only)
             .map_err(|_| ActorError::Invalid("Invalid delegation App ceiling".into()))?;
-    }
-    if config.permissions.readable_roots.len() > 64
-        || config.permissions.writable_roots.len() > 64
-        || config.permissions.message_targets.len() > 64
-        || config
-            .permissions
-            .tools
-            .as_ref()
-            .is_some_and(|t| t.len() > 256)
-    {
-        return Err(ActorError::Invalid("Too many permission grants".into()).into());
     }
     config.workspace = canonical_path(&config.workspace)?;
     config.permissions.readable_roots = config

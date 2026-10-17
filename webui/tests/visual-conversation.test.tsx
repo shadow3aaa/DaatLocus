@@ -58,6 +58,15 @@ describe("fixed presentation and chronological source", () => {
   });
 });
 describe("durable drafts are identity/Actor partitioned data, never credentials", () => {
+  test("drafts and pending sends retain more than four attachment references", () => {
+    const store = memory();
+    const attachments = Array.from({length: 6}, (_, index) => ({id: `attachment-${index}`, name: `File ${index}`, media_type: "text/plain", size_bytes: index, uri: "https://unsafe.example/file"}));
+    const ids = attachments.map(item => item.id);
+    saveDraft("owner:id:root", "root", {text: "draft", attachments, pending: {content: "draft", attachments: ids, key: "operation-key"}}, store, 100);
+    const recovered = loadDraft("owner:id:root", "root", store, 101)!;
+    expect(recovered.attachments.map(item => item.id)).toEqual(ids);
+    expect(recovered.pending?.attachments).toEqual(ids);
+  });
   test("refresh restores text, safe references and the pending operation key", () => {
     const store=memory(); saveDraft("owner:public-id:root","root",{text:"草稿",attachments:[{id:"opaque-id",name:"报告.txt",media_type:"text/plain",size_bytes:12,uri:"https://unsafe.example/file"}],pending:{content:"草稿",attachments:["opaque-id"],key:"operation-key"}},store,100);
     const recovered=loadDraft("owner:public-id:root","root",store,101)!;

@@ -116,7 +116,6 @@ pub fn apply(store: &ActorStore, local: StageId, change: &Change, now: i64) -> R
         let previous:Option<String>=tx.query_row("SELECT record FROM stage_revocations WHERE target=?1",[record.target.to_string()],|r|r.get(0)).optional()?;
         if previous.is_none(){
             if removed_in(tx)?.contains(&record.issuer){return Err(StageError::Forbidden("Revoked issuer cannot issue new removals"));}
-            let count:i64=tx.query_row("SELECT COUNT(*) FROM stage_revocations",[],|r|r.get(0))?;if count>=1024{return Err(StageError::Capacity("Revocation budget reached"));}
             let encoded=serde_json::to_string(change).map_err(|_|StageError::Invalid("Invalid revocation record"))?;tx.execute("INSERT INTO stage_revocations VALUES(?1,?2,?3)",params![record.target.to_string(),encoded,now])?;}Ok(())})?;
     let known = store.stage_transaction(|tx| {
         Ok(tx.query_row(

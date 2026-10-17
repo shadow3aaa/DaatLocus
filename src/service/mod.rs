@@ -631,7 +631,6 @@ async fn send_message(
     }
     if request.content.len() > 64 * 1024
         || (request.content.trim().is_empty() && request.attachments.is_empty())
-        || request.attachments.len() > crate::daemon::attachments::MAX_ATTACHMENTS
     {
         return Err(ApiError::invalid());
     }

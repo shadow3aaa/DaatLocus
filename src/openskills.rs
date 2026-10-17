@@ -17,8 +17,6 @@ const OPENSKILLS_CONFIG_FILE_NAME: &str = "openskills.toml";
 const AGENTS_DIR_NAME: &str = ".agents";
 const SKILLS_DIR_NAME: &str = "skills";
 const SKILL_METADATA_BUDGET_CHARS: usize = 8_000;
-const MAX_SCAN_DEPTH: usize = 6;
-const MAX_SKILL_DIRS_PER_ROOT: usize = 2_000;
 const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1_024;
 
@@ -448,11 +446,10 @@ fn discover_skills_under_root(
         return;
     }
 
-    let mut queue = VecDeque::from([(root.to_path_buf(), 0usize)]);
+    let mut queue = VecDeque::from([root.to_path_buf()]);
     let mut visited = HashSet::from([canonicalize_lossy(root)]);
-    let mut truncated = false;
 
-    while let Some((dir, depth)) = queue.pop_front() {
+    while let Some(dir) = queue.pop_front() {
         if policy.is_some_and(|policy| !policy.is_path_readable(&dir)) {
             continue;
         }
@@ -490,16 +487,9 @@ fn discover_skills_under_root(
             };
 
             if metadata.is_dir() {
-                if depth >= MAX_SCAN_DEPTH {
-                    continue;
-                }
-                if visited.len() >= MAX_SKILL_DIRS_PER_ROOT {
-                    truncated = true;
-                    continue;
-                }
                 let canonical = canonicalize_lossy(&path);
                 if visited.insert(canonical.clone()) {
-                    queue.push_back((canonical, depth + 1));
+                    queue.push_back(canonical);
                 }
                 continue;
             }
@@ -514,13 +504,6 @@ fn discover_skills_under_root(
                 }
             }
         }
-    }
-
-    if truncated {
-        catalog.errors.push(OpenSkillError {
-            path: root.to_path_buf(),
-            message: format!("skills scan truncated after {MAX_SKILL_DIRS_PER_ROOT} directories"),
-        });
     }
 }
 
@@ -902,6 +885,25 @@ mod tests {
             .expect("prompt");
         assert!(prompt.contains("charts: Build charts from metrics"));
         assert!(prompt.contains("r0/charts/SKILL.md"));
+    }
+
+    #[test]
+    fn discovers_skills_beyond_the_former_directory_depth_quota() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("a/b/c/d/e/f/g/h");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            nested.join(SKILL_FILE_NAME),
+            "---\nname: deep\ndescription: A deeply nested skill\n---\n\nOriginal instructions\n",
+        )
+        .unwrap();
+        let catalog = load_openskills_from_roots(vec![SkillRoot {
+            path: temp.path().to_path_buf(),
+            scope: OpenSkillScope::Project,
+        }]);
+        assert!(catalog.errors().is_empty());
+        assert_eq!(catalog.skills().len(), 1);
+        assert_eq!(catalog.skills()[0].name, "deep");
     }
 
     #[test]

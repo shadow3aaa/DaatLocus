@@ -142,13 +142,13 @@ export function submissionFor(previous: PendingSubmission | undefined, content: 
 }
 type AttachmentDraft = {
   attachments: api.Attachment[];
-  uploadQueue?: { reserved: number; pending: number; tail: Promise<void> };
+  uploadQueue?: { pending: number; tail: Promise<void> };
 };
 type DraftEntry = AttachmentDraft & {
   text: string;
   pending?: PendingSubmission;
 };
-/** Reserve slots synchronously; one draft serializes uploads across mounted views. */
+/** One draft serializes uploads across mounted views. */
 export async function queueAttachmentUploads(entry: AttachmentDraft, files: FileList | File[], options: {
   signal: AbortSignal;
   isCurrent: () => boolean;
@@ -159,31 +159,24 @@ export async function queueAttachmentUploads(entry: AttachmentDraft, files: File
     throw new Error("Attachments must be a file array or FileList");
   const selected = Array.from(files);
   if (!selected.length) return;
-  const queue = entry.uploadQueue ??= { reserved: 0, pending: 0, tail: Promise.resolve() };
-  if (entry.attachments.length + queue.reserved + selected.length > 4)
-    throw new Error("A message can contain at most four attachments");
+  const queue = entry.uploadQueue ??= { pending: 0, tail: Promise.resolve() };
   const ensureCurrent = () => {
     if (options.signal.aborted) throw options.signal.reason ?? new DOMException("Aborted", "AbortError");
     if (!options.isCurrent()) throw new DOMException("Conversation changed", "AbortError");
   };
   ensureCurrent();
-  queue.reserved += selected.length;
   queue.pending += 1;
   options.onChanged();
-  let committed = 0;
   const task = queue.tail.then(async () => {
     for (const file of selected) {
       ensureCurrent();
       const attachment = await options.upload(file, options.signal);
       ensureCurrent();
       entry.attachments.push(attachment);
-      committed += 1;
-      queue.reserved -= 1;
       options.onChanged();
     }
   });
   const finished = task.finally(() => {
-    queue.reserved -= selected.length - committed;
     queue.pending -= 1;
     options.onChanged();
   });

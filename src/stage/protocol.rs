@@ -61,7 +61,7 @@ impl BlobRef {
     pub fn validate(&self) -> Result<()> {
         if self.hash.len() != 64
             || hex::decode(&self.hash).is_err()
-            || self.size > 32 * 1024 * 1024
+            || i64::try_from(self.size).is_err()
             || self.version != 1
         {
             return Err(StageError::Invalid("Invalid content reference"));
@@ -96,12 +96,11 @@ impl RemoteCeiling {
                 && name.len() <= 128
                 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         };
-        if self.apps.len() > 16
-            || self.apps.iter().any(|app| !valid(app))
+        if self.apps.iter().any(|app| !valid(app))
             || self
                 .tools
                 .as_ref()
-                .is_some_and(|tools| tools.len() > 256 || tools.iter().any(|tool| !valid(tool)))
+                .is_some_and(|tools| tools.iter().any(|tool| !valid(tool)))
         {
             return Err(StageError::Invalid("Invalid remote capability ceiling"));
         }
@@ -510,10 +509,7 @@ impl Envelope {
                 }
                 for actor in actors {
                     actor.address.validate()?;
-                    if actor.address.stage_id != peer
-                        || actor.name.len() > 200
-                        || actor.apps.len() > 16
-                    {
+                    if actor.address.stage_id != peer {
                         return Err(StageError::Forbidden(
                             "Invalid authoritative Actor directory",
                         ));
@@ -596,8 +592,7 @@ impl Envelope {
                 content,
                 attachments,
             } => {
-                if self.invocation_id.is_none() || target.stage_id != local || attachments.len() > 4
-                {
+                if self.invocation_id.is_none() || target.stage_id != local {
                     return Err(StageError::Invalid("Invalid invocation routing"));
                 }
                 if invocation_created(
@@ -611,9 +606,6 @@ impl Envelope {
                 }
                 target.validate()?;
                 content.validate()?;
-                if attachments.len() > 16 {
-                    return Err(StageError::Capacity("Attachment count exceeds budget"));
-                }
                 for attachment in attachments {
                     attachment.validate()?;
                 }

@@ -16,12 +16,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{model_protocol::AgentContentPart, sandbox::RuntimeSandboxPolicy};
 
-const MAX_TEXT_FILE_BYTES: u64 = 10 * 1024 * 1024;
 pub const MAX_VIEW_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_READ_PAGE_BYTES: usize = 1024 * 1024;
 static FILE_WRITES: Mutex<()> = Mutex::new(());
-const MAX_DIRECTORY_ENTRIES: usize = 20_000;
-const MAX_SEARCH_FILES: usize = 2000;
 
 #[model_schema]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -341,7 +338,7 @@ pub(crate) fn read_authorized_bytes(
         return Err(miette!("file exceeds the size limit"));
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(limit + 1)
+    file.take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| miette!("unable to read file"))?;
     if bytes.len() as u64 > limit {
@@ -427,13 +424,10 @@ pub fn list_directory(
         .map_err(|_| miette!("unable to pin listing directory"))?;
     check_opened_file(directory.handle(), &path, policy, false)?;
     let names = directory
-        .names(MAX_DIRECTORY_ENTRIES)
+        .names()
         .map_err(|_| miette!("unable to enumerate the authorized directory"))?;
     let mut entries = BTreeMap::new();
-    for (index, name) in names.into_iter().enumerate() {
-        if index >= MAX_DIRECTORY_ENTRIES {
-            return Err(miette!("directory exceeds the listing size limit"));
-        }
+    for name in names {
         let entry_path = path.join(&name);
         let Ok(name) = name.into_string() else {
             continue;
@@ -497,9 +491,6 @@ pub fn search_text(
     let limit = args.limit.unwrap_or(50).clamp(1, 200);
     let mut pending = vec![root];
     let mut visited = HashSet::new();
-    let mut remaining_bytes = MAX_TEXT_FILE_BYTES;
-    let mut scanned_entries = 0;
-    let mut scanned_files = 0;
     let mut output_bytes = 0usize;
     let mut result = SearchResult {
         matches: Vec::new(),
@@ -519,34 +510,20 @@ pub fn search_text(
                 .map_err(|_| miette!("unable to pin search directory"))?;
             check_opened_file(directory.handle(), &actual, policy, false)?;
             let names = directory
-                .names(MAX_DIRECTORY_ENTRIES.saturating_sub(scanned_entries))
+                .names()
                 .map_err(|_| miette!("unable to enumerate authorized search directory"))?;
             let mut children = Vec::new();
             for name in names {
-                scanned_entries += 1;
-                if scanned_entries > MAX_DIRECTORY_ENTRIES {
-                    result.limited = true;
-                    break;
-                }
                 children.push(actual.join(name));
             }
             children.sort();
             pending.extend(children.into_iter().rev());
-            if result.limited {
-                break;
-            }
             continue;
         }
         if !metadata.is_file() {
             continue;
         }
-        scanned_files += 1;
-        if scanned_files > MAX_SEARCH_FILES || metadata.len() > remaining_bytes {
-            result.limited = true;
-            break;
-        }
-        let bytes = read_bytes(&actual, remaining_bytes, policy)?;
-        remaining_bytes -= bytes.len() as u64;
+        let bytes = read_bytes(&actual, u64::MAX, policy)?;
         let Ok(text) = std::str::from_utf8(&bytes) else {
             continue;
         };
@@ -585,7 +562,7 @@ pub fn read_file(
     args: &ReadFileArgs,
 ) -> Result<ReadFileResult> {
     let path = authorized_path(cwd, policy, &args.path, false)?;
-    let bytes = read_bytes(&path, MAX_TEXT_FILE_BYTES, policy)?;
+    let bytes = read_bytes(&path, u64::MAX, policy)?;
     let digest = sha256(&bytes);
     let text = String::from_utf8(bytes).map_err(|_| miette!("file is not UTF-8 text"))?;
     let start_line = args.start_line.unwrap_or(1);
@@ -705,9 +682,6 @@ pub fn write_file(
     policy: &RuntimeSandboxPolicy,
     args: &WriteFileArgs,
 ) -> Result<FileWriteResult> {
-    if args.content.len() as u64 > MAX_TEXT_FILE_BYTES {
-        return Err(miette!("file exceeds the size limit"));
-    }
     write_bytes(
         cwd,
         policy,
@@ -792,7 +766,7 @@ pub fn edit_file(
         .map_err(|_| miette!("file write lock is unavailable"))?;
     let path = authorized_path(cwd, policy, &args.path, true)?;
     policy.ensure_path_readable(&path, "existing file")?;
-    let bytes = read_bytes(&path, MAX_TEXT_FILE_BYTES, policy)?;
+    let bytes = read_bytes(&path, u64::MAX, policy)?;
     check_hash(&bytes, &args.expected_sha256)?;
     let mut content =
         String::from_utf8(bytes.clone()).map_err(|_| miette!("file is not UTF-8 text"))?;
@@ -809,13 +783,6 @@ pub fn edit_file(
         return Err(miette!(
             "old_text is ambiguous; include more surrounding text"
         ));
-    }
-    let size = content
-        .len()
-        .saturating_sub(args.old_text.len())
-        .saturating_add(args.new_text.len());
-    if size as u64 > MAX_TEXT_FILE_BYTES {
-        return Err(miette!("file exceeds the size limit"));
     }
     content.replace_range(offset..offset + args.old_text.len(), &args.new_text);
     let permissions = fs::metadata(&path)
@@ -1085,6 +1052,30 @@ mod tests {
                 schema["required"].as_array().unwrap().len()
             );
         }
+    }
+
+    #[test]
+    fn search_reaches_matches_after_the_former_file_scan_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..2001 {
+            fs::write(dir.path().join(format!("{index:04}.txt")), "no match").unwrap();
+        }
+        fs::write(dir.path().join("last.txt"), "needle after all files\n").unwrap();
+        let result = search_text(
+            dir.path(),
+            &RuntimeSandboxPolicy::disabled(),
+            &SearchTextArgs {
+                path: ".".into(),
+                query: "needle".into(),
+                case_sensitive: true,
+                limit: Some(1),
+            },
+        )
+        .unwrap();
+        assert!(!result.limited);
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].text, "needle after all files\n");
+        assert!(result.matches[0].path.ends_with("last.txt"));
     }
 
     #[test]

@@ -1078,7 +1078,7 @@ pub fn directory(host: &Host, peer: StageId) -> Result<Vec<RemoteActor>> {
     host.system.store().stage_transaction(|tx|{
         let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='stage_directory')",[],|r|r.get(0))?;
         if !exists{return Ok(vec![]);}
-        let rows=tx.prepare("SELECT record FROM stage_directory WHERE stage=?1 ORDER BY actor LIMIT 100")?.query_map([peer.to_string()],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        let rows=tx.prepare("SELECT record FROM stage_directory WHERE stage=?1 ORDER BY actor")?.query_map([peer.to_string()],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
         rows.into_iter().map(|value|serde_json::from_str(&value).map_err(|_|StageError::Invalid("Invalid Actor directory cache"))).collect()
     })
 }

@@ -258,10 +258,6 @@ pub(crate) fn archive(tx: &Transaction<'_>, device: StageId, head: &Head) -> Res
     {
         return Ok(id);
     }
-    let used: i64 = tx.query_row("SELECT (SELECT COALESCE(SUM(length(record)),0) FROM core_recovery_rows)+(SELECT COALESCE(SUM(length(record)),0) FROM core_rows)", [], |r| r.get(0))?;
-    if used > 128 * 1024 * 1024 {
-        return Err(StageError::Capacity("Recovery archive budget reached"));
-    }
     let id = uuid::Uuid::new_v4().to_string();
     tx.execute(
         "INSERT INTO core_recovery_archives(id,device,head,created) VALUES(?1,?2,?3,?4)",

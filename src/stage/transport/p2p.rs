@@ -124,10 +124,9 @@ impl P2pChannel {
         }
     }
     pub async fn new(stun_urls: Vec<String>, loopback_only: bool) -> Result<Self> {
-        if stun_urls.len() > 4
-            || stun_urls
-                .iter()
-                .any(|url| url.len() > 200 || !url.starts_with("stun:") || url.contains('@'))
+        if stun_urls
+            .iter()
+            .any(|url| url.len() > 200 || !url.starts_with("stun:") || url.contains('@'))
         {
             return Err(StageError::Invalid(
                 "Only explicitly configured STUN endpoints are supported",

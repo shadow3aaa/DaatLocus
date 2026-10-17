@@ -404,7 +404,7 @@
     "password_must_contain_at_least_12_characters": "Password must contain at least 12 characters."
   },
   "folder_attachment": {
-    "a_folder_can_contain_up_to_2_000_files": "A folder can contain up to 2,000 files.",
+    "choose_a_nonempty_folder": "Choose a nonempty folder.",
     "folder_size_cannot_exceed_32_mb": "Folder size cannot exceed 32 MB.",
     "packed_attachment_exceeds_32_mb": "Packed attachment exceeds 32 MB.",
     "the_folder_contains_an_invalid_path": "The folder contains an invalid path.",

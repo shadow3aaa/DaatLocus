@@ -427,22 +427,8 @@ pub(crate) fn apply(
             let mut configuration: super::core_wire::Configuration = serde_json::from_value(value)
                 .map_err(|_| StageError::Invalid("Invalid shared configuration"))?;
             if change.key != "core"
-                || configuration.name.len() > 100
-                || configuration.instructions.len() > 64 * 1024
+                || configuration.name.trim().is_empty()
                 || !configuration.context.valid()
-                || configuration.apps.len() > 16
-                || configuration
-                    .delegation_apps
-                    .as_ref()
-                    .is_some_and(|apps| apps.len() > 16)
-                || configuration
-                    .tools
-                    .as_ref()
-                    .is_some_and(|tools| tools.len() > 256)
-                || configuration
-                    .app_access
-                    .as_ref()
-                    .is_some_and(|apps| apps.len() > 16)
             {
                 return Err(StageError::Invalid("Invalid shared configuration"));
             }

@@ -311,42 +311,27 @@ impl<'a> Journal<'a> {
         self.store.stage_transaction(|tx| {
             authorize(tx, peer, actor, now)?;
             tx.execute("DELETE FROM stage_snapshot_pages WHERE expires<=?1", [now])?;
-            let count: i64 = tx.query_row(
-                "SELECT COUNT(DISTINCT token) FROM stage_snapshot_pages",
-                [],
-                |r| r.get(0),
-            )?;
-            if count >= 32 {
-                return Err(StageError::Capacity("Snapshot limit reached"));
-            }
             let (base, _) = head(tx, actor)?;
             let token = Uuid::new_v4();
             let ids = tx
-                .prepare("SELECT id FROM messages WHERE actor_id=?1 ORDER BY seq LIMIT 10001")?
+                .prepare("SELECT id FROM messages WHERE actor_id=?1 ORDER BY seq")?
                 .query_map([actor], |r| r.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            if ids.len() > 10000 {
-                return Err(StageError::Capacity("Snapshot message limit reached"));
-            }
             let mut facts=ids.iter().map(|id|message_fact(tx,id)).collect::<Result<Vec<_>>>()?;
-            let streams=tx.prepare("SELECT message,generation,channel,offset,version FROM actor_text_heads WHERE actor=?1 AND offset>0 AND message IN(SELECT id FROM messages WHERE actor_id=?1 AND status='\"running\"') LIMIT 101")?.query_map([actor],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u32>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
-            if streams.len()>100 {return Err(StageError::Capacity("Snapshot active text limit reached"));}
+            let streams=tx.prepare("SELECT message,generation,channel,offset,version FROM actor_text_heads WHERE actor=?1 AND offset>0 AND message IN(SELECT id FROM messages WHERE actor_id=?1 AND status='\"running\"')")?.query_map([actor],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u32>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
             for (message,generation,channel,offset,version) in streams {
-                if offset>32*1024*1024 {return Err(StageError::Capacity("Snapshot text budget reached"));}
                 let mut text=String::new();
                 let mut query=tx.prepare("SELECT json_extract(e.record,'$.text') FROM actor_event_index i JOIN events e ON e.seq=i.event WHERE i.actor=?1 AND json_extract(e.record,'$.type')='generation_delta' AND json_extract(e.record,'$.message_id')=?2 AND json_extract(e.record,'$.generation')=?3 AND json_extract(e.record,'$.channel')=?4 ORDER BY i.ordinal")?;
-                for chunk in query.query_map(params![actor,message,generation,channel],|r|r.get::<_,String>(0))? {let chunk=chunk?;if text.len().saturating_add(chunk.len())>32*1024*1024 {return Err(StageError::Capacity("Snapshot text budget reached"));}text.push_str(&chunk);}
+                for chunk in query.query_map(params![actor,message,generation,channel],|r|r.get::<_,String>(0))? {let chunk=chunk?;text.push_str(&chunk);}
                 if text.len() as i64!=offset {return Err(StageError::Conflict("Active text requires retained events"));}
                 let content=super::blob::put(tx,actor,text.as_bytes())?.content;
                 facts.push(Fact::TextState{message_id:message,generation,channel,version:version as u64,content});
             }
-            let mut bytes = 0usize;
             let pages = facts.len().div_ceil(32).max(1);
             for page in 0..pages {
                 let data = serde_json::to_string(&facts.iter().skip(page*32).take(32).collect::<Vec<_>>())
                     .map_err(|_| StageError::Invalid("Cannot encode snapshot"))?;
-                bytes = bytes.saturating_add(data.len());
-                if bytes > 4 * 1024 * 1024 || data.len() > 48 * 1024 {
+                if data.len() > 48 * 1024 {
                     return Err(StageError::Capacity("Snapshot metadata budget reached"));
                 }
                 tx.execute(

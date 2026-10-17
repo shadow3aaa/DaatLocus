@@ -1,12 +1,8 @@
 //! Attachment decoding and upload limits, independent of a conversation protocol.
 use base64::Engine;
 
-pub const MAX_ATTACHMENTS: usize = 4;
 pub const MAX_IMAGE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_FILE_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
-// Account for base64 expansion per file plus command text and JSON metadata.
-pub const MAX_ATTACHMENT_REQUEST_BYTES: usize =
-    MAX_ATTACHMENTS * MAX_FILE_ATTACHMENT_BYTES.div_ceil(3) * 4 + 2 * 1024 * 1024;
 
 pub fn sanitize_attachment_extension(extension: &str) -> String {
     extension

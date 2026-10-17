@@ -304,7 +304,7 @@ pub fn export(system: &ActorSystem, actor: &str, id: &str) -> Result<Resource> {
     policy.filesystem.readable_roots = vec![base.clone()];
     policy.filesystem.bound_roots = vec![base];
     let bytes =
-        crate::file_io::read_bytes(&record.path, 32 * 1024 * 1024, &policy).map_err(|_| {
+        crate::file_io::read_bytes(&record.path, record.size_bytes, &policy).map_err(|_| {
             StageError::Forbidden("Resource path is outside controlled delivery storage")
         })?;
     if bytes.len() as u64 != record.size_bytes {

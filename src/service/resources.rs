@@ -173,7 +173,7 @@ async fn serve_file(
     policy.filesystem.bound_roots = vec![base];
     let path = resource.path.clone();
     let bytes = tokio::task::spawn_blocking(move || {
-        crate::file_io::read_bytes(&path, 32 * 1024 * 1024, &policy)
+        crate::file_io::read_bytes(&path, resource.size_bytes, &policy)
     })
     .await
     .map_err(|_| ApiError::internal())?

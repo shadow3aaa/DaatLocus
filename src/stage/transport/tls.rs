@@ -193,10 +193,8 @@ fn key(identity: &DeviceIdentity) -> PrivateKeyDer<'static> {
     PrivatePkcs8KeyDer::from(identity.tls_private_key().to_vec()).into()
 }
 pub fn server(identity: &DeviceIdentity, allowed: &[DeviceProfile]) -> Result<TlsAcceptor> {
-    if allowed.is_empty() || allowed.len() > 64 {
-        return Err(StageError::Invalid(
-            "TLS needs a bounded authorized peer set",
-        ));
+    if allowed.is_empty() {
+        return Err(StageError::Invalid("TLS needs an authorized peer set"));
     }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = Pins {

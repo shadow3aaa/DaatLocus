@@ -302,9 +302,6 @@ impl SignalSocket {
         let SignalEvent::Registered { peers } = event else {
             return Err(StageError::Forbidden("Signaling registration rejected"));
         };
-        if peers.len() > 64 {
-            return Err(StageError::Capacity("Signaling device budget exceeded"));
-        }
         value.peers = peers;
         Ok(value)
     }

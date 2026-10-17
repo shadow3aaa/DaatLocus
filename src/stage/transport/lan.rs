@@ -28,7 +28,7 @@ impl LanDiscovery {
         known: HashSet<StageId>,
         interfaces: Vec<String>,
     ) -> Result<Self> {
-        if address.port() == 0 || known.len() > 64 || interfaces.len() > 16 {
+        if address.port() == 0 {
             return Err(StageError::Invalid("Invalid LAN discovery configuration"));
         }
         let daemon =
@@ -163,9 +163,6 @@ impl LanDiscovery {
         }
     }
     pub fn update_known(&mut self, known: HashSet<StageId>) -> Result<()> {
-        if known.len() > 64 {
-            return Err(StageError::Capacity("LAN peer budget exceeded"));
-        }
         self.known = known;
         Ok(())
     }

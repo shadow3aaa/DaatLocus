@@ -80,7 +80,7 @@ const files = (...names: string[]) => names.map(name => new File([name], name));
 const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
 
 describe("serialized attachment uploads", () => {
-  test("concurrent batches reserve slots immediately and stay busy until the last batch finishes", async () => {
+  test("concurrent batches accept more than four files and stay busy until the last batch finishes", async () => {
     const entry: Parameters<typeof queueAttachmentUploads>[0] = { attachments: [] };
     const first = deferred<Attachment>();
     const last = deferred<Attachment>();
@@ -93,7 +93,7 @@ describe("serialized attachment uploads", () => {
     };
     const one = queueAttachmentUploads(entry, files("a", "b"), options);
     const two = queueAttachmentUploads(entry, files("c", "d"), options);
-    await expect(queueAttachmentUploads(entry, files("overflow"), options)).rejects.toThrow();
+    const three = queueAttachmentUploads(entry, files("e", "f"), options);
     await flush();
     expect(calls).toEqual(["a"]);
     expect(entry.attachments).toHaveLength(0);
@@ -105,11 +105,12 @@ describe("serialized attachment uploads", () => {
     expect(entry.attachments.map(item => item.id)).toEqual(["a", "b", "c"]);
     last.resolve(attachment("d"));
     await two;
-    expect(entry.attachments.map(item => item.id)).toEqual(["a", "b", "c", "d"]);
+    await three;
+    expect(entry.attachments.map(item => item.id)).toEqual(["a", "b", "c", "d", "e", "f"]);
     expect(busy.at(-1)).toBe(false);
   });
 
-  test("failure releases reservations without blocking a following batch", async () => {
+  test("failure preserves completed uploads without blocking a following batch", async () => {
     const entry = { attachments: [] as Attachment[] };
     const rejected = deferred<Attachment>();
     const options = { signal: new AbortController().signal, isCurrent: () => true,
@@ -145,14 +146,15 @@ describe("serialized attachment uploads", () => {
     }
   });
 
-  test("the converted file count governs the limit and array-like impostors are rejected", async () => {
+  test("selected iterables upload every file and array-like impostors are rejected", async () => {
     const entry = { attachments: [] as Attachment[] };
     let uploads = 0;
     const options = { signal: new AbortController().signal, isCurrent: () => true, upload: async (file: File) => { uploads += 1; return attachment(file.name); }, onChanged: () => {} };
     const selected = files("a");
     selected[Symbol.iterator] = function* () { yield* files("a", "b", "c", "d", "e"); };
-    await expect(queueAttachmentUploads(entry, selected, options)).rejects.toThrow();
+    await queueAttachmentUploads(entry, selected, options);
     await expect(queueAttachmentUploads(entry, { length: 1, 0: new File(["a"], "a") } as unknown as FileList, options)).rejects.toThrow();
-    expect(uploads).toBe(0);
+    expect(uploads).toBe(5);
+    expect(entry.attachments.map(item => item.id)).toEqual(["a", "b", "c", "d", "e"]);
   });
 });

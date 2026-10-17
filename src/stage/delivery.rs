@@ -80,7 +80,6 @@ impl<'a> Deliveries<'a> {
         if target.stage_id == self.local
             || (text.trim().is_empty() && attachments.is_empty())
             || text.len() > 64 * 1024
-            || attachments.len() > 4
         {
             return Err(StageError::Invalid("Invalid remote Actor input"));
         }

@@ -2,7 +2,7 @@ import { t } from "@/lib/i18n";
 /** A browser folder is uploaded as one bounded archive, never as a server path. */
 export async function zipFolder(files: File[]): Promise<File> {
   const limit = 32 * 1024 * 1024;
-  if (!files.length || files.length > 2000) throw new Error(t("folder_attachment.a_folder_can_contain_up_to_2_000_files"));
+  if (!files.length) throw new Error(t("folder_attachment.choose_a_nonempty_folder"));
   if (files.reduce((total, file) => total + file.size, 0) > limit) throw new Error(t("folder_attachment.folder_size_cannot_exceed_32_mb"));
   const { Zip, ZipDeflate } = await import("fflate");
   const names = new Set<string>();

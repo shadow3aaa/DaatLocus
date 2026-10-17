@@ -166,7 +166,7 @@ impl<'a> Replica<'a> {
     ) -> Result<bool> {
         address.validate()?;
         page.base.validate()?;
-        if page.token.is_nil() || page.page > 316 || page.entries.len() > 32 {
+        if page.token.is_nil() || page.entries.len() > 32 {
             return Err(StageError::Invalid("Invalid Actor snapshot page"));
         }
         for fact in &page.entries {
@@ -192,8 +192,8 @@ impl<'a> Replica<'a> {
             if page.page>next {return Err(StageError::Conflict("Actor snapshot page requires replay"));}
             let previous:Option<Vec<u8>>=tx.query_row("SELECT bytes FROM stage_replica_snapshot_pages WHERE stage=?1 AND actor=?2 AND token=?3 AND page=?4",params![address.stage_id.to_string(),address.actor_id,page.token.to_string(),page.page],|r|r.get(0)).optional()?;
             if previous.as_ref().is_some_and(|previous|previous!=&bytes) {return Err(StageError::Conflict("Snapshot page retry changed content"));}
-            let (all,pending):(i64,i64)=tx.query_row("SELECT COALESCE(SUM(length(bytes)),0),COALESCE(SUM(CASE WHEN processed=0 THEN length(bytes) ELSE 0 END),0) FROM stage_replica_snapshot_pages WHERE stage=?1 AND actor=?2",params![address.stage_id.to_string(),address.actor_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            if previous.is_none() && (all as usize+bytes.len()>4*1024*1024 || pending as usize+bytes.len()>SUBSCRIPTION_BYTES) {return Err(StageError::Capacity("Actor snapshot cache is full"));}
+            let pending:i64=tx.query_row("SELECT COALESCE(SUM(length(bytes)),0) FROM stage_replica_snapshot_pages WHERE stage=?1 AND actor=?2 AND processed=0",params![address.stage_id.to_string(),address.actor_id],|r|r.get(0))?;
+            if previous.is_none() && pending as usize+bytes.len()>SUBSCRIPTION_BYTES {return Err(StageError::Capacity("Actor snapshot cache is full"));}
             tx.execute("INSERT OR IGNORE INTO stage_replica_snapshot_pages(stage,actor,token,page,bytes) VALUES(?1,?2,?3,?4,?5)",params![address.stage_id.to_string(),address.actor_id,page.token.to_string(),page.page,bytes])?;
             apply_snapshot(tx,address)?;
             let complete:bool=tx.query_row("SELECT complete FROM stage_replica_snapshot WHERE stage=?1 AND actor=?2",params![address.stage_id.to_string(),address.actor_id],|r|r.get(0))?;Ok(complete)
@@ -491,10 +491,7 @@ fn apply(tx: &rusqlite::Transaction<'_>, address: &ActorAddress) -> Result<()> {
                 } => {
                     let prior:Option<(i64,String)>=tx.query_row("SELECT version,text FROM stage_replica_text WHERE stage=?1 AND actor=?2 AND message=?3 AND generation=?4 AND channel=?5",params![address.stage_id.to_string(),address.actor_id,message_id,generation,channel],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
                     let (previous, current) = prior.unwrap_or((0, String::new()));
-                    if *offset != current.len() as u64
-                        || *version != previous as u64 + 1
-                        || current.len().saturating_add(text.len()) > 32 * 1024 * 1024
-                    {
+                    if *offset != current.len() as u64 || *version != previous as u64 + 1 {
                         return Err(StageError::Conflict("Actor text append requires replay"));
                     }
                     tx.execute("INSERT INTO stage_replica_text VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(stage,actor,message,generation,channel) DO UPDATE SET version=excluded.version,text=excluded.text",params![address.stage_id.to_string(),address.actor_id,message_id,generation,channel,*version as i64,current+text])?;

@@ -404,7 +404,7 @@
     "password_must_contain_at_least_12_characters": "密码至少需要 12 个字符。"
   },
   "folder_attachment": {
-    "a_folder_can_contain_up_to_2_000_files": "文件夹最多包含 2000 个文件。",
+    "choose_a_nonempty_folder": "请选择非空文件夹。",
     "folder_size_cannot_exceed_32_mb": "文件夹大小不能超过 32 MB。",
     "packed_attachment_exceeds_32_mb": "打包后的附件超过 32 MB。",
     "the_folder_contains_an_invalid_path": "文件夹包含无法处理的路径。",

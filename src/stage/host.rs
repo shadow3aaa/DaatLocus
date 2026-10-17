@@ -65,13 +65,10 @@ impl Settings {
         if self.label.trim().is_empty()
             || self.label.len() > 100
             || self.listen.parse::<std::net::SocketAddr>().is_err()
-            || self.interfaces.len() > 16
             || self
                 .interfaces
                 .iter()
                 .any(|name| name.is_empty() || name.len() > 100)
-            || self.ssh.len() > 64
-            || self.stun.len() > 4
         {
             return Err(StageError::Invalid("Invalid device settings"));
         }
