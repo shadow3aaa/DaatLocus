@@ -65,7 +65,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
             "mime_type",
             "byte_len",
         ],
-        "actors__create" | "actors__send" => &[
+        "actors__create" | "actors__import_conversation" | "actors__send" => &[
             "id",
             "actor_id",
             "message_id",
@@ -85,7 +85,10 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
             output.insert((*key).into(), value.clone());
         }
     }
-    if matches!(domain_name, "actors__create" | "actors__send") {
+    if matches!(
+        domain_name,
+        "actors__create" | "actors__import_conversation" | "actors__send"
+    ) {
         // Older Core results retained a host-local URL, but their explicit
         // device argument still identifies the original host after replication.
         let stage = payload
@@ -197,6 +200,21 @@ fn save_actor(tx: &Transaction<'_>, actor: &ActorRecord) -> Result<()> {
             actor: actor.summary(),
         },
     )?;
+    Ok(())
+}
+fn save_resource(
+    tx: &Transaction<'_>,
+    resource: StoredResource,
+    message_id: Option<&str>,
+) -> Result<()> {
+    let mut data = serde_json::to_value(&resource).into_diagnostic()?;
+    let used:i64=sql(tx.query_row("SELECT COALESCE(SUM(json_extract(record,'$.size_bytes')),0) FROM resources WHERE NOT(actor_id=?1 AND id=?2)",params![resource.actor_id,resource.id],|r|r.get(0)))?;
+    if (used as u64).saturating_add(resource.size_bytes) > 512 * 1024 * 1024 {
+        return Err(ActorError::Conflict("Account resource storage budget reached".into()).into());
+    }
+    data["path"] = serde_json::to_value(&resource.path).into_diagnostic()?;
+    data["message_id"] = serde_json::to_value(message_id).into_diagnostic()?;
+    sql(tx.execute("INSERT INTO resources(actor_id,id,record) VALUES(?1,?2,?3) ON CONFLICT(actor_id,id) DO UPDATE SET record=excluded.record",params![resource.actor_id,resource.id,encode(&data)?]))?;
     Ok(())
 }
 fn message_tx(tx: &Transaction<'_>, id: &str) -> Result<MessageRecord> {
@@ -448,6 +466,17 @@ impl ActorStore {
         let mut db = self.db.lock();
         let tx = sql(db.transaction())?;
         save_actor(&tx, actor)?;
+        self.commit(tx)
+    }
+    pub(crate) fn save_actor_with_resource(
+        &self,
+        actor: &ActorRecord,
+        resource: StoredResource,
+    ) -> Result<()> {
+        let mut db = self.db.lock();
+        let tx = sql(db.transaction())?;
+        save_actor(&tx, actor)?;
+        save_resource(&tx, resource, None)?;
         self.commit(tx)
     }
     pub fn set_status(&self, id: &str, status: ActorStatus) -> Result<()> {
@@ -1865,10 +1894,7 @@ impl ActorStore {
     ) -> Result<()> {
         let mut db = self.db.lock();
         let tx = sql(db.transaction())?;
-        let mut data = serde_json::to_value(&resource).into_diagnostic()?;
-        data["path"] = serde_json::to_value(&resource.path).into_diagnostic()?;
-        data["message_id"] = serde_json::to_value(message_id).into_diagnostic()?;
-        sql(tx.execute("INSERT INTO resources(actor_id,id,record) VALUES(?1,?2,?3) ON CONFLICT(actor_id,id) DO UPDATE SET record=excluded.record",params![resource.actor_id,resource.id,encode(&data)?]))?;
+        save_resource(&tx, resource, message_id)?;
         self.commit(tx)
     }
     pub fn resource(&self, actor_id: &str, id: &str) -> Result<StoredResource> {

@@ -548,7 +548,8 @@
     "login_limited": "Too many sign-in attempts.",
     "registration_pending": "Account registration is in progress.",
     "account_unavailable": "Account unavailable.",
-    "connection_failed": "Connection failed. Try again."
+    "connection_failed": "Connection failed. Try again.",
+    "invalid_codex_conversation": "This Codex conversation could not be read. Refresh the list and choose another."
   },
   "effort": {
     "none": "None",
@@ -693,5 +694,32 @@
     "refresh_action": "Refresh apps",
     "install_action": "Install app",
     "tool_action": "App tool"
+  },
+  "imports": {
+    "title": "Import",
+    "intro": "Bring a conversation from another AI app into Daat Locus.",
+    "sources": "Import from other AI apps",
+    "import": "Import",
+    "message_count": "{{count}} messages",
+    "idle_note": "Core will create an Actor with this context. It will wait for you to continue.",
+    "sending": "Sending…",
+    "submitted": "Sent to Core. Open the conversation to follow the import and find your Actor.",
+    "view_core": "View in Core",
+    "bubble_title": "Import Codex conversation",
+    "status_queued": "Waiting to import",
+    "status_running": "Preparing Actor",
+    "status_completed": "Import request processed",
+    "status_failed": "Import failed",
+    "status_cancelled": "Import cancelled",
+    "status_interrupted": "Import interrupted",
+    "codex_conversations": "Codex conversations",
+    "back": "Back to import",
+    "search": "Search conversations",
+    "refresh": "Refresh list",
+    "archived": "Archived",
+    "loading": "Loading conversations…",
+    "empty": "No Codex conversations found on this device.",
+    "no_results": "No matching conversations.",
+    "load_more": "Load more"
   }
 }

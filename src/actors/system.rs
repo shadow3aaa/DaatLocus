@@ -978,6 +978,7 @@ impl ActorSystem {
         parent: &ActorRecord,
         config: ActorConfig,
         workspace_policy: Option<&crate::sandbox::RuntimeSandboxPolicy>,
+        imported: Option<(&crate::resources::Resource, &str)>,
     ) -> Result<ActorRecord> {
         if cfg!(target_os = "android") && config.apps.iter().any(|app| app == "terminal") {
             return Err(invalid("Terminal is unavailable on this device"));
@@ -988,6 +989,18 @@ impl ActorSystem {
         {
             return Err(ActorError::Unavailable("Actor configuration is changing".into()).into());
         }
+        let import_id = imported.map(|(_, message)| {
+            let hash = crate::stage::digest(
+                format!("conversation-import:{}:{message}", parent.id).as_bytes(),
+            );
+            let bytes = hex::decode(hash).expect("SHA256 hex");
+            Uuid::from_bytes(bytes[..16].try_into().expect("SHA256 prefix")).to_string()
+        });
+        if let Some(id) = &import_id
+            && let Ok(actor) = self.store().actor(id)
+        {
+            return Ok(actor);
+        }
         let config = self.hosted_config(config)?;
         self.validate_config(&config)?;
         crate::file_io::ensure_directory(
@@ -996,7 +1009,7 @@ impl ActorSystem {
         )?;
         let actor = ActorRecord {
             context: Default::default(),
-            id: Uuid::new_v4().to_string(),
+            id: import_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
             parent_id: Some(parent.id.clone()),
             depth: parent
                 .depth
@@ -1008,20 +1021,45 @@ impl ActorSystem {
             updated_at_ms: now(),
         };
         self.prepare_dirs(&actor.id)?;
-        self.store().save_actor(&actor)?;
+        if let Some((resource, _)) = imported {
+            let evidence = crate::conversation_import::prepare_evidence(
+                self, &parent.id, &actor.id, resource,
+            )?;
+            self.store().save_actor_with_resource(&actor, evidence)?;
+        } else {
+            self.store().save_actor(&actor)?;
+        }
         crate::stage::ledger::inherit_account_ownership(self.store(), &parent.id, &actor.id)
             .map_err(|error| miette::miette!("{error}"))?;
         Ok(actor)
     }
     pub fn create_owned(&self, parent: &str, config: ActorConfig) -> Result<ActorRecord> {
         let parent = self.actor(parent)?;
-        self.create(&parent, config, None)
+        self.create(&parent, config, None, None)
     }
     pub fn create_from_actor(
         &self,
         sender: &str,
         config: ActorConfig,
         context: &AppToolExecutionContext,
+    ) -> Result<ActorRecord> {
+        self.create_from_actor_with_resource(sender, config, context, None)
+    }
+    pub(crate) fn import_from_actor(
+        &self,
+        sender: &str,
+        config: ActorConfig,
+        resource: &crate::resources::Resource,
+        context: &AppToolExecutionContext,
+    ) -> Result<ActorRecord> {
+        self.create_from_actor_with_resource(sender, config, context, Some(resource))
+    }
+    fn create_from_actor_with_resource(
+        &self,
+        sender: &str,
+        config: ActorConfig,
+        context: &AppToolExecutionContext,
+        resource: Option<&crate::resources::Resource>,
     ) -> Result<ActorRecord> {
         let parent = self.app_actor(sender)?;
         self.store()
@@ -1058,7 +1096,12 @@ impl ActorSystem {
             ));
         }
         check_child(&ceiling, &config)?;
-        self.create(&parent, config, Some(&context.sandbox_policy))
+        self.create(
+            &parent,
+            config,
+            Some(&context.sandbox_policy),
+            resource.map(|resource| (resource, call.message_id.as_str())),
+        )
     }
     pub fn list_visible(&self) -> Result<Vec<ActorSummary>> {
         Ok(self

@@ -1,3 +1,4 @@
+import { messageDisplayText } from "@/lib/conversation-import";
 import { useLayoutEffect, useState, type CSSProperties, type RefObject } from "react";
 import ReactMarkdown from "react-markdown";
 import { t } from "@/lib/i18n";
@@ -68,7 +69,7 @@ export function ConversationHistory({messages, scroll, onNavigate}: {
     {stops.map((stop, index) => {
       const message = messages[stop.target];
       const id = messageAnchor(message);
-      const title = message.content || message.attachments[0]?.name || t("conversation_pane.history_message");
+      const title = messageDisplayText(message) || message.attachments[0]?.name || t("conversation_pane.history_message");
       const visible = position.visible.some(item => item >= stop.first && item <= stop.last);
       const width = preview == null ? 6 : tickWidths[Math.abs(index - preview)] ?? 6;
       return <Tooltip key={message.id} open={preview === index}>

@@ -11,6 +11,8 @@ mod configuration;
 mod conversation;
 #[path = "http/devices_api.rs"]
 mod devices;
+#[path = "http/imports_api.rs"]
+mod imports;
 #[path = "http/reset_api.rs"]
 mod reset;
 #[path = "http/resources_api.rs"]

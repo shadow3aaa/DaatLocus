@@ -13,6 +13,7 @@ pub mod builtin_apps;
 pub mod config;
 pub mod config_setup;
 pub mod context_budget;
+pub(crate) mod conversation_import;
 pub mod core;
 pub mod daat_locus_paths;
 pub mod daemon;

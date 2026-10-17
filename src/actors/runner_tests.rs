@@ -3560,6 +3560,88 @@ async fn start_core_fixture(system: &ActorSystem) -> Arc<crate::stage::runtime::
 }
 
 #[tokio::test]
+async fn core_import_routes_through_device_permissions_and_never_starts_the_imported_actor() {
+    let provider = Arc::new(ReplayProvider::new(vec![]));
+    let (_dir, system) = runtime(provider.clone()).await;
+    let network = start_core_fixture(&system).await;
+    let transcript = crate::conversation_import::parse_codex(b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"core-import-fixture\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Preserve original UI context\"}}\n").unwrap();
+    let evidence = crate::resources::publish(
+        &system,
+        "core",
+        "UI context",
+        crate::conversation_import::MEDIA_TYPE,
+        &serde_json::to_vec(&transcript).unwrap(),
+    )
+    .unwrap();
+    provider.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall {id:"read-import".into(),name:"actors__read_resource".into(),arguments:json!({"resource_id":evidence.id,"offset":null,"limit":4096})}]),
+        MockReply::Calls(vec![AgentToolCall {id:"prepare-import".into(),name:"actors__import_conversation".into(),arguments:json!({"stage_id":network.host.local,"resource_id":evidence.id,"name":"Athena","instructions":"Preserve UI context; wait for a new request."})}]),
+        MockReply::Answer("Imported; waiting for the owner."),
+    ]);
+    let input = system
+        .send_user(
+            "core",
+            "Import this conversation; do not start it.".into(),
+            vec![super::super::Attachment {
+                id: evidence.id.clone(),
+                name: evidence.name.clone(),
+                media_type: evidence.media_type.clone(),
+                size_bytes: evidence.content.size,
+                uri: format!("/v1/actors/core/resources/{}", evidence.id),
+            }],
+            None,
+        )
+        .unwrap();
+    let done = wait_core_completed(&system, &input.id).await;
+    assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
+    let imported = system
+        .store()
+        .actors()
+        .unwrap()
+        .into_iter()
+        .find(|actor| actor.config.name == "Athena")
+        .expect("Core created the imported Actor");
+    assert_eq!(imported.status, ActorStatus::Idle);
+    assert!(
+        system
+            .store()
+            .messages(&imported.id, None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        system
+            .store()
+            .messages("root", None, 10)
+            .unwrap()
+            .items
+            .is_empty(),
+        "Import cannot start another Actor either"
+    );
+    assert!(crate::resources::export(&system, &imported.id, &evidence.id).is_ok());
+    let tools = system
+        .store()
+        .tool_summaries("core", &input.id, None, 10)
+        .unwrap()
+        .items;
+    let created = tools
+        .iter()
+        .find(|tool| tool.name == "actors__import_conversation")
+        .unwrap();
+    assert!(created.error.is_none(), "{:?}", created.error);
+    assert_eq!(created.outcome.as_ref().unwrap()["id"], imported.id);
+    assert!(tools.iter().all(|tool| tool.name != "actors__send"));
+    assert_eq!(
+        provider.requests.lock().len(),
+        3,
+        "Only Core performed inference"
+    );
+    network.stop().await;
+    system.shutdown().await;
+}
+
+#[tokio::test]
 async fn core_delivery_is_visible_before_the_originating_turn_finishes() {
     let provider = Arc::new(ReplayProvider::new(vec![
         MockReply::Calls(vec![AgentToolCall {

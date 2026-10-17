@@ -182,7 +182,8 @@ impl Fixture {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let state = ServiceState::new(system.clone(), url.clone())
             .unwrap()
-            .with_listen_address(listener.local_addr().unwrap());
+            .with_listen_address(listener.local_addr().unwrap())
+            .with_codex_home(temp.path().join("codex"));
         let stage = state.stage.clone().unwrap();
         let auth = stage.host.accounts.clone();
         if initialize_account {

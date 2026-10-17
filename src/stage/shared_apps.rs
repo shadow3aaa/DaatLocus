@@ -37,6 +37,15 @@ struct CreateArgs {
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct ImportArgs {
+    stage_id: String,
+    resource_id: String,
+    name: String,
+    instructions: String,
+}
+#[model_schema]
+#[derive(Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListArgs {
     stage_id: String,
     cursor: Option<usize>,
@@ -82,7 +91,14 @@ impl App for AccountActors {
     fn delegates_approval(&self, call: &AgentToolCall) -> bool {
         matches!(
             call.name.as_str(),
-            "devices" | "list" | "create" | "send" | "status" | "cancel" | "deliver"
+            "devices"
+                | "list"
+                | "create"
+                | "import_conversation"
+                | "send"
+                | "status"
+                | "cancel"
+                | "deliver"
         )
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
@@ -91,6 +107,7 @@ impl App for AccountActors {
             spec.input_schema = match spec.name.as_str() {
                 "list" => model_schema_for::<ListArgs>(),
                 "create" => model_schema_for::<CreateArgs>(),
+                "import_conversation" => model_schema_for::<ImportArgs>(),
                 "send" => model_schema_for::<SendArgs>(),
                 "status" | "cancel" => model_schema_for::<RequestArgs>(),
                 _ => continue,
@@ -139,6 +156,7 @@ impl App for AccountActors {
             ));
         }
         self.system.record_for_tool(shared::ACTOR_ID, caller)?;
+        self.local.check_import_operation(call, context)?;
         Ok(())
     }
     async fn execute_tool(

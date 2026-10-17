@@ -1,11 +1,13 @@
 import { t } from "@/lib/i18n";
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
-import { ArrowLeftIcon, MonitorIcon, SearchIcon, SettingsIcon, ShieldCheckIcon, SlidersHorizontalIcon, SunIcon } from "lucide-react";
+import { ArrowLeftIcon, DownloadIcon, MonitorIcon, SearchIcon, SettingsIcon, ShieldCheckIcon, SlidersHorizontalIcon, SunIcon } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { AppearanceSettings } from "@/components/settings/appearance-settings";
+import { ImportSettings } from "@/components/settings/import-settings";
+import { getImportCapabilities } from "@/lib/conversation-import";
 import { SettingsSection, SettingsGroup, SettingsRow } from "@/components/settings/structure";
 import { AccountEditor } from "@/components/settings/account-editor";
 import {
@@ -18,9 +20,9 @@ import { modeLabel } from "@/components/composer";
 import { ProvidersSettings } from "@/components/settings/providers-settings";
 import { errorText, Picker, StatusNote } from "@/components/settings/controls";
 
-export type SettingsTab = "general" | "personal" | "account" | "permissions" | "models";
+export type SettingsTab = "general" | "personal" | "account" | "permissions" | "models" | "import";
 export type SettingsPageHandle = { close(): void };
-const paths: Record<SettingsTab, string> = {general: "general", personal: "appearance", account: "devices", permissions: "permissions", models: "providers"};
+const paths: Record<SettingsTab, string> = {general: "general", personal: "appearance", account: "devices", permissions: "permissions", models: "providers", import: "import"};
 export function settingsPath(tab: SettingsTab) { return `/settings/${paths[tab]}`; }
 export function settingsTabFromPath(path: string): SettingsTab | null {
   return (Object.keys(paths) as SettingsTab[]).find(tab => path === settingsPath(tab)) ?? null;
@@ -29,9 +31,10 @@ export function settingsTabFromPath(path: string): SettingsTab | null {
 export const SettingsPage = forwardRef<SettingsPageHandle, {
   open: boolean; onOpenChange: (open: boolean) => void; actorId: string;
   onActorChanged: (actorId?: string) => void;
+  onViewCore(): void;
   preferences: Preferences; onPreferencesChanged: (preferences: Preferences) => void;
   initialTab?: SettingsTab; canManage?: boolean; onTabChange(tab: SettingsTab): void;
-}>(function SettingsPage({open, onOpenChange, actorId, onActorChanged, preferences, onPreferencesChanged, initialTab = "general", canManage = true, onTabChange}, ref) {
+}>(function SettingsPage({open, onOpenChange, actorId, onActorChanged, onViewCore, preferences, onPreferencesChanged, initialTab = "general", canManage = true, onTabChange}, ref) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [actor, setActor] = useState<ActorDetail | null>(null);
   const [config, setConfig] = useState<SetupConfigRequest | null>(null);
@@ -45,6 +48,17 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
   const [mobileDetail, setMobileDetail] = useState(false);
   const [accountVisited, setAccountVisited] = useState(initialTab === "account");
   const [query, setQuery] = useState("");
+  const [importsSupported, setImportsSupported] = useState(false);
+  useEffect(() => {
+    if (!open || !canManage) return;
+    const controller = new AbortController();
+    void getImportCapabilities(controller.signal).then(capabilities => {
+      if(controller.signal.aborted)return;
+      setImportsSupported(capabilities.codex);
+      if(!capabilities.codex&&initialTab==="import"){setTab("general");onTabChange("general");}
+    }).catch(()=>{if(!controller.signal.aborted){setImportsSupported(false);if(initialTab==="import"){setTab("general");onTabChange("general");}}});
+    return ()=>controller.abort();
+  }, [open, canManage]);
   const actorRef = useRef(actorId);
   const scroll = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => { if (scroll.current) scroll.current.scrollTop = 0; }, [tab]);
@@ -103,6 +117,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
     {id: "general" as const, label: t("settings_page.general"), icon: SettingsIcon, keywords: t("common.language")},
     {id: "personal" as const, label: t("settings_dialog.appearance"), icon: SunIcon, keywords: [t("settings_dialog.theme"), t("settings_dialog.light"), t("settings_dialog.dark"), t("settings_dialog.system"), t("appearance.code_theme"), t("appearance.accent"), t("appearance.interface_size"), t("appearance.content_size"), t("appearance.full_width")].join(" ")},
     ...(canManage ? [
+      ...(importsSupported ? [{id: "import" as const, label: t("imports.title"), icon: DownloadIcon, keywords: "Codex"}] : []),
       {id: "account" as const, label: t("settings_dialog.configuration"), icon: MonitorIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), "SSH", t("access_gate.public_connection_service"), t("reset_work.title")].join(" ")},
       {id: "permissions" as const, label: t("settings_dialog.permissions"), icon: ShieldCheckIcon, keywords: t("settings_dialog.approval_mode")},
       {id: "models" as const, label: t("providers_settings.providers"), icon: SlidersHorizontalIcon, keywords: [t("composer.models"), t("composer.default_model"), t("provider_editor.api_key")].join(" ")},
@@ -127,6 +142,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
           <Picker id="dl-client-language" label={t("common.language")} description={t("settings_page.interface_language")} value={preferences.language} options={[{value: "system", label: t("settings_page.detect_language")}, {value: "zh-CN", label: t("common.chinese")}, {value: "en-US", label: t("common.english")}]} onChange={value=>onPreferencesChanged({...preferences,language:value as Preferences["language"]})} />
         </SettingsGroup></div>
         <div hidden={tab !== "personal"}><AppearanceSettings preferences={preferences} onChange={onPreferencesChanged} /></div>
+        {canManage && importsSupported && <div hidden={tab !== "import"}><ImportSettings onViewCore={onViewCore} /></div>}
         {canManage&&<div hidden={tab !== "account"}>{accountVisited && <AccountEditor onChanged={()=>onActorChanged()}/>}</div>}
         {canManage&&<div hidden={tab !== "permissions"}><SettingsSection title={t("settings_dialog.action_approval")}><SettingsGroup><SettingsRow label={t("settings_dialog.approval_mode")}>
           <ToggleGroup type="single" aria-label={t("settings_dialog.approval_mode")} value={actor?.config?.permissions.approval_mode||"auto"} disabled={locked||loading||!actor} className="dl-settings-options" onValueChange={mode=>{if(mode)void changeMode(mode as ApprovalMode);}}>

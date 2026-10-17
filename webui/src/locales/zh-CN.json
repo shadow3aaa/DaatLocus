@@ -548,7 +548,8 @@
     "login_limited": "登录请求过于频繁。",
     "registration_pending": "账号注册正在进行。",
     "account_unavailable": "账号暂时无法连接。",
-    "connection_failed": "连接失败，请重试。"
+    "connection_failed": "连接失败，请重试。",
+    "invalid_codex_conversation": "无法读取此 Codex 会话，请刷新列表或选择其他会话。"
   },
   "effort": {
     "none": "无",
@@ -693,5 +694,32 @@
     "refresh_action": "刷新应用",
     "install_action": "安装应用",
     "tool_action": "调用应用工具"
+  },
+  "imports": {
+    "title": "导入",
+    "intro": "将其他 AI 应用中的会话导入 Daat Locus。",
+    "sources": "从其他 AI 应用导入",
+    "import": "导入",
+    "message_count": "{{count}} 条消息",
+    "idle_note": "Core 会根据会话创建 Actor，等待你继续。",
+    "sending": "正在发送…",
+    "submitted": "已交给 Core。打开对话即可查看导入进展和创建的 Actor。",
+    "view_core": "在 Core 中查看",
+    "bubble_title": "导入 Codex 会话",
+    "status_queued": "等待导入",
+    "status_running": "正在准备 Actor",
+    "status_completed": "导入请求已处理",
+    "status_failed": "导入失败",
+    "status_cancelled": "已取消导入",
+    "status_interrupted": "导入已中断",
+    "codex_conversations": "Codex 会话",
+    "back": "返回导入",
+    "search": "搜索会话",
+    "refresh": "刷新列表",
+    "archived": "已归档",
+    "loading": "正在读取会话…",
+    "empty": "此设备上没有找到 Codex 会话。",
+    "no_results": "没有匹配的会话。",
+    "load_more": "加载更多"
   }
 }

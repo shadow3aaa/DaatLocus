@@ -1,3 +1,5 @@
+import { importedConversation, messageDisplayText } from "@/lib/conversation-import";
+import { ImportConversationBubble } from "@/components/import-conversation";
 import { getCurrentWebUiLanguage, t } from "@/lib/i18n";
 import type { Access, MessageRecord } from "@/lib/actor-api";
 import { isUserDelivery, isUserSource } from "@/lib/work-timeline";
@@ -27,13 +29,13 @@ function OutcomeStatus({ message }: { message: MessageRecord }) {
 export function PrimaryTurn({ message, chat, access, onActor, typing }: Props & { typing?: boolean }) {
   const user = isUserSource(message);
   const tools = chat.tools.filter(tool => tool.message_id === message.id);
-  const tasks = tools.filter(tool => !tool.error && ["actors__create", "actors__send"].includes(domainToolName(tool.name)) && tool.outcome);
+  const tasks = tools.filter(tool => !tool.error && ["actors__create", "actors__import_conversation", "actors__send"].includes(domainToolName(tool.name)) && tool.outcome);
   const taskTarget = (tool: typeof tasks[number]) => { const info = asObject(tool.outcome); return actorIdFromUrl(asText(info.conversation_url), typeof location === "undefined" ? undefined : location.href) || asText(info.actor_id) || asText(info.id); };
   const delegated = new Set(tasks.filter(tool => domainToolName(tool.name) === "actors__send").map(taskTarget));
-  const references = tasks.filter(tool => domainToolName(tool.name) !== "actors__create" || !delegated.has(taskTarget(tool)));
+  const references = tasks.filter(tool => domainToolName(tool.name) === "actors__send" || !delegated.has(taskTarget(tool)));
   if (!user && message.reply_to.kind !== "user" && !(message.reply_to.kind === "remote" && message.reply_to.user)) return null;
   return <article className="dl-message-turn dl-primary-turn" id={`message-${message.actor_id}-${message.id}`}>
-    {user && <div className="dl-message dl-message-user"><div className="dl-bubble dl-bubble-user">{message.content && <p className="dl-user-text">{message.content}</p>}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</div><small className="dl-message-receipt">{t("conversation_turns.delivered_time", {time:new Date(message.created_at_ms).toLocaleTimeString(getCurrentWebUiLanguage(), { hour: "numeric", minute: "2-digit" })})}</small><CopyMessage content={message.content} /></div>}
+    {user && <div className="dl-message dl-message-user"><div className="dl-bubble dl-bubble-user">{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{message.content && <p className="dl-user-text">{message.content}</p>}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</div><small className="dl-message-receipt">{t("conversation_turns.delivered_time", {time:new Date(message.created_at_ms).toLocaleTimeString(getCurrentWebUiLanguage(), { hour: "numeric", minute: "2-digit" })})}</small><CopyMessage content={messageDisplayText(message)} /></div>}
     <Guidance message={message} chat={chat} primary />
     {isUserDelivery(message) && <div className="dl-message dl-message-assistant"><div className="dl-bubble dl-bubble-assistant"><Markdown content={message.reply || ""} onActor={onActor} /></div><CopyMessage content={message.reply || ""} /></div>}
     {references.map(tool => { const info = asObject(tool.outcome); const target = taskTarget(tool); return target ? <ActorReference key={tool.id} actorId={target} label={asText(info.name)} messageId={asText(info.message_id)} onOpen={onActor} /> : null; })}
@@ -47,7 +49,7 @@ export function WorkTurn({ message, chat, access, onActor }: Props) {
   const user = isUserSource(message);
   const tools = chat.tools.filter(tool => tool.message_id === message.id);
   return <article className="dl-message-turn dl-work-turn" id={`message-${message.actor_id}-${message.id}`}>
-    {(message.content || message.attachments.length > 0) && <div className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}>{!user && message.source.kind === "actor" && <ActorReference actorId={message.source.actor_id} onOpen={onActor} detail={["result", "progress"].includes(message.kind) ? t("conversation_turns.collaboration_reply") : t("conversation_turns.delegate_task")} />}<div className={cn(user && "dl-work-prompt")}>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</div>{user && message.content && <div className="dl-work-user-actions"><CopyMessage content={message.content} /></div>}</div>}
+    {(message.content || message.attachments.length > 0) && <div className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}>{!user && message.source.kind === "actor" && <ActorReference actorId={message.source.actor_id} onOpen={onActor} detail={["result", "progress"].includes(message.kind) ? t("conversation_turns.collaboration_reply") : t("conversation_turns.delegate_task")} />}<div className={cn(user && "dl-work-prompt")}>{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</div>{user && message.content && <div className="dl-work-user-actions"><CopyMessage content={messageDisplayText(message)} /></div>}</div>}
     <Guidance message={message} chat={chat} />
     {message.kind !== "delivery" && <WorkRound message={message} events={chat.events} tools={tools} nextToolCursor={chat.toolNext[message.id]} onMoreTools={() => chat.loadMoreTools(message.id)} onActor={onActor} />}
     <Decisions message={message} chat={chat} access={access} />

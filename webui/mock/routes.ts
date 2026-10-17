@@ -1,4 +1,5 @@
 import { appsRoute } from "./apps";
+import { importsRoute } from "./imports";
 /**
  * Development fixtures for the client HTTP/SSE wire shapes. Authentication,
  * permissions and actual execution remain the real service's responsibility.
@@ -214,7 +215,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     const id=url.searchParams.get("scene")??"conversation";
     if(!activateScenario(id)) return invalidRequest("Unknown preview scenario");
     const scene=scenarios.find(item=>item.id===id)!;
-    return new Response(null,{status:303,headers:{Location:scene.id.startsWith("apps")?"/apps":scene.actor===ROOT_ACTOR_ID?"/":`/actors/${scene.actor}`}});
+    return new Response(null,{status:303,headers:{Location:scene.id==="imports"?"/settings/import":scene.id.startsWith("apps")?"/apps":scene.actor===ROOT_ACTOR_ID?"/":`/actors/${scene.actor}`}});
   }
   if(path==="/__mock/scenario" && method==="POST") {const body=await jsonBody(req);if(typeof body?.id!=="string"||!activateScenario(body.id))return invalidRequest("Unknown preview scenario");return json({id:previewState.id});}
   if (path === "/__mock/health" && method === "GET") return json({ ok: true });
@@ -257,6 +258,12 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
   if (path === "/v1/account/session" && method === "DELETE") return noContent();
 
   // ---- stage --------------------------------------------------------------
+  if (path === "/v1/imports" && method === "GET") return json({codex: previewState.id !== "imports-unsupported"});
+  if (path.startsWith("/v1/imports/") && ["POST","GET"].includes(method)) {
+    if(previewState.id==="imports-unsupported")return notFound();
+    if (!previewState.authenticated) return json({code: "unauthorized"}, 401);
+    return importsRoute(path, req);
+  }
   if (path === "/v1/stage" && method === "GET") {
     const stage: StageInfo = {
       stage_id: STAGE_ID,

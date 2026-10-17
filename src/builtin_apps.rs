@@ -226,6 +226,7 @@ pub(crate) fn read_only_tool(app: &str, tool: &str) -> bool {
             "devices"
                 | "list"
                 | "create"
+                | "import_conversation"
                 | "send"
                 | "status"
                 | "cancel"

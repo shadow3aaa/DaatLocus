@@ -444,3 +444,26 @@ App 效果。没有常驻后台服务保证，也不以关闭 sandbox 为代价�
 窗口和共用界面中的窗口按钮、拖动区；macOS 使用透明覆盖标题栏与原生红黄绿按钮。
 原生窗口命令只操作调用者的主窗口，权限绑定确切对话 origin/路径，不开放任意窗口
 定位、文件或进程控制。浏览器入口不渲染窗口控制，关窗仍只隐藏，不停止 Actor。
+
+### Conversation import
+
+Local Codex sessions and archived sessions are discovered through a private filesystem
+index, with bounded searchable pages and opaque source IDs. Selection checks file
+freshness before and after a scope-checked read; credential files are never indexed.
+Unsupported devices (including Android) advertise no import capability and hide
+the settings category. Selected Codex rollout JSONL is parsed server-side.
+Only user/assistant text is retained, without duplicated Codex event copies,
+private reasoning, system/developer instructions, tool protocol or grants.
+`GET /v1/imports` advertises availability; `GET /v1/imports/codex` lists sources.
+`POST /v1/imports/codex/preview` accepts only a listed source ID and stores immutable, Actor-scoped conversation
+evidence and returns its opaque resource ID, title and message count.
+`POST /v1/imports/codex` submits it to Core through the normal durable user inbox,
+using the resource identity for idempotency. Core reads the evidence and chooses
+an explicit device, name and factual context through Actors `import_conversation`.
+Creation inherits device/parent grants and the current workspace, retains the
+original resource in the new Actor ledger, and leaves the inbox empty. Retrying
+creation for that input returns the same Actor. Import inputs cannot create via
+the ordinary tool, send/cancel delegated work, be edited or become steering.
+They remain cancellable. No foreign effects are replayed or provider transcripts
+injected into inference history. The shared WebUI renders a compact import card
+from the attachment's semantic media type, including queue/search/history previews.

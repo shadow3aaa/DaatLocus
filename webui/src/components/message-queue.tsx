@@ -1,3 +1,4 @@
+import { importedConversation, messageDisplayText } from "@/lib/conversation-import";
 import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { useEffect, useRef, useState } from "react";
@@ -16,8 +17,9 @@ function QueueMessage({ message, active, chat, access }: {message: MessageRecord
   useEffect(() => { if (!editing) setText(message.content); }, [message.content, editing]);
   const pendingGuide = message.kind === "steering";
   const controls = access.kind === "owner";
-  const canGuide = controls && active && !pendingGuide;
-  const summary = message.content.trim() || message.attachments.map(item => item.name).join("、");
+  const importing = !!importedConversation(message);
+  const canGuide = controls && active && !pendingGuide && !importing;
+  const summary = messageDisplayText(message).trim() || message.attachments.map(item => item.name).join("、");
   function edit() { original.current = message; setText(message.content); setError(""); setEditing(true); }
   async function run(action: () => Promise<unknown>) {
     setBusy(true); setError("");
@@ -33,8 +35,8 @@ function QueueMessage({ message, active, chat, access }: {message: MessageRecord
       <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm" disabled={busy || !canGuide} aria-label={t("message_queue.guide_task_value0", {value0: summary})} onClick={() => { if (active) void run(() => chat.steer(message, active.id)); }}><CornerDownRightIcon /><span>{t("message_queue.guide")}</span></Button></TooltipTrigger><TooltipContent>{active ? t("message_queue.add_this_message_to_the_current_task") : t("message_queue.no_task_is_running")}</TooltipContent></Tooltip>
       <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" disabled={busy} aria-label={t("message_queue.withdraw_queued_message_value0", {value0: summary})} onClick={() => void run(() => chat.amend(message))}><Trash2Icon /></Button></TooltipTrigger><TooltipContent>{t("message_queue.withdraw")}</TooltipContent></Tooltip>
       <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" disabled={busy} aria-label={t("message_queue.more_message_actions_value0", {value0: summary})}><EllipsisIcon /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" side="top">
-        <DropdownMenuItem onSelect={edit}><PencilIcon />{t("message_queue.edit_message")}</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => void run(() => navigator.clipboard.writeText(message.content))}><CopyIcon />{t("conversation_content.copy_message")}</DropdownMenuItem>
+        {!importing && <DropdownMenuItem onSelect={edit}><PencilIcon />{t("message_queue.edit_message")}</DropdownMenuItem>}
+        <DropdownMenuItem onSelect={() => void run(() => navigator.clipboard.writeText(messageDisplayText(message)))}><CopyIcon />{t("conversation_content.copy_message")}</DropdownMenuItem>
         <DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => void run(() => chat.clearQueue())}><Trash2Icon />{t("message_queue.clear_queue")}</DropdownMenuItem>
       </DropdownMenuContent></DropdownMenu>
     </div>}

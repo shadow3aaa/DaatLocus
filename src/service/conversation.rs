@@ -89,6 +89,7 @@ async fn steer(
     Json(input): Json<Steer>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, true).await?;
+    reject_import_edit(&state, &actor, &message)?;
     if input.target_message_id.len() > 128 || input.expected_updated_at_ms < 0 {
         return Err(ApiError::invalid());
     }
@@ -114,6 +115,7 @@ async fn edit(
     Json(input): Json<Edit>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, true).await?;
+    reject_import_edit(&state, &actor, &message)?;
     if input.content.len() > 64 * 1024
         || input.content.trim().is_empty() && input.attachments.is_empty()
         || input.expected_updated_at_ms < 0
@@ -169,6 +171,20 @@ async fn edit(
     let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
     redact(&mut value, &state.system.config());
     Ok(Json(value))
+}
+fn reject_import_edit(state: &ServiceState, actor: &str, message: &str) -> ApiResult<()> {
+    let record = state
+        .system
+        .store()
+        .message(message)
+        .map_err(ApiError::from_report)?;
+    if record.actor_id != actor {
+        return Err(ApiError::not_found());
+    }
+    if crate::conversation_import::is_import(&record) {
+        return Err(ApiError::invalid());
+    }
+    Ok(())
 }
 async fn withdraw(
     State(state): State<ServiceState>,

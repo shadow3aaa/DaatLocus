@@ -1846,7 +1846,7 @@ impl Controller {
         if app != "actors"
             || !matches!(
                 call.name.as_str(),
-                "list" | "create" | "send" | "status" | "cancel"
+                "list" | "create" | "import_conversation" | "send" | "status" | "cancel"
             )
         {
             return Err(StageError::Forbidden(

@@ -4,6 +4,7 @@ mod approvals;
 mod apps;
 mod auth;
 mod conversation;
+mod imports;
 mod remote;
 mod reset;
 mod resources;
@@ -37,6 +38,7 @@ pub struct ServiceState {
     origins: Arc<Vec<String>>,
     auth_flows: Arc<Mutex<HashMap<String, PendingSetupProviderAuthFlow>>>,
     authentication: Arc<Mutex<auth::Authentication>>,
+    codex_imports: Arc<crate::conversation_import::sources::CodexSources>,
     listen_address: Option<std::net::SocketAddr>,
     /// Set only by the authenticated OS-owner IPC dispatcher, never by HTTP input.
     bootstrap_owner: bool,
@@ -52,6 +54,7 @@ impl ServiceState {
             origins: Arc::new(trusted_origins(vec![public_origin])),
             auth_flows: Arc::new(Mutex::new(HashMap::new())),
             authentication: Arc::new(Mutex::new(auth::Authentication::new())),
+            codex_imports: Arc::new(Default::default()),
             listen_address: None,
             bootstrap_owner: false,
         })
@@ -65,6 +68,13 @@ impl ServiceState {
 
     pub fn with_origins(mut self, origins: Vec<String>) -> Self {
         self.origins = Arc::new(trusted_origins(origins));
+        self
+    }
+    /// Select the local Codex profile for an embedded service or isolated host fixture.
+    pub fn with_codex_home(mut self, home: std::path::PathBuf) -> Self {
+        self.codex_imports = Arc::new(crate::conversation_import::sources::CodexSources::new(
+            Some(home),
+        ));
         self
     }
 }
@@ -131,6 +141,7 @@ pub fn router(state: ServiceState) -> Router {
         )
         .merge(admin::routes())
         .merge(apps::routes())
+        .merge(imports::routes())
         .merge(stages::routes())
         .merge(remote::routes())
         .merge(approvals::routes())

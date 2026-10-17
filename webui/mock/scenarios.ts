@@ -4,6 +4,10 @@ import { resetStore } from "./fixtures";
 import { addApproval, addMessage, addTool, configHolder, emitEvent, newId, now, ROOT_ACTOR_ID, setActorStatus, STAGE_ID, store, touchMessage, type ActorStore } from "./state";
 
 export const scenarios = [
+  {id:"imports", label:"导入 · 本机会话选择", actor:ROOT_ACTOR_ID},
+  {id:"imports-unsupported", label:"导入 · 不支持的设备隐藏入口", actor:ROOT_ACTOR_ID},
+  {id:"import-running", label:"导入 · Core 正在准备 Actor", actor:ROOT_ACTOR_ID},
+  {id:"import-failed", label:"导入 · 失败", actor:ROOT_ACTOR_ID},
   {id:"apps", label:"应用 · 列表与连接管理", actor:ROOT_ACTOR_ID},
   {id:"apps-empty", label:"应用 · 空列表", actor:ROOT_ACTOR_ID},
   {id:"apps-loading", label:"应用 · 加载中", actor:ROOT_ACTOR_ID},
@@ -62,6 +66,12 @@ export function activateScenario(id: string): boolean {
     Object.assign(work.detail.config!.permissions,{read_only:false,writable_roots:["webui/src"]});
   }
   const clear=(actor:ActorStore)=>{actor.messages=[];actor.events=[];actor.tools=[];actor.approvals=[];actor.messageSeq=0;actor.eventSeq=0;actor.toolSeq=0;};
+  if (id.startsWith("import-")) {
+    clear(core);
+    const record = addMessage(core, {kind:"request",source:{kind:"user"},reply_to:{kind:"user"},content:"Import the attached Codex conversation; prepare an idle Actor without sending work.",status:id==="import-running"?"running":"failed",attachments:[{id:"import-example",name:"检查消息滚动与输入框布局",media_type:"application/vnd.daat-locus.codex-conversation+json",size_bytes:640,uri:"/v1/actors/core/resources/import-example"}]});
+    if(id==="import-failed")touchMessage(record,{error:"Model provider is unavailable",finished_at_ms:now()});
+    emitEvent(core.summary.id,{type:"message_added",message_id:record.id});
+  }
   if (id==="empty") clear(core);
   if (["connecting","synchronizing","recovering","reconciling","offline","recovery_blocked"].includes(id)) {
     Object.assign(previewState.core,{state:id,ready:false,synchronized:false});

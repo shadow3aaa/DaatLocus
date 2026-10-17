@@ -1,3 +1,4 @@
+import { messageDisplayText } from "@/lib/conversation-import";
 import { getCurrentWebUiLanguage, t } from "@/lib/i18n";
 import { useEffect, useRef, useState } from "react";
 import { ArrowUpRightIcon, SearchIcon } from "lucide-react";
@@ -31,7 +32,7 @@ export function SearchDialog({ open, onOpenChange, actorId, onSelect }: { open: 
     <div className="dl-search-results">
       {loading && !items.length && <div className="flex flex-col gap-3"><Skeleton className="h-20 w-full rounded-xl" /><Skeleton className="h-20 w-full rounded-xl" /></div>}
       {!loading && !items.length && !error && <Empty><EmptyHeader><EmptyTitle>{query.trim() ? t("search_dialog.no_results") : t("search_dialog.search_this_conversation")}</EmptyTitle>{query.trim() && <EmptyDescription>{t("search_dialog.try_another_search")}</EmptyDescription>}</EmptyHeader></Empty>}
-      {items.map(message => { const source = message.content + "\n" + (message.reply || ""); const plain = searchPreview(source); const value = plain.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) ? plain : source; return <button className="dl-search-result" key={message.id} onClick={() => { onSelect(message); onOpenChange(false); }}><span><small>{new Date(message.created_at_ms).toLocaleDateString(getCurrentWebUiLanguage())} · {message.source.kind === "user" ? t("search_dialog.messages_and_replies") : t("search_dialog.collaboration_messages")}</small><p>{highlight(excerpt(value, query.trim()), query.trim())}</p></span><ArrowUpRightIcon aria-hidden="true" /></button>; })}
+      {items.map(message => { const source = messageDisplayText(message) + "\n" + (message.reply || ""); const plain = searchPreview(source); const value = plain.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) ? plain : source; return <button className="dl-search-result" key={message.id} onClick={() => { onSelect(message); onOpenChange(false); }}><span><small>{new Date(message.created_at_ms).toLocaleDateString(getCurrentWebUiLanguage())} · {message.source.kind === "user" ? t("search_dialog.messages_and_replies") : t("search_dialog.collaboration_messages")}</small><p>{highlight(excerpt(value, query.trim()), query.trim())}</p></span><ArrowUpRightIcon aria-hidden="true" /></button>; })}
       {more !== null && <Button variant="ghost" size="sm" disabled={loading} onClick={() => { void loadMore(); }}>{t("search_dialog.more_results")}</Button>}
       {error && <div className="dl-client-error" role="alert"><span>{error}</span><Button variant="ghost" size="sm" onClick={() => { setError(""); if (items.length && more !== null) void loadMore(); else setRetry(value => value + 1); }}>{t("app.retry")}</Button></div>}
     </div>
