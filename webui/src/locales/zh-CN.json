@@ -43,7 +43,7 @@
   },
   "conversation_content": {
     "completed": "已完成",
-    "incomplete": "未完成",
+    "incomplete": "项未完成",
     "queued": "已排队",
     "in_progress": "进行中",
     "stopped": "已停止",
@@ -56,7 +56,6 @@
     "delegated": "已委派",
     "created": "已创建",
     "could_not_load_details_try_again": "详细结果暂时无法加载，请重试。",
-    "incomplete": "项未完成",
     "failed": "失败",
     "could_not_load_earlier_actions": "更早的操作暂时无法加载。",
     "loading": "正在加载…",
@@ -321,12 +320,12 @@
     "saved": "已保存",
     "settings_categories": "设置分类",
     "configuration": "账号与设备",
-    "appearance": "个性化",
+    "appearance": "外观",
     "permissions": "权限",
-    "theme": "外观",
-    "system": "跟随系统",
-    "light": "亮色",
-    "dark": "暗色",
+    "theme": "主题",
+    "system": "系统",
+    "light": "浅色",
+    "dark": "深色",
     "action_approval": "操作批准",
     "approval_mode": "批准模式",
     "loading_configuration": "加载配置…",
@@ -576,5 +575,24 @@
     "saving": "正在保存文件",
     "save_failed": "文件保存失败",
     "resource": "资源"
+  },
+  "navigation": {
+    "app_navigation": "应用导航",
+    "home": "首页",
+    "profile_menu": "打开个人资料菜单",
+    "close_sidebar": "收起侧栏",
+    "open_sidebar": "展开侧栏"
+  },
+  "settings_page": {
+    "general": "常规",
+    "search_settings": "搜索设置",
+    "personal": "个人",
+    "back_to_chat": "返回对话",
+    "back_to_settings": "返回设置",
+    "visual_style": "视觉风格",
+    "mode": "模式",
+    "search_placeholder": "搜索",
+    "interface_language": "应用界面语言",
+    "detect_language": "自动检测"
   }
 }

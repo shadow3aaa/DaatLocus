@@ -68,10 +68,15 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
       // Growing drafts and attachment/queue controls change the reserved space,
       // while the message viewport itself continues behind those controls.
       if (follow.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
+      if (scroll.current) {
+        const area = scroll.current;
+        setAtBottom(area.scrollHeight - area.scrollTop - area.clientHeight < 110);
+      }
     };
     updateInsets();
     const observer = new ResizeObserver(updateInsets);
     observer.observe(controls);
+    observer.observe(section);
     if (header) observer.observe(header);
     return () => observer.disconnect();
   }, [actorId, compact, waitingMessage]);

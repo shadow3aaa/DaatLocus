@@ -43,7 +43,7 @@
   },
   "conversation_content": {
     "completed": "Completed",
-    "incomplete": "Incomplete",
+    "incomplete": "incomplete",
     "queued": "Queued",
     "in_progress": "In progress",
     "stopped": "Stopped",
@@ -56,7 +56,6 @@
     "delegated": "Delegated",
     "created": "Created",
     "could_not_load_details_try_again": "Could not load details. Try again.",
-    "incomplete": "incomplete",
     "failed": "Failed",
     "could_not_load_earlier_actions": "Could not load earlier actions.",
     "loading": "Loading…",
@@ -576,5 +575,24 @@
     "saving": "Saving file",
     "save_failed": "Could not save file",
     "resource": "Resource"
+  },
+  "navigation": {
+    "app_navigation": "App navigation",
+    "home": "Home",
+    "profile_menu": "Open profile menu",
+    "close_sidebar": "Close sidebar",
+    "open_sidebar": "Open sidebar"
+  },
+  "settings_page": {
+    "general": "General",
+    "search_settings": "Search settings",
+    "personal": "Personal",
+    "back_to_chat": "Back to chat",
+    "back_to_settings": "Back to settings",
+    "visual_style": "Visual style",
+    "mode": "Mode",
+    "search_placeholder": "Search",
+    "interface_language": "App interface language",
+    "detect_language": "Auto-detect"
   }
 }

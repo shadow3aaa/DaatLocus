@@ -13,6 +13,8 @@ async fn spa_fallback_never_masks_api_errors_or_unknown_paths() {
         "/v1/shares",
         "/share/removed",
         "/settings",
+        "/settings/missing",
+        "/settings/providers/extra",
         "/actors/root/extra",
         "/assets/unknown.js",
         "/%2e%2e/private",
@@ -31,7 +33,15 @@ async fn spa_fallback_never_masks_api_errors_or_unknown_paths() {
                 .starts_with("application/json")
         );
     }
-    for path in ["/", "/actors/root"] {
+    for path in [
+        "/",
+        "/actors/root",
+        "/settings/general",
+        "/settings/appearance",
+        "/settings/devices",
+        "/settings/permissions",
+        "/settings/providers",
+    ] {
         let response = fixture
             .client
             .get(format!("{}{path}", fixture.url))

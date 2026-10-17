@@ -28,11 +28,11 @@ export function AreaField({ id, label, ...props }: ComponentProps<typeof Textare
   return <SettingsRow id={id} label={label} stacked><Textarea id={id} {...props} /></SettingsRow>;
 }
 
-export function Picker({ id, label, value, onChange, options, disabled, action }: {
+export function Picker({ id, label, value, onChange, options, disabled, action, description }: {
   id: string; label: string; value: string; onChange: (value: string) => void;
-  options: { value: string; label: string }[];  disabled?: boolean; action?: ReactNode;
+  options: { value: string; label: string }[];  disabled?: boolean; action?: ReactNode; description?: string;
 }) {
-  return <SettingsRow id={id} label={label}><Select value={value} onValueChange={onChange} disabled={disabled}>
+  return <SettingsRow id={id} label={label} description={description}><Select value={value} onValueChange={onChange} disabled={disabled}>
     <SelectTrigger id={id}><SelectValue /></SelectTrigger>
     <SelectContent><SelectGroup>{options.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectGroup></SelectContent>
   </Select>{action}</SettingsRow>;

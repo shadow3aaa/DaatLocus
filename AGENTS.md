@@ -12,9 +12,10 @@ client are connected.
 
 - Root has the fixed IM presentation; every other Actor has the work presentation,
   including when opened in the main window. Reuse data/control hooks, not a
-  container-dependent rendering mode. Account/settings live in the top-left
-  floating menu, conversation search in the top-right floating button.
-  Actor references open a conversation dialog; never restore a permanent sidebar.
+  container-dependent rendering mode. A narrow app navigation rail contains Home
+  and the account menu; mobile uses a modal navigation drawer. There is one Core
+  entry, no session/chat catalog or permanent Actor sidebar. Actor references
+  open a conversation dialog. Settings use full-page categories.
 - Use a rounded multiline composer with attachments, approval/model selectors
   and send/cancel controls. Preserve drafts when a send or upload fails.
 - Derive local message/activity views from semantic events. Fetch heavy details
@@ -81,7 +82,7 @@ client are connected.
   with a thin separator, followed by interleaved prose and compact icon/text tool
   groups. Activity lists flow in the conversation, without a nested scrolling box
   or fade mask. Actor popups never change this
-  identity-based presentation. Keep no permanent sidebar or multi-page Dashboard.
+  identity-based presentation. Keep no session list, Actor sidebar or multi-page Dashboard.
   Show outcomes and failures in their conversation; keep no separate new-update
   notification widget. Private provider diagnostics are not conversation prose.
 - Keep Skills as discoverable instruction resources accessed through Apps. Keep
@@ -349,7 +350,7 @@ schemas; do not silently repair them through provider-specific normalization.
   and schemas stay with each App. Keep no partial root `prompts` directory.
 - WebUI text uses matching `webui/src/locales/en-US.json` and `zh-CN.json` catalogs.
   Default to the browser's first supported language, with English fallback;
-  Appearance offers browser default, Chinese and English with automatic save.
+  General settings offer browser default, Chinese and English with automatic save.
   Language changes update existing views. Preserve user text and original source content.
 - Use `tests/http_api.rs` with contract suites in `tests/http` and reusable isolated
   account/server fixtures in `tests/support`. Do not restore the simulated UI example.

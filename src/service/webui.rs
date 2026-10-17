@@ -37,7 +37,17 @@ impl AssetContent {
 
 include!(concat!(env!("OUT_DIR"), "/webui-assets.rs"));
 
-fn conversation_route(path: &str) -> bool {
+fn app_route(path: &str) -> bool {
+    if matches!(
+        path,
+        "/settings/general"
+            | "/settings/appearance"
+            | "/settings/devices"
+            | "/settings/permissions"
+            | "/settings/providers"
+    ) {
+        return true;
+    }
     if let Some(rest) = path.strip_prefix("/stages/")
         && let Some((stage, actor)) = rest.split_once("/actors/")
     {
@@ -70,7 +80,7 @@ pub(super) async fn serve(method: Method, uri: Uri) -> Response {
     {
         return ApiError::not_found().into_response();
     }
-    let spa = conversation_route(path);
+    let spa = app_route(path);
     let asset_path = if spa { "/index.html" } else { path };
     let Some((_, mime, content)) = WEBUI_ASSETS.iter().find(|(key, _, _)| *key == asset_path)
     else {
@@ -205,9 +215,18 @@ mod tests {
     }
 
     #[test]
-    fn spa_routes_are_explicit_locators() {
-        for path in ["/", "/actors/root", "/actors/a-b_9"] {
-            assert!(conversation_route(path));
+    fn spa_routes_are_explicit() {
+        for path in [
+            "/",
+            "/actors/root",
+            "/actors/a-b_9",
+            "/settings/general",
+            "/settings/appearance",
+            "/settings/devices",
+            "/settings/permissions",
+            "/settings/providers",
+        ] {
+            assert!(app_route(path));
         }
         for path in [
             "/v1/missing",
@@ -215,9 +234,11 @@ mod tests {
             "/actors/a/extra",
             "/share/../x",
             "/settings",
+            "/settings/missing",
+            "/settings/providers/extra",
             "/assets/x.js",
         ] {
-            assert!(!conversation_route(path));
+            assert!(!app_route(path));
         }
     }
 }

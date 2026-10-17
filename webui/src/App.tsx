@@ -1,18 +1,17 @@
 import { useTranslation } from "react-i18next";
 import { t } from "@/lib/i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LogOutIcon, SearchIcon, SettingsIcon, } from "lucide-react";
+import { PanelLeftIcon, SearchIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { NavigationDrawer, NavigationRail } from "@/components/app-navigation";
 import { AccessGate } from "@/components/access-gate";
 import { DesktopTitlebar } from "@/components/desktop-titlebar";
 import { NativeResourcePreview } from "@/components/native-resource-preview";
 import { ActorDialog } from "@/components/actor-dialog";
 import { ConversationPane } from "@/components/conversation-pane";
 import { SearchDialog } from "@/components/search-dialog";
-import { SettingsDialog } from "@/components/settings-dialog";
+import { SettingsPage, settingsPath, settingsTabFromPath, type SettingsPageHandle, type SettingsTab } from "@/components/settings-page";
 import { useCoreStatus } from "@/hooks/use-core-status";
 import { coreConnectionMessage, getStage } from "@/lib/stage-api";
 import { configurePrimaryActor } from "@/lib/work-timeline";
@@ -35,8 +34,12 @@ export default function App() {
   const [actorTarget, setActorTarget] = useState<{actorId:string; id:string; revision:number} | null>(null);
   const [models, setModels] = useState<ComposerModel[]>([]);
   const [ready, setReady] = useState(false);
-  const [settings, setSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<"personal" | "account" | "permissions" | "models">("account");
+  const [settings, setSettings] = useState(() => settingsTabFromPath(location.pathname) !== null);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>(() => settingsTabFromPath(location.pathname) ?? "general");
+  const [mobile, setMobile] = useState(() => matchMedia("(max-width: 767px)").matches);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const settingsPage = useRef<SettingsPageHandle>(null);
+  const settingsReturnPath = useRef("/");
   const [searching, setSearching] = useState(false);
 
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -44,9 +47,10 @@ export default function App() {
   const [logoutError, setLogoutError] = useState(false);
   const authEpoch = useRef(0);
   const peek = actorStack.at(-1) || null;
+  useEffect(() => { const media = matchMedia("(max-width: 767px)"); const update = () => { setMobile(media.matches); setSidebarOpen(false); }; media.addEventListener("change", update); return () => media.removeEventListener("change", update); }, []);
 
   useEffect(() => { applyPreferences(preferences); savePreferences(preferences); void setWebUiLanguage(preferences.language); const media = matchMedia("(prefers-color-scheme: dark)"); const change = () => applyPreferences(preferences); media.addEventListener("change", change); const languageChange = () => { void setWebUiLanguage(preferences.language); }; window.addEventListener("languagechange", languageChange); return () => { media.removeEventListener("change", change); window.removeEventListener("languagechange", languageChange); }; }, [preferences]);
-  const revoked = useCallback(() => { authEpoch.current++; configureConversationDevice(null); clearConversationDrafts(); setAccess(null); setActorStack([]); setActorTarget(null); setTargetMessage(null); setSettings(false); setSearching(false); }, []);
+  const revoked = useCallback(() => { authEpoch.current++; configureConversationDevice(null); clearConversationDrafts(); setAccess(null); setActorStack([]); setActorTarget(null); setTargetMessage(null); setSettings(false); setSearching(false); setSidebarOpen(false); }, []);
   const core = useCoreStatus(access ? accessKey(access) : null, revoked);
   const conversationReady = entry === "core" && core ? core.model_ready : ready;
   const connectionMessage = entry === "core" ? coreConnectionMessage(core) : null;
@@ -82,12 +86,15 @@ export default function App() {
       setAccess(result);
   }, []);
   useEffect(() => { let live = true; setChecking(true); void configure().catch(error => { if (!live) return; if (error instanceof ActorApiError && [401,403,410].includes(error.status)) revoked(); else setAccess(null); }).finally(() => { if (live) setChecking(false); }); return () => { live = false; authEpoch.current++; }; }, [configure, revoked]);
-  useEffect(() => { function pop() { const linked = actorIdFromUrl(location.href, location.href); const id = linked ? localActorId(linked) : null; setActorStack(id && id !== entry ? [id] : []); } window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, [entry]);
+  useEffect(() => { function pop() { const tab = settingsTabFromPath(location.pathname); if (tab) {setSettingsTab(tab);setSettings(true);return;} if (settings) {history.pushState(null, "", settingsPath(settingsTab));settingsPage.current?.close();return;} const linked = actorIdFromUrl(location.href, location.href); const id = linked ? localActorId(linked) : null; setActorStack(id && id !== entry ? [id] : []); } window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, [entry, settings, settingsTab]);
   useEffect(() => { function shortcut(event: KeyboardEvent) { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k" && access && !peek && !settings) { event.preventDefault(); setSearching(true); } } window.addEventListener("keydown", shortcut); return () => window.removeEventListener("keydown", shortcut); }, [access, peek, settings]);
-  function openActor(address: string, messageId?: string) { const id = localActorId(address); setActorTarget(messageId ? {actorId:id,id:messageId,revision:Date.now()} : null); if (id === entry && !peek) { if (messageId) setTargetMessage(old => ({id: messageId, revision: (old?.revision || 0) + 1})); return; } setActorStack(old => old.at(-1) === id ? old : [...old, id]); history.pushState(null, "", conversationUrl(address)); }
+  function openActor(address: string, messageId?: string) { if (mobile) setSidebarOpen(false); const id = localActorId(address); setActorTarget(messageId ? {actorId:id,id:messageId,revision:Date.now()} : null); if (id === entry && !peek) { if (messageId) setTargetMessage(old => ({id: messageId, revision: (old?.revision || 0) + 1})); return; } setActorStack(old => old.at(-1) === id ? old : [...old, id]); history.pushState(null, "", conversationUrl(address)); }
   function closeActor() { setActorStack([]); history.replaceState(null, "", "/"); }
   function backActor() { const next = actorStack.slice(0, -1); setActorStack(next); history.replaceState(null, "", next.length ? conversationUrl(next.at(-1)!) : "/"); }
-  function openSettings(tab: typeof settingsTab) { setSettingsTab(tab); setSettings(true); }
+  function openSettings(tab: SettingsTab) { if (!settings) settingsReturnPath.current = location.pathname; setSettingsTab(tab); setSettings(true); setSidebarOpen(false); history.pushState(null, "", settingsPath(tab)); }
+  function closeSettings(open: boolean) { if (open) return; setSettings(false); history.replaceState(null, "", settingsReturnPath.current); }
+  function home() { if (settings) { settingsPage.current?.close(); return; } closeActor(); if (mobile) setSidebarOpen(false); }
+  function search() { if (mobile) setSidebarOpen(false); setSearching(true); }
   async function changed(actorId?: string) {
     const epoch = authEpoch.current;
     setRefreshVersion(old => old + 1);
@@ -112,15 +119,16 @@ export default function App() {
     <NativeResourcePreview />
     {access && logoutError && <div className="dl-action-error" role="alert"><span>{t("app.could_not_sign_out_try_again")}</span><Button variant="ghost" size="sm" onClick={() => { void logout(); }}>{t("app.retry")}</Button></div>}
     {checking ? <div className="dl-app-loading" role="status"><span className="dl-loading-orbit" />{t("app.connecting")}</div> : !access ? <AccessGate onAuthenticated={configure} /> : <>
-      <div className="dl-floating-account"><DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline" size="icon-lg" className="dl-profile-button" aria-label={t("app.configuration_and_settings")}><Avatar><AvatarFallback>{Array.from(access.account?.name || t("app.account")).slice(0, 2).join("")}</AvatarFallback></Avatar></Button></DropdownMenuTrigger>
-        <DropdownMenuContent align="start" sideOffset={12} className="dl-account-menu"><DropdownMenuLabel className="dl-account-menu-header"><Avatar className="size-9"><AvatarFallback>{Array.from(access.account?.name || t("app.account")).slice(0, 2).join("")}</AvatarFallback></Avatar><span><strong>{access.account?.name || t("app.account")}</strong><small>{t("app.signed_in")}</small></span></DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuGroup>
-          <DropdownMenuItem onSelect={() => openSettings("account")}><SettingsIcon data-icon="inline-start" />{t("app.settings")}</DropdownMenuItem>
-        </DropdownMenuGroup><DropdownMenuSeparator /><DropdownMenuGroup><DropdownMenuItem onSelect={() => { void logout(); }}><LogOutIcon data-icon="inline-start" />{t("app.sign_out")}</DropdownMenuItem></DropdownMenuGroup></DropdownMenuContent>
-      </DropdownMenu></div>
-      <div className="dl-floating-actions"><Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon-lg" className="dl-floating-button" aria-label={t("app.search_conversation")} onClick={() => setSearching(true)}><SearchIcon /></Button></TooltipTrigger><TooltipContent>{t("app.search_conversation_ctrl_k")}</TooltipContent></Tooltip></div>
+      <div className="dl-app-shell"><NavigationRail access={access} settings={settings} onHome={home} onSettings={() => openSettings("general")} onLogout={() => void logout()} /><div className="dl-shell-body">
+      {/* Keep the Core pane laid out so settings do not reset its reading position. */}
+      <div className="dl-home-layout" data-inactive={settings} aria-hidden={settings || undefined} inert={settings || undefined}>
+      <div className="dl-main-view"><header className="dl-main-heading">{mobile && <Button variant="ghost" size="icon-sm" className="dl-open-sidebar" aria-label={t("navigation.open_sidebar")} onClick={() => setSidebarOpen(true)}><PanelLeftIcon /></Button>}<h1>Daat Locus</h1><Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" className="dl-main-search" aria-label={t("app.search_conversation")} onClick={search}><SearchIcon /></Button></TooltipTrigger><TooltipContent>{t("app.search_conversation_ctrl_k")}</TooltipContent></Tooltip></header>
       <ConversationPane key={entry} actorId={entry} connectionMessage={connectionMessage} access={access} onActor={openActor} onAccessRevoked={revoked} models={models} ready={conversationReady} refreshVersion={refreshVersion} targetMessage={targetMessage} onConfigureModels={() => openSettings("models")} />
-      <ActorDialog connectionMessage={peek === entry ? connectionMessage : null} initialTarget={actorTarget?.actorId === peek ? actorTarget : null} actorId={peek} open={Boolean(peek)} onClose={closeActor} onActor={openActor} onBack={actorStack.length > 1 ? backActor : undefined} access={access} models={models} ready={peek === entry ? conversationReady : ready} onAccessRevoked={revoked} refreshVersion={refreshVersion} />
-      <SettingsDialog open={settings} onOpenChange={setSettings} actorId={entry} initialTab={settingsTab} preferences={preferences} onPreferencesChanged={setPreferences} onActorChanged={id => { void changed(id); }} canManage={access.kind === "owner"} />
+      </div></div>
+      {mobile && <NavigationDrawer access={access} open={sidebarOpen && !settings} onOpenChange={setSidebarOpen} onHome={home} onSettings={() => openSettings("general")} onLogout={() => void logout()} />}
+      <SettingsPage ref={settingsPage} open={settings} onOpenChange={closeSettings} actorId={entry} initialTab={settingsTab} onTabChange={tab => {setSettingsTab(tab);history.replaceState(null, "", settingsPath(tab));}} preferences={preferences} onPreferencesChanged={setPreferences} onActorChanged={id => { void changed(id); }} canManage={access.kind === "owner"} />
+      </div></div>
+      <ActorDialog connectionMessage={peek === entry ? connectionMessage : null} initialTarget={actorTarget?.actorId === peek ? actorTarget : null} actorId={peek} open={Boolean(peek) && !settings} onClose={closeActor} onActor={openActor} onBack={actorStack.length > 1 ? backActor : undefined} access={access} models={models} ready={peek === entry ? conversationReady : ready} onAccessRevoked={revoked} refreshVersion={refreshVersion} />
       <SearchDialog open={searching} onOpenChange={setSearching} actorId={entry} onSelect={message => setTargetMessage(old => ({ id: message.id, revision: (old?.revision || 0) + 1 }))} />
     </>}
   </main></TooltipProvider>;
