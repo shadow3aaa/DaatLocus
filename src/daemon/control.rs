@@ -323,10 +323,10 @@ mod platform {
     pub fn bind(record: &Status) -> Result<Listener> {
         let path = endpoint(record);
         let parent = path.parent().expect("socket parent");
-        if let Ok(info) = std::fs::symlink_metadata(parent) {
-            if info.file_type().is_symlink() || info.uid() != unsafe { libc::geteuid() } {
-                return Err(miette!("Control directory has a different OS owner"));
-            }
+        if let Ok(info) = std::fs::symlink_metadata(parent)
+            && (info.file_type().is_symlink() || info.uid() != unsafe { libc::geteuid() })
+        {
+            return Err(miette!("Control directory has a different OS owner"));
         }
         std::fs::create_dir_all(parent).into_diagnostic()?;
         protect_private_path(parent)?;
@@ -347,7 +347,7 @@ mod platform {
                 return false;
             };
             // Sandboxed App processes inhabit a different user namespace.
-            return matches!((std::fs::read_link(format!("/proc/{pid}/ns/user")), std::fs::read_link("/proc/self/ns/user")), (Ok(peer), Ok(own)) if peer == own);
+            matches!((std::fs::read_link(format!("/proc/{pid}/ns/user")), std::fs::read_link("/proc/self/ns/user")), (Ok(peer), Ok(own)) if peer == own)
         }
         #[cfg(not(target_os = "linux"))]
         {

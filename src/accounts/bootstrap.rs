@@ -172,13 +172,10 @@ fn platform_owner(peer: SocketAddr, listener: SocketAddr) -> bool {
             std::net::IpAddr::V4(ip) => format!("{:08X}", u32::from_ne_bytes(ip.octets())),
             std::net::IpAddr::V6(ip) => ip
                 .octets()
-                .chunks_exact(4)
-                .map(|chunk| {
-                    format!(
-                        "{:08X}",
-                        u32::from_ne_bytes(chunk.try_into().expect("IPv6 chunk"))
-                    )
-                })
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| format!("{:08X}", u32::from_ne_bytes(*chunk)))
                 .collect(),
         };
         format!("{encoded}:{:04X}", value.port())

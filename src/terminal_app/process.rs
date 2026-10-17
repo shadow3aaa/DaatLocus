@@ -498,7 +498,9 @@ fn powershell_single_quoted(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{HeadTailOutputBuffer, shell_command};
+    use super::HeadTailOutputBuffer;
+    #[cfg(windows)]
+    use super::shell_command;
 
     #[cfg(windows)]
     #[tokio::test]
