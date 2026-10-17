@@ -1029,7 +1029,9 @@ async fn two_device_partition_preserves_both_branches_and_does_not_replay_the_lo
     b.shutdown().await;
 }
 
-#[tokio::test]
+// Each device has an independent multithreaded runtime in production. Keep
+// their heartbeats runnable while another device performs synchronous I/O.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_device_core_preserves_resources_context_and_effects_across_sequential_takeover() {
     if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
         let _ = tracing_subscriber::fmt()
@@ -1224,7 +1226,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
             .unwrap()
             .iter()
             .any(|actor| actor.config.name == "Hosted project"),
-        "no effect: A {:?}, B {:?}, C {:?}, requests A {}, errors AB {:?} AC {:?} BC {:?}, message A {:?}, message B {:?}",
+        "no effect: A {:?}, B {:?}, C {:?}, requests A {}, errors AB {:?} AC {:?} BC {:?}, message A {:?}, message B {:?}, tools A {:?}",
         net_a.core.read().as_ref().unwrap().status(),
         net_b.core.read().as_ref().unwrap().status(),
         net_c.core.read().as_ref().unwrap().status(),
@@ -1237,7 +1239,9 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
             .map(|message| (message.status, message.error)),
         b.store()
             .message(&input.id)
-            .map(|message| (message.status, message.error))
+            .map(|message| (message.status, message.error)),
+        a.store()
+            .tool_summaries(shared::ACTOR_ID, &input.id, None, 30)
     );
     let hosted = b
         .store()
