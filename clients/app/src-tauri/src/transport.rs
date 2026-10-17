@@ -156,6 +156,7 @@ impl Transport {
             downloads: tokio::sync::Semaphore::new(1),
         })
     }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     pub fn set_origin(&self, origin: Url) {
         *self.origin.write().unwrap() = origin;
         self.clear();
