@@ -40,7 +40,7 @@ use windows_sys::Win32::{
         CreateFileW, DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_DELETE_CHILD,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
-        FILE_WRITE_DATA, FILE_WRITE_EA, OPEN_EXISTING,
+        FILE_WRITE_DATA, FILE_WRITE_EA, GetLongPathNameW, OPEN_EXISTING,
     },
     System::{
         Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
@@ -318,7 +318,10 @@ fn spawn_restricted_async_inner(
     let argv = command_argv(input.program, input.args);
     let mut command_line = to_wide(argv_to_command_line(&argv));
     let program_wide = to_wide(input.program.as_os_str());
-    let current_dir_wide = to_wide(current_dir.as_os_str());
+    // PowerShell/.NET expands 8.3 names by inspecting ancestor directories.
+    // The worker may access its workspace but cannot enumerate those parents;
+    // resolve the OS spelling in the broker before entering the AppContainer.
+    let current_dir_wide = working_directory_wide(&current_dir)?;
     let env_block = environment_block(input.policy);
     let creation = crate::process_spawn::creation_lock()?;
     let (stdio, parent_pipes) = StartupHandles::new_with_parent_pipes(&input.options)?;
@@ -447,6 +450,26 @@ fn check_spawn_cancelled(options: &SandboxProcessOptions) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn working_directory_wide(path: &Path) -> io::Result<Vec<u16>> {
+    let path = to_wide(path.as_os_str());
+    let size = unsafe { GetLongPathNameW(path.as_ptr(), ptr::null_mut(), 0) };
+    if size == 0 {
+        return Err(last_os_error("Cannot resolve sandbox working directory"));
+    }
+    let mut expanded = vec![0u16; size as usize];
+    let written = unsafe { GetLongPathNameW(path.as_ptr(), expanded.as_mut_ptr(), size) };
+    if written == 0 {
+        return Err(last_os_error("Cannot resolve sandbox working directory"));
+    }
+    if written >= size {
+        return Err(io::Error::other(
+            "Sandbox working directory changed during setup",
+        ));
+    }
+    expanded.truncate(written as usize + 1);
+    Ok(expanded)
 }
 
 fn bounded_acl_policy(
