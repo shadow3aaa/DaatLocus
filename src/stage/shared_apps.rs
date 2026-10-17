@@ -171,7 +171,12 @@ impl App for AccountActors {
         .map_err(|_| miette::miette!("Invalid target device"))?;
         let Response::Catalog { apps } = self
             .controller
-            .request(stage, Request::Catalog)
+            .request(
+                stage,
+                Request::Catalog {
+                    epoch: self.controller.epoch(),
+                },
+            )
             .await
             .map_err(|error| miette::miette!("{error}"))?
         else {

@@ -533,7 +533,7 @@ impl Controller {
     }
     pub async fn request(&self, peer: StageId, request: Request) -> Result<Response> {
         let label = match &request {
-            Request::Catalog => "catalog",
+            Request::Catalog { .. } => "catalog",
             Request::Prepare { .. } => "prepare",
             Request::Publish { .. } => "publish",
             Request::Resources { .. } => "resources",
@@ -860,9 +860,12 @@ impl Controller {
                 self.checkpoint().await?;
                 Ok(Response::Published)
             }
-            Request::Catalog => Ok(Response::Catalog {
-                apps: self.local_catalog()?,
-            }),
+            Request::Catalog { epoch } => {
+                self.synchronize_worker_head(peer, epoch).await?;
+                Ok(Response::Catalog {
+                    apps: self.local_catalog()?,
+                })
+            }
             Request::Journal { after } => Ok(Response::Journal {
                 batches: shared_store::batches(system.store(), &after, 8)?,
             }),
@@ -1794,6 +1797,17 @@ impl Controller {
         }
         Ok(())
     }
+    async fn synchronize_worker_head(&self, peer: StageId, epoch: u64) -> Result<()> {
+        let committed = self.require_worker(peer, epoch).await?;
+        let runtime = self.runtime()?;
+        let _replica = self.replica.lock().await;
+        if shared_store::head(runtime.host.system.store())? != committed.head
+            && self.adopt(&committed.head).is_err()
+        {
+            self.restore_snapshot(peer, committed.head).await?;
+        }
+        Ok(())
+    }
     fn local_catalog(&self) -> Result<Vec<Installation>> {
         let runtime = self.runtime()?;
         let actor = runtime
@@ -1850,15 +1864,7 @@ impl Controller {
                 "Core can only coordinate hosted Actors",
             ));
         }
-        let committed = self.require_worker(peer, epoch).await?;
-        {
-            let _replica = self.replica.lock().await;
-            if shared_store::head(system.store())? != committed.head
-                && self.adopt(&committed.head).is_err()
-            {
-                self.restore_snapshot(peer, committed.head).await?;
-            }
-        }
+        self.synchronize_worker_head(peer, epoch).await?;
         let mut actor = system
             .core_device_actor()
             .map_err(|_| StageError::Unavailable("Device Apps are unavailable"))?;

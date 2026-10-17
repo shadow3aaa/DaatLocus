@@ -118,7 +118,9 @@ pub enum Request {
         model: Option<String>,
         approval_mode: Option<ApprovalMode>,
     },
-    Catalog,
+    Catalog {
+        epoch: u64,
+    },
     Prepare {
         batch: Batch,
     },
