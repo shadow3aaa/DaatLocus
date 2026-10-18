@@ -161,9 +161,6 @@ impl Traversal {
         if local.hint.hard == remote.hint.hard {
             return;
         }
-        let Ok(permit) = ATTEMPTS.try_acquire() else {
-            return;
-        };
         let socket = socket.clone();
         let hard = local.hint.hard;
         let destinations = remote.hint.endpoints.clone();
@@ -178,14 +175,28 @@ impl Traversal {
         let mut stop = self.stop.subscribe();
         drop(state);
         tokio::spawn(async move {
-            let _permit = permit;
+            let started = tokio::time::Instant::now();
             let _release = Release(socket.clone());
+            // A busy device must not permanently skip enhancement for its
+            // third peer. Wait fairly within the same total attempt budget.
+            let permit = tokio::select! {
+                permit = ATTEMPTS.acquire() => match permit { Ok(permit) => permit, Err(_) => return },
+                _ = tokio::time::sleep(DURATION) => return,
+                _ = stop.wait_for(|stopped| *stopped) => return,
+            };
+            let _permit = permit;
             let work = socket.punch(hard, destinations);
             tokio::select! {
                 _ = work => {},
-                _ = tokio::time::sleep(DURATION) => {},
+                _ = tokio::time::sleep_until(started + DURATION) => {},
                 _ = stop.wait_for(|stopped| *stopped) => {},
             }
+            tracing::debug!(
+                hard,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                physical_socket_selected = socket.route.read().is_some(),
+                "Direct UDP traversal attempt settled"
+            );
         });
     }
 }
@@ -444,25 +455,26 @@ impl Socket {
                 return;
             };
             let mut pool = Vec::new();
-            for _ in 0..SOCKETS {
-                let Ok(socket) = UdpSocket::bind(SocketAddr::new(local.ip(), 0)) else {
-                    break;
-                };
-                let Ok(socket) = TokioRuntime.wrap_udp_socket(socket) else {
-                    break;
-                };
-                pool.push(socket);
-            }
-            *self.pool.write() = pool.clone();
-            self.notify();
-            tracing::debug!(
-                sockets = pool.len(),
-                "Direct UDP traversal socket pool ready"
-            );
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            for _ in 0..DURATION.as_secs() {
+            for round in 0..DURATION.as_secs() {
                 interval.tick().await;
+                let target = match round {
+                    0 => 16,
+                    1 => 64,
+                    _ => SOCKETS,
+                };
+                while pool.len() < target {
+                    let Ok(socket) = UdpSocket::bind(SocketAddr::new(local.ip(), 0)) else {
+                        break;
+                    };
+                    let Ok(socket) = TokioRuntime.wrap_udp_socket(socket) else {
+                        break;
+                    };
+                    pool.push(socket);
+                }
+                *self.pool.write() = pool.clone();
+                self.notify();
                 for socket in &pool {
                     // One congested socket must not stall all the others.
                     let _ = tokio::time::timeout(
@@ -476,10 +488,23 @@ impl Socket {
             let Ok(ports) = ports(&destinations) else {
                 return;
             };
-            let mut interval = tokio::time::interval(DURATION / PROBES as u32);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            for port in ports {
-                interval.tick().await;
+            let started = tokio::time::Instant::now();
+            let mut last_probe = started - Duration::from_millis(2);
+            for (index, port) in ports.into_iter().enumerate() {
+                // Spend a small first stage on nearby mappings, then pace the
+                // randomized search across the rest of the existing budget.
+                let offset = if index < 128 {
+                    Duration::from_millis(index as u64 * 2)
+                } else {
+                    Duration::from_millis(256)
+                        + (DURATION - Duration::from_millis(256)) * (index as u32 - 128)
+                            / (PROBES as u32 - 128)
+                };
+                tokio::time::sleep_until(
+                    (started + offset).max(last_probe + Duration::from_millis(2)),
+                )
+                .await;
+                last_probe = tokio::time::Instant::now();
                 let target = SocketAddr::new(destinations[0].ip(), port);
                 let _ = tokio::time::timeout(
                     Duration::from_millis(10),

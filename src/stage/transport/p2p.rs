@@ -16,8 +16,8 @@ use webrtc::{
     data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit, RTCDataChannelState},
     peer_connection::{
         PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
-        RTCIceGatheringState, RTCIceServer, RTCPeerConnectionState, RTCSdpType,
-        RTCSessionDescription, SettingEngineBuilder,
+        RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer, RTCPeerConnectionState,
+        RTCSdpType, RTCSessionDescription, SettingEngineBuilder,
     },
 };
 
@@ -107,8 +107,198 @@ pub struct P2pChannel {
     readers: Vec<tokio::task::JoinHandle<()>>,
     traversal: Arc<super::punch::Traversal>,
     compact: Arc<AtomicBool>,
+    remote: Arc<tokio::sync::Mutex<Option<RTCSessionDescription>>>,
+    trickle: Arc<AtomicBool>,
+    remote_ready: Arc<tokio::sync::Notify>,
+    peer_ready: watch::Sender<bool>,
+    signaled: AtomicBool,
+}
+const TRICKLE: &str = "a=x-daat-trickle:1";
+const UPDATE: &str = "a=x-daat-update:1";
+const READY: &str = "a=x-daat-ready:1";
+
+#[derive(Clone)]
+pub(crate) struct CandidateUpdates {
+    pc: Arc<dyn PeerConnection>,
+    traversal: Arc<super::punch::Traversal>,
+    remote: Arc<tokio::sync::Mutex<Option<RTCSessionDescription>>>,
+    trickle: Arc<AtomicBool>,
+    remote_ready: Arc<tokio::sync::Notify>,
+    ready: watch::Receiver<u8>,
+    closed: watch::Receiver<bool>,
+    peer_ready: watch::Sender<bool>,
+}
+fn fixed_sdp(sdp: &str) -> Vec<&str> {
+    sdp.lines()
+        .filter(|line| {
+            !line.starts_with("a=candidate:")
+                && *line != "a=end-of-candidates"
+                && !line.starts_with("a=x-daat-punch:")
+                && *line != UPDATE
+                && *line != READY
+        })
+        .collect()
+}
+impl CandidateUpdates {
+    pub async fn apply(&self, value: Negotiation) -> Result<()> {
+        let mut remote = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let ready = self.remote_ready.notified();
+                tokio::pin!(ready);
+                ready.as_mut().enable();
+                let remote = self.remote.lock().await;
+                if remote.is_some() {
+                    break remote;
+                }
+                drop(remote);
+                ready.await;
+            }
+        })
+        .await
+        .map_err(|_| StageError::Forbidden("ICE update preceded remote SDP"))?;
+        let previous = remote.as_ref().unwrap();
+        if !self.trickle.load(Ordering::Relaxed)
+            || value.description.sdp_type != previous.sdp_type
+            || fixed_sdp(&value.description.sdp) != fixed_sdp(&previous.sdp)
+        {
+            return Err(StageError::Forbidden(
+                "ICE update changed authenticated transport",
+            ));
+        }
+        let mut updated = previous.clone();
+        let previous_candidates = previous
+            .sdp
+            .lines()
+            .filter(|line| line.starts_with("a=candidate:"))
+            .collect::<std::collections::HashSet<_>>();
+        let mid = previous
+            .sdp
+            .lines()
+            .find_map(|line| line.strip_prefix("a=mid:"))
+            .unwrap_or("0")
+            .to_owned();
+        for line in value
+            .description
+            .sdp
+            .lines()
+            .filter(|line| line.starts_with("a=candidate:"))
+        {
+            if !previous_candidates.contains(line) {
+                if updated
+                    .sdp
+                    .lines()
+                    .filter(|line| line.starts_with("a=candidate:"))
+                    .count()
+                    >= 32
+                {
+                    return Err(StageError::Capacity("ICE candidate budget exceeded"));
+                }
+                self.pc
+                    .add_ice_candidate(RTCIceCandidateInit {
+                        candidate: line[2..].to_owned(),
+                        sdp_mid: Some(mid.clone()),
+                        sdp_mline_index: Some(0),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(rtc_error)?;
+                updated.sdp.push_str(&format!("{line}\r\n"));
+            }
+        }
+        self.traversal.remote(&value.description);
+        if value.description.sdp.lines().any(|line| line == READY) {
+            self.peer_ready.send_replace(true);
+        }
+        *remote = Some(updated);
+        Ok(())
+    }
+    pub async fn publish(
+        self,
+        identity: Arc<DeviceIdentity>,
+        root: TrustRoot,
+        target: StageId,
+        attempt: Attempt,
+        tx: mpsc::Sender<crate::stage::signaling::SignalCommand>,
+    ) {
+        let mut last = String::new();
+        let started = std::time::Instant::now();
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+        while started.elapsed() < std::time::Duration::from_secs(20) {
+            interval.tick().await;
+            if *self.closed.borrow() {
+                break;
+            }
+            if !self.trickle.load(Ordering::Relaxed) {
+                continue;
+            }
+            let Some(mut description) = self.pc.local_description().await else {
+                break;
+            };
+            self.traversal.local(&mut description);
+            description.sdp.push_str(&format!(
+                "{}\r\n{TRICKLE}\r\n{UPDATE}\r\n",
+                super::wire::SDP
+            ));
+            let ready = *self.ready.borrow() == 3;
+            if ready {
+                description.sdp.push_str(&format!("{READY}\r\n"));
+            }
+            if description.sdp == last || description.sdp.len() > 6144 {
+                continue;
+            }
+            last = description.sdp.clone();
+            let Ok(fingerprint) = fingerprint(&description.sdp) else {
+                break;
+            };
+            let Ok(proof) = identity.sign(
+                "rtc-negotiation",
+                &Negotiation {
+                    version: 1,
+                    group_id: root.group_id.clone(),
+                    source: identity.profile().stage_id,
+                    target,
+                    generation: attempt.generation,
+                    nonce: attempt.nonce,
+                    expires_at_ms: chrono::Utc::now().timestamp_millis() + 90_000,
+                    description,
+                    fingerprint,
+                },
+            ) else {
+                break;
+            };
+            if !matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    tx.send(crate::stage::signaling::SignalCommand::Offer(proof))
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
+                break;
+            }
+            if ready {
+                break;
+            }
+        }
+    }
 }
 impl P2pChannel {
+    pub(crate) fn signal_updates(&self) -> CandidateUpdates {
+        self.signaled.store(true, Ordering::Relaxed);
+        self.updates()
+    }
+    pub(crate) fn updates(&self) -> CandidateUpdates {
+        CandidateUpdates {
+            pc: self.pc.clone(),
+            traversal: self.traversal.clone(),
+            remote: self.remote.clone(),
+            trickle: self.trickle.clone(),
+            remote_ready: self.remote_ready.clone(),
+            ready: self.ready.clone(),
+            closed: self.closed.clone(),
+            peer_ready: self.peer_ready.clone(),
+        }
+    }
     pub fn verified_peer(&self) -> Result<super::tls::VerifiedPeer> {
         if *self.ready.borrow() != 3 || *self.closed.borrow() {
             return Err(StageError::Forbidden(
@@ -221,6 +411,11 @@ impl P2pChannel {
                             ready_tx.send_modify(|value| *value |= bit);
                         }
                         Some(DataChannelEvent::OnMessage(message)) => {
+                            tracing::trace!(
+                                channel = bit,
+                                bytes = message.data.len(),
+                                "RTC frame received"
+                            );
                             let value = if message.is_string
                                 || message.data.is_empty()
                                 || message.data.len() > MAX_FRAME
@@ -260,6 +455,11 @@ impl P2pChannel {
             readers,
             traversal,
             compact: Arc::new(AtomicBool::new(false)),
+            remote: Arc::new(tokio::sync::Mutex::new(None)),
+            trickle: Arc::new(AtomicBool::new(false)),
+            remote_ready: Arc::new(tokio::sync::Notify::new()),
+            peer_ready: watch::channel(false).0,
+            signaled: AtomicBool::new(false),
         })
     }
 
@@ -286,15 +486,35 @@ impl P2pChannel {
         // One unreachable interface can keep STUN gathering active past the
         // negotiation budget. Send the candidates already gathered instead of
         // discarding working routes while waiting for every STUN transaction.
-        let complete = match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            gathered.wait_for(|complete| *complete),
-        )
-        .await
-        {
-            Ok(Ok(_)) => true,
-            Ok(Err(_)) => return Err(StageError::Unavailable("RTC gathering stopped")),
-            Err(_) => false,
+        let started = std::time::Instant::now();
+        let complete = loop {
+            if *gathered.borrow() {
+                break true;
+            }
+            let current = self.pc.local_description().await;
+            let usable = current.as_ref().is_some_and(|sdp| {
+                sdp.sdp.lines().any(|line| {
+                    let fields = line.split_whitespace().collect::<Vec<_>>();
+                    line.starts_with("a=candidate:")
+                        && fields.len() >= 8
+                        && (fields[7] == "srflx"
+                            || fields[4].parse::<std::net::Ipv6Addr>().is_ok_and(|ip| {
+                                let first = ip.segments()[0];
+                                (0x2000..0x4000).contains(&first)
+                            })
+                            || self.trickle.load(Ordering::Relaxed))
+                })
+            });
+            if started.elapsed() >= std::time::Duration::from_millis(300) && usable {
+                break false;
+            }
+            if started.elapsed() >= std::time::Duration::from_secs(5) {
+                break false;
+            }
+            tokio::select! {
+                result = gathered.changed() => { result.map_err(|_| StageError::Unavailable("RTC gathering stopped"))?; },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
+            }
         };
         let mut description = self
             .pc
@@ -319,6 +539,18 @@ impl P2pChannel {
         description
             .sdp
             .push_str(&format!("{}\r\n", super::wire::SDP));
+        description.sdp.push_str(&format!("{TRICKLE}\r\n"));
+        tracing::debug!(
+            phase = if offer {
+                "offer_candidates"
+            } else {
+                "answer_candidates"
+            },
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            candidates,
+            complete,
+            "RTC connection phase completed"
+        );
         if description.sdp.len() > 6 * 1024 {
             return Err(StageError::Capacity("RTC negotiation budget exceeded"));
         }
@@ -376,6 +608,12 @@ impl P2pChannel {
             .map_err(rtc_error)?;
         self.traversal.remote(&value.description);
         self.peer = Some(peer.clone());
+        self.trickle.store(
+            value.description.sdp.lines().any(|line| line == TRICKLE),
+            Ordering::Relaxed,
+        );
+        *self.remote.lock().await = Some(value.description);
+        self.remote_ready.notify_waiters();
         Ok(())
     }
     pub async fn answer(
@@ -390,21 +628,31 @@ impl P2pChannel {
             .await
     }
     pub async fn connected(&mut self) -> Result<()> {
+        let started = std::time::Instant::now();
         if self.peer.is_none() {
             return Err(StageError::Forbidden("RTC peer has not authenticated"));
         }
-        tokio::time::timeout(std::time::Duration::from_secs(20), async {
-            while *self.ready.borrow() != 3 {
+        let mut peer_ready = self.peer_ready.subscribe();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while *self.ready.borrow() != 3 || (self.signaled.load(Ordering::Relaxed) && self.trickle.load(Ordering::Relaxed) && !*peer_ready.borrow()) {
                 if *self.closed.borrow() { return Err(StageError::Unavailable("RTC channel closed")); }
                 tokio::select! {
                     result=self.ready.changed()=>result.map_err(|_| StageError::Unavailable("RTC channel closed"))?,
                     _=self.closed.changed()=>return Err(StageError::Unavailable("RTC channel closed")),
+                    result=peer_ready.changed()=>result.map_err(|_| StageError::Unavailable("RTC readiness signal stopped"))?,
                 }
             }
             Ok(())
         })
         .await
-        .map_err(|_| StageError::Unavailable("RTC connection timed out"))?
+        .map_err(|_| StageError::Unavailable("RTC connection timed out"))?;
+        tracing::debug!(
+            phase = "ice_dtls_sctp",
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "RTC connection phase completed"
+        );
+        result
     }
     pub async fn send(&self, frame: &Envelope, bulk: bool) -> Result<usize> {
         if self.peer.is_none() {
@@ -481,6 +729,7 @@ struct ConnectionEvents {
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for ConnectionEvents {
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        tracing::debug!(?state, "RTC transport state changed");
         if matches!(
             state,
             RTCPeerConnectionState::Connected
@@ -520,12 +769,137 @@ async fn send_frame(
         .send(bytes.as_slice().into())
         .await
         .map_err(rtc_error)?;
+    tracing::trace!(bytes = bytes.len(), "RTC frame accepted by send buffer");
     Ok(bytes.len())
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::stage::protocol::Body;
+    #[tokio::test]
+    async fn incremental_candidates_connect_without_replacing_authenticated_sdp() {
+        let mut a = DeviceIdentity::generate().unwrap();
+        let b = DeviceIdentity::generate().unwrap();
+        let root = a.initialize_group(1000, 100000).unwrap().root;
+        let attempt = Attempt {
+            generation: 1,
+            nonce: Uuid::new_v4(),
+        };
+        let mut left = P2pChannel::new(vec![], true).await.unwrap();
+        let mut right = P2pChannel::new(vec![], true).await.unwrap();
+        let offer = left
+            .offer(&a, &root, b.profile().stage_id, attempt, 1000)
+            .await
+            .unwrap();
+        let strip = |proof: &SignedProof, identity: &DeviceIdentity| {
+            let mut value: Negotiation = proof
+                .verify("rtc-negotiation", &identity.profile().public_key)
+                .unwrap();
+            value.description.sdp = value
+                .description
+                .sdp
+                .lines()
+                .filter(|line| !line.starts_with("a=candidate:") && *line != "a=end-of-candidates")
+                .map(|line| format!("{line}\r\n"))
+                .collect();
+            identity.sign("rtc-negotiation", &value).unwrap()
+        };
+        right
+            .apply_signal(
+                &strip(&offer, &a),
+                &a.profile(),
+                &root,
+                b.profile().stage_id,
+                attempt,
+                1000,
+            )
+            .await
+            .unwrap();
+        let answer = right
+            .answer(&b, &root, a.profile().stage_id, attempt, 1000)
+            .await
+            .unwrap();
+        left.apply_signal(
+            &strip(&answer, &b),
+            &b.profile(),
+            &root,
+            a.profile().stage_id,
+            attempt,
+            1000,
+        )
+        .await
+        .unwrap();
+        let update = |proof: &SignedProof, identity: &DeviceIdentity| {
+            let mut value: Negotiation = proof
+                .verify("rtc-negotiation", &identity.profile().public_key)
+                .unwrap();
+            value.description.sdp.push_str(&format!("{UPDATE}\r\n"));
+            value
+        };
+        let mut changed = update(&offer, &a);
+        changed.description.sdp = changed
+            .description
+            .sdp
+            .lines()
+            .map(|line| {
+                if line.starts_with("a=ice-pwd:") {
+                    "a=ice-pwd:substituted-password\r\n".into()
+                } else {
+                    format!("{line}\r\n")
+                }
+            })
+            .collect();
+        assert!(right.updates().apply(changed).await.is_err());
+        right.updates().apply(update(&offer, &a)).await.unwrap();
+        left.updates().apply(update(&answer, &b)).await.unwrap();
+        let (l, r) = tokio::join!(left.connected(), right.connected());
+        l.unwrap();
+        r.unwrap();
+        let left_updates = left.signal_updates();
+        let right_updates = right.signal_updates();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), left.connected())
+                .await
+                .is_err(),
+            "local channel open must not substitute for peer readiness"
+        );
+        let mut ready_offer = update(&offer, &a);
+        ready_offer
+            .description
+            .sdp
+            .push_str(&format!("{READY}\r\n"));
+        let mut ready_answer = update(&answer, &b);
+        ready_answer
+            .description
+            .sdp
+            .push_str(&format!("{READY}\r\n"));
+        right_updates.apply(ready_offer).await.unwrap();
+        left_updates.apply(ready_answer).await.unwrap();
+        let (l, r) = tokio::join!(left.connected(), right.connected());
+        l.unwrap();
+        r.unwrap();
+        let frame = Envelope {
+            version: 1,
+            source: a.profile().stage_id,
+            target: b.profile().stage_id,
+            generation: 1,
+            message_id: Uuid::new_v4(),
+            invocation_id: None,
+            in_reply_to: None,
+            created_at_ms: 1000,
+            expires_at_ms: 10000,
+            body: Body::Heartbeat,
+        };
+        left.send(&frame, false).await.unwrap();
+        let (received, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(3), right.receive())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(received.message_id, frame.message_id);
+        left.close().await.unwrap();
+        right.close().await.unwrap();
+    }
     #[tokio::test]
     async fn real_loopback_channels_bind_signed_dtls_and_transfer_protocol() {
         check_channels(vec![]).await;
@@ -576,6 +950,8 @@ mod tests {
         let proxy_addr = proxy.local_addr().unwrap();
         let available = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let forwarding_available = available.clone();
+        let established = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let forwarding_established = established.clone();
         // Model two endpoint filters: packets pass only while both sides have
         // sent recently. A late answer must not arrive after the answerer's
         // checks have already stopped, even though connected() is still waiting.
@@ -590,18 +966,25 @@ mod tests {
                     continue;
                 }
                 let now = Instant::now();
+                // A short initial filter catches exhausted setup checks. Once
+                // established, retain the NAT mapping across the six-second
+                // outage; requiring both independent consent timers to fire
+                // within 400ms of one another models a different failure.
+                let filter_lifetime = if forwarding_established.load(Ordering::Relaxed) {
+                    Duration::from_secs(30)
+                } else {
+                    Duration::from_millis(400)
+                };
                 let target = if source == left_addr {
                     left_seen = Some(now);
                     right_addr.filter(|_| {
-                        right_seen.is_some_and(|seen| {
-                            now.duration_since(seen) < Duration::from_millis(400)
-                        })
+                        right_seen.is_some_and(|seen| now.duration_since(seen) < filter_lifetime)
                     })
                 } else {
                     right_addr = Some(source);
                     right_seen = Some(now);
                     left_seen
-                        .filter(|seen| now.duration_since(*seen) < Duration::from_millis(400))
+                        .filter(|seen| now.duration_since(*seen) < filter_lifetime)
                         .map(|_| left_addr)
                 };
                 if let Some(target) = target {
@@ -673,6 +1056,7 @@ mod tests {
         .unwrap();
         l.unwrap();
         r.unwrap();
+        established.store(true, Ordering::Relaxed);
         let frame = Envelope {
             version: 1,
             source: a.profile().stage_id,

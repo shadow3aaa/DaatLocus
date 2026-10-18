@@ -101,6 +101,15 @@ Set `DAAT_LOCUS_TEST_STAGE_SIGNALING` to an explicitly chosen WSS origin, then r
 exercise SDP forwarding, authenticated P2P connections, message replication and
 private model-configuration sync; they do not establish reachability through every NAT.
 
+For connection measurements, enable debug logs for `daat_locus::stage`. The
+`native_dial`, `offer_candidates`, `answer_candidates` and `ice_dtls_sctp` phase
+records report elapsed milliseconds and outcomes without SDP or credentials.
+Content completion reports original bytes and elapsed time; transport counters
+separate content payload bytes from encoded protocol bytes. Compare repeated
+attempts on the same network using connection success rate, median/tail setup
+latency and verified content throughput. Include initiation direction, IPv4/IPv6,
+network changes and loss; local loopback tests do not measure cellular performance.
+
 Keep browser preferences local and account configuration private. UI strings
 use translation keys; language switching must update existing views without
 translating user/source content. Test catalog parity, browser defaults and

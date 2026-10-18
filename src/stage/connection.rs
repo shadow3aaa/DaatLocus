@@ -124,6 +124,27 @@ async fn read<S: AsyncRead + Unpin, T: serde::de::DeserializeOwned>(stream: &mut
     stream.read_exact(&mut bytes).await?;
     serde_json::from_slice(&bytes).map_err(|_| StageError::Invalid("Invalid link handshake"))
 }
+/// Only the deterministic dialer chooses a path. The other device waits for
+/// its signed preface before taking the commit lock, so crossed LAN/RTC races
+/// cannot each hold a lock while waiting on a different physical connection.
+pub(crate) async fn read_preface<S: AsyncRead + Unpin>(stream: &mut S) -> Result<SignedProof> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), read(stream))
+        .await
+        .map_err(|_| StageError::Unavailable("Peer path selection timed out"))?
+}
+pub(crate) async fn read_p2p_preface(
+    channel: &mut super::transport::p2p::P2pChannel,
+) -> Result<SignedProof> {
+    let (frame, _) = tokio::time::timeout(std::time::Duration::from_secs(10), channel.receive())
+        .await
+        .map_err(|_| StageError::Unavailable("Peer path selection timed out"))??;
+    let super::protocol::Body::ChannelHello { proof } = frame.body else {
+        return Err(StageError::Forbidden(
+            "Expected channel identity confirmation",
+        ));
+    };
+    Ok(proof)
+}
 /// `binding` is a TLS exporter or the verified signed DTLS negotiation binding.
 /// No business traffic is admitted until both sides confirm their durable commit.
 pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
@@ -133,6 +154,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     verified: &VerifiedPeer,
     binding: &str,
     now: i64,
+    preface: Option<SignedProof>,
 ) -> Result<(u64, Uuid)> {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let current = ledger.peer(verified.stage_id(), now)?;
@@ -151,7 +173,10 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
             expires_at_ms: now.saturating_add(30_000),
         };
         write(stream, &identity.sign("stage-channel", &hello)?).await?;
-        let proof: SignedProof = read(stream).await?;
+        let proof: SignedProof = match preface {
+            Some(proof) => proof,
+            None => read(stream).await?,
+        };
         let foreign: Hello = proof.verify("stage-channel", &current.device.public_key)?;
         if foreign.version != 1
             || foreign.source != verified.stage_id()
@@ -208,6 +233,7 @@ pub async fn handshake_p2p(
     ledger: &StageLedger<'_>,
     attempt: super::transport::p2p::Attempt,
     now: i64,
+    preface: Option<SignedProof>,
 ) -> Result<(u64, Uuid)> {
     use super::protocol::{Body, Envelope};
     let verified = channel.verified_peer()?;
@@ -247,9 +273,9 @@ pub async fn handshake_p2p(
     };
     tokio::time::timeout(std::time::Duration::from_secs(10),async {
         channel.send(&frame(Body::ChannelHello{proof:identity.sign("stage-channel",&hello)?}),false).await?;
-        let (response,_)=channel.receive().await?;let Body::ChannelHello{proof}=response.body else{return Err(StageError::Forbidden("Expected channel identity confirmation"));};
+        let proof=match preface {Some(proof)=>proof,None=>read_p2p_preface(channel).await?};
         let foreign:Hello=proof.verify("stage-channel",&current.device.public_key)?;
-        if foreign.source!=verified.stage_id()||foreign.target!=local||foreign.binding!=binding||foreign.nonce!=attempt.nonce||foreign.expires_at_ms<=now||foreign.expires_at_ms>now+60000{return Err(StageError::Forbidden("Invalid DTLS channel confirmation"));}
+        if foreign.version!=1||foreign.source!=verified.stage_id()||foreign.target!=local||foreign.binding!=binding||foreign.nonce!=attempt.nonce||foreign.expires_at_ms<=now||foreign.expires_at_ms>now+60000{return Err(StageError::Forbidden("Invalid DTLS channel confirmation"));}
         let recovered=ledger.recover_connection(verified.stage_id(),foreign.generation,foreign.committed_nonce,now)?;
         let next=recovered.max(foreign.generation)+1;if next!=attempt.generation{return Err(StageError::Conflict("Negotiated generation requires recovery"));}
         ledger.prepare_connection(verified.stage_id(),next,attempt.nonce,now)?;

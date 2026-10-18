@@ -26,6 +26,7 @@ struct Candidate {
 pub async fn run(runtime: Arc<Runtime>) {
     let mut failures = 0u32;
     loop {
+        let network_epoch = runtime.network_generation();
         if runtime.is_stopped() || runtime.host.settings().signaling_origin.is_none() {
             break;
         }
@@ -56,11 +57,16 @@ pub async fn run(runtime: Arc<Runtime>) {
             }
         }
         runtime.clear_signal();
+        if runtime.network_generation() != network_epoch {
+            failures = 0;
+            continue;
+        }
         let delay = (1000u64 << failures.min(6)).min(10000);
         tokio::select! {_=tokio::time::sleep(std::time::Duration::from_millis(delay))=>{},_=runtime.signal_notification()=>{}}
     }
 }
 async fn connected(runtime: Arc<Runtime>, mut socket: SignalSocket) -> Result<()> {
+    let network_epoch = runtime.network_generation();
     let connected_origin = runtime.host.settings().signaling_origin;
     let mut after = None;
     loop {
@@ -76,6 +82,8 @@ async fn connected(runtime: Arc<Runtime>, mut socket: SignalSocket) -> Result<()
     let (tx, mut commands) = mpsc::channel(32);
     runtime.install_signal(tx);
     let mut candidates: HashMap<StageId, Candidate> = HashMap::new();
+    let mut updates: HashMap<StageId, (Attempt, super::transport::p2p::CandidateUpdates, i64)> =
+        HashMap::new();
     let mut jobs = tokio::task::JoinSet::new();
     let mut negotiating: HashMap<StageId, (Uuid, tokio::task::AbortHandle)> = HashMap::new();
     let mut sweep = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -89,7 +97,7 @@ async fn connected(runtime: Arc<Runtime>, mut socket: SignalSocket) -> Result<()
     discover_online(&runtime, &online, &mut discovered);
     let result = async {
         while !runtime.is_stopped() {
-            if runtime.host.settings().signaling_origin != connected_origin { break; }
+            if runtime.host.settings().signaling_origin != connected_origin || runtime.network_generation() != network_epoch { break; }
             tokio::select! {
                 command=commands.recv()=>match command {
                     Some(SignalCommand::Revoke(change))=>socket.send_revocation(&change).await?,
@@ -97,7 +105,7 @@ async fn connected(runtime: Arc<Runtime>, mut socket: SignalSocket) -> Result<()
                     Some(SignalCommand::Connect(peer))=>{
                         if negotiating.contains_key(&peer) || candidates.contains_key(&peer) || runtime.connected(peer) || runtime.host.settings().ssh.contains_key(&peer) { continue; }
                         if !online.contains(&peer) { runtime.p2p_failed(peer, &StageError::Unavailable("Public peer is not available")); continue; }
-                        if !super::connection::automatic_dialer(runtime.host.local,peer) || negotiating.len()+candidates.len()>=8 || runtime.begin_p2p(peer).is_err() { continue; }
+                        if !super::connection::automatic_dialer(runtime.host.local,peer) || negotiating.len()+updates.len()>=8 || runtime.begin_p2p(peer).is_err() { continue; }
                         let record = super::ledger::StageLedger::attach(runtime.host.system.store(),runtime.host.local).peer(peer,chrono::Utc::now().timestamp_millis())?;
                         let attempt = Attempt {generation:record.generation+1,nonce:Uuid::new_v4()};
                         let owner = runtime.clone();
@@ -128,8 +136,16 @@ async fn connected(runtime: Arc<Runtime>, mut socket: SignalSocket) -> Result<()
                     match result {
                         Ok((channel,proof))=>{
                             if let Err(error)=socket.send_negotiation(&proof).await { close_later(&runtime,channel); return Err(error); }
+                            let updater = channel.signal_updates();
+                            updates.insert(peer, (attempt, updater.clone(), chrono::Utc::now().timestamp_millis()+30_000));
+                            let identity = runtime.host.identity()?;
+                            let root = runtime.host.enrollment()?.root;
+                            let commands = runtime.signals.read().clone();
+                            if let Some(commands) = commands {
+                                runtime.spawn(updater.publish(identity, root, peer, attempt, commands));
+                            }
                             if is_offer { candidates.insert(peer,Candidate {channel,attempt,deadline:chrono::Utc::now().timestamp_millis()+20000}); }
-                            else { complete(runtime.clone(),peer,channel,attempt); }
+                            else { complete(runtime.clone(),peer,channel,attempt,network_epoch); }
                         }
                         Err(error)=>runtime.p2p_failed(peer,&error),
                     }
@@ -153,8 +169,21 @@ async fn connected(runtime: Arc<Runtime>, mut socket: SignalSocket) -> Result<()
                         let value:Negotiation=proof.verify("rtc-negotiation",&record.device.public_key)?;
                         let attempt=Attempt{generation:value.generation,nonce:value.nonce};
                         verify_signal(&proof,&record.device,&runtime.host.enrollment()?.root,runtime.host.local,attempt,chrono::Utc::now().timestamp_millis())?;
+                        if value.description.sdp.lines().any(|line| line == "a=x-daat-update:1") {
+                            if let Some((expected, updater, deadline)) = updates.get(&source)
+                                && expected.generation == attempt.generation && expected.nonce == attempt.nonce
+                                && *deadline > chrono::Utc::now().timestamp_millis() {
+                                let updater = updater.clone();
+                                runtime.spawn(async move {
+                                    if let Err(error) = updater.apply(value).await {
+                                        tracing::debug!(reason = %error, "Rejected incremental ICE candidates");
+                                    }
+                                });
+                            }
+                            continue;
+                        }
                         if value.description.sdp_type==webrtc::peer_connection::RTCSdpType::Offer {
-                            if runtime.connected(source)||runtime.host.settings().ssh.contains_key(&source)||super::connection::automatic_dialer(runtime.host.local,source)||negotiating.contains_key(&source)||negotiating.len()+candidates.len()>=8||runtime.begin_p2p(source).is_err() { continue; }
+                            if runtime.connected(source)||runtime.host.settings().ssh.contains_key(&source)||super::connection::automatic_dialer(runtime.host.local,source)||negotiating.contains_key(&source)||negotiating.len()+updates.len()>=8||runtime.begin_p2p(source).is_err() { continue; }
                             let owner=runtime.clone();
                             let abort=jobs.spawn(async move {
                                 let result=tokio::time::timeout(std::time::Duration::from_secs(15),answer(&owner,&proof,&record.device,attempt)).await.map_err(|_|StageError::Unavailable("RTC answer timed out")).and_then(|result|result);
@@ -172,9 +201,9 @@ async fn connected(runtime: Arc<Runtime>, mut socket: SignalSocket) -> Result<()
                             runtime.spawn(async move {
                                 let result=async {
                                     candidate.channel.apply_signal(&proof,&record.device,&owner.host.enrollment()?.root,owner.host.local,attempt,chrono::Utc::now().timestamp_millis()).await?;
-                                    finish(owner.clone(),candidate.channel,attempt).await
+                                    finish(owner.clone(),candidate.channel,attempt,network_epoch).await
                                 }.await;
-                                if let Err(error)=result { owner.p2p_failed(source,&error); }
+                                if let Err(error)=result && owner.network_generation() == network_epoch { owner.p2p_failed(source,&error); }
                             });
                         }
                     },
@@ -187,6 +216,7 @@ async fn connected(runtime: Arc<Runtime>, mut socket: SignalSocket) -> Result<()
                 },
                 _=runtime.signal_notification()=>{},
                 _=sweep.tick()=>{
+                    updates.retain(|peer, (_, _, deadline)| *deadline > chrono::Utc::now().timestamp_millis() && !runtime.connected(*peer));
                     socket.heartbeat().await?;
                     discover_online(&runtime,&online,&mut discovered);
                     let expired=candidates.iter().filter(|(_,candidate)|candidate.deadline<=chrono::Utc::now().timestamp_millis()).map(|(peer,_)|*peer).collect::<Vec<_>>();
@@ -198,11 +228,15 @@ async fn connected(runtime: Arc<Runtime>, mut socket: SignalSocket) -> Result<()
     }.await;
     jobs.abort_all();
     for peer in negotiating.keys().copied() {
-        runtime.p2p_failed(peer, &StageError::Unavailable("Public negotiation ended"));
+        if runtime.network_generation() == network_epoch {
+            runtime.p2p_failed(peer, &StageError::Unavailable("Public negotiation ended"));
+        }
     }
     for (peer, candidate) in candidates {
         close_later(&runtime, candidate.channel);
-        runtime.p2p_failed(peer, &StageError::Unavailable("Public negotiation ended"));
+        if runtime.network_generation() == network_epoch {
+            runtime.p2p_failed(peer, &StageError::Unavailable("Public negotiation ended"));
+        }
     }
     result.and(socket.close().await)
 }
@@ -256,10 +290,18 @@ async fn offer(
         }
     }
 }
-fn complete(runtime: Arc<Runtime>, peer: StageId, channel: P2pChannel, attempt: Attempt) {
+fn complete(
+    runtime: Arc<Runtime>,
+    peer: StageId,
+    channel: P2pChannel,
+    attempt: Attempt,
+    network_epoch: u64,
+) {
     let own = runtime.clone();
     runtime.spawn(async move {
-        if let Err(error) = finish(own.clone(), channel, attempt).await {
+        if let Err(error) = finish(own.clone(), channel, attempt, network_epoch).await
+            && own.network_generation() == network_epoch
+        {
             own.p2p_failed(peer, &error);
         }
     });
@@ -303,12 +345,31 @@ async fn answer(
         }
     }
 }
-async fn finish(runtime: Arc<Runtime>, mut channel: P2pChannel, attempt: Attempt) -> Result<()> {
+pub(super) async fn finish(
+    runtime: Arc<Runtime>,
+    mut channel: P2pChannel,
+    attempt: Attempt,
+    network_epoch: u64,
+) -> Result<()> {
     if let Err(error) = channel.connected().await {
         let _ = channel.close().await;
         return Err(error);
     }
     let peer = channel.verified_peer()?;
+    tracing::debug!(local = %runtime.host.local, peer = %peer.stage_id(), chooses_path = super::connection::automatic_dialer(runtime.host.local, peer.stage_id()), "Selecting authenticated RTC path");
+    let preface = if !super::connection::automatic_dialer(runtime.host.local, peer.stage_id()) {
+        Some(super::connection::read_p2p_preface(&mut channel).await?)
+    } else {
+        None
+    };
+    let lock = runtime.peer_lock(peer.stage_id());
+    let _guard = lock.lock().await;
+    if runtime.network_generation() != network_epoch {
+        channel.close().await?;
+        return Err(StageError::Unavailable(
+            "Network changed during ICE negotiation",
+        ));
+    }
     if runtime.connected(peer.stage_id()) {
         channel.close().await?;
         return Ok(());
@@ -322,6 +383,7 @@ async fn finish(runtime: Arc<Runtime>, mut channel: P2pChannel, attempt: Attempt
         &ledger,
         attempt,
         chrono::Utc::now().timestamp_millis(),
+        preface,
     )
     .await;
     let (generation, _) = match result {
@@ -331,6 +393,12 @@ async fn finish(runtime: Arc<Runtime>, mut channel: P2pChannel, attempt: Attempt
             return Err(error);
         }
     };
+    if runtime.network_generation() != network_epoch {
+        channel.close().await?;
+        return Err(StageError::Unavailable(
+            "Network changed during channel confirmation",
+        ));
+    }
     let check = peer.clone();
     let owner = runtime.clone();
     let framed = PeerChannel::p2p(peer, channel, move |frame, scope| {
@@ -356,6 +424,11 @@ mod tests {
         public_runtime_connects(true).await;
     }
     async fn public_runtime_connects(stale_lan: bool) {
+        if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter("daat_locus::stage=debug,daat_locus::stage::transport::p2p=trace")
+                .try_init();
+        }
         let endpoint = std::env::var("DAAT_LOCUS_TEST_STAGE_SIGNALING").unwrap();
         let a_dir = tempfile::tempdir().unwrap();
         let b_dir = tempfile::tempdir().unwrap();
@@ -428,13 +501,17 @@ mod tests {
             a_runtime.state(b_host.local).route,
             b_runtime.state(a_host.local).route,
         );
+        let errors = (
+            a_runtime.last_error(b_host.local),
+            b_runtime.last_error(a_host.local),
+        );
         a_runtime.stop().await;
         b_runtime.stop().await;
         a.shutdown().await;
         b.shutdown().await;
         assert!(
             connected_result.is_ok() && connected,
-            "public runtime did not connect"
+            "public runtime did not connect; routes={routes:?}, errors={errors:?}"
         );
         assert_eq!(routes, (Some(Route::P2p), Some(Route::P2p)));
     }

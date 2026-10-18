@@ -340,6 +340,7 @@ async fn serve_with_timings(network: Arc<Network>, timings: Timings) {
         credentials_changed.as_mut().enable();
         settings_changed.as_mut().enable();
         let endpoint = runtime.host.settings().signaling_origin;
+        let network_epoch = runtime.network_generation();
         let result = if let Some(endpoint) = &endpoint {
             match (
                 runtime.host.accounts.current(),
@@ -356,16 +357,20 @@ async fn serve_with_timings(network: Arc<Network>, timings: Timings) {
                             false,
                         );
                     }
-                    match register(
+                    let registration = register(
                         endpoint,
                         &identity,
                         &record.name,
                         Some(enrollment),
                         runtime.host.settings().label,
                         timings.registration,
-                    )
-                    .await
-                    {
+                    );
+                    tokio::pin!(registration);
+                    match tokio::select! {
+                        result = &mut registration => result,
+                        _ = &mut settings_changed => continue,
+                        _ = &mut credentials_changed => continue,
+                    } {
                         Ok((mut socket, _)) => {
                             last_failure = None;
                             delay = Duration::from_secs(1).min(timings.retry_cap);
@@ -377,6 +382,7 @@ async fn serve_with_timings(network: Arc<Network>, timings: Timings) {
                                 endpoint,
                                 &record,
                                 timings,
+                                network_epoch,
                             )
                             .await;
                             // Closing a broken socket must not delay reconnect indefinitely.
@@ -431,6 +437,7 @@ async fn published(
     endpoint: &str,
     record: &super::CredentialBundle,
     timings: Timings,
+    network_epoch: u64,
 ) -> std::result::Result<(), Failure> {
     let label = runtime.host.settings().label;
     let mut attempts: HashMap<(StageId, uuid::Uuid), (Instant, Attempt)> = HashMap::new();
@@ -449,6 +456,7 @@ async fn published(
             return Err(Failure::Authority);
         }
         if settings.signaling_origin.as_deref() != Some(endpoint)
+            || runtime.network_generation() != network_epoch
             || settings.label != label
             || !runtime
                 .host
@@ -639,6 +647,63 @@ mod tests {
         runtime.host.save_settings(settings).unwrap();
         let network = Network::start_without_publication(&runtime).await.unwrap();
         (directory, system, runtime, network)
+    }
+    #[tokio::test]
+    async fn network_change_replaces_a_healthy_publication_without_heartbeat_expiry() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let (_directory, system, runtime, network) = publication_fixture(endpoint).await;
+        let (ready, mut registrations) = tokio::sync::mpsc::channel(2);
+        let server = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_registration(stream).await;
+                ready.send(()).await.unwrap();
+                connections.spawn(async move {
+                    while let Some(Ok(message)) = socket.next().await {
+                        if let Message::Ping(bytes) = message
+                            && socket.send(Message::Pong(bytes)).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+            std::future::pending::<()>().await;
+        });
+        let own = network.clone();
+        let publisher = tokio::spawn(async move {
+            serve_with_timings(
+                own,
+                Timings {
+                    registration: Duration::from_secs(5),
+                    tick: Duration::from_secs(1),
+                    heartbeat: Duration::from_secs(15),
+                    pong: Duration::from_secs(30),
+                    retry_cap: Duration::from_secs(5),
+                },
+            )
+            .await;
+        });
+        tokio::time::timeout(Duration::from_secs(3), registrations.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        runtime.connectivity_changed();
+        // This fixture owns a standalone publisher, whereas production stores
+        // this Network on Runtime and wakes it from connectivity_changed().
+        network.publication_wake.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(3), registrations.recv())
+            .await
+            .expect("network change waited for heartbeat expiry")
+            .unwrap();
+        publisher.abort();
+        let _ = publisher.await;
+        server.abort();
+        let _ = server.await;
+        network.stop().await;
+        system.shutdown().await;
     }
     #[tokio::test]
     async fn silent_half_open_publication_reconnects_then_accepts_only_matching_pongs() {

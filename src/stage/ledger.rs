@@ -1531,7 +1531,8 @@ mod tests {
                 &first_ledger,
                 &peer_left,
                 &binding_left,
-                2001
+                2001,
+                None
             ),
             connection::handshake(
                 &mut right,
@@ -1539,7 +1540,8 @@ mod tests {
                 &second_ledger,
                 &peer_right,
                 &binding_right,
-                2001
+                2001,
+                None
             )
         );
         let a = a.unwrap();

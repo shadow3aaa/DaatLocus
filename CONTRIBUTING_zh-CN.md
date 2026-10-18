@@ -66,6 +66,14 @@ Actor 历史或已修改的代码目录，同一样本内保留相关 Actor 上�
 被忽略的输出目录，不提交源码。当前仓库没有 DeepSWE／模型能力评测适配器；
 下方模拟负载脚本测量后台资源开销，不能衡量解题能力。
 
+## 设备连接测量
+
+连接性能测量可启用 `daat_locus::stage` 的 debug 日志；`native_dial`、
+`offer_candidates`、`answer_candidates` 和 `ice_dtls_sctp` 分阶段记录耗时和结果，
+不记录 SDP 或凭据。内容完成日志记录原始字节与耗时，传输计数区分原始内容字节和
+编码后的协议字节。同一网络重复比较成功率、建链耗时中位数／尾部值与校验后的
+内容吞吐，并记录发起方向、IPv4／IPv6、网络切换和丢包；本机回环测试不能代表蜂窝性能。
+
 ## 后端资源压力测试
 
 单文件脚本 `scripts/perf.rs` 通过 `rust-script scripts/perf.rs` 直接运行，
