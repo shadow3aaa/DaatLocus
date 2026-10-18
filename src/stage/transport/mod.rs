@@ -1,6 +1,7 @@
 //! Authenticated transport primitives. Protocol, grants and durability live above this layer.
 pub mod lan;
 pub mod p2p;
+mod punch;
 pub mod signaling;
 pub mod ssh;
 pub mod tls;

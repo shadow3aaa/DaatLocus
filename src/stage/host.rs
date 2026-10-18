@@ -55,7 +55,10 @@ impl Settings {
                 .as_deref()
                 .is_some_and(|origin| origin.starts_with("wss://"))
         {
-            vec!["stun:stun.cloudflare.com:3478".into()]
+            vec![
+                "stun:stun.cloudflare.com:3478".into(),
+                "stun:stun.l.google.com:19302".into(),
+            ]
         } else {
             self.stun.clone()
         }
@@ -453,9 +456,10 @@ mod tests {
         let mut settings = Settings::default();
         assert!(settings.public_stun_urls().is_empty());
         settings.signaling_origin = Some("wss://connection.example".into());
-        assert_eq!(
-            settings.public_stun_urls(),
-            ["stun:stun.cloudflare.com:3478"]
+        let servers = settings.public_stun_urls();
+        assert!(
+            servers.iter().collect::<HashSet<_>>().len() >= 2,
+            "mapping classification needs observations from distinct STUN targets"
         );
         settings.stun = vec!["stun:operator.example:3478".into()];
         assert_eq!(settings.public_stun_urls(), settings.stun);

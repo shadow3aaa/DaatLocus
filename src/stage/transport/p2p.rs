@@ -102,6 +102,7 @@ pub struct P2pChannel {
     peer: Option<DeviceProfile>,
     gathered: watch::Receiver<bool>,
     readers: Vec<tokio::task::JoinHandle<()>>,
+    traversal: Arc<super::punch::Traversal>,
 }
 impl P2pChannel {
     pub fn verified_peer(&self) -> Result<super::tls::VerifiedPeer> {
@@ -133,6 +134,11 @@ impl P2pChannel {
             ));
         }
         let mut setting = SettingEngineBuilder::default();
+        // Defaults exhaust a candidate after about 1.6 seconds, before a slow
+        // answer has finished gathering. Keep checks alive through gathering
+        // and the bounded connection window instead of waiting without probes.
+        setting = setting
+            .with_ice_connection_attempts(Some(std::time::Duration::from_millis(200)), Some(125));
         if loopback_only {
             // The driver binds only 127.0.0.1 below, so no other interface is gathered.
             setting = setting.with_include_loopback_candidate(true);
@@ -140,8 +146,10 @@ impl P2pChannel {
         let (ready_tx, ready) = watch::channel(0u8);
         let (closed_tx, closed) = watch::channel(false);
         let (gathered_tx, gathered) = watch::channel(false);
+        let traversal = super::punch::Traversal::new()?;
         let pc: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
+                .with_runtime(traversal.runtime())
                 .with_setting_engine(setting.build())
                 .with_configuration(
                     RTCConfigurationBuilder::default()
@@ -158,6 +166,7 @@ impl P2pChannel {
                 .with_handler(Arc::new(ConnectionEvents {
                     closed: closed_tx.clone(),
                     gathered: gathered_tx,
+                    traversal: traversal.clone(),
                 }))
                 .with_udp_addrs(if loopback_only {
                     vec!["127.0.0.1:0"]
@@ -244,6 +253,7 @@ impl P2pChannel {
             peer: None,
             gathered,
             readers,
+            traversal,
         })
     }
 
@@ -267,18 +277,39 @@ impl P2pChannel {
             .set_local_description(description)
             .await
             .map_err(rtc_error)?;
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+        // One unreachable interface can keep STUN gathering active past the
+        // negotiation budget. Send the candidates already gathered instead of
+        // discarding working routes while waiting for every STUN transaction.
+        let complete = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
             gathered.wait_for(|complete| *complete),
         )
         .await
-        .map_err(|_| StageError::Unavailable("RTC gathering timed out"))?
-        .map_err(|_| StageError::Unavailable("RTC gathering stopped"))?;
-        let description = self
+        {
+            Ok(Ok(_)) => true,
+            Ok(Err(_)) => return Err(StageError::Unavailable("RTC gathering stopped")),
+            Err(_) => false,
+        };
+        let mut description = self
             .pc
             .local_description()
             .await
             .ok_or(StageError::Unavailable("RTC description is unavailable"))?;
+        let candidates = description
+            .sdp
+            .lines()
+            .filter(|line| line.starts_with("a=candidate:"))
+            .count();
+        if candidates == 0 {
+            return Err(StageError::Unavailable("RTC has no local candidates"));
+        }
+        if !complete {
+            tracing::debug!(
+                candidates,
+                "RTC gathering budget reached; using collected candidates"
+            );
+        }
+        self.traversal.local(&mut description);
         if description.sdp.len() > 6 * 1024 {
             return Err(StageError::Capacity("RTC negotiation budget exceeded"));
         }
@@ -323,9 +354,10 @@ impl P2pChannel {
     ) -> Result<()> {
         let value = verify_signal(proof, peer, root, local, attempt, now)?;
         self.pc
-            .set_remote_description(value.description)
+            .set_remote_description(value.description.clone())
             .await
             .map_err(rtc_error)?;
+        self.traversal.remote(&value.description);
         self.peer = Some(peer.clone());
         Ok(())
     }
@@ -344,7 +376,7 @@ impl P2pChannel {
         if self.peer.is_none() {
             return Err(StageError::Forbidden("RTC peer has not authenticated"));
         }
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
             while *self.ready.borrow() != 3 {
                 if *self.closed.borrow() { return Err(StageError::Unavailable("RTC channel closed")); }
                 tokio::select! {
@@ -378,6 +410,7 @@ impl P2pChannel {
         Ok((Envelope::decode(&bytes)?, bytes.len()))
     }
     pub async fn close(&self) -> Result<()> {
+        self.traversal.stop();
         tokio::time::timeout(std::time::Duration::from_secs(5), self.pc.close())
             .await
             .map_err(|_| StageError::Unavailable("RTC close timed out"))?
@@ -392,6 +425,7 @@ pub struct P2pSender {
 }
 impl Drop for P2pChannel {
     fn drop(&mut self) {
+        self.traversal.stop();
         for reader in &self.readers {
             reader.abort();
         }
@@ -419,15 +453,23 @@ impl P2pSender {
 struct ConnectionEvents {
     closed: watch::Sender<bool>,
     gathered: watch::Sender<bool>,
+    traversal: Arc<super::punch::Traversal>,
 }
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for ConnectionEvents {
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
         if matches!(
             state,
-            RTCPeerConnectionState::Disconnected
+            RTCPeerConnectionState::Connected
+                | RTCPeerConnectionState::Disconnected
                 | RTCPeerConnectionState::Failed
                 | RTCPeerConnectionState::Closed
+        ) {
+            self.traversal.stop();
+        }
+        if matches!(
+            state,
+            RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
         ) {
             self.closed.send_replace(true);
         }
@@ -460,10 +502,191 @@ mod tests {
     use crate::stage::protocol::Body;
     #[tokio::test]
     async fn real_loopback_channels_bind_signed_dtls_and_transfer_protocol() {
+        check_channels(vec![]).await;
+    }
+    #[tokio::test]
+    async fn unresponsive_stun_does_not_discard_working_candidates() {
+        // A device can have one working interface and another whose STUN server
+        // never responds. Gathering every address must not prevent signed SDP.
+        let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        check_channels(vec![format!("stun:{}", blackhole.local_addr().unwrap())]).await;
+        let mut request = [0u8; 1500];
+        blackhole
+            .try_recv_from(&mut request)
+            .expect("STUN was not attempted");
+    }
+    #[tokio::test]
+    async fn delayed_answer_and_transient_loss_preserve_authenticated_channels() {
+        use std::{
+            net::SocketAddr,
+            time::{Duration, Instant},
+        };
         let mut a = DeviceIdentity::generate().unwrap();
         let b = DeviceIdentity::generate().unwrap();
         let root = a.initialize_group(1000, 100000).unwrap().root;
         let mut left = P2pChannel::new(vec![], true).await.unwrap();
+        let mut right = P2pChannel::new(vec![], true).await.unwrap();
+        let attempt = Attempt {
+            generation: 1,
+            nonce: Uuid::new_v4(),
+        };
+        let offer = left
+            .offer(&a, &root, b.profile().stage_id, attempt, 1000)
+            .await
+            .unwrap();
+        let original: Negotiation = offer
+            .verify("rtc-negotiation", &a.profile().public_key)
+            .unwrap();
+        let fields = original
+            .description
+            .sdp
+            .lines()
+            .find_map(|line| line.strip_prefix("a=candidate:"))
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        let left_addr: SocketAddr = format!("{}:{}", fields[4], fields[5]).parse().unwrap();
+        let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let available = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let forwarding_available = available.clone();
+        // Model two endpoint filters: packets pass only while both sides have
+        // sent recently. A late answer must not arrive after the answerer's
+        // checks have already stopped, even though connected() is still waiting.
+        let forwarding = tokio::spawn(async move {
+            let mut buffer = [0u8; 65536];
+            let mut left_seen = None;
+            let mut right_seen = None;
+            let mut right_addr = None;
+            loop {
+                let (n, source) = proxy.recv_from(&mut buffer).await.unwrap();
+                if !forwarding_available.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
+                let now = Instant::now();
+                let target = if source == left_addr {
+                    left_seen = Some(now);
+                    right_addr.filter(|_| {
+                        right_seen.is_some_and(|seen| {
+                            now.duration_since(seen) < Duration::from_millis(400)
+                        })
+                    })
+                } else {
+                    right_addr = Some(source);
+                    right_seen = Some(now);
+                    left_seen
+                        .filter(|seen| now.duration_since(*seen) < Duration::from_millis(400))
+                        .map(|_| left_addr)
+                };
+                if let Some(target) = target {
+                    proxy.send_to(&buffer[..n], target).await.unwrap();
+                }
+            }
+        });
+        struct Forwarder(tokio::task::JoinHandle<()>);
+        impl Drop for Forwarder {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _forwarder = Forwarder(forwarding);
+        let routed = |proof: &SignedProof, identity: &DeviceIdentity| {
+            let mut signal: Negotiation = proof
+                .verify("rtc-negotiation", &identity.profile().public_key)
+                .unwrap();
+            signal.description.sdp = signal
+                .description
+                .sdp
+                .lines()
+                .map(|line| {
+                    if let Some(candidate) = line.strip_prefix("a=candidate:") {
+                        let mut parts = candidate
+                            .split_whitespace()
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>();
+                        parts[4] = proxy_addr.ip().to_string();
+                        parts[5] = proxy_addr.port().to_string();
+                        format!("a=candidate:{}\r\n", parts.join(" "))
+                    } else {
+                        format!("{line}\r\n")
+                    }
+                })
+                .collect();
+            identity.sign("rtc-negotiation", &signal).unwrap()
+        };
+        right
+            .apply_signal(
+                &routed(&offer, &a),
+                &a.profile(),
+                &root,
+                b.profile().stage_id,
+                attempt,
+                1000,
+            )
+            .await
+            .unwrap();
+        let answer = right
+            .answer(&b, &root, a.profile().stage_id, attempt, 1000)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        left.apply_signal(
+            &routed(&answer, &b),
+            &b.profile(),
+            &root,
+            a.profile().stage_id,
+            attempt,
+            1000,
+        )
+        .await
+        .unwrap();
+        let (l, r) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(left.connected(), right.connected())
+        })
+        .await
+        .unwrap();
+        l.unwrap();
+        r.unwrap();
+        let frame = Envelope {
+            version: 1,
+            source: a.profile().stage_id,
+            target: b.profile().stage_id,
+            generation: 1,
+            message_id: Uuid::new_v4(),
+            invocation_id: None,
+            in_reply_to: None,
+            created_at_ms: 1000,
+            expires_at_ms: 10000,
+            body: Body::Heartbeat,
+        };
+        left.send(&frame, false).await.unwrap();
+        let (received, _) = tokio::time::timeout(Duration::from_secs(2), right.receive())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.message_id, frame.message_id);
+        // ICE Disconnected is temporary, unlike Failed/Closed. Keep the same
+        // signed DTLS/SCTP channel through a recoverable interruption rather
+        // than turning the event into a permanent receiver error.
+        available.store(false, std::sync::atomic::Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        available.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut resumed = frame.clone();
+        resumed.message_id = Uuid::new_v4();
+        left.send(&resumed, false).await.unwrap();
+        let (received, _) = tokio::time::timeout(Duration::from_secs(10), right.receive())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.message_id, resumed.message_id);
+        left.close().await.unwrap();
+        right.close().await.unwrap();
+    }
+    async fn check_channels(stun_urls: Vec<String>) {
+        let mut a = DeviceIdentity::generate().unwrap();
+        let b = DeviceIdentity::generate().unwrap();
+        let root = a.initialize_group(1000, 100000).unwrap().root;
+        let mut left = P2pChannel::new(stun_urls, true).await.unwrap();
         let mut right = P2pChannel::new(vec![], true).await.unwrap();
         let nonce = Uuid::new_v4();
         let offer = left

@@ -1432,6 +1432,7 @@ dependencies = [
  "regex",
  "reqwest 0.13.5",
  "rmcp",
+ "rtc-stun",
  "rusqlite",
  "rustls",
  "rustls-platform-verifier",
