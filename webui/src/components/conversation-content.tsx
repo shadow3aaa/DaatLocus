@@ -12,7 +12,7 @@ import { ToolDetail, ApprovalDetails } from "@/components/tool-details";
 import { asObject as object, asText as string, readableSummary, toolLabel, toolIcon, activitySummary, activityIcon, activityLabel, domainToolName } from "@/lib/tool-presentation";
 
 
-export function ActorReference({ actorId, label, onOpen, detail, messageId }: { actorId: string; label?: string; onOpen(id: string, messageId?: string): void; detail?: string; messageId?: string }) {
+export function ActorReference({ actorId, label, onOpen, detail, messageId }: { actorId: string; label?: string; onOpen(id: string): void; detail?: string; messageId?: string }) {
   const targetId = localActorId(actorId);
   const [name, setName] = useState(label || t("actor_dialog.actor_conversation"));
   const [status, setStatus] = useState<MessageStatus | "ready" | "unknown">("unknown");
@@ -38,7 +38,7 @@ export function ActorReference({ actorId, label, onOpen, detail, messageId }: { 
     return () => controller.abort();
   }, [targetId, label, messageId]);
   const stateLabel = { queued: t("conversation_content.queued"), running: t("conversation_content.in_progress"), completed: t("conversation_content.completed"), failed: t("conversation_content.incomplete"), cancelled: t("conversation_content.stopped"), interrupted: t("conversation_content.interrupted"), ready: t("conversation_content.ready"), unknown: t("conversation_content.view_conversation") }[status];
-  return <button type="button" className="dl-actor-reference" data-status={status} onClick={() => onOpen(actorId, messageId)} aria-label={t("conversation_content.view_value0_value1", {value0: name, value1: stateLabel})}>
+  return <button type="button" className="dl-actor-reference" data-status={status} onClick={() => onOpen(actorId)} aria-label={t("conversation_content.view_value0_value1", {value0: name, value1: stateLabel})}>
     <MessageCircleIcon aria-hidden="true" /><span><strong>{name}</strong>{detail && <small>{detail}</small>}</span><span className="dl-reference-action"><span>{stateLabel}</span><i className="dl-task-state" aria-hidden="true" /></span>
   </button>;
 }

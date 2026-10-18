@@ -152,6 +152,10 @@ export function activateScenario(id: string): boolean {
     }
     const record=message(work,"把这轮界面检查的结果整理一下。");
     touchMessage(record,{reply:"这轮布局检查已完成。\n\n- 保留历史消息的阅读位置。\n- 输入框展开时，末尾仍然完整可见。\n- 窄屏使用全屏对话和返回按钮。\n\n还检查了长段落、列表和代码的换行。"});
+    // The task started outside the newest page. Opening its card should still
+    // enter at the newest edge; only an explicit search should fetch that input.
+    const task = core.tools.find(tool => tool.result.name === "actors__send");
+    if (task) task.result.outcome = {actor_id:"research",name:"检查消息滚动与输入框布局",message_id:work.messages[0].id};
   }
   if(id==="long-content") {
     for(let i=0;i<44;i++) message(work,`第 ${i+1} 项检查：消息区、标题和输入框在改变窗口尺寸时保持稳定。`);

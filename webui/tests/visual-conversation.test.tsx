@@ -13,6 +13,16 @@ const message: MessageRecord = { seq: 1,id:"m",actor_id:"root",source:{kind:"use
 const event = (seq:number,event:EventRecord["event"]): EventRecord => ({seq,actor_id:"root",created_at_ms:seq,event});
 const memory = (): Storage => { const data = new Map<string,string>(); return { get length(){return data.size;},clear(){data.clear();},getItem(key){return data.get(key)??null;},key(index){return [...data.keys()][index]??null;},removeItem(key){data.delete(key);},setItem(key,value){data.set(key,value);} }; };
 describe("fixed presentation and chronological source", () => {
+  test("search filters individual conversation sides and work presentation hides intermediate disclosures", () => {
+    const record = {...message, content:"UNMATCHED_USER_INPUT", reply:"MATCHED_FINAL_REPLY",status:"completed" as const};
+    const chat = {messages:[],tools:[],approvals:[],events:[],toolNext:{}} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
+    for (const Component of [PrimaryTurn, WorkTurn]) {
+      const html = renderToStaticMarkup(<Component message={record} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} searchQuery="matched_final" />);
+      expect(html).toContain("MATCHED_FINAL_REPLY");
+      expect(html).not.toContain("UNMATCHED_USER_INPUT");
+      expect(html).not.toContain(" aria-expanded=");
+    }
+  });
   test("queue previews use authorized resource addresses instead of attachment URLs", () => {
     const queued = {...message,status:"queued" as const,attachments:[{id:"image-id",name:"preview.png",media_type:"image/png",size_bytes:42,uri:"https://untrusted.example/private"}]};
     const chat = {queueCursor:null} as unknown as Parameters<typeof MessageQueue>[0]["chat"];

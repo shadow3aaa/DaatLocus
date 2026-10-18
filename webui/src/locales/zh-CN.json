@@ -202,13 +202,9 @@
   "search_dialog": {
     "search_failed_try_again": "搜索暂时无法完成，请重试。",
     "could_not_load_earlier_results": "较早的结果暂时无法加载。",
-    "search": "输入关键词…",
+    "search": "搜索聊天…",
     "no_results": "没有找到相关记录",
-    "search_this_conversation": "想找哪句话？",
-    "try_another_search": "换一个关键词再试试。",
-    "messages_and_replies": "消息与回复",
-    "collaboration_messages": "协作消息",
-    "more_results": "更多结果"
+    "close_search": "关闭搜索"
   },
   "account_editor": {
     "public_login_status": "公网登录状态",
@@ -583,7 +579,7 @@
     "settings": "设置",
     "sign_out": "退出登录",
     "search_conversation": "搜索聊天记录",
-    "search_conversation_ctrl_k": "搜索聊天记录 · Ctrl K"
+    "search_conversation_shortcut": "搜索聊天记录 · Ctrl F"
   },
   "desktop_window": {
     "window_controls": "窗口控制",

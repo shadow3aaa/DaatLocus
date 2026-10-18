@@ -202,13 +202,9 @@
   "search_dialog": {
     "search_failed_try_again": "Search failed. Try again.",
     "could_not_load_earlier_results": "Could not load earlier results.",
-    "search": "Search…",
+    "search": "Search chats…",
     "no_results": "No results",
-    "search_this_conversation": "Search this conversation",
-    "try_another_search": "Try another search.",
-    "messages_and_replies": "Messages and replies",
-    "collaboration_messages": "Collaboration messages",
-    "more_results": "More results"
+    "close_search": "Close search"
   },
   "account_editor": {
     "public_login_status": "Public login status",
@@ -583,7 +579,7 @@
     "settings": "Settings",
     "sign_out": "Sign out",
     "search_conversation": "Search conversation",
-    "search_conversation_ctrl_k": "Search conversation · Ctrl K"
+    "search_conversation_shortcut": "Search conversation · Ctrl F"
   },
   "desktop_window": {
     "window_controls": "Window controls",

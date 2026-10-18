@@ -1,6 +1,6 @@
 import { motionScrollBehavior } from "@/lib/appearance";
 import { t } from "@/lib/i18n";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownIcon, RefreshCwIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -10,29 +10,38 @@ import { ConversationConnection } from "@/components/conversation-connection";
 import { ConversationHistory } from "@/components/conversation-history";
 import { PrimaryTurn, WorkTurn } from "@/components/conversation-turns";
 import { MessageQueue, queuedUserInput } from "@/components/message-queue";
-import { isPrimaryActor, isUserSource } from "@/lib/work-timeline";
+import { isPrimaryActor, isUserDelivery, isUserSource } from "@/lib/work-timeline";
 import { OwnerApprovalNotice } from "@/components/owner-approval-notice";
 import { useActorConversation } from "@/hooks/use-actor-conversation";
 import { accessKey, actorModelReady, patchActorPreferences, type Access, type ApprovalMode, type ActorDetail } from "@/lib/actor-api";
 import { cn } from "@/lib/utils";
 import type { ConversationConnectionMessage } from "@/lib/stage-api";
 import { connectionBlocks } from "@/lib/stage-api";
+import { useConversationSearch } from "@/hooks/use-conversation-search";
+import { matchingConversationMessages, matchesConversationText } from "@/lib/conversation-search";
+import { ConversationSearchBar } from "@/components/conversation-search";
+import { LazyPage } from "@/components/lazy-page";
 
-export function ConversationPane({ connectionMessage, actorId, access, onActor, onAccessRevoked, models = [], ready = true, compact = false, refreshVersion = 0, targetMessage, onActorLoaded, onConfigureModels }: {
+export function ConversationPane({ connectionMessage, actorId, access, onActor, onAccessRevoked, models = [], ready = true, compact = false, refreshVersion = 0, searchOpen = false, onSearchOpenChange, onActorLoaded, onConfigureModels }: {
   connectionMessage?: ConversationConnectionMessage | null;
-  actorId: string; access: Access; onActor(id: string, messageId?: string): void; onAccessRevoked(): void; models?: ComposerModel[]; ready?: boolean;
-  compact?: boolean; refreshVersion?: number; targetMessage?: { id: string; revision: number } | null; onActorLoaded?(actor: ActorDetail): void;
+  actorId: string; access: Access; onActor(id: string): void; onAccessRevoked(): void; models?: ComposerModel[]; ready?: boolean;
+  compact?: boolean; refreshVersion?: number; searchOpen?: boolean; onSearchOpenChange?(open: boolean): void; onActorLoaded?(actor: ActorDetail): void;
   onConfigureModels?(): void;
 }) {
   const primaryView = isPrimaryActor(actorId);
-  const openActor = (id: string, messageId?: string) => onActor(actorId.includes("~") && !id.includes("~") ? `${actorId.split("~")[0]}~${id}` : id, messageId);
+  const openActor = (id: string) => onActor(actorId.includes("~") && !id.includes("~") ? `${actorId.split("~")[0]}~${id}` : id);
   const chat = useActorConversation(actorId, { onAccessRevoked, sessionKey: accessKey(access), includeActivity: !primaryView });
+  const [searchQuery, setSearchQuery] = useState("");
+  const search = useConversationSearch(actorId, searchQuery, searchOpen);
+  const filtering = searchOpen && Boolean(searchQuery.trim());
+  const resultsId = useId();
+  const normalView = useRef<{top: number; follow: boolean; anchor?: {id: string; top: number}}>({top: 0, follow: true});
+  const previousSearch = useRef({open: false, query: ""});
   const pane = useRef<HTMLElement>(null);
   const footer = useRef<HTMLDivElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
-  const initialized = useRef(false);
-  const olderHeight = useRef<number | null>(null);
+  const olderAnchor = useRef<{node: HTMLElement; top: number} | null>(null);
   const [atBottom, setAtBottom] = useState(true);
   const [changing, setChanging] = useState(false);
   const [localError, setLocalError] = useState("");
@@ -49,10 +58,12 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const active = workingMessages.find(message => message.status === "running");
   const mode = actor?.config?.permissions.approval_mode || "auto";
   const queue = primaryView ? [] : chat.messages.filter(queuedUserInput);
-  const visibleMessages = chat.messages.filter(message => (primaryView || !queuedUserInput(message)) && !(message.status === "cancelled" && message.started_at_ms == null && ["user", "remote_user"].includes(message.source.kind)) && !(message.kind === "steering" && message.status === "completed" && chat.messages.some(parent => parent.id === message.in_reply_to)));
+  const sourceMessages = useMemo(() => filtering ? matchingConversationMessages(search.ready && !search.failed ? search.items : [], chat.messages, searchQuery) : chat.messages, [filtering, search.ready, search.failed, search.items, chat.messages, searchQuery]);
+  const visibleMessages = useMemo(() => sourceMessages.filter(message => (primaryView || !queuedUserInput(message)) && !(message.status === "cancelled" && message.started_at_ms == null && ["user", "remote_user"].includes(message.source.kind)) && !(message.kind === "steering" && message.status === "completed" && sourceMessages.some(parent => parent.id === message.in_reply_to)) && (!filtering || !primaryView || (isUserSource(message) && matchesConversationText(message.content, searchQuery)) || (isUserDelivery(message) && matchesConversationText(message.reply || "", searchQuery)))), [sourceMessages, primaryView, filtering, searchQuery]);
+  const presentationChat = filtering ? {...chat, messages: sourceMessages} : chat;
   const typingId = primaryView ? [...visibleMessages].reverse().find(message => message.status === "running")?.id : undefined;
   const receiptMessageId = primaryView ? [...chat.messages].reverse().find(message => isUserSource(message) && !(message.status === "cancelled" && message.started_at_ms == null))?.id : undefined;
-  useEffect(() => { initialized.current = false; follow.current = true; setAtBottom(true); setLocalError(""); filePreparation.current = { actorId, busy: false }; setPreparingFiles(false); }, [actorId]);
+  useEffect(() => { follow.current = true; olderAnchor.current = null; setAtBottom(true); setLocalError(""); filePreparation.current = { actorId, busy: false }; setPreparingFiles(false); }, [actorId]);
   useEffect(() => { if (actor) onActorLoaded?.(actor); }, [actor, onActorLoaded]);
   useEffect(() => { if (refreshVersion) void chat.refresh(); }, [refreshVersion]);
   useLayoutEffect(() => {
@@ -66,10 +77,10 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
       if (header) section.style.setProperty("--dl-header-space", `${header.offsetHeight}px`);
       // Growing drafts and attachment/queue controls change the reserved space,
       // while the message viewport itself continues behind those controls.
-      if (follow.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
+      if (follow.current && scroll.current && scroll.current.scrollTop !== 0) scroll.current.scrollTop = 0;
       if (scroll.current) {
         const area = scroll.current;
-        setAtBottom(area.scrollHeight - area.scrollTop - area.clientHeight < 110);
+        setAtBottom(area.scrollTop > -110);
       }
     };
     updateInsets();
@@ -79,37 +90,46 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
     if (header) observer.observe(header);
     return () => observer.disconnect();
   }, [actorId, compact, waitingMessage]);
+  function visibleAnchor() {
+    const area = scroll.current;
+    return area && Array.from(area.querySelectorAll<HTMLElement>(".dl-message-turn")).find(item => item.getBoundingClientRect().bottom > area.getBoundingClientRect().top);
+  }
+  function rememberView() {
+    const area = scroll.current; if (!area) return;
+    const anchor = visibleAnchor();
+    normalView.current = {top: area.scrollTop, follow: follow.current, anchor: anchor ? {id: anchor.id, top: anchor.getBoundingClientRect().top} : undefined};
+  }
   useLayoutEffect(() => {
     const area = scroll.current; if (!area) return;
-    if (olderHeight.current !== null) { area.scrollTop += area.scrollHeight - olderHeight.current; olderHeight.current = null; return; }
-    if (!chat.loading && !initialized.current) {
-      initialized.current = true;
-      if (targetMessage) follow.current = false;
-      else area.scrollTop = area.scrollHeight;
+    const previous = previousSearch.current;
+    previousSearch.current = {open: searchOpen, query: searchQuery};
+    if (previous.open && !searchOpen) {
+      const saved = normalView.current;
+      follow.current = saved.follow;
+      area.scrollTop = saved.follow ? 0 : saved.top;
+      const anchor = saved.anchor && area.querySelector<HTMLElement>(`#${CSS.escape(saved.anchor.id)}`);
+      if (anchor && saved.anchor && !saved.follow) area.scrollTop += anchor.getBoundingClientRect().top - saved.anchor.top;
+      setAtBottom(area.scrollTop > -110);
+      setSearchQuery("");
+      return;
     }
-    else if (follow.current) area.scrollTop = area.scrollHeight;
-  }, [chat.messages, chat.generations, chat.tools, chat.approvals, chat.loading]);
-  useEffect(() => {
-    if (!targetMessage || chat.loading) return;
-    follow.current = false;
-    let live = true;
-    void chat.jump(targetMessage.id).then(() => {
-      if (!live) return;
-      requestAnimationFrame(() => {
-        if (!live) return;
-        const area = scroll.current;
-        const node = area?.querySelector<HTMLElement>(`#${CSS.escape(`message-${actorId}-${targetMessage.id}`)}`);
-        // Loading history can emit a bottom scroll event while jump() is pending.
-        // Reassert the navigation intent before later activity updates arrive.
-        follow.current = false;
-        node?.scrollIntoView({ behavior: "instant", block: "center" });
-        if (area) setAtBottom(area.scrollHeight - area.scrollTop - area.clientHeight < 110);
-        node?.classList.add("dl-message-highlight");
-        setTimeout(() => node?.classList.remove("dl-message-highlight"), 2500);
-      });
-    }).catch(() => { if (live) setLocalError(t("conversation_pane.could_not_open_this_record")); });
-    return () => { live = false; };
-  }, [targetMessage, actorId, chat.loading]);
+    if (searchOpen && (!previous.open || previous.query !== searchQuery)) {
+      follow.current = false;
+      area.scrollTop = 0;
+      setAtBottom(true);
+    } else if (olderAnchor.current) {
+      const anchor = olderAnchor.current;
+      area.scrollTop += anchor.node.getBoundingClientRect().top - anchor.top;
+      olderAnchor.current = null;
+    } else if (!searchOpen && follow.current && area.scrollTop !== 0) area.scrollTop = 0;
+    if (!searchOpen) rememberView();
+  }, [visibleMessages, chat.generations, chat.tools, chat.approvals, chat.loading, searchOpen, searchQuery]);
+  useLayoutEffect(() => {
+    if (!searchOpen || motionScrollBehavior() === "auto") return;
+    const list = scroll.current?.firstElementChild;
+    const animation = list?.animate([{opacity: .4, transform: "translateY(5px)"}, {opacity: 1, transform: "translateY(0)"}], {duration: 180, easing: "cubic-bezier(.2,.8,.2,1)"});
+    return () => animation?.cancel();
+  }, [visibleMessages, searchOpen]);
   async function configure(next: { model?: string | null; mode?: ApprovalMode }) {
     if (!actor?.config || active) return;
     setChanging(true); setLocalError("");
@@ -132,25 +152,40 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
     } catch (error) { if (filePreparation.current === preparation) setLocalError(error instanceof Error ? error.message : t("conversation_pane.attachment_upload_failed_try_again")); }
     finally { preparation.busy = false; if (filePreparation.current === preparation) setPreparingFiles(false); }
   }
-  function bottom() { follow.current = true; setAtBottom(true); scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: motionScrollBehavior() }); }
+  function bottom() { follow.current = true; setAtBottom(true); scroll.current?.scrollTo({ top: 0, behavior: motionScrollBehavior() }); }
+  async function earlier() {
+    const node = visibleAnchor();
+    olderAnchor.current = node ? {node, top: node.getBoundingClientRect().top} : null;
+    try { await chat.loadOlder(); }
+    catch { olderAnchor.current = null; setLocalError(t("conversation_pane.could_not_load_earlier_messages")); }
+  }
+  async function moreMatches(signal: AbortSignal) {
+    const node = visibleAnchor();
+    olderAnchor.current = node ? {node, top: node.getBoundingClientRect().top} : null;
+    try { await search.more(signal); } catch (error) { olderAnchor.current = null; throw error; }
+  }
   const errors = localError || chat.error;
-  return <section ref={pane} className={cn("dl-conversation", primaryView ? "dl-primary-conversation" : "dl-work-conversation", compact && "dl-conversation-compact")} aria-label={t("conversation_pane.value0_conversation", {value0: name})}>
+  return <section ref={pane} className={cn("dl-conversation", primaryView ? "dl-primary-conversation" : "dl-work-conversation", compact && "dl-conversation-compact")} aria-label={t("conversation_pane.value0_conversation", {value0: name})} data-search-open={searchOpen} onKeyDownCapture={event => { if (searchOpen && event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onSearchOpenChange?.(false); } }}>
+    <ConversationSearchBar open={searchOpen} query={searchQuery} onQueryChange={setSearchQuery} onClose={() => onSearchOpenChange?.(false)} busy={search.busy} controls={resultsId} />
     <ConversationConnection message={waitingMessage}>
       {!compact && !primaryView && <header className="dl-conversation-heading"><span>{name}</span><span className={cn("dl-status-dot", active && "dl-status-working")} /><small>{chat.streamStatus === "reconnecting" ? t("conversation_pane.reconnecting") : active ? t("conversation_pane.working") : t("conversation_pane.ready")}</small></header>}
-      <div className="dl-conversation-scroll" ref={scroll} onScroll={() => { const area = scroll.current; if (!area) return; const near = area.scrollHeight - area.scrollTop - area.clientHeight < 110; follow.current = near; setAtBottom(near); }}>
-        <div className="dl-message-list" aria-live="polite" aria-relevant="additions">
-          {!chat.loading && actor && !chat.messages.length && !errors && <Empty className="dl-conversation-empty"><EmptyHeader>
+      <div className="dl-conversation-scroll" ref={scroll} onScroll={() => { const area = scroll.current; if (!area) return; const near = area.scrollTop > -110; if (!searchOpen) follow.current = near; setAtBottom(near); if (!searchOpen) rememberView(); }}>
+        <div className="dl-message-list" id={resultsId} aria-busy={filtering && search.busy} aria-live={searchOpen ? "off" : "polite"} aria-relevant="additions">
+          {!filtering && !chat.loading && actor && !chat.messages.length && !errors && <Empty className="dl-conversation-empty"><EmptyHeader>
             {primaryView && <img src="/logo-mark.svg" alt="" className="dl-empty-logo dl-brand-mark" />}
             <EmptyTitle>{!connecting && !ready ? t("conversation_pane.set_up_model") : primaryView ? "Daat Locus" : name}</EmptyTitle>
             {!connecting && ready && <EmptyDescription>{t("conversation_pane.start_conversation")}</EmptyDescription>}
           </EmptyHeader>{!connecting && !ready && onConfigureModels && <Button onClick={onConfigureModels}>{t("providers_settings.add_provider")}</Button>}</Empty>}
           {chat.loading && <div className="dl-loading-messages"><Skeleton className="h-24 w-4/5 rounded-3xl" /><Skeleton className="ml-auto h-14 w-3/5 rounded-3xl" /><Skeleton className="h-32 w-4/5 rounded-3xl" /></div>}
-          {chat.hasMore && <Button variant="ghost" size="sm" className="dl-load-history" disabled={chat.loadingOlder} onClick={() => { olderHeight.current = scroll.current?.scrollHeight ?? null; void chat.loadOlder().catch(() => setLocalError(t("conversation_pane.could_not_load_earlier_messages"))); }}>{t("conversation_pane.load_earlier_messages")}</Button>}
-          {visibleMessages.map(message => primaryView ? <PrimaryTurn key={message.id} message={message} chat={chat} access={access} onActor={openActor} typing={message.id === typingId} receiptMessageId={receiptMessageId} /> : <WorkTurn key={message.id} message={message} chat={chat} access={access} onActor={openActor} />)}
+          {!filtering && chat.hasMore && <Button variant="ghost" size="sm" className="dl-load-history" disabled={chat.loadingOlder} onClick={() => { void earlier(); }}>{t("conversation_pane.load_earlier_messages")}</Button>}
+          {filtering && search.ready && !search.failed && search.next !== null && <LazyPage key={searchQuery.trim()} cursor={search.next} onLoad={moreMatches} errorMessage={t("search_dialog.could_not_load_earlier_results")} />}
+          {filtering && search.ready && search.failed && <div className="dl-client-error" role="alert"><span>{t("search_dialog.search_failed_try_again")}</span><Button variant="ghost" size="sm" onClick={search.retry}>{t("app.retry")}</Button></div>}
+          {filtering && search.ready && !search.failed && !visibleMessages.length && <Empty className="dl-filter-empty"><EmptyHeader><EmptyTitle>{t("search_dialog.no_results")}</EmptyTitle></EmptyHeader></Empty>}
+          {visibleMessages.map(message => primaryView ? <PrimaryTurn key={message.id} message={message} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} typing={message.id === typingId} receiptMessageId={receiptMessageId} /> : <WorkTurn key={message.id} message={message} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} />)}
           <div className="dl-conversation-bottom" />
         </div>
       </div>
-      {!primaryView && <ConversationHistory messages={visibleMessages} scroll={scroll} onNavigate={() => {follow.current = false;}} />}
+      {!primaryView && !searchOpen && <ConversationHistory messages={visibleMessages} scroll={scroll} onNavigate={() => {follow.current = false;}} />}
       <div ref={footer} className="dl-conversation-footer">
         {!connecting && !ready && chat.messages.length > 0 && onConfigureModels && <div className="dl-model-required"><span>{t("conversation_pane.model_required")}</span><Button variant="outline" size="sm" onClick={onConfigureModels}>{t("app.settings")}</Button></div>}
         {!compact && canManage && <OwnerApprovalNotice actorId={actorId} onActor={onActor} onAccessRevoked={onAccessRevoked} />}

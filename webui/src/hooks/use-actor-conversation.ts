@@ -522,15 +522,11 @@ export function useActorConversation(actorId: string | null, options: Conversati
       setToolDetails(previous => ({ ...previous, [resultId]: detail }));
     return detail;
   }, [actorId, toolDetails, valid]);
-  const search = useCallback((text: string, before?: number) => actorId ? api.searchMessages(actorId, text, { before, signal: controller.current?.signal }) : Promise.resolve({ items: [], next_cursor: null } as api.Page<api.MessageRecord>), [actorId]);
-  const jump = useCallback(async (messageId: string) => { if (!actorId)
-    return; const generation = epoch.current; const message = await api.getMessage(actorId, messageId); if (valid(generation))
-    dispatch({ type: "message", message }); return message; }, [actorId, valid]);
   const live = useMemo(() => new Map(Object.entries(state.generations)), [state.generations]);
   const current = state.actorId === actorId && enabled;
   return { ...(current ? state : initialConversation(actorId)), live: current ? live : new Map<string, GenerationDraft>(),
     draft: current ? draft : draftEntry().text, setDraft, attachments: current ? attachments : draftEntry().attachments, uploading, addAttachments, removeAttachment,
     loading: loading || Boolean(actorId && enabled && !current), loadingOlder, hasMore: current && state.nextCursor !== null, more: current && state.nextCursor !== null, loadOlder, loadMore: loadOlder,
     sending, send, cancel, amend, steer, loadQueue, clearQueue, error, streamStatus, connected: streamStatus === "connected", refresh, refreshActor,
-    loadTools, loadMoreTools, loadToolDetails, fetchResult: loadToolDetails, toolDetails: current ? toolDetails : {}, search, jump };
+    loadTools, loadMoreTools, loadToolDetails, fetchResult: loadToolDetails, toolDetails: current ? toolDetails : {} };
 }
