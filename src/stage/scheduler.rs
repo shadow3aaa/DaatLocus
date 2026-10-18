@@ -22,8 +22,19 @@ pub struct Traffic {
     pub retransmission_bytes: u64,
     pub frames: u64,
     pub queue_peak_bytes: usize,
+    pub content_payload_bytes: u64,
+    pub content_wire_bytes: u64,
 }
 impl Traffic {
+    pub fn record_frame(&mut self, class: Class, frame: &Envelope, bytes: usize) {
+        self.record(class, bytes);
+        if let super::protocol::Body::BlobChunk { bytes: payload, .. } = &frame.body {
+            self.content_payload_bytes = self
+                .content_payload_bytes
+                .saturating_add(payload.len() as u64);
+            self.content_wire_bytes = self.content_wire_bytes.saturating_add(bytes as u64);
+        }
+    }
     /// Protocol bytes, including a TCP frame prefix where the adapter adds one.
     /// These counters deliberately do not claim to measure IP/DTLS/TLS overhead.
     pub fn record(&mut self, class: Class, bytes: usize) {

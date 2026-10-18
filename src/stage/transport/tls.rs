@@ -213,7 +213,7 @@ pub fn server(identity: &DeviceIdentity, allowed: &[DeviceProfile]) -> Result<Tl
             key(identity),
         )
         .map_err(|_| StageError::Invalid("Invalid Stage TLS identity"))?;
-    config.alpn_protocols = vec![b"daat-locus-stage/1".to_vec()];
+    config.alpn_protocols = vec![super::wire::ALPN.to_vec(), b"daat-locus-stage/1".to_vec()];
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 pub fn client(identity: &DeviceIdentity, peer: &DeviceProfile) -> Result<TlsConnector> {
@@ -232,7 +232,7 @@ pub fn client(identity: &DeviceIdentity, peer: &DeviceProfile) -> Result<TlsConn
             key(identity),
         )
         .map_err(|_| StageError::Invalid("Invalid Stage TLS identity"))?;
-    config.alpn_protocols = vec![b"daat-locus-stage/1".to_vec()];
+    config.alpn_protocols = vec![super::wire::ALPN.to_vec(), b"daat-locus-stage/1".to_vec()];
     Ok(TlsConnector::from(Arc::new(config)))
 }
 pub fn server_name(peer: StageId) -> Result<ServerName<'static>> {
@@ -276,7 +276,10 @@ pub async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
     let tls = tokio::time::timeout(std::time::Duration::from_secs(10), acceptor.accept(stream))
         .await
         .map_err(|_| StageError::Unavailable("Stage TLS handshake timed out"))??;
-    if tls.get_ref().1.alpn_protocol() != Some(b"daat-locus-stage/1") {
+    if !matches!(
+        tls.get_ref().1.alpn_protocol(),
+        Some(super::wire::ALPN | b"daat-locus-stage/1")
+    ) {
         return Err(StageError::Forbidden("Stage TLS protocol mismatch"));
     }
     Ok(tls)
@@ -292,7 +295,10 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
     )
     .await
     .map_err(|_| StageError::Unavailable("Stage TLS handshake timed out"))??;
-    if tls.get_ref().1.alpn_protocol() != Some(b"daat-locus-stage/1") {
+    if !matches!(
+        tls.get_ref().1.alpn_protocol(),
+        Some(super::wire::ALPN | b"daat-locus-stage/1")
+    ) {
         return Err(StageError::Forbidden("Stage TLS protocol mismatch"));
     }
     Ok(tls)
@@ -302,6 +308,36 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     use crate::stage::protocol::{Body, Envelope};
+    #[tokio::test]
+    async fn stage_alpn_negotiates_compact_and_falls_back_for_either_legacy_side() {
+        let a = DeviceIdentity::generate().unwrap();
+        let b = DeviceIdentity::generate().unwrap();
+        for (legacy_server, legacy_client, expected) in [
+            (false, false, super::super::wire::ALPN),
+            (true, false, b"daat-locus-stage/1".as_slice()),
+            (false, true, b"daat-locus-stage/1".as_slice()),
+        ] {
+            let acceptor = server(&a, &[b.profile()]).unwrap();
+            let connector = client(&b, &a.profile()).unwrap();
+            let mut server_config = acceptor.config().as_ref().clone();
+            let mut client_config = connector.config().as_ref().clone();
+            if legacy_server {
+                server_config.alpn_protocols = vec![b"daat-locus-stage/1".to_vec()];
+            }
+            if legacy_client {
+                client_config.alpn_protocols = vec![b"daat-locus-stage/1".to_vec()];
+            }
+            let acceptor = TlsAcceptor::from(Arc::new(server_config));
+            let connector = TlsConnector::from(Arc::new(client_config));
+            let (left, right) = tokio::io::duplex(65536);
+            let (server, client) = tokio::join!(
+                accept(&acceptor, left),
+                connect(&connector, a.profile().stage_id, right)
+            );
+            assert_eq!(server.unwrap().get_ref().1.alpn_protocol(), Some(expected));
+            assert_eq!(client.unwrap().get_ref().1.alpn_protocol(), Some(expected));
+        }
+    }
     #[tokio::test]
     async fn mutual_device_pins_bind_real_tls_and_reject_a_wrong_peer() {
         let a = DeviceIdentity::generate().unwrap();

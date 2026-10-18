@@ -6,7 +6,10 @@ use crate::stage::{
     protocol::{Envelope, MAX_FRAME},
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 use webrtc::{
@@ -103,6 +106,7 @@ pub struct P2pChannel {
     gathered: watch::Receiver<bool>,
     readers: Vec<tokio::task::JoinHandle<()>>,
     traversal: Arc<super::punch::Traversal>,
+    compact: Arc<AtomicBool>,
 }
 impl P2pChannel {
     pub fn verified_peer(&self) -> Result<super::tls::VerifiedPeer> {
@@ -122,6 +126,7 @@ impl P2pChannel {
             control: self.control.clone(),
             bulk: self.bulk.clone(),
             pc: self.pc.clone(),
+            compact: self.compact.clone(),
         }
     }
     pub async fn new(stun_urls: Vec<String>, loopback_only: bool) -> Result<Self> {
@@ -254,6 +259,7 @@ impl P2pChannel {
             gathered,
             readers,
             traversal,
+            compact: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -310,6 +316,9 @@ impl P2pChannel {
             );
         }
         self.traversal.local(&mut description);
+        description
+            .sdp
+            .push_str(&format!("{}\r\n", super::wire::SDP));
         if description.sdp.len() > 6 * 1024 {
             return Err(StageError::Capacity("RTC negotiation budget exceeded"));
         }
@@ -353,6 +362,14 @@ impl P2pChannel {
         now: i64,
     ) -> Result<()> {
         let value = verify_signal(proof, peer, root, local, attempt, now)?;
+        self.compact.store(
+            value
+                .description
+                .sdp
+                .lines()
+                .any(|line| line == super::wire::SDP),
+            Ordering::Relaxed,
+        );
         self.pc
             .set_remote_description(value.description.clone())
             .await
@@ -394,7 +411,7 @@ impl P2pChannel {
             return Err(StageError::Forbidden("RTC peer has not authenticated"));
         }
         let channel = if bulk { &self.bulk } else { &self.control };
-        send_frame(channel, frame).await
+        send_frame(channel, frame, self.compact.load(Ordering::Relaxed)).await
     }
 
     pub async fn receive(&mut self) -> Result<(Envelope, usize)> {
@@ -407,7 +424,12 @@ impl P2pChannel {
             value=self.incoming_bulk.recv()=>value,
         }
         .ok_or(StageError::Unavailable("RTC channel closed"))??;
-        Ok((Envelope::decode(&bytes)?, bytes.len()))
+        let format = if self.compact.load(Ordering::Relaxed) {
+            super::wire::Format::BinaryZstd
+        } else {
+            super::wire::Format::Json
+        };
+        Ok((format.decode(&bytes)?, bytes.len()))
     }
     pub async fn close(&self) -> Result<()> {
         self.traversal.stop();
@@ -422,6 +444,7 @@ pub struct P2pSender {
     control: Arc<dyn DataChannel>,
     bulk: Arc<dyn DataChannel>,
     pc: Arc<dyn PeerConnection>,
+    compact: Arc<AtomicBool>,
 }
 impl Drop for P2pChannel {
     fn drop(&mut self) {
@@ -440,7 +463,7 @@ impl Drop for P2pChannel {
 impl P2pSender {
     pub async fn send(&self, frame: &Envelope, bulk: bool) -> Result<usize> {
         let channel = if bulk { &self.bulk } else { &self.control };
-        send_frame(channel, frame).await
+        send_frame(channel, frame, self.compact.load(Ordering::Relaxed)).await
     }
 
     pub async fn close(&self) -> Result<()> {
@@ -479,21 +502,24 @@ impl PeerConnectionEventHandler for ConnectionEvents {
             .send_replace(state == RTCIceGatheringState::Complete);
     }
 }
-async fn send_frame(channel: &Arc<dyn DataChannel>, frame: &Envelope) -> Result<usize> {
+async fn send_frame(
+    channel: &Arc<dyn DataChannel>,
+    frame: &Envelope,
+    compact: bool,
+) -> Result<usize> {
     if channel.ready_state().await.map_err(rtc_error)? != RTCDataChannelState::Open {
         return Err(StageError::Unavailable("RTC channel is not open"));
     }
-    let bytes = frame.encode()?;
+    let format = if compact {
+        super::wire::Format::BinaryZstd
+    } else {
+        super::wire::Format::Json
+    };
+    let bytes = format.encode(frame)?;
     channel
-        .try_send(bytes.as_slice().into())
+        .send(bytes.as_slice().into())
         .await
-        .map_err(|error| {
-            if matches!(error, webrtc::error::Error::ErrSendBufferFull) {
-                StageError::Capacity("RTC send backlog is full")
-            } else {
-                rtc_error(error)
-            }
-        })?;
+        .map_err(rtc_error)?;
     Ok(bytes.len())
 }
 #[cfg(test)]

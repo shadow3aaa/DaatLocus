@@ -481,7 +481,12 @@ impl Runtime {
         .await?;
         let owner = self.clone();
         let authenticated = peer.clone();
-        let channel = PeerChannel::stream(peer, stream, move |frame, scope| {
+        let format = if stream.get_ref().1.alpn_protocol() == Some(super::transport::wire::ALPN) {
+            super::transport::wire::Format::BinaryZstd
+        } else {
+            super::transport::wire::Format::Json
+        };
+        let channel = PeerChannel::stream_format(peer, stream, format, move |frame, scope| {
             owner.authorize_send(&authenticated, frame, scope)
         });
         self.attach(channel, generation, Route::Lan);
@@ -629,14 +634,19 @@ impl Runtime {
     fn attach_stream<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>(
         self: &Arc<Self>,
         verified: super::transport::tls::VerifiedPeer,
-        stream: S,
+        stream: tokio_rustls::client::TlsStream<S>,
         generation: u64,
         route: Route,
     ) {
         let owner = self.clone();
         let check = verified.clone();
+        let format = if stream.get_ref().1.alpn_protocol() == Some(super::transport::wire::ALPN) {
+            super::transport::wire::Format::BinaryZstd
+        } else {
+            super::transport::wire::Format::Json
+        };
         self.attach(
-            PeerChannel::stream(verified, stream, move |frame, scope| {
+            PeerChannel::stream_format(verified, stream, format, move |frame, scope| {
                 owner.authorize_send(&check, frame, scope)
             }),
             generation,
