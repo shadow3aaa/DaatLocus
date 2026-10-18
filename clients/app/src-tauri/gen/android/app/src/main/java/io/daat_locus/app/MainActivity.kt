@@ -18,7 +18,9 @@ class MainActivity : TauriActivity() {
       val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
       val keyboard = insets.getInsets(WindowInsetsCompat.Type.ime())
       view.setPadding(bars.left, bars.top, bars.right, max(bars.bottom, keyboard.bottom))
-      insets
+      // The native container already applies system and keyboard insets. Do not
+      // forward them to WebView, which would reserve the same safe area again.
+      WindowInsetsCompat.CONSUMED
     }
   }
   override fun onWebViewCreate(webView: WebView) {

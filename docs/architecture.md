@@ -450,6 +450,8 @@ Android 上以 O_PATH 遍历不可列举的系统祖先目录，仅在授权目�
 也属于 Apps 不可访问的私有基础设施。
 账号 bootstrap 只授予确切 loopback origin 主 WebView，普通登录仍写 HttpOnly cookie。
 资源预览留在认证 WebView 的 sandbox dialog，外部链接交给系统浏览器。
+Android 原生容器统一应用系统栏、刘海和键盘 inset，并消费已处理的 inset；
+WebView 不应再次为同一安全区预留边距。移动抽屉与全屏 Actor 弹窗必须覆盖内容视口。
 
 Android 与其他设备使用同样的执行、同步和投票规则，无移动设备专用成员类型。
 新设备同步为 learner；投票权只在授权节点交接时通过 joint membership 转移。

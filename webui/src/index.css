@@ -277,7 +277,9 @@ html[data-desktop-platform] { --dl-window-bar: 36px; }
   .dl-navigation-rail { display: none; }
   .dl-main-view, .dl-settings-page { border-radius: 0; }
   .dl-main-heading { gap: 8px; }
-  .dl-sidebar-drawer { left: 0; top: calc(var(--dl-window-bar) + env(safe-area-inset-top)); bottom: 0; translate: none; transform: none; width: min(320px,calc(100vw - 48px)); max-width: none; height: calc(100dvh - var(--dl-window-bar) - env(safe-area-inset-top)); padding: 0 0 env(safe-area-inset-bottom); display: flex; flex-direction: column; gap: 0; border-radius: 0 16px 16px 0; }
+  /* Do not combine translate/transform resets: CSS minification folds them into
+     transform:none, exposing DialogContent's independent translate utilities. */
+  .dl-sidebar-drawer { left: 0; top: calc(var(--dl-window-bar) + env(safe-area-inset-top)); bottom: 0; translate: none; width: min(320px,calc(100vw - 48px)); max-width: none; height: calc(100dvh - var(--dl-window-bar) - env(safe-area-inset-top)); padding: 0 0 env(safe-area-inset-bottom); display: flex; flex-direction: column; gap: 0; border-radius: 0 16px 16px 0; }
   .dl-settings-page { display: block; }
   .dl-settings-sidebar { box-sizing: border-box; width: auto; height: 100%; border: 0; padding: 0 12px; }
   .dl-settings-sidebar header { height: 60px; padding: 10px 0; }
@@ -708,7 +710,7 @@ button.dl-activity-heading:hover { color: var(--foreground); }
   .dl-composer [data-slot=input-group-control] { font-size: calc(var(--ui-font-size, 14px) * 16 / 14); } .dl-composer-toolbar { gap: 2px; } .dl-model-trigger { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); max-width: 135px; } .dl-model-effort { display: none; }
   .dl-mode-trigger { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); padding: 0 5px; } .dl-reference-action { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); padding-left: 7px; }
   .dl-actor-reference { min-width: 0; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
-  .dl-actor-dialog { inset: var(--dl-window-bar) 0 0; translate: none; transform: none; width: 100%; max-width: none; height: calc(100dvh - var(--dl-window-bar)); max-height: none; border-radius: 0; box-shadow: none; animation: none; background: var(--background); }
+  .dl-actor-dialog { inset: var(--dl-window-bar) 0 0; translate: none; width: 100%; max-width: none; height: calc(100dvh - var(--dl-window-bar)); max-height: none; border-radius: 0; box-shadow: none; animation: none; background: var(--background); }
   .dl-actor-dialog-heading { padding: calc(12px + env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 12px max(14px,env(safe-area-inset-left)); }
   .dl-actor-dialog-heading>div { background: var(--background); }
   .dl-actor-dialog-title { gap: 9px; } .dl-conversation-compact { --dl-header-space: 60px; }
