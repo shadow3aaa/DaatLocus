@@ -4,7 +4,7 @@ import { useState } from "react";
 import { ExternalLinkIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, Markdown } from "@/components/markdown";
-import type { JsonValue, ToolResult } from "@/lib/actor-api";
+import type { ApprovalScope, JsonValue, ToolResult } from "@/lib/actor-api";
 import { resourceActorId, safeLink } from "@/lib/conversation-links";
 import { asObject, asRows, asText, readableSummary, domainToolName } from "@/lib/tool-presentation";
 import { FileChangeView } from "@/components/file-change";
@@ -92,11 +92,15 @@ export function ToolDetail({ result, onActor }: { result: ToolResult; onActor?(i
   return <div className="dl-tool-note">{text ? <Markdown content={text} /> : <p>{readableSummary(result.summary) || t("tool_details.action_completed")}</p>}<ToolParameters value={domainFields(fields)} /></div>;
 }
 
-export function ApprovalDetails({ result, requested }: { result: ToolResult["arguments"]; requested: { readable_roots: string[]; writable_roots: string[]; operation_details?: ToolResult["arguments"] } }) {
+export function ApprovalDetails({ result, requested, review, scopes }: { result: ToolResult["arguments"]; review?: {criteria:string} | null; scopes?: ApprovalScope[]; requested: { readable_roots: string[]; writable_roots: string[]; operation_details?: ToolResult["arguments"] } }) {
   const operation=asObject(requested.operation_details ?? undefined);
   const app=asObject(operation.app);
   const source=asObject(app.source);
   const connection=asText(source.url)||asText(source.command);
   const mcp=/^mcp_[a-f0-9]{32}$/.test(asText(app.id)) && operation.parameters != null;
-  return <div className="dl-approval-details">{mcp && <><p>{asText(app.name)} · {asText(operation.tool)}</p>{connection&&<p className="dl-parameter-text">{t("apps.connection")}: {connection}</p>}</>}<ToolParameters value={mcp?operation.parameters:result} />{requested.readable_roots.length > 0 && <section className="dl-permission-roots"><h4>{t("tool_details.additional_read_access")}</h4><ul>{requested.readable_roots.map(path => <li key={path}><code>{path}</code></li>)}</ul></section>}{requested.writable_roots.length > 0 && <section className="dl-permission-roots"><h4>{t("tool_details.additional_write_access")}</h4><ul>{requested.writable_roots.map(path => <li key={path}><code>{path}</code></li>)}</ul></section>}{requested.operation_details != null && !mcp && <section className="dl-permission-roots"><h4>{t("tool_details.execution_details")}</h4><ToolParameters value={requested.operation_details} /></section>}</div>;
+  const paths = scopes?.filter((scope): scope is Extract<ApprovalScope,{kind:"filesystem"}> => scope.kind === "filesystem");
+  const reads = paths?.length ? paths.filter(scope=>!scope.write).map(scope=>scope.path) : requested.readable_roots;
+  const writes = paths?.length ? paths.filter(scope=>scope.write).map(scope=>scope.path) : requested.writable_roots;
+  const recursive = new Set(paths?.filter(scope=>scope.recursive).map(scope=>scope.path));
+  return <div className="dl-approval-details">{review && <section className="dl-permission-roots"><h4>{t("tool_details.review_criteria")}</h4><p className="dl-parameter-text">{review.criteria}</p></section>}{mcp && <><p>{asText(app.name)} · {asText(operation.tool)}</p>{connection&&<p className="dl-parameter-text">{t("apps.connection")}: {connection}</p>}</>}<ToolParameters value={mcp?operation.parameters:result} />{reads.length > 0 && <section className="dl-permission-roots"><h4>{t("tool_details.additional_read_access")}</h4><ul>{reads.map(path => <li key={path}><code>{path}</code>{recursive.has(path) && <small> · {t("tool_details.includes_subdirectories")}</small>}</li>)}</ul></section>}{writes.length > 0 && <section className="dl-permission-roots"><h4>{t("tool_details.additional_write_access")}</h4><ul>{writes.map(path => <li key={path}><code>{path}</code>{recursive.has(path) && <small> · {t("tool_details.includes_subdirectories")}</small>}</li>)}</ul></section>}{requested.operation_details != null && !mcp && <section className="dl-permission-roots"><h4>{t("tool_details.execution_details")}</h4><ToolParameters value={requested.operation_details} /></section>}</div>;
 }

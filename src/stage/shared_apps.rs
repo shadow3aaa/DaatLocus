@@ -30,7 +30,6 @@ struct CreateArgs {
     stage_id: String,
     name: String,
     workspace: Option<String>,
-    read_only: bool,
     instructions: Option<String>,
     model: Option<String>,
 }
@@ -91,15 +90,7 @@ impl App for AccountActors {
     fn delegates_approval(&self, call: &AgentToolCall) -> bool {
         matches!(
             call.name.as_str(),
-            "devices"
-                | "list"
-                | "create"
-                | "import_conversation"
-                | "send"
-                | "status"
-                | "cancel"
-                | "deliver"
-                | "yield"
+            "list" | "create" | "import_conversation" | "send" | "status" | "cancel"
         )
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
@@ -126,18 +117,6 @@ impl App for AccountActors {
         }
         specs.push(AppToolSpec {name:"devices".into(), description:"List authorized account devices and actual connectivity. Select an explicit stage_id for hosted Actor operations. Offline targets are never silently moved.".into(),input_schema:model_schema_for::<EmptyAppArgs>()});
         specs
-            .into_iter()
-            .filter(|spec| {
-                self.actor
-                    .config
-                    .permissions
-                    .tools
-                    .as_ref()
-                    .is_none_or(|tools| tools.contains(&format!("actors__{}", spec.name)))
-                    && (!self.actor.config.permissions.read_only
-                        || crate::builtin_apps::read_only_tool("actors", &spec.name))
-            })
-            .collect()
     }
     fn before_tool_call(
         &self,
@@ -222,7 +201,7 @@ impl App for AccountActors {
                     app: "actors".into(),
                     revision: installation.revision,
                     call: routed,
-                    identity_read_only: self.actor.config.permissions.read_only,
+                    identity_read_only: self.actor.remote_read_only,
                 },
             )
             .await
@@ -252,14 +231,10 @@ pub fn manager(
     actor: ActorRecord,
     system: ActorSystem,
 ) -> miette::Result<AppManager> {
-    let policy = actor.clone();
-    AppManager::new(vec![Box::new(crate::builtin_apps::RestrictedApp::new(
-        Box::new(AccountActors {
-            controller,
-            local: ActorApp::new(shared::ACTOR_ID.into(), system.clone()),
-            actor,
-            system,
-        }),
-        &policy,
-    ))])
+    AppManager::new(vec![Box::new(AccountActors {
+        controller,
+        local: ActorApp::new(shared::ACTOR_ID.into(), system.clone()),
+        actor,
+        system,
+    })])
 }

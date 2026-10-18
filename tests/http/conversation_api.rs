@@ -331,6 +331,7 @@ async fn queries_are_bounded_and_every_actor_has_a_link_without_catalog_configur
     let mut config = parent.config.clone();
     config.instructions = "private instructions ".repeat(10_000);
     let spawned = ActorRecord {
+        remote_read_only: false,
         context: Default::default(),
         id: "spawned".into(),
         parent_id: Some(child),
@@ -431,7 +432,7 @@ async fn actor_creation_constraints_cannot_be_rewritten_through_client_managemen
         StatusCode::METHOD_NOT_ALLOWED
     );
     let mut changed = original.clone();
-    changed.permissions.read_only = true;
+    changed.instructions = "Replace identity".into();
     assert_eq!(
         fixture
             .owner(reqwest::Method::PUT, &endpoint)
@@ -531,6 +532,8 @@ async fn owner_can_open_and_control_created_actors() {
                 arguments: json!({"path": "README.md"}),
             },
             requested: ToolPermissionRequest::default(),
+            review: None,
+            scopes: vec![],
             mode: ApprovalMode::Ask,
             decision: ApprovalDecision::Pending,
             reason: "Owner approval required".into(),

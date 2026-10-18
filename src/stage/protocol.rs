@@ -84,29 +84,10 @@ pub enum Origin {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteCeiling {
-    pub apps: Vec<String>,
-    pub tools: Option<Vec<String>>,
     pub read_only: bool,
     pub approval_mode: crate::actors::ApprovalMode,
 }
-impl RemoteCeiling {
-    pub fn validate(&self) -> Result<()> {
-        let valid = |name: &str| {
-            !name.is_empty()
-                && name.len() <= 128
-                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        };
-        if self.apps.iter().any(|app| !valid(app))
-            || self
-                .tools
-                .as_ref()
-                .is_some_and(|tools| tools.iter().any(|tool| !valid(tool)))
-        {
-            return Err(StageError::Invalid("Invalid remote capability ceiling"));
-        }
-        Ok(())
-    }
-}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvocationState {
@@ -609,8 +590,7 @@ impl Envelope {
                 for attachment in attachments {
                     attachment.validate()?;
                 }
-                if let Origin::Actor { actor, ceiling, .. } = origin {
-                    ceiling.validate()?;
+                if let Origin::Actor { actor, .. } = origin {
                     actor.validate()?;
                     if actor.stage_id != peer {
                         return Err(StageError::Forbidden(

@@ -33,8 +33,8 @@ client are connected.
   arguments before opening storage or starting the runtime. Android embeds the same
   core with app-private Files and HTTP Browser. Terminal and broader native Apps
   remain future work.
-- Enforce account Owner and Actor permissions at every operation. Delegation
-  cannot increase capability grants. Restrictive process isolation must fail
+- Enforce account ownership, authenticated remote authority and sandbox access at
+  every operation. Restrictive process isolation must fail
   closed when the platform cannot enforce it.
 - Do not restore deleted modules merely to make the old product run or compile.
 - Do not recreate the old Session, RuntimeTool, Dashboard, Sleep, or Workflow
@@ -56,7 +56,8 @@ client are connected.
   MCP protocol. List/inspect/refresh skip review but retain hard permissions;
   install/enable/close require existing approval. Refresh only at settled tool-group
   boundaries or the next input, preserving Actor identity/history and unchanged Apps.
-  Core still exposes only Actors. Installation never expands explicit Actor grants.
+  Core constructs only the portable Actors App. Other Actors receive every
+  device-provided App; there are no Actor App or tool capability allowlists.
   Do not require a common `get_state` tool or a separate App workspace UI.
 - Core is the only preset Actor and the default entry. Every other Actor is
   created and named by its creating Actor; never preset a device executor.
@@ -67,14 +68,14 @@ client are connected.
   access. Results remain associated with the originating request.
 - The account Core directly exposes only the portable Actors App. Hosted Actors
   on the same device install the same device-provided Apps; creation cannot select
-  Apps. Read-only identity, App action grants, tool allowlists and filesystem scope
-  constrain execution without changing installation. Hosted Actors perform
-  research and filesystem/process/browser work. Keep the delegation App
-  ceiling distinct from installed Apps and intersect it with device capability;
-  never increase read-only, filesystem, tool or approval grants through delegation.
+  Apps. Do not retain App access lists, tool allowlists, delegation App ceilings,
+  local read-only Actor identities or recipient lists. Hosted Actors perform
+  research and filesystem/process/browser work with their project sandbox and
+  Actor-local remembered approvals. Authenticated remote authority and private
+  data isolation remain execution boundaries, independent of App installation.
 - Actor configuration is internal creation/persistence state, not a user management
   surface. Do not expose editors or client/native RPCs that rewrite Apps, workspace,
-  instructions, read-only identity, filesystem roots, recipients or tool allowlists.
+  instructions or filesystem roots.
   User permission controls only switch Full access / Ask / Auto; model selection
   stays a composer preference. Actor creation happens through the Actors App,
   with inherited creation constraints. Actors have no individual deletion operation.
@@ -86,9 +87,9 @@ client are connected.
   reconnecting replicas synchronize. Never expose reset to models or Apps, or add
   individual Actor deletion in the client, HTTP API or native protocol.
   Completion, idleness, restart or worker shutdown must not recycle an Actor.
-- Project, read-only investigation, and general Actors use the same core with
-  the same device Apps and different access constraints. Enforce read-only and folder scope in
-  tools, not only in prompts.
+- Project, investigation and general Actors use the same core and device Apps.
+  Project workspaces grant recursive filesystem access from their top directory.
+  Enforce sandbox and authenticated remote restrictions in tools, not only prompts.
 - Guest conversation sharing, PIN sessions and quick-tunnel publication are removed.
   Retain optional CF P2P signaling; it is not a conversation-sharing service.
 - Keep one shared WebUI for native and browser clients. Core shows explicit user deliveries,
@@ -151,11 +152,21 @@ Every effect still requires device-side epoch, authorization, approval and sandb
 - Auto uses an independent model request without worker history or execution
   tools. Its only decisions are approve/deny. Errors, timeouts and invalid
   responses deny the operation; Auto cannot fall back to human approval.
+- Apps declare operations requiring review, their review criteria and semantic
+  approval fingerprints. Undeclared ordinary operations do not require review.
+  Sandbox access outside existing or remembered roots independently requires
+  review, regardless of which App requested access.
 - Ask waits for Owner approval of immutable arguments and requested scope. None
   omits review and can use the operation's requested extra filesystem scope.
-- A grant is limited to one proposed action. Never mutate permanent Actor grants
-  from a model review. Read-only identity, tool restrictions,
-  framework credentials and other Actors' private data remain hard constraints.
+  Approval memory is automatic, with no opt-in control or reminder. Display review
+  cards only for Ask; automatic review stays out of the conversation UI.
+  Approved fingerprints persist per Actor. Reuse equivalent approved actions;
+  merge covered filesystem scopes, with directories recursively covering children
+  and write grants covering reads. Policy, target or meaningful argument changes
+  require a new action fingerprint. Keep remembered grants separate from Actor
+  configuration and reclaim them when Actor data is removed by account reset.
+  Never broaden authenticated remote authority, framework credential access or
+  other Actors' private data through review or remembered grants.
 - Models cannot set their approval mode or change a child's inherited mode.
   Only Owner configuration changes mode. Cancellation/reconfiguration must
   invalidate waiting approvals. Owner HTTP resolution is only for Ask Pending.

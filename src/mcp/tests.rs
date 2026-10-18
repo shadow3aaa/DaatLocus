@@ -134,6 +134,7 @@ fn context(directory: &std::path::Path) -> AppToolExecutionContext {
         tool_output_max_tokens: 4096,
         turn_epoch: 1,
         actor_call: Some(ActorCallContext {
+            remote_read_only: false,
             actor_id: "test-actor".into(),
             message_id: "test-request".into(),
             private_roots: vec![],
@@ -339,14 +340,13 @@ async fn refresh_preserves_other_app_instances_and_queries_are_exempt() {
     );
     for name in ["list", "inspect", "refresh"] {
         assert!(
-            apps.review_exempt(&call(&format!("apps_manager__{name}"), json!({})))
+            apps.review_requirement(&call(&format!("apps_manager__{name}"), json!({})), &context)
                 .unwrap()
+                .is_none()
         );
     }
     assert!(
-        !apps
-            .review_exempt(&call("apps_manager__install", json!({})))
-            .unwrap()
+        apps.review_requirement(&call("apps_manager__install", json!({"name":"Reviewed","description":null,"transport":"http","url":"http://localhost:1234/mcp","command":null,"arguments":[]})), &context).unwrap().is_some()
     );
     let manager = crate::app::AppId::new("apps_manager").unwrap();
     apps.execute_tool_for_app(

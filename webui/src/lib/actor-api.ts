@@ -19,13 +19,8 @@ export type Page<T, C = number> = {
 };
 export type ActorPermissions = {
   approval_mode: ApprovalMode;
-  read_only: boolean;
   readable_roots: string[];
   writable_roots: string[];
-  message_targets: string[];
-  allow_children: boolean;
-  tools: string[] | null;
-  delegation_apps?: string[] | null;
 };
 export type ActorConfig = {
   name: string;
@@ -42,7 +37,6 @@ export type ActorSummary = {
   name: string;
   status: ActorStatus;
   apps: string[];
-  read_only: boolean;
   created_at_ms: number;
   updated_at_ms: number;
 };
@@ -143,7 +137,10 @@ export type ToolResult = Omit<ToolSummary, "seq"> & {
   payload: JsonValue;
   model_content: string;
 };
+export type ApprovalScope = {kind:"filesystem";path:string;write:boolean;recursive:boolean} | {kind:"app";namespace:string;policy:string;action:string};
 export type ApprovalRecord = {
+  review?: {namespace:string;criteria:string;action:JsonValue} | null;
+  scopes?: ApprovalScope[];
   seq: number;
   id: string;
   actor_id: string;

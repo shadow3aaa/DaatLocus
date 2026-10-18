@@ -1,4 +1,4 @@
-//! Capability checks shared by Actor creation and every tool execution.
+//! Filesystem scope, approval-mode inheritance and private storage protection.
 use super::{ActorConfig, ActorError};
 use crate::sandbox::{
     FileSystemSandboxPolicy, RuntimeSandboxPolicy, StrongFilesystemSandboxMode, WritableRoot,
@@ -37,15 +37,8 @@ pub fn normalize_config(mut config: ActorConfig) -> Result<ActorConfig> {
     if config.name.trim().is_empty() {
         return Err(ActorError::Invalid("Invalid Actor name".into()).into());
     }
-    crate::builtin_apps::validate_app_names(&config.apps, config.permissions.read_only)
+    crate::builtin_apps::validate_app_names(&config.apps)
         .map_err(|_| ActorError::Invalid("Invalid or unavailable App configuration".into()))?;
-    if let Some(apps) = &config.permissions.app_access {
-        crate::builtin_apps::validate_app_grants(apps, config.permissions.read_only)?;
-    }
-    if let Some(apps) = &config.permissions.delegation_apps {
-        crate::builtin_apps::validate_app_grants(apps, config.permissions.read_only)
-            .map_err(|_| ActorError::Invalid("Invalid delegation App ceiling".into()))?;
-    }
     config.workspace = canonical_path(&config.workspace)?;
     config.permissions.readable_roots = config
         .permissions
@@ -63,9 +56,6 @@ pub fn normalize_config(mut config: ActorConfig) -> Result<ActorConfig> {
     config.permissions.readable_roots.dedup();
     config.permissions.writable_roots.sort();
     config.permissions.writable_roots.dedup();
-    if config.permissions.read_only && !config.permissions.writable_roots.is_empty() {
-        return Err(ActorError::Invalid("Read-only Actors cannot have write grants".into()).into());
-    }
     if !covered(&config.workspace, &config.permissions.readable_roots) {
         return Err(ActorError::Invalid("Workspace requires a read grant".into()).into());
     }
@@ -81,73 +71,27 @@ pub fn normalize_config(mut config: ActorConfig) -> Result<ActorConfig> {
 fn covered(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path.starts_with(root))
 }
-pub fn delegation_apps(config: &ActorConfig) -> &[String] {
-    config
-        .permissions
-        .delegation_apps
-        .as_deref()
-        .unwrap_or_else(|| direct_apps(config))
-}
-pub fn direct_apps(config: &ActorConfig) -> &[String] {
-    config
-        .permissions
-        .app_access
-        .as_deref()
-        .unwrap_or(&config.apps)
-}
-pub fn app_granted(grants: &[String], app: &str) -> bool {
-    grants.iter().any(|grant| grant == "*" || grant == app)
-}
-pub fn intersect_app_grants(a: &[String], b: &[String]) -> Vec<String> {
-    if a.iter().any(|value| value == "*") {
-        return b.to_vec();
-    }
-    if b.iter().any(|value| value == "*") {
-        return a.to_vec();
-    }
-    a.iter().filter(|app| b.contains(app)).cloned().collect()
-}
 pub fn check_child(parent: &ActorConfig, child: &ActorConfig) -> Result<()> {
     let p = &parent.permissions;
     let c = &child.permissions;
-    if !p.allow_children
-        || (p.read_only && !c.read_only)
-        || (c.allow_children && !p.allow_children)
-        || approval_strength(c.approval_mode) < approval_strength(p.approval_mode)
-        || direct_apps(child)
-            .iter()
-            .any(|app| !app_granted(delegation_apps(parent), app))
-        || delegation_apps(child)
-            .iter()
-            .any(|app| !app_granted(delegation_apps(parent), app))
+    if approval_strength(c.approval_mode) < approval_strength(p.approval_mode)
         || c.readable_roots
             .iter()
             .any(|root| !covered(root, &p.readable_roots))
         || c.writable_roots
             .iter()
             .any(|root| !covered(root, &p.writable_roots))
-        || c.message_targets
-            .iter()
-            .any(|target| !p.message_targets.contains(target))
-        || p.tools.as_ref().is_some_and(|allowed| {
-            c.tools
-                .as_ref()
-                .is_none_or(|requested| requested.iter().any(|tool| !allowed.contains(tool)))
-        })
     {
-        return Err(
-            ActorError::Forbidden("Delegation cannot increase Actor capabilities".into()).into(),
-        );
+        return Err(ActorError::Forbidden(
+            "Creation exceeds the authorized filesystem scope or approval mode".into(),
+        )
+        .into());
     }
     Ok(())
 }
 
 pub fn check_recipient(sender: &ActorConfig, recipient: &ActorConfig) -> Result<()> {
-    let mut ceiling = sender.clone();
-    ceiling.permissions.allow_children = true;
-    let mut requested = recipient.clone();
-    requested.permissions.allow_children = false;
-    check_child(&ceiling, &requested)
+    check_child(sender, recipient)
 }
 pub(crate) fn approval_strength(mode: super::ApprovalMode) -> u8 {
     match mode {
@@ -319,64 +263,4 @@ fn windows_private_acl(path: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod delegation_tests {
-    use super::*;
-    #[test]
-    fn wildcard_delegation_intersection_never_expands_a_specific_ceiling() {
-        for (a, b, expected) in [
-            (vec!["*"], vec!["files"], vec!["files"]),
-            (vec!["files"], vec!["*"], vec!["files"]),
-            (vec!["*"], vec![], vec![]),
-            (
-                vec!["files", "browser"],
-                vec!["browser", "terminal"],
-                vec!["browser"],
-            ),
-            (vec!["*"], vec!["*"], vec!["*"]),
-        ] {
-            let values =
-                |items: Vec<&str>| items.into_iter().map(str::to_owned).collect::<Vec<_>>();
-            assert_eq!(
-                intersect_app_grants(&values(a), &values(b)),
-                values(expected)
-            );
-        }
-    }
-    #[test]
-    fn portable_core_delegates_only_inside_its_separate_ceiling() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut parent = ActorConfig {
-            name: "Core".into(),
-            workspace: directory.path().to_path_buf(),
-            apps: vec!["actors".into()],
-            model: None,
-            instructions: String::new(),
-            permissions: super::super::ActorPermissions::workspace(
-                directory.path().to_path_buf(),
-                false,
-            ),
-        };
-        parent.permissions.delegation_apps = Some(vec!["actors".into(), "files".into()]);
-        let mut child = parent.clone();
-        child.apps = vec!["files".into()];
-        child.permissions.delegation_apps = None;
-        assert!(check_child(&parent, &child).is_ok());
-        child.apps = vec!["terminal".into()];
-        assert!(check_child(&parent, &child).is_err());
-        child.apps = vec!["files".into()];
-        child.permissions.delegation_apps = Some(vec!["terminal".into()]);
-        assert!(check_child(&parent, &child).is_err());
-        child.permissions.delegation_apps = None;
-        parent.permissions.read_only = true;
-        assert!(check_child(&parent, &child).is_err());
-        child.permissions.read_only = true;
-        child.permissions.writable_roots.clear();
-        parent.permissions.writable_roots.clear();
-        assert!(check_child(&parent, &child).is_ok());
-        parent.permissions.tools = Some(vec!["actors__create".into()]);
-        assert!(check_child(&parent, &child).is_err());
-    }
 }

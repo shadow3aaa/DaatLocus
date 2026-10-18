@@ -11,7 +11,6 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Configuration {
     #[serde(default)]
     pub context: crate::actors::AgentContext,
@@ -19,14 +18,7 @@ pub struct Configuration {
     pub instructions: String,
     pub model: Option<String>,
     pub apps: Vec<String>,
-    #[serde(default)]
-    pub delegation_apps: Option<Vec<String>>,
     pub approval_mode: crate::actors::ApprovalMode,
-    pub read_only: bool,
-    pub tools: Option<Vec<String>>,
-    #[serde(default)]
-    pub app_access: Option<Vec<String>>,
-    pub allow_children: bool,
 }
 impl Configuration {
     pub fn from_actor(actor: &crate::actors::ActorRecord) -> Self {
@@ -37,12 +29,7 @@ impl Configuration {
             instructions: config.instructions.clone(),
             model: config.model.clone(),
             apps: config.apps.clone(),
-            delegation_apps: config.permissions.delegation_apps.clone(),
             approval_mode: config.permissions.approval_mode,
-            read_only: config.permissions.read_only,
-            tools: config.permissions.tools.clone(),
-            app_access: config.permissions.app_access.clone(),
-            allow_children: config.permissions.allow_children,
         }
     }
     pub fn apply(&self, config: &mut crate::actors::ActorConfig) {
@@ -50,16 +37,7 @@ impl Configuration {
         config.instructions = self.instructions.clone();
         config.model = self.model.clone();
         config.apps = vec!["actors".into()];
-        config.permissions.delegation_apps = Some(
-            self.delegation_apps
-                .clone()
-                .unwrap_or_else(|| self.apps.clone()),
-        );
         config.permissions.approval_mode = self.approval_mode;
-        config.permissions.read_only = self.read_only;
-        config.permissions.tools = self.tools.clone();
-        config.permissions.app_access = self.app_access.clone();
-        config.permissions.allow_children = self.allow_children;
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -199,7 +177,7 @@ mod preference_tests {
             )
             .is_err()
         );
-        assert!(serde_json::from_value::<Request>(serde_json::json!({"kind":"preferences","model_present":false,"model":null,"approval_mode":"none","read_only":false})).is_err());
+        assert!(serde_json::from_value::<Request>(serde_json::json!({"kind":"preferences","model_present":false,"model":null,"approval_mode":"none","filesystem_roots":[]})).is_err());
         assert!(
             serde_json::from_value::<super::super::protocol::ActorAdminAction>(
                 serde_json::json!({"kind":"configure","config":{}})

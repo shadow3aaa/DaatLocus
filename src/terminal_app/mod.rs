@@ -948,11 +948,49 @@ impl App for TerminalApp {
         ]
     }
 
+    fn review_requirement(
+        &self,
+        call: &AgentToolCall,
+        context: &AppToolExecutionContext,
+    ) -> Result<Option<crate::actors::AppReview>> {
+        let review = match call.name.as_str() {
+            "terminal_exec" => true,
+            "terminal_write_stdin" => !parse_terminal_tool_args::<TerminalWriteStdinArgs>(call)?
+                .text
+                .is_empty(),
+            "terminal_terminate" => true,
+            _ => false,
+        };
+        let mut arguments = call.arguments.clone();
+        if let Some(object) = arguments.as_object_mut() {
+            for field in [
+                "yield_time_ms",
+                "max_chars",
+                "wait_mode",
+                "additional_read_roots",
+                "additional_write_roots",
+            ] {
+                object.remove(field);
+            }
+        }
+        Ok(review.then(|| crate::actors::AppReview::new("terminal/process/v1",
+            "Review the exact command or process input and working directory for requested effects, destructive changes, network publication, credential use and data disclosure. A directory grant alone does not authorize arbitrary shell effects. Empty output polling requires no review.",
+            serde_json::json!({"tool":call.name,"arguments":arguments,"cwd":context.execution_cwd}))))
+    }
     fn permission_request(
         &self,
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
     ) -> Result<ToolPermissionRequest> {
+        if context
+            .actor_call
+            .as_ref()
+            .is_some_and(|caller| caller.remote_read_only)
+        {
+            return Err(miette!(
+                "Remote read-only authority cannot run native processes"
+            ));
+        }
         let mut request = ToolPermissionRequest::default();
         let session_id = match call.name.as_str() {
             "terminal_exec" => {
@@ -1017,6 +1055,15 @@ impl App for TerminalApp {
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
     ) -> Result<()> {
+        if context
+            .actor_call
+            .as_ref()
+            .is_some_and(|caller| caller.remote_read_only)
+        {
+            return Err(miette!(
+                "Remote read-only authority cannot run native processes"
+            ));
+        }
         let process_policy = terminal_process_policy(context);
         if call.name == "terminal_exec" {
             let args: TerminalExecArgs = parse_terminal_tool_args(call)?;

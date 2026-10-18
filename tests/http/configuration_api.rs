@@ -118,7 +118,11 @@ async fn composer_preferences_patch_preserves_latest_grants_and_unspecified_mode
         .insert("alternate".into(), config.models["mock"].clone());
     fixture.system.update_config(config).await.unwrap();
     let mut tightened = fixture.system.actor(&actor).unwrap().config;
-    tightened.permissions.writable_roots.clear();
+    let extra = fixture.system.device_workspace().join("extra-read-access");
+    std::fs::create_dir(&extra).unwrap();
+    let extra = extra.canonicalize().unwrap();
+    tightened.permissions.readable_roots.push(extra.clone());
+    tightened.permissions.readable_roots.sort();
     tightened.permissions.approval_mode = ApprovalMode::Ask;
     fixture
         .system
@@ -144,7 +148,11 @@ async fn composer_preferences_patch_preserves_latest_grants_and_unspecified_mode
     assert_eq!(response.status(), StatusCode::OK);
     let saved = fixture.system.actor(&actor).unwrap().config;
     assert_eq!(saved.model.as_deref(), Some("alternate"));
-    assert!(saved.permissions.writable_roots.is_empty());
+    assert_eq!(
+        saved.permissions.readable_roots,
+        tightened.permissions.readable_roots
+    );
+    assert!(saved.permissions.writable_roots.contains(&saved.workspace));
     assert_eq!(saved.permissions.approval_mode, ApprovalMode::None);
     let response = fixture
         .owner(reqwest::Method::PATCH, &format!("/v1/actors/{actor}"))

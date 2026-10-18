@@ -79,7 +79,7 @@ active work by changing assignments, never by deleting or recycling Actors.
 ## Reuse before creating
 
 Use the bounded Actor list and known request references. Match responsibility,
-device, workspace, Apps, read-only constraints and current work. A familiar name
+device, workspace, available device Apps and current work. A familiar name
 or an idle status alone does not establish suitability. Keep stage_id with Actor
 and request references; the same path on another device is not the same checkout.
 

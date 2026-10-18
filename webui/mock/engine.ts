@@ -147,7 +147,7 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
       if (imported) {
         if (!(await rest(run, 700))) return cancelRun(actor, user, reply, "");
         const id = newId(), config = actor.detail.config!;
-        const importedActor = createActor({id, name: "Athena", parent_id: ROOT_ACTOR_ID, apps: ["actors", "files", "browser"], model: config.model, approval_mode: config.permissions.approval_mode, read_only: config.permissions.read_only, readable_roots: config.permissions.readable_roots, writable_roots: config.permissions.writable_roots, message_targets: [], allow_children: true, workspace: config.workspace, instructions: imported.name});
+        const importedActor = createActor({id, name: "Athena", parent_id: ROOT_ACTOR_ID, apps: ["actors", "files", "browser"], model: config.model, approval_mode: config.permissions.approval_mode, readable_roots: config.permissions.readable_roots, writable_roots: config.permissions.writable_roots, workspace: config.workspace, instructions: imported.name});
         emitEvent(id, {type: "actor_changed", actor: importedActor.summary});
         const callId = newId(), resultId = newId(), outcome = {id, name: "Athena", conversation_url: `/actors/${id}`};
         addTool(actor, {id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__import_conversation", summary: "Imported conversation", error: null, model_content: "Actor prepared", arguments: {resource_id: imported.id, name: "Athena", instructions: imported.name}, outcome, payload: outcome});

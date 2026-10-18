@@ -33,9 +33,9 @@ describe("conversation semantic reducer", () => {
   test("tool events retain references and do not introduce detailed payloads or modify configuration", () => {
     let state = initialConversation("root");
     const actor: ActorDetail = { id: "root", conversation_url: "/actors/root", status: "idle", created_at_ms: 1, updated_at_ms: 1,
-      config: { name: "Original", workspace: "workspace", apps: ["files"], model: null, instructions: "keep", permissions: { approval_mode: "ask", read_only: true, readable_roots: ["workspace"], writable_roots: [], message_targets: [], allow_children: true, tools: null } } };
+      config: { name: "Original", workspace: "workspace", apps: ["files"], model: null, instructions: "keep", permissions: { approval_mode: "ask", readable_roots: ["workspace"], writable_roots: [] } } };
     state = conversationReducer(state, { type: "actor", actor });
-    state = conversationReducer(state, { type: "event", record: event(1, { type: "actor_changed", actor: { id: "root", name: "Updated name", conversation_url: "/actors/root", status: "running", apps: ["files"], read_only: true, created_at_ms: 1, updated_at_ms: 2 } }) });
+    state = conversationReducer(state, { type: "event", record: event(1, { type: "actor_changed", actor: { id: "root", name: "Updated name", conversation_url: "/actors/root", status: "running", apps: ["files"], created_at_ms: 1, updated_at_ms: 2 } }) });
     state = conversationReducer(state, { type: "event", record: event(2, { type: "tool_started", message_id: "m", call_id: "call", name: "files__read_file" }) });
     state = conversationReducer(state, { type: "event", record: event(3, { type: "tool_finished", message_id: "m", call_id: "call", name: "files__read_file", result_id: "result", summary: "Read file", error: null }) });
     expect(state.actor?.config).toBe(actor.config);

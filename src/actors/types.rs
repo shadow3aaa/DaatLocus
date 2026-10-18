@@ -45,6 +45,20 @@ pub struct ToolPermissionRequest {
     pub operation_details: Value,
 }
 
+impl ToolPermissionRequest {
+    pub fn canonicalized(mut self) -> miette::Result<Self> {
+        for roots in [&mut self.readable_roots, &mut self.writable_roots] {
+            *roots = roots
+                .iter()
+                .map(|path| super::permissions::canonical_path(path))
+                .collect::<miette::Result<_>>()?;
+            roots.sort();
+            roots.dedup();
+        }
+        Ok(self)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalRecord {
     pub seq: i64,
@@ -53,6 +67,10 @@ pub struct ApprovalRecord {
     pub message_id: String,
     pub call: crate::model_protocol::AgentToolCall,
     pub requested: ToolPermissionRequest,
+    #[serde(default)]
+    pub review: Option<super::AppReview>,
+    #[serde(default)]
+    pub scopes: Vec<super::ApprovalScope>,
     pub mode: ApprovalMode,
     pub decision: ApprovalDecision,
     pub reason: String,
@@ -61,39 +79,19 @@ pub struct ApprovalRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ActorPermissions {
     #[serde(default)]
     pub approval_mode: ApprovalMode,
-    pub read_only: bool,
     pub readable_roots: Vec<PathBuf>,
     pub writable_roots: Vec<PathBuf>,
-    /// Extra recipients beyond this Actor's parent and children.
-    pub message_targets: Vec<String>,
-    pub allow_children: bool,
-    /// Action grants over the device's installed Apps; never an installation list.
-    #[serde(default)]
-    pub app_access: Option<Vec<String>>,
-    /// Creation/delegation ceiling, independent of directly installed Apps.
-    /// None restricts delegation to the Actor's own installed Apps.
-    #[serde(default)]
-    pub delegation_apps: Option<Vec<String>>,
-    /// Null permits the tools of installed Apps, subject to read-only policy.
-    pub tools: Option<Vec<String>>,
 }
 
 impl ActorPermissions {
-    pub fn workspace(workspace: PathBuf, read_only: bool) -> Self {
+    pub fn workspace(workspace: PathBuf) -> Self {
         Self {
             approval_mode: ApprovalMode::Auto,
-            read_only,
             readable_roots: vec![workspace.clone()],
-            writable_roots: if read_only { vec![] } else { vec![workspace] },
-            message_targets: vec![],
-            allow_children: true,
-            app_access: None,
-            delegation_apps: None,
-            tools: None,
+            writable_roots: vec![workspace],
         }
     }
 }
@@ -118,6 +116,9 @@ pub enum ActorStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActorRecord {
+    /// Execution-only restriction from authenticated remote authority; never Actor configuration.
+    #[serde(skip)]
+    pub remote_read_only: bool,
     pub id: String,
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing)]
@@ -138,7 +139,6 @@ pub struct ActorSummary {
     pub name: String,
     pub status: ActorStatus,
     pub apps: Vec<String>,
-    pub read_only: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -152,7 +152,6 @@ impl ActorRecord {
             name: self.config.name.clone(),
             status: self.status,
             apps: self.config.apps.clone(),
-            read_only: self.config.permissions.read_only,
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
         }
@@ -224,10 +223,36 @@ pub struct Attachment {
     pub uri: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct DelegationGrant {
-    pub apps: Vec<String>,
+    #[serde(default)]
+    pub read_only: bool,
     pub permissions: ActorPermissions,
+}
+
+impl<'de> Deserialize<'de> for DelegationGrant {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Stored {
+            #[serde(default)]
+            read_only: Option<bool>,
+            permissions: Value,
+        }
+        let stored = Stored::deserialize(deserializer)?;
+        let read_only = stored.read_only.unwrap_or_else(|| {
+            stored
+                .permissions
+                .get("read_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
+        let permissions =
+            serde_json::from_value(stored.permissions).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            read_only,
+            permissions,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

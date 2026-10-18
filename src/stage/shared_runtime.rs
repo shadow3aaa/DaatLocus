@@ -1843,16 +1843,6 @@ impl Controller {
     ) -> Result<Response> {
         let runtime = self.runtime()?;
         let system = &runtime.host.system;
-        if app != "actors"
-            || !matches!(
-                call.name.as_str(),
-                "list" | "create" | "import_conversation" | "send" | "status" | "cancel"
-            )
-        {
-            return Err(StageError::Forbidden(
-                "Core can only coordinate hosted Actors",
-            ));
-        }
         self.synchronize_worker_head(peer, epoch).await?;
         let mut actor = system
             .core_device_actor()
@@ -1863,8 +1853,8 @@ impl Controller {
             )
             .map_err(|_| StageError::Invalid("Invalid App policy"))?,
         );
-        if current != revision || !actor.config.apps.iter().any(|installed| installed == app) {
-            return Err(StageError::Forbidden("Device App grants changed"));
+        if current != revision {
+            return Err(StageError::Forbidden("Device App installation changed"));
         }
         let input = system
             .store()
@@ -1899,9 +1889,8 @@ impl Controller {
             return self.effect_result(message, &call.id);
         }
         if identity_read_only {
-            actor.config.permissions.read_only = true;
+            actor.remote_read_only = true;
             actor.config.permissions.writable_roots.clear();
-            actor.config.apps.retain(|app| app != "terminal");
         }
         let cache_revision = super::digest(
             &serde_json::to_vec(
@@ -1939,8 +1928,18 @@ impl Controller {
             .map_err(|_| StageError::Forbidden("App scope cannot be determined"))?;
         let control = Arc::new(ActorControl::default());
         let deadline = Instant::now() + Duration::from_secs(1190);
+        let requirement = manager
+            .review_requirement(&call, &context)
+            .map_err(|_| StageError::Invalid("App review policy is unavailable"))?;
         let review = crate::actors::approval::authorize(
-            system, &actor, &input, &call, &control, &context, &requested,
+            system,
+            &actor,
+            &input,
+            &call,
+            &control,
+            &context,
+            &requested,
+            requirement.as_ref(),
         );
         tokio::pin!(review);
         let approved = loop {

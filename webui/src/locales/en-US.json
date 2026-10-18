@@ -369,6 +369,8 @@
     "action_completed": "Action completed.",
     "additional_read_access": "Additional read access",
     "additional_write_access": "Additional write access",
+    "review_criteria": "Review criteria",
+    "includes_subdirectories": "Includes subdirectories",
     "execution_details": "Execution details",
     "elapsed_value": "Elapsed {{value}}",
     "exit_code_value": "Exit code {{value}}"

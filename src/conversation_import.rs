@@ -346,8 +346,6 @@ mod tests {
         .unwrap();
         system.seed_test_actor("root");
         let mut parent = system.actor("root").unwrap();
-        parent.config.permissions.read_only = true;
-        parent.config.permissions.writable_roots.clear();
         parent.config.permissions.approval_mode = ApprovalMode::Ask;
         system.store().save_actor(&parent).unwrap();
         let transcript = parse_codex(&rollout(&[json!({"type":"event_msg","payload":{"type":"user_message","message":"Preserve this context; do not run commands."}})])).unwrap();
@@ -378,7 +376,13 @@ mod tests {
         let actor = system.actor(id).unwrap();
         assert_eq!(actor.status, ActorStatus::Idle);
         assert_eq!(actor.config.workspace, parent.config.workspace);
-        assert!(actor.config.permissions.read_only);
+        assert!(
+            actor
+                .config
+                .permissions
+                .writable_roots
+                .contains(&actor.config.workspace)
+        );
         assert_eq!(actor.config.permissions.approval_mode, ApprovalMode::Ask);
         assert!(!system.store().has_queued_input(id).unwrap());
         assert!(

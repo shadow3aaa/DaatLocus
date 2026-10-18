@@ -168,25 +168,22 @@ export type ActorSeed = {
   apps: string[];
   model: string | null;
   approval_mode: ApprovalMode;
-  read_only: boolean;
   readable_roots: string[];
   writable_roots: string[];
-  message_targets: string[];
-  allow_children: boolean;
   workspace: string;
   instructions: string;
 };
 
 export function createActor(seed: ActorSeed): ActorStore {
   const ts = now();
+  const apps = seed.id === ROOT_ACTOR_ID ? ["actors"] : ["actors","apps_manager","files","terminal","browser","artifacts"];
   const summary: ActorSummary = {
     id: seed.id,
     parent_id: seed.parent_id,
     conversation_url: `/actors/${seed.id}`,
     name: seed.name,
     status: "idle",
-    apps: [...seed.apps],
-    read_only: seed.read_only,
+    apps: [...apps],
     created_at_ms: ts,
     updated_at_ms: ts,
   };
@@ -199,17 +196,13 @@ export function createActor(seed: ActorSeed): ActorStore {
     config: {
       name: seed.name,
       workspace: seed.workspace,
-      apps: [...seed.apps],
+      apps: [...apps],
       model: seed.model,
       instructions: seed.instructions,
       permissions: {
         approval_mode: seed.approval_mode,
-        read_only: seed.read_only,
-        readable_roots: [...seed.readable_roots],
-        writable_roots: [...seed.writable_roots],
-        message_targets: [...seed.message_targets],
-        allow_children: seed.allow_children,
-        tools: null,
+            readable_roots: [...seed.readable_roots],
+        writable_roots: Array.from(new Set([seed.workspace,...seed.writable_roots])),
       },
     },
     status: "idle",

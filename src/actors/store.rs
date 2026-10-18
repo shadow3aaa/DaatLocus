@@ -335,10 +335,13 @@ impl ActorStore {
           CREATE TABLE IF NOT EXISTS resources(actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,id TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(actor_id,id));
           CREATE TABLE IF NOT EXISTS idempotency(actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,principal TEXT NOT NULL,key TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(actor_id,principal,key));
           CREATE TABLE IF NOT EXISTS approvals(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,record TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS actor_approval_scopes(actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,fingerprint TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(actor_id,fingerprint));
+          CREATE INDEX IF NOT EXISTS approval_scope_kind ON actor_approval_scopes(actor_id,json_extract(record,'$.kind'));
           CREATE INDEX IF NOT EXISTS approval_actor ON approvals(actor_id,seq);"))?;
         crate::persistence::set_private_file_permissions(path).into_diagnostic()?;
         let tx = sql(db.transaction())?;
         super::migrations::retire_guest_execution(&tx, now()).into_diagnostic()?;
+        super::migrations::remove_actor_capability_lists(&tx).into_diagnostic()?;
         crate::stage::blob::initialize(&tx).map_err(|error| miette::miette!("{error}"))?;
         crate::stage::journal::initialize(&tx).map_err(|error| miette::miette!("{error}"))?;
         crate::stage::sync::initialize(&tx).map_err(|error| miette::miette!("{error}"))?;
@@ -1310,6 +1313,9 @@ impl ActorStore {
             return Err(ActorError::Conflict("Approval request is no longer active".into()).into());
         }
         approval.decision = decision;
+        if decision == ApprovalDecision::Approved {
+            super::grants::remember(&tx, &approval.actor_id, &approval.scopes)?;
+        }
         approval.reason = reason.chars().take(1000).collect();
         if decision != ApprovalDecision::Pending {
             approval.resolved_at_ms = Some(now());

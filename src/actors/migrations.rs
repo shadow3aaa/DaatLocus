@@ -1,21 +1,21 @@
 //! Persistent format transitions preserve history without reviving retired capabilities.
 use rusqlite::{Transaction, params};
 
-/// Strip retired capabilities from persisted or replicated configuration only.
-/// Keep explicit empty grants: converting them to None would expand authority.
-pub(crate) fn retire_study_grants(
-    apps: &mut Vec<String>,
-    app_access: &mut Option<Vec<String>>,
-    delegation_apps: &mut Option<Vec<String>>,
-    tools: &mut Option<Vec<String>>,
-) {
-    apps.retain(|app| app != "study");
-    for grants in [app_access, delegation_apps].into_iter().flatten() {
-        grants.retain(|app| app != "study");
-    }
-    if let Some(tools) = tools {
-        tools.retain(|tool| !tool.starts_with("study__"));
-    }
+pub(super) fn remove_actor_capability_lists(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE actors SET record=json_remove(record,
+        '$.config.permissions.app_access','$.config.permissions.delegation_apps',
+        '$.config.permissions.tools','$.config.permissions.read_only',
+        '$.config.permissions.message_targets','$.config.permissions.allow_children')
+        WHERE json_type(record,'$.config.permissions.app_access') IS NOT NULL
+           OR json_type(record,'$.config.permissions.delegation_apps') IS NOT NULL
+           OR json_type(record,'$.config.permissions.tools') IS NOT NULL
+           OR json_type(record,'$.config.permissions.read_only') IS NOT NULL
+           OR json_type(record,'$.config.permissions.message_targets') IS NOT NULL
+           OR json_type(record,'$.config.permissions.allow_children') IS NOT NULL",
+        [],
+    )?;
+    Ok(())
 }
 
 pub(super) fn retire_guest_execution(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<()> {

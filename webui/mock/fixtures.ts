@@ -65,8 +65,8 @@ export function resetAccountWork(): void {
   store.attachments.clear(); store.idempotency.clear(); store.approvalWakers.clear();
   workReset.generation = {revision: (workReset.generation?.revision ?? 0) + 1, writer: STAGE_ID};
   createActor({id: ROOT_ACTOR_ID, name: "Daat Locus", parent_id: null, apps: ["actors"], model: null,
-    approval_mode: "auto", read_only: false, readable_roots: ["~"], writable_roots: ["~"],
-    message_targets: [], allow_children: true, workspace: "~", instructions: ""});
+    approval_mode: "auto", readable_roots: ["~"], writable_roots: ["~"],
+    workspace: "~", instructions: ""});
   broadcastResync();
 }
 
@@ -84,11 +84,8 @@ function seed(): void {
     apps: ["actors"],
     model: "mock-large",
     approval_mode: "ask",
-    read_only: false,
     readable_roots: ["~"],
     writable_roots: ["~"],
-    message_targets: [],
-    allow_children: true,
     workspace: "~",
     instructions: "You are the root Actor of the mock account.",
   });
@@ -99,13 +96,10 @@ function seed(): void {
     apps: ["files", "browser"],
     model: "mock-mini",
     approval_mode: "none",
-    read_only: true,
     readable_roots: ["~/research"],
     writable_roots: [],
-    message_targets: [ROOT_ACTOR_ID],
-    allow_children: false,
     workspace: "~/research",
-    instructions: "Read-only investigation Actor seeded by the mock server.",
+    instructions: "Investigation Actor seeded by the mock server.",
   });
 
   seedHistory(root, [

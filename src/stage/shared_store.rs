@@ -430,30 +430,11 @@ pub(crate) fn apply(
             Ok(change.key.clone())
         }
         Entity::Configuration => {
-            let mut configuration: super::core_wire::Configuration = serde_json::from_value(value)
+            let configuration: super::core_wire::Configuration = serde_json::from_value(value)
                 .map_err(|_| StageError::Invalid("Invalid shared configuration"))?;
             if change.key != "core"
                 || configuration.name.trim().is_empty()
                 || !configuration.context.valid()
-            {
-                return Err(StageError::Invalid("Invalid shared configuration"));
-            }
-            crate::actors::migrations::retire_study_grants(
-                &mut configuration.apps,
-                &mut configuration.app_access,
-                &mut configuration.delegation_apps,
-                &mut configuration.tools,
-            );
-            if configuration.app_access.as_ref().is_some_and(|apps| {
-                crate::builtin_apps::validate_app_grants(apps, configuration.read_only).is_err()
-            }) || crate::builtin_apps::validate_app_grants(
-                configuration
-                    .delegation_apps
-                    .as_ref()
-                    .unwrap_or(&configuration.apps),
-                configuration.read_only,
-            )
-            .is_err()
             {
                 return Err(StageError::Invalid("Invalid shared configuration"));
             }
@@ -611,7 +592,7 @@ fn require_message(tx: &Transaction<'_>, id: &str) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn older_checkpoints_drop_retired_study_grants_and_still_reject_unknown_apps() {
+    fn core_checkpoint_configuration_cannot_install_device_apps() {
         let source_dir = tempfile::tempdir().unwrap();
         let target_dir = tempfile::tempdir().unwrap();
         let source = store(source_dir.path());
@@ -619,32 +600,17 @@ mod tests {
         let leader = StageId::new();
         let follower = StageId::new();
         let mut actor = source.actor(ACTOR_ID).unwrap();
-        actor.config.apps = vec!["actors".into()];
-        actor.config.permissions.app_access = Some(vec!["study".into()]);
-        actor.config.permissions.delegation_apps = Some(vec!["files".into(), "study".into()]);
-        actor.config.permissions.tools =
-            Some(vec!["actors__create".into(), "study__create_node".into()]);
+        actor.config.apps = vec!["files".into(), "terminal".into()];
+        actor.config.instructions = "Keep shared identity".into();
         source.save_actor(&actor).unwrap();
         let batch = capture(&source, "account-a", leader, 1).unwrap().unwrap();
         copy(&source, &target, &batch);
         commit(&target, &batch, follower).unwrap();
-        commit(&source, &batch, leader).unwrap();
-        let imported = target.actor(ACTOR_ID).unwrap();
-        assert_eq!(imported.config.permissions.app_access, Some(vec![]));
+        assert_eq!(target.actor(ACTOR_ID).unwrap().config.apps, ["actors"]);
         assert_eq!(
-            imported.config.permissions.delegation_apps,
-            Some(vec!["files".into()])
+            target.actor(ACTOR_ID).unwrap().config.instructions,
+            "Keep shared identity"
         );
-        assert_eq!(
-            imported.config.permissions.tools,
-            Some(vec!["actors__create".into()])
-        );
-        actor.config.permissions.delegation_apps = Some(vec!["unknown-app".into()]);
-        source.save_actor(&actor).unwrap();
-        let invalid = capture(&source, "account-a", leader, 1).unwrap().unwrap();
-        copy(&source, &target, &invalid);
-        assert!(commit(&target, &invalid, follower).is_err());
-        assert_eq!(target.actor(ACTOR_ID).unwrap().config, imported.config);
     }
 
     #[test]
@@ -849,11 +815,8 @@ mod tests {
         b.tool_started(ACTOR_ID, &unknown.id, &call).unwrap();
         let mut pending = input();
         pending.delegation_grant = Some(crate::actors::DelegationGrant {
-            apps: vec!["actors".into()],
-            permissions: crate::actors::ActorPermissions::workspace(
-                b_dir.path().to_path_buf(),
-                true,
-            ),
+            read_only: true,
+            permissions: crate::actors::ActorPermissions::workspace(b_dir.path().to_path_buf()),
         });
         let pending = b.enqueue(pending, None).unwrap();
         let batch = capture(&b, "account-a", target, 2).unwrap().unwrap();
@@ -892,7 +855,7 @@ mod tests {
         let restored = b.message(&pending.id).unwrap();
         assert_eq!(restored.status, MessageStatus::Queued);
         assert!(
-            restored.delegation_grant.unwrap().permissions.read_only,
+            restored.delegation_grant.unwrap().read_only,
             "private input constraints must survive restoration"
         );
         assert_eq!(
@@ -971,6 +934,7 @@ mod tests {
         let store = ActorStore::open(&path.join("actors.sqlite")).unwrap();
         store
             .save_actor(&ActorRecord {
+                remote_read_only: false,
                 context: Default::default(),
                 id: ACTOR_ID.into(),
                 parent_id: None,
@@ -981,7 +945,7 @@ mod tests {
                     apps: vec!["files".into()],
                     model: None,
                     instructions: String::new(),
-                    permissions: ActorPermissions::workspace(path.to_path_buf(), false),
+                    permissions: ActorPermissions::workspace(path.to_path_buf()),
                 },
                 status: ActorStatus::Idle,
                 created_at_ms: 1,

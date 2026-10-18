@@ -19,7 +19,7 @@ function Guidance({ message, chat, primary, receiptMessageId }: {message:Message
   return <>{chat.messages.filter(item=>item.kind==="steering" && item.status==="completed" && item.in_reply_to===message.id).map(item=><div key={item.id} id={`message-${item.actor_id}-${item.id}`} className={primary?"dl-message dl-message-user dl-guidance-message":"dl-work-user-input dl-guidance-message"}><small className="dl-guidance-label">{t("conversation_turns.guidance_for_the_current_task")}</small><div className={primary?"dl-bubble dl-bubble-user":"dl-work-prompt"}>{item.content&&<p className="dl-user-text">{item.content}</p>}{item.attachments.length>0&&<AttachmentList items={item.attachments}/>}</div>{primary && receiptMessageId === item.id && <MessageReceipt message={item} />}</div>)}</>;
 }
 function Decisions({ message, chat, access }: Omit<Props, "onActor">) {
-  return <>{chat.approvals.filter(record => record.message_id === message.id && record.decision === "pending").map(record => <Approval key={record.id} record={record} canManage={access.kind === "owner"} onResolved={() => { void chat.refresh(); }} />)}</>;
+  return <>{chat.approvals.filter(record => record.message_id === message.id && record.mode === "ask" && record.decision === "pending").map(record => <Approval key={record.id} record={record} canManage={access.kind === "owner"} onResolved={() => { void chat.refresh(); }} />)}</>;
 }
 function OutcomeStatus({ message }: { message: MessageRecord }) {
   if (message.status === "failed") return <p role="status" className="dl-operation-error">{conversationFailureMessage(message.error)}</p>;
@@ -38,7 +38,7 @@ export function PrimaryTurn({ message, chat, access, onActor, typing, receiptMes
   const input = user || guidance;
   const outcomes = messageOutcomeTools(tools);
   const working = typing ?? message.status === "running";
-  const response = isUserDelivery(message) || references.length > 0 || outcomes.artifacts.length > 0 || outcomes.changes.length > 0 || chat.approvals.some(record => record.message_id === message.id && record.decision === "pending") || (user && ["failed", "cancelled", "interrupted"].includes(message.status)) || working;
+  const response = isUserDelivery(message) || references.length > 0 || outcomes.artifacts.length > 0 || outcomes.changes.length > 0 || chat.approvals.some(record => record.message_id === message.id && record.mode === "ask" && record.decision === "pending") || (user && ["failed", "cancelled", "interrupted"].includes(message.status)) || working;
   if (!input && !response) return null;
   return <article className="dl-message-turn dl-primary-turn" data-first-side={input ? "user" : "assistant"} data-last-side={response ? "assistant" : "user"} id={`message-${message.actor_id}-${message.id}`}>
     {input && <div className="dl-primary-inputs">

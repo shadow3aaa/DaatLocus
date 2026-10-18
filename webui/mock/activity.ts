@@ -45,9 +45,7 @@ function edit(file: string): Action {
 export function seedActivityPreview(actor: ActorStore, thinkingOnly = false) {
   actor.detail.config!.name = "Iris";
   actor.summary.name = "Iris";
-  actor.summary.read_only = thinkingOnly;
-  actor.detail.config!.permissions.read_only = thinkingOnly;
-  actor.detail.config!.permissions.writable_roots = thinkingOnly ? [] : ["~/research"];
+  actor.detail.config!.permissions.writable_roots = ["~/research"];
   const input = addMessage(actor, {kind:"request",source:{kind:"user"},reply_to:{kind:"user"},content:thinkingOnly?"先想一下如何验证消息区的布局。":"检查消息区的阅读体验，修正布局并验证桌面和手机。",status:"running"});
   touchMessage(input, {started_at_ms:now()-48000});
   emitEvent(actor.summary.id,{type:"message_added",message_id:input.id});

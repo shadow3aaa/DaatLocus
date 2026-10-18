@@ -101,22 +101,28 @@ impl<'a> Deliveries<'a> {
                 request_id: Uuid::parse_str(&request.id)
                     .map_err(|_| StageError::Invalid("Invalid originating request"))?,
                 ceiling: RemoteCeiling {
-                    apps: crate::actors::permissions::delegation_apps(&source.config).to_vec(),
-                    tools: source.config.permissions.tools.clone(),
-                    read_only: source.config.permissions.read_only,
+                    read_only: source.remote_read_only,
                     approval_mode: source.config.permissions.approval_mode,
                 },
             }
         } else {
             Origin::User
         };
+        let mut permissions = source.config.permissions.clone();
+        if request.is_none_or(|message| message.remote_authority.is_none()) {
+            let remembered = self
+                .store
+                .filesystem_approval_scopes(&source.id)
+                .map_err(|_| StageError::Invalid("Invalid remembered filesystem scope"))?;
+            crate::actors::grants::extend_permissions(&mut permissions, &remembered);
+        }
         let record = Sent {
             target: target.clone(),
             local_actor: source.id.clone(),
             request_id: request.map(|message| message.id.clone()),
             grant: DelegationGrant {
-                apps: crate::actors::permissions::direct_apps(&source.config).to_vec(),
-                permissions: source.config.permissions.clone(),
+                read_only: source.remote_read_only,
+                permissions,
             },
         };
         self.store.stage_transaction(|tx| {
@@ -214,7 +220,7 @@ impl<'a> Deliveries<'a> {
                 let data:String=tx.query_row("SELECT record FROM messages WHERE id=?1 AND actor_id=?2",params![request,source.local_actor],|r|r.get(0)).optional()?.ok_or(StageError::Forbidden("Originating request is unavailable"))?;
                 let original:MessageRecord=parse(data)?;
                 let mut grant=source.grant;
-                if matches!(frame.body,Body::Delivery{state:InvocationState::ResultUnknown,..}) {grant.apps.clear();grant.permissions.tools=Some(vec![]);grant.permissions.read_only=true;grant.permissions.writable_roots.clear();grant.permissions.allow_children=false;}
+                if matches!(frame.body,Body::Delivery{state:InvocationState::ResultUnknown,..}) {grant.read_only=true;grant.permissions.writable_roots.clear();}
                 let input=MessageRecord{seq:0,id:Uuid::new_v4().to_string(),actor_id:source.local_actor.clone(),source:MessageSource::RemoteActor{stage_id:peer,actor_id:actor.actor_id.clone(),invocation_id:*invocation},reply_to:original.reply_to,kind:if matches!(frame.body,Body::Delivery{state:InvocationState::Running,..}){MessageKind::Progress}else{MessageKind::Result},in_reply_to:Some(original.id),delegation_grant:Some(grant),remote_authority:Some(RemoteAuthority{peer,grant_actor:source.local_actor,reply_for:Some(*invocation)}),content:text,attachments:vec![],status:MessageStatus::Queued,cancel_requested:false,started_at_ms:None,finished_at_ms:None,final_generation:None,reply:None,error:None,created_at_ms:now,updated_at_ms:now};
                 Some(crate::actors::store::insert_message(tx,input).map_err(|_|StageError::Unavailable("Reply inbox could not be persisted"))?.id)
             }else{None};

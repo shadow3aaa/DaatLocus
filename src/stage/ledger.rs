@@ -730,19 +730,18 @@ impl<'a> StageLedger<'a> {
                 }
                 let actor=crate::actors::store::actor_tx(tx,&target.actor_id).map_err(|_|StageError::Forbidden("Actor is unavailable"))?;
                 let remote_ceiling = match origin {super::protocol::Origin::Actor{ceiling,..}=>Some(ceiling),super::protocol::Origin::User=>None};
-                let read_only=actor.config.permissions.read_only||permission.read_only||remote_ceiling.is_some_and(|ceiling|ceiling.read_only);
+                let read_only=permission.read_only||remote_ceiling.is_some_and(|ceiling|ceiling.read_only);
                 let workspace=actor.config.workspace.clone();
                 if !actor.config.permissions.readable_roots.iter().any(|root|workspace.starts_with(root)) {return Err(StageError::Forbidden("Actor workspace is unavailable"));}
-                let mut capabilities=actor.config.permissions.clone();capabilities.read_only=read_only;capabilities.readable_roots=vec![workspace.clone()];capabilities.writable_roots=if read_only||!actor.config.permissions.writable_roots.iter().any(|root|workspace.starts_with(root)) {vec![]}else{vec![workspace]};capabilities.allow_children=false;
-                let mut apps=actor.config.apps;
-                if let Some(ceiling)=remote_ceiling {
-                    apps.retain(|app|ceiling.apps.contains(app));
-                    if let Some(tools)=&ceiling.tools { capabilities.tools=Some(capabilities.tools.as_ref().map_or_else(||tools.clone(),|current|current.iter().filter(|tool|tools.contains(tool)).cloned().collect())); }
-                    if crate::actors::permissions::approval_strength(capabilities.approval_mode) < crate::actors::permissions::approval_strength(ceiling.approval_mode) { capabilities.approval_mode=ceiling.approval_mode; }
-                }
+                let mut capabilities=actor.config.permissions.clone();
+                let remembered=crate::actors::grants::filesystem_scopes(tx,&actor.id).map_err(|_|StageError::Invalid("Invalid remembered filesystem scope"))?;
+                crate::actors::grants::extend_permissions(&mut capabilities,&remembered);
+                if read_only {capabilities.writable_roots.clear();}
+                if let Some(ceiling)=remote_ceiling
+                    && crate::actors::permissions::approval_strength(capabilities.approval_mode) < crate::actors::permissions::approval_strength(ceiling.approval_mode) { capabilities.approval_mode=ceiling.approval_mode; }
                 let user=matches!(origin,super::protocol::Origin::User);
                 let source=match origin {super::protocol::Origin::User=>crate::actors::MessageSource::RemoteUser {stage_id:id,invocation_id:invocation},super::protocol::Origin::Actor {actor,..}=>crate::actors::MessageSource::RemoteActor {stage_id:id,actor_id:actor.actor_id.clone(),invocation_id:invocation}};
-                let input=crate::actors::MessageRecord {seq:0,id:Uuid::new_v4().to_string(),actor_id:target.actor_id.clone(),source,reply_to:crate::actors::ReplyTarget::Remote {stage_id:id,invocation_id:invocation,user},kind:crate::actors::MessageKind::Request,in_reply_to:None,delegation_grant:Some(crate::actors::DelegationGrant {apps,permissions:capabilities}),remote_authority:Some(crate::actors::RemoteAuthority {peer:id,grant_actor:target.actor_id.clone(),reply_for:None}),content,attachments:admitted_attachments,status:crate::actors::MessageStatus::Queued,cancel_requested:false,started_at_ms:None,finished_at_ms:None,final_generation:None,reply:None,error:None,created_at_ms:now,updated_at_ms:now};
+                let input=crate::actors::MessageRecord {seq:0,id:Uuid::new_v4().to_string(),actor_id:target.actor_id.clone(),source,reply_to:crate::actors::ReplyTarget::Remote {stage_id:id,invocation_id:invocation,user},kind:crate::actors::MessageKind::Request,in_reply_to:None,delegation_grant:Some(crate::actors::DelegationGrant {read_only,permissions:capabilities}),remote_authority:Some(crate::actors::RemoteAuthority {peer:id,grant_actor:target.actor_id.clone(),reply_for:None}),content,attachments:admitted_attachments,status:crate::actors::MessageStatus::Queued,cancel_requested:false,started_at_ms:None,finished_at_ms:None,final_generation:None,reply:None,error:None,created_at_ms:now,updated_at_ms:now};
                 Some(crate::actors::store::insert_message(tx,input).map_err(|_|StageError::Unavailable("Actor inbox could not be persisted"))?.id)
             }else{None};
             let receipt=Receipt {invocation,actor_id:target.actor_id.clone(),state:InvocationState::DurableReceived,result:None,duplicate:false,message_id};
@@ -1044,6 +1043,7 @@ mod tests {
             let store = ActorStore::open(&temp.path().join("actors.sqlite3")).unwrap();
             store
                 .save_actor(&ActorRecord {
+                    remote_read_only: false,
                     context: Default::default(),
                     id: "root".into(),
                     parent_id: None,
@@ -1054,7 +1054,7 @@ mod tests {
                         apps: vec!["files".into()],
                         model: None,
                         instructions: String::new(),
-                        permissions: ActorPermissions::workspace(temp.path().to_path_buf(), true),
+                        permissions: ActorPermissions::workspace(temp.path().to_path_buf()),
                     },
                     status: ActorStatus::Idle,
                     created_at_ms: 1000,
@@ -1149,7 +1149,6 @@ mod tests {
         let fixture = Fixture::new();
         let peer = fixture.remote.profile().stage_id;
         let mut actor = fixture.store.actor("root").unwrap();
-        actor.config.permissions.read_only = false;
         actor.config.permissions.writable_roots = vec![fixture.temp.path().to_path_buf()];
         actor.config.permissions.approval_mode = ApprovalMode::None;
         actor.config.apps = vec!["files".into(), "terminal".into(), "browser".into()];
@@ -1177,8 +1176,6 @@ mod tests {
                 },
                 request_id: Uuid::new_v4(),
                 ceiling: RemoteCeiling {
-                    apps: vec!["files".into()],
-                    tools: Some(vec!["files__read_file".into()]),
                     read_only: true,
                     approval_mode: ApprovalMode::Ask,
                 },
@@ -1190,14 +1187,10 @@ mod tests {
             .unwrap();
         let input = fixture.store.message(&receipt.message_id.unwrap()).unwrap();
         let ceiling = input.delegation_grant.as_ref().unwrap();
-        assert_eq!(ceiling.apps, vec!["files".to_string()]);
         assert_eq!(ceiling.permissions.approval_mode, ApprovalMode::Ask);
-        assert!(ceiling.permissions.read_only);
+        assert!(ceiling.read_only);
         assert!(ceiling.permissions.writable_roots.is_empty());
-        assert_eq!(
-            ceiling.permissions.tools,
-            Some(vec!["files__read_file".into()])
-        );
+
         assert!(input.remote_authority.is_some());
         assert!(
             serde_json::to_value(&input)
@@ -2091,14 +2084,7 @@ mod tests {
             crate::actors::MessageSource::RemoteUser { .. }
         ));
         assert!(message.remote_authority.is_some());
-        assert!(
-            message
-                .delegation_grant
-                .as_ref()
-                .unwrap()
-                .permissions
-                .read_only
-        );
+        assert!(message.delegation_grant.as_ref().unwrap().read_only);
         assert!(
             !serde_json::to_value(message)
                 .unwrap()

@@ -227,7 +227,7 @@ impl StageReceiver {
                             name: actor.name,
                             status: actor.status,
                             apps: actor.apps,
-                            read_only: actor.read_only || grant.read_only,
+                            read_only: grant.read_only,
                             converse: grant.converse,
                         });
                     }

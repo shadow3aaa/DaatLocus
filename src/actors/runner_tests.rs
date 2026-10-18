@@ -28,9 +28,6 @@ async fn app_installation_refreshes_tools_between_protocol_groups_without_replay
         MockReply::Answer("Ready"),
     ]));
     let (_dir, system) = runtime(provider.clone()).await;
-    let mut actor = system.actor("root").unwrap();
-    actor.config.permissions.app_access = Some(vec!["*".into()]);
-    system.store().save_actor(&actor).unwrap();
     let input = system
         .send_user("root", "Install the requested App".into(), vec![], None)
         .unwrap();
@@ -114,12 +111,8 @@ async fn apps_manager_queries_and_refresh_complete_in_ask_mode_without_approval(
 }
 
 #[tokio::test]
-async fn yield_skips_review_but_failed_or_ungranted_calls_do_not_silence_a_reply() {
-    for (arguments, granted, silent) in [
-        (json!({}), true, true),
-        (json!({"content":"invalid"}), true, false),
-        (json!({}), false, false),
-    ] {
+async fn yield_skips_review_but_malformed_calls_do_not_silence_a_reply() {
+    for (arguments, silent) in [(json!({}), true), (json!({"content":"invalid"}), false)] {
         let provider = Arc::new(ReplayProvider::new(vec![
             MockReply::Calls(vec![AgentToolCall {
                 id: "yield-input".into(),
@@ -130,12 +123,8 @@ async fn yield_skips_review_but_failed_or_ungranted_calls_do_not_silence_a_reply
         ]));
         let (_dir, system) = runtime(provider.clone()).await;
         let mut actor = system.actor("root").unwrap();
-        actor.config.permissions.read_only = true;
         actor.config.permissions.writable_roots.clear();
         actor.config.permissions.approval_mode = super::super::ApprovalMode::Ask;
-        if !granted {
-            actor.config.permissions.tools = Some(vec!["actors__read_history".into()]);
-        }
         system.store().save_actor(&actor).unwrap();
         let input = system
             .send_user("root", "Process this update".into(), vec![], None)
@@ -1320,7 +1309,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     model_a.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {
             id: "one-device-effect".into(), name: "actors__create".into(),
-            arguments: json!({"stage_id":host_b.local,"name":"Hosted project","workspace":null,"read_only":false,"instructions":null,"model":null}),
+            arguments: json!({"stage_id":host_b.local,"name":"Hosted project","workspace":null,"instructions":null,"model":null}),
         }]),
         MockReply::Calls(vec![AgentToolCall {
             id: "remote-image".into(), name: "actors__read_resource".into(),
@@ -1743,6 +1732,131 @@ async fn runtime(provider: Arc<ReplayProvider>) -> (tempfile::TempDir, ActorSyst
     (directory, system)
 }
 
+#[tokio::test]
+async fn remote_delegation_retains_readonly_authority_and_original_review_mode() {
+    use crate::stage::{
+        identity::DeviceIdentity,
+        ledger::{ActorGrant, StageLedger},
+    };
+    let (_directory, system, _) = paused_runtime().await;
+    let child = system
+        .create_owned("root", project_config(&system, "delegated worker"))
+        .unwrap();
+    let mut host = DeviceIdentity::generate().unwrap();
+    let remote = DeviceIdentity::generate().unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let root = host.initialize_group(now, now + 600000).unwrap();
+    let enrollment = host
+        .authorize(
+            &root,
+            &remote.join_request(now).unwrap(),
+            now,
+            now + 300000,
+            false,
+        )
+        .unwrap();
+    let ledger =
+        StageLedger::initialize(system.store(), host.profile().stage_id, &root.root).unwrap();
+    ledger
+        .import_peer(
+            enrollment,
+            vec![ActorGrant {
+                actor_id: "root".into(),
+                read: true,
+                converse: true,
+                delegate: true,
+                read_only: true,
+            }],
+            now,
+        )
+        .unwrap();
+    let mut input = MessageRecord {
+        seq: 0,
+        id: uuid::Uuid::new_v4().to_string(),
+        actor_id: "root".into(),
+        source: super::super::MessageSource::RemoteUser {
+            stage_id: remote.profile().stage_id,
+            invocation_id: uuid::Uuid::new_v4(),
+        },
+        reply_to: super::super::ReplyTarget::User,
+        kind: super::super::MessageKind::Request,
+        in_reply_to: None,
+        delegation_grant: None,
+        remote_authority: None,
+        content: "Delegate a read-only investigation".into(),
+        attachments: vec![],
+        status: MessageStatus::Queued,
+        cancel_requested: false,
+        started_at_ms: None,
+        finished_at_ms: None,
+        final_generation: None,
+        reply: None,
+        error: None,
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    let mut permissions = system.actor("root").unwrap().config.permissions;
+    permissions.approval_mode = super::super::ApprovalMode::Ask;
+    permissions.writable_roots.clear();
+    input.delegation_grant = Some(super::super::DelegationGrant {
+        read_only: true,
+        permissions,
+    });
+    input.remote_authority = Some(super::super::RemoteAuthority {
+        peer: remote.profile().stage_id,
+        grant_actor: "root".into(),
+        reply_for: None,
+    });
+    let input = system.store().enqueue(input, None).unwrap();
+    system.store().claim_next("root").unwrap().unwrap();
+    let delegated = system
+        .send_from_actor("root", &input.id, &child.id, "Inspect the project".into())
+        .unwrap();
+    let execution = system.execution_actor(&delegated).unwrap();
+    assert!(execution.remote_read_only);
+    assert!(execution.config.permissions.writable_roots.is_empty());
+    assert_eq!(
+        execution.config.permissions.approval_mode,
+        super::super::ApprovalMode::Ask
+    );
+    system.store().claim_next(&child.id).unwrap().unwrap();
+    let context = system.execution_context(&execution, &delegated).unwrap();
+    assert!(
+        system
+            .requested_tool_context(
+                &context,
+                &super::super::ToolPermissionRequest {
+                    writable_roots: vec![child.config.workspace.clone()],
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
+    // Revoking the original device grant also invalidates already queued descendants.
+    ledger
+        .import_peer(
+            host.authorize(
+                &root,
+                &remote.join_request(now).unwrap(),
+                now,
+                now + 300000,
+                false,
+            )
+            .unwrap(),
+            vec![ActorGrant {
+                actor_id: "root".into(),
+                read: true,
+                converse: true,
+                delegate: false,
+                read_only: true,
+            }],
+            now,
+        )
+        .unwrap();
+    assert!(system.execution_actor(&delegated).is_err());
+    system.shutdown().await;
+}
+
 async fn wait_completed(system: &ActorSystem, id: &str) -> MessageRecord {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
@@ -1924,15 +2038,6 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
     ]));
     let (_caller_dir, a) = runtime(caller_model.clone()).await;
     let a_id = a.store().public_stage_id().unwrap();
-    let mut caller = a.actor("root").unwrap();
-    caller.config.permissions.message_targets.push(
-        crate::stage::ActorAddress {
-            stage_id: b_id,
-            actor_id: "root".into(),
-        }
-        .conversation_url(),
-    );
-    a.store().save_actor(&caller).unwrap();
     let now = chrono::Utc::now().timestamp_millis();
     let mut identity_a = DeviceIdentity::generate_for_stage(a_id).unwrap();
     let identity_b = DeviceIdentity::generate_for_stage(b_id).unwrap();
@@ -2168,7 +2273,35 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
         }]),
         MockReply::Answer("The write was denied."),
     ]));
-    let (_directory, system) = runtime(provider).await;
+    let (directory, system) = runtime(provider.clone()).await;
+    let approved = directory.path().join("approved");
+    std::fs::create_dir(&approved).unwrap();
+    let approved_file = approved.join("reference.txt");
+    std::fs::write(&approved_file, "remembered remote reference").unwrap();
+    system
+        .store()
+        .stage_transaction(|tx| {
+            super::super::grants::remember(
+                tx,
+                "root",
+                &[super::super::ApprovalScope::filesystem(&approved, true).unwrap()],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let child = system
+        .create_owned("root", project_config(&system, "separate worker"))
+        .unwrap();
+    if let Some(MockReply::Calls(calls)) = provider.replies.lock().front_mut() {
+        calls.push(AgentToolCall {
+            id: "remote-read-memory".into(),
+            name: "files__read_file".into(),
+            arguments: json!({"path":approved_file,"start_line":null,"line_count":null}),
+        });
+        calls.push(AgentToolCall { id:"remote-write-memory".into(), name:"files__write_file".into(), arguments:json!({"path":approved.join("forbidden.txt"),"content":"denied","expected_sha256":null}) });
+        calls.push(AgentToolCall { id:"remote-delegation".into(), name:"actors__send".into(), arguments:json!({"actor_id":child.id,"stage_id":null,"content":"Attempt delegated work"}) });
+    }
     let mut host = DeviceIdentity::generate().unwrap();
     let remote = DeviceIdentity::generate().unwrap();
     let now = chrono::Utc::now().timestamp_millis();
@@ -2282,6 +2415,19 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
     };
     assert_eq!(bytes, b"The write was denied.");
     assert_eq!(message.status, MessageStatus::Completed);
+    assert!(!approved.join("forbidden.txt").exists());
+    {
+        let requests = provider.requests.lock();
+        let follow_up = &requests[1].messages;
+        assert!(follow_up.iter().any(|row| matches!(row, AgentMessage::Tool { tool_call_id, content, .. }
+            if tool_call_id == "remote-read-memory" && content.contains("remembered remote reference"))));
+        for denied in ["remote-write", "remote-write-memory", "remote-delegation"] {
+            assert!(follow_up.iter().any(
+                |row| matches!(row, AgentMessage::Tool { tool_call_id, content, .. }
+                if tool_call_id == denied && content.contains("App error"))
+            ));
+        }
+    }
     assert!(matches!(
         message.source,
         super::super::MessageSource::RemoteUser { .. }
@@ -2296,6 +2442,14 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
             .exists()
     );
     assert!(message.remote_authority.is_some());
+    assert!(
+        system
+            .store()
+            .messages(&child.id, None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
     let result = ledger
         .result(
             remote.profile().stage_id,
@@ -2600,9 +2754,9 @@ async fn paused_runtime() -> (tempfile::TempDir, ActorSystem, Arc<ReplayProvider
     (directory, system, provider)
 }
 
-fn project_config(system: &ActorSystem, name: &str, read_only: bool) -> ActorConfig {
+fn project_config(system: &ActorSystem, name: &str) -> ActorConfig {
     let workspace = system.actor("root").unwrap().config.workspace.join(name);
-    let mut permissions = super::super::ActorPermissions::workspace(workspace.clone(), read_only);
+    let mut permissions = super::super::ActorPermissions::workspace(workspace.clone());
     permissions.approval_mode = super::super::ApprovalMode::None;
     ActorConfig {
         name: name.into(),
@@ -2619,7 +2773,7 @@ async fn delegated_and_direct_inputs_keep_their_original_reply_targets() {
     use super::super::{MessageKind, ReplyTarget};
     let (_directory, system, _) = paused_runtime().await;
     let child = system
-        .create_owned("root", project_config(&system, "project", false))
+        .create_owned("root", project_config(&system, "project"))
         .unwrap();
     let final_constraint =
         "Full original constraint: retain local data and never publish the report";
@@ -2740,7 +2894,7 @@ async fn delegated_and_direct_inputs_keep_their_original_reply_targets() {
 async fn actor_identity_history_and_queued_work_survive_crash_recovery() {
     use super::super::{ApprovalDecision, ApprovalMode, ApprovalRecord, ToolPermissionRequest};
     let (directory, system, provider) = paused_runtime().await;
-    let mut config = project_config(&system, "persistent", false);
+    let mut config = project_config(&system, "persistent");
     config.permissions.approval_mode = ApprovalMode::Ask;
     let child = system.create_owned("root", config).unwrap();
     let completed = system
@@ -2802,6 +2956,8 @@ async fn actor_identity_history_and_queued_work_survive_crash_recovery() {
             message_id: active.id.clone(),
             call: pending_call,
             requested: ToolPermissionRequest::default(),
+            review: None,
+            scopes: vec![],
             mode: ApprovalMode::Ask,
             decision: ApprovalDecision::Pending,
             reason: "Pending owner approval".into(),
@@ -2859,124 +3015,120 @@ async fn actor_identity_history_and_queued_work_survive_crash_recovery() {
 }
 
 #[tokio::test]
-async fn read_only_actor_cannot_delegate_new_write_requests_to_stronger_actors() {
+async fn hosted_actors_delegate_to_account_peers_without_capability_or_recipient_lists() {
     let (_directory, system, _) = paused_runtime().await;
-    let writable = system
-        .create_owned("root", project_config(&system, "writable", false))
+    let sender = system
+        .create_owned("root", project_config(&system, "sender"))
         .unwrap();
-    let mut research_config = project_config(&system, "research", true);
-    research_config.apps.push("actors".into());
-    let reader_workspace = research_config.workspace.join("reader");
-    let mut reader_config = research_config.clone();
-    reader_config.name = "Reader before upgrade".into();
-    reader_config.apps = vec!["files".into()];
-    reader_config.workspace = reader_workspace.clone();
-    reader_config.permissions = super::super::ActorPermissions::workspace(reader_workspace, true);
-    reader_config.permissions.approval_mode = super::super::ApprovalMode::None;
-    let reader = system.create_owned("root", reader_config).unwrap();
-    research_config
-        .permissions
-        .message_targets
-        .push(writable.id.clone());
-    research_config
-        .permissions
-        .message_targets
-        .push(reader.id.clone());
-    let research = system.create_owned("root", research_config).unwrap();
+    let receiver = system
+        .create_owned("root", project_config(&system, "receiver"))
+        .unwrap();
     let input = system
-        .send_user(&research.id, "Investigate the project".into(), vec![], None)
+        .send_user(&sender.id, "Coordinate work".into(), vec![], None)
         .unwrap();
-    system.store().claim_next(&research.id).unwrap().unwrap();
-    assert!(
-        system
-            .send_from_actor(&research.id, &input.id, "root", "Write on my behalf".into())
-            .is_err()
-    );
-    assert!(
-        system
-            .send_from_actor(
-                &research.id,
-                &input.id,
-                &writable.id,
-                "Write on my behalf".into()
-            )
-            .is_err()
-    );
-    assert!(
-        system
-            .store()
-            .messages("root", None, 100)
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    assert!(
-        system
-            .store()
-            .messages(&writable.id, None, 100)
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    let context = system
-        .execution_context(&research, &system.store().message(&input.id).unwrap())
-        .unwrap();
-    assert!(
-        system
-            .requested_tool_context(
-                &context,
-                &super::super::ToolPermissionRequest {
-                    operation_details: serde_json::Value::Null,
-                    readable_roots: vec![],
-                    writable_roots: vec![writable.config.workspace.clone()]
-                }
-            )
-            .is_err()
-    );
+    system.store().claim_next(&sender.id).unwrap().unwrap();
     let delegated = system
         .send_from_actor(
-            &research.id,
+            &sender.id,
             &input.id,
-            &reader.id,
-            "Read the requested files".into(),
+            &receiver.id,
+            "Work on your project".into(),
         )
         .unwrap();
-    assert!(delegated.delegation_grant.is_some());
+    assert_eq!(delegated.actor_id, receiver.id);
     assert!(
-        serde_json::to_value(&delegated)
-            .unwrap()
-            .get("delegation_grant")
-            .is_none(),
-        "internal capabilities must never be exposed in the message API"
-    );
-    let snapshot = system
-        .store()
-        .message(&delegated.id)
-        .unwrap()
-        .delegation_grant;
-    let mut upgraded = reader.config.clone();
-    upgraded.permissions.read_only = false;
-    upgraded
-        .permissions
-        .writable_roots
-        .push(upgraded.workspace.clone());
-    system.update_owned(&reader.id, upgraded).await.unwrap();
-    let active_receiver = system.store().claim_next(&reader.id).unwrap().unwrap();
-    assert_eq!(active_receiver.id, delegated.id);
-    assert!(
-        active_receiver.delegation_grant.is_some(),
-        "claim/save must preserve the immutable delegation ceiling"
+        matches!(delegated.reply_to, super::super::ReplyTarget::Actor { actor_id, request_id } if actor_id == sender.id && request_id == input.id)
     );
     assert_eq!(
-        serde_json::to_value(&snapshot).unwrap(),
-        serde_json::to_value(&active_receiver.delegation_grant).unwrap()
+        system.store().claim_next(&receiver.id).unwrap().unwrap().id,
+        delegated.id
     );
+    let context = system
+        .execution_context(&receiver, &system.store().message(&delegated.id).unwrap())
+        .unwrap();
+    assert!(
+        context
+            .sandbox_policy
+            .is_path_writable(&receiver.config.workspace.join("nested/result.txt"))
+    );
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn removing_recipient_lists_preserves_account_ownership_including_foreign_subtrees() {
+    let (_directory, system, _) = paused_runtime().await;
+    system.store().stage_transaction(|tx| {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
+        tx.execute("INSERT INTO stage_account_actors VALUES('root','local-account')", [])?;
+        Ok(())
+    }).unwrap();
+    let sender = system
+        .create_owned("root", project_config(&system, "sender"))
+        .unwrap();
+    let peer = system
+        .create_owned("root", project_config(&system, "peer"))
+        .unwrap();
+    let foreign = system
+        .create_owned("root", project_config(&system, "foreign"))
+        .unwrap();
+    let child = system
+        .create_owned(&foreign.id, project_config(&system, "foreign child"))
+        .unwrap();
+    system
+        .store()
+        .stage_transaction(|tx| {
+            tx.execute(
+                "UPDATE stage_account_actors SET account='other-account' WHERE actor=?1",
+                [&foreign.id],
+            )?;
+            tx.execute(
+                "DELETE FROM stage_account_actors WHERE actor=?1",
+                [&child.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let visible = system.list_for_actor(&sender.id).unwrap();
+    assert!(visible.iter().any(|actor| actor.id == peer.id));
+    assert!(
+        !visible
+            .iter()
+            .any(|actor| actor.id == foreign.id || actor.id == child.id)
+    );
+    let input = system
+        .send_user(
+            &sender.id,
+            "Coordinate this account's work".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    system.store().claim_next(&sender.id).unwrap().unwrap();
     assert!(
         system
-            .execution_context(&system.actor(&reader.id).unwrap(), &active_receiver)
-            .is_err(),
-        "a queued read-only request must not acquire the recipient's newly granted writes"
+            .send_from_actor(&sender.id, &input.id, &peer.id, "Requested work".into())
+            .is_ok()
     );
+    for target in [&foreign.id, &child.id] {
+        assert!(
+            system
+                .send_from_actor(
+                    &sender.id,
+                    &input.id,
+                    target,
+                    "Forbidden cross-account work".into()
+                )
+                .is_err()
+        );
+        assert!(
+            system
+                .store()
+                .messages(target, None, 10)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+    }
     system.shutdown().await;
 }
 
@@ -3006,7 +3158,7 @@ async fn broad_operation_scope_cannot_read_future_actors_delivery_data() {
         },
     );
     let future = system
-        .create_owned("root", project_config(&system, "future", false))
+        .create_owned("root", project_config(&system, "future"))
         .unwrap();
     let secret = system.actor_data_dir(&future.id).join("private.txt");
     std::fs::write(&secret, "future Actor data").unwrap();
@@ -3028,7 +3180,7 @@ async fn broad_operation_scope_cannot_read_future_actors_delivery_data() {
 async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
     use super::super::StoredResource;
     let (_directory, system, _) = paused_runtime().await;
-    let mut parent_config = project_config(&system, "parent", false);
+    let mut parent_config = project_config(&system, "parent");
     parent_config.apps.push("actors".into());
     let parent = system.create_owned("root", parent_config).unwrap();
     let original = system
@@ -3043,10 +3195,8 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
     let mut config = parent.config.clone();
     config.name = "report worker".into();
     config.workspace = parent.config.workspace.join("report-worker");
-    config.permissions = super::super::ActorPermissions::workspace(config.workspace.clone(), false);
+    config.permissions = super::super::ActorPermissions::workspace(config.workspace.clone());
     config.permissions.approval_mode = super::super::ApprovalMode::None;
-    config.permissions.app_access = parent.config.permissions.app_access.clone();
-    config.permissions.delegation_apps = parent.config.permissions.delegation_apps.clone();
     let deep = system
         .create_from_actor(&parent.id, config, &parent_context)
         .unwrap();
@@ -3582,12 +3732,12 @@ async fn token_calibration_survives_restart_and_is_bound_to_the_model() {
 }
 
 #[tokio::test]
-async fn history_app_is_own_actor_scoped_paged_and_has_no_provider_reasoning() {
+async fn actor_archive_is_own_actor_scoped_paged_and_has_no_provider_reasoning() {
     use crate::{actor_app::ActorApp, app::App};
     let provider = Arc::new(ReplayProvider::new(vec![MockReply::Pending]));
     let (_dir, system) = runtime(provider.clone()).await;
     let child = system
-        .create_owned("root", project_config(&system, "other actor", false))
+        .create_owned("root", project_config(&system, "other actor"))
         .unwrap();
     system
         .store()
@@ -3611,7 +3761,7 @@ async fn history_app_is_own_actor_scoped_paged_and_has_no_provider_reasoning() {
     provider.started.notified().await;
     let actor = system.actor("root").unwrap();
     let context = system.execution_context(&actor, &message).unwrap();
-    let mut app = ActorApp::history_only("root".into(), system.clone());
+    let mut app = ActorApp::new("root".into(), system.clone());
     let mut query = AgentToolCall {
         id: "history-query".into(),
         name: "read_history".into(),
@@ -3626,8 +3776,6 @@ async fn history_app_is_own_actor_scoped_paged_and_has_no_provider_reasoning() {
     query.arguments["cursor"] = first.payload["next_cursor"].clone();
     let second = app.execute_tool(&query, &context).await.unwrap();
     assert!(second.payload["entries"][0]["offset"].as_u64().unwrap() > 0);
-    query.name = "create".into();
-    assert!(app.before_tool_call(&query, &context).is_err());
     system.shutdown().await;
 }
 
@@ -3846,7 +3994,7 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
     root.config.permissions.approval_mode = super::super::ApprovalMode::None;
     system.store().save_actor(&root).unwrap();
     let network = start_core_fixture(&system).await;
-    let mut child_config = project_config(&system, "Hosted worker", false);
+    let mut child_config = project_config(&system, "Hosted worker");
     child_config.model = Some("worker".into());
     let child = system.create_owned("root", child_config).unwrap();
     let stage = system.store().public_stage_id().unwrap();
@@ -3936,10 +4084,7 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
         Some("The worker is investigating.")
     );
     assert_eq!(system.actor("core").unwrap().config.apps, vec!["actors"]);
-    assert!(crate::actors::permissions::app_granted(
-        crate::actors::permissions::delegation_apps(&system.core_device_actor().unwrap().config),
-        "files",
-    ));
+
     network.stop().await;
     system.shutdown().await;
 }
@@ -3947,7 +4092,7 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
 #[tokio::test]
 async fn coordinator_yields_between_required_results_and_routes_only_progress_then_final() {
     let (_directory, system, provider) = paused_runtime().await;
-    let mut config = project_config(&system, "Argus", true);
+    let mut config = project_config(&system, "Argus");
     config.apps.push("actors".into());
     let coordinator = system.create_owned("root", config).unwrap();
     let mut config = coordinator.config.clone();

@@ -369,6 +369,8 @@
     "action_completed": "操作已完成。",
     "additional_read_access": "本次额外读取",
     "additional_write_access": "本次额外写入",
+    "review_criteria": "审查标准",
+    "includes_subdirectories": "包含子目录",
     "execution_details": "执行细节",
     "elapsed_value": "用时 {{value}}",
     "exit_code_value": "退出代码 {{value}}"

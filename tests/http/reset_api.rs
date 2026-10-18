@@ -80,7 +80,6 @@ async fn account_reset_removes_actors_approvals_and_resources_but_preserves_iden
     assert_eq!(fixture.system.store().actors().unwrap().len(), 1);
     let root = fixture.system.actor("core").unwrap();
     assert_eq!(root.config.permissions.approval_mode, ApprovalMode::Auto);
-    assert!(root.config.permissions.message_targets.is_empty());
     assert_eq!(
         fixture.system.actor("core").unwrap().config.apps,
         ["actors"]

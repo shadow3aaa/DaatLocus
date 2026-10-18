@@ -70,8 +70,7 @@ export function activateScenario(id: string): boolean {
   const core=store.actors.get(ROOT_ACTOR_ID)!;
   const work=store.actors.get("research")!;
   if(id==="approval"||id==="long-content") {
-    work.summary.read_only=false;
-    Object.assign(work.detail.config!.permissions,{read_only:false,writable_roots:["webui/src"]});
+    Object.assign(work.detail.config!.permissions,{writable_roots:["webui/src"]});
   }
   const clear=(actor:ActorStore)=>{actor.messages=[];actor.events=[];actor.tools=[];actor.approvals=[];actor.messageSeq=0;actor.eventSeq=0;actor.toolSeq=0;};
   if (id.startsWith("activity-") || id === "thinking-only") {

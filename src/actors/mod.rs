@@ -1,7 +1,9 @@
 mod context;
+pub mod grants;
 pub(crate) mod migrations;
 mod types;
 pub use context::{AgentContext, HistoryAnchor};
+pub use grants::{AppReview, ApprovalFingerprint, ApprovalScope};
 pub use types::*;
 pub mod approval;
 pub mod permissions;

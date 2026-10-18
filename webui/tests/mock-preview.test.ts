@@ -57,7 +57,6 @@ describe("standalone WebUI preview",()=>{
   test("seeded approvals reach a completed outcome for either decision",async()=>{
     for(const decision of ["approve","deny"]){
       activateScenario("approval");const actor=store.actors.get("research")!;
-      expect(actor.detail.config!.permissions.read_only).toBe(false);
       const approval=actor.approvals[0];
       const response=await request(`/v1/approvals/${approval.id}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({decision})});
       expect(response.status).toBe(200);

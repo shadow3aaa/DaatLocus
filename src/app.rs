@@ -145,6 +145,7 @@ impl AppToolExecutionResult {
 
 #[derive(Clone)]
 pub struct ActorCallContext {
+    pub remote_read_only: bool,
     pub actor_id: String,
     pub message_id: String,
     /// Native processes must never inherit access to service storage trees.
@@ -171,8 +172,12 @@ impl AppToolExecutionContext {
 
 #[async_trait]
 pub trait App: Send + Sync {
-    fn review_exempt(&self, _call: &AgentToolCall) -> bool {
-        false
+    fn review_requirement(
+        &self,
+        _call: &AgentToolCall,
+        _context: &AppToolExecutionContext,
+    ) -> Result<Option<crate::actors::AppReview>> {
+        Ok(None)
     }
     fn managed_revision(&self) -> Option<u64> {
         None
@@ -189,8 +194,7 @@ pub trait App: Send + Sync {
     fn can_passivate(&self) -> bool {
         false
     }
-    /// The App owns authorization for this call: origin-bound conversation
-    /// delivery or operation review on the target device.
+    /// Forwarded operations are reviewed by the App on their target device.
     fn delegates_approval(&self, _call: &AgentToolCall) -> bool {
         false
     }
@@ -250,12 +254,16 @@ impl AppManager {
             })
             .collect()
     }
-    pub fn review_exempt(&self, call: &AgentToolCall) -> Result<bool> {
+    pub fn review_requirement(
+        &self,
+        call: &AgentToolCall,
+        context: &AppToolExecutionContext,
+    ) -> Result<Option<crate::actors::AppReview>> {
         let (id, call) = self.dispatch(call)?;
-        Ok(self
-            .apps
+        self.apps
             .get(&id)
-            .is_some_and(|app| app.review_exempt(&call)))
+            .ok_or_else(|| miette!("App is missing"))?
+            .review_requirement(&call, context)
     }
     pub async fn prepare_managed(
         &mut self,
@@ -446,7 +454,8 @@ impl AppManager {
         self.apps
             .get(&id)
             .ok_or_else(|| miette!("App is missing"))?
-            .permission_request(&app_call, context)
+            .permission_request(&app_call, context)?
+            .canonicalized()
     }
 
     fn validated_dispatch(
