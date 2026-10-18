@@ -1516,7 +1516,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
             .count(),
         1
     );
-    tokio::time::timeout(Duration::from_secs(12), async {
+    let replicated = tokio::time::timeout(Duration::from_secs(12), async {
         loop {
             if c.store()
                 .message(&input.id)
@@ -1527,8 +1527,18 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
-    .await
-    .unwrap();
+    .await;
+    assert!(
+        replicated.is_ok(),
+        "completed input did not replicate: B {}, C {}, head B {:?}, head C {:?}, input C {:?}, BC {:?}, CB {:?}",
+        net_b.core.read().as_ref().unwrap().status(),
+        net_c.core.read().as_ref().unwrap().status(),
+        shared_store::head(b.store()).unwrap(),
+        shared_store::head(c.store()).unwrap(),
+        c.store().message(&input.id),
+        net_b.last_error(host_c.local),
+        net_c.last_error(host_b.local),
+    );
     let received = c
         .store()
         .resource(shared::ACTOR_ID, &attachment.id)
@@ -1546,13 +1556,25 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
             None,
         )
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(12), async {
+    let started = tokio::time::timeout(Duration::from_secs(12), async {
         while model_b.requests.lock().len() < 2 {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
-    .await
-    .unwrap();
+    .await;
+    assert!(
+        started.is_ok(),
+        "next input did not start on B: B {}, C {}, head B {:?}, head C {:?}, input B {:?}, input C {:?}, requests C {}, BC {:?}, CB {:?}",
+        net_b.core.read().as_ref().unwrap().status(),
+        net_c.core.read().as_ref().unwrap().status(),
+        shared_store::head(b.store()).unwrap(),
+        shared_store::head(c.store()).unwrap(),
+        b.store().message(&next.id),
+        c.store().message(&next.id),
+        model_c.requests.lock().len(),
+        net_b.last_error(host_c.local),
+        net_c.last_error(host_b.local),
+    );
     net_b.stop().await;
     tokio::time::timeout(Duration::from_secs(20), async {
         while c.store().message(&next.id).unwrap().status != MessageStatus::Completed {

@@ -378,6 +378,12 @@ pub fn commit(store: &ActorStore, batch: &Batch, local: StageId) -> Result<()> {
         if current!=batch.previous{return Err(StageError::Conflict("Shared Actor requires replay"));}
         tx.execute("UPDATE core_meta SET value='1' WHERE key='importing'",[])?;
         for change in &batch.changes {
+            if batch.leader != local {
+                // Capture reserves ordinals before publication. A fenced worker's
+                // abandoned proposal cannot displace incoming canonical order;
+                // core_rows distinguishes committed order from those reservations.
+                tx.execute("DELETE FROM core_order WHERE entity=?1 AND ordinal=?2 AND remote_key<>?3 AND NOT EXISTS(SELECT 1 FROM core_rows r WHERE r.entity=core_order.entity AND r.remote_key=core_order.remote_key)",params![change.entity.name(),change.ordinal as i64,change.key])?;
+            }
             tx.execute("INSERT INTO core_order VALUES(?1,?2,?3) ON CONFLICT(entity,remote_key) DO UPDATE SET ordinal=excluded.ordinal",params![change.entity.name(),change.key,change.ordinal as i64])?;
             let bytes:Vec<u8>=tx.query_row("SELECT bytes FROM stage_blobs WHERE hash=?1 AND size=?2",params![change.content.hash,change.content.size as i64],|r|r.get(0))?;
             if super::digest(&bytes)!=change.content.hash{return Err(StageError::Conflict("Checkpoint content changed"));}
@@ -1137,6 +1143,110 @@ mod tests {
         assert_eq!(b.messages(ACTOR_ID, None, 100).unwrap().items.len(), 75);
         assert!(a_dir.path() != b.actor(ACTOR_ID).unwrap().config.workspace);
     }
+    #[test]
+    fn incoming_checkpoint_replaces_unpublished_order_without_losing_pending_input() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = store(a_dir.path());
+        let b = store(b_dir.path());
+        let leader = StageId::new();
+        let follower = StageId::new();
+        let first = a.enqueue(input(), None).unwrap();
+        let initial = capture(&a, "account-a", leader, 1).unwrap().unwrap();
+        copy(&a, &b, &initial);
+        commit(&a, &initial, leader).unwrap();
+        commit(&b, &initial, follower).unwrap();
+
+        let pending = b.enqueue(input(), None).unwrap();
+        let abandoned = capture(&b, "account-a", follower, 2).unwrap().unwrap();
+        let accepted = a.enqueue(input(), None).unwrap();
+        let incoming = capture(&a, "account-a", leader, 3).unwrap().unwrap();
+        assert_ne!(abandoned.head, incoming.head);
+        copy(&a, &b, &incoming);
+        commit(&a, &incoming, leader).unwrap();
+        prepare(&b, &incoming, "account-a").unwrap();
+        commit(&b, &incoming, follower).unwrap();
+
+        assert_eq!(head(&b).unwrap(), incoming.head);
+        assert_eq!(
+            b.message(&pending.id).unwrap().status,
+            MessageStatus::Queued
+        );
+        let next = capture(&b, "account-a", follower, 4).unwrap().unwrap();
+        let pending_change = next
+            .changes
+            .iter()
+            .find(|change| change.entity == Entity::Message && change.key == pending.id)
+            .unwrap();
+        assert_eq!(pending_change.ordinal, 3);
+        copy(&b, &a, &next);
+        commit(&b, &next, follower).unwrap();
+        commit(&a, &next, leader).unwrap();
+        for system in [&a, &b] {
+            let ids = system
+                .messages(ACTOR_ID, None, 100)
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ids,
+                [first.id.clone(), accepted.id.clone(), pending.id.clone()]
+            );
+        }
+    }
+
+    #[test]
+    fn incoming_checkpoint_cannot_displace_already_committed_order() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = store(a_dir.path());
+        let b = store(b_dir.path());
+        let leader = StageId::new();
+        let follower = StageId::new();
+        let first = a.enqueue(input(), None).unwrap();
+        let initial = capture(&a, "account-a", leader, 1).unwrap().unwrap();
+        copy(&a, &b, &initial);
+        commit(&a, &initial, leader).unwrap();
+        commit(&b, &initial, follower).unwrap();
+        let second = a.enqueue(input(), None).unwrap();
+        let incoming = capture(&a, "account-a", leader, 1).unwrap().unwrap();
+        copy(&a, &b, &incoming);
+        let mut invalid = incoming.clone();
+        invalid
+            .changes
+            .iter_mut()
+            .find(|change| change.entity == Entity::Message && change.key == second.id)
+            .unwrap()
+            .ordinal = 1;
+        invalid.head.hash = crate::stage::digest(
+            &serde_json::to_vec(&json!({"previous":invalid.previous,"changes":invalid.changes}))
+                .unwrap(),
+        );
+        assert!(commit(&b, &invalid, follower).is_err());
+        assert_eq!(head(&b).unwrap(), initial.head);
+        assert_eq!(
+            b.messages(ACTOR_ID, None, 100)
+                .unwrap()
+                .items
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            [first.id.as_str()]
+        );
+        commit(&b, &incoming, follower).unwrap();
+        assert_eq!(
+            b.messages(ACTOR_ID, None, 100)
+                .unwrap()
+                .items
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            [first.id.as_str(), second.id.as_str()]
+        );
+    }
+
     #[test]
     fn takeover_claims_committed_order_instead_of_device_arrival_order() {
         let a_dir = tempfile::tempdir().unwrap();
