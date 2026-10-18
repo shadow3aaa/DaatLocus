@@ -3801,6 +3801,95 @@ async fn start_core_fixture(system: &ActorSystem) -> Arc<crate::stage::runtime::
 }
 
 #[tokio::test]
+async fn core_new_user_input_preempts_thinking_without_losing_context_or_completed_effects() {
+    let provider = Arc::new(ReplayProvider::new(vec![]));
+    let (_dir, system) = runtime(provider.clone()).await;
+    let network = start_core_fixture(&system).await;
+    provider.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall {
+            id: "create-once-before-new-input".into(),
+            name: "actors__create".into(),
+            arguments: json!({"stage_id":network.host.local,"name":"Retained worker","workspace":null,"instructions":null,"model":null}),
+        }]),
+        MockReply::Pending,
+        MockReply::Answer("Both messages are now considered."),
+    ]);
+    let original = system
+        .send_user("core", "Prepare a worker, then think.".into(), vec![], None)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while provider.requests.lock().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Core did not reach its pending inference");
+    let update = system
+        .send_user(
+            "core",
+            "Consider this new message immediately.".into(),
+            vec![],
+            Some("im-update".into()),
+        )
+        .unwrap();
+    // Acceptance and conversation visibility do not wait for the old model.
+    assert!(
+        system
+            .store()
+            .messages("core", None, 30)
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.id == update.id)
+    );
+    let retry = system
+        .send_user(
+            "core",
+            update.content.clone(),
+            vec![],
+            Some("im-update".into()),
+        )
+        .unwrap();
+    assert_eq!(retry.id, update.id);
+    let done = wait_core_completed(&system, &update.id).await;
+    assert_eq!(
+        done.reply.as_deref(),
+        Some("Both messages are now considered.")
+    );
+    let previous = system.store().message(&original.id).unwrap();
+    assert_eq!(previous.status, MessageStatus::Completed);
+    assert!(previous.reply.is_none() && previous.error.is_none() && !previous.cancel_requested);
+    assert!(
+        provider.dropped.load(Ordering::Acquire),
+        "The obsolete model request must be dropped"
+    );
+    {
+        let requests = provider.requests.lock();
+        assert_eq!(requests.len(), 3);
+        let history = &requests[2].messages;
+        for text in [&original.content, &update.content] {
+            assert!(history.iter().any(|row| matches!(row, AgentMessage::User { content } if content.as_text().contains(text.as_str()))));
+        }
+        assert!(history.iter().any(|row| matches!(row, AgentMessage::Tool { tool_call_id, .. } if tool_call_id == "create-once-before-new-input")));
+    }
+    let workers: Vec<_> = system
+        .store()
+        .actors()
+        .unwrap()
+        .into_iter()
+        .filter(|actor| actor.config.name == "Retained worker")
+        .collect();
+    assert_eq!(
+        workers.len(),
+        1,
+        "Completed App effects must not be replayed"
+    );
+    assert_eq!(workers[0].status, ActorStatus::Idle);
+    network.stop().await;
+    system.shutdown().await;
+}
+
+#[tokio::test]
 async fn core_import_routes_through_device_permissions_and_never_starts_the_imported_actor() {
     let provider = Arc::new(ReplayProvider::new(vec![]));
     let (_dir, system) = runtime(provider.clone()).await;
@@ -4009,6 +4098,25 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
     let first = system
         .send_user("core", "Investigate".into(), vec![], None)
         .unwrap();
+    // The second input must arrive after dispatch has actually happened. An
+    // input received during speculative inference now supersedes that inference.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if system
+                .store()
+                .tool_summaries("core", &first.id, None, 10)
+                .unwrap()
+                .items
+                .iter()
+                .any(|tool| tool.call_id == "delegate" && tool.error.is_none())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Core did not dispatch the delegated work");
     let second = system
         .send_user("core", "Meanwhile, answer this".into(), vec![], None)
         .unwrap();

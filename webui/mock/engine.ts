@@ -28,6 +28,8 @@ type Run = {
   userMessageId: string;
   replyId: string | null;
   cancelled: boolean;
+  superseded: boolean;
+  phase: "inference" | "tools";
   wake: (() => void) | null;
 };
 
@@ -51,13 +53,24 @@ export function isActorBusy(actorId: string): boolean {
 
 /** Start (or queue) a turn for a freshly created user request message. */
 export function submitTurn(actor: ActorStore, user: MessageRecord): void {
-  if (user.status !== "running") return; // queued: drained by finishTurn
+  if (user.status !== "running") {
+    if (actor.summary.id === ROOT_ACTOR_ID && user.status === "queued") {
+      const active = [...runsByUserMessage.values()].find(run => run.actorId === ROOT_ACTOR_ID);
+      if (active) {
+        active.superseded = true;
+        if (active.phase === "inference") active.wake?.();
+      }
+    }
+    return; // queued: drained after the current protocol group settles
+  }
   activeActors.add(actor.summary.id);
   const run: Run = {
     actorId: actor.summary.id,
     userMessageId: user.id,
     replyId: null,
     cancelled: false,
+    superseded: false,
+    phase: "inference",
     wake: null,
   };
   runsByUserMessage.set(user.id, run);
@@ -99,9 +112,9 @@ async function rest(run: Run, ms: number): Promise<boolean> {
       run.wake = null;
       resolve();
     };
-    if (run.cancelled) run.wake?.();
+    if (run.cancelled || run.superseded && run.phase === "inference") run.wake?.();
   });
-  return !run.cancelled;
+  return !run.cancelled && !(run.superseded && run.phase === "inference");
 }
 
 function compose(actorName: string, input: string): { reasoning: string[]; assistant: string[] } {
@@ -130,8 +143,9 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
   try {
     setActorStatus(actor, "running");
 
-    if (!(await rest(run, 300))) {
-      cancelUserOnly(actor, user);
+    if (!(await rest(run, actorId === ROOT_ACTOR_ID ? 1200 : 300))) {
+      if (run.superseded && !run.cancelled) completeRun(actor, user, user, "");
+      else cancelUserOnly(actor, user);
       return;
     }
 
@@ -143,6 +157,7 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
     emitEvent(actorId, { type: "generation_started", message_id: reply.id, generation: 1 });
 
     if (actorId === ROOT_ACTOR_ID) {
+      run.phase = "tools";
       const imported = user.attachments.find(item => item.media_type === CODEX_IMPORT_MEDIA_TYPE);
       if (imported) {
         if (!(await rest(run, 700))) return cancelRun(actor, user, reply, "");
@@ -290,7 +305,7 @@ function completeRun(actor: ActorStore, user: MessageRecord, reply: MessageRecor
   const finished = now();
   touchMessage(reply, {
     status: "completed",
-    reply: text,
+    reply: runsByUserMessage.get(user.id)?.superseded ? null : text,
     final_generation: 1,
     finished_at_ms: finished,
   });

@@ -802,6 +802,15 @@ impl ActorStore {
         let rows = sql(statement.query_map(params![actor, target], |r| r.get::<_, String>(0)))?;
         rows.map(|r| decode(sql(r)?)).collect()
     }
+    /// Core is an IM peer: a fresh owner input supersedes speculative inference,
+    /// while collaborators' progress remains ordinary serial inbox work.
+    pub(crate) fn core_user_input_waiting(&self) -> Result<bool> {
+        sql(self.db.lock().query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE actor_id='core' AND status='\"queued\"' AND json_extract(record,'$.kind')='request' AND json_extract(record,'$.source.kind') IN ('user','remote_user') AND json_extract(record,'$.cancel_requested')=0)",
+            [],
+            |row| row.get(0),
+        ))
+    }
     pub(crate) fn apply_steering(
         &self,
         actor: &str,

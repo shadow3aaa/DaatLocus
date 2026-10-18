@@ -27,7 +27,15 @@ function OutcomeStatus({ message }: { message: MessageRecord }) {
   if (message.status === "cancelled" || message.status === "interrupted") return <p role="status" className="dl-operation-note">{message.started_at_ms == null ? t("conversation_turns.queued_message_withdrawn") : t("conversation_turns.task_stopped_completed_actions_are_retained")}</p>;
   return null;
 }
-export function PrimaryTurn({ message, chat, access, onActor, typing, receiptMessageId, searchQuery }: Props & { typing?: boolean; receiptMessageId?: string }) {
+export function PrimaryTranscript({ messages, working, receiptMessageId, ...props }: Omit<Props, "message"> & { messages: MessageRecord[]; working: boolean; receiptMessageId?: string }) {
+  return <>
+    {messages.map(message => <PrimaryTurn key={message.id} message={message} receiptMessageId={receiptMessageId} {...props} />)}
+    {working && props.searchQuery === undefined && <div className="dl-primary-turn" data-first-side="assistant" data-last-side="assistant">
+      <div className="dl-primary-typing" role="status" aria-label={t("conversation_turns.working")}><i /><i /><i /></div>
+    </div>}
+  </>;
+}
+export function PrimaryTurn({ message, chat, access, onActor, receiptMessageId, searchQuery }: Props & { receiptMessageId?: string }) {
   const user = isUserSource(message);
   const tools = chat.tools.filter(tool => tool.message_id === message.id);
   const tasks = tools.filter(tool => !tool.error && ["actors__create", "actors__import_conversation", "actors__send"].includes(domainToolName(tool.name)) && tool.outcome);
@@ -40,8 +48,7 @@ export function PrimaryTurn({ message, chat, access, onActor, typing, receiptMes
   const input = (user && (!filtering || matchesConversationText(messageDisplayText(message), searchQuery!))) || (!filtering && guidance);
   const reply = isUserDelivery(message) && (!filtering || matchesConversationText(message.reply || "", searchQuery!));
   const outcomes = messageOutcomeTools(tools);
-  const working = !filtering && (typing ?? message.status === "running");
-  const response = reply || (!filtering && (references.length > 0 || outcomes.artifacts.length > 0 || outcomes.changes.length > 0 || chat.approvals.some(record => record.message_id === message.id && record.mode === "ask" && record.decision === "pending") || (user && ["failed", "cancelled", "interrupted"].includes(message.status)) || working));
+  const response = reply || (!filtering && (references.length > 0 || outcomes.artifacts.length > 0 || outcomes.changes.length > 0 || chat.approvals.some(record => record.message_id === message.id && record.mode === "ask" && record.decision === "pending") || (user && ["failed", "cancelled", "interrupted"].includes(message.status))));
   if (!input && !response) return null;
   return <article className="dl-message-turn dl-primary-turn" data-first-side={input ? "user" : "assistant"} data-last-side={response ? "assistant" : "user"} id={`message-${message.actor_id}-${message.id}`}>
     {input && <div className="dl-primary-inputs">
@@ -54,7 +61,6 @@ export function PrimaryTurn({ message, chat, access, onActor, typing, receiptMes
     {!filtering && (outcomes.artifacts.length > 0 || outcomes.changes.length > 0) && <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />}
     {!filtering && <Decisions message={message} chat={chat} access={access} />}
     {!filtering && user && <OutcomeStatus message={message} />}
-    {working && <div className="dl-primary-typing" role="status" aria-label={t("conversation_turns.working")}><i /><i /><i /></div>}
     </div>}
   </article>;
 }

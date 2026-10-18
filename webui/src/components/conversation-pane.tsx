@@ -8,7 +8,7 @@ import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "@/components/u
 import { Composer, type ComposerModel } from "@/components/composer";
 import { ConversationConnection } from "@/components/conversation-connection";
 import { ConversationHistory } from "@/components/conversation-history";
-import { PrimaryTurn, WorkTurn } from "@/components/conversation-turns";
+import { PrimaryTranscript, WorkTurn } from "@/components/conversation-turns";
 import { MessageQueue, queuedUserInput } from "@/components/message-queue";
 import { isPrimaryActor, isUserDelivery, isUserSource } from "@/lib/work-timeline";
 import { OwnerApprovalNotice } from "@/components/owner-approval-notice";
@@ -61,11 +61,43 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const sourceMessages = useMemo(() => filtering ? matchingConversationMessages(search.ready && !search.failed ? search.items : [], chat.messages, searchQuery) : chat.messages, [filtering, search.ready, search.failed, search.items, chat.messages, searchQuery]);
   const visibleMessages = useMemo(() => sourceMessages.filter(message => (primaryView || !queuedUserInput(message)) && !(message.status === "cancelled" && message.started_at_ms == null && ["user", "remote_user"].includes(message.source.kind)) && !(message.kind === "steering" && message.status === "completed" && sourceMessages.some(parent => parent.id === message.in_reply_to)) && (!filtering || !primaryView || (isUserSource(message) && matchesConversationText(message.content, searchQuery)) || (isUserDelivery(message) && matchesConversationText(message.reply || "", searchQuery)))), [sourceMessages, primaryView, filtering, searchQuery]);
   const presentationChat = filtering ? {...chat, messages: sourceMessages} : chat;
-  const typingId = primaryView ? [...visibleMessages].reverse().find(message => message.status === "running")?.id : undefined;
   const receiptMessageId = primaryView ? [...chat.messages].reverse().find(message => isUserSource(message) && !(message.status === "cancelled" && message.started_at_ms == null))?.id : undefined;
   useEffect(() => { follow.current = true; olderAnchor.current = null; setAtBottom(true); setLocalError(""); filePreparation.current = { actorId, busy: false }; setPreparingFiles(false); }, [actorId]);
   useEffect(() => { if (actor) onActorLoaded?.(actor); }, [actor, onActorLoaded]);
   useEffect(() => { if (refreshVersion) void chat.refresh(); }, [refreshVersion]);
+  useEffect(() => {
+    const area = scroll.current;
+    if (!area) return;
+    let touchY: number | null = null;
+    const wheel = (event: WheelEvent) => {
+      // The modal's document scroll lock assumes a positive scrollTop and
+      // mistakes our bottom origin for the top. Let this viewport handle its
+      // native scrolling; overscroll-behavior still contains it inside the pane.
+      event.stopPropagation();
+      if (event.deltaY < 0) follow.current = false;
+    };
+    const touchStart = (event: TouchEvent) => { touchY = event.touches.length === 1 ? event.touches[0].clientY : null; };
+    const touchMove = (event: TouchEvent) => {
+      if (event.touches.length !== 1 || touchY === null) return;
+      event.stopPropagation();
+      const next = event.touches[0].clientY;
+      if (next > touchY) follow.current = false;
+      touchY = next;
+    };
+    const keyDown = (event: KeyboardEvent) => {
+      if (["ArrowUp", "PageUp", "Home"].includes(event.key) && !(event.target as HTMLElement).closest("input, textarea, select, [contenteditable]")) follow.current = false;
+    };
+    area.addEventListener("wheel", wheel, {passive: true});
+    area.addEventListener("touchstart", touchStart, {passive: true});
+    area.addEventListener("touchmove", touchMove, {passive: true});
+    area.addEventListener("keydown", keyDown);
+    return () => {
+      area.removeEventListener("wheel", wheel);
+      area.removeEventListener("touchstart", touchStart);
+      area.removeEventListener("touchmove", touchMove);
+      area.removeEventListener("keydown", keyDown);
+    };
+  }, [actorId]);
   useLayoutEffect(() => {
     const section = pane.current;
     const controls = footer.current;
@@ -87,6 +119,9 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
     const observer = new ResizeObserver(updateInsets);
     observer.observe(controls);
     observer.observe(section);
+    // Markdown, images and expanded activity can grow after the message commit.
+    const list = scroll.current?.firstElementChild;
+    if (list) observer.observe(list);
     if (header) observer.observe(header);
     return () => observer.disconnect();
   }, [actorId, compact, waitingMessage]);
@@ -152,7 +187,25 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
     } catch (error) { if (filePreparation.current === preparation) setLocalError(error instanceof Error ? error.message : t("conversation_pane.attachment_upload_failed_try_again")); }
     finally { preparation.busy = false; if (filePreparation.current === preparation) setPreparingFiles(false); }
   }
-  function bottom() { follow.current = true; setAtBottom(true); scroll.current?.scrollTo({ top: 0, behavior: motionScrollBehavior() }); }
+  function bottom() {
+    follow.current = true;
+    olderAnchor.current = null;
+    setAtBottom(true);
+    // Smooth scrolling emits intermediate positions that look like leaving the
+    // bottom and can disable following before the new message is laid out.
+    scroll.current?.scrollTo({ top: 0, behavior: "instant" });
+  }
+  function submit() {
+    if (connecting) return;
+    // Resume following before send() publishes the message or clears the draft.
+    // Do not jump again after the request: the user may have scrolled meanwhile.
+    bottom();
+    if (searchOpen) {
+      normalView.current = {top: 0, follow: true};
+      onSearchOpenChange?.(false);
+    }
+    void chat.send().catch(() => {});
+  }
   async function earlier() {
     const node = visibleAnchor();
     olderAnchor.current = node ? {node, top: node.getBoundingClientRect().top} : null;
@@ -169,7 +222,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
     <ConversationSearchBar open={searchOpen} query={searchQuery} onQueryChange={setSearchQuery} onClose={() => onSearchOpenChange?.(false)} busy={search.busy} controls={resultsId} />
     <ConversationConnection message={waitingMessage}>
       {!compact && !primaryView && <header className="dl-conversation-heading"><span>{name}</span><span className={cn("dl-status-dot", active && "dl-status-working")} /><small>{chat.streamStatus === "reconnecting" ? t("conversation_pane.reconnecting") : active ? t("conversation_pane.working") : t("conversation_pane.ready")}</small></header>}
-      <div className="dl-conversation-scroll" ref={scroll} onScroll={() => { const area = scroll.current; if (!area) return; const near = area.scrollTop > -110; if (!searchOpen) follow.current = near; setAtBottom(near); if (!searchOpen) rememberView(); }}>
+      <div className="dl-conversation-scroll" ref={scroll} onScroll={() => { const area = scroll.current; if (!area) return; const near = area.scrollTop > -110; if (!searchOpen) follow.current = area.scrollTop >= 0; setAtBottom(near); if (!searchOpen) rememberView(); }}>
         <div className="dl-message-list" id={resultsId} aria-busy={filtering && search.busy} aria-live={searchOpen ? "off" : "polite"} aria-relevant="additions">
           {!filtering && !chat.loading && actor && !chat.messages.length && !errors && <Empty className="dl-conversation-empty"><EmptyHeader>
             {primaryView && <img src="/logo-mark.svg" alt="" className="dl-empty-logo dl-brand-mark" />}
@@ -181,7 +234,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
           {filtering && search.ready && !search.failed && search.next !== null && <LazyPage key={searchQuery.trim()} cursor={search.next} onLoad={moreMatches} errorMessage={t("search_dialog.could_not_load_earlier_results")} />}
           {filtering && search.ready && search.failed && <div className="dl-client-error" role="alert"><span>{t("search_dialog.search_failed_try_again")}</span><Button variant="ghost" size="sm" onClick={search.retry}>{t("app.retry")}</Button></div>}
           {filtering && search.ready && !search.failed && !visibleMessages.length && <Empty className="dl-filter-empty"><EmptyHeader><EmptyTitle>{t("search_dialog.no_results")}</EmptyTitle></EmptyHeader></Empty>}
-          {visibleMessages.map(message => primaryView ? <PrimaryTurn key={message.id} message={message} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} typing={message.id === typingId} receiptMessageId={receiptMessageId} /> : <WorkTurn key={message.id} message={message} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} />)}
+          {primaryView ? <PrimaryTranscript messages={visibleMessages} working={Boolean(active)} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} receiptMessageId={receiptMessageId} /> : visibleMessages.map(message => <WorkTurn key={message.id} message={message} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} />)}
           <div className="dl-conversation-bottom" />
         </div>
       </div>
@@ -192,7 +245,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
         {!atBottom && <Button className="dl-jump-bottom" variant="outline" size="icon" aria-label={t("conversation_pane.jump_to_latest")} onClick={bottom}><ArrowDownIcon /></Button>}
         {errors && <div className="dl-client-error" role="alert"><span>{errors}</span><Button size="sm" variant="ghost" onClick={() => { setLocalError(""); void chat.refresh(); }}><RefreshCwIcon data-icon="inline-start" />{t("app.retry")}</Button></div>}
         <MessageQueue messages={queue} active={active} chat={chat} access={access} />
-        <Composer presentation={primaryView ? "primary" : "work"} key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={() => { if (connecting) return; void chat.send().then(bottom).catch(() => {}); }} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} working={Boolean(active)} onStop={() => { if (active) void chat.cancel(active.id).catch(() => {}); }} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} mode={mode} onModeChange={next => { void configure({ mode: next }); }} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={!ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : !primaryView ? t("conversation_pane.message_value0", {value0: name}) : t("composer.message")} compact={compact} />
+        <Composer presentation={primaryView ? "primary" : "work"} key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} working={Boolean(active)} onStop={() => { if (active) void chat.cancel(active.id).catch(() => {}); }} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} mode={mode} onModeChange={next => { void configure({ mode: next }); }} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={!ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : !primaryView ? t("conversation_pane.message_value0", {value0: name}) : t("composer.message")} compact={compact} />
       </div>
     </ConversationConnection>
   </section>;

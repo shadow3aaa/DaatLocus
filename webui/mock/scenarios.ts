@@ -16,6 +16,7 @@ export const scenarios = [
   {id:"conversation", label:"主会话", actor:ROOT_ACTOR_ID},
   {id:"bubble-spacing", label:"主对话 · 连续气泡与双方切换", actor:ROOT_ACTOR_ID},
   {id:"long-core", label:"主对话 · 长历史与长回复", actor:ROOT_ACTOR_ID},
+  {id:"core-incoming", label:"主对话 · 处理中收到新消息", actor:ROOT_ACTOR_ID},
   {id:"empty", label:"空对话", actor:ROOT_ACTOR_ID},
   {id:"work", label:"工作对话", actor:"research"},
   {id:"activity-replay", label:"工作活动 · 分步演示", actor:"research"},
@@ -87,6 +88,13 @@ export function activateScenario(id: string): boolean {
     emitEvent(core.summary.id,{type:"message_added",message_id:record.id});
   }
   if (id==="empty") clear(core);
+  if (id === "core-incoming") {
+    clear(core);
+    message(core, "请检查这份界面的布局。", true);
+    addMessage(core, {kind:"request",source:{kind:"user"},reply_to:{kind:"user"},content:"再补充一点：也检查一下手机上的显示。",status:"queued"});
+    addMessage(core, {kind:"request",source:{kind:"user"},reply_to:{kind:"user"},content:"保留正在输入的草稿。",status:"queued"});
+    setActorStatus(core, "running");
+  }
   if (id === "bubble-spacing") {
     clear(core);
     const request = message(core, "重新发我看看。");

@@ -1,10 +1,11 @@
 import i18n from "../src/lib/i18n";
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { PrimaryTurn, WorkTurn } from "../src/components/conversation-turns";
+import { PrimaryTranscript, PrimaryTurn, WorkTurn } from "../src/components/conversation-turns";
 import { WorkRound } from "../src/components/work-round";
 import { Activities } from "../src/components/conversation-content";
 import { MessageQueue } from "../src/components/message-queue";
+import { Composer } from "../src/components/composer";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import { activityTools, isLiveReasoning, mergeActivity, workActivityTimeline, workTimeline } from "../src/lib/work-timeline";
 import { clearStoredDrafts, loadDraft, saveDraft } from "../src/lib/conversation-drafts";
@@ -13,6 +14,34 @@ const message: MessageRecord = { seq: 1,id:"m",actor_id:"root",source:{kind:"use
 const event = (seq:number,event:EventRecord["event"]): EventRecord => ({seq,actor_id:"root",created_at_ms:seq,event});
 const memory = (): Storage => { const data = new Map<string,string>(); return { get length(){return data.size;},clear(){data.clear();},getItem(key){return data.get(key)??null;},key(index){return [...data.keys()][index]??null;},removeItem(key){data.delete(key);},setItem(key,value){data.set(key,value);} }; };
 describe("fixed presentation and chronological source", () => {
+  test("Core has one conversation status after new inputs even while an older input is running", () => {
+    const old = {...message,actor_id:"core",content:"OLDER_INPUT"};
+    const latest = {...old,id:"latest",status:"queued" as const,content:"LATEST_INPUT"};
+    const chat = {messages:[old,latest],tools:[],approvals:[],events:[]} as unknown as Parameters<typeof PrimaryTranscript>[0]["chat"];
+    const render = (messages: MessageRecord[], working: boolean, searchQuery?: string) => renderToStaticMarkup(<PrimaryTranscript messages={messages} working={working} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} searchQuery={searchQuery} />);
+    const before = render([old], true);
+    expect(before.indexOf('role="status"')).toBeGreaterThan(before.indexOf("OLDER_INPUT"));
+    const after = render([old,latest], true);
+    expect(after.match(/role="status"/g)).toHaveLength(1);
+    expect(after.indexOf('role="status"')).toBeGreaterThan(after.indexOf("LATEST_INPUT"));
+    expect(render([old,latest], false)).not.toContain('role="status"');
+    expect(render([old,latest], true, "")).not.toContain('role="status"');
+  });
+  test("a busy Core remains an IM composer while a work Actor retains stop controls", () => {
+    const props: Parameters<typeof Composer>[0] = {value:"",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,working:true,onStop:()=>{},canManage:false,mode:"auto",onModeChange:()=>{},models:[],modelName:"",onModelChange:()=>{}};
+    const render = (presentation: "primary" | "work", value = "") => renderToStaticMarkup(<Composer {...props} presentation={presentation} value={value} />);
+    const stop = `aria-label="${i18n.t("composer.stop_task")}"`;
+    const send = `aria-label="${i18n.t("composer.send_message")}"`;
+    expect(render("primary")).toContain(send);
+    expect(render("primary")).not.toContain(stop);
+    expect(render("primary", "new input")).toContain(send);
+    expect(render("work")).toContain(stop);
+  });
+  test("Core shows newly queued user messages before the running input finishes", () => {
+    const queued = {...message,id:"new-input",actor_id:"core",status:"queued" as const,content:"NEW_IM_INPUT"};
+    const chat = {messages:[message,queued],tools:[],approvals:[],events:[]} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
+    expect(renderToStaticMarkup(<PrimaryTurn message={queued} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />)).toContain("NEW_IM_INPUT");
+  });
   test("search filters individual conversation sides and work presentation hides intermediate disclosures", () => {
     const record = {...message, content:"UNMATCHED_USER_INPUT", reply:"MATCHED_FINAL_REPLY",status:"completed" as const};
     const chat = {messages:[],tools:[],approvals:[],events:[],toolNext:{}} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];

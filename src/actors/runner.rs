@@ -342,6 +342,18 @@ async fn execute_message(
             )?;
             return Ok(Some(String::new()));
         }
+        if core_user_input_waiting(system, actor)? {
+            // Only reached between settled protocol groups. Keep the old input
+            // and completed observations in history, then let the next inbox
+            // input continue the conversation under its own authority. This is
+            // not cancellation of the Actor or any delegated work.
+            system.store().append_history(
+                &actor.id,
+                &message.id,
+                &[AgentMessage::assistant("")],
+            )?;
+            return Ok(None);
+        }
         for guide in system.store().pending_steering(&actor.id, &message.id)? {
             let mut update = guide.clone();
             update.content = format!(
@@ -415,10 +427,11 @@ async fn execute_message(
             }
             Err(error) => return Err(error),
         };
-        if !system
-            .store()
-            .pending_steering(&actor.id, &message.id)?
-            .is_empty()
+        if core_user_input_waiting(system, actor)?
+            || !system
+                .store()
+                .pending_steering(&actor.id, &message.id)?
+                .is_empty()
         {
             continue;
         }
@@ -935,6 +948,10 @@ fn context_overflow(error: &miette::Report) -> bool {
     crate::context_budget::is_context_budget_exceeded(error)
 }
 
+fn core_user_input_waiting(system: &ActorSystem, actor: &ActorRecord) -> Result<bool> {
+    Ok(actor.id == crate::stage::shared::ACTOR_ID && system.store().core_user_input_waiting()?)
+}
+
 // Keep Actor and request authority explicit at the model execution boundary.
 #[allow(clippy::too_many_arguments)]
 async fn generate(
@@ -956,6 +973,9 @@ async fn generate(
     };
     for attempt in 1..=policy.max_attempts {
         check_interruption(system, control, message)?;
+        if core_user_input_waiting(system, actor)? {
+            return Ok(None);
+        }
         *generation = generation.saturating_add(1);
         system.store().append_event(
             &actor.id,
@@ -1019,7 +1039,7 @@ async fn generate(
                 _ = timer.tick() => {
                     pending.flush(system, actor, message, *generation)?;
                     check_interruption(system,control, message)?;
-                    if !system.store().pending_steering(&actor.id, &message.id)?.is_empty() {
+                    if core_user_input_waiting(system, actor)? || !system.store().pending_steering(&actor.id, &message.id)?.is_empty() {
                         let usage = provider.token_usage_info();
                         system.store().record_model_usage(&actor.id, usage.total_token_usage.delta_from(&usage_before), usage.model_context_window)?;
                         return Ok(None);
@@ -1027,7 +1047,7 @@ async fn generate(
                 },
                 () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
                     check_interruption(system,control, message)?;
-                    if !system.store().pending_steering(&actor.id, &message.id)?.is_empty() {
+                    if core_user_input_waiting(system, actor)? || !system.store().pending_steering(&actor.id, &message.id)?.is_empty() {
                         let usage = provider.token_usage_info();
                         system.store().record_model_usage(&actor.id, usage.total_token_usage.delta_from(&usage_before), usage.model_context_window)?;
                         return Ok(None);
@@ -1082,7 +1102,7 @@ async fn generate(
                         () = &mut backoff => break,
                         () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
                             check_interruption(system,control, message)?;
-                            if !system.store().pending_steering(&actor.id, &message.id)?.is_empty() { return Ok(None); }
+                            if core_user_input_waiting(system, actor)? || !system.store().pending_steering(&actor.id, &message.id)?.is_empty() { return Ok(None); }
                         },
                     }
                 }
