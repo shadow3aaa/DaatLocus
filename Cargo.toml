@@ -39,10 +39,13 @@ members = [
     "crates/daat-locus-macros",
     "crates/daat-locus-auth",
     "crates/daat-locus-client-protocol",
+    "crates/daat-locus-virtual-workspace",
+    "crates/daat-locus-virtual-workspace/hook",
     "clients/app/src-tauri",
     "xtask",
 ]
 default-members = ["."]
+exclude = ["crates/daat-locus-virtual-workspace/driver"]
 resolver = "3"
 
 [features]
@@ -156,7 +159,17 @@ features = [
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
 ]
+
+[target.'cfg(windows)'.dependencies]
+daat-locus-virtual-workspace = { path = "crates/daat-locus-virtual-workspace" }
+png = "0.18"
+windows = { version = "0.62.2", features = ["Win32_UI_Shell", "Win32_System_Com", "Win32_Foundation"] }
 
 [profile.release]
 codegen-units = 1

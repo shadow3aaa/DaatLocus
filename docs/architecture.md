@@ -74,6 +74,322 @@ Actor 列表在 SQLite 内按 ID 游标分页；容量、模型引用校验和�
 只读取计数、模型名或 ID，不加载全部配置。历史分页加载时直接借用消息计算预算，
 只为通过预算检查的模型请求复制工作窗口，不为每页构造临时完整请求。
 
+## Windows Virtual Workspace 基础设施
+
+`crates/daat-locus-virtual-workspace` 是可独立构建的 lib crate，不依赖 Actor、
+账号存储、WebUI 或 Tauri。Windows ComputerUse App 在服务内使用此库；Core 的
+工具集合仍只有 Actors App。`driver/` 是自有 Rust `cdylib` UMDF 2.25 / IddCx 1.4 驱动，使用独立
+Cargo 构建图；工作区 `xtask idd-driver` 准备固定版本/哈希 WDK、调用 Cargo 编译、
+Inf2Cat 打包并可用已有代码签名证书签名，不使用独立 PowerShell 构建脚本。
+Windows 10 1903+ x64，驱动消费并释放 swap-chain 帧，桌面捕获由 lib 完成。
+`DriverPackage::install` 经正常 PnP 安装一次驱动与持久适配器，需要 OS 管理员
+权限，允许系统发布者确认。先注册根枚举设备节点再安装/绑定，首次安装不依赖旧节点。
+库的普通部署 API 不修改证书存储；发行 helper 显式向 LocalMachine Root 与
+TrustedPublisher 导入嵌入的专用自签名代码签名公钥证书，安装页面说明该行为。
+helper 在导入前用固定公钥验证 CAT 签名，导入后验证 INF/DLL 的目录成员签名；
+不接受包旁边的任意证书或调用方指定的信任身份。私钥不进入源码或安装包。
+机器级互斥与 HKLM 持久记录串行化安装、保留已有信任；失败回滚本次新增信任，
+PnP 部分部署失败先回收新增驱动包，不能在驱动仍需重启清理时提前撤销信任。
+Burn 按 CAT SHA256 和两处证书存在状态检测已部署版本，客户端 MSI 保持 per-user；
+驱动 ExePackage 的 InstallCondition 在版本与信任均满足时跳过整个永久前置包，
+Repair（Burn action 8）仍执行修复，实际部署保留安装文件缓存供维护。
+只设置 DetectCondition 不足以跳过缓存：Burn 6 会缓存请求为 Present 的包，
+在没有提权执行的计划中写入 ProgramData 而失败；也不应无条件计划机器缓存清理。
+不通过放宽系统缓存目录权限解决此问题。
+卸载某个用户客户端保留共享驱动。显式完整驱动卸载移除 DL 适配器和该身份的
+所有已存储版本，再删除安装器拥有的信任项；已有信任不删除，需要重启时延后清理。
+不修改 Secure Boot、测试签名、内存完整性或签名强制策略，首次下载提示仍可能出现。
+安装/加载兼容性仍须在干净目标系统验证；自签信任不等于微软认证。
+安装和证书管理不能暴露为 WebView 原生命令或 Actor 工具。
+
+`VirtualDisplay::create` / `VirtualWorkspace::create` 不要求预先存在虚拟屏：
+库通过设备接口 CreateFile / IOCTL 创建属于该文件对象的监视器，无管道、额外
+守护服务、全局屏幕数量设置或心跳保活。适配器同时支持至多 8 个监视器。
+驱动从 IddCxMonitorArrival 返回实际 adapter LUID 与 target ID，lib 按这两个值
+匹配 DisplayConfig，不能按连接器索引、显示名称或“新增的第一个屏幕”猜测归属。
+驱动协议使用固定宽度、版本化字节消息，不传进程指针或 Rust 原生布局。
+自定义 IOCTL 经 IddCx 的 EvtIddCxDeviceIoControl 转发，不另建默认 WDF 队列。
+DisplayConfig 的查询与配置统一使用 VIRTUAL_MODE_AWARE；旧式查询会映射 IDD 的
+adapter/target，不能用于归属匹配。虚拟模式路径分别编码源、目标和 desktop-image
+索引，保留其他路径的模式引用；间接显示由目标 base output technology 识别，
+不能由驱动报告的连接器类型推断。
+库在捕获、放置和输入前通过原文件对象查询监视器租约，防止设备恢复后复用的
+LUID/target ID 被旧 workspace 误认领；关闭文件后排队的创建请求也必须拒绝。
+支持 720p 至 4K 的五种 60 Hz 模式，
+可配置分辨率和位置；SetDisplayConfig 保留其他活动路径及显式源/目标模式，不使用
+全局 Extend、不允许自动改动其他输出模式，也不写用户的持久布局。重叠位置拒绝。
+默认选择与独立物理屏相邻且未占用的位置，优先右侧，不把多个工作区排成依赖
+前一屏存在的长链；找不到空位时要求显式位置。独立物理屏必须保持启用。
+
+每个 workspace 独占一个非继承设备句柄。构造失败、析构或进程退出关闭最后句柄，
+驱动 EvtFileCleanup 只拔除该文件对象的屏幕，显式 remove/close 等待输出移除。
+正常 remove/Drop 先用 DisplayConfig 停用自己的活动路径、保留其余源/目标模式，
+再关闭设备句柄，避免热拔除触发 Windows 重排其他输出；等待移除同时检查
+targetAvailable 和路径活动标记。进程被强杀时没有这一步用户态停用过程，
+由驱动文件清理拔除屏幕，布局变化仍由 Windows 处理。
+睡眠/设备停机退休适配器代次及所有屏幕；旧句柄清理不能移除新代次屏幕，
+恢复后不自动重放旧 workspace 的创建或输入。关闭屏幕不卸载适配器/驱动包。
+attach 仅借用现有输出，
+不能配置或删除该输出。DisplayConfig 的 adapter LUID、target ID 和 monitor device path 标识目标，
+每次操作重新检查显示几何和拓扑；镜像输出以及没有独立物理显示器的环境拒绝连接。
+
+窗口引用绑定 HWND、PID、进程创建时间、GUI 线程和观察时的物理像素几何。
+放置窗口使用不请求激活的异步 SetWindowPos；调用方重新观察后才能输入，不隐式
+还原最小化/最大化窗口。截图返回 IDD 显示范围的原始 BGRA 像素，不含界面布局
+或模型调用；当前 GDI 捕获不保证受保护内容或所有 GPU 表面的图像。
+
+输入通过 CreateSyntheticPointerDevice / InjectSyntheticPointerInput 创建真实
+touch contact，由 Windows 命中测试、捕获并生成可用 GetPointerInfo 读取的
+WM_POINTER 消息；不伪造 pointer 消息，不使用鼠标/键盘 SendInput 或恢复用户焦点。
+此原生触摸路径与下面的可选 DLL Hook 路径独立。每个实例串行管理一个 contact 的
+Down/Move/Up/Cancel，活动 contact 不能换窗。目标窗口必须完整位于工作区，
+输入点必须命中其客户区；显示变化、窗口变化和遮挡均在操作前拒绝。
+取消只释放自己的 touch 状态；析构随后回收自己拥有的屏幕，不关闭应用或删除 Actor 数据。
+
+Windows 接受输入只代表接受合成帧，不证明目标应用已执行。输入前后分别观察
+前台、键盘焦点和光标，跨操作比较前台/焦点；发现变化后中断后续输入，允许取消。
+这些快照不能证明观察间没有瞬时焦点变化。WM_POINTERACTIVATE、触摸到鼠标的
+兼容转换和目标应用行为仍可能激活窗口；原生触摸不提供独立键盘。
+调试夹具区分自行处理 PA_NOACTIVATE 的 pointer-aware 窗口与默认激活
+行为，前者通过不能推导第三方应用也通过。自建 IDD 上的默认 pointer 激活用例
+也覆盖 WS_EX_NOACTIVATE：该样式不替代接收窗口处理 WM_POINTERACTIVATE。
+库不修改目标窗口样式来声称焦点隔离。未知效果必须重新观察，不自动重放。
+
+`hook/` 是普通 Cargo workspace 成员 `daat-locus-workspace-hook`，产出 Rust
+cdylib；不修改系统 DLL、内核或目标磁盘文件。`WindowHook::attach` 热加载调用方
+明确提供的 DLL，在目标进程的指定 GUI 线程安装 WH_CBT / WH_GETMESSAGE；
+不安装桌面全局 Hook。当前仅接受与控制端相同架构的目标，且控制端必须处于
+目标进程之外。`VirtualWorkspace::hook` 额外检查安装时目标完整位于工作区。
+这一路径明确允许向目标进程加载 DLL；应用无需预先适配，但可能限制 DLL 加载。
+CBT 在已安装 Hook 的 GUI 线程中，按真实窗口归属否决指定顶层窗口、子控件及 owned
+窗口的激活/焦点请求；请求目标可以来自另一个 GUI 线程/进程。输入命令仍须在目标
+自身线程执行。独立兄弟窗口不受该策略约束，不恢复用户焦点。守卫 close/Drop
+先禁用策略，再卸载 Hook；不承诺立即卸载 DLL。
+
+可视顶层窗口与输入表面分别建模。`InputSurface` 通过真实子窗口/owner 关系归属
+顶层窗口，绑定自己的 HWND、进程创建时间、GUI 线程与 class；不要求内容与框架
+具有同一 PID/TID。`WindowHook` 持有各实际 GUI 线程的租约，命令投递到对应表面，
+重新观察时回收失效内容线程并发现新表面。归属判断不因相同 PID 授权独立兄弟窗口。
+接管、观察和派发前，App 同样检查内容进程的自身进程/私有路径排除边界。
+输入接收者绑定完整表面身份及新观察中的几何信息，不能仅凭 class 继续使用旧路由。
+
+安装前读取目标二进制签名策略；纯 Hook API 对 Microsoft/Store-only 策略返回类型化
+错误，而非等待无效握手或要求 Agent 重新点击。`WindowInput` / `VirtualWorkspace::input`
+仅在接管阶段遇到该错误时选择 UI Automation；操作已经开始后绝不更换后端重放。
+UIA 使用 `CUIAutomation8`，显式关闭 `IUIAutomation2::AutoSetFocus`，并设置有界连接/
+事务超时；不调用 SetFocus。仍在允许注入的框架/内容线程保留 CBT 守卫，受签名策略
+保护的内容进程不加载自研 DLL。真实 Calculator 算术验收与纯 Hook 签名策略拒绝
+测试均属于独立库的 opt-in 原生测试；前者检查实际显示的 7 + 5 = 12、桌面输入保持
+与撤权，后者检查拒绝发生在输入之前并回收部分安装的租约。
+
+UIA 坐标从实际原生输入表面换算为物理屏幕位置，命中元素必须同时满足受控原生进程
+身份和 UIA 树中的窗口归属。左键操作调用 Invoke/Toggle/SelectionItem/ExpandCollapse
+模式，垂直滚动沿受控祖先查找 Scroll 模式，关闭使用 Window 模式；不调用测试端的
+Invoke 来伪造生产输入。缺少模式在派发前明确拒绝。UIA 后端不声称支持通用按键、
+插入位置 Unicode 文本或指针拖曳，也不把替换整个 Value 冒充插入文本；观察中的
+supported_actions 反映实际后端。COM 错误或焦点/capture 变化停止后续输入并保留
+未知效果，不恢复桌面状态来掩盖干扰。UIA 接口调用完成不证明任意软件的异步业务完成。
+
+同一 GUI 线程只允许一个 Hook 租约。控制端与 DLL 通过会话内、默认 OS 访问控制、
+非继承的命名文件映射交换版本化定长命令，无进程指针、管道或额外服务。
+目标/控制端 PID 与进程创建时间、目标 GUI 线程、可视根窗口及其进程/线程身份、
+传输表面、随机唤醒 token 共同约束操作；DLL 确认控制进程仍存活。
+目标根窗口或传输表面销毁会禁用该租约。交还时先禁用组内所有租约，再逐一等待/卸载；
+内容进程已退出后，系统移除其 Hook 不应阻止回收或重新绑定。
+发布/认领/完成/取消以原子状态传递 payload 所有权，每条命令只认领一次；
+超时取消尚未开始的命令，已开始的效果视为未知，禁用租约并拒绝后续输入，不重放。
+首次握手确认回调确实在目标线程执行，不能把 SetWindowsHookEx 成功等同于可用。
+
+Hook 文本操作在目标线程对明确子控件派发 UTF-16 WM_CHAR；键操作派发
+WM_KEYDOWN/UP，并临时设置、恢复该 GUI 线程键盘状态，支持 Shift/Control。
+它不执行应用消息循环的 accelerator 翻译，不提供 Raw Input、系统快捷键或
+GetAsyncKeyState 虚拟化。鼠标操作按控件客户区坐标派发 move/left click/wheel
+消息，不移动真实光标；click 的 down/up 在单次回调中完成。
+`WindowHook::drag` 接受 2..=128 个 signed-16-bit 控件客户区坐标，先校验整条轨迹，
+起点必须在客户区内，后续点可移出客户区。按下、携带 MK_LBUTTON 的移动和抬起
+在单次目标线程回调中完成，不 sleep、不跨命令持有按键，不提供 OLE drag/drop。
+手势守卫在异常结束时派发 WM_CANCELMODE，并释放仅属于目标窗口树的 capture；
+超时仍遵守未知效果不重放约定。协议 ABI 为 4，旧 DLL 在安装 Hook 前拒绝。
+关闭窗口也在追踪的目标线程命令内同步派发 WM_CLOSE，不遗留可在交还后执行的关闭消息。
+已有鼠标 capture 时拒绝 click/drag；原生控件仍可能在同步手势内短暂取得真实
+capture，因此不承诺用户同时拖拽的独立性。GetFocus/GetCursorPos 等查询没有虚拟化。
+回执只证明派发及前后桌面观察，不证明任意应用执行成功或不存在瞬时干扰。
+标准 EDIT/BUTTON/trackbar 的跨进程夹具只验证这些控件；默认触摸兼容转换在 CBT 拦截下
+仍可能移动系统光标，不能作为无干扰鼠标后端。ComputerUse 使用 Hook 或 UIA 输入，不回退到触摸。
+
+## ComputerUse App（Windows）
+
+Windows x64 提供 `computer_use` 设备 App，普通 Actor 按现有规则获得，
+Core 仍仅直接持有 Actors App。其他平台在后端实现前不提供这个设备 App。
+采用窗口定向的“发现、选定、观察、单次操作、再观察”交互；工具沿用现有 App
+执行机制，不新增 JavaScript REPL、工具引擎或 Actor 类型。
+
+Agent 不管理驱动、DLL、显示器编号、分辨率、Hook、HWND 或设备 IOCTL。
+第一次接管窗口时，服务懒创建共享虚拟屏，App 分配独立窗口区域并建立输入租约；运行资源由
+专用 Windows OS 线程持有，App 通过有界类型化请求串行调度。共享设备注册表
+协调窗口/GUI 线程租约；冲突返回 busy，不让两个 Actor 同时操控同一目标。
+服务不创建展示窗口，不依赖 Tauri 事件循环，也不新增常驻管道服务。
+
+### 工具与窗口生命周期
+
+工具前缀为 `computer_use__`。Rust 输入类型使用
+`model_schema` / `model_schema_for`，可选属性使用 required nullable 字段；
+轨迹点使用 `{x,y}` 对象数组，不使用坐标元组或带 payload 的动作联合类型。
+
+| 操作 | 输入要点 | 行为 |
+| --- | --- | --- |
+| `list_apps` | query、cursor、limit | 有界枚举可发现应用，返回 opaque app_id 和名称 |
+| `list_windows` | app_id、cursor、limit | 有界枚举具体窗口，返回 opaque window_id、标题、归属、模态关系和接管状态 |
+| `launch_app` | app_id | 先分配虚拟屏区域再启动；唯一、可归属且已出现在虚拟屏的新窗口直接接管并返回截图，否则返回未确认结果 |
+| `open_window` | window_id | 明确接管这个窗口，放到虚拟屏、取得 Hook 租约并返回首个观察 |
+| `get_window_state` | window_id、region、scale | 默认返回完整窗口截图；支持窗口内区域和整数放大，返回 state_id、可用操作和输入接收目标 |
+| `adjust_window` | window_id、state_id、action、width、height、x、y | 非激活调整受控窗口：resize、move、fit、restore；返回完整窗口观察并清除旧输入路由 |
+| `click` | window_id、state_id、x、y、button、click_count | 根据观察坐标解析实际控件并派发点击 |
+| `type_text` | window_id、state_id、text | 向已选定的窗口内输入接收目标提交字面 Unicode 文本 |
+| `press_key` | window_id、state_id、key | 向该输入接收目标派发按键或组合键 |
+| `scroll` | window_id、state_id、x、y、delta_x、delta_y | 在指定位置解析接收控件并滚动 |
+| `drag` | window_id、state_id、path | 在当前返回图像坐标中执行有界左键轨迹，由宿主转换裁剪和倍率 |
+| `give_window` | window_id、state_id、placement | 撤销控制引用并向物理屏交还窗口；支持原位、居中、左半屏、右半屏 |
+| `release_window` | window_id | 释放接管、Hook 和输入路由，不发送关闭应用指令 |
+| `close_window` | window_id、state_id | 明确请求关闭该窗口，可能产生未保存确认对话框，不结束整个进程 |
+
+`open_window` 是明确改变窗口位置的操作；枚举和观察不自动接管。运行中的应用
+可能只有用户正在使用的窗口，不能因应用名匹配就移动它。启动也可能被应用转交给
+已有实例；启动前记录所有顶层 HWND（包括隐藏窗口），返回候选来自真实枚举，
+不把原有窗口重新显示冒充新建窗口。新窗口按启动回执的 PID/进程创建时间，或
+Shell 目标 AUMID 与根/实际托管内容进程的系统应用标识对应；不能仅按标题或启动
+期间全局新增窗口猜测归属。回执不含服务凭据。
+启动前即建立共享虚拟屏并保留区域。临时自身子命令在清理的环境中启动：EXE 用
+CreateProcessW 的 STARTF_USEPOSITION/STARTF_USESIZE/STARTF_USESHOWWINDOW 设置初始坐标、尺寸和
+SW_SHOWNOACTIVATE，不继承句柄；Shell App 使用虚拟屏内隐藏非激活 owner，传入
+SEE_MASK_HMONITOR 和目标 HMONITOR。不将虚拟屏设为主屏，也不通过设置用户光标/
+前台来选择启动位置；首次增屏仍受 Windows 热插拔重定位边界约束。
+在虚拟屏上确认唯一、可归属的新窗口后，沿用这次分配区域取得输入租约并返回首个
+图像；无需模型再调用 open_window。应用仍可覆盖启动位置/激活提示或复用已有实例，
+此时返回 outcome_unknown，不自动挪动用户原有窗口，也不通过事后恢复前台掩盖问题。
+启动提示不是任意第三方应用首帧位置的强制隔离；观察位置与首次显示测试分开验证。
+当前 Calculator 会忽略 Shell 显示器提示并激活到物理屏；此类启动未满足首帧虚拟屏
+要求，按未确认结果处理，不能因其他 EXE 的首次显示测试通过就宣称通用支持。
+启动、接管等改变状态的操作在需要观察确认时也返回当前窗口观察。
+
+窗口 ID 由宿主登记，绑定设备、Actor、租约代次及真实窗口身份；不能由模型构造
+原生句柄。进程创建时间、GUI 线程、窗口销毁和几何变化继续在执行时校验。
+owned 模态/弹出窗口作为相关窗口返回，具有各自 window_id 和截图；不能按 PID
+自动授权整个应用的全部窗口。新模态需要识别归属、纳入工作区并停止向被阻塞的
+父窗口输入。当前只共享同 GUI 线程的 owned 窗口族 Hook；同线程独立兄弟窗口不能
+同时接管，跨线程对话框的关系也不能按 PID 猜测。
+
+`release_window` 不等于关闭应用或 Actor。释放前处理目标的输入状态并移除 Hook；
+借用窗口按记录的有效原位置非激活归还，无法归还时保留明确的释放失败状态，不能
+声称应用已关闭。`give_window` 和 release 都先把同线程受控窗口族从控制表移入
+待交还表，清除输入路由和 state_id，再禁用 Hook、取消未开始的命令，等待已开始的
+命令返回后卸载 Hook 并非激活移动窗口。等待超时返回 handoff_pending，保留禁用的
+守卫和显示，允许 release 重试清理；旧 ID 不能再观察、输入、关闭或重新接管。
+交还完成后只有重新发现得到的新 ID 才能显式接管。移动失败保留待交还状态。
+共享虚拟屏由服务基础设施持有，独立库 `SharedDisplay` 的专用线程管理 IDD 句柄。
+首次分配窗口区域才创建屏幕；默认同一服务进程的全部 Actor/System 复用一个输出。
+交还最后一个窗口、App shutdown、模型切换和 App 空闲回收不拔屏，不重新配置
+分辨率/位置。App 仅 attach 借用工作区，窗口保留 `DisplayRegion` 直到交还完成。
+服务持有者全部退出后，仍有窗口区域时继续保留屏幕；最后的持有者和区域释放后
+才正常移除。若输入仍在执行，后台清理线程继续等待，不能提前暴露窗口。
+服务进程退出/驱动卸载仍会拔屏；本接口不是跨进程/profile 的常驻屏幕代理。
+异常退出导致的窗口重排仍遵守 Windows 热拔除边界。窗口租约、待交还窗口或 Hook
+阻止 App 空闲回收；服务持有的空屏不阻止。驱动/显示失效时，存在区域就拒绝重建；
+所有区域释放后下次显式接管才允许恢复，旧图像、路由和输入效果不重放。
+
+共享屏幕固定布局，在 Windows 工作区（避开任务栏）内分配互不重叠的窗口区域；空间不足时拒绝新增接管，要求先释放窗口，
+不增屏、不调分辨率、不移动其他 Actor 的窗口。执行和观察检查窗口仍位于租用区域。
+首次创建等待 Explorer 的工作区布局稳定，避免任务栏稍后出现后压缩已分配区域。
+截图在捕获前后检查真实 Z-order 遮挡、窗口几何及显示租约；发现遮挡不发布图像。
+这仍是前后采样检查，不是原子窗口合成捕获；任意应用自行移动/弹窗可使观察失败。
+
+### 观察、坐标与输入目标
+
+`get_window_state` 的语义结果包括 window_id、state_id、标题、实际图像 width/height、
+完整窗口 window_width/window_height、相对完整窗口的 client_area、view.region/scale、
+虚拟屏本地 workspace 尺寸和 window_x/window_y（不含系统绝对坐标）、
+截图资源引用、input_target、related_windows 和 supported_actions。
+默认截图包含完整窗口（标题栏、边框、客户区），原始分辨率；region 为完整窗口内的
+像素矩形，scale 为 1..=4 的整数倍率，均为空时恢复默认。越界裁剪直接拒绝，不返回
+残缺图像；图像至多 8 百万像素。弹窗单独标识，不让 Agent 估计系统坐标。
+坐标以实际返回图片的左上角为原点，使用图片像素。App 保存裁剪/缩放、DPI、
+客户区/屏幕/子控件变换，在执行时完成转换，不把 HWND 或显示坐标推给 Agent。
+新观察撤销旧坐标；输入完成后的默认观察恢复完整窗口。非客户区可见但不能作为
+鼠标输入接收面，标题栏管理使用 adjust_window。当前视口外的内容需要滚动或调整窗口，
+截图放大不能显示应用没有渲染的文档内容。
+
+`adjust_window` 的 resize 使用完整窗口尺寸，move 使用相对虚拟屏的 x/y；fit 选择
+最大空闲矩形，restore 恢复到现有保留区域，未使用参数必须为空。state_id 通常绑定
+最新观察；无法截图时允许显式传空恢复。宿主保留新旧区域直到实际位置确认，移动
+超时不释放任一可能区域、不自动重放。最大化窗口在既有激活守卫下还原再非激活移动；
+接管最大化窗口也使用这条路径。不重建屏幕、不改变分辨率、不挪动其他窗口。
+调整后清除接收目标并返回完整窗口观察；焦点、前台、捕获或光标变化停止输入，
+不通过恢复用户桌面掩盖干扰。
+原生放置只发送一次，随后有界等待目标几何稳定；不因系统或应用自行重排而反复移动。
+
+首版以截图为主，不虚构可访问性树。UIA 以后可增加真实的 element_ref 和语义
+操作；在实现前不发布 set_value、secondary_action 或伪造的元素索引。
+截图通过现有 Actor Resource ledger 和工具 model_images 返回，进入模型视觉
+内容；工具 payload 不塞 base64，客户端事件只传引用，展开时再读取重资源。
+不支持视觉的模型收到明确能力错误，不能先执行动作再发现无法观察。
+
+每次坐标/输入操作必须带对应窗口最近的 state_id。它绑定截图坐标变换和输入
+代次，其他输入、重新接管或窗口/模态变化使旧引用失效。它不冻结应用，也不能
+证明截图后像素未变化；执行前仍需检查身份、几何、命中控件和阻塞窗口。
+普通异步动画不应因逐帧像素 hash 不一致而导致操作永远被拒绝。
+
+每个输入工具完成后自动采集并返回新观察，Agent 看过新观察再决定下一步。
+不提供盲目的多动作批处理；一个 drag 的完整轨迹仍算一个输入动作。
+直线拖曳只需给起终两个点，中间移动由宿主采样；曲线任务给折线点，不能要求
+模型机械计算插值。滚动量使用滚轮刻度，正 delta_y 向下、正 delta_x 向右；
+宿主转换原生方向/单位，不承诺应用会移动精确的文档像素距离。
+截图反映当时画面，不保证应用完成业务操作。等待加载时再次显式观察，不使用
+模型轮询运行时全量快照或后台连续截图注入对话。
+
+`input_target` 是 App 记录的明确派发目标，不是 Windows 前台焦点。
+点击通过原生命中测试解析控件并更新此路由；派发文本/按键前重新校验它仍属于
+接管窗口。观察会说明路由目标及其边界，但不会把“点击过某控件”等同于编辑器
+已获得内部焦点。尚无有效输入目标时返回错误，不把文字发给用户当前编辑框。
+App 以 HWND、控件类名和几何记录路由并执行校验；lib 接受明确控件 HWND。
+
+`press_key` 使用可移植按键名称（如 Enter、Escape、Ctrl+A）；后端
+明确报告实际支持范围。当前 lib 的 Shift/Control 消息派发不等于 accelerator
+消息循环、Tab 导航或系统快捷键均已实现。未支持的按键、右/中键、水平滚动等
+在作用前返回 unsupported，不能退化成用户桌面的 SendInput 或激活窗口。
+不提供 `activate_window` 逃生通道。`type_text` 提交最终文本，不模拟拼音输入。
+首版仅单次左键、纵向滚动、Shift/Control 组合及有限导航键，文本每次最多
+1024 个 UTF-16 单元；拒绝 Tab、Alt、Win、双击、其他鼠标键及水平滚动。
+
+### 结果、授权与集成边界
+
+输入结果区分 not_started、dispatched 和 outcome_unknown，附派发回执、当前
+观察或 observation_error。派发成功但截图失败属于未知结果；超时、取消、
+重启或设备失联不自动重放输入。窗口应用卡住也可能阻塞它自身的 GUI 线程，
+不能把库中的有界消息数量描述为任意应用都会按时返回。
+窗口/观察引用属于创建它们的设备和宿主代次，不能随 Actor 迁移到另一台设备
+后继续使用。恢复保留 Actor 历史和截图资源，重新发现实际窗口，不自动重启应用。
+
+ComputerUse 采用一项粗粒度的设备桌面操作授权，沿用 Ask / Auto / Full access
+及 Actor 的自动记忆，不按点击、打字、拖曳或应用分别建立审批权限。审查指纹
+对应明确的设备桌面能力范围；不把每个坐标和文本内容变成新的动作级授权。
+纯枚举沿用普通查询规则；首次接管/启动取得该能力，后续已覆盖操作复用授权。
+桌面能力经明确授权后是项目文件沙箱的例外：任意宿主 GUI 可读取/修改该 Windows
+用户能访问的文件，不能声称隔离了服务凭据或其他 Actor 的磁盘数据。此例外不修改
+传给 Files、Terminal 或其他 App 的沙箱。设备 epoch、认证只读远端拒绝、DL 自身
+进程/窗口排除仍逐次检查；截图资源继续由 Actor HTTP 授权保护。模型指令不替代隔离。
+
+原生 Windows 打包包含版本匹配的 Hook DLL 和驱动部署包，普通 Cargo lib 构建
+仍不自动调用 WDK。安装器负责正常提权的签名驱动部署/修复，模型不运行管理员
+命令或管理证书。现有客户端 per-user MSI 与机器级驱动部署分别处理，不把
+整个客户端悄悄改成管理员常驻程序。发行前仍需验证真实签名包、升级/回滚、
+驱动稳定性及应用兼容性；本节不是对这些验证已经完成的声明。
+
+显示拓扑配置的实测边界：创建/移除自有 IDD 屏幕时，Windows 可将系统光标重定位
+到主屏中央，物理输出模式未变也可能发生。这不是 Hook 鼠标输入造成的移动；
+App 不通过事后 SetCursorPos 掩盖此行为。目前不保证屏幕生命周期期间光标位置不变。
+输入/WM_CLOSE 处理器若进入同步模态循环，会使命令保持执行中；超时后输入停止，
+交还保持 pending，直到处理器退出。跨线程模态与任意应用兼容性尚未得到完整验证。
+
 ## 执行与恢复
 
 SQLite 的事务同时提交消息变化和语义事件，稳定 ID 标识输入、工具调用、资源

@@ -27,6 +27,8 @@ pub const DEVICE_APPS: &[&str] = &[
     "terminal",
     "browser",
     "artifacts",
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    "computer_use",
 ];
 pub(crate) const ALL_APPS: &[&str] = &[
     "actors",
@@ -35,6 +37,7 @@ pub(crate) const ALL_APPS: &[&str] = &[
     "browser",
     "artifacts",
     "apps_manager",
+    "computer_use",
 ];
 
 pub fn validate_app_names(names: &[String]) -> Result<()> {
@@ -86,6 +89,12 @@ pub fn create_apps(
             #[cfg(not(target_os = "android"))]
             "browser" => Box::new(BrowserApp::new()),
             "artifacts" => Box::new(ArtifactsApp::new(actor.id.clone(), system.clone())),
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            "computer_use" => Box::new(crate::computer_use_app::ComputerUseApp::new(
+                actor.id.clone(),
+                system.clone(),
+                supports_vision,
+            )),
             _ => return Err(miette!("unknown App `{name}`")),
         };
         apps.push(inner);

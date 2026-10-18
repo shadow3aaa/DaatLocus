@@ -56,6 +56,8 @@ struct Worker {
 }
 struct Inner {
     app_registry: Arc<crate::mcp::Registry>,
+    #[cfg(windows)]
+    computer_display: Mutex<Option<daat_locus_virtual_workspace::SharedDisplay>>,
     workspace: PathBuf,
     store: ActorStore,
     config: RwLock<Config>,
@@ -88,6 +90,18 @@ fn forbidden(message: &str) -> miette::Report {
 }
 
 impl ActorSystem {
+    #[cfg(windows)]
+    pub(crate) fn computer_display(&self) -> Result<daat_locus_virtual_workspace::SharedDisplay> {
+        let mut display = self.inner.computer_display.lock();
+        if display.is_none() {
+            *display =
+                Some(daat_locus_virtual_workspace::SharedDisplay::global().into_diagnostic()?);
+        }
+        Ok(display
+            .as_ref()
+            .expect("initialized display service")
+            .clone())
+    }
     pub(crate) fn shared_core(&self) -> Option<Arc<crate::stage::shared_runtime::Controller>> {
         self.inner
             .core
@@ -344,6 +358,8 @@ impl ActorSystem {
         store.recover()?;
         let system = Self {
             inner: Arc::new(Inner {
+                #[cfg(windows)]
+                computer_display: Mutex::new(None),
                 app_registry: crate::mcp::Registry::open(data_dir.join("apps.json"))?,
                 workspace,
                 store,

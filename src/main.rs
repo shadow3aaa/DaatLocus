@@ -17,6 +17,26 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
     let (command, arguments) = cli::parse_args();
+    #[cfg(windows)]
+    if let cli::Command::ComputerUseLaunch {
+        app,
+        display,
+        left,
+        top,
+        right,
+        bottom,
+    } = &command
+    {
+        if let Err(error) = daat_locus::computer_use_app::launch_from_clean_process(
+            app,
+            display,
+            [*left, *top, *right, *bottom],
+        ) {
+            eprintln!("{error:?}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let profile_base = std::env::var_os("DAAT_LOCUS_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -76,6 +96,8 @@ async fn dispatch(
     use daemon::control::{self, Action, LaunchOptions};
     let opening = |status: &control::Status| daemon::open_client(status);
     match command {
+        #[cfg(windows)]
+        cli::Command::ComputerUseLaunch { .. } => unreachable!("handled before service startup"),
         cli::Command::ClientBootstrap => {
             use std::io::Read;
             let mut bytes = zeroize::Zeroizing::new(Vec::new());

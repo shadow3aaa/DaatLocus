@@ -1,0 +1,70 @@
+[package]
+name = "daat-locus-virtual-workspace"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Windows IDD workspace and thread-scoped input hook experiments, independent of the Actor runtime"
+
+[dependencies]
+thiserror = "2.0.18"
+clap = { version = "4.5.38", features = ["derive"], optional = true }
+
+[features]
+driver-setup = ["dep:clap", "dep:sha2"]
+
+[target.'cfg(windows)'.dependencies]
+uuid = { version = "1.23.4", features = ["v4"] }
+sha2 = { version = "0.11.0", optional = true }
+windows = { version = "0.62.2", features = [
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+] }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Devices_Display",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Enumeration_Pnp",
+    "Win32_Devices_Properties",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_WinTrust",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Pointer",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+clap = { version = "4.5.38", features = ["derive"] }
+tempfile = "3.23.0"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+] }
+
+[[example]]
+name = "workspace-debug"
+path = "examples/workspace_debug.rs"
+
+[[bin]]
+name = "daat-locus-display-setup"
+path = "src/bin/driver_setup.rs"
+required-features = ["driver-setup"]

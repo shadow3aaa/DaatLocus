@@ -1,5 +1,7 @@
 //! Distribution builds select native assets or an independently embedded browser UI.
 mod android;
+mod computer_use;
+mod idd_driver;
 mod reporting;
 
 use clap::{Args, Parser, Subcommand};
@@ -21,6 +23,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Task {
+    /// Build, validate and optionally sign the Rust Windows virtual display driver.
+    IddDriver(idd_driver::Options),
     Package {
         #[command(subcommand)]
         format: Format,
@@ -44,6 +48,12 @@ struct Package {
     out_dir: Option<PathBuf>,
     #[arg(long)]
     skip_build: bool,
+    /// Existing signed IDD package; otherwise build it through idd-driver.
+    #[arg(long)]
+    idd_package: Option<PathBuf>,
+    /// CurrentUser/My code-signing certificate for the driver, Hook DLL and setup helper.
+    #[arg(long)]
+    windows_certificate_thumbprint: Option<String>,
 }
 #[derive(Deserialize)]
 struct Manifest {
@@ -84,13 +94,15 @@ fn output(command: &mut Command) -> Result<String> {
 }
 fn run() -> Result<()> {
     let started = std::time::Instant::now();
-    let Cli {
-        command: Task::Package { format },
-    } = Cli::parse();
+    let cli = Cli::parse();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .to_path_buf();
+    let format = match cli.command {
+        Task::IddDriver(options) => return idd_driver::build(&root, options),
+        Task::Package { format } => format,
+    };
     let meta: Manifest = toml::from_str(&fs::read_to_string(root.join("Cargo.toml"))?)?;
     let (args, kind) = match format {
         Format::Binary(args) => (args, "binary"),
@@ -189,9 +201,19 @@ fn run() -> Result<()> {
     } else {
         require_embedded(&binary)?;
     }
+    let computer_assets = if context.target == "x86_64-pc-windows-msvc" {
+        Some(computer_use::prepare(
+            &context,
+            args.idd_package,
+            args.windows_certificate_thumbprint,
+            args.skip_build,
+        )?)
+    } else {
+        None
+    };
     match kind {
-        "binary" => archive(&context)?,
-        "windows" => windows(&context)?,
+        "binary" => archive_with_assets(&context, computer_assets.as_ref())?,
+        "windows" => windows(&context, computer_assets.as_ref())?,
         _ => macos(&context)?,
     };
     status(
@@ -294,7 +316,7 @@ fn contains_marker(mut reader: impl std::io::Read, marker: &[u8]) -> std::io::Re
         buffer.copy_within(length - retained..length, 0);
     }
 }
-fn archive(context: &Context) -> Result<()> {
+fn archive_with_assets(context: &Context, assets: Option<&computer_use::Assets>) -> Result<()> {
     let path = context.output.join(format!("{}.tar.zst", context.stem()));
     let encoder = zstd::Encoder::new(fs::File::create(&path)?, 15)?;
     let mut tar = tar::Builder::new(encoder);
@@ -303,10 +325,30 @@ fn archive(context: &Context) -> Result<()> {
         &binary,
         PathBuf::from(context.stem()).join(binary.file_name().unwrap()),
     )?;
+    if let Some(assets) = assets {
+        for path in [&assets.hook, &assets.setup] {
+            tar.append_path_with_name(
+                path,
+                PathBuf::from(context.stem())
+                    .join(path.file_name().ok_or("missing artifact filename")?),
+            )?;
+        }
+        for name in [
+            "DaatLocusVirtualDisplay.inf",
+            "DaatLocusVirtualDisplay.dll",
+            "DaatLocusVirtualDisplay.cat",
+            "LICENSE.microsoft",
+        ] {
+            tar.append_path_with_name(
+                assets.driver.join(name),
+                PathBuf::from(context.stem()).join(name),
+            )?;
+        }
+    }
 
     tar.into_inner()?.finish()?;
     let reader = zstd::Decoder::new(fs::File::open(&path)?)?;
-    if tar::Archive::new(reader).entries()?.count() != 1 {
+    if tar::Archive::new(reader).entries()?.count() != if assets.is_some() { 7 } else { 1 } {
         return Err("Archive verification failed".into());
     }
     packaged("binary archive", &path)?;
@@ -352,7 +394,7 @@ fn png_file(root: &Path, path: &Path, size: u32) -> Result<()> {
         .write_image_data(&raster(root, size)?)?;
     Ok(())
 }
-fn windows(context: &Context) -> Result<()> {
+fn windows(context: &Context, computer: Option<&computer_use::Assets>) -> Result<()> {
     let work = context.work()?;
     let icon = work.join("app.ico");
     let mut directory = ico::IconDir::new(ico::ResourceType::Icon);
@@ -370,6 +412,12 @@ fn windows(context: &Context) -> Result<()> {
     }
     let source = work.join("package.wxs");
     let msi = context.output.join(format!("{}.msi", context.stem()));
+    let hook_component = computer.map(|assets| format!(r#"<Component Id="ComputerHook"><File Id="ComputerHookDll" Source="{}" KeyPath="yes"/></Component>"#, xml(&assets.hook.to_string_lossy()))).unwrap_or_default();
+    let hook_reference = if computer.is_some() {
+        "<ComponentRef Id=\"ComputerHook\"/>"
+    } else {
+        ""
+    };
     fs::write(
         &source,
         format!(
@@ -380,13 +428,14 @@ fn windows(context: &Context) -> Result<()> {
 <StandardDirectory Id="LocalAppDataFolder"><Directory Id="INSTALLFOLDER" Name="Daat Locus">
 <Component Id="Main"><File Id="MainExe" Source="{}" KeyPath="yes"/></Component>
 <Component Id="Launcher"><File Id="LauncherExe" Source="{}" KeyPath="yes"/></Component>
+{}
 <Component Id="Path"><Environment Id="UserPath" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="no"/><RegistryValue Root="HKCU" Key="Software\DaatLocus" Name="Path" Value="1" Type="integer" KeyPath="yes"/></Component>
 </Directory></StandardDirectory>
 <StandardDirectory Id="ProgramMenuFolder"><Directory Id="MenuFolder" Name="Daat Locus"><Component Id="Shortcut">
 <Shortcut Id="Launch" Name="Daat Locus" Target="[#LauncherExe]" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon"/>
 <RemoveFolder Id="RemoveMenu" On="uninstall"/><RegistryValue Root="HKCU" Key="Software\DaatLocus" Name="Menu" Value="1" Type="integer" KeyPath="yes"/>
 </Component></Directory></StandardDirectory>
-<Feature Id="Product"><ComponentRef Id="Main"/><ComponentRef Id="Launcher"/><ComponentRef Id="Path"/><ComponentRef Id="Shortcut"/></Feature>
+<Feature Id="Product"><ComponentRef Id="Main"/><ComponentRef Id="Launcher"/>{}<ComponentRef Id="Path"/><ComponentRef Id="Shortcut"/></Feature>
 </Package></Wix>"#,
             xml(context
                 .meta
@@ -396,7 +445,9 @@ fn windows(context: &Context) -> Result<()> {
             xml(&context.meta.version),
             xml(&icon.to_string_lossy()),
             xml(&context.binary("daat-locus").to_string_lossy()),
-            xml(&client.to_string_lossy())
+            xml(&client.to_string_lossy()),
+            hook_component,
+            hook_reference
         ),
     )?;
     command(
@@ -422,7 +473,12 @@ fn windows(context: &Context) -> Result<()> {
         .replace('{', "\\{")
         .replace('}', "\\}")
         .replace('\n', "\\par\n");
-    fs::write(&license, format!("{{\\rtf1\\ansi {body}}}"))?;
+    let trust_notice = if computer.is_some() {
+        "This setup installs the Daat Locus virtual display driver and adds its bundled self-signed code-signing certificate to this computer's Trusted Root and Trusted Publishers stores. Administrator approval is required. Only the public certificate is installed.\\par\\par "
+    } else {
+        ""
+    };
+    fs::write(&license, format!("{{\\rtf1\\ansi {trust_notice}{body}}}"))?;
     let logo = work.join("logo.png");
     png_file(&context.root, &logo, 128)?;
     let webview = work.join("MicrosoftEdgeWebview2Setup.exe");
@@ -460,6 +516,7 @@ fn windows(context: &Context) -> Result<()> {
 <util:RegistrySearch Id="WebView2Machine64Search" Variable="WebView2Machine64" Root="HKLM" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always64"/>
 <util:RegistrySearch Id="WebView2User32Search" Variable="WebView2User32" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always32"/>
 <util:RegistrySearch Id="WebView2User64Search" Variable="WebView2User64" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always64"/>
+{}
 <Chain>
 <ExePackage Id="WebView2" SourceFile="{}" InstallArguments="/silent /install" DetectCondition="WebView2Machine32 &gt; v0.0.0.0 OR WebView2Machine64 &gt; v0.0.0.0 OR WebView2User32 &gt; v0.0.0.0 OR WebView2User64 &gt; v0.0.0.0" Permanent="yes" PerMachine="no" Vital="yes">
 <ExitCode Value="0" Behavior="success"/>
@@ -469,6 +526,7 @@ fn windows(context: &Context) -> Result<()> {
 <ExitCode Value="1641" Behavior="forceReboot"/>
 <ExitCode Behavior="error"/>
 </ExePackage>
+{}
 <MsiPackage SourceFile="{}" Compressed="yes"/>
 </Chain>
 </Bundle>
@@ -477,7 +535,13 @@ fn windows(context: &Context) -> Result<()> {
             xml(&icon.to_string_lossy()),
             xml(&license.to_string_lossy()),
             xml(&logo.to_string_lossy()),
+            if computer.is_some() {
+                computer_use::detection()
+            } else {
+                String::new()
+            },
             xml(&webview.to_string_lossy()),
+            computer.map(computer_use::prerequisite).unwrap_or_default(),
             xml(&msi.to_string_lossy())
         ),
     )?;
@@ -631,7 +695,7 @@ mod tests {
         fs::write(c.binary("daat-locus"), UI_MARKER).unwrap();
         fs::write(c.binary("daat-locus-app"), b"desktop-client").unwrap();
         require_embedded(&c.binary("daat-locus")).unwrap();
-        archive(&c).unwrap();
+        archive_with_assets(&c, None).unwrap();
         let reader = zstd::Decoder::new(
             fs::File::open(c.output.join(format!("{}.tar.zst", c.stem()))).unwrap(),
         )
@@ -648,5 +712,48 @@ mod tests {
                 "daat-locus-0.5.0-x86_64-pc-windows-msvc/daat-locus.exe"
             ),]
         );
+        let assets = computer_use::Assets {
+            hook: c.release.join("daat_locus_workspace_hook.dll"),
+            setup: c.binary("daat-locus-display-setup"),
+            driver: c.release.join("driver"),
+            package_hash: "fixture".into(),
+        };
+        fs::create_dir(&assets.driver).unwrap();
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert("daat-locus.exe".to_string(), UI_MARKER.to_vec());
+        for path in [&assets.hook, &assets.setup] {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            fs::write(path, name.as_bytes()).unwrap();
+            expected.insert(name.clone(), name.into_bytes());
+        }
+        for name in [
+            "DaatLocusVirtualDisplay.inf",
+            "DaatLocusVirtualDisplay.dll",
+            "DaatLocusVirtualDisplay.cat",
+            "LICENSE.microsoft",
+        ] {
+            fs::write(assets.driver.join(name), name.as_bytes()).unwrap();
+            expected.insert(name.into(), name.as_bytes().to_vec());
+        }
+        archive_with_assets(&c, Some(&assets)).unwrap();
+        let reader = zstd::Decoder::new(
+            fs::File::open(c.output.join(format!("{}.tar.zst", c.stem()))).unwrap(),
+        )
+        .unwrap();
+        let mut archive = tar::Archive::new(reader);
+        let mut actual = std::collections::BTreeMap::new();
+        for entry in archive.entries().unwrap() {
+            use std::io::Read;
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            assert_eq!(path.parent().unwrap(), Path::new(&c.stem()));
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            actual.insert(
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                bytes,
+            );
+        }
+        assert_eq!(actual, expected);
     }
 }

@@ -126,6 +126,237 @@ launch, hide/reopen, independent client exit and orderly service stop on a deskt
 Native code uses fixed companion CLI operations and validates profile, executable
 and loopback origin. Keep WebView process/filesystem/shell capabilities disabled.
 
+## Windows Virtual Workspace
+
+The independent library is `crates/daat-locus-virtual-workspace`, with a companion
+UMDF/IddCx driver in `driver/`. Library builds do not build the service/WebUI.
+The Windows service integrates it through the `computer_use` App;
+Core still exposes only Actors. The managed display backend requires Windows 10 1903+ x64. Build/check:
+
+```powershell
+cargo test --locked -p daat-locus-virtual-workspace --all-targets
+cargo clippy --locked -p daat-locus-virtual-workspace --all-targets -- -D warnings
+cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- probe
+```
+
+Build the Rust companion driver with stable Rust, MSVC x64 tools, a Windows SDK
+and libclang (for WDK binding generation). No C++ driver source is compiled:
+
+```powershell
+cargo run --locked -p xtask -- idd-driver
+cargo run --locked -p xtask -- idd-driver --check
+cargo fmt --manifest-path crates/daat-locus-virtual-workspace/driver/Cargo.toml -- --check
+# Optionally sign with an existing trusted certificate in CurrentUser/My:
+cargo run --locked -p xtask -- idd-driver --certificate-thumbprint '<thumbprint>'
+```
+
+The xtask restores a version/SHA256-pinned Microsoft WDK NuGet package beneath
+`target/virtual-workspace-deps`, compiles the UMDF DLL and validates/generates its
+catalog with Inf2Cat. Outputs stay in `target/virtual-workspace-driver`.
+The xtask also runs Universal InfVerif and ApiValidator; the DLL uses a static CRT.
+The driver is a separate Cargo workspace with a checked-in lockfile: normal lib
+builds never invoke WDK tools. `--wdk-root` can use an existing WDK content root.
+Distribute the INF, DLL and signed CAT together with `LICENSE.microsoft`;
+unsigned build output is not an installable release. Signing the DLL precedes
+catalog generation, using SHA256 and RFC3161 timestamps. Bundled distributions use
+the dedicated self-signed `Daat Locus Virtual Display` identity. Its public DER
+certificate lives in `crates/daat-locus-virtual-workspace/certificates`; private
+signing/backup materials belong in the owner's `.daat-locus-private/windows-idd`
+secrets repository. The installer explicitly provisions trust; this does not
+constitute Microsoft certification or eliminate first-download warnings.
+Validate installation and loading on clean supported Windows with Secure Boot and
+memory integrity enabled, starting without the certificate and exercising the
+actual installer's trust provisioning. Record unsupported configurations accurately.
+The xtask never installs drivers or changes Windows trust/signature enforcement.
+
+On an authorized elevated local connection, provision the signed package once.
+The distribution helper imports only its embedded public identity into machine
+Root and TrustedPublisher stores, then creates/binds the persistent PnP adapter.
+Normal Windows elevation applies. Runtime creates no software devices: it opens the installed
+device interface and requests a per-file monitor, without elevation, pipes, heartbeats
+or an extra service. No preexisting virtual screen, manual registry editing or
+display-settings action is required. Elevate only the installation command:
+
+```powershell
+cargo build --locked -p daat-locus-virtual-workspace --features driver-setup --bin daat-locus-display-setup
+sudo --chdir "$PWD" "$PWD/target/debug/daat-locus-display-setup.exe" install --package "$PWD/target/virtual-workspace-driver"
+cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- screen --width 1920 --height 1080 --seconds 10
+cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- lab
+# Without the companion driver, test only native WM_POINTER delivery:
+cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- pointer-lab --self-test
+```
+
+Library consumers use `DriverPackage::open(...).install()` during deployment,
+and service hosts retain `SharedDisplay::global()` independently of Apps. Its
+first `reserve(width, height)` creates one screen; `DisplayRegion` guards reserve
+nonoverlapping placement space. Releasing the last region leaves the screen active.
+Attach per-App `VirtualWorkspace`s to `region.display().id`; keep each region until
+its window has been returned. Dropping the last service/region owner removes the
+screen. These are process-local service owners, not a cross-process profile broker.
+Run `cargo test --locked -p daat-locus-virtual-workspace --test native_shared_display -- --ignored --nocapture --test-threads=1`
+on the unlocked signed-driver test machine to verify idle reuse, concurrent regions,
+cursor/topology stability after warmup and final-owner cleanup. Replacement regions
+retain both possible positions until native placement is confirmed; the test also
+checks that other clients cannot reuse either position prematurely.
+
+For explicitly short-lived diagnostic workspaces use
+`VirtualWorkspace::create(DisplayOptions::default())` for an owned screen,
+`configure(...)` for size/position, and `close()` to wait for removal. Drop/process
+exit also unplugs owned screens through WDF file cleanup; borrowed `attach` outputs
+are never removed. Up to eight independent workspace files can own monitors on the
+adapter. Device/power loss retires their generation, without automatic recreation.
+Normal close/Drop deactivates its path before unplugging it, preserving other modes
+instead of letting hot-unplug normalize their positions. Process termination still
+releases the monitor through file cleanup, with layout handled by Windows.
+Automatic placement chooses free space adjacent to a physical output, preferring
+its right edge. Explicit positions remain available when those edges are occupied.
+Keep a physical display active. `lab --display '<exact GDI name from probe>'`
+remains an optional diagnostic for a borrowed existing output.
+
+The lab creates two disposable windows in the same process and GUI thread. Click
+the human window to start the interactive experiment. `--self-test` activates only
+that fixture window and runs bounded assertions. Use `--default-activation` to
+measure default window activation instead of the fixture's PA_NOACTIVATE handler;
+with `--self-test` this explicitly expects activation and verifies its detection.
+No existing user window is moved, controlled or closed. Do not move the physical
+mouse during automated assertions; interactive diagnostics allow human movement
+and report it without claiming which source caused it. Windows foreground-lock
+policy may deny automatic fixture activation; run from a focused local terminal
+or use the click-to-start lab. An activation-denied run is a failed prerequisite.
+
+To keep automated assertions while starting with an actual user click, run
+`workspace-debug lab --self-test --click-to-start`. Click inside its Human window
+within two minutes. The assertions then verify capture and native pointer delivery;
+the process exits and releases its screen. Add `--default-activation` to measure
+default activation on that owned screen instead of the pointer-aware fixture.
+`--default-activation --noactivate-window` additionally gives the disposable
+receiver `WS_EX_NOACTIVATE`. Its assertions still require detecting activation:
+that window style does not suppress default `WM_POINTERACTIVATE` behavior.
+
+Native integration tests are ignored by default, require an interactive unlocked
+desktop, and fail with a prerequisite error instead of silently passing. Run them
+one at a time. The physical-screen tests need no IDD. The owned-display lifecycle
+and complete workspace tests require the signed companion driver already installed,
+create their own screen without administrator access, and release it; no monitor environment variable
+is needed. The lifecycle test asserts original outputs remain unchanged during
+creation, resize and removal; the full workspace test also verifies fixture pixels:
+
+```powershell
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace native_pointer_metadata_and_input_preservation -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace default_pointer_activation_is_detected -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace default_pointer_activation_on_owned_display_is_detected -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace noactivate_style_does_not_prevent_default_pointer_activation_on_owned_display -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace owned_display_lifecycle_preserves_existing_outputs -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace closing_one_workspace_preserves_another_on_the_same_adapter -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace owned_monitor_is_removed_when_client_process_is_terminated -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace same_process_same_thread_pointer_delivery_preserves_human_input -- --ignored --exact --nocapture --test-threads=1
+```
+
+CI builds/catalog-validates the driver on Windows and checks the Rust library
+across its OS matrix. Hosted CI does not load an unsigned driver or provision an
+interactive IDD desktop; do not
+report ignored integration cases as passing. Successful pointer-aware fixture
+delivery does not establish arbitrary-app compatibility or independent keyboard
+focus. Windows owns pointer routing and activation. Never simulate pointer IDs
+with PostMessage or restore human focus to hide a
+failed experiment. See the [pointer API](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-injectsyntheticpointerinput)
+and [activation contract](https://learn.microsoft.com/en-us/windows/win32/inputmsg/wm-pointeractivate).
+
+The optional `hook/` Cargo member builds a Rust DLL that Windows loads into only
+the selected target GUI thread's process. No target source changes or restarts are
+required. This explicitly permits DLL injection for the Hook experiment. Build
+the DLL and lab in the same profile/architecture, then run from a focused local
+terminal with a stationary cursor:
+
+```powershell
+cargo build --locked -p daat-locus-workspace-hook
+cargo build --locked -p daat-locus-virtual-workspace --example hook_lab
+./target/debug/examples/hook_lab.exe --dll ./target/debug/daat_locus_workspace_hook.dll
+# Automatically run the tests and leave the live preview open:
+./target/debug/examples/hook_lab.exe --run-tests
+# Automatically verify and close; no-driver diagnostic remains available:
+./target/debug/examples/hook_lab.exe --self-test
+./target/debug/examples/hook_lab.exe --physical-screen --self-test
+cargo test --locked -p daat-locus-virtual-workspace --test native_hook -- --ignored --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_hosted -- --ignored --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_calculator -- --ignored --nocapture --test-threads=1
+```
+
+By default the lab creates its own 1280x720 IDD output and opens a live preview
+with a Run tests button. The DLL defaults to the matching profile directory beside
+the examples folder. The native GUI thread captures and paints actual BGRA frames
+on a 50ms timer, preserving aspect ratio on resize. It reports test progress and
+keeps showing the screen after success/failure until closed; closing releases the
+fixture and owned screen. The preview does not forward mouse/keyboard input.
+`--self-test` additionally requires a stationary physical cursor and exits after
+verification; interactive mode allows physical cursor movement while checking
+focus/capture. `--physical-screen` retains the separate-window no-driver lab.
+
+The controller launches a separate disposable process containing two ordinary
+Win32 windows on one GUI thread. It verifies CBT activation/focus vetoes, native
+EDIT text/Unicode/navigation/Shift-selection, a native BUTTON message click,
+unchanged human text/focus/cursor, sibling-target rejection, modifier restoration,
+native trackbar dragging from 20 to approximately 80, hot detach/reattach,
+timeout cancellation without delayed replay, and owner-process
+death cleanup and rejection of mouse actions during human capture. Foreground
+activation denial fails the prerequisite. The owned-display
+case requires the installed signed driver; the physical-screen case does not.
+These opt-in cases are not run by hosted CI. CI compiles the DLL on Windows.
+
+`native_hosted` creates disposable frame/content processes on its own IDD output.
+It verifies cross-process Chinese text/clicks, content-process replacement, sibling
+rejection, and revocation of every route. `native_calculator` launches a new real
+Calculator instance and only closes the new frame identified from that launch;
+existing windows/processes are never reused or killed. UI Automation reads button
+bounds and display results only: the production `WindowInput` API selects UIA,
+invokes the actual controls, and must display 7 + 5 = 12 without changing
+foreground/focus/cursor/capture. The test prepares its own Calculator/human windows
+before measuring input; any temporary fixture style/input-queue setup is restored
+before the baseline. It never restores focus after an action. It also verifies
+unsupported caret/key input is refused and revoked routes cannot dispatch.
+A separate native test verifies pure Hook's typed pre-input signature-policy error
+and partial-lease cleanup. Do not disable OS/application mitigations to pass either
+test. Normal runs ignore these environment-dependent cases; explicitly opting in
+fails clearly when an installed app/driver or interactive prerequisite is missing.
+
+`WindowInput` chooses Hook normally and UIA on a setup-time signature restriction.
+UIA explicitly disables `AutoSetFocus`, retains available CBT guards, and supports
+accessible click/vertical scroll/close patterns. It does not advertise arbitrary
+keys, caret insertion or dragging. A failed/uncertain action never triggers backend
+fallback or replay. Apps can still implement incompatible behavior; check actual
+results and desktop receipts. `native_hosted` also verifies UIA on a real Win32
+BUTTON as well as the cross-process Hook route.
+
+Consumers hold `WindowHook::attach(&window, absolute_dll_path)` (or initially
+`workspace.hook(...)`) while operating the target; `text`, `key` and `mouse` take
+an explicit control HWND. `close`/Drop disables the policy and removes the hooks;
+immediate complete DLL unloading is not promised. Only same-architecture targets
+are supported. Protected/elevated targets may refuse hook installation/loading.
+Input is synchronous message dispatch, not independent hardware input: no
+Raw Input, accelerator-loop integration, `GetFocus`/`GetCursorPos` virtualization
+or OLE drag/drop. `drag(control, path, timeout)` dispatches a complete left-button
+gesture of 2..=128 signed-16-bit client points in one callback, without sleeps or
+holding a button between commands. Start inside the client; later points may leave
+it. Early cancellation sends WM_CANCELMODE and releases target capture. Existing
+capture is refused; native controls can briefly take real capture inside a click
+or drag. Do not claim simultaneous-drag isolation or arbitrary-app support.
+`--native-touch` separately measures genuine touch with default window handling;
+CBT can block activation while compatibility promotion still moves the system
+cursor, so that path is not a cursor-preserving fallback. Unknown effects must be
+observed, never replayed automatically.
+
+For driver-stage diagnostics, enable its ETW provider only for the experiment:
+
+```powershell
+sudo logman start DaatLocusIdd -p '{70b75adc-3a20-4a68-99a4-bc5249203ca0}' -ets -o "$PWD/target/idd-diagnostics.etl"
+# Run the install or screen operation being diagnosed.
+sudo logman stop DaatLocusIdd -ets
+```
+
+Events contain stages and status codes without application data. `EventWriteString`
+payloads may appear as UTF-16 `EventPayload` in `Get-WinEvent -Path ... -Oldest`
+XML on a machine without provider metadata. Keep traces under ignored `target`.
+
 ## Actor orchestration evaluations
 
 The shared model-facing policy is `src/app_instructions/orchestration.md`.
@@ -235,6 +466,101 @@ databases; reports remain under ignored `target`. An uncatchable process kill or
 power loss can prevent cleanup. Do not point the driver at an existing profile.
 
 ## Process management and packaging
+
+Windows ComputerUse is a device App for non-Core Actors. Its single remembered
+desktop authorization explicitly covers GUI file access outside the project
+sandbox; it does not expand Files/Terminal grants. Handing a window back revokes
+its IDs before hooks are removed or physical placement begins. A running command
+keeps handoff pending until it finishes. The native App test uses disposable
+windows and the installed signed IDD; run from an unlocked foreground terminal
+with a stationary cursor, after building the matching Hook DLL and hook_lab.
+It checks complete-window PNG dimensions, magnified crop input routing, resizing,
+moving, fitting, maximized-window recovery, stale image rejection and unchanged
+foreground/focus/capture/cursor during window adjustment:
+
+```powershell
+$env:DAAT_LOCUS_BUILD_WEBUI='0'
+cargo test --locked --no-default-features --lib computer_use_app
+cargo test --locked --no-default-features --lib computer_use_app::windows::tests::native_actor_take_input_give_revocation_and_inflight_handoff -- --ignored --exact --nocapture --test-threads=1
+```
+
+For startup placement, also build the current CLI and `launch_target` example.
+Run native checks serially:
+
+```powershell
+cargo build --locked --no-default-features --bin daat-locus
+cargo build --locked -p daat-locus-virtual-workspace --example launch_target
+cargo test --locked -p daat-locus-virtual-workspace --test native_launch initial_visible_window -- --ignored --nocapture --test-threads=1
+cargo test --locked --no-default-features --lib computer_use_app::windows::launch_tests -- --ignored --nocapture --test-threads=1
+```
+
+The first check verifies the EXE's first `WM_SHOWWINDOW` rectangle, rather than a
+later relocation. The App check uses the real clean launcher with a Unicode/spaced
+executable path and verifies automatic acquisition, protected environment removal,
+and preservation of an existing window. Shell monitor hints are advisory: the
+separate opt-in `calculator_shell_activation_respects_the_virtual_monitor_hint`
+compatibility check currently fails because Calculator shows on the physical
+monitor and activates. Do not report this case as fixed or convert it to a passing
+prerequisite skip; unconfirmed startup must retain its `outcome_unknown` result.
+
+Windows x64 distributions also build and verify the Hook DLL, deployment helper,
+and signed IDD package. Use `--windows-certificate-thumbprint <CurrentUser/My SHA1>`
+to sign them, or `--idd-package <directory>` for an existing signed driver package
+with already signed helpers. Bundled packaging requires the pinned distribution
+identity (SHA1 `C2D252AEFAF27171C36AF1BD6DAF2FDC5441E462`); the helper rejects a
+CAT signed by another identity before provisioning trust. The signing host must
+already trust this public certificate for SignTool policy verification; on first
+bootstrap a signed package can be installed by the helper before re-running that
+verification. WiX Burn elevates the machine driver installer; the client MSI remains
+per-user. The install page discloses machine certificate trust. The CAT hash and
+certificate presence detect an unchanged installed prerequisite. Its InstallCondition
+skips the entire permanent prerequisite when already present during Install, while
+Repair (Burn action 8) still executes the helper. Keep source caching for actual
+deployments/maintenance; neither request machine caching nor unconditional cleanup
+on the skip path. Do not relax ProgramData cache ACLs to work around a mixed-scope
+bundle failure. Client uninstall
+retains the shared adapter/trust; explicit complete removal uses elevated
+`daat-locus-display-setup.exe uninstall`. This removes all matching driver versions
+and only certificate entries recorded as installer-owned. If removal needs a reboot,
+repeat it after restarting to finish trust cleanup. No background service or boot,
+Secure Boot, HVCI, or signature-policy changes are added. Private keys are never bundled.
+Windows may recenter the physical cursor when the IDD topology is created/removed,
+even with unchanged physical output modes. Input cursor assertions therefore use
+the configured-display baseline; lifecycle tests still check foreground/focus,
+capture, references and physical output geometry. The backend does not reposition
+the user's cursor to hide the topology behavior. A synchronous modal input/WM_CLOSE
+handler can keep input/handoff pending until it exits; arbitrary apps remain
+an explicit compatibility validation requirement.
+Archive users run `sudo ./daat-locus-display-setup.exe install` from the extracted
+directory once. `--skip-build` still verifies all required signatures.
+
+Trust rollback/ownership tests run with `--features driver-setup`, including in
+Windows CI. For the opt-in elevated driver roundtrip, close all DL workspaces and
+start with no bundled driver/certificate (use the explicit uninstall above):
+
+```powershell
+$env:DAAT_LOCUS_SIGNED_IDD_PACKAGE="$PWD/target/virtual-workspace-driver"
+cargo test --locked -p daat-locus-virtual-workspace --features driver-setup --lib windows::driver_trust::tests::native_bundled_installation_rejects_tampering_and_cleans_trust -- --ignored --exact --nocapture --test-threads=1
+```
+
+Run this test from an elevated terminal on a disposable Windows test environment.
+It rejects a modified INF and checks trust rollback, installs/repairs a signed
+package, creates/removes a real monitor, and removes driver/trust. It leaves the
+bundled driver uninstalled; install it again afterward if needed. Missing elevation
+or a signed package fails explicitly. This does not establish all target OS policies.
+
+Also run the mixed-scope installer regression from a **non-elevated** Windows
+terminal with WiX 6 and the Bal extension installed:
+
+```powershell
+cargo test --locked -p xtask computer_use::tests::present_machine_driver_does_not_require_machine_cache_for_user_install -- --ignored --exact --nocapture
+```
+
+It executes a real Burn install/uninstall with the production driver prerequisite
+authoring, a controlled already-present driver state, and a unique disposable
+per-user MSI. It checks the installed file contents and removal, without installing
+a driver or changing machine trust/cache permissions. Full product installation
+and Repair still need validation; archive/layout checks do not exercise Apply.
 
 `start --open`, `status --json`, `stop` and `restart` address the selected
 `--profile` through local OS-owner IPC. Test process identity, profile isolation,

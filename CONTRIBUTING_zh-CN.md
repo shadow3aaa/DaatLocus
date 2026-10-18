@@ -47,6 +47,265 @@ Cargo `--offline` 本身不会禁止构建脚本联网。详见[模型目录](do
 避免一台设备的同步存储操作阻塞所有设备的心跳。从并行测试池中排除此用例时，必须保留这个
 显式执行步骤，不能减少协调回归覆盖。
 
+## Windows Virtual Workspace
+
+Windows x64 服务的 ComputerUse 是普通 Actor 的设备 App，Core 不直接持有。
+一项记忆的桌面操作授权明确允许 GUI 越出项目文件沙箱，不扩大 Files/Terminal 权限。
+交还窗口先撤销引用再卸载 Hook 和放置；已开始的命令未结束时保持待交还。
+构建匹配的 Hook DLL 和 hook_lab、安装签名驱动后，在解锁且前台的终端中保持光标
+静止执行真实 App 测试。覆盖完整窗口 PNG 尺寸、放大区域输入命中、尺寸/位置调整、
+适应空闲区域、最大化恢复、旧图像撤权，以及调整期间前台/焦点/捕获/光标不变：
+
+```powershell
+$env:DAAT_LOCUS_BUILD_WEBUI='0'
+cargo test --locked --no-default-features --lib computer_use_app
+cargo test --locked --no-default-features --lib computer_use_app::windows::tests::native_actor_take_input_give_revocation_and_inflight_handoff -- --ignored --exact --nocapture --test-threads=1
+```
+
+启动位置另需构建当前 CLI 与 `launch_target`，在解锁桌面中保持光标静止、串行运行：
+
+```powershell
+cargo build --locked --no-default-features --bin daat-locus
+cargo build --locked -p daat-locus-virtual-workspace --example launch_target
+cargo test --locked -p daat-locus-virtual-workspace --test native_launch initial_visible_window -- --ignored --nocapture --test-threads=1
+cargo test --locked --no-default-features --lib computer_use_app::windows::launch_tests -- --ignored --nocapture --test-threads=1
+```
+
+前者检查 EXE 第一次 WM_SHOWWINDOW 的位置，而不是事后移动；后者通过真实清理环境的
+启动子命令，使用带空格/中文的路径，验证自动接管、受保护环境变量排除及已有窗口保持。
+Shell 显示器提示不是强制隔离：单独 opt-in 的
+`calculator_shell_activation_respects_the_virtual_monitor_hint` 兼容性检查目前失败，
+计算器会在物理屏显示并激活；不得将其描述为已修复或通过前置条件跳过掩盖。
+无法确认的启动继续返回 outcome_unknown。
+
+Windows 发行构建同时携带并验签 Hook DLL、部署 helper 与 IDD 包。
+`cargo xtask package windows --windows-certificate-thumbprint <CurrentUser/My指纹>`
+完成构建与签名；`--idd-package <目录>` 可提供已有签名驱动包，helper 仍需有效签名。
+发行包使用固定的 `Daat Locus Virtual Display` 自签身份，SHA1 指纹为
+`C2D252AEFAF27171C36AF1BD6DAF2FDC5441E462`；其他身份的 CAT 在导入信任前拒绝。
+签名机需已信任该公钥以完成 SignTool 策略验签；首次引导时可先用 helper 安装
+已生成的签名包，再重新验签。私钥和可恢复备份保存在私有 secrets 仓库，安装包只含公钥。
+WiX Burn 对机器级驱动安装提权，客户端 MSI 保持 per-user。安装页说明将导入
+机器 Root/TrustedPublisher 信任；CAT 哈希和证书存在状态检测未变版本。
+InstallCondition 在驱动和信任已满足时跳过整个永久前置包，Repair（Burn action 8）
+仍执行修复，实际部署保留安装文件缓存供维护。跳过路径不请求机器缓存，也不无条件
+计划缓存清理，避免 Burn 6 在无提权执行的 per-user 安装计划中写入 ProgramData 失败；
+不放宽系统缓存 ACL。
+卸载客户端保留共享适配器/信任；需完整清理时，提权运行
+`daat-locus-display-setup.exe uninstall`，移除该身份所有驱动版本后只删除安装器新增的
+证书项。需要重启时保留信任，重启后再次运行卸载完成清理。已有证书不删除。
+不增加后台服务，不修改启动、Secure Boot、内存完整性或签名强制策略。
+实测 Windows 可在新增/移除 IDD 拓扑时把系统光标移至主屏中央，物理输出模式未变
+也可能发生；输入隔离测试从屏幕配置完成后取基准，生命周期测试仍检查前台、焦点、
+capture、引用撤销与物理输出几何。后端不恢复用户光标来掩盖系统行为。同步模态
+输入/WM_CLOSE 处理器可使输入/交还保持 pending 直到退出；任意应用兼容性仍需专项验证。
+归档用户解压后只需一次 `sudo ./daat-locus-display-setup.exe install`。
+`--skip-build` 仍执行全部必需签名检查。
+
+Windows CI 以 `--features driver-setup` 运行信任保留/回滚测试。管理员原生往返测试
+需先关闭工作区，使用上述完整卸载移除捆绑驱动与证书，并在隔离的 Windows 测试环境运行：
+
+```powershell
+$env:DAAT_LOCUS_SIGNED_IDD_PACKAGE="$PWD/target/virtual-workspace-driver"
+cargo test --locked -p daat-locus-virtual-workspace --features driver-setup --lib windows::driver_trust::tests::native_bundled_installation_rejects_tampering_and_cleans_trust -- --ignored --exact --nocapture --test-threads=1
+```
+
+该测试拒绝篡改 INF 并检查信任回滚，再安装/修复、创建真实屏幕、完整卸载驱动与信任。
+结束时驱动未安装，按需重新安装；缺少提权或签名包明确失败，不能据此证明所有系统策略兼容。
+
+另外，在安装 WiX 6/Bal 扩展的**非提权** Windows 终端执行缓存回归：
+
+```powershell
+cargo test --locked -p xtask computer_use::tests::present_machine_driver_does_not_require_machine_cache_for_user_install -- --ignored --exact --nocapture
+```
+
+该测试使用生产驱动包编排、受控的“驱动已存在”状态和独立临时 per-user MSI，
+真正运行 Burn 安装/卸载并核对文件内容及删除结果；不安装驱动或改变机器信任/缓存权限。
+完整产品安装和 Repair 仍需验证，归档提取及 layout 检查不能代替 Apply。
+
+独立 lib crate 位于 `crates/daat-locus-virtual-workspace`，`driver/` 包含配套
+UMDF/IddCx 驱动源码。lib 构建不构建后台/WebUI；Windows 服务通过 `computer_use`
+设备 App 接入，Core 仍仅持有 Actors App。托管屏幕
+后端需要 Windows 10 1903+ x64：
+
+```powershell
+cargo test --locked -p daat-locus-virtual-workspace --all-targets
+cargo clippy --locked -p daat-locus-virtual-workspace --all-targets -- -D warnings
+cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- probe
+```
+
+使用 stable Rust、MSVC x64 工具、Windows SDK 与 libclang 构建配套 Rust 驱动，
+libclang 只用于生成 WDK 绑定，不编译 C++ 驱动代码：
+
+```powershell
+cargo run --locked -p xtask -- idd-driver
+cargo run --locked -p xtask -- idd-driver --check
+cargo fmt --manifest-path crates/daat-locus-virtual-workspace/driver/Cargo.toml -- --check
+# 可使用 CurrentUser/My 中已存在的可信证书签名：
+cargo run --locked -p xtask -- idd-driver --certificate-thumbprint '<thumbprint>'
+```
+
+xtask 将固定版本/SHA256 的微软 WDK NuGet 包还原到 `target/virtual-workspace-deps`，
+编译 UMDF DLL，用 Inf2Cat 校验并生成目录包；产物位于 `target/virtual-workspace-driver`。
+xtask 同时执行 Universal InfVerif 与 ApiValidator，DLL 使用静态 CRT。
+驱动使用独立 Cargo 构建图和已保存的锁文件，普通 lib 构建不调用 WDK；
+`--wdk-root` 可指定现有 WDK 内容根目录。发行时一起分发
+INF、DLL、已签名 CAT 和 `LICENSE.microsoft`；未签名构建不能作为可安装发行包。
+DLL 签名在生成 CAT 之前完成，使用 SHA256 与 RFC3161 时间戳。捆绑发行使用专用
+自签名身份，公钥位于 lib 的 `certificates/virtual-display.cer`，由安装器显式建立信任；
+这不等于微软认证，也不消除首次下载提示。须从未信任该证书的干净目标 Windows 开始，
+通过真实安装器验证安装和加载，包括 Secure Boot/内存完整性配置；准确记录不兼容项。
+xtask 不安装驱动、不修改证书存储或 Windows 签名策略。
+
+发行 helper 通过正常管理员授权导入嵌入的固定公钥证书，再创建并绑定持久 PnP 适配器。
+运行时直接打开设备接口，通过 IOCTL 创建归属文件对象的监视器，
+不提权、不使用管道/心跳/额外服务。不要求已有虚拟屏、手工导证书、编辑注册表或
+修改显示设置。下面只有安装命令需要 sudo：
+
+```powershell
+cargo build --locked -p daat-locus-virtual-workspace --features driver-setup --bin daat-locus-display-setup
+sudo --chdir "$PWD" "$PWD/target/debug/daat-locus-display-setup.exe" install --package "$PWD/target/virtual-workspace-driver"
+cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- screen --width 1920 --height 1080 --seconds 10
+cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- lab
+# 没有配套驱动时，仅验证原生 WM_POINTER 输入：
+cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- pointer-lab --self-test
+```
+
+库调用方通过 `DriverPackage::open(...).install()` 部署驱动，
+服务宿主在 App 外保留 `SharedDisplay::global()`。首次 `reserve(width, height)`
+创建一个屏幕，`DisplayRegion` 为窗口保留互不重叠的位置，直到物理交还完成。
+App 使用 `region.display().id` attach 借用工作区；最后一个区域释放后屏幕保持启用，
+最后的服务持有者和窗口区域都释放后才移除。这是进程内共享，不是跨 profile
+进程的屏幕代理。在已解锁且装有签名驱动的测试机上，串行运行
+`cargo test --locked -p daat-locus-virtual-workspace --test native_shared_display -- --ignored --nocapture --test-threads=1`
+验证空闲复用、并发区域、首次创建之后的光标/拓扑稳定和最后持有者清理；
+还检查位置尚未确认时新旧区域同时保留，其他客户端不能提前复用任一位置。
+
+短期诊断工作区仍使用
+`VirtualWorkspace::create(DisplayOptions::default())` 创建拥有的屏幕，
+`configure(...)` 修改分辨率/位置，`close()` 等待移除。析构或进程退出也会拔除
+自己的屏幕，由 WDF 文件清理回调完成；`attach` 借用的输出不被删除。适配器支持
+最多 8 个独立 workspace 文件。设备/电源停机退休代次，恢复后不自动重建旧屏幕。
+正常 close/Drop 先停用自己的路径并保留其余模式，再拔除屏幕，避免热拔除
+重排其他输出；进程被强杀时仍通过文件清理回收监视器，布局由 Windows 处理。
+自动位置选择物理屏相邻的空位、优先右侧；相邻位置被占满时可传入显式位置。
+保留物理屏启用。
+`lab --display '<probe 打印的精确 GDI 名称>'` 仅用于可选的已有屏幕诊断。
+
+夹具在同一进程、同一 GUI 线程创建两个一次性窗口。交互模式下点击 Human 窗口
+开始；`--self-test` 只激活自建 Human 窗口并有界运行断言。默认接收窗口自行处理
+PA_NOACTIVATE；`--default-activation` 改用系统默认激活行为。与 `--self-test`
+组合时，明确要求观察到激活并验证检测结果。夹具不移动、控制或关闭现有用户窗口。
+自动断言期间保持物理鼠标静止；交互模式允许用户移动并报告变化，不声称变化来源。
+Windows 前台锁策略可能拒绝自动激活夹具；从获得焦点的本机终端运行，或使用
+点击启动模式。自动激活被拒绝属于前置条件失败。
+
+需要由真实点击开始、同时保留自动断言时，运行
+`workspace-debug lab --self-test --click-to-start`，在两分钟内点击自建 Human
+窗口内部。断言检查捕获与原生 pointer 输入，结束后释放屏幕。增加
+`--default-activation` 可在自建 IDD 屏幕上测量默认激活行为。
+`--default-activation --noactivate-window` 还会让自建接收窗口带有
+WS_EX_NOACTIVATE；断言仍要求检测到激活，因为该样式不能抑制默认
+WM_POINTERACTIVATE 行为。
+
+原生集成测试默认 ignored，要求已解锁的交互桌面；缺少前置条件时明确失败，
+不提前返回成功。逐项执行，避免多个夹具争抢前台。前两项只需物理屏；生命周期
+和完整工作区用例需要已经安装的已签名配套驱动，运行无需管理员，会自行创建并释放屏幕，不需要
+监视器环境变量。生命周期测试断言创建、调整和回收时原有输出保持不变，完整
+工作区用例还检查 IDD 显示中的实际夹具颜色：
+
+```powershell
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace native_pointer_metadata_and_input_preservation -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace default_pointer_activation_is_detected -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace default_pointer_activation_on_owned_display_is_detected -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace noactivate_style_does_not_prevent_default_pointer_activation_on_owned_display -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace owned_display_lifecycle_preserves_existing_outputs -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace closing_one_workspace_preserves_another_on_the_same_adapter -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace owned_monitor_is_removed_when_client_process_is_terminated -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_workspace same_process_same_thread_pointer_delivery_preserves_human_input -- --ignored --exact --nocapture --test-threads=1
+```
+
+CI 在各 OS 检查 Rust crate，Windows 构建驱动并校验目录包；托管 CI 不加载
+未签名驱动，也未配置交互式 IDD 桌面，不能把 ignored 集成测试报告为通过。pointer-aware 夹具
+成功不代表任意应用兼容或独立键盘焦点。Windows 决定 pointer 路由与激活；
+不能用 PostMessage 伪造 pointer ID，或恢复用户焦点掩盖失败。
+参见[输入 API](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-injectsyntheticpointerinput)
+和[激活契约](https://learn.microsoft.com/en-us/windows/win32/inputmsg/wm-pointeractivate)。
+
+可选的 `hook/` Cargo 成员构建 Rust DLL，由 Windows 加载到所选 GUI 线程的
+目标进程内；无需修改目标源码或重启应用。这一实验明确允许 DLL 注入。
+DLL 与夹具须使用相同 profile/架构构建；在获得焦点的本机终端中执行，保持光标静止：
+
+```powershell
+cargo build --locked -p daat-locus-workspace-hook
+cargo build --locked -p daat-locus-virtual-workspace --example hook_lab
+./target/debug/examples/hook_lab.exe --dll ./target/debug/daat_locus_workspace_hook.dll
+# 自动运行测试，保留实时预览窗口：
+./target/debug/examples/hook_lab.exe --run-tests
+# 自动验证后关闭；仍可使用不依赖驱动的诊断模式：
+./target/debug/examples/hook_lab.exe --self-test
+./target/debug/examples/hook_lab.exe --physical-screen --self-test
+cargo test --locked -p daat-locus-virtual-workspace --test native_hook -- --ignored --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_hosted -- --ignored --nocapture --test-threads=1
+cargo test --locked -p daat-locus-virtual-workspace --test native_calculator -- --ignored --nocapture --test-threads=1
+```
+
+默认自行创建 1280x720 IDD 屏幕并打开实时预览，点击 Run tests 开始。
+DLL 默认取 examples 目录同一 profile 下的构建产物。原生 GUI 线程以 50ms
+定时器捕获、绘制实际 BGRA，缩放窗口时保持画面比例。测试阶段和结果显示在
+窗口内，成功或失败后继续显示画面，关闭时回收夹具和自有屏幕。预览不转发输入。
+`--self-test` 要求物理光标静止并在验证后退出；交互模式允许物理光标移动，仍
+检查焦点/capture。`--physical-screen` 保留不依赖驱动的独立双窗口诊断。
+
+控制端启动独立夹具进程，其两个普通 Win32 窗口共用一个 GUI 线程。验证 CBT
+激活/焦点否决、标准 EDIT 的 Unicode 文本/导航/Shift 选择、标准 BUTTON 消息
+点击、标准滑块从 20 拖至约 80、用户文本/焦点/光标保持、同线程兄弟控件拒绝、修饰键状态恢复、热卸载/重挂、
+超时取消无延迟重放、已有用户 capture 时拒绝鼠标操作，以及控制进程死亡后的策略释放。前台激活被拒绝属于前置条件
+失败。自有屏幕用例需要已安装的签名驱动，物理屏用例无需驱动；托管 CI 不运行
+这些 opt-in 桌面用例，但在 Windows 编译 DLL。
+
+`native_hosted` 在自有 IDD 屏上创建独立框架/内容进程，验证跨进程中文输入与点击、
+内容进程更换、无关兄弟窗口拒绝和全部输入路由撤权。`native_calculator` 启动真实的
+新计算器实例，仅关闭本次启动识别出的新窗口，不复用或终止已有窗口/进程。
+测试端 UI Automation 只读取按钮位置与结果；生产 `WindowInput` 选择 UIA 并调用
+实际控件，必须显示 7 + 5 = 12，同时保持前台、焦点、光标和 capture。测试先准备
+自己的计算器/用户夹具窗口；临时样式与输入队列准备均在基线前恢复，操作后不恢复焦点。
+还检查不支持的通用键盘/插入文本明确拒绝，撤权后不能派发。另一个用例验证纯 Hook
+在输入前返回类型化签名策略错误，并回收部分安装的租约。不得关闭系统或应用缓解策略
+来让测试通过。普通测试将这些外部环境用例标为 ignored；显式运行时，缺少应用、驱动
+或交互前置条件会明确失败。
+
+`WindowInput` 通常选择 Hook，仅在接管时遇到签名策略限制才选择 UIA。UIA 显式关闭
+AutoSetFocus，保留允许安装的 CBT 守卫，支持可访问性点击、垂直滚动和关闭；不声称
+支持通用按键、插入位置文本或拖曳。失败/未知效果不触发后端重试。应用仍可能不兼容，
+必须检查实际结果与桌面回执。`native_hosted` 除跨进程 Hook 路由外，也验证真实 Win32
+BUTTON 上的 UIA 操作。
+
+调用方持有 `WindowHook::attach(&window, absolute_dll_path)` 或初始
+`workspace.hook(...)`，用 `text`、`key`、`mouse` 向明确控件 HWND 派发操作。
+close/Drop 禁用策略并卸载 Hook，不承诺 DLL 立即完全卸载。仅支持同架构目标；
+受保护/提权应用可能拒绝安装或加载。这是同步消息派发，不是独立硬件输入：
+尚无 Raw Input、accelerator 消息循环、GetFocus/GetCursorPos 虚拟化和 OLE 拖放。
+`drag(control, path, timeout)` 在一次回调内完成 2..=128 个 signed-16-bit
+客户区坐标组成的左键拖曳，不 sleep、不跨命令按住；起点必须在客户区内，后续点
+允许移出。异常结束派发 WM_CANCELMODE 并释放目标 capture。
+已有 capture 时拒绝鼠标操作；原生控件可能在单次点击/拖曳内短暂取得真实 capture，不能
+据此宣称支持用户同时拖拽或任意软件。`--native-touch` 单独测量默认窗口处理的
+真实触摸；CBT 可阻止激活，但兼容转换仍可能移动系统光标，不能作为保持光标的
+后备输入路径。未知效果必须先观察，不自动重放。
+
+定位驱动内部阶段时，仅在实验期间启用 ETW provider：
+
+```powershell
+sudo logman start DaatLocusIdd -p '{70b75adc-3a20-4a68-99a4-bc5249203ca0}' -ets -o "$PWD/target/idd-diagnostics.etl"
+# 执行需要诊断的安装或屏幕操作。
+sudo logman stop DaatLocusIdd -ets
+```
+
+事件只含阶段与状态码，不含应用数据。没有 provider 元数据时，
+`Get-WinEvent -Path ... -Oldest` 的 XML 可能把 EventWriteString 的 UTF-16
+内容放在 `EventPayload`。跟踪文件保留在已忽略的 `target` 下。
+
 ## Actor 编排评测
 
 通用模型指令维护在 `src/app_instructions/orchestration.md`。Core 和安装管理型

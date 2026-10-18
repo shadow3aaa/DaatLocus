@@ -10,6 +10,7 @@ pub mod browser_app;
 #[cfg(not(target_os = "android"))]
 pub mod browser_install;
 pub mod builtin_apps;
+pub mod computer_use_app;
 pub mod config;
 pub mod config_setup;
 pub mod context_budget;

@@ -590,6 +590,61 @@ mod tests {
             arguments: json!({"path":"source.txt","start_line":null,"line_count":null}),
         }
     }
+
+    #[tokio::test]
+    async fn computer_desktop_grant_is_remembered_without_expanding_project_filesystem() {
+        use crate::{app::App, computer_use_app::ComputerUseApp};
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(json!({
+            "decision":"approve", "reason":"Requested desktop operation"
+        }))));
+        let (_dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let app = ComputerUseApp::new(actor.id.clone(), system.clone(), true);
+        let base = system.execution_context(&actor, &message).unwrap();
+        assert!(!base.sandbox_policy.filesystem.full_disk_read);
+        let mut original_policy = base.sandbox_policy.clone();
+        original_policy.filesystem.readable_roots.sort();
+        original_policy.filesystem.readable_roots.dedup();
+        let control = ActorControl::default();
+        for (name, arguments) in [
+            ("open_window", json!({"window_id":"discovered-window"})),
+            (
+                "type_text",
+                json!({"window_id":"discovered-window","state_id":"image","text":"中文"}),
+            ),
+            (
+                "give_window",
+                json!({"window_id":"discovered-window","state_id":"new-image","placement":"center"}),
+            ),
+        ] {
+            let call = AgentToolCall {
+                id: Uuid::new_v4().to_string(),
+                name: name.into(),
+                arguments,
+            };
+            let requested = app.permission_request(&call, &base).unwrap();
+            let review = app.review_requirement(&call, &base).unwrap();
+            let effective = super::authorize(
+                &system,
+                &actor,
+                &message,
+                &call,
+                &control,
+                &base,
+                &requested,
+                review.as_ref(),
+            )
+            .await
+            .unwrap();
+            app.before_tool_call(&call, &effective).unwrap();
+            assert_eq!(effective.sandbox_policy, original_policy);
+        }
+        assert_eq!(
+            reviewer.requests.lock().len(),
+            1,
+            "coordinate/text changes must reuse the desktop grant"
+        );
+        system.shutdown().await;
+    }
     async fn approval(system: &ActorSystem, message_id: &str) -> ApprovalRecord {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {

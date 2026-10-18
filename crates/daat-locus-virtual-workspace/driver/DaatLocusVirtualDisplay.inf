@@ -1,0 +1,55 @@
+[Version]
+Signature="$Windows NT$"
+Class=Display
+ClassGuid={4d36e968-e325-11ce-bfc1-08002be10318}
+ClassVer=2.0
+Provider=%Provider%
+CatalogFile=DaatLocusVirtualDisplay.cat
+DriverVer=10/18/2026,0.1.0.7
+PnpLockdown=1
+
+[Manufacturer]
+%Provider%=Models,NTamd64.10.0...18362
+[Models.NTamd64.10.0...18362]
+%Device%=Workspace,Root\DaatLocusVirtualDisplay
+
+[SourceDisksNames]
+1=%Disk%
+[SourceDisksFiles]
+DaatLocusVirtualDisplay.dll=1
+[DestinationDirs]
+DriverFiles=13
+[DriverFiles]
+DaatLocusVirtualDisplay.dll
+
+[Workspace.NT]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
+CopyFiles=DriverFiles
+[Workspace.NT.HW]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+AddReg=Hardware
+[Hardware]
+; Device access is established by the administrator during normal PnP installation.
+; Runtime monitor ownership is scoped to each opened file object, not a global pipe.
+HKR,,Security,0x00000000,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+HKR,,UpperFilters,0x00010000,"IndirectKmd"
+HKR,WUDF,DeviceGroupId,0x00000000,"DaatLocusVirtualDisplay"
+[Workspace.NT.Services]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
+[Workspace.NT.Wdf]
+UmdfService=DaatLocusVirtualDisplay,DriverService
+UmdfServiceOrder=DaatLocusVirtualDisplay
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
+[DriverService]
+UmdfLibraryVersion=2.25.0
+ServiceBinary=%13%\DaatLocusVirtualDisplay.dll
+UmdfExtensions=IddCx0102
+
+[Strings]
+Provider="Daat Locus"
+Device="Daat Locus Virtual Workspace Display"
+Disk="Daat Locus Virtual Display Driver"

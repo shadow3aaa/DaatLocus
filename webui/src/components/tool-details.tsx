@@ -57,6 +57,20 @@ export function ToolDetail({ result, onActor }: { result: ToolResult; onActor?(i
     if (result.name === "apps_manager__refresh") return <p className="dl-tool-note">{t("apps.refresh_action")}</p>;
     return <ul className="dl-tool-result-list">{apps.filter(app=>asText(app.name)).map((app,index)=><li key={index}><strong>{asText(app.name)}</strong>{asText(app.description)&&<p>{asText(app.description)}</p>}<small>{app.enabled?t("apps.enabled"):t("apps.disabled")}</small></li>)}</ul>;
   }
+  if (result.name.startsWith("computer_use__")) {
+    const observation = asObject(payload.observation);
+    const image = asText(observation.screenshot_url);
+    const rows = [...asRows(payload.apps), ...asRows(payload.windows), ...asRows(payload.discovered_windows), ...asRows(payload.related_windows)];
+    const status = asText(payload.status);
+    const statusKeys: Record<string, string> = { observed: "computer_use.observed", dispatched: "computer_use.dispatched", outcome_unknown: "computer_use.outcome_unknown", handoff_pending: "computer_use.handoff_pending", given_to_user: "computer_use.given_to_user" };
+    return <section className="dl-tool-details">
+      {result.error && <p className="dl-operation-error">{readableSummary(result.error)}</p>}
+      {asText(observation.title) && <p>{asText(observation.title)}</p>}
+      {statusKeys[status] && <p className="dl-tool-note">{t(statusKeys[status])}</p>}
+      {image && resourceActorId(image, location.href) && <div className="dl-artifact"><img src={resourceSource(image)} alt={asText(observation.title) || t("computer_use.window_image")} loading="lazy" /></div>}
+      {rows.length > 0 && <ul className="dl-tool-result-list">{rows.map((row, index) => <li key={asText(row.window_id) || asText(row.app_id) || index}><strong>{asText(row.title) || asText(row.name)}</strong>{typeof row.taken === "boolean" && <small>{t(row.taken ? "computer_use.controlled" : "computer_use.not_controlled")}</small>}</li>)}</ul>}
+    </section>;
+  }
   if (result.error) return <p className="dl-operation-error">{readableSummary(result.error) || t("tool_details.action_failed")}</p>;
   if (result.name.startsWith("terminal__")) {
     const session = asObject(payload.session);

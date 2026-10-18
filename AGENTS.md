@@ -36,6 +36,10 @@ client are connected.
 - Enforce account ownership, authenticated remote authority and sandbox access at
   every operation. Restrictive process isolation must fail
   closed when the platform cannot enforce it.
+  The explicitly approved ComputerUse desktop capability is an exception to the
+  project filesystem sandbox: target GUI apps retain this Windows user's file
+  access. Keep this exception inside ComputerUse; other Apps retain their sandbox.
+  Reject read-only remote authority and exclude Daat Locus's own processes/windows.
 - Do not restore deleted modules merely to make the old product run or compile.
 - Do not recreate the old Session, RuntimeTool, Dashboard, Sleep, or Workflow
   architecture through aliases, adapters, compatibility bridges, or renamed

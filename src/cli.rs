@@ -33,6 +33,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Internal credential-free application launcher.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    ComputerUseLaunch {
+        app: String,
+        #[arg(long)]
+        display: String,
+        #[arg(long, allow_hyphen_values = true)]
+        left: i32,
+        #[arg(long, allow_hyphen_values = true)]
+        top: i32,
+        #[arg(long, allow_hyphen_values = true)]
+        right: i32,
+        #[arg(long, allow_hyphen_values = true)]
+        bottom: i32,
+    },
     /// Internal desktop bootstrap protocol; reads a bounded OPAQUE message from stdin.
     #[command(hide = true)]
     ClientBootstrap,

@@ -1,0 +1,31 @@
+[package]
+name = "daat-locus-idd-driver"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Daat Locus UMDF 2 / IddCx virtual display driver"
+
+# Separate build graph: normal library builds need neither Windows nor the WDK.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+windows = { version = "0.62.2", default-features = false, features = [
+    "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi", "Win32_System_Threading", "Win32_Security",
+    "Win32_System_Diagnostics_Etw",
+] }
+
+[build-dependencies]
+bindgen = "0.72"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
