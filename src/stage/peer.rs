@@ -34,6 +34,132 @@ mod backpressure_tests {
     };
 
     #[tokio::test]
+    async fn content_window_fetches_ahead_accepts_reordering_and_resumes_verified_parts() {
+        use crate::stage::{
+            blob::Manifest,
+            protocol::{BlobAccess, CHUNK_BYTES},
+            transport::tls::VerifiedPeer,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let system = ActorSystem::open_account_gated(
+            directory.path().join("actors"),
+            directory.path().join("workspace"),
+            Config::default(),
+        )
+        .await
+        .unwrap();
+        let host = Host::load(system.clone()).unwrap();
+        host.initialize(true).unwrap();
+        let remote = DeviceIdentity::generate().unwrap();
+        let enrollment = host
+            .enroll_authenticated_device(&remote.join_request(now()).unwrap())
+            .unwrap();
+        let ledger = StageLedger::attach(system.store(), host.local);
+        ledger.import_peer(enrollment, vec![], now()).unwrap();
+        let nonce = Uuid::new_v4();
+        ledger
+            .prepare_connection(remote.profile().stage_id, 1, nonce, now())
+            .unwrap();
+        ledger
+            .commit_generation(remote.profile().stage_id, 0, 1, nonce, now())
+            .unwrap();
+        let (local, mut stream) = tokio::io::duplex(1024 * 1024);
+        let channel = PeerChannel::stream(
+            VerifiedPeer::signed_dtls(&remote.profile()),
+            local,
+            |_, _| Ok(()),
+        );
+        let (mut link, _) = PeerLink::new(host.clone(), channel, 1);
+        link.work_generation = crate::stage::reset::generation(&host).unwrap();
+        let payload = (0..CHUNK_BYTES * 20)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>();
+        let manifest = Manifest::from_bytes(&payload).unwrap();
+        let hash = manifest.content.hash.clone();
+        // A previous connection already persisted one verified part.
+        let store = ContentStore::new(system.store());
+        store
+            .begin_download(remote.profile().stage_id, &manifest, now())
+            .unwrap();
+        store
+            .receive_chunk(
+                remote.profile().stage_id,
+                &hash,
+                2,
+                &payload[2 * CHUNK_BYTES..3 * CHUNK_BYTES],
+                now(),
+            )
+            .unwrap();
+        let access = BlobAccess::Actor {
+            actor: ActorAddress {
+                stage_id: remote.profile().stage_id,
+                actor_id: "root".into(),
+            },
+        };
+        let (tx, rx) = oneshot::channel();
+        link.download(access.clone(), manifest.content.clone(), Waiter::Fetch(tx))
+            .unwrap();
+        let (query, _) = transport::read_frame(&mut stream).await.unwrap();
+        let response = |request: &Envelope, body| Envelope {
+            source: remote.profile().stage_id,
+            target: host.local,
+            message_id: Uuid::new_v4(),
+            in_reply_to: Some(request.message_id),
+            body,
+            ..request.clone()
+        };
+        link.receive(response(
+            &query,
+            Body::BlobManifest {
+                access,
+                manifest: manifest.clone(),
+            },
+        ))
+        .unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for count in [8, 8, 3] {
+            let mut requests = vec![];
+            // Every request in this window must arrive before any reply.
+            for _ in 0..count {
+                let (request, _) = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    transport::read_frame(&mut stream),
+                )
+                .await
+                .expect("content still uses stop-and-wait")
+                .unwrap();
+                let Body::BlobRead { chunk, .. } = request.body else {
+                    panic!("expected content read")
+                };
+                assert_ne!(chunk, 2, "verified part was downloaded again");
+                assert!(seen.insert(chunk), "duplicate chunk request");
+                requests.push((request, chunk));
+            }
+            assert!(link.downloads[&hash].inflight.len() <= 8);
+            for (request, chunk) in requests.into_iter().rev() {
+                let bytes = payload
+                    [chunk as usize * CHUNK_BYTES..(chunk as usize + 1) * CHUNK_BYTES]
+                    .to_vec();
+                link.receive(response(
+                    &request,
+                    Body::BlobChunk {
+                        content: manifest.content.clone(),
+                        chunk,
+                        chunk_hash: crate::stage::digest(&bytes),
+                        bytes,
+                    },
+                ))
+                .unwrap();
+            }
+        }
+        assert_eq!(seen.len(), 19);
+        assert_eq!(rx.await.unwrap().unwrap(), payload);
+        assert_eq!(store.verified_bytes(&manifest.content).unwrap(), payload);
+        assert!(link.downloads.is_empty());
+        drop(link);
+        system.shutdown().await;
+    }
+    #[tokio::test]
     async fn existing_history_survives_a_slow_writer_and_still_receives_device_metadata() {
         let directory = tempfile::tempdir().unwrap();
         let mut config = Config {
@@ -306,22 +432,14 @@ impl PeerHandle {
 }
 enum Pending {
     Rpc(oneshot::Sender<Result<Body>>),
-    Manifest {
-        hash: String,
-    },
-    Chunk {
-        hash: String,
-        chunk: u32,
-        remaining: VecDeque<u32>,
-    },
+    Manifest { hash: String },
+    Chunk { hash: String, chunk: u32 },
     Directory,
     AccountCredentials,
     AccountConfiguration,
     Members,
     Revocations,
-    Snapshot {
-        actor: ActorAddress,
-    },
+    Snapshot { actor: ActorAddress },
 }
 enum Waiter {
     Input(Box<Envelope>),
@@ -333,7 +451,13 @@ struct Download {
     reference: BlobRef,
     access: BlobAccess,
     waiters: Vec<Waiter>,
+    remaining: VecDeque<u32>,
+    inflight: std::collections::HashSet<u32>,
+    started: std::time::Instant,
 }
+const DOWNLOAD_WINDOW: usize = 8;
+// Leave room for identity, cancellation, coordination and other control RPCs.
+const CONTENT_REQUESTS: usize = 24;
 struct Subscription {
     request: Envelope,
     cursor: Option<Cursor>,
@@ -360,6 +484,7 @@ pub struct PeerLink {
     views: Subscriptions,
     inflight: HashMap<Uuid, i64>,
     downloads: HashMap<String, Download>,
+    download_cursor: Option<String>,
 }
 impl Drop for PeerLink {
     fn drop(&mut self) {
@@ -400,6 +525,7 @@ impl PeerLink {
                 views: Subscriptions::default(),
                 inflight: HashMap::new(),
                 downloads: HashMap::new(),
+                download_cursor: None,
             },
             PeerHandle {
                 commands: tx,
@@ -615,6 +741,7 @@ impl PeerLink {
             writable.as_mut().enable();
             if let Err(error) = self
                 .drain_deferred()
+                .and_then(|_| self.pump_downloads())
                 .and_then(|_| self.publish())
                 .and_then(|_| self.flush())
             {
@@ -1759,13 +1886,13 @@ impl PeerLink {
                         &manifest,
                         now(),
                     )?);
-                self.next_chunk(hash, missing)
+                download.remaining = missing;
+                if download.remaining.is_empty() {
+                    self.finish_download(&hash)?;
+                }
+                self.pump_downloads()
             }
-            Pending::Chunk {
-                hash,
-                chunk,
-                remaining,
-            } => {
+            Pending::Chunk { hash, chunk } => {
                 let Body::BlobChunk {
                     content,
                     chunk: actual,
@@ -1775,10 +1902,11 @@ impl PeerLink {
                 else {
                     return Err(StageError::Invalid("Expected content chunk"));
                 };
-                let download = self
-                    .downloads
-                    .get_mut(&hash)
-                    .ok_or(StageError::Conflict("Content waiter expired"))?;
+                let Some(download) = self.downloads.get_mut(&hash) else {
+                    // Other in-flight chunks may finish after this download
+                    // was denied or timed out. They cannot revive its waiters.
+                    return Ok(());
+                };
                 download.deadline = now() + 30000;
                 if content != download.reference || actual != chunk {
                     return Err(StageError::Conflict("Content chunk changed"));
@@ -1790,7 +1918,11 @@ impl PeerLink {
                     &bytes,
                     now(),
                 )?;
-                self.next_chunk(hash, remaining)
+                download.inflight.remove(&chunk);
+                if download.remaining.is_empty() && download.inflight.is_empty() {
+                    self.finish_download(&hash)?;
+                }
+                self.pump_downloads()
             }
             Pending::Snapshot { actor } => {
                 let Body::ActorSnapshot { page, .. } = frame.body else {
@@ -1890,41 +2022,66 @@ impl PeerLink {
                 reference,
                 waiters: vec![waiter],
                 deadline: now() + 30000,
+                remaining: VecDeque::new(),
+                inflight: Default::default(),
+                started: std::time::Instant::now(),
             },
         );
         Ok(())
     }
-    fn next_chunk(&mut self, hash: String, mut remaining: VecDeque<u32>) -> Result<()> {
-        if let Some(chunk) = remaining.pop_front() {
-            let download = self
-                .downloads
-                .get(&hash)
-                .ok_or(StageError::Conflict("Content waiter expired"))?;
-            self.request(
-                Body::BlobRead {
+    fn pump_downloads(&mut self) -> Result<()> {
+        // Fill round-robin so several resources can make progress, bounded by
+        // both the per-content window and the shared RPC/transport budgets.
+        loop {
+            let mut progress = false;
+            let mut hashes = self.downloads.keys().cloned().collect::<Vec<_>>();
+            hashes.sort_unstable();
+            if let Some(cursor) = &self.download_cursor {
+                let split = hashes.partition_point(|hash| hash <= cursor);
+                hashes.rotate_left(split);
+            }
+            for hash in hashes {
+                if self.pending.len() >= CONTENT_REQUESTS || self.deferred.len() >= 8 {
+                    return Ok(());
+                }
+                let download = self.downloads.get_mut(&hash).unwrap();
+                if download.inflight.len() >= DOWNLOAD_WINDOW {
+                    continue;
+                }
+                let Some(chunk) = download.remaining.pop_front() else {
+                    continue;
+                };
+                download.inflight.insert(chunk);
+                let body = Body::BlobRead {
                     access: download.access.clone(),
                     content: download.reference.clone(),
                     chunk,
-                },
-                Pending::Chunk {
-                    hash,
-                    chunk,
-                    remaining,
-                },
-                Class::Blob,
-            )
-        } else {
-            let download = self
-                .downloads
-                .remove(&hash)
-                .ok_or(StageError::Conflict("Content waiter expired"))?;
-            let bytes =
-                ContentStore::new(self.host.system.store()).verified_bytes(&download.reference)?;
-            for waiter in download.waiters {
-                self.complete(waiter, bytes.clone())?;
+                };
+                self.download_cursor = Some(hash.clone());
+                self.request(body, Pending::Chunk { hash, chunk }, Class::Blob)?;
+                progress = true;
             }
-            Ok(())
+            if !progress {
+                return Ok(());
+            }
         }
+    }
+    fn finish_download(&mut self, hash: &str) -> Result<()> {
+        let download = self
+            .downloads
+            .remove(hash)
+            .ok_or(StageError::Conflict("Content waiter expired"))?;
+        let bytes =
+            ContentStore::new(self.host.system.store()).verified_bytes(&download.reference)?;
+        tracing::debug!(
+            bytes = bytes.len(),
+            elapsed_ms = download.started.elapsed().as_millis() as u64,
+            "Peer content transfer completed"
+        );
+        for waiter in download.waiters {
+            self.complete(waiter, bytes.clone())?;
+        }
+        Ok(())
     }
     fn complete(&mut self, waiter: Waiter, bytes: Vec<u8>) -> Result<()> {
         match waiter {
