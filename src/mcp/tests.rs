@@ -63,6 +63,33 @@ async fn installations_and_tools_survive_reopen_and_growth_beyond_former_quotas(
     assert_eq!(Registry::open(path).unwrap().entries().len(), 66);
 }
 
+#[test]
+fn installation_approval_binds_the_full_connection_without_disclosing_hidden_parameters() {
+    use crate::actors::ApprovalFingerprint;
+    let directory = tempfile::tempdir().unwrap();
+    let app = AppsManager::new(
+        Registry::open(directory.path().join("apps.json")).unwrap(),
+        "test-actor".into(),
+    );
+    let context = context(directory.path());
+    let review = |query| {
+        app.review_requirement(&call("install", json!({
+        "name":"Requested App","description":null,"transport":"http",
+        "url":format!("https://example.invalid/mcp?target={query}"),"command":null,"arguments":[]
+    })), &context).unwrap().unwrap()
+    };
+    let first = review("private-first-target");
+    let second = review("private-second-target");
+    assert_eq!(first.action["connection"], second.action["connection"]);
+    assert_ne!(
+        first.approval_fingerprint().unwrap(),
+        second.approval_fingerprint().unwrap()
+    );
+    let public = serde_json::to_string(&first).unwrap();
+    assert!(!public.contains("private-first-target"));
+    assert!(!public.contains("target="));
+}
+
 #[derive(Default)]
 struct Fake {
     calls: AtomicUsize,

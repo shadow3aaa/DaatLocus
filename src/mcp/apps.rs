@@ -120,10 +120,17 @@ impl App for AppsManager {
         if !matches!(call.name.as_str(), "install" | "enable" | "close") {
             return Ok(None);
         }
+        let mut action = self.permission_request(call, context)?.operation_details;
+        if call.name == "install" {
+            let source = args::<InstallArgs>(call)?.source()?;
+            action["connection_fingerprint"] = json!(crate::stage::digest(
+                &serde_json::to_vec(&source).into_diagnostic()?
+            ));
+        }
         Ok(Some(crate::actors::AppReview::new(
             "apps_manager/lifecycle/v1",
             "Confirm the requested device-local App installation or lifecycle change, including its exact executable, connection, and installation revision. Do not approve unrequested command execution or credential disclosure.",
-            self.permission_request(call, context)?.operation_details,
+            action,
         )))
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
