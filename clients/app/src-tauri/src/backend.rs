@@ -89,7 +89,8 @@ impl Backend {
         }
         #[cfg(windows)]
         command.creation_flags(0x08000000);
-        let output = tokio::time::timeout(Duration::from_secs(65), command.output()).await??;
+        // Upgrading a running build allows 60s for orderly stop and 30s for readiness.
+        let output = tokio::time::timeout(Duration::from_secs(100), command.output()).await??;
         if !output.status.success() {
             return Err("Local service operation failed".into());
         }

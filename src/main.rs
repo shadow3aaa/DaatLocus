@@ -17,6 +17,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
     let (command, arguments) = cli::parse_args();
+    if matches!(
+        command,
+        cli::Command::Serve | cli::Command::Start { .. } | cli::Command::Account { .. }
+    ) && let Err(error) = daemon::control::current_executable_sha256()
+    {
+        eprintln!("{error:?}");
+        std::process::exit(1);
+    }
     #[cfg(windows)]
     if let cli::Command::ComputerUseLaunch {
         app,
@@ -135,6 +143,8 @@ async fn dispatch(
             let previous = control::query(&root, Action::Status).await?;
             if matches!(command, cli::Command::Start { .. })
                 && let Some(status) = &previous
+                && status.matches_current_executable()?
+                && status.state == control::State::Running
             {
                 println!("Already running · {}", status.url);
                 if open {

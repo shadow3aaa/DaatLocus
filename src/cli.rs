@@ -54,7 +54,7 @@ pub enum Command {
     ClientBootstrap,
     /// Start the Actor service and WebUI in the foreground (the default).
     Serve,
-    /// Start the service in the background; optionally open its WebUI.
+    /// Start the service in the background, gracefully upgrading an older running build.
     Start {
         #[arg(long)]
         open: bool,

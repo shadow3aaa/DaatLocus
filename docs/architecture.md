@@ -777,7 +777,11 @@ SPA 只匹配确切对话路径，未知 API 不返回 index.html。维护 CLI �
 解析参数；`serve` 前台运行，`start/status/stop/restart` 通过 profile 本地
 OS-owner IPC 管理后台进程，不借用浏览器认证、不删除 Actor 数据。后台存活按 PID 与
 进程启动时间识别，不依赖安装升级时可能被移动的映像路径；IPC 仍校验 OS Owner、
-端点进程与实例身份。
+端点进程与实例身份。服务启动前捕获自身 EXE 的 SHA256，保存在本机维护状态中；
+`start`（包括桌面客户端启动）只复用同一安装位置且指纹一致的运行实例。旧版本缺失
+指纹或同版本重新构建后指纹变化时，通过原有 OS-owner 通道正常停止，再沿用 profile、
+监听地址和 workspace 启动新代码，避免旧服务加载升级后的 Hook DLL。其他安装位置
+的服务不能被这个自动升级路径停止。`status` 不触发升级，退出客户端仍保留服务。
 
 
 Windows/macOS 的共用 Tauri 客户端位于 `clients/app/src-tauri`。窗口从配套 CLI

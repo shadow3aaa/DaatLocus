@@ -1,6 +1,7 @@
 //! A running service must remain controllable when an installer replaces its executable.
 use daat_locus::daemon::control::{self, Action};
 use std::{
+    io::Write,
     path::PathBuf,
     process::{Child, Command, Stdio},
     time::Duration,
@@ -69,19 +70,93 @@ async fn replacing_a_running_executable_preserves_control_and_rejects_a_stale_pr
     );
     std::fs::write(&metadata, serde_json::to_vec(&before).unwrap()).unwrap();
 
-    control::query(&root, Action::Stop).await.unwrap().unwrap();
+    let cli = |action: &str| {
+        let mut command = tokio::process::Command::new(&installed);
+        command
+            .arg(action)
+            .env("DAAT_LOCUS_HOME", &root)
+            .env_remove("DAAT_LOCUS_PROFILE_NAME")
+            .env_remove("DAAT_LOCUS_ACCOUNT_STORAGE_ROOT")
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
+        command
+    };
+    let unchanged = cli("start").output().await.unwrap();
+    assert!(unchanged.status.success());
+    assert_eq!(
+        control::query(&root, Action::Status)
+            .await
+            .unwrap()
+            .unwrap()
+            .instance,
+        before.instance,
+        "starting the same build must leave the independent service running"
+    );
+
+    // An executable overlay changes the installed build's hash while retaining
+    // an executable image and the exact same semantic package version.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&installed)
+        .unwrap()
+        .write_all(b"daat-locus-upgrade-regression")
+        .unwrap();
+    let upgrade = cli("start").output();
     // Reap the child as it exits, including on Unix where an unreaped zombie
     // still has a process-table entry.
-    let exit = tokio::time::timeout(Duration::from_secs(20), async {
+    let reaped = async {
         loop {
             if let Some(exit) = service.0.try_wait().unwrap() {
                 break exit;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    };
+    let (upgrade, exit) = tokio::time::timeout(Duration::from_secs(40), async {
+        tokio::join!(upgrade, reaped)
     })
     .await
     .expect("the renamed service must shut down normally");
     assert!(exit.success(), "service exited with {exit}");
+    let upgrade = upgrade.unwrap();
+    assert!(
+        upgrade.status.success(),
+        "{}",
+        String::from_utf8_lossy(&upgrade.stderr)
+    );
+    let upgraded = control::query(&root, Action::Status)
+        .await
+        .unwrap()
+        .unwrap();
+    // Guard the detached child even if a later assertion fails.
+    struct Detached(control::Status);
+    impl Drop for Detached {
+        fn drop(&mut self) {
+            let system = sysinfo::System::new_all();
+            if let Some(process) = system.process(sysinfo::Pid::from_u32(self.0.pid))
+                && process.start_time() == self.0.process_started
+            {
+                process.kill();
+            }
+        }
+    }
+    let _detached = Detached(upgraded.clone());
+    assert_ne!(upgraded.instance, before.instance);
+    assert_ne!(upgraded.executable_sha256, before.executable_sha256);
+    assert_eq!(upgraded.options.listen, before.options.listen);
+    assert_eq!(upgraded.options.workspace, before.options.workspace);
+    assert_eq!(upgraded.options.profile, before.options.profile);
+    assert!(cli("start").output().await.unwrap().status.success());
+    assert_eq!(
+        control::query(&root, Action::Status)
+            .await
+            .unwrap()
+            .unwrap()
+            .instance,
+        upgraded.instance
+    );
+    control::stop(&root).await.unwrap();
     assert!(control::load(&root).unwrap().is_none());
 }

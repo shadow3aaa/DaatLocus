@@ -35,11 +35,51 @@ pub struct Status {
     pub process_started: u64,
     pub started_at_ms: i64,
     pub executable: PathBuf,
+    /// Captured from the process image before service startup, never re-read from
+    /// an installation path which an updater may already have replaced.
+    #[serde(default)]
+    pub executable_sha256: Option<String>,
     pub namespace: PathBuf,
     pub root: PathBuf,
     pub url: String,
     pub options: LaunchOptions,
     pub state: State,
+}
+impl Status {
+    pub fn matches_current_executable(&self) -> Result<bool> {
+        let current = std::env::current_exe().into_diagnostic()?;
+        if self.executable.canonicalize().into_diagnostic()?
+            != current.canonicalize().into_diagnostic()?
+        {
+            return Err(miette!("Service belongs to another installation"));
+        }
+        Ok(self.executable_sha256.as_deref() == Some(current_executable_sha256()?))
+    }
+}
+
+/// Call before initializing the service so an update cannot change the recorded
+/// image identity during startup. CLI start uses the same identity for upgrades,
+/// including rebuilds which retain the same package version.
+pub fn current_executable_sha256() -> Result<&'static str> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    static HASH: std::sync::OnceLock<std::io::Result<String>> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        let mut file = std::fs::File::open(std::env::current_exe()?)?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+        }
+        Ok(hex::encode(hash.finalize()))
+    })
+    .as_ref()
+    .map(String::as_str)
+    .map_err(|error| miette!("Cannot identify service executable: {error}"))
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -122,6 +162,7 @@ impl Server {
             process_started,
             started_at_ms: chrono::Utc::now().timestamp_millis(),
             executable,
+            executable_sha256: Some(current_executable_sha256()?.to_owned()),
             namespace,
             root,
             url,
@@ -544,6 +585,17 @@ mod tests {
         let mut stopped = server.stopping();
         let reply = query(&root, Action::Status).await.unwrap().unwrap();
         assert_eq!(reply.instance, server.status.instance);
+        assert!(reply.matches_current_executable().unwrap());
+        // Old releases have no startup fingerprint. A pathname alone must not
+        // make them eligible for reuse after an installer replaces that file.
+        let mut legacy = serde_json::to_value(&reply).unwrap();
+        legacy.as_object_mut().unwrap().remove("executable_sha256");
+        let legacy: Status = serde_json::from_value(legacy).unwrap();
+        assert!(!legacy.matches_current_executable().unwrap());
+        let mut another_installation = reply.clone();
+        another_installation.executable = dir.path().join("another-installation");
+        std::fs::write(&another_installation.executable, b"another installation").unwrap();
+        assert!(another_installation.matches_current_executable().is_err());
         assert!(!*stopped.borrow());
         let mut forged = platform::connect(server.status()).await.unwrap();
         write_frame(
