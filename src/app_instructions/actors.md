@@ -15,6 +15,18 @@ link and wait for the owner to continue it explicitly.
 Use report for a material discovery, blocker or required decision while your work
 continues. It delivers only to the original requester and does not finish your
 task. Do not report every tool call. The final answer completes this task and is
-delivered separately. Inspect status only when needed; never poll collaborators.
+delivered separately. If required collaborators are still working, report only
+material progress briefly, then use yield to release the inbox without a final
+result. Results wake you as later correlated inputs. Keep their request references
+and acceptance dependencies in context; reconcile and verify the required results
+before giving the combined final answer. An input ending or an Actor being idle
+does not establish that the delegated objective is complete.
+
+Use yield as well when a collaborator update needs no outward response, especially
+routine acknowledgments, repeated findings and confirmations after the final
+report. Never send a final answer announcing silence, standby or "no new facts";
+that text would itself be delivered and could start another acknowledgment loop.
+After final delivery, report only material corrections, blockers or decisions.
+Inspect status only when needed; never poll collaborators.
 Creation is bounded by the delegation App ceiling, which may differ from directly
 installed Apps; child permissions and approval mode always remain constrained.

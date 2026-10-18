@@ -1329,6 +1329,65 @@ mod tests {
         );
     }
     #[test]
+    fn takeover_preserves_a_committed_yield_without_turning_its_boundary_into_a_reply() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = store(a_dir.path());
+        let b = store(b_dir.path());
+        let leader = StageId::new();
+        let input = a.enqueue(input(), None).unwrap();
+        a.claim_next(ACTOR_ID).unwrap().unwrap();
+        let call = crate::model_protocol::AgentToolCall {
+            id: "silent-update".into(),
+            name: "actors__yield".into(),
+            arguments: serde_json::json!({}),
+        };
+        a.append_history(
+            ACTOR_ID,
+            &input.id,
+            &[
+                crate::model_protocol::AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                    None,
+                    None,
+                    vec![call.clone()],
+                ),
+            ],
+        )
+        .unwrap();
+        a.tool_finished(
+            ACTOR_ID,
+            &input.id,
+            &call,
+            serde_json::json!({"finish_turn":true}),
+            "Input yielded",
+            "Input yielded",
+            None,
+        )
+        .unwrap();
+        a.append_history(
+            ACTOR_ID,
+            &input.id,
+            &[crate::model_protocol::AgentMessage::assistant("")],
+        )
+        .unwrap();
+        let batch = capture(&a, "account-a", leader, 1).unwrap().unwrap();
+        copy(&a, &b, &batch);
+        prepare(&b, &batch, "account-a").unwrap();
+        commit(&b, &batch, StageId::new()).unwrap();
+        resume(&b).unwrap();
+        assert!(incomplete_calls(&b, &input.id).unwrap().is_empty());
+        let boundary = completed_answer(&b, &input.id).unwrap().unwrap();
+        assert!(
+            b.finish_message(&input.id, MessageStatus::Completed, Some(&boundary), None)
+                .unwrap()
+                .is_none()
+        );
+        let completed = b.message(&input.id).unwrap();
+        assert_eq!(completed.status, MessageStatus::Completed);
+        assert_eq!(completed.reply, None);
+        assert_eq!(b.messages(ACTOR_ID, None, 10).unwrap().items.len(), 1);
+    }
+    #[test]
     fn committed_core_context_replicates_without_replaying_tools_or_importing_device_grants() {
         let a_dir = tempfile::tempdir().unwrap();
         let b_dir = tempfile::tempdir().unwrap();

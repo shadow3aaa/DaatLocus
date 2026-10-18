@@ -113,6 +113,68 @@ async fn apps_manager_queries_and_refresh_complete_in_ask_mode_without_approval(
     system.shutdown().await;
 }
 
+#[tokio::test]
+async fn yield_skips_review_but_failed_or_ungranted_calls_do_not_silence_a_reply() {
+    for (arguments, granted, silent) in [
+        (json!({}), true, true),
+        (json!({"content":"invalid"}), true, false),
+        (json!({}), false, false),
+    ] {
+        let provider = Arc::new(ReplayProvider::new(vec![
+            MockReply::Calls(vec![AgentToolCall {
+                id: "yield-input".into(),
+                name: "actors__yield".into(),
+                arguments,
+            }]),
+            MockReply::Answer("This input still needs a reply."),
+        ]));
+        let (_dir, system) = runtime(provider.clone()).await;
+        let mut actor = system.actor("root").unwrap();
+        actor.config.permissions.read_only = true;
+        actor.config.permissions.writable_roots.clear();
+        actor.config.permissions.approval_mode = super::super::ApprovalMode::Ask;
+        if !granted {
+            actor.config.permissions.tools = Some(vec!["actors__read_history".into()]);
+        }
+        system.store().save_actor(&actor).unwrap();
+        let input = system
+            .send_user("root", "Process this update".into(), vec![], None)
+            .unwrap();
+        let completed = wait_completed(&system, &input.id).await;
+        assert_eq!(
+            completed.status,
+            MessageStatus::Completed,
+            "{:?}",
+            completed.error
+        );
+        assert_eq!(
+            completed.reply.as_deref(),
+            if silent {
+                None
+            } else {
+                Some("This input still needs a reply.")
+            }
+        );
+        assert_eq!(provider.requests.lock().len(), if silent { 1 } else { 2 });
+        assert!(
+            system
+                .store()
+                .approvals(Some("root"), None, 10)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        let tools = system
+            .store()
+            .tool_summaries("root", &input.id, None, 10)
+            .unwrap()
+            .items;
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].error.is_none(), silent);
+        system.shutdown().await;
+    }
+}
+
 async fn wait_passivated(system: &ActorSystem) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while system.resident_workers() != 0 {
@@ -3749,7 +3811,7 @@ impl ModelFactory for CoordinatorFactory {
     }
 }
 #[tokio::test]
-async fn core_yields_after_delegating_and_receives_progress_while_worker_runs() {
+async fn core_yields_after_delegating_and_silently_receives_progress_while_worker_runs() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -3794,7 +3856,7 @@ async fn core_yields_after_delegating_and_receives_progress_while_worker_runs() 
             AgentToolCall{id:"ack".into(),name:"actors__deliver".into(),arguments:json!({"content":"The worker is investigating.","finish_turn":true})},
         ]),
         MockReply::Answer("Your second message has been handled."),
-        MockReply::Calls(vec![AgentToolCall{id:"update".into(),name:"actors__deliver".into(),arguments:json!({"content":"The cause is known; repair continues.","finish_turn":true})}]),
+        MockReply::Calls(vec![AgentToolCall{id:"absorb-update".into(),name:"actors__yield".into(),arguments:json!({})}]),
     ]);
     let first = system
         .send_user("core", "Investigate".into(), vec![], None)
@@ -3815,10 +3877,10 @@ async fn core_yields_after_delegating_and_receives_progress_while_worker_runs() 
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let messages = system.store().messages("core", None, 100).unwrap().items;
-            if messages.iter().any(|m| {
-                m.kind == MessageKind::Delivery
-                    && m.reply.as_deref() == Some("The cause is known; repair continues.")
-            }) {
+            if messages
+                .iter()
+                .any(|m| m.kind == MessageKind::Progress && m.status == MessageStatus::Completed)
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -3858,12 +3920,169 @@ async fn core_yields_after_delegating_and_receives_progress_while_worker_runs() 
         }
     );
     assert!(progress.content.contains("repair is still running"));
+    assert_eq!(progress.reply, None);
+    let messages = system.store().messages("core", None, 100).unwrap().items;
+    let deliveries: Vec<_> = messages
+        .iter()
+        .filter(|m| m.kind == MessageKind::Delivery)
+        .collect();
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "The routine update must not produce a user message"
+    );
+    assert_eq!(
+        deliveries[0].reply.as_deref(),
+        Some("The worker is investigating.")
+    );
     assert_eq!(system.actor("core").unwrap().config.apps, vec!["actors"]);
     assert!(crate::actors::permissions::app_granted(
         crate::actors::permissions::delegation_apps(&system.core_device_actor().unwrap().config),
         "files",
     ));
     network.stop().await;
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn coordinator_yields_between_required_results_and_routes_only_progress_then_final() {
+    let (_directory, system, provider) = paused_runtime().await;
+    let mut config = project_config(&system, "Argus", true);
+    config.apps.push("actors".into());
+    let coordinator = system.create_owned("root", config).unwrap();
+    let mut config = coordinator.config.clone();
+    config.name = "First collaborator".into();
+    let first = system
+        .create_owned(&coordinator.id, config.clone())
+        .unwrap();
+    config.name = "Second collaborator".into();
+    let second = system.create_owned(&coordinator.id, config).unwrap();
+    let original = system
+        .send_user(
+            "root",
+            "Analyze both areas, then give one report".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    system.store().claim_next("root").unwrap().unwrap();
+    let request = system
+        .send_from_actor(
+            "root",
+            &original.id,
+            &coordinator.id,
+            "Reconcile both required reviews".into(),
+        )
+        .unwrap();
+    system
+        .store()
+        .finish_message(&original.id, MessageStatus::Completed, None, None)
+        .unwrap();
+    provider.replies.lock().extend([
+        MockReply::Calls(vec![
+            AgentToolCall{id:"first-review".into(),name:"actors__send".into(),arguments:json!({"actor_id":first.id,"stage_id":null,"content":"Review the first area"})},
+            AgentToolCall{id:"second-review".into(),name:"actors__send".into(),arguments:json!({"actor_id":second.id,"stage_id":null,"content":"Review the second area"})},
+            AgentToolCall{id:"brief-progress".into(),name:"actors__report".into(),arguments:json!({"content":"Both reviews are underway."})},
+            AgentToolCall{id:"wait-for-reviews".into(),name:"actors__yield".into(),arguments:json!({})},
+            // Even a call after yield receives its observation before the boundary.
+            AgentToolCall{id:"read-context".into(),name:"actors__read_history".into(),arguments:json!({"cursor":null,"message_id":null,"limit":1})},
+        ]),
+        MockReply::Calls(vec![AgentToolCall{id:"first-review-received".into(),name:"actors__yield".into(),arguments:json!({})}]),
+        MockReply::Answer("Combined report: area one is correct; area two needs a correction."),
+    ]);
+
+    async fn advance(system: &ActorSystem, actor: &str) -> MessageRecord {
+        let input = system.store().claim_next(actor).unwrap().unwrap();
+        let record = system.execution_actor(&input).unwrap();
+        let mut apps =
+            builtin_apps::create_apps(&record, system.clone(), &system.config()).unwrap();
+        let reply = execute_message(system, &record, &input, &ActorControl::default(), &mut apps)
+            .await
+            .unwrap();
+        system
+            .store()
+            .finish_message(&input.id, MessageStatus::Completed, reply.as_deref(), None)
+            .unwrap();
+        apps.shutdown().await.unwrap();
+        system.store().message(&input.id).unwrap()
+    }
+
+    let yielded = advance(&system, &coordinator.id).await;
+    assert_eq!(yielded.id, request.id);
+    assert_eq!(yielded.reply, None);
+    let observations = system
+        .store()
+        .tool_summaries(&coordinator.id, &request.id, None, 10)
+        .unwrap()
+        .items;
+    assert_eq!(observations.len(), 5);
+    assert!(
+        observations.iter().all(|tool| tool.error.is_none()),
+        "{observations:?}"
+    );
+    let updates = system.store().messages("root", None, 100).unwrap().items;
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[1].kind, MessageKind::Progress);
+    assert!(updates[1].content.contains("Both reviews are underway."));
+
+    let input = system.store().claim_next(&first.id).unwrap().unwrap();
+    system
+        .store()
+        .finish_message(
+            &input.id,
+            MessageStatus::Completed,
+            Some("Area one is correct."),
+            None,
+        )
+        .unwrap();
+    assert_eq!(advance(&system, &coordinator.id).await.reply, None);
+    assert_eq!(
+        system
+            .store()
+            .messages("root", None, 100)
+            .unwrap()
+            .items
+            .len(),
+        2,
+        "The first contribution must not trigger a partial final report or acknowledgment"
+    );
+    assert_eq!(
+        system.store().messages(&second.id, None, 10).unwrap().items[0].status,
+        MessageStatus::Queued
+    );
+
+    let input = system.store().claim_next(&second.id).unwrap().unwrap();
+    system
+        .store()
+        .finish_message(
+            &input.id,
+            MessageStatus::Completed,
+            Some("Area two needs a correction."),
+            None,
+        )
+        .unwrap();
+    let completed = advance(&system, &coordinator.id).await;
+    assert_eq!(
+        completed.reply.as_deref(),
+        Some("Combined report: area one is correct; area two needs a correction.")
+    );
+    let updates = system.store().messages("root", None, 100).unwrap().items;
+    assert_eq!(updates.len(), 3);
+    assert_eq!(updates[2].kind, MessageKind::Result);
+    assert_eq!(
+        updates[2].in_reply_to.as_deref(),
+        Some(original.id.as_str())
+    );
+    assert!(
+        updates[2]
+            .content
+            .contains(completed.reply.as_deref().unwrap())
+    );
+    assert_eq!(
+        provider.requests.lock().len(),
+        3,
+        "Yield must not make a follow-up inference"
+    );
     system.shutdown().await;
 }
 

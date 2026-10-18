@@ -99,6 +99,7 @@ impl App for AccountActors {
                 | "status"
                 | "cancel"
                 | "deliver"
+                | "yield"
         )
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
@@ -176,7 +177,7 @@ impl App for AccountActors {
         }
         if matches!(
             call.name.as_str(),
-            "read_history" | "read_resource" | "deliver"
+            "read_history" | "read_resource" | "deliver" | "yield"
         ) {
             return self.local.execute_tool(call, context).await;
         }

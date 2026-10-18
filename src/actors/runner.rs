@@ -130,7 +130,7 @@ pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<Actor
                 Some("Execution interrupted; completed effects were not rolled back".to_owned()),
                 true,
             ),
-            (_, Ok(reply)) => (MessageStatus::Completed, Some(reply), None, false),
+            (_, Ok(reply)) => (MessageStatus::Completed, reply, None, false),
             (_, Err(error)) => (
                 MessageStatus::Failed,
                 None,
@@ -243,7 +243,7 @@ async fn execute_message(
     message: &MessageRecord,
     control: &ActorControl,
     apps: &mut AppManager,
-) -> Result<String> {
+) -> Result<Option<String>> {
     check_interruption(system, control, message)?;
     let context = system.execution_context(actor, message)?;
     let provider = system.provider(actor)?;
@@ -323,6 +323,16 @@ async fn execute_message(
                 message.id
             );
         }
+        if system.store().turn_yielded(&actor.id, &message.id)? {
+            // The successful tool observation is durable and all calls in its
+            // protocol group have settled; no final text is sent or inferred.
+            system.store().append_history(
+                &actor.id,
+                &message.id,
+                &[AgentMessage::assistant("")],
+            )?;
+            return Ok(None);
+        }
         if actor.id == crate::stage::shared::ACTOR_ID
             && system.store().core_turn_delivered(&message.id)?
         {
@@ -333,7 +343,7 @@ async fn execute_message(
                 &message.id,
                 &[AgentMessage::assistant("")],
             )?;
-            return Ok(String::new());
+            return Ok(Some(String::new()));
         }
         for guide in system.store().pending_steering(&actor.id, &message.id)? {
             let mut update = guide.clone();
@@ -468,7 +478,7 @@ async fn execute_message(
             system
                 .store()
                 .append_history(&actor.id, &message.id, &[final_message])?;
-            return Ok(reply);
+            return Ok(Some(reply));
         }
         empty_reasoning_responses = 0;
         validate_response_calls(&response)?;
@@ -753,7 +763,7 @@ async fn system_prompt(
 ) -> Result<String> {
     let mut prompt = format!(
         "You are {} (Actor {}). Use installed App tools for external actions.\n\
-        Your final assistant answer completes this input and is delivered to its original sender.\n\
+        Your final assistant answer completes this input and is delivered to its original sender. Use actors__yield to end an input without sending any reply.\n\
         Delegation queues independent work; results arrive as later inputs. Do not claim completion of queued work.\n\
         The owner may follow Actor links and converse with any Actor. Creator relationships govern capability inheritance and routing, not owner conversation access.\n\
         Actor identity and history are retained permanently; neither users nor models can delete Actors.\n\

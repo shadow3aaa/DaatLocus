@@ -189,8 +189,8 @@ impl RestrictedApp {
             .tools
             .as_ref()
             .is_none_or(|tools| tools.contains(&id.mangle_tool_name(name)));
-        let own_history =
-            id.as_str() == "actors" && matches!(name, "read_history" | "read_resource" | "report");
+        let own_history = id.as_str() == "actors"
+            && matches!(name, "read_history" | "read_resource" | "report" | "yield");
         let introspection =
             id.as_str() == "apps_manager" && matches!(name, "list" | "inspect" | "refresh");
         (self.app_allowed || own_history || introspection)
@@ -232,6 +232,7 @@ pub(crate) fn read_only_tool(app: &str, tool: &str) -> bool {
                 | "cancel"
                 | "deliver"
                 | "report"
+                | "yield"
                 | "read_history"
                 | "read_resource"
         ),

@@ -136,15 +136,25 @@ the checks ran against another revision or a tree changing concurrently.
 
 ## Receive, verify and adapt
 
-send queues work. Finish the current input when ready to receive later progress
-and results; do not poll or wait for collaborators. Keep delegated request IDs
+send queues work. Use yield to end the current input silently when ready to
+receive later progress and results; do not poll or wait for collaborators.
+Core can instead deliver a brief material update with finish_turn=true. Hosted
+Actors can report a brief material update before yielding. Keep delegated request IDs
 and their dependencies in task context. A dispatch acknowledgment, progress
 report or completed coordination input is not a completed deliverable.
 
 On each result, relate it to the original request, inspect the evidence and
 decide whether to integrate it, request a focused correction or change the
-approach. If dependencies remain, make the pending work clear and yield again.
+approach. If required dependencies remain, keep any outward progress brief and
+provisional, make the pending work clear when it matters, and yield again. Do not
+send a full report or completion claim until the integration owner has reconciled
+the required contributions and verified the combined outcome. Closing a
+coordination input does not complete the delegated objective.
 Report material blockers and decisions without forwarding routine tool chatter.
+Absorb routine acknowledgments and unchanged confirmations with yield; do not
+acknowledge acknowledgments or send text claiming to stay silent. After final
+delivery, reopen outward reporting only for a material correction, blocker or
+required decision, rather than forwarding each late collaborator message.
 
 For code changes, establish the failure when practical, test the affected
 behavior, then run the relevant broader checks on the final combined candidate.

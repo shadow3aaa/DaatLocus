@@ -22,6 +22,9 @@ fn delivery_id(actor: &str, input: &str, call: &str) -> String {
     let bytes = hex::decode(hash).expect("SHA256 hex");
     Uuid::from_bytes(bytes[..16].try_into().expect("SHA256 prefix")).to_string()
 }
+fn turn_yielded(db: &Connection, actor: &str, message: &str) -> Result<bool> {
+    sql(db.query_row("SELECT EXISTS(SELECT 1 FROM tools WHERE actor_id=?1 AND message_id=?2 AND done=1 AND json_extract(record,'$.name')='actors__yield' AND json_extract(record,'$.error') IS NULL AND json_extract(record,'$.payload.finish_turn')=1)", params![actor, message], |r|r.get(0)))
+}
 fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
     if result.error.is_some() {
         return None;
@@ -1446,6 +1449,9 @@ impl ActorStore {
     pub fn core_turn_delivered(&self, message: &str) -> Result<bool> {
         sql(self.db.lock().query_row("SELECT EXISTS(SELECT 1 FROM tools WHERE actor_id='core' AND message_id=?1 AND done=1 AND json_extract(record,'$.name')='actors__deliver' AND json_extract(record,'$.error') IS NULL AND json_extract(record,'$.payload.finish_turn')=1)", [message], |r|r.get(0)))
     }
+    pub(crate) fn turn_yielded(&self, actor: &str, message: &str) -> Result<bool> {
+        turn_yielded(&self.db.lock(), actor, message)
+    }
     pub fn tool_result(&self, id: &str) -> Result<ToolResultRecord> {
         decode(
             sql(self
@@ -1678,7 +1684,14 @@ impl ActorStore {
         // Explicit Core deliveries are independent conversation messages. A
         // later final model answer closes the input without duplicating them.
         let explicit: bool = sql(tx.query_row("SELECT EXISTS(SELECT 1 FROM messages m WHERE actor_id=?1 AND json_extract(record,'$.kind')='delivery' AND json_extract(record,'$.in_reply_to')=?2 AND EXISTS(SELECT 1 FROM events e WHERE e.actor_id=m.actor_id AND json_extract(e.record,'$.type')='message_added' AND json_extract(e.record,'$.message_id')=m.id))", params![message.actor_id,id], |r|r.get(0)))?;
-        let reply = if message.actor_id == crate::stage::shared::ACTOR_ID
+        let yielded =
+            status == MessageStatus::Completed && turn_yielded(&tx, &message.actor_id, id)?;
+        let reply = if yielded {
+            // Recovery can reach here with a committed empty assistant boundary.
+            // The successful yield observation, not replayed model text, decides
+            // whether this input has an outward result.
+            None
+        } else if message.actor_id == crate::stage::shared::ACTOR_ID
             && explicit
             && status == MessageStatus::Completed
         {
@@ -1753,7 +1766,11 @@ impl ActorStore {
             actor.updated_at_ms = now();
             save_actor(&tx, &actor)?;
         }
-        let routed = if let ReplyTarget::Actor {
+        // A deliberate yield closes only this inbox input. No placeholder result
+        // may wake the requester or escape as an empty remote delivery.
+        let routed = if yielded && status == MessageStatus::Completed {
+            None
+        } else if let ReplyTarget::Actor {
             actor_id,
             request_id,
         } = &message.reply_to
