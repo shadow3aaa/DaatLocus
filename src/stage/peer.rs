@@ -478,6 +478,15 @@ impl PeerLink {
             ));
         }
         if remote != self.work_generation {
+            // The older peer must receive our queued signed reset before we
+            // tear down this link. Returning immediately can abort the writer
+            // and discard the only copy telling it to reset, on every retry.
+            // No business traffic is processed while waiting for it to close.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.channel.closed.changed(),
+            )
+            .await;
             return Err(StageError::Conflict(
                 "Peer must apply account reset before reconnecting",
             ));
