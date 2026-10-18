@@ -163,12 +163,17 @@ requirements; an Actor saying "done" is not validation. For other domains, use
 the equivalent source, artifact or observable outcome checks.
 
 For scope or propagation requirements, delegate a bounded verification task that
-traces the producer-to-consumer contract and checks the far boundary of the scope.
-Require a case where the triggering condition and observed effect are at different
-locations, so a partial implementation cannot pass by checking only the effect's
-location. Verify actual upstream bounds instead of assuming a field or helper
-covers the required scope. Derive the expected result from the original requirement
-and return the minimal counterexample with observed versus required behavior.
+includes the original requirement and asks the verifier to distinguish complete
+behavior from a plausible partial implementation. Require it to name the partial
+implementation, trace the actual values and bounds from producer to consumer,
+and construct a case that must fail under that partial implementation. Put the
+trigger only at a boundary the partial implementation would omit, with the
+observed effect elsewhere; a case also triggered inside its covered scope cannot
+establish completeness. Derive expected behavior from the requirement, run the
+case against the candidate, and report inputs, relevant bounds, expected versus
+observed behavior, and why the partial implementation would fail. Pass this
+verification obligation explicitly to the assigned Actor; do not accept a claim
+of full coverage while that partial implementation would still pass its checks.
 
 Respect the task's time and cost constraints. Add a collaborator only for a
 distinct expected contribution; stop expanding when coordination or repeated
