@@ -52,7 +52,7 @@ export async function membership(bundle: Enrollment, trusted: Root, revoked: Set
     const value = await verify<Membership>(proof, "membership", key);
     assert(value.version === 1 && value.group_id === trusted.group_id && value.issuer === issuer && canEnroll);
     assert(Number.isSafeInteger(value.issued_at_ms) && Number.isSafeInteger(value.expires_at_ms));
-    assert(value.issued_at_ms <= now && value.expires_at_ms > now && value.expires_at_ms <= expires);
+    assert(value.issued_at_ms <= now + 30000 && value.expires_at_ms > now && value.expires_at_ms <= expires);
     assert(value.device && uuid.test(value.device.stage_id) && uuid.test(value.join_id));
     assert(!seen.has(value.device.stage_id) && !revoked.has(value.device.stage_id));
     assert(/^[0-9a-f]{64}$/i.test(value.device.tls_sha256) && bytes(value.device.public_key, 32).length === 32);

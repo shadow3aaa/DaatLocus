@@ -32,6 +32,22 @@ describe("signaling authentication", () => {
     const other = await setup(); await expect(membership(fixture.enrollment, other.root, new Set(), 2000)).rejects.toThrow();
     await expect(membership(fixture.enrollment, fixture.root, new Set(), 100000)).rejects.toThrow();
   });
+  test("small device clock offsets do not reject freshly issued membership", async () => {
+    const fixture = await setup();
+    const issued = 100000;
+    const proof = await sign(fixture.authority, "membership", {
+      version: 1, group_id: fixture.root.group_id, issuer: null, device: fixture.device,
+      join_id: crypto.randomUUID(), issued_at_ms: issued, expires_at_ms: issued + 60000, can_enroll: true,
+    });
+    const enrollment = { root: fixture.root, chain: [proof] };
+    for (const now of [issued - 30000, issued - 1000, issued, issued + 1000]) {
+      expect((await membership(enrollment, fixture.root, new Set(), now)).device.stage_id).toBe(fixture.device.stage_id);
+    }
+    for (const now of [issued - 30001, issued + 60000]) {
+      await expect(membership(enrollment, fixture.root, new Set(), now)).rejects.toThrow();
+    }
+    await expect(membership(enrollment, fixture.root, new Set([fixture.device.stage_id]), issued - 1000)).rejects.toThrow();
+  });
   test("only signed SDP with the same DTLS fingerprint is forwarded", async () => {
     const fixture = await setup(); const fingerprint = Array(32).fill("ab").join(":");
     const value = { version: 1, group_id: fixture.root.group_id, source: fixture.device.stage_id, target: crypto.randomUUID(), generation: 1, nonce: crypto.randomUUID(), expires_at_ms: 10000, description: { type: "offer", sdp: `v=0\r\na=fingerprint:sha-256 ${fingerprint}\r\n` }, fingerprint };

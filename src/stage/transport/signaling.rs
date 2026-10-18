@@ -96,7 +96,9 @@ mod tests {
         let endpoint = std::env::var("DAAT_LOCUS_TEST_STAGE_SIGNALING").unwrap();
         let mut a = DeviceIdentity::generate().unwrap();
         let b = DeviceIdentity::generate().unwrap();
-        let now = chrono::Utc::now().timestamp_millis();
+        // Devices do not share the rendezvous server's clock. Exercise a real
+        // freshly issued membership ahead of the server without extending expiry.
+        let now = chrono::Utc::now().timestamp_millis() + 20_000;
         let own = a.initialize_group(now, now + 600_000).unwrap();
         let other = a
             .authorize(

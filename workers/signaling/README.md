@@ -12,6 +12,8 @@ challenge/identity, membership expiry, issuer IDs and bounded rate counters.
 An alarm removes expired registrations/challenges; ordinary WebSocket ping/pong
 does not require a business poll. The server rechecks group configuration,
 revocation and membership expiry before every forwarding operation.
+Membership issuance accepts at most 30 seconds of future clock skew; expiration,
+revocation, signatures and authorization chains remain strictly checked.
 
 Requirements: Node 22 or newer and Bun. Node 24 was used for local verification.
 

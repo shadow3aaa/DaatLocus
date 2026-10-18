@@ -11,6 +11,9 @@ use std::{
 
 const MAX_PROOF: usize = 8192;
 pub const MAX_CHAIN: usize = 8;
+/// Independent device clocks need not agree to the millisecond. This only
+/// bounds future issuance; expiry, revocation and chain authority stay exact.
+pub(crate) const CLOCK_SKEW_MS: i64 = 30_000;
 const DOMAIN: &[u8] = b"DaatLocus.Stage.v1\0";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -389,8 +392,8 @@ pub fn verify_join_request(request: &JoinRequest, now: i64) -> Result<()> {
         || body.device != request.device
         || body.nonce != request.nonce
         || body.created_at_ms != request.created_at_ms
-        || now < request.created_at_ms
-        || now - request.created_at_ms > 5 * 60 * 1000
+        || request.created_at_ms > now.saturating_add(CLOCK_SKEW_MS)
+        || now.saturating_sub(request.created_at_ms) > 5 * 60 * 1000
     {
         return Err(StageError::Forbidden(
             "Join request is inconsistent or expired",
@@ -426,7 +429,7 @@ pub fn verify_enrollment(
             || member.group_id != root.group_id
             || member.issuer != issuer
             || !can_enroll
-            || member.issued_at_ms > now
+            || member.issued_at_ms > now.saturating_add(CLOCK_SKEW_MS)
             || member.expires_at_ms <= now
             || member.expires_at_ms > maximum_expiry
             || revoked.contains(&member.device.stage_id)
@@ -457,6 +460,43 @@ pub fn verify_enrollment(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn device_join_and_enrollment_tolerate_only_bounded_clock_skew() {
+        let issued = 1_000_000;
+        let mut authority = DeviceIdentity::generate().unwrap();
+        let device = DeviceIdentity::generate().unwrap();
+        let root = authority
+            .initialize_group(issued, issued + 600_000)
+            .unwrap();
+        let request = device.join_request(issued).unwrap();
+        let enrollment = authority
+            .authorize(&root, &request, issued, issued + 300_000, true)
+            .unwrap();
+        for clock in [issued - 30_000, issued - 1_000, issued, issued + 1_000] {
+            verify_join_request(&request, clock).unwrap();
+            assert_eq!(
+                verify_enrollment(&root.root, &enrollment.chain, clock, &HashSet::new())
+                    .unwrap()
+                    .device,
+                device.profile()
+            );
+        }
+        for clock in [issued - 30_001, issued + 300_001] {
+            assert!(verify_join_request(&request, clock).is_err());
+            assert!(
+                verify_enrollment(&root.root, &enrollment.chain, clock, &HashSet::new()).is_err()
+            );
+        }
+        assert!(
+            verify_enrollment(
+                &root.root,
+                &enrollment.chain,
+                issued + 300_000,
+                &HashSet::new()
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn independent_keys_verify_enrollment_and_reject_forgery_wrong_group_and_expiry() {
