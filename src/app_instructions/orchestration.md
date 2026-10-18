@@ -162,6 +162,14 @@ Distinguish passed, failed and unavailable checks. Review the diff against the
 requirements; an Actor saying "done" is not validation. For other domains, use
 the equivalent source, artifact or observable outcome checks.
 
+For scope or propagation requirements, delegate a bounded verification task that
+traces the producer-to-consumer contract and checks the far boundary of the scope.
+Require a case where the triggering condition and observed effect are at different
+locations, so a partial implementation cannot pass by checking only the effect's
+location. Verify actual upstream bounds instead of assuming a field or helper
+covers the required scope. Derive the expected result from the original requirement
+and return the minimal counterexample with observed versus required behavior.
+
 Respect the task's time and cost constraints. Add a collaborator only for a
 distinct expected contribution; stop expanding when coordination or repeated
 investigation costs more than it resolves. When blocked, identify the missing
