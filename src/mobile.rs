@@ -20,6 +20,11 @@ pub struct MobileService {
     foreground: AtomicBool,
 }
 impl MobileService {
+    pub fn connectivity_changed(&self) {
+        if let Some(stage) = &self.state.stage {
+            stage.connectivity_changed();
+        }
+    }
     pub async fn start(application_dir: PathBuf) -> Result<Arc<Self>> {
         // Workspace is a sibling of private service storage. It must never be
         // inside the credential deny-root used by every App execution context.
@@ -123,6 +128,7 @@ impl MobileService {
                     .start()
                     .await
                     .map_err(|_| miette::miette!("Device transport unavailable"))?;
+                stage.connectivity_changed();
             }
             self.state.system.resume_execution().await
         } else {

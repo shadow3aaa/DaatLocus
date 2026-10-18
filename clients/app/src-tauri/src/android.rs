@@ -2,6 +2,21 @@ use daat_locus::mobile::MobileService;
 use std::sync::Arc;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
+static SERVICE: std::sync::OnceLock<std::sync::Weak<MobileService>> = std::sync::OnceLock::new();
+
+// An OS connectivity hint only. No WebView/JavaScript command or authority is
+// introduced, and callbacks before service initialization are harmless.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_daat_1locus_app_MainActivity_nativeNetworkChanged(
+    _env: *mut jni::sys::JNIEnv,
+    _activity: jni::sys::jobject,
+) {
+    if let Some(service) = SERVICE.get().and_then(std::sync::Weak::upgrade) {
+        tauri::async_runtime::spawn(async move {
+            service.connectivity_changed();
+        });
+    }
+}
 
 struct Client(Arc<MobileService>);
 #[tauri::command]
@@ -48,6 +63,7 @@ pub fn run() {
                 tauri::async_runtime::block_on(MobileService::start(app.path().app_data_dir()?))
                     .map_err(|_| "Cannot start Daat Locus")?;
             let origin = url::Url::parse(&service.origin)?;
+            let _ = SERVICE.set(Arc::downgrade(&service));
             crate::transport::capability(app.handle())?;
             app.manage(crate::transport::Transport::new(Arc::new(
                 std::sync::RwLock::new(origin),
