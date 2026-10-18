@@ -659,6 +659,7 @@ impl P2pChannel {
             return Err(StageError::Forbidden("RTC peer has not authenticated"));
         }
         let channel = if bulk { &self.bulk } else { &self.control };
+        channel.writable().await.map_err(rtc_error)?;
         send_frame(channel, frame, self.compact.load(Ordering::Relaxed)).await
     }
 
@@ -709,6 +710,10 @@ impl Drop for P2pChannel {
     }
 }
 impl P2pSender {
+    pub(crate) async fn wait_writable(&self, bulk: bool) -> Result<()> {
+        let channel = if bulk { &self.bulk } else { &self.control };
+        channel.writable().await.map_err(rtc_error)
+    }
     pub async fn send(&self, frame: &Envelope, bulk: bool) -> Result<usize> {
         let channel = if bulk { &self.bulk } else { &self.control };
         send_frame(channel, frame, self.compact.load(Ordering::Relaxed)).await

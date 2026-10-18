@@ -23,6 +23,9 @@ pub trait FrameReader: Send {
 }
 #[async_trait]
 pub trait FrameWriter: Send {
+    async fn writable(&mut self, _bulk: bool) -> Result<()> {
+        Ok(())
+    }
     async fn write(&mut self, frame: &Envelope, bulk: bool) -> Result<usize>;
     async fn close(&mut self);
 }
@@ -62,6 +65,9 @@ impl FrameReader for P2pChannel {
 }
 #[async_trait]
 impl FrameWriter for P2pSender {
+    async fn writable(&mut self, bulk: bool) -> Result<()> {
+        self.wait_writable(bulk).await
+    }
     async fn write(&mut self, frame: &Envelope, bulk: bool) -> Result<usize> {
         self.send(frame, bulk).await
     }
@@ -392,6 +398,17 @@ fn spawn_writer(
                     writer.close().await;
                     return;
                 };
+                // Capacity can take seconds to become available. Check authority
+                // after that wait, immediately before admitting bytes to SCTP.
+                if !matches!(
+                    tokio::time::timeout(write_timeout, writer.writable(item.class == Class::Blob))
+                        .await,
+                    Ok(Ok(()))
+                ) {
+                    closed_tx.send_replace(true);
+                    writer.close().await;
+                    return;
+                }
                 if authorize(&queued.frame, &queued.scope).is_err() {
                     closed_tx.send_replace(true);
                     writer.close().await;
@@ -448,6 +465,98 @@ mod liveness_tests {
             Ok(frame.encode()?.len())
         }
         async fn close(&mut self) {}
+    }
+    struct CapacityWriter {
+        waiting: Option<tokio::sync::oneshot::Sender<()>>,
+        capacity: Arc<Notify>,
+        written: mpsc::Sender<uuid::Uuid>,
+    }
+    #[async_trait]
+    impl FrameWriter for CapacityWriter {
+        async fn writable(&mut self, _: bool) -> Result<()> {
+            if let Some(waiting) = self.waiting.take() {
+                let _ = waiting.send(());
+            }
+            self.capacity.notified().await;
+            Ok(())
+        }
+        async fn write(&mut self, frame: &Envelope, _: bool) -> Result<usize> {
+            self.written.send(frame.message_id).await.unwrap();
+            Ok(frame.encode()?.len())
+        }
+        async fn close(&mut self) {}
+    }
+    #[tokio::test]
+    async fn revoked_authority_cannot_emit_after_waiting_for_capacity() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let identity = crate::stage::identity::DeviceIdentity::generate().unwrap();
+        let authority = Arc::new(AtomicBool::new(true));
+        let current = authority.clone();
+        let (waiting, wait) = tokio::sync::oneshot::channel();
+        let (written, mut writes) = mpsc::channel(1);
+        let capacity = Arc::new(Notify::new());
+        let mut channel = PeerChannel::new(
+            VerifiedPeer::signed_dtls(&identity.profile()),
+            Box::new(PendingReader),
+            Box::new(CapacityWriter {
+                waiting: Some(waiting),
+                capacity: capacity.clone(),
+                written,
+            }),
+            None,
+            move |_, _| {
+                if current.load(Ordering::Acquire) {
+                    Ok(())
+                } else {
+                    Err(StageError::Forbidden("revoked"))
+                }
+            },
+        );
+        let payload = b"PRIVATE_CONTENT".to_vec();
+        let hash = crate::stage::digest(&payload);
+        let frame = Envelope {
+            version: 1,
+            source: crate::stage::StageId::new(),
+            target: identity.profile().stage_id,
+            generation: 1,
+            message_id: uuid::Uuid::new_v4(),
+            invocation_id: None,
+            in_reply_to: None,
+            created_at_ms: 1,
+            expires_at_ms: 10000,
+            body: crate::stage::protocol::Body::BlobChunk {
+                content: crate::stage::protocol::BlobRef {
+                    hash: hash.clone(),
+                    size: payload.len() as u64,
+                    version: 1,
+                },
+                chunk: 0,
+                chunk_hash: hash,
+                bytes: payload,
+            },
+        };
+        channel
+            .sender
+            .send(frame, Class::Blob, SendScope::Actor("private".into()))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+            .await
+            .unwrap()
+            .unwrap();
+        authority.store(false, Ordering::Release);
+        capacity.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            channel.closed.wait_for(|closed| *closed),
+        )
+        .await
+        .expect("revocation was not rechecked after capacity wait")
+        .unwrap();
+        assert!(
+            writes.try_recv().is_err(),
+            "revoked private content reached the writer"
+        );
+        channel.close().await;
     }
     #[tokio::test]
     async fn blocked_content_writer_does_not_block_control_emission() {
