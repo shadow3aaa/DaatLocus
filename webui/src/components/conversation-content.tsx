@@ -5,7 +5,6 @@ import { useEffect, useId, useRef, useState } from "react";
 import { CheckIcon, ChevronRightIcon, CopyIcon, DownloadIcon, MessageCircleIcon, ShieldCheckIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { LazyPage } from "@/components/lazy-page";
 import { localActorId } from "@/lib/conversation-links";
 import { getActor, getMessage, listMessages, subscribeActorEvents, getToolResult, resolveApproval, type ApprovalRecord, type Attachment, type ToolResult, type ToolSummary, type MessageStatus } from "@/lib/actor-api";
 import { ToolDetail, ApprovalDetails } from "@/components/tool-details";
@@ -63,7 +62,7 @@ function ToolGroupIcon() {
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="6" cy="7" r="3" /><circle cx="18" cy="5" r="3" /><circle cx="6" cy="19" r="3" /><circle cx="18" cy="17" r="3" /><path d="M9 7h2a4 4 0 0 0 4-2M9 19h2a4 4 0 0 0 4-4v-2a4 4 0 0 1 3-4" /></svg>;
 }
 
-export function Activities({ actorId, tools, onActor, thinking, nextCursor, onLoadMore }: { actorId: string; tools: (ToolSummary & { status?: "running" | "completed" | "unknown" })[]; thinking?: string | null; onActor(id: string): void; nextCursor?: number | null; onLoadMore?(): Promise<unknown> }) {
+export function Activities({ actorId, tools, onActor, thinking }: { actorId: string; tools: (ToolSummary & { status?: "running" | "completed" | "unknown" })[]; thinking?: string | null; onActor(id: string): void }) {
   const contentId = useId();
   const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -111,7 +110,6 @@ export function Activities({ actorId, tools, onActor, thinking, nextCursor, onLo
           {selected && <div className="dl-step-detail">{details[tool.id] ? <ToolDetail result={details[tool.id]} onActor={onActor} /> : error ? <div className="dl-client-error" role="alert"><span>{error}</span><Button variant="ghost" size="sm" onClick={() => { void expand(tool, true); }}>{t("app.retry")}</Button></div> : <Skeleton className="h-16 w-full rounded-lg" />}</div>}
         </div>;
       })}
-      {nextCursor != null && onLoadMore && <LazyPage cursor={nextCursor} onLoad={onLoadMore} errorMessage={t("conversation_content.could_not_load_earlier_actions")} />}
     </div>}
   </div>;
 }

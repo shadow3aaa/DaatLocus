@@ -133,7 +133,7 @@ describe("fixed presentation and chronological source", () => {
   });
   test("completed activity renders collapsed with intermediate prose hidden", () => {
     const completed = {...message,status:"completed" as const,started_at_ms:10_000,finished_at_ms:72_000,reply:"结果",final_generation:2};
-    const html = renderToStaticMarkup(<WorkRound message={completed} events={[event(1,{type:"generation_delta",message_id:"m",generation:1,channel:"assistant",text:"INTERMEDIATE_TEXT"})]} tools={[]} onMoreTools={async()=>{}} onActor={()=>{}}/>);
+    const html = renderToStaticMarkup(<WorkRound message={completed} events={[event(1,{type:"generation_delta",message_id:"m",generation:1,channel:"assistant",text:"INTERMEDIATE_TEXT"})]} tools={[]} onActor={()=>{}}/>);
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain("INTERMEDIATE_TEXT");
   });

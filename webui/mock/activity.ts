@@ -2,7 +2,7 @@ import type { JsonValue, MessageRecord } from "../src/lib/actor-api";
 import { addMessage, addTool, emitEvent, newId, now, setActorStatus, store, touchMessage, type ActorStore } from "./state";
 
 type Action = { name: string; summary: string; arguments: JsonValue; outcome: JsonValue; payload: JsonValue };
-type Preview = { actor: ActorStore; input: MessageRecord; generation: number; phase: number; pending?: { call: string; action: Action } };
+type Preview = { actor: ActorStore; input: MessageRecord; generation: number; phase: number; overflow?: boolean; pending?: { call: string; action: Action } };
 let preview: Preview | null = null;
 
 function text(state: Preview, channel: "assistant" | "reasoning", content: string) {
@@ -74,11 +74,28 @@ export function seedActivityPreview(actor: ActorStore, thinkingOnly = false) {
   text(state,"reasoning","这里还需要保留连续工具调用的顺序，展开时才能核对完整记录。\n\n正在核对活动标题与正文的分界，并检查窄屏下是否出现重叠。");
 }
 
+export function seedOverflowActivityPreview(actor: ActorStore) {
+  seedActivityPreview(actor);
+  preview!.overflow = true;
+}
+
 // Manual stepping keeps previews and tests deterministic while exercising the
 // mounted WebUI through the same incremental SSE facts as a real running Actor.
 export function advanceActivityPreview(): boolean {
   const state = preview;
   if (!state || store.actors.get(state.actor.summary.id) !== state.actor || state.phase >= 4) return false;
+  if (state.overflow && state.phase < 3) {
+    ++state.phase;
+    finish(state);
+    text(state,"assistant",`第 ${state.phase + 1} 阶段检查：之前的操作保留在原位，继续检查新的文件。`);
+    start(state,read(`webui/src/layout/phase-${state.phase}.tsx`)); finish(state);
+    text(state,"reasoning","开始检查下一项。");
+    // A burst exceeds the bounded conversation stream window. The activity view
+    // must retain its prefix or backfill the gap, never append summary leftovers.
+    for (let index = 0; index < 400; index++) emitEvent(state.actor.summary.id,{type:"generation_delta",message_id:state.input.id,generation:state.generation,channel:"reasoning",text:`\n\n正在核对第 ${state.phase + 1} 阶段的细节。`});
+    start(state,read(`webui/src/layout/phase-${state.phase}-pending.tsx`));
+    return true;
+  }
   switch (++state.phase) {
     case 1: start(state,read("webui/src/index.css")); break;
     case 2:

@@ -7,6 +7,16 @@ export function mergeActivity(current: EventRecord[], incoming: EventRecord[], a
   for (const record of [...current, ...incoming]) if (record.actor_id === actorId && "message_id" in record.event && record.event.message_id === messageId) records.set(record.seq, record);
   return Array.from(records.values()).sort((a,b) => a.seq-b.seq);
 }
+// An expanded round retains its consumed prefix independently of the bounded
+// conversation stream. A disconnected live tail must be backfilled before it
+// can be joined; tool summaries cannot establish chronology for the gap.
+export function extendActivityHistory(history: EventRecord[], live: EventRecord[], actorId: string, messageId: string, through: number) {
+  const window = live.filter(record => record.actor_id === actorId);
+  const latest = window.at(-1)?.seq ?? 0;
+  if (latest <= through) return {records: history, through, gap: false};
+  if (window[0].seq > through) return {records: history, through, gap: true};
+  return {records: mergeActivity(history, window, actorId, messageId), through: latest, gap: false};
+}
 export function workTimeline(events: EventRecord[], message: MessageRecord, complete = true): WorkSegment[] {
   const items = mergeActivity([], events, message.actor_id, message.id);
   const lastGeneration = Math.max(0, ...items.flatMap(({event}) => "generation" in event ? [event.generation] : []));
