@@ -33,6 +33,16 @@ describe("fixed presentation and chronological source", () => {
     const work=renderToStaticMarkup(<WorkTurn message={delivery} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}}/>);
     expect(work).toContain(delivery.reply!);
   });
+  test("primary omits empty deliveries but retains deliveries containing only a file outcome", () => {
+    const delivery: MessageRecord = {...message, id:"file-delivery", source:{kind:"actor",actor_id:"core"}, kind:"delivery", content:"", status:"completed"};
+    const chat = {messages:[],tools:[],approvals:[]} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
+    const render = () => renderToStaticMarkup(<PrimaryTurn message={delivery} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
+    expect(render()).toBe("");
+    chat.tools = [{id:"file",message_id:delivery.id,call_id:"present",name:"artifacts__present",summary:"",error:null,started_at_ms:1,finished_at_ms:2,outcome:{uri:"/v1/actors/root/resources/report",title:"report.txt"}}];
+    const html = render();
+    expect(html).toContain('href="/v1/actors/root/resources/report"');
+    expect(html).toContain("report.txt");
+  });
   test("prose interleaves with actual tool groups; final generation is not duplicated", () => {
     const records = [event(1,{type:"generation_started",message_id:"m",generation:1}),event(2,{type:"generation_delta",message_id:"m",generation:1,channel:"assistant",text:"先检查"}),event(3,{type:"tool_started",message_id:"m",call_id:"c",name:"files__read_file"}),event(4,{type:"generation_started",message_id:"m",generation:2}),event(5,{type:"generation_delta",message_id:"m",generation:2,channel:"assistant",text:"结果"})];
     expect(workTimeline(records,{...message,status:"completed",reply:"结果",final_generation:2}).map(item=>item.kind)).toEqual(["text","tools"]);

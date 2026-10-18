@@ -13,6 +13,7 @@ export const scenarios = [
   {id:"apps-loading", label:"应用 · 加载中", actor:ROOT_ACTOR_ID},
   {id:"apps-error", label:"应用 · 加载失败", actor:ROOT_ACTOR_ID},
   {id:"conversation", label:"主会话", actor:ROOT_ACTOR_ID},
+  {id:"bubble-spacing", label:"主对话 · 连续气泡与双方切换", actor:ROOT_ACTOR_ID},
   {id:"long-core", label:"主对话 · 长历史与长回复", actor:ROOT_ACTOR_ID},
   {id:"empty", label:"空对话", actor:ROOT_ACTOR_ID},
   {id:"work", label:"工作对话", actor:"research"},
@@ -73,6 +74,26 @@ export function activateScenario(id: string): boolean {
     emitEvent(core.summary.id,{type:"message_added",message_id:record.id});
   }
   if (id==="empty") clear(core);
+  if (id === "bubble-spacing") {
+    clear(core);
+    const request = message(core, "重新发我看看。");
+    touchMessage(request, { reply: "这是之前修正过的初稿，先重新发你看看。我接着核对要求和还需补齐的部分。" });
+    const deliver = (reply: string) => {
+      const record = addMessage(core, { kind: "delivery", source: {kind: "actor", actor_id: ROOT_ACTOR_ID}, reply_to: {kind: "user"}, content: "", status: "completed" });
+      touchMessage(record, {reply, finished_at_ms: now()});
+      return record;
+    };
+    // An internal record between deliveries must not create an empty visual turn.
+    deliver("");
+    deliver("核对完了，18 页排版和四张图都正常，图 3 的修正也在。\n\n这份可以直接审阅。你看时重点检查第 17 页的待确认问题，以及第 12 页的性能目标是否符合你的设想。");
+    const followUp = message(core, "这些模板部分来自模板要求吗？");
+    touchMessage(followUp, {reply: "我核对一下这两项的来源，区分老师明确要求的内容和我整理文档时加的结构。"});
+    const report = deliver("按我读取指导书后的记录，这两类内容有要求依据，但具体表格是我整理的：\n\n- 需求提出：记录需求编号、提出人、日期与原始描述。\n- 修订记录：记录评审后改了什么，以及待确定问题清单。\n\n表格样式和栏目是否必须原样保留，还需核对原文。");
+    addTool(core, {id: newId(), actor_id: ROOT_ACTOR_ID, message_id: report.id, call_id: newId(), name: "actors__send", summary: "核对原文", error: null, started_at_ms: now()-1000, finished_at_ms: now(), arguments: {}, model_content: "已交给研究员", outcome: {actor_id: "research", name: "研究员"}, payload: null});
+    deliver("我也会检查原文，确认哪些必须保留，哪些可以删简。");
+    addMessage(core, {kind: "request", source: {kind: "user"}, reply_to: {kind: "user"}, content: "好，再看看原文。", status: "queued"});
+    addMessage(core, {kind: "request", source: {kind: "user"}, reply_to: {kind: "user"}, content: "保留需要确认的地方。", status: "queued"});
+  }
   if (["connecting","synchronizing","recovering","reconciling","offline","recovery_blocked"].includes(id)) {
     Object.assign(previewState.core,{state:id,ready:false,synchronized:false});
   }

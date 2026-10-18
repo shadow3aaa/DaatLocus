@@ -10,7 +10,7 @@ import { ConversationConnection } from "@/components/conversation-connection";
 import { ConversationHistory } from "@/components/conversation-history";
 import { PrimaryTurn, WorkTurn } from "@/components/conversation-turns";
 import { MessageQueue, queuedUserInput } from "@/components/message-queue";
-import { isPrimaryActor } from "@/lib/work-timeline";
+import { isPrimaryActor, isUserSource } from "@/lib/work-timeline";
 import { OwnerApprovalNotice } from "@/components/owner-approval-notice";
 import { useActorConversation } from "@/hooks/use-actor-conversation";
 import { accessKey, actorModelReady, patchActorPreferences, type Access, type ApprovalMode, type ActorDetail } from "@/lib/actor-api";
@@ -51,6 +51,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const queue = primaryView ? [] : chat.messages.filter(queuedUserInput);
   const visibleMessages = chat.messages.filter(message => (primaryView || !queuedUserInput(message)) && !(message.status === "cancelled" && message.started_at_ms == null && ["user", "remote_user"].includes(message.source.kind)) && !(message.kind === "steering" && message.status === "completed" && chat.messages.some(parent => parent.id === message.in_reply_to)));
   const typingId = primaryView ? [...visibleMessages].reverse().find(message => message.status === "running")?.id : undefined;
+  const receiptMessageId = primaryView ? [...chat.messages].reverse().find(message => isUserSource(message) && !(message.status === "cancelled" && message.started_at_ms == null))?.id : undefined;
   useEffect(() => { initialized.current = false; follow.current = true; setAtBottom(true); setLocalError(""); filePreparation.current = { actorId, busy: false }; setPreparingFiles(false); }, [actorId]);
   useEffect(() => { if (actor) onActorLoaded?.(actor); }, [actor, onActorLoaded]);
   useEffect(() => { if (refreshVersion) void chat.refresh(); }, [refreshVersion]);
@@ -145,7 +146,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
           </EmptyHeader>{!connecting && !ready && onConfigureModels && <Button onClick={onConfigureModels}>{t("providers_settings.add_provider")}</Button>}</Empty>}
           {chat.loading && <div className="dl-loading-messages"><Skeleton className="h-24 w-4/5 rounded-3xl" /><Skeleton className="ml-auto h-14 w-3/5 rounded-3xl" /><Skeleton className="h-32 w-4/5 rounded-3xl" /></div>}
           {chat.hasMore && <Button variant="ghost" size="sm" className="dl-load-history" disabled={chat.loadingOlder} onClick={() => { olderHeight.current = scroll.current?.scrollHeight ?? null; void chat.loadOlder().catch(() => setLocalError(t("conversation_pane.could_not_load_earlier_messages"))); }}>{t("conversation_pane.load_earlier_messages")}</Button>}
-          {visibleMessages.map(message => primaryView ? <PrimaryTurn key={message.id} message={message} chat={chat} access={access} onActor={openActor} typing={message.id === typingId} /> : <WorkTurn key={message.id} message={message} chat={chat} access={access} onActor={openActor} />)}
+          {visibleMessages.map(message => primaryView ? <PrimaryTurn key={message.id} message={message} chat={chat} access={access} onActor={openActor} typing={message.id === typingId} receiptMessageId={receiptMessageId} /> : <WorkTurn key={message.id} message={message} chat={chat} access={access} onActor={openActor} />)}
           <div className="dl-conversation-bottom" />
         </div>
       </div>

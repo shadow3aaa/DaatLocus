@@ -10,12 +10,18 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 
+export function messageOutcomeTools(tools: ToolSummary[]) {
+  return {
+    artifacts: tools.filter(tool => !tool.error && domainToolName(tool.name) === "artifacts__present" && safeLink(asText(asObject(tool.outcome).uri))),
+    changes: tools.filter(tool => !tool.error && ["files__write_file", "files__edit_file", "files__copy_file"].includes(domainToolName(tool.name)) && asText(asObject(tool.outcome).path)),
+  };
+}
+
 export function MessageOutcomes({ actorId, tools, onActor }: { actorId: string; tools: ToolSummary[]; onActor(id: string): void }) {
   const [more, setMore] = useState(false); const [view, setView] = useState(false); const [selected, setSelected] = useState<ToolSummary | null>(null); const [detail, setDetail] = useState<ToolResult | null>(null); const [error, setError] = useState("");
   const request = useRef<AbortController | null>(null);
   useEffect(() => () => request.current?.abort(), [actorId]);
-  const artifacts = tools.filter(tool => !tool.error && domainToolName(tool.name) === "artifacts__present" && asText(asObject(tool.outcome).uri));
-  const changes = tools.filter(tool => !tool.error && ["files__write_file", "files__edit_file", "files__copy_file"].includes(domainToolName(tool.name)) && asText(asObject(tool.outcome).path));
+  const { artifacts, changes } = messageOutcomeTools(tools);
   const files = new Map<string, ToolSummary[]>();
   for (const change of changes) { const path = asText(asObject(change.outcome).path); files.set(path, [...files.get(path) || [], change]); }
   const count = (field: string, items = changes) => items.reduce((total, tool) => total + Number(asObject(tool.outcome)[field] || 0), 0);
