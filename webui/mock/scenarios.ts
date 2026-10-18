@@ -1,4 +1,5 @@
 import { resetApps } from "./apps";
+import { advanceActivityPreview, seedActivityPreview, seedPaginatedActivityPreview } from "./activity";
 import type { CoreStatus, Device } from "../src/lib/stage-api";
 import { resetStore } from "./fixtures";
 import { addApproval, addMessage, addTool, configHolder, emitEvent, newId, now, ROOT_ACTOR_ID, setActorStatus, STAGE_ID, store, touchMessage, type ActorStore } from "./state";
@@ -17,6 +18,12 @@ export const scenarios = [
   {id:"long-core", label:"主对话 · 长历史与长回复", actor:ROOT_ACTOR_ID},
   {id:"empty", label:"空对话", actor:ROOT_ACTOR_ID},
   {id:"work", label:"工作对话", actor:"research"},
+  {id:"activity-replay", label:"工作活动 · 分步演示", actor:"research"},
+  {id:"activity-thinking", label:"工作活动 · 思考中的连续工具组", actor:"research"},
+  {id:"activity-tools", label:"工作活动 · 工具执行中", actor:"research"},
+  {id:"activity-complete", label:"工作活动 · 完成与正文交错", actor:"research"},
+  {id:"activity-pagination", label:"工作活动 · 长记录滚动加载", actor:"research"},
+  {id:"thinking-only", label:"工作活动 · 尚未调用工具", actor:"research"},
   {id:"loading", label:"消息加载中", actor:ROOT_ACTOR_ID},
   {id:"request-error", label:"读取失败与重试", actor:ROOT_ACTOR_ID},
   {id:"running", label:"正在执行与工具活动", actor:"research"},
@@ -67,6 +74,13 @@ export function activateScenario(id: string): boolean {
     Object.assign(work.detail.config!.permissions,{read_only:false,writable_roots:["webui/src"]});
   }
   const clear=(actor:ActorStore)=>{actor.messages=[];actor.events=[];actor.tools=[];actor.approvals=[];actor.messageSeq=0;actor.eventSeq=0;actor.toolSeq=0;};
+  if (id.startsWith("activity-") || id === "thinking-only") {
+    clear(work);
+    if (id === "activity-pagination") seedPaginatedActivityPreview(work);
+    else seedActivityPreview(work, id === "thinking-only");
+    if (id === "activity-tools") advanceActivityPreview();
+    if (id === "activity-complete") while (advanceActivityPreview()) { /* Seed all settled phases. */ }
+  }
   if (id.startsWith("import-")) {
     clear(core);
     const record = addMessage(core, {kind:"request",source:{kind:"user"},reply_to:{kind:"user"},content:"Import the attached Codex conversation; prepare an idle Actor without sending work.",status:id==="import-running"?"running":"failed",attachments:[{id:"import-example",name:"检查消息滚动与输入框布局",media_type:"application/vnd.daat-locus.codex-conversation+json",size_bytes:640,uri:"/v1/actors/core/resources/import-example"}]});

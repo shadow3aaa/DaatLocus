@@ -1,6 +1,6 @@
-import { t } from "@/lib/i18n";
+import { getCurrentWebUiLanguage, t } from "@/lib/i18n";
 import type { JsonValue, ToolSummary } from "./actor-api";
-import { FileTextIcon, FilePlus2Icon, FileMinus2Icon, PencilLineIcon, TerminalSquareIcon, SearchIcon, Globe2Icon, MessageCircleIcon, ImageIcon, PackageIcon, PaperclipIcon } from "lucide-react";
+import { FileTextIcon, FilePlus2Icon, FileMinus2Icon, PencilIcon, TerminalSquareIcon, SearchIcon, Globe2Icon, MessageCircleIcon, ImageIcon, PackageIcon, PaperclipIcon } from "lucide-react";
 
 export const asObject = (value: JsonValue | undefined): Record<string, JsonValue> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 export const asText = (value: JsonValue | undefined): string => typeof value === "string" ? value : "";
@@ -14,6 +14,7 @@ const labels: Record<string, string> = {
   apps_manager__list: "apps.list_action", apps_manager__inspect: "apps.inspect_action", apps_manager__refresh: "apps.refresh_action", apps_manager__install: "apps.install_action", apps_manager__enable: "apps.enable", apps_manager__close: "apps.close",
   artifacts__present: "tool_details.deliver_result",
   actors__read_resource: "tool_presentation.read_attachment_or_output",
+  actors__report: "tool_presentation.report_progress", actors__yield: "tool_presentation.yield_input",
 };
 
 const fieldLabels: Record<string, string> = {
@@ -35,8 +36,8 @@ export function toolIcon(name: string, outcome?: JsonValue | null) {
   if (name.includes("search")) return SearchIcon;
   if (name.startsWith("browser__")) return Globe2Icon;
   if (name.includes("delete")) return FileMinus2Icon;
-  if (name.includes("edit_file")) return PencilLineIcon;
-  if (name.includes("write_file")) return asObject(outcome).created === true ? FilePlus2Icon : PencilLineIcon;
+  if (name.includes("edit_file")) return PencilIcon;
+  if (name.includes("write_file")) return asObject(outcome).created === true ? FilePlus2Icon : PencilIcon;
   if (name.includes("image")) return ImageIcon;
   if (name.startsWith("files__")) return FileTextIcon;
   if (name.startsWith("artifacts__")) return PaperclipIcon;
@@ -45,18 +46,18 @@ export function toolIcon(name: string, outcome?: JsonValue | null) {
 export function activitySummary(names: string[]) {
   names = names.map(domainToolName);
   const parts: string[] = [];
+  if (names.some(name => name.startsWith("browser__"))) parts.push(t("tool_presentation.browsed_pages"));
   if (names.some(name => /files__(write|edit|copy|delete)_/.test(name))) parts.push(t("tool_presentation.edited_files"));
   else if (names.some(name => name.startsWith("files__"))) parts.push(t("tool_presentation.read_files"));
   if (names.some(name => name.startsWith("terminal__"))) parts.push(t("tool_presentation.ran_commands"));
   if (names.some(name => name.includes("search"))) parts.push(t("tool_presentation.searched_content"));
-  if (names.some(name => name.startsWith("browser__"))) parts.push(t("tool_presentation.browsed_pages"));
   if (names.some(name => name.startsWith("actors__"))) parts.push(t("tool_presentation.handled_collaboration"));
-  return parts.join("、") || t("tool_presentation.value0_actions", {value0: names.length});
+  return parts.join(getCurrentWebUiLanguage() === "zh-CN" ? "" : " ") || t("tool_presentation.value0_actions", {value0: names.length});
 }
 
 export function activityIcon(names: string[]) {
   const domains = names.map(domainToolName);
-  return toolIcon(domains.find(name => /files__(write|edit|copy)_/.test(name)) || domains.find(name => name.startsWith("terminal__")) || domains[0] || "");
+  return toolIcon(domains.find(name => name.startsWith("browser__")) || domains.find(name => /files__(write|edit|copy)_/.test(name)) || domains.find(name => name.startsWith("terminal__")) || domains[0] || "");
 }
 
 export function activityLabel(tool: ToolSummary & { status?: "running" | "completed" | "unknown" }) {
@@ -65,6 +66,7 @@ export function activityLabel(tool: ToolSummary & { status?: "running" | "comple
   const active = tool.status === "running";
   const outcome = asObject(tool.outcome ?? undefined);
   const summary = readableSummary(tool.summary);
+  if (name.startsWith("browser__")) return {label:summary || toolLabel(name),detail:active?t("tool_presentation.running_2"):""};
   if (name.startsWith("apps_manager__")) return {label:toolLabel(name),detail:active?t("tool_presentation.running_2"):""};
   if (/^mcp_[a-f0-9]{32}__/.test(name)) { const app=asObject(outcome.app); return {label:asText(app.name) || t("apps.tool_action"),detail:asText(app.tool) || (active?t("tool_presentation.running_2"):"")}; }
   if (name === "terminal__terminal_exec") return {
@@ -75,6 +77,7 @@ export function activityLabel(tool: ToolSummary & { status?: "running" | "comple
     label: active ? t("tool_presentation.editing") : tool.error ? t("tool_presentation.edit_failed") : t("tool_presentation.edited"),
     detail: asText(outcome.path) || summary || t("tool_presentation.file"),
   };
+  if (name === "files__read_file") return { label: active ? t("tool_presentation.reading") : t("tool_presentation.read"), detail: asText(outcome.path) || summary };
   return { label: toolLabel(tool.name), detail: active ? t("tool_presentation.running_2") : summary };
 }
 

@@ -47,6 +47,32 @@ export function activityTools(events: EventRecord[], message: MessageRecord, sum
 export function isLiveReasoning(segment: WorkSegment, index: number, segments: WorkSegment[], running: boolean): boolean {
   return running && index === segments.length - 1 && segment.kind === "text" && segment.channel === "reasoning";
 }
+export type WorkActivitySegment =
+  | Extract<WorkSegment, { kind: "text" }>
+  | { kind: "activity"; seq: number; callIds: string[]; thinking: string | null };
+
+// Reasoning updates the current activity's headline; only actual assistant prose
+// separates groups. Historical reasoning never becomes another disclosure body.
+export function workActivityTimeline(events: EventRecord[], message: MessageRecord, complete = true, live = true): WorkActivitySegment[] {
+  const segments = workTimeline(events, message, complete);
+  const output: WorkActivitySegment[] = [];
+  for (const [index, segment] of segments.entries()) {
+    if (segment.kind === "text" && segment.channel === "assistant") {
+      output.push(segment);
+      continue;
+    }
+    let group = output.at(-1);
+    if (group?.kind !== "activity") {
+      group = { kind: "activity", seq: segment.seq, callIds: [], thinking: null };
+      output.push(group);
+    }
+    if (segment.kind === "tools") group.callIds.push(...segment.callIds);
+    else if (isLiveReasoning(segment, index, segments, live && message.status === "running")) {
+      group.thinking = segment.content.split(/\n\s*\n/).filter(part => part.trim()).at(-1)?.replace(/\s+/g, " ").trim() || null;
+    }
+  }
+  return output.filter(segment => segment.kind === "text" || segment.callIds.length > 0 || segment.thinking);
+}
 export function elapsedLabel(start?: number | null, end?: number | null, now = Date.now()): string | null {
   if (start == null) return null;
   const seconds = Math.max(0, Math.floor(((end ?? now) - start) / 1000));

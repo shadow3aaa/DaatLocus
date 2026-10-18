@@ -71,7 +71,6 @@
     "failed": "Failed",
     "could_not_load_earlier_actions": "Could not load earlier actions.",
     "loading": "Loading…",
-    "more_actions": "More actions",
     "review_the_action_and_requested_access": "Review the action and requested access.",
     "waiting_for_the_owner_to_approve": "Waiting for the owner to approve.",
     "this_action_was_approved": "This action was approved.",
@@ -352,6 +351,7 @@
     "collapse_preview": "Collapse preview",
     "expand_preview": "Expand preview",
     "action_failed": "Action failed.",
+    "plain_text": "Plain text",
     "command_output": "Command output",
     "elapsed": "Elapsed",
     "exit_code": "Exit code",
@@ -393,8 +393,7 @@
     "working_value0": "Working · {{value0}}",
     "elapsed_value0": "Elapsed {{value0}}",
     "activity": "Activity",
-    "no_intermediate_activity_recorded": "No intermediate activity recorded.",
-    "more_activity": "More activity"
+    "no_intermediate_activity_recorded": "No intermediate activity recorded."
   },
   "use_actor_conversation": {
     "some_attachments_are_unavailable_your_draft_is_retained_attach_t": "Some attachments are unavailable. Your draft is retained. Attach the files again."
@@ -483,7 +482,7 @@
     "read_files": "Read files",
     "ran_commands": "Ran commands",
     "searched_content": "Searched content",
-    "browsed_pages": "Browsed pages",
+    "browsed_pages": "Used browser",
     "handled_collaboration": "Handled collaboration",
     "value0_actions": "{{value0}} actions",
     "running": "Running",
@@ -492,6 +491,12 @@
     "editing": "Editing",
     "edit_failed": "Edit failed",
     "edited": "Edited",
+    "report_progress": "Reported progress",
+    "yield_input": "Awaiting further results",
+    "reading": "Reading",
+    "read": "Read",
+    "edited_file_details": "Edited files",
+    "command_ran": "Ran command",
     "running_2": "Running…"
   },
   "work_timeline": {

@@ -1,4 +1,4 @@
-import { isCodeTheme } from "@/lib/appearance";
+import { useCodeHighlight } from "@/hooks/use-code-highlight";
 import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { memo, useEffect, useState, type ReactNode } from "react";
@@ -7,21 +7,11 @@ import remarkGfm from "remark-gfm";
 import { CheckIcon, CopyIcon, MessageCircleIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { actorIdFromUrl, resourceActorId, safeLink } from "@/lib/conversation-links";
-import { highlightCodeWithShiki, type ShikiHighlightedCode } from "@/lib/shiki-highlight";
 
 export function CodeBlock({ code, language, startLine }: { code: string; language: string; startLine?: number }) {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
-  const [highlight, setHighlight] = useState<ShikiHighlightedCode | null>(null);
-  useEffect(() => {
-    let live = true;
-    let revision = 0;
-    const update = () => { const current = ++revision; void highlightCodeWithShiki(code, language, document.documentElement.classList.contains("dark") ? "dark" : "light", isCodeTheme(document.documentElement.dataset.codeTheme) ? document.documentElement.dataset.codeTheme : "github").then(value => { if (live && current === revision) setHighlight(value); }).catch(() => { if (live && current === revision) setHighlight(null); }); };
-    update();
-    const observer = new MutationObserver(update);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "data-code-theme"] });
-    return () => { live = false; observer.disconnect(); };
-  }, [code, language]);
+  const highlight = useCodeHighlight(code, language);
   useEffect(() => { if (!copied) return; const timer = setTimeout(() => setCopied(false), 1600); return () => clearTimeout(timer); }, [copied]);
   return <div className="dl-code-block">
     <div className="dl-code-heading"><span>{language || t("markdown.code")}</span><Button variant="ghost" size="sm" aria-label={t("markdown.copy_code")} onClick={() => { setCopyFailed(false); void navigator.clipboard.writeText(code).then(() => setCopied(true)).catch(() => setCopyFailed(true)); }}>{copied ? <CheckIcon data-icon="inline-start" /> : <CopyIcon data-icon="inline-start" />}{copied ? t("markdown.copied") : t("markdown.copy")}</Button></div>

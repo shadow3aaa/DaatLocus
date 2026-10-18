@@ -3,9 +3,10 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PrimaryTurn, WorkTurn } from "../src/components/conversation-turns";
 import { WorkRound } from "../src/components/work-round";
+import { Activities } from "../src/components/conversation-content";
 import { MessageQueue } from "../src/components/message-queue";
 import { TooltipProvider } from "../src/components/ui/tooltip";
-import { activityTools, isLiveReasoning, mergeActivity, workTimeline } from "../src/lib/work-timeline";
+import { activityTools, isLiveReasoning, mergeActivity, workActivityTimeline, workTimeline } from "../src/lib/work-timeline";
 import { clearStoredDrafts, loadDraft, saveDraft } from "../src/lib/conversation-drafts";
 import type { EventRecord, MessageRecord } from "../src/lib/actor-api";
 const message: MessageRecord = { seq: 1,id:"m",actor_id:"root",source:{kind:"user",},reply_to:{kind:"user",},kind:"request",in_reply_to:null,content:"整理报告",attachments:[],status:"running",cancel_requested:false,reply:null,error:null,created_at_ms:1,updated_at_ms:1 };
@@ -59,6 +60,37 @@ describe("fixed presentation and chronological source", () => {
     const finished=event(3,{type:"tool_finished",message_id:"m",call_id:"terminal",name:"terminal__terminal_exec",result_id:"result",summary:"Done",error:null});
     expect(activityTools([...records,finished],message,[])).toMatchObject([{id:"result",status:"completed"}]);
     expect(activityTools(records,{...message,status:"interrupted"},[])).toMatchObject([{status:"completed",error:i18n.t("conversation_content.interrupted")}]);
+  });
+  test("reasoning between protocol groups updates one headline while prose separates activity", () => {
+    const records = [
+      event(1,{type:"generation_delta",message_id:"m",generation:1,channel:"reasoning",text:"HISTORICAL_REASONING"}),
+      event(2,{type:"tool_started",message_id:"m",call_id:"read",name:"files__read_file"}),
+      event(3,{type:"generation_delta",message_id:"m",generation:2,channel:"reasoning",text:"MORE_HISTORICAL_REASONING"}),
+      event(4,{type:"tool_started",message_id:"m",call_id:"edit",name:"files__edit_file"}),
+      event(5,{type:"tool_finished",message_id:"m",call_id:"read",name:"files__read_file",result_id:"read-result",summary:"Read",error:null}),
+      event(6,{type:"generation_delta",message_id:"m",generation:3,channel:"assistant",text:"PROGRESS_PROSE"}),
+      event(7,{type:"tool_started",message_id:"m",call_id:"check",name:"terminal__terminal_exec"}),
+      event(8,{type:"generation_delta",message_id:"m",generation:4,channel:"reasoning",text:"Previous paragraph.\n\nChecking the final result."}),
+    ];
+    expect(workActivityTimeline(records,message)).toEqual([
+      {kind:"activity",seq:1,callIds:["read","edit"],thinking:null},
+      {kind:"text",seq:6,generation:3,channel:"assistant",content:"PROGRESS_PROSE"},
+      {kind:"activity",seq:7,callIds:["check"],thinking:"Checking the final result."},
+    ]);
+    const toolStarted = event(9,{type:"tool_started",message_id:"m",call_id:"verify",name:"files__read_file"});
+    expect(workActivityTimeline([...records,toolStarted],message).at(-1)).toEqual({kind:"activity",seq:7,callIds:["check","verify"],thinking:null});
+    expect(workActivityTimeline(records,{...message,status:"completed"}).at(-1)).toEqual({kind:"activity",seq:7,callIds:["check"],thinking:null});
+    expect(workActivityTimeline(records,message,false,false).at(-1)).toEqual({kind:"activity",seq:7,callIds:["check"],thinking:null});
+  });
+  test("thinking without tool calls has no disclosure or historical reasoning body", () => {
+    const records = [event(1,{type:"generation_delta",message_id:"m",generation:1,channel:"reasoning",text:"HIDDEN_EARLIER_PARAGRAPH\n\nCurrent thought."})];
+    const segments = workActivityTimeline(records,message);
+    expect(segments).toEqual([{kind:"activity",seq:1,callIds:[],thinking:"Current thought."}]);
+    const html = renderToStaticMarkup(<Activities actorId="root" tools={[]} thinking="Current thought." onActor={()=>{}} />);
+    expect(html).toContain('role="status"');
+    expect(html).toContain("Current thought.");
+    expect(html).not.toContain("<button");
+    expect(workActivityTimeline(records,{...message,status:"completed"})).toEqual([]);
   });
   test("completed activity renders collapsed with intermediate prose hidden", () => {
     const completed = {...message,status:"completed" as const,started_at_ms:10_000,finished_at_ms:72_000,reply:"结果",final_generation:2};

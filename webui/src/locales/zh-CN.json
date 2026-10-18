@@ -71,7 +71,6 @@
     "failed": "失败",
     "could_not_load_earlier_actions": "更早的操作暂时无法加载。",
     "loading": "正在加载…",
-    "more_actions": "更多操作",
     "review_the_action_and_requested_access": "请确认下面的操作与访问范围。",
     "waiting_for_the_owner_to_approve": "这项操作正在等待拥有者确认。",
     "this_action_was_approved": "本次操作已获批准。",
@@ -352,6 +351,7 @@
     "collapse_preview": "收起预览",
     "expand_preview": "展开预览",
     "action_failed": "操作未完成。",
+    "plain_text": "纯文本",
     "command_output": "命令输出",
     "elapsed": "用时",
     "exit_code": "退出代码",
@@ -393,8 +393,7 @@
     "working_value0": "正在处理 · {{value0}}",
     "elapsed_value0": "用时 {{value0}}",
     "activity": "执行记录",
-    "no_intermediate_activity_recorded": "这一轮未记录中间活动。",
-    "more_activity": "更多活动"
+    "no_intermediate_activity_recorded": "这一轮未记录中间活动。"
   },
   "use_actor_conversation": {
     "some_attachments_are_unavailable_your_draft_is_retained_attach_t": "部分附件已不可用，草稿已保留，请重新添加附件。"
@@ -483,7 +482,7 @@
     "read_files": "读取了文件",
     "ran_commands": "运行了命令",
     "searched_content": "搜索了内容",
-    "browsed_pages": "浏览了网页",
+    "browsed_pages": "已使用浏览器",
     "handled_collaboration": "处理了协作任务",
     "value0_actions": "{{value0}} 项操作",
     "running": "正在运行",
@@ -492,6 +491,12 @@
     "editing": "正在编辑",
     "edit_failed": "编辑失败",
     "edited": "已编辑",
+    "report_progress": "汇报进度",
+    "yield_input": "等待后续结果",
+    "reading": "正在读取",
+    "read": "已读取",
+    "edited_file_details": "已编辑的文件",
+    "command_ran": "已运行命令",
     "running_2": "正在执行…"
   },
   "work_timeline": {

@@ -29,11 +29,12 @@ describe("tool observations are product content, never protocol dumps", () => {
     expect(html).not.toContain("HIDDEN_COMPLETE_OUTPUT");
     expect(html).not.toContain("opaque-id");
   });
-  test("compact command rows use source facts and hide serialized summaries", () => {
+  test("command activity starts collapsed and keeps source facts separate from serialized summaries", () => {
     const tool = {seq:1,...result({name:"d_abcdef123456_terminal__terminal_exec",summary:'{"internal":"HIDDEN_SUMMARY"}',outcome:{command:"cargo check"}})};
     expect(activityLabel(tool).detail).toBe("cargo check");
     const html = renderToStaticMarkup(<Activities actorId="root" tools={[tool]} onActor={()=>{}}/>);
-    expect(html).toContain("cargo check");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain("cargo check");
     expect(html).not.toContain("HIDDEN_SUMMARY"); expect(html).not.toContain("HIDDEN_MODEL_PROTOCOL");
   });
   test("unknown tools retain a readable outcome while hiding internal envelopes", () => {

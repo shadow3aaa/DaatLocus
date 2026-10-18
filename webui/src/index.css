@@ -358,10 +358,7 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
 .dl-disclosure svg { width: 15px; height: 15px; transition: transform .15s; }
 .dl-disclosure svg:last-child { width: 13px; height: 13px; }
 .dl-chevron-open { transform: rotate(90deg); }
-.dl-thinking { margin: 8px 0 12px; }
-.dl-thinking-body { color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 14 / 14); padding: 10px 0 5px; max-width: 90%; }
 .dl-step-list { display: flex; flex-direction: column; gap: 7px; width: 100%; border-left: 1px solid var(--border); padding-left: 15px; margin-left: 6px; }
-.dl-step-list-single { border-left: 0; padding-left: 0; margin-left: 0; }
 .dl-step-error-state { color: var(--destructive); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
 .dl-step { min-width: 0; }
 .dl-step-label { display: flex; align-items: center; gap: 8px; border: 0; padding: 4px 0; color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); text-align: left; background: transparent; max-width: 100%; min-width: 0; }
@@ -372,8 +369,6 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
 .dl-step-error-mark { background: var(--destructive); }
 .dl-tool-details { margin: 9px 0 12px 12px; padding: 12px 14px; background: var(--muted); border-radius: 12px; max-width: calc(100% - 12px); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
 .dl-tool-details pre, .dl-approval-details pre { overflow: auto; max-height: 360px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace,'Cascadia Code',monospace; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.6; }
-.dl-terminal-command { display: flex; align-items: flex-start; gap: 8px; }
-.dl-terminal-command svg { width: 15px; height: 15px; flex: 0 0 auto; margin-top: 3px; }
 .dl-tool-details small { color: var(--muted-foreground); }
 .dl-tool-note { margin: 8px 0 12px 12px; color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.65; }
 .dl-browser-details>a { display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; margin-bottom: 8px; }
@@ -621,25 +616,58 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
 .dark { --change-added: oklch(.75 .14 150); --change-removed: oklch(.76 .14 25); --diff-added-bg: oklch(.3 .04 150); --diff-removed-bg: oklch(.3 .04 25); }
 .dl-primary-composer .dl-composer-textarea { padding-right: 5px; }
 .dl-primary-composer .dl-composer:has(.dl-stop-button) { grid-template-columns: 44px minmax(0,1fr) 88px; }
-.dl-inline-diff { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin: 10px 0 13px; }
-.dl-inline-diff>header { display: flex; gap: 8px; align-items: center; background: var(--muted); padding: 6px 10px; color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
-.dl-inline-diff>header>code { min-width: 0; overflow-wrap: anywhere; }.dl-inline-diff>header>button { margin-left: auto; }
-.dl-diff-lines { max-height: 380px; overflow: auto; padding: 5px 0; }
-.dl-diff-line { display: grid; grid-template-columns: 38px 38px 17px minmax(max-content,1fr); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.7; font-family: ui-monospace,'Cascadia Code',monospace; min-height: 22px; padding: 1px 8px 1px 0; border-left: 3px solid transparent; }
-.dl-diff-line code { white-space: pre; }.dl-diff-number { text-align: right; padding-right: 9px; color: var(--muted-foreground); user-select: none; }
+.dl-inline-diff { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin: 8px 0 12px; background: var(--background); }
+.dl-inline-diff>header { display: flex; gap: 8px; align-items: center; background: color-mix(in srgb, var(--foreground) 2%, var(--background)); border-bottom: 1px solid var(--border); padding: 6px 10px; color: var(--muted-foreground); font-size: var(--content-font-size, 16px); }
+.dl-inline-diff>header>span:first-child { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }.dl-inline-diff>header>button { margin-left: auto; }
+.dl-inline-diff>header small { font-size: inherit; white-space: nowrap; }
+.dl-diff-lines { max-height: 380px; overflow: auto; padding: 3px 0; }
+.dl-diff-line { display: grid; grid-template-columns: 54px minmax(max-content,1fr); font-size: var(--tool-code-size, var(--code-font-size, 13px)); line-height: 1.65; font-family: ui-monospace,'Cascadia Code',monospace; min-height: 22px; padding: 0 8px 0 0; border-left: 4px solid transparent; }
+.dl-diff-line code { white-space: pre; padding-left: 12px; }.dl-diff-number { text-align: right; padding-right: 9px; color: var(--muted-foreground); user-select: none; }
 .dl-diff-line-added { background: var(--diff-added-bg); border-left-color: var(--change-added); }.dl-diff-line-removed { background: var(--diff-removed-bg); border-left-color: var(--change-removed); }
-.dl-diff-line-added .dl-diff-sign { color: var(--change-added); }.dl-diff-line-removed .dl-diff-sign { color: var(--change-removed); }
+.dl-diff-line-added .dl-diff-number { color: var(--change-added); }.dl-diff-line-removed .dl-diff-number { color: var(--change-removed); }
+.dl-diff-line-added { border-image: repeating-linear-gradient(to bottom, var(--change-added) 0 1px, transparent 1px 2px) 1; }
+.dl-diff-line-removed { border-image: repeating-linear-gradient(to bottom, var(--change-removed) 0 1px, transparent 1px 2px) 1; }
+.dl-diff-word { background: color-mix(in srgb, var(--change-added) 18%, transparent); color: inherit; border-radius: 3px; }
+.dl-diff-line-removed .dl-diff-word { background: color-mix(in srgb, var(--change-removed) 18%, transparent); }
 .dl-code-block pre.dl-numbered-source { padding: 9px 0; }.dl-source-line { display: grid; grid-template-columns: 43px minmax(max-content,1fr); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.8; }
 .dl-source-number { text-align: right; padding-right: 12px; color: var(--muted-foreground); user-select: none; }.dl-source-line>span:last-child { padding-right: 13px; }
 .dl-round-content { padding-top: 19px; }.dl-round-empty { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); color: var(--muted-foreground); }
 .dl-work-progress { margin: 0 0 24px; }
-.dl-work-conversation .dl-activities { margin: 21px 0 26px; gap: 5px; width: 100%; }
+.dl-work-conversation .dl-activities { margin: 16px 0 24px; gap: 2px; width: 100%; min-width: 0; }
+.dl-activity-heading { display: flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; border: 0; padding: 0; background: transparent; color: var(--muted-foreground); font: inherit; font-size: var(--content-font-size, 16px); line-height: 1.5; text-align: left; }
+button.dl-activity-heading:hover { color: var(--foreground); }
+.dl-activity-heading:focus-visible { outline: 2px solid var(--ring); outline-offset: 4px; border-radius: 3px; }
+.dl-activity-heading > svg { width: 20px; height: 20px; flex-shrink: 0; }
+.dl-activity-heading > svg:last-child { width: 14px; height: 14px; transition: transform .15s; }
+.dl-activity-open { transform: rotate(90deg); }
+.dl-activity-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.dl-activity-thinking { color: var(--chat-subtle); }
+.dl-step-error-state { flex-shrink: 0; white-space: nowrap; }
+.dl-step-stat { flex-shrink: 0; color: var(--muted-foreground); font-size: calc(var(--content-font-size, 16px) * 13 / 16); }
+.dl-step-file { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--border); }
 .dl-round-content>.dl-activities:first-child { margin-top: 0; }
 .dl-round-content>:last-child { margin-bottom: 0; }
 .dl-work-conversation .dl-step-list { border-left: 0; padding-left: 0; margin-left: 0; gap: 2px; }
-.dl-work-conversation .dl-step-label { font-size: var(--content-font-size, 16px); gap: 6px; padding: 5px 0; line-height: 1.5; color: var(--muted-foreground); }
+.dl-work-conversation .dl-step-label { font-size: var(--content-font-size, 16px); gap: 6px; padding: 2px 0; line-height: 1.5; color: var(--muted-foreground); }
 .dl-work-conversation .dl-step-label:hover { color: var(--foreground); }
-.dl-work-conversation .dl-step-label>svg:first-child { width: 16px; height: 16px; }
+.dl-work-conversation .dl-step-label>svg:first-child { width: 20px; height: 20px; }
+.dl-activities svg { stroke-width: 1.65; }
+.dl-step-label > .dl-step-chevron { width: 14px; height: 14px; opacity: 0; flex-shrink: 0; }
+.dl-step-label:hover > .dl-step-chevron, .dl-step-label:focus-visible > .dl-step-chevron, .dl-step-label[aria-expanded="true"] > .dl-step-chevron { opacity: 1; }
+.dl-step-detail { --tool-code-size: calc(var(--code-font-size, 13px) * 16 / 13); min-width: 0; }
+.dl-step-detail > .dl-inline-diff { margin: 8px 0; }
+.dl-step-detail .dl-diff-lines { max-height: 144px; }
+.dl-tool-output { margin: 8px 0; overflow: hidden; border: 1px solid var(--settings-border); border-radius: 12px; background: color-mix(in srgb, var(--foreground) 4%, var(--background)); color: var(--muted-foreground); }
+.dl-tool-output > header { display: flex; align-items: center; gap: 10px; padding: 6px 10px; font-size: var(--content-font-size, 16px); line-height: 1.5; }
+.dl-output-context { min-width: 0; margin-left: auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.dl-tool-output > header a { margin-left: auto; }
+.dl-tool-output > header a > svg { width: 14px; height: 14px; }
+.dl-output-scroll { max-height: 184px; overflow: auto; padding: 8px 10px 12px; }
+.dl-output-scroll pre, .dl-output-command { font-family: ui-monospace,'Cascadia Code',monospace; font-size: var(--tool-code-size, var(--code-font-size, 13px)); line-height: 1.65; }
+.dl-output-scroll pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dl-output-command { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.dl-output-command code { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; color: color-mix(in srgb, var(--foreground) 65%, var(--background)); }
+.dl-output-command > span { flex-shrink: 0; }
 .dl-work-conversation .dl-disclosure { font-size: var(--content-font-size, 16px); line-height: 1.5; }
 .dl-work-conversation .dl-disclosure>svg:first-child { width: 16px; height: 16px; }
 .dl-message-queue { margin: 0 22px -18px; padding: 6px 12px 25px; border: 1px solid var(--border); border-bottom: 0; border-radius: 22px 22px 0 0; background: var(--background); }
@@ -816,7 +844,7 @@ html[data-mobile-platform=android] .dl-app { padding-top: env(safe-area-inset-to
 }
 
 /* Appearance preferences apply equally to the main view and Actor dialogs. */
-.dl-primary-turn .dl-bubble, .dl-work-prompt, .dl-work-delegated-input, .dl-work-final, .dl-work-progress, .dl-thinking-body, .dl-appearance-preview>p { font-size: var(--content-font-size, 16px); line-height: 1.65; }
+.dl-primary-turn .dl-bubble, .dl-work-prompt, .dl-work-delegated-input, .dl-work-final, .dl-work-progress, .dl-appearance-preview>p { font-size: var(--content-font-size, 16px); line-height: 1.65; }
 .dl-work-prompt, .dl-work-delegated-input, .dl-work-final, .dl-work-progress { line-height: 1.625; }
 .dl-primary-turn .dl-bubble { line-height: 1.375; }
 .dl-code-block pre, .dl-source-line, .dl-tool-details pre, .dl-approval-details pre { font-size: var(--code-font-size, 13px); }

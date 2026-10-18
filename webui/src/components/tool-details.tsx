@@ -1,15 +1,18 @@
 import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { useState } from "react";
-import { ExternalLinkIcon, TerminalIcon } from "lucide-react";
+import { ExternalLinkIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, Markdown } from "@/components/markdown";
 import type { JsonValue, ToolResult } from "@/lib/actor-api";
 import { resourceActorId, safeLink } from "@/lib/conversation-links";
 import { asObject, asRows, asText, readableSummary, domainToolName } from "@/lib/tool-presentation";
 import { FileChangeView } from "@/components/file-change";
-import { elapsedLabel } from "@/lib/work-timeline";
 import { ToolParameters } from "@/components/tool-parameters";
+
+function TextOutput({ label, content, command, context, href }: { label: string; content: string; command?: string; context?: string; href?: string | null }) {
+  return <section className="dl-tool-output"><header><span>{label}</span>{context && <span className="dl-output-context" title={context}>{context}</span>}{href && <a href={href} target="_blank" rel="noreferrer" aria-label={t("tool_details.open_value0", {value0:context || href})}><ExternalLinkIcon aria-hidden="true" /></a>}</header><div className="dl-output-scroll" tabIndex={0} role="region" aria-label={label}>{command && <div className="dl-output-command"><span aria-hidden="true">$</span><code>{command}</code></div>}<pre>{content}</pre></div></section>;
+}
 
 function domainFields(payload: Record<string,JsonValue>): JsonValue {
   return Object.fromEntries(Object.entries(payload).filter(([key]) => !["private_metadata","model_content","model_transcript","debug","raw_response"].includes(key)).map(([key,value]) => {
@@ -62,8 +65,7 @@ export function ToolDetail({ result, onActor }: { result: ToolResult; onActor?(i
     const stderr = asText(payload.stderr);
     const cwd = asText(payload.cwd) || asText(session.cwd);
     const exit = payload.exit_code ?? session.exit_code;
-    const elapsed = elapsedLabel(typeof session.started_at_ms === "number" ? session.started_at_ms : result.started_at_ms, typeof session.finished_at_ms === "number" ? session.finished_at_ms : result.finished_at_ms);
-    return <div className="dl-tool-details dl-terminal-details">{command && <div className="dl-terminal-command"><TerminalIcon aria-hidden="true" /><code>{command}</code></div>}{cwd && <small>{cwd}</small>}{(output || stderr) && <pre aria-label={t("tool_details.command_output")}>{output}{stderr && `\n${stderr}`}</pre>}{elapsed && <small>{t("tool_details.elapsed_value", {value:elapsed})} · </small>}{exit != null ? <small>{t("tool_details.exit_code_value", {value:String(exit)})}</small> : payload.running === true ? <small>{t("tool_details.command_is_running")}</small> : <small>{t("tool_details.command_finished")}</small>}</div>;
+    return <div className="dl-terminal-details"><TextOutput label="Shell" command={command} context={cwd} content={`${output}${stderr ? `\n${stderr}` : ""}`} />{typeof exit === "number" && exit !== 0 && <small>{t("tool_details.exit_code_value", {value:exit})}</small>}{payload.running === true && <small>{t("tool_details.command_is_running")}</small>}</div>;
   }
   if (result.name === "artifacts__present") return <ArtifactView result={result} />;
   if (result.name === "actors__read_resource") return <p className="dl-tool-note">{t("tool_details.read_attachment_or_complete_output")}</p>;
@@ -83,7 +85,7 @@ export function ToolDetail({ result, onActor }: { result: ToolResult; onActor?(i
     const source = asText(payload.snapshot) || asText(payload.body);
     let document: JsonValue | undefined;
     if (asText(payload.media_type).includes("json")) { try { document = JSON.parse(source) as JsonValue; } catch { /* Invalid source remains literal text. */ } }
-    return <div className="dl-tool-details dl-browser-details">{href && <a href={href} target="_blank" rel="noreferrer">{asText(payload.title) || asText(page.title) || url}<ExternalLinkIcon aria-hidden="true" /></a>}{typeof payload.status === "number" && <small>HTTP {payload.status}</small>}{document !== undefined ? <ToolParameters value={document} /> : source ? <pre aria-label={t("tool_details.page_content")}>{source}</pre> : <p className="dl-tool-note">{readableSummary(result.summary) || t("tool_details.page_action_completed")}</p>}</div>;
+    return document !== undefined ? <div className="dl-tool-details dl-browser-details"><ToolParameters value={document} /></div> : <TextOutput label={t("tool_details.plain_text")} context={asText(payload.title) || asText(page.title)} content={source || readableSummary(result.summary) || t("tool_details.page_action_completed")} href={href} />;
   }
   const text = [payload.message, payload.description, payload.text, payload.content].map(value => readableSummary(asText(value))).find(Boolean);
   const fields = text ? Object.fromEntries(Object.entries(payload).filter(([key]) => !["message","description","text","content"].includes(key))) : payload;
