@@ -60,6 +60,8 @@ struct State {
     last: Option<LogId<NodeId>>,
     membership: StoredMembership<NodeId, openraft::EmptyNode>,
     term: u64,
+    #[serde(default)]
+    time: Option<i64>,
     head: Head,
     epoch: u64,
     lease: Option<Lease>,
@@ -70,7 +72,7 @@ struct State {
 impl State {
     fn apply(&mut self, id: LogId<NodeId>, proposal: &Proposal) -> Outcome {
         if proposal.work_generation < self.work_generation {
-            return self.outcome(false, proposal.time);
+            return self.outcome(false, self.time.unwrap_or(proposal.time).max(proposal.time));
         }
         if proposal.work_generation > self.work_generation {
             self.work_generation = proposal.work_generation.clone();
@@ -83,12 +85,18 @@ impl State {
         }
         if self.term != id.leader_id.term {
             self.term = id.leader_id.term;
+            self.time = None;
             self.lease = None;
             self.candidates.clear();
             self.lease_instance = None;
             self.handoff_after = 0;
         }
-        let now = proposal.time;
+        // Concurrent commands can enter the Raft log in a different order from
+        // their timestamp samples. Never rewind this term's applied clock: an
+        // older Inspect must not make a newer lease appear longer than LEASE_MS,
+        // and an older Renew must not resurrect an already expired lease.
+        let now = self.time.unwrap_or(proposal.time).max(proposal.time);
+        self.time = Some(now);
         self.candidates.retain(|_, entry| entry.time + 10000 > now);
         let caller = proposal.caller;
         let own = self.lease_instance == Some(proposal.instance)
@@ -578,6 +586,96 @@ mod tests {
             lease_instance: Some(instance),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn reordered_commands_keep_leases_bounded_and_cannot_revive_expired_workers() {
+        let device = StageId::new();
+        let instance = uuid::Uuid::new_v4();
+        let mut state = active(device, instance);
+        let renewal = Proposal {
+            work_generation: None,
+            caller: device,
+            operation: Operation::Renew {
+                epoch: 7,
+                head: Head::default(),
+            },
+            acknowledgements: vec![],
+            time: 2000,
+            claim_ready: true,
+            instance,
+        };
+        assert!(propose(&mut state, renewal.clone()).accepted);
+        // Restoring persisted state or a snapshot must preserve the applied
+        // timestamp watermark before another command is replayed.
+        state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        // An Inspect sampled before the renewal may be submitted after it.
+        let inspect = Proposal {
+            operation: Operation::Inspect,
+            time: 1000,
+            ..renewal.clone()
+        };
+        let reply = propose(&mut state, inspect.clone());
+        assert!(reply.accepted);
+        assert_eq!(reply.server_time_ms, 2000);
+        assert_eq!(reply.lease.as_ref().unwrap().expires_at_ms, 8000);
+        let sent = std::time::Instant::now();
+        let received = sent + std::time::Duration::from_millis(100);
+        let mut fence = shared::Fence::default();
+        fence.observe(&reply, sent, received).unwrap();
+        assert!(fence.permits(device, 7, received));
+        assert!(!fence.permits(device, 7, sent + std::time::Duration::from_millis(6000)));
+
+        let expired = propose(
+            &mut state,
+            Proposal {
+                time: 8000,
+                ..inspect
+            },
+        );
+        assert!(expired.lease.is_none());
+        let delayed = propose(
+            &mut state,
+            Proposal {
+                time: 3000,
+                ..renewal
+            },
+        );
+        assert!(
+            !delayed.accepted,
+            "an old sample cannot revive an expired lease"
+        );
+        assert!(delayed.lease.is_none());
+    }
+
+    #[test]
+    fn a_new_term_uses_its_own_clock_and_invalidates_the_previous_lease() {
+        let device = StageId::new();
+        let instance = uuid::Uuid::new_v4();
+        let mut state = active(device, instance);
+        state.time = Some(5000);
+        let proposal = Proposal {
+            work_generation: None,
+            caller: device,
+            operation: Operation::Inspect,
+            acknowledgements: vec![],
+            time: -1000,
+            claim_ready: true,
+            instance,
+        };
+        let id = LogId::new(openraft::CommittedLeaderId::new(2, device.into()), 2);
+        let reply = state.apply(id, &proposal).reply;
+        assert!(reply.accepted);
+        assert_eq!(reply.server_time_ms, -1000);
+        assert!(reply.lease.is_none());
+        let renewal = Proposal {
+            operation: Operation::Renew {
+                epoch: 7,
+                head: Head::default(),
+            },
+            ..proposal
+        };
+        assert!(!state.apply(id, &renewal).reply.accepted);
     }
 
     #[test]

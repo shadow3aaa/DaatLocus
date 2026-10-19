@@ -1543,30 +1543,44 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
             None,
         )
         .unwrap();
+    // Core treats a fresh owner input as the next conversation turn. Wait for
+    // it to supersede speculative inference instead of racing a steering RPC
+    // against that intentional turn boundary.
     tokio::time::timeout(Duration::from_secs(10), async {
-        while a.store().message(&guidance.id).is_err() {
+        while model_a.requests.lock().len() < 4 {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .unwrap();
-    // Forwarding assigns the authoritative revision. Steering must use the
-    // received current record rather than this device's initial enqueue time.
-    let guidance_revision = a.store().message(&guidance.id).unwrap().updated_at_ms;
-    b.steer_queued(shared::ACTOR_ID, &guidance.id, &input.id, guidance_revision)
+    .expect("the new Core input did not supersede speculative inference");
+    let original = a.store().message(&input.id).unwrap();
+    assert_eq!(original.status, MessageStatus::Completed);
+    assert!(original.reply.is_none());
+    assert!(original.error.is_none());
+    let active = a.store().message(&guidance.id).unwrap();
+    assert_eq!(active.status, MessageStatus::Running);
+    assert_eq!(active.kind, MessageKind::Request);
+    assert!(
+        b.steer_queued(
+            shared::ACTOR_ID,
+            &guidance.id,
+            &input.id,
+            active.updated_at_ms
+        )
         .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while model_a.requests.lock().len() < 3 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
+        .is_err(),
+        "a running request cannot steer an already completed Core turn"
+    );
+    let unchanged = a.store().message(&guidance.id).unwrap();
+    assert_eq!(unchanged.kind, MessageKind::Request);
+    assert_eq!(unchanged.in_reply_to, active.in_reply_to);
+    assert_eq!(unchanged.updated_at_ms, active.updated_at_ms);
+    assert!(model_a.dropped.load(Ordering::Acquire));
+    model_a.dropped.store(false, Ordering::Release);
     net_a.stop().await;
     let result = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let input = b.store().message(&input.id).unwrap();
+            let input = b.store().message(&guidance.id).unwrap();
             if input.status == MessageStatus::Completed {
                 break input;
             }
@@ -1581,7 +1595,14 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     );
     assert!(model_a.dropped.load(Ordering::Acquire));
     assert_eq!(model_b.requests.lock().len(), 1);
+    let retained = b.store().message(&input.id).unwrap();
+    assert_eq!(retained.status, MessageStatus::Completed);
+    assert!(retained.reply.is_none());
     for request in model_b.requests.lock().iter() {
+        assert!(request.messages.iter().any(|message| matches!(message,
+            AgentMessage::User { content }
+                if content.as_text().contains("Create a hosted project on B")
+        )));
         let paths: Vec<_> = request
             .messages
             .iter()
@@ -1633,7 +1654,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     let replicated = tokio::time::timeout(Duration::from_secs(12), async {
         loop {
             if c.store()
-                .message(&input.id)
+                .message(&guidance.id)
                 .is_ok_and(|m| m.status == MessageStatus::Completed)
             {
                 break;
@@ -1649,7 +1670,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
         net_c.core.read().as_ref().unwrap().status(),
         shared_store::head(b.store()).unwrap(),
         shared_store::head(c.store()).unwrap(),
-        c.store().message(&input.id),
+        c.store().message(&guidance.id),
         net_b.last_error(host_c.local),
         net_c.last_error(host_b.local),
     );

@@ -150,6 +150,38 @@ pub fn wrap_command(
 pub(super) struct MacosSandboxAsyncChild {
     child: tokio::process::Child,
 }
+
+fn finish_exited_group_cleanup(pid: u32, result: std::io::Result<()>) -> std::io::Result<()> {
+    let Err(error) = result else {
+        return Ok(());
+    };
+    if error.raw_os_error() == Some(libc::EPERM) {
+        // XNU's killpg1 excludes zombies, and returns EPERM if no signalable
+        // members remain. The caller has observed this leader with WNOWAIT,
+        // so it still reserves its PID/group ID. Accept only a complete group
+        // snapshot containing that zombie alone: it cannot fork after the
+        // snapshot. A second slot detects any other member or truncated list;
+        // query failures and genuinely denied live descendants stay errors.
+        // PROC_PGRP_ONLY is defined in Apple's sys/proc_info.h.
+        const PROC_PGRP_ONLY: u32 = 2;
+        let mut members = [0 as libc::pid_t; 2];
+        let bytes = unsafe {
+            libc::proc_listpids(
+                PROC_PGRP_ONLY,
+                pid,
+                members.as_mut_ptr().cast(),
+                std::mem::size_of_val(&members) as libc::c_int,
+            )
+        };
+        if bytes == std::mem::size_of::<libc::pid_t>() as libc::c_int
+            && members[0] == pid as libc::pid_t
+        {
+            return Ok(());
+        }
+    }
+    Err(error)
+}
+
 impl MacosSandboxAsyncChild {
     pub fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
         self.child.stdin.take()
@@ -194,7 +226,7 @@ impl MacosSandboxAsyncChild {
             if info.si_pid == 0 {
                 return Ok(None);
             }
-            self.start_kill()?;
+            finish_exited_group_cleanup(pid, self.start_kill())?;
         }
         self.child.try_wait()
     }
@@ -288,17 +320,20 @@ mod tests {
         .unwrap();
         let profile = &spec.args[spec.args.iter().position(|arg| arg == "-p").unwrap() + 1];
         assert!(!profile.contains(temp.path().to_str().unwrap()));
-        let parameter = spec
+        let parameters = spec
             .args
             .iter()
-            .find(|arg| {
-                arg.starts_with("-DDL_PATH_") && arg.ends_with(temp.path().to_str().unwrap())
-            })
-            .unwrap();
-        assert_eq!(
-            parameter.split_once('=').unwrap().1,
-            temp.path().to_str().unwrap()
-        );
+            .filter(|arg| arg.starts_with("-DDL_PATH_"))
+            .map(|arg| arg.split_once('=').unwrap().1)
+            .collect::<Vec<_>>();
+        // /var is a symlink to /private/var on macOS. Both exact spellings
+        // must survive as data; suffix matching can select the resolved one.
+        for path in [
+            temp.path().to_owned(),
+            std::fs::canonicalize(temp.path()).unwrap(),
+        ] {
+            assert!(parameters.contains(&path.to_str().unwrap()));
+        }
     }
     #[tokio::test]
     async fn actor_scope_runs_shell_and_enforces_future_and_ancestor_denies() {
@@ -397,12 +432,14 @@ printf '%s' "$command" > {}
     #[tokio::test]
     async fn root_exit_and_drop_close_background_process_pipes() {
         use tokio::io::{AsyncBufReadExt, BufReader};
-        for cancel in [false, true] {
+        for (cancel, background) in [(false, false), (false, true), (true, true)] {
             let temp = tempfile::tempdir().unwrap();
             let command = if cancel {
                 "sleep 300 & printf 'ready\n'; read command"
-            } else {
+            } else if background {
                 "sleep 300 & printf 'ready\n'"
+            } else {
+                "printf 'ready\n'; exit 7"
             };
             let mut child = SandboxAsyncChild::spawn_shell(
                 &policy(temp.path()),
@@ -427,6 +464,38 @@ printf '%s' "$command" > {}
             if cancel {
                 drop(child);
             } else {
+                // Observe a zombie deterministically, without allowing Tokio
+                // to reap it before the group-cleanup path is exercised.
+                let pid = child.id().unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+                        assert_eq!(
+                            unsafe {
+                                libc::waitid(
+                                    libc::P_PID,
+                                    pid,
+                                    &mut info,
+                                    libc::WNOHANG | libc::WEXITED | libc::WNOWAIT,
+                                )
+                            },
+                            0
+                        );
+                        if info.si_pid != 0 {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                // An actual live descendant must prevent EPERM recovery.
+                // Other failures must propagate even for a zombie-only group.
+                let errno = if background { libc::EPERM } else { libc::EIO };
+                let error =
+                    finish_exited_group_cleanup(pid, Err(std::io::Error::from_raw_os_error(errno)))
+                        .unwrap_err();
+                assert_eq!(error.raw_os_error(), Some(errno));
                 let status = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                     loop {
                         if let Some(status) = child.try_wait().unwrap() {
@@ -437,7 +506,7 @@ printf '%s' "$command" > {}
                 })
                 .await
                 .unwrap();
-                assert!(status.success());
+                assert_eq!(status.code(), Some(if background { 0 } else { 7 }));
             }
             let mut tail = String::new();
             tokio::time::timeout(
