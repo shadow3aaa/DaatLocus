@@ -72,7 +72,8 @@ jobs:
       - name: Require native MXC/PSEC
         run: cargo test --locked --no-default-features --lib sandbox::windows::tests::require_native_mxc -- --ignored --exact
       - name: Check native sandbox boundaries and lifecycle
-        run: cargo test --locked --no-default-features --lib sandbox:: -- --include-ignored --test-threads=4
+        run: |
+          cargo test --locked --no-default-features --lib sandbox:: -- --include-ignored --test-threads=4
       - name: Check native Terminal
         run: cargo test --locked --no-default-features --lib terminal_app::process::tests::terminal_shell_runs_inside_required_native_isolation -- --ignored --exact
       - name: Check native MCP transport
