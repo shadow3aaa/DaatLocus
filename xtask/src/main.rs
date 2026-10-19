@@ -68,6 +68,12 @@ struct Metadata {
     version: String,
     authors: Vec<String>,
 }
+impl Metadata {
+    // Native installer fields accept numeric versions, not SemVer prerelease/build suffixes.
+    fn installer_version(&self) -> &str {
+        self.version.split(['-', '+']).next().unwrap()
+    }
+}
 struct Context {
     root: PathBuf,
     meta: Metadata,
@@ -446,7 +452,7 @@ fn windows(context: &Context, computer: Option<&computer_use::Assets>) -> Result
                 .authors
                 .first()
                 .map_or("Daat Locus", String::as_str)),
-            xml(&context.meta.version),
+            xml(context.meta.installer_version()),
             xml(&icon.to_string_lossy()),
             xml(&context.binary("daat-locus").to_string_lossy()),
             xml(&client.to_string_lossy()),
@@ -535,7 +541,7 @@ fn windows(context: &Context, computer: Option<&computer_use::Assets>) -> Result
 </Chain>
 </Bundle>
 </Wix>"#,
-            xml(&context.meta.version),
+            xml(context.meta.installer_version()),
             xml(&icon.to_string_lossy()),
             xml(&license.to_string_lossy()),
             xml(&logo.to_string_lossy()),
@@ -619,8 +625,8 @@ fn macos(context: &Context) -> Result<()> {
         app.join("Contents/Info.plist"),
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleName</key><string>Daat Locus</string><key>CFBundleDisplayName</key><string>Daat Locus</string><key>CFBundleExecutable</key><string>daat-locus-app</string><key>CFBundleIdentifier</key><string>io.daat-locus.app</string><key>CFBundleIconFile</key><string>AppIcon</string><key>CFBundleShortVersionString</key><string>{}</string><key>CFBundleVersion</key><string>{}</string><key>CFBundlePackageType</key><string>APPL</string><key>LSMinimumSystemVersion</key><string>11.0</string></dict></plist>"#,
-            xml(&context.meta.version),
-            xml(&context.meta.version)
+            xml(context.meta.installer_version()),
+            xml(context.meta.installer_version())
         ),
     )?;
     let stage = work.join("installer-root");
@@ -645,7 +651,7 @@ fn macos(context: &Context) -> Result<()> {
                 "--identifier",
                 "io.daat-locus.pkg",
                 "--version",
-                &context.meta.version,
+                context.meta.installer_version(),
                 "--install-location",
                 "/",
             ])

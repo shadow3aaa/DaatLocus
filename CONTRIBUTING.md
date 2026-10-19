@@ -600,9 +600,14 @@ packaging rejects duplicate service assets or a missing native UI.
 `.github/workflows` contains two workflows. `ci.yaml` checks debug builds, tests,
 warnings and formatting without private signing keys. `release.yaml` builds and
 validates release packages on Linux, macOS, Windows and Android on main pushes,
-`v*` tag pushes, or manual runs on those refs. Main runs keep outputs only on the
-runner: no artifact upload or publishing. Version-tag runs upload the verified
-packages and publish a GitHub Release after all platform builds pass.
+`v*` tag pushes, or manual runs on those refs. Main runs append
+`-dev.YYYYMMDDHHMMSS` (UTC) to the patch version in the disposable checkout and
+upload verified packages as Actions artifacts, without publishing a GitHub Release.
+All platforms share one timestamp per workflow run. Program versions, Android
+version names and package filenames carry this suffix; Windows/macOS numeric
+installer fields and Android version codes retain the base version. Version tags
+must match the checked-in package version; these builds keep the original version
+and publish a GitHub Release after all platform builds pass.
 
 Repository Actions Secrets must contain `WINDOWS_IDD_PFX_BASE64` and
 `WINDOWS_IDD_PFX_PASSWORD` for the pinned distribution PFX, plus
