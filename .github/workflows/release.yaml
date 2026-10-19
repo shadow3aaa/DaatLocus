@@ -190,7 +190,18 @@ jobs:
                   if ($certificate.Thumbprint -ne $thumbprint) { throw 'Bundled public certificate differs from signing identity' }
                 }
                 Invoke-SigningStage "Import public certificate into CurrentUser/$store" {
-                  Import-Certificate -FilePath $public -CertStoreLocation "Cert:\CurrentUser\$store" | Out-Null
+                  if ($store -eq 'Root') {
+                    # Import-Certificate can wait for a desktop confirmation in CurrentUser/Root.
+                    # Keep the same user store and use the Windows command-line store writer.
+                    & (Join-Path $env:SystemRoot 'System32/certutil.exe') -user -f -addstore Root $public *> $null
+                    if ($LASTEXITCODE -ne 0) { throw "CurrentUser/Root import failed (certutil exit $LASTEXITCODE)" }
+                  } else {
+                    Import-Certificate -FilePath $public -CertStoreLocation "Cert:\CurrentUser\$store" | Out-Null
+                  }
+                }
+                Invoke-SigningStage "Validate imported public identity in CurrentUser/$store" {
+                  $imported = Get-Item -LiteralPath $target
+                  if ($imported.Thumbprint -ne $thumbprint) { throw 'Unexpected imported public signing identity' }
                 }
               }
             }
@@ -249,6 +260,7 @@ jobs:
             target/${{ steps.host.outputs.target }}/release/package/*-setup.exe
             target/${{ steps.host.outputs.target }}/release/package/*.pkg
       - name: Remove Windows signing identity
+        timeout-minutes: 3
         if: always() && runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -265,7 +277,12 @@ jobs:
               $target = "Cert:\CurrentUser\$store\C2D252AEFAF27171C36AF1BD6DAF2FDC5441E462"
               if (Test-Path -LiteralPath $target) {
                 if ($store -eq 'My') { Remove-Item -LiteralPath $target -DeleteKey -Force }
-                else { Remove-Item -LiteralPath $target -Force }
+                elseif ($store -eq 'Root') {
+                  # Removing a successfully imported protected root must also avoid desktop prompts.
+                  & (Join-Path $env:SystemRoot 'System32/certutil.exe') -user -f -delstore Root C2D252AEFAF27171C36AF1BD6DAF2FDC5441E462 *> $null
+                  if ($LASTEXITCODE -ne 0) { throw "CurrentUser/Root cleanup failed (certutil exit $LASTEXITCODE)" }
+                  if (Test-Path -LiteralPath $target) { throw 'Signing root remains after cleanup' }
+                } else { Remove-Item -LiteralPath $target -Force }
               }
             }
             Remove-Item -LiteralPath $journal -Force
