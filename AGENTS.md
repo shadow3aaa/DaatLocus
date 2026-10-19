@@ -31,8 +31,10 @@ client are connected.
 - The maintenance CLI uses clap for argument parsing, validation, help and version
   exits. Preserve the original terminal character logo and help palette. Parse
   arguments before opening storage or starting the runtime. Android embeds the same
-  core with app-private Files and HTTP Browser. Terminal and broader native Apps
-  remain future work.
+  core with app-private Files, HTTP Browser and an Owner-enabled PhoneUse native
+  backend. PhoneUse alone may use Shizuku or librootkotlinx Root authorization;
+  the service and other Apps keep their ordinary UID and sandbox. Terminal and
+  broader native Apps remain future work.
 - Enforce account ownership, authenticated remote authority and sandbox access at
   every operation. Restrictive process isolation must fail
   closed when the platform cannot enforce it.

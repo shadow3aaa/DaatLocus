@@ -592,6 +592,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(target_os = "android"))]
     async fn computer_desktop_grant_is_remembered_without_expanding_project_filesystem() {
         use crate::{app::App, computer_use_app::ComputerUseApp};
         let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(json!({

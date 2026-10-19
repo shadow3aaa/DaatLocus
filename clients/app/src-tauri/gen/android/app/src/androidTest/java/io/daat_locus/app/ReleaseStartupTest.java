@@ -23,9 +23,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class ReleaseStartupTest extends Instrumentation {
     private boolean syncDiagnostics;
     private boolean syncCheck;
+    private Bundle arguments;
     @Override
     public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
+        this.arguments = arguments;
         syncDiagnostics = arguments != null && "sync".equals(arguments.getString("mode"));
         syncCheck = arguments != null && "check".equals(arguments.getString("mode"));
         start();
@@ -36,7 +38,7 @@ public final class ReleaseStartupTest extends Instrumentation {
         Bundle status = new Bundle();
         status.putString("id", "InstrumentationTestRunner");
         status.putString("class", getClass().getName());
-        status.putString("test", syncCheck ? "existingAccountSyncAndInput" : syncDiagnostics ? "existingAccountSync" : "freshInstallLoadsAccountLogin");
+        status.putString("test", arguments != null && "phone".equals(arguments.getString("mode")) ? "phoneUseNativeContract" : syncCheck ? "existingAccountSyncAndInput" : syncDiagnostics ? "existingAccountSync" : "freshInstallLoadsAccountLogin");
         status.putInt("numtests", 1);
         status.putInt("current", 1);
         sendStatus(1, status);
@@ -45,6 +47,13 @@ public final class ReleaseStartupTest extends Instrumentation {
             Activity activity = startActivitySync(new Intent(Intent.ACTION_MAIN)
                 .setClassName(getTargetContext(), "io.daat_locus.app.MainActivity")
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            if (arguments != null && "phone".equals(arguments.getString("mode"))) {
+                result.putString("checks", PhoneUseTest.run(this, activity, arguments));
+                sendStatus(0, status);
+                result.putString("stream", "true".equals(arguments.getString("verify_display")) ? "\nOK (PhoneUse display persistence)\n" : "\nOK (PhoneUse native contract)\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if (syncDiagnostics || syncCheck) {
                 SystemClock.sleep(5000);
                 if (syncCheck) result.putString("check", checkExistingAccount(activity));
@@ -116,7 +125,7 @@ public final class ReleaseStartupTest extends Instrumentation {
 
     // Invoke the actual native transport from the main WebView. Diagnostic HTTP
     // calls must not accidentally target the Tauri static-asset protocol.
-    private static String nativeFetch() {
+    static String nativeFetch() {
         return "(async function(path,options={}){"
             + "const call=window.__TAURI_INTERNALS__.invoke;"
             + "const headers=Object.entries(options.headers||{}).filter(([k])=>k.toLowerCase()!=='x-daat-request');"
@@ -131,7 +140,7 @@ public final class ReleaseStartupTest extends Instrumentation {
             + "}finally{await call('native_http_cancel',{id});}})";
     }
 
-    private Object evaluate(Activity activity, String script) throws Exception {
+    Object evaluate(Activity activity, String script) throws Exception {
         CountDownLatch done = new CountDownLatch(1);
         java.util.concurrent.atomic.AtomicReference<String> value = new java.util.concurrent.atomic.AtomicReference<>();
         runOnMainSync(() -> {
@@ -192,7 +201,7 @@ public final class ReleaseStartupTest extends Instrumentation {
         return result.toString();
     }
 
-    private static WebView findWebView(View view) {
+    static WebView findWebView(View view) {
         if (view instanceof WebView) return (WebView) view;
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;

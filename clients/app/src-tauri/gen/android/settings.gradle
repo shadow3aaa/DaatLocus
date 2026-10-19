@@ -1,3 +1,4 @@
 include ':app'
+include ':phone-use-fixture'
 
 apply from: 'tauri.settings.gradle'

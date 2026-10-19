@@ -711,7 +711,7 @@ Do not commit caches, generated artifacts, runtime logs, credentials or experime
 
 ## Android builds
 
-Use JDK 17+, Android SDK 36 / NDK 27, Bun, wasm-pack and Rust Android targets.
+Use JDK 17+, Android SDK 37.0 / NDK 27.2.12479018, Bun, wasm-pack and Rust Android targets.
 The maintained Gradle project is `clients/app/src-tauri/gen/android`; generated
 JNI sources, native libraries and build outputs are ignored. Run `bun install
 --frozen-lockfile` in `clients/app`, then `bun run android:dev` or
@@ -750,6 +750,40 @@ DAAT_LOCUS_ANDROID_SIGNING=/private/release.properties DAAT_LOCUS_ANDROID_ABI=ar
 Use `x86_64` for an x86 emulator and build with `cargo xtask package android --target
 x86_64` first. The excluded Rust task uses the already-built native library;
 do not run this against stale native output.
+
+PhoneUse uses Shizuku API/provider 13.1.5 and librootkotlinx 2.0.0-beta02.
+The latter requires SDK 37; the maintained project pins AGP 9.2.1, Kotlin 2.3.21
+and Gradle 9.4.1. Runtime display isolation requires Android 15/API 35 or newer.
+Use dedicated disposable emulators: one with a running shell-UID Shizuku service,
+one with Magisk/another supported root provider and a working standard `su`.
+Authorize the test-signed DL installation through the relevant manager. Do not
+run against a personal account or delete existing device data to make tests pass.
+
+Build the device APK, then `:phone-use-fixture:assembleDebug` and
+`:app:assembleUniversalReleaseAndroidTest -x :app:rustBuildUniversalRelease` in
+the Gradle directory with the same signing properties. Run
+`python3 clients/app/scripts/test-phone-use.py --help` from the repository root.
+Provide the device serial, method, APK paths, a `phone-test-*` account and
+`DAAT_LOCUS_PHONE_TEST_PASSWORD`. The instrumentation creates that account through
+the actual OPAQUE WebUI, or logs into the matching test account; it refuses other
+accounts. The fixture is a separate unprivileged APK, never included in DL.
+The test checks the Owner gate, actual privileged UID, PNG contents/dimensions,
+Unicode replacement, key dispatch, main-screen focus/IME preservation, stale
+state/epoch and cancellation rejection, Actor/window isolation, crop/scale,
+release/reacquire, cross-Actor task preservation, immediate relaunch after task closure,
+detach/reset and the disabled gate. It also exercises edge-to-edge geometry in
+portrait/landscape, settings and drawer controls, dialog bounds, and real IME
+show/hide transitions without residual padding. Display settings remain drafts until
+Apply; the test verifies in-place resizing preserves display IDs and task contents,
+rejects old observation references, and retains settings across a process restart.
+`-PdaatTestBuildType=debug` selects debug instrumentation for iteration; validation
+must also exercise R8. Tests fail when prerequisites are missing. A local deterministic model fixture also drives the real Core/Actor/App/JNI path and checks model image delivery plus the authenticated screenshot resource endpoint; no external model service is used.
+
+The `android-phone-use` CI job runs both methods on the provisioned runner named
+by `PHONE_USE_RUNNER`, with `PHONE_USE_SHIZUKU_SERIAL`, `PHONE_USE_ROOT_SERIAL`,
+and private `PHONE_USE_TEST_SIGNING` (properties path) / `PHONE_USE_TEST_PASSWORD`.
+Provision JDK 17+, SDK/NDK, emulator authorization and disposable test accounts on
+that runner. An unconfigured/skipped runner is unavailable native coverage.
 
 ## MCP validation
 

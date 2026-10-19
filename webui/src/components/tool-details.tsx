@@ -57,7 +57,7 @@ export function ToolDetail({ result, onActor }: { result: ToolResult; onActor?(i
     if (result.name === "apps_manager__refresh") return <p className="dl-tool-note">{t("apps.refresh_action")}</p>;
     return <ul className="dl-tool-result-list">{apps.filter(app=>asText(app.name)).map((app,index)=><li key={index}><strong>{asText(app.name)}</strong>{asText(app.description)&&<p>{asText(app.description)}</p>}<small>{app.enabled?t("apps.enabled"):t("apps.disabled")}</small></li>)}</ul>;
   }
-  if (result.name.startsWith("computer_use__")) {
+  if ((result.name.startsWith("computer_use__") || result.name.startsWith("phone_use__"))) {
     const observation = asObject(payload.observation);
     const image = asText(observation.screenshot_url);
     const rows = [...asRows(payload.apps), ...asRows(payload.windows), ...asRows(payload.discovered_windows), ...asRows(payload.related_windows)];

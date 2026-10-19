@@ -81,6 +81,7 @@ fn views_refuse_partial_crops_oversized_images_and_coordinate_overflow() {
 }
 
 #[test]
+#[cfg(not(target_os = "android"))]
 fn all_computer_schemas_are_portable_and_handoff_is_explicit() {
     let tools = ComputerUseApp::specifications();
     for tool in &tools {
@@ -102,6 +103,37 @@ fn all_computer_schemas_are_portable_and_handoff_is_explicit() {
         .is_err()
     );
     assert!(!tools.iter().any(|t| t.name == "activate_window"));
+}
+
+#[test]
+fn phone_schemas_support_explicit_text_replacement_without_desktop_window_management() {
+    let tools = android::specifications();
+    for tool in &tools {
+        crate::schema_utils::validate_model_facing_schema(&tool.input_schema).unwrap();
+    }
+    let replace = tools.iter().find(|tool| tool.name == "set_text").unwrap();
+    crate::schema_utils::validate_value_against_schema(
+        &json!({"window_id":"window","state_id":"image","text":"中文🙂"}),
+        &replace.input_schema,
+        "set_text",
+    )
+    .unwrap();
+    assert!(
+        crate::schema_utils::validate_value_against_schema(
+            &json!({"window_id":"window","text":"中文🙂"}),
+            &replace.input_schema,
+            "set_text",
+        )
+        .is_err()
+    );
+    for name in [
+        "type_text",
+        "adjust_window",
+        "give_window",
+        "activate_window",
+    ] {
+        assert!(!tools.iter().any(|tool| tool.name == name));
+    }
 }
 
 #[test]

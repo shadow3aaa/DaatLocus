@@ -1,6 +1,6 @@
 import { t } from "@/lib/i18n";
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
-import { ArrowLeftIcon, DownloadIcon, MonitorIcon, SearchIcon, SettingsIcon, ShieldCheckIcon, SlidersHorizontalIcon, SunIcon } from "lucide-react";
+import { ArrowLeftIcon, DownloadIcon, MonitorIcon, SearchIcon, SettingsIcon, ShieldCheckIcon, SlidersHorizontalIcon, SunIcon, UserRoundIcon } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { Button } from "@/components/ui/button";
@@ -19,10 +19,12 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { modeLabel } from "@/components/composer";
 import { ProvidersSettings } from "@/components/settings/providers-settings";
 import { errorText, Picker, StatusNote } from "@/components/settings/controls";
+import { PhoneUseSettings } from "@/components/settings/phone-use-settings";
+import { isAndroid } from "@/lib/mobile";
 
-export type SettingsTab = "general" | "personal" | "account" | "permissions" | "models" | "import";
+export type SettingsTab = "general" | "personal" | "account" | "permissions" | "models" | "import" | "gui";
 export type SettingsPageHandle = { close(): void };
-const paths: Record<SettingsTab, string> = {general: "general", personal: "appearance", account: "devices", permissions: "permissions", models: "providers", import: "import"};
+const paths: Record<SettingsTab, string> = {general: "general", personal: "appearance", account: "devices", permissions: "permissions", models: "providers", import: "import", gui: "gui"};
 export function settingsPath(tab: SettingsTab) { return `/settings/${paths[tab]}`; }
 export function settingsTabFromPath(path: string): SettingsTab | null {
   return (Object.keys(paths) as SettingsTab[]).find(tab => path === settingsPath(tab)) ?? null;
@@ -47,6 +49,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
   const [confirmClose, setConfirmClose] = useState(false);
   const [mobileDetail, setMobileDetail] = useState(false);
   const [accountVisited, setAccountVisited] = useState(initialTab === "account");
+  const [guiVisited, setGuiVisited] = useState(initialTab === "gui");
   const [query, setQuery] = useState("");
   const [importsSupported, setImportsSupported] = useState(false);
   useEffect(() => {
@@ -118,13 +121,14 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
     {id: "personal" as const, label: t("settings_dialog.appearance"), icon: SunIcon, keywords: [t("settings_dialog.theme"), t("settings_dialog.light"), t("settings_dialog.dark"), t("settings_dialog.system"), t("appearance.code_theme"), t("appearance.accent"), t("appearance.interface_size"), t("appearance.content_size"), t("appearance.full_width")].join(" ")},
     ...(canManage ? [
       ...(importsSupported ? [{id: "import" as const, label: t("imports.title"), icon: DownloadIcon, keywords: "Codex"}] : []),
-      {id: "account" as const, label: t("settings_dialog.configuration"), icon: MonitorIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), "SSH", t("access_gate.public_connection_service"), t("reset_work.title")].join(" ")},
+      {id: "account" as const, label: t("settings_dialog.configuration"), icon: UserRoundIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), "SSH", t("access_gate.public_connection_service"), t("reset_work.title")].join(" ")},
+      ...(isAndroid() ? [{id: "gui" as const, label: t("phone_use.title"), icon: MonitorIcon, keywords: "Shizuku Root"}] : []),
       {id: "permissions" as const, label: t("settings_dialog.permissions"), icon: ShieldCheckIcon, keywords: t("settings_dialog.approval_mode")},
       {id: "models" as const, label: t("providers_settings.providers"), icon: SlidersHorizontalIcon, keywords: [t("composer.models"), t("composer.default_model"), t("provider_editor.api_key")].join(" ")},
     ] : []),
   ];
   const filtered = categories.filter(category => `${category.label} ${category.keywords}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
-  function selectTab(next: SettingsTab) {setTab(next);setNotice(null);setError(null);setLoading(false);setMobileDetail(true);if(next === "account")setAccountVisited(true);onTabChange(next);}
+  function selectTab(next: SettingsTab) {setTab(next);setNotice(null);setError(null);setLoading(false);setMobileDetail(true);if(next === "account")setAccountVisited(true);if(next === "gui")setGuiVisited(true);onTabChange(next);}
   if (!open) return null;
 
   return <section className="dl-settings-page" data-mobile-detail={mobileDetail} data-category={tab} aria-label={t("app.settings")}>
@@ -144,6 +148,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
         <div hidden={tab !== "personal"}><AppearanceSettings preferences={preferences} onChange={onPreferencesChanged} /></div>
         {canManage && importsSupported && <div hidden={tab !== "import"}><ImportSettings onViewCore={onViewCore} /></div>}
         {canManage&&<div hidden={tab !== "account"}>{accountVisited && <AccountEditor onChanged={()=>onActorChanged()}/>}</div>}
+        {canManage && isAndroid() && <div hidden={tab !== "gui"}>{(guiVisited || initialTab === "gui") && <PhoneUseSettings />}</div>}
         {canManage&&<div hidden={tab !== "permissions"}><SettingsSection title={t("settings_dialog.action_approval")}><SettingsGroup><SettingsRow label={t("settings_dialog.approval_mode")}>
           <ToggleGroup type="single" aria-label={t("settings_dialog.approval_mode")} value={actor?.config?.permissions.approval_mode||"auto"} disabled={locked||loading||!actor} className="dl-settings-options" onValueChange={mode=>{if(mode)void changeMode(mode as ApprovalMode);}}>
             {(["none","ask","auto"] as const).map(mode=><ToggleGroupItem key={mode} value={mode}>{modeLabel(mode)}</ToggleGroupItem>)}

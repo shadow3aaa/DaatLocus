@@ -15,6 +15,11 @@ describe("tool observations are product content, never protocol dumps", () => {
     expect(html).toContain("Returned document");
     for(const hidden of ["PRIVATE_TYPED_TEXT","PRIVATE_DRIVER_METADATA","PRIVATE_STATE_TOKEN","HIDDEN_MODEL_PROTOCOL"]) expect(html).not.toContain(hidden);
   });
+  test("PhoneUse renders window observations without private native identifiers or typed input", () => {
+    const html = renderToStaticMarkup(<ToolDetail result={result({name:"phone_use__set_text",arguments:{text:"PRIVATE_TYPED_TEXT"},payload:{status:"dispatched",observation:{title:"Android document",width:1280,height:720,state_id:"PRIVATE_STATE_TOKEN",window_id:"PRIVATE_WINDOW_TOKEN",input_target:{kind:"editable_control",text:"PRIVATE_RECEIVER_TEXT"}},private_metadata:"PRIVATE_NATIVE_METADATA"}})}/>);
+    expect(html).toContain("Android document");
+    for (const hidden of ["PRIVATE_TYPED_TEXT","PRIVATE_STATE_TOKEN","PRIVATE_WINDOW_TOKEN","PRIVATE_NATIVE_METADATA","HIDDEN_MODEL_PROTOCOL"]) expect(html).not.toContain(hidden);
+  });
   test("MCP errors preserve source text without exposing binary or protocol fields", () => {
     const name="mcp_00000000000000000000000000000001__t1234567890";
     const html=renderToStaticMarkup(<ToolDetail result={result({name,error:"remote_error",payload:{content:[{type:"text",text:"<script>record rejected</script>"},{type:"image",data:"BINARY_SENTINEL",mimeType:"image/png"}],app:{name:"Example",tool:"lookup"},private_metadata:"PRIVATE_SENTINEL"}})}/>);

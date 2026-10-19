@@ -415,6 +415,59 @@ App 不通过事后 SetCursorPos 掩盖此行为。目前不保证屏幕生命�
 输入/WM_CLOSE 处理器若进入同步模态循环，会使命令保持执行中；超时后输入停止，
 交还保持 pending，直到处理器退出。跨线程模态与任意应用兼容性尚未得到完整验证。
 
+## PhoneUse App（Android）
+
+Android 提供 `phone_use` 设备 App，普通 Actor 获得，Core 仍只直接持有 Actors。
+Owner 在独立的「GUI 操作」设置页启用设备能力，并选择 Shizuku 或 Root。
+Shizuku UserService 使用已授权的 ADB（UID 2000）身份；Root 使用
+librootkotlinx 的 RootSession/RootCommand（UID 0）。Rust 服务、Files 和其他 App
+仍在普通应用 UID 中运行，不获得 shell、任意 Binder 或 root 文件系统接口。
+原生配置命令只接受可信主 WebView，并逐次检查当前 Owner 会话。
+模型工具不能启用、重新连接或更换授权方式。进程重启、授权丢失或连接断开后，
+由 Owner 在设置中重新连接；不自动请求系统权限或重放操作。
+
+已验证的显示隔离策略要求 Android 15（API 35）以上；旧版本明确拒绝。
+每个 Actor 持有独立的虚拟屏幕，默认 1280×720、160 dpi，启用独立焦点、
+禁止抢占全局焦点、隐藏 IME 策略与随屏销毁任务的 flags，并检查实际显示标志、
+display unique ID 和存活状态。普通窗口的发现、截图、触摸和按键仅限该屏幕。
+不移动用户主屏任务，不接受模型提供的 display ID，不回退到主屏输入。
+截图通过 ImageReader 获取，再以 FD 传给普通 UID；Rust 将其发布到既有
+Actor 资源账本，客户端和模型沿用相同的授权资源契约。
+GUI 操作的高级设置通过独立 Owner 原生命令串行保存设备本地的宽度、高度和 DPI。
+宽高为 256–4096 的整数，单屏及存活屏幕总预算均不超过 800 万像素，DPI 为 80–640。
+建屏及调整尺寸时核对系统实际尺寸和 DPI。高级设置先保留草稿，Owner 点击应用后
+原地调整已有 VirtualDisplay 和图像接收器，不增加屏幕或重放任务；旧窗口和截图引用
+全部撤销，需重新发现和观察。失败时回滚已调整屏幕；无法确认回滚则关闭操作准入，
+由 Owner 重新连接。配置持久化失败同样回滚尺寸；仅在确认调整与持久化均成功后发布
+新偏好。模型不能修改这些偏好或覆盖请求中的建屏参数，失败或校验失败保留界面草稿。
+
+工具前缀是 `phone_use__`，沿用发现、接管、观察、操作、再观察流程。
+launcher app_id、window_id 和 state_id 都是宿主生成的 opaque 引用。
+启动前记录实际 task 集合，只有确认目标包在自有屏幕出现唯一新任务才返回成功；
+应用拒绝多屏或复用已有任务时返回 outcome_unknown，不能盲目重新启动。
+已知 singleTask / singleInstance launcher 在派发前拒绝。应用内部后续导航仍可能
+调用系统单例路由；任意第三方应用的导航兼容性并无全局保证，目标身份变化后必须
+重新发现，不能继续使用旧窗口引用。
+输入前校验 Actor、执行代次、任务、无障碍窗口与根节点身份、几何、遮挡和最新观察。
+取消在独立通道关闭未开始的操作；进行中的手势释放触点，未知效果不重放。
+截图支持窗口内裁剪与 1–4 倍放大，输入坐标始终相对返回图像。
+
+Android 不提供 Windows 的 adjust_window、give_window、type_text。
+点击选择实际可编辑节点；`set_text` 通过 ACTION_SET_TEXT 替换完整 Unicode 文本，
+返回控件实际文本，不模拟第二套输入法。自定义不支持此操作的控件明确失败。
+按键只接受实际支持的有限导航键，触摸只支持单次左键、纵向滚动和有界拖曳。
+release_window 撤销旧引用并保留任务，重新发现后需显式 open_window。
+新虚拟屏显式设置并核对 DISPLAY_IME_POLICY_HIDE，禁止副屏编辑器连接或迁移主屏输入法；
+文本输入走所选控件的 ACTION_SET_TEXT。close_window 移除选中任务，不调用 force-stop；Android 可在最后一个任务关闭后
+异步回收缓存进程，关闭回执有界等待这次回收，避免立即重新启动时进入正在退出的进程。
+普通 App detach 保留有任务的屏幕；
+Owner 关闭连接或执行账号工作重置时释放屏幕及任务。无任务的 detach 回收空屏幕。
+
+操作沿用 Actor 的 Ask / Auto / Full access 和权限记忆。粗粒度授权指纹包含
+设备及实际授权方式、UID；切换权限来源后重新审查，不按每个坐标和文本重复授权。
+只读远端拒绝、DL 自身应用排除与设备执行授权始终有效。
+目标 GUI 应用保留其 Android 用户权限；本能力不声称为目标应用提供文件沙箱。
+
 ## 执行与恢复
 
 SQLite 的事务同时提交消息变化和语义事件，稳定 ID 标识输入、工具调用、资源
@@ -876,7 +929,7 @@ profile 与账号凭据版本绑定保证会话权限。
 同一 profile 的窗口；后台重启后重连已核实的本机服务。CLI 与可选浏览器入口保留。
 Android 将同一服务与 Actor/App 核心编译为 APK 内的 Rust 原生库，使用 OS 私有目录，
 不启动桌面 daemon、CLI 子进程或独立 root。它可以创建账号并独立推理，也可以成为
-同账号共享核心的执行设备。设备可为普通 Actor 提供 Actors、Files、HTTP Browser、Artifacts；账号 Core 直接仅用 Actors；
+同账号共享核心的执行设备。设备可为普通 Actor 提供 Actors、Files、HTTP Browser、Artifacts、PhoneUse；账号 Core 直接仅用 Actors；
 终端不安装，未实现的进程隔离始终拒绝。Files 使用目录句柄与实际打开 FD 校验，
 Android 上以 O_PATH 遍历不可列举的系统祖先目录，仅在授权目标读取目录内容；
 创建文件用 renameat2 的 RENAME_NOREPLACE 原子提交，避免 SELinux 禁止的硬链接，
@@ -884,8 +937,10 @@ Android 上以 O_PATH 遍历不可列举的系统祖先目录，仅在授权目�
 也属于 Apps 不可访问的私有基础设施。
 账号 bootstrap 只授予确切 loopback origin 主 WebView，普通登录仍写 HttpOnly cookie。
 资源预览留在认证 WebView 的 sandbox dialog，外部链接交给系统浏览器。
-Android 原生容器统一应用系统栏、刘海和键盘 inset，并消费已处理的 inset；
-WebView 不应再次为同一安全区预留边距。移动抽屉与全屏 Actor 弹窗必须覆盖内容视口。
+Android WebView 延伸到系统栏和刘海区域，原生层将安全区几何传给 CSS；标题栏、
+抽屉标题、输入区和浮动弹窗分别避让，不给整页增加顶部 padding。原生容器仅为键盘
+缩小内容视口，并将已处理的 IME inset 归零后继续传递，避免重复预留和残留留白。
+移动抽屉与全屏 Actor 弹窗覆盖内容视口，并在自己的标题与底部控件处理安全区。
 Android 默认网络回调将网络与地址变化合并 300 毫秒后通过 JNI 通知后台，避免依赖
 受限的系统目录枚举；Activity 销毁时注销回调，不新增 WebView 网络控制命令。
 

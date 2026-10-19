@@ -363,7 +363,8 @@
     "handoff_pending": "输入已停止，窗口尚未交还完成",
     "given_to_user": "窗口已归还给你，Agent 控制已结束",
     "controlled": "位于 Agent 工作区",
-    "not_controlled": "未接管"
+    "not_controlled": "未接管",
+    "set_text": "替换文本"
   },
   "tool_details": {
     "deliver_result": "交付结果",
@@ -751,5 +752,32 @@
     "empty": "此设备上没有找到 Codex 会话。",
     "no_results": "没有匹配的会话。",
     "load_more": "加载更多"
+  },
+  "phone_use": {
+    "title": "GUI 操作",
+    "enable": "启用 GUI 操作",
+    "scope": "允许在虚拟屏幕中操作 GUI 应用",
+    "method": "授权方式",
+    "disabled": "已关闭",
+    "disconnected": "连接已断开",
+    "connecting": "正在连接…",
+    "ready": "可用",
+    "unsupported": "需要 Android 15 或更高版本",
+    "unavailable": "授权或连接不可用",
+    "reconnect": "授权 / 重新连接",
+    "disable_effect": "关闭后，正在操作的应用中未保存的内容可能丢失。",
+    "authorize": "启用 GUI 操作",
+    "choose_method": "选择一个授权方式",
+    "advanced": "高级",
+    "width": "宽度（像素）",
+    "height": "高度（像素）",
+    "density": "显示密度（DPI）",
+    "display_effect": "点击应用后调整虚拟屏幕。",
+    "apply": "应用",
+    "display_invalid": "宽、高须为 256–4096 的整数，总像素不超过 800 万；DPI 须为 80–640 的整数。",
+    "methods": {
+      "shizuku": "Shizuku",
+      "root": "Root"
+    }
   }
 }

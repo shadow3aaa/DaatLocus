@@ -56,6 +56,7 @@ tracing = "0.1"
 jni = "0.22"
 rustls-platform-verifier = "0.7"
 ndk-context = "0.1"
+miette = "7.6.0"
 tauri-plugin-opener = "2"
 
 [dev-dependencies]

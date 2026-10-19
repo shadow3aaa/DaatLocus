@@ -13,6 +13,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+#[cfg(any(target_os = "android", test))]
+pub mod android;
 #[cfg(windows)]
 mod windows;
 
@@ -238,6 +240,8 @@ pub struct ComputerUseApp {
     supports_vision: bool,
     #[cfg(windows)]
     client: Option<windows::Client>,
+    #[cfg(target_os = "android")]
+    android: android::Client,
 }
 
 impl ComputerUseApp {
@@ -248,9 +252,17 @@ impl ComputerUseApp {
             supports_vision,
             #[cfg(windows)]
             client: None,
+            #[cfg(target_os = "android")]
+            android: android::Client::new(),
         }
     }
     fn specifications() -> Vec<AppToolSpec> {
+        #[cfg(target_os = "android")]
+        return android::specifications();
+        #[cfg(not(target_os = "android"))]
+        Self::windows_specifications()
+    }
+    fn windows_specifications() -> Vec<AppToolSpec> {
         let tool = |name: &str, description: &str, input_schema| AppToolSpec {
             name: name.into(),
             description: description.into(),
@@ -349,9 +361,17 @@ impl ComputerUseApp {
 #[async_trait]
 impl App for ComputerUseApp {
     fn id(&self) -> AppId {
-        AppId::new("computer_use").expect("static App identifier")
+        AppId::new(if cfg!(target_os = "android") {
+            "phone_use"
+        } else {
+            "computer_use"
+        })
+        .expect("static App identifier")
     }
     fn docs(&self) -> AppDocs {
+        #[cfg(target_os = "android")]
+        return AppDocs::from_markdown(include_str!("../app_instructions/phone_use.md"));
+        #[cfg(not(target_os = "android"))]
         AppDocs::from_markdown(include_str!("../app_instructions/computer_use.md"))
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
@@ -364,7 +384,11 @@ impl App for ComputerUseApp {
                 .as_ref()
                 .is_none_or(|client| !client.has_resources())
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "android")]
+        {
+            self.android.can_passivate()
+        }
+        #[cfg(not(any(windows, target_os = "android")))]
         {
             true
         }
@@ -392,6 +416,9 @@ impl App for ComputerUseApp {
         ) {
             return Ok(None);
         }
+        #[cfg(target_os = "android")]
+        return self.android.review(&self.system);
+        #[cfg(not(target_os = "android"))]
         Ok(Some(AppReview::new(
             "computer_use/desktop/v1",
             "Authorize interactive computer operation on this device's Windows user desktop, including screenshots, taking and giving windows, launching supported apps and GUI input. This is one remembered desktop capability and an explicit exception to the project filesystem sandbox: target apps can access files available to this Windows user. It does not change other Apps' sandbox policies. Read-only remote authority and Daat Locus window/process exclusion remain mandatory.",
@@ -435,48 +462,17 @@ impl App for ComputerUseApp {
                 .expect("initialized client")
                 .call(call.clone(), context.clone())
                 .await?;
-            let mut result = AppToolExecutionResult::new(reply.summary, reply.payload, None);
-            result.failure = reply.failure;
-            if let Some(bytes) = reply.image {
-                let resource = match crate::resources::publish(
-                    &self.system,
-                    &self.actor_id,
-                    "computer-use.png",
-                    "image/png",
-                    &bytes,
-                ) {
-                    Ok(resource) => resource,
-                    Err(_) => {
-                        result.payload["status"] = json!("outcome_unknown");
-                        result.payload["observation_error"] = json!(
-                            "Screenshot resource publication failed; observe before continuing, do not replay the operation"
-                        );
-                        result.failure = Some("ComputerUse screenshot resource unavailable after native operation; do not replay".into());
-                        return Ok(result);
-                    }
-                };
-                result.payload["observation"]["screenshot"] =
-                    serde_json::to_value(&resource).map_err(|e| miette!("{e}"))?;
-                result.payload["observation"]["screenshot_url"] = json!(format!(
-                    "/v1/actors/{}/resources/{}",
-                    self.actor_id, resource.id
-                ));
-                result
-                    .model_images
-                    .push(crate::model_protocol::AgentContentPart::ResourceImage {
-                        resource,
-                        description: Some(
-                            "Complete window or explicitly selected region. Input coordinates use this returned image; the host maps its crop and scale. Use adjust_window for title-bar/window management."
-                                .into(),
-                        ),
-                    });
-            }
-            Ok(result)
+            self.publish_reply(reply.summary, reply.payload, reply.failure, reply.image)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "android")]
+        {
+            let reply = self.android.call(&self.actor_id, call, context).await?;
+            self.publish_reply(reply.summary, reply.payload, reply.failure, reply.image)
+        }
+        #[cfg(not(any(windows, target_os = "android")))]
         {
             let _ = (&self.system, call);
-            Err(miette!("ComputerUse currently requires Windows x64"))
+            Err(miette!("ComputerUse requires a supported native backend"))
         }
     }
     async fn shutdown(&mut self) -> Result<()> {
@@ -484,7 +480,58 @@ impl App for ComputerUseApp {
         if let Some(client) = self.client.take() {
             client.shutdown().await?;
         }
+        #[cfg(target_os = "android")]
+        self.android.shutdown(&self.actor_id).await?;
         Ok(())
+    }
+}
+
+impl ComputerUseApp {
+    #[cfg(any(windows, target_os = "android"))]
+    fn publish_reply(
+        &self,
+        summary: String,
+        payload: Value,
+        failure: Option<String>,
+        image: Option<Vec<u8>>,
+    ) -> Result<AppToolExecutionResult> {
+        let mut result = AppToolExecutionResult::new(summary, payload, None);
+        result.failure = failure;
+        if let Some(bytes) = image {
+            let resource = match crate::resources::publish(
+                &self.system,
+                &self.actor_id,
+                "computer-use.png",
+                "image/png",
+                &bytes,
+            ) {
+                Ok(resource) => resource,
+                Err(_) => {
+                    result.payload["status"] = json!("outcome_unknown");
+                    result.payload["observation_error"] = json!(
+                        "Screenshot resource publication failed; observe before continuing, do not replay the operation"
+                    );
+                    result.failure = Some("ComputerUse screenshot resource unavailable after native operation; do not replay".into());
+                    return Ok(result);
+                }
+            };
+            result.payload["observation"]["screenshot"] =
+                serde_json::to_value(&resource).map_err(|e| miette!("{e}"))?;
+            result.payload["observation"]["screenshot_url"] = json!(format!(
+                "/v1/actors/{}/resources/{}",
+                self.actor_id, resource.id
+            ));
+            result
+                    .model_images
+                    .push(crate::model_protocol::AgentContentPart::ResourceImage {
+                        resource,
+                        description: Some(
+                            "Observed window or explicitly selected region. Input coordinates use this returned image; the host maps its crop and scale."
+                                .into(),
+                        ),
+                    });
+        }
+        Ok(result)
     }
 }
 

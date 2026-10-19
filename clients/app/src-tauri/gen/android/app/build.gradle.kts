@@ -4,6 +4,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.parcelize")
     id("rust")
 }
 
@@ -39,7 +40,8 @@ val tauriProperties = Properties().apply {
 }
 
 android {
-    compileSdk = 36
+    compileSdk = 37
+    ndkVersion = "27.2.12479018"
     namespace = "io.daat_locus.app"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
@@ -51,7 +53,7 @@ android {
         testInstrumentationRunner = "io.daat_locus.app.ReleaseStartupTest"
     }
     // Startup tests must exercise the same R8/JNI boundary as the distributed APK.
-    testBuildType = "release"
+    testBuildType = providers.gradleProperty("daatTestBuildType").getOrElse("release")
     signingConfigs {
         create("release") {
             if (!signingProperties.isEmpty) {
@@ -118,6 +120,9 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.13.0")
     implementation("com.google.android.material:material:1.14.0")
     implementation("androidx.lifecycle:lifecycle-process:2.11.0")
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
+    implementation("be.mygod.librootkotlinx:librootkotlinx:2.0.0-beta02")
     testImplementation("junit:junit:4.13.2")
 }
 

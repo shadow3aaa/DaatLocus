@@ -571,7 +571,10 @@ release APK，验证签名证书 SHA256 与 APK 16 KiB 对齐，最后删除签�
 
 ## Android 构建
 
-需要 JDK 17+、Android SDK 36 / NDK 27、Bun、wasm-pack 和 Rust Android targets。
+需要 JDK 17+、Android SDK 37.0 / NDK 27.2.12479018、Bun、wasm-pack 和 Rust Android targets。
+项目固定 AGP 9.2.1、Kotlin 2.3.21、Gradle 9.4.1，以满足
+librootkotlinx 2.0.0-beta02；Shizuku API/provider 使用 13.1.5。
+PhoneUse 的显示隔离要求 Android 15/API 35 以上。
 `clients/app/src-tauri/gen/android` 是维护中的 Gradle 源码；生成的 JNI 源码、原生库
 和构建输出均已忽略。在 `clients/app` 执行 `bun install --frozen-lockfile`，然后使用
 `bun run android:dev` 或设置 `DAAT_LOCUS_ANDROID_SIGNING=/私有路径/release.properties`
@@ -593,6 +596,25 @@ release APK，验证签名证书 SHA256 与 APK 16 KiB 对齐，最后删除签�
 ```sh
 DAAT_LOCUS_ANDROID_SIGNING=/私有路径/release.properties DAAT_LOCUS_ANDROID_ABI=arm64-v8a ./gradlew :app:connectedUniversalReleaseAndroidTest -x :app:rustBuildUniversalRelease
 ```
+
+PhoneUse 使用两个可丢弃模拟器，分别预置并启动 shell UID 的 Shizuku 与支持标准
+`su` 的 Root 管理器，为测试签名的 DL 安装授予权限。不能使用个人账号或清除已有
+设备数据。构建设备 APK 后，在 Gradle 目录构建 `:phone-use-fixture:assembleDebug`
+与 `:app:assembleUniversalReleaseAndroidTest -x :app:rustBuildUniversalRelease`。
+从仓库根目录运行 `python3 clients/app/scripts/test-phone-use.py --help`，传入 serial、
+method、三个 APK 路径、`phone-test-*` 账号及环境变量
+`DAAT_LOCUS_PHONE_TEST_PASSWORD`。测试通过真实 OPAQUE 页面创建/登录匹配的临时
+账号，拒绝其他账号。夹具是独立无权限 APK，不打入 DL。测试涵盖 Owner 校验、
+真实 UID、截图、Unicode、按键、主屏焦点/IME 保持、旧状态/代次与取消拒绝、
+Actor 隔离、裁剪、释放/接管、其他 Actor 任务保留、任务关闭后立即重启、detach/重置
+和关闭开关后的拒绝。还会检查横竖屏 edge-to-edge 几何、设置/抽屉控件、弹窗边界及
+真实键盘展开/收起，验证没有残留或重复留白。显示参数仅在点击应用后生效；测试验证
+原地调整保留屏幕 ID 和任务内容、拒绝旧观察引用，并在进程重启后保留参数。
+迭代可用 `-PdaatTestBuildType=debug`，最终还必须覆盖 R8；缺少前提时测试失败。完整链路通过本机确定性模型服务驱动真实 Core 创建普通 Actor，执行 PhoneUse 工具并验证模型图片和认证资源接口；不连接外部模型服务。
+CI 的 `android-phone-use` job 通过 `PHONE_USE_RUNNER`、
+`PHONE_USE_SHIZUKU_SERIAL`、`PHONE_USE_ROOT_SERIAL` 及私有
+`PHONE_USE_TEST_SIGNING`（properties 路径）、`PHONE_USE_TEST_PASSWORD` 运行两种方式。
+需预置 SDK/NDK、JDK 17+、模拟器授权与临时账号；未配置 runner 表示缺少原生覆盖。
 
 x86 模拟器使用 `x86_64`，先运行 `cargo xtask package android --target x86_64`。
 排除的 Rust 任务使用刚构建好的原生库，不得使用过期产物运行测试。

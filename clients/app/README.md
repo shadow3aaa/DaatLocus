@@ -87,7 +87,7 @@ Background transitions stop inference and preserve interrupted-effect records;
 foreground resumes queued work. Android can kill the process, so this is not a
 permanent background execution service. Transport reconnects and resumes journals.
 
-Install Android SDK 36, NDK 27 and JDK 17+, with Android Rust targets and wasm-pack.
+Install Android SDK 37.0, NDK 27.2.12479018 and JDK 17+, with Android Rust targets and wasm-pack.
 After `bun install --frozen-lockfile` in `clients/app`, run:
 
 ```sh

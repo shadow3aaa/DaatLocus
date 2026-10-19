@@ -296,8 +296,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ env.CHECK_ONLY != 'true' }}
-      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.0.11902837"
-      - run: echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.11902837" >> "$GITHUB_ENV"
+      - run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
+      - run: echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
       - run: cargo install wasm-pack --locked
       - run: bun install --frozen-lockfile
         working-directory: webui

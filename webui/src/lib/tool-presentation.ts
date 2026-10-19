@@ -1,12 +1,13 @@
 import { getCurrentWebUiLanguage, t } from "@/lib/i18n";
 import type { JsonValue, ToolSummary } from "./actor-api";
-import { FileTextIcon, FilePlus2Icon, FileMinus2Icon, PencilIcon, TerminalSquareIcon, SearchIcon, Globe2Icon, MessageCircleIcon, ImageIcon, PackageIcon, PaperclipIcon, MonitorIcon } from "lucide-react";
+import { FileTextIcon, FilePlus2Icon, FileMinus2Icon, PencilIcon, TerminalSquareIcon, SearchIcon, Globe2Icon, MessageCircleIcon, ImageIcon, PackageIcon, PaperclipIcon, MonitorIcon, SmartphoneIcon } from "lucide-react";
 
 export const asObject = (value: JsonValue | undefined): Record<string, JsonValue> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 export const asText = (value: JsonValue | undefined): string => typeof value === "string" ? value : "";
 export const asRows = (value: JsonValue | undefined): Record<string, JsonValue>[] => Array.isArray(value) ? value.map(asObject) : [];
 
 const labels: Record<string, string> = {
+  phone_use__list_apps: "computer_use.list_apps", phone_use__list_windows: "computer_use.list_windows", phone_use__launch_app: "computer_use.launch_app", phone_use__open_window: "computer_use.open_window", phone_use__get_window_state: "computer_use.observe", phone_use__click: "computer_use.click", phone_use__set_text: "computer_use.set_text", phone_use__press_key: "computer_use.press_key", phone_use__scroll: "computer_use.scroll", phone_use__drag: "computer_use.drag", phone_use__release_window: "computer_use.release_window", phone_use__close_window: "computer_use.close_window",
   computer_use__adjust_window: "computer_use.adjust_window",
   computer_use__list_apps: "computer_use.list_apps", computer_use__list_windows: "computer_use.list_windows", computer_use__launch_app: "computer_use.launch_app", computer_use__open_window: "computer_use.open_window", computer_use__get_window_state: "computer_use.observe", computer_use__click: "computer_use.click", computer_use__type_text: "computer_use.type_text", computer_use__press_key: "computer_use.press_key", computer_use__scroll: "computer_use.scroll", computer_use__drag: "computer_use.drag", computer_use__give_window: "computer_use.give_window", computer_use__release_window: "computer_use.release_window", computer_use__close_window: "computer_use.close_window",
   actors__archive: "tool_presentation.archive_actor", actors__unarchive: "tool_presentation.unarchive_actor",
@@ -34,6 +35,7 @@ export function toolLabel(name: string) { const domain=domainToolName(name); ret
 export function fieldLabel(name: string) { return fieldLabels[name] ? t(fieldLabels[name]) : words(name); }
 export function toolIcon(name: string, outcome?: JsonValue | null) {
   name = domainToolName(name);
+  if (name.startsWith("phone_use__")) return SmartphoneIcon;
   if (name.startsWith("computer_use__")) return MonitorIcon;
   if (name.startsWith("terminal__")) return TerminalSquareIcon;
   if (name.startsWith("actors__")) return MessageCircleIcon;

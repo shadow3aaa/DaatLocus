@@ -583,6 +583,8 @@ impl ActorSystem {
         for (id, worker) in workers {
             self.stop_actor_worker(&id, worker).await?;
         }
+        #[cfg(target_os = "android")]
+        crate::computer_use_app::android::reset_resources()?;
         crate::stage::reset::replace(self.store(), record, &root)
             .map_err(|error| miette::miette!("{error}"))?;
         crate::stage::reset::cleanup(self).map_err(|error| miette::miette!("{error}"))?;

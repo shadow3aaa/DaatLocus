@@ -1509,6 +1509,7 @@ dependencies = [
  "hex",
  "ico",
  "jni 0.22.4",
+ "miette",
  "mimalloc",
  "ndk-context",
  "open",

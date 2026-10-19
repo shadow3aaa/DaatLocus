@@ -13,7 +13,7 @@ import androidx.annotation.Keep
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import kotlin.math.max
+import androidx.core.graphics.Insets
 
 class MainActivity : TauriActivity() {
   private var multicast: WifiManager.MulticastLock? = null
@@ -21,6 +21,8 @@ class MainActivity : TauriActivity() {
   private val networkHandler = Handler(Looper.getMainLooper())
   @Keep
   private external fun nativeNetworkChanged()
+  @Keep
+  private external fun nativeWindowInsetsChanged(top: Float, right: Float, bottom: Float, left: Float)
   private val networkChanged = Runnable { nativeNetworkChanged() }
   private fun queueNetworkChange() {
     networkHandler.removeCallbacks(networkChanged)
@@ -34,15 +36,23 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    PhoneUseController.initialize(applicationContext)
     connectivity.registerDefaultNetworkCallback(networkCallback)
     ViewCompat.setOnApplyWindowInsetsListener(findViewById(android.R.id.content)) { view, insets ->
       val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
       val keyboard = insets.getInsets(WindowInsetsCompat.Type.ime())
-      view.setPadding(bars.left, bars.top, bars.right, max(bars.bottom, keyboard.bottom))
-      // The native container already applies system and keyboard insets. Do not
-      // forward them to WebView, which would reserve the same safe area again.
-      WindowInsetsCompat.CONSUMED
+      val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+      // Resize only for the keyboard, including on older WebViews. System bars
+      // overlap the page background; individual web controls apply safe areas.
+      view.setPadding(0, 0, 0, if (imeVisible) keyboard.bottom else 0)
+      val density = resources.displayMetrics.density
+      nativeWindowInsetsChanged(bars.top / density, bars.right / density,
+        if (imeVisible) 0f else bars.bottom / density, bars.left / density)
+      WindowInsetsCompat.Builder(insets)
+        .setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
+        .build()
     }
+    ViewCompat.requestApplyInsets(findViewById(android.R.id.content))
   }
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)

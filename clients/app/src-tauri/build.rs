@@ -76,6 +76,9 @@ fn main() {
             .app_manifest(tauri_build::AppManifest::new().commands(&[
                 "desktop_account",
                 "desktop_window",
+                "phone_use_status",
+                "phone_use_configure",
+                "phone_use_display_configure",
                 "native_http_start",
                 "native_http_write",
                 "native_http_send",

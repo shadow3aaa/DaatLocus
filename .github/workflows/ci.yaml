@@ -158,8 +158,8 @@ jobs:
           packages: platform-tools
       - uses: oven-sh/setup-bun@v2
       - uses: Swatinem/rust-cache@v2
-      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.0.11902837"
-      - run: echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.11902837" >> "$GITHUB_ENV"
+      - run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
+      - run: echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
       - run: cargo install wasm-pack --locked
       - run: bun install --frozen-lockfile
         working-directory: webui
@@ -167,3 +167,42 @@ jobs:
         working-directory: clients/app
       - run: bun run android:build --debug
         working-directory: clients/app
+  android-phone-use:
+    # Requires two disposable, provisioned API 35+ emulators. A skipped job is
+    # unavailable coverage, never evidence of a successful privilege test.
+    if: ${{ vars.PHONE_USE_RUNNER != '' }}
+    runs-on: ${{ vars.PHONE_USE_RUNNER }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        method: [shizuku, root]
+    env:
+      DAAT_LOCUS_ANDROID_SIGNING: ${{ secrets.PHONE_USE_TEST_SIGNING }}
+      DAAT_LOCUS_PHONE_TEST_PASSWORD: ${{ secrets.PHONE_USE_TEST_PASSWORD }}
+      DAAT_LOCUS_ANDROID_ABI: arm64-v8a
+      PHONE_SERIAL: ${{ matrix.method == 'root' && vars.PHONE_USE_ROOT_SERIAL || vars.PHONE_USE_SHIZUKU_SERIAL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,wasm32-unknown-unknown
+      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-pack --locked
+      - run: bun install --frozen-lockfile
+        working-directory: webui
+      - run: bun install --frozen-lockfile
+        working-directory: clients/app
+      - run: bun run android:build
+        working-directory: clients/app
+      - run: ./gradlew :phone-use-fixture:assembleDebug :app:assembleUniversalReleaseAndroidTest -x :app:rustBuildUniversalRelease
+        working-directory: clients/app/src-tauri/gen/android
+      - name: Require real native privilege and display isolation
+        run: >-
+          python3 clients/app/scripts/test-phone-use.py
+          --serial "$PHONE_SERIAL" --method "${{ matrix.method }}"
+          --account "phone-test-ci-${{ matrix.method }}"
+          --app-apk clients/app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+          --test-apk clients/app/src-tauri/gen/android/app/build/outputs/apk/androidTest/universal/release/app-universal-release-androidTest.apk
+          --fixture-apk clients/app/src-tauri/gen/android/phone-use-fixture/build/outputs/apk/debug/phone-use-fixture-debug.apk

@@ -3,6 +3,40 @@ use std::sync::Arc;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 static SERVICE: std::sync::OnceLock<std::sync::Weak<MobileService>> = std::sync::OnceLock::new();
+static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+static SAFE_AREA: std::sync::Mutex<[f32; 4]> = std::sync::Mutex::new([0.0; 4]);
+
+fn apply_safe_area(window: &tauri::WebviewWindow) {
+    let values = *SAFE_AREA.lock().unwrap_or_else(|e| e.into_inner());
+    // OS geometry only, with no JS-to-native capability. Explicit values also
+    // support WebViews older than CSS system-bar inset forwarding (M136).
+    let script = format!(
+        "document.documentElement.dataset.mobilePlatform='android';\
+         ['top','right','bottom','left'].forEach((side,i)=>\
+         document.documentElement.style.setProperty('--dl-safe-'+side,{}[i]+'px'));",
+        serde_json::json!(values)
+    );
+    let _ = window.eval(script);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_daat_1locus_app_MainActivity_nativeWindowInsetsChanged(
+    _env: *mut jni::sys::JNIEnv,
+    _activity: jni::sys::jobject,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+) {
+    let values = [top, right, bottom, left];
+    if !values.iter().all(|v| v.is_finite() && *v >= 0.0) {
+        return;
+    }
+    *SAFE_AREA.lock().unwrap_or_else(|e| e.into_inner()) = values;
+    if let Some(window) = APP.get().and_then(|app| app.get_webview_window("main")) {
+        apply_safe_area(&window);
+    }
+}
 
 // An OS connectivity hint only. No WebView/JavaScript command or authority is
 // introduced, and callbacks before service initialization are harmless.
@@ -50,6 +84,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             desktop_account,
+            crate::phone_use::phone_use_status,
+            crate::phone_use::phone_use_configure,
+            crate::phone_use::phone_use_display_configure,
             crate::transport::native_http_start,
             crate::transport::native_http_write,
             crate::transport::native_http_send,
@@ -58,7 +95,9 @@ pub fn run() {
             crate::transport::native_resource_download
         ])
         .setup(|app| {
+            let _ = APP.set(app.handle().clone());
             platform_tls()?;
+            crate::phone_use::initialize()?;
             let service =
                 tauri::async_runtime::block_on(MobileService::start(app.path().app_data_dir()?))
                     .map_err(|_| "Cannot start Daat Locus")?;
@@ -77,6 +116,11 @@ pub fn run() {
                     "Object.defineProperty(window,'__DAAT_LOCUS_MOBILE__',{value:'android'});",
                 )
                 .on_page_load(|window, payload| {
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+                        && crate::transport::navigation(window.app_handle(), payload.url())
+                    {
+                        apply_safe_area(&window);
+                    }
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
                         && crate::transport::navigation(window.app_handle(), payload.url())
                     {

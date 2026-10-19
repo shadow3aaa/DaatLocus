@@ -486,8 +486,33 @@ pub async fn native_resource_download(
 pub fn capability(app: &tauri::AppHandle) -> tauri::Result<()> {
     app.add_capability(serde_json::json!({
         "identifier":"native-client", "windows":["main"], "local":true,
-        "permissions":["allow-desktop-account", "allow-desktop-window", "allow-native-http-start", "allow-native-http-write", "allow-native-http-send", "allow-native-http-read", "allow-native-http-cancel", "allow-native-resource-download"]
+        "permissions":["allow-desktop-account", "allow-desktop-window", "allow-phone-use-status", "allow-phone-use-configure", "allow-phone-use-display-configure", "allow-native-http-start", "allow-native-http-write", "allow-native-http-send", "allow-native-http-read", "allow-native-http-cancel", "allow-native-resource-download"]
     }).to_string())
+}
+
+/// Local device capability settings still require the profile's current Owner session.
+#[cfg(target_os = "android")]
+pub async fn authorize_owner(window: &WebviewWindow) -> Result<()> {
+    authorize(window)?;
+    let state = window.state::<Transport>();
+    let response = state
+        .prepare(
+            window,
+            Metadata {
+                path: "/v1/stage".into(),
+                method: "GET".into(),
+                headers: vec![],
+            },
+            vec![],
+        )?
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|_| UNAVAILABLE)?;
+    if !response.status().is_success() {
+        return Err("Owner login required".into());
+    }
+    Ok(())
 }
 
 pub fn resources(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {

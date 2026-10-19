@@ -18,6 +18,11 @@ export function mockPreviewPlugin(): Plugin {
       responses.clear();
     },
     resolveId(id) {
+      if (process.env.DAAT_LOCUS_MOCK_PHONE === "1") {
+        const normalized = id.replaceAll("\\", "/");
+        if (id === "@/lib/phone-use" || normalized.endsWith("/src/lib/phone-use")) return path.resolve(import.meta.dirname, "phone-use.ts");
+        if (id === "@/lib/mobile" || normalized.endsWith("/src/lib/mobile")) return path.resolve(import.meta.dirname, "mobile.ts");
+      }
       if (id === "@/generated/account-pake/daat_locus_auth" ||
           id.replaceAll("\\", "/").endsWith("/src/generated/account-pake/daat_locus_auth")) {
         return path.resolve(import.meta.dirname, "account-pake.ts");

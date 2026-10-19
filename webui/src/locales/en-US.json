@@ -363,7 +363,8 @@
     "handoff_pending": "Input stopped; window handoff is incomplete",
     "given_to_user": "Window returned to you; Agent control ended",
     "controlled": "In the Agent workspace",
-    "not_controlled": "Not controlled"
+    "not_controlled": "Not controlled",
+    "set_text": "Replace text"
   },
   "tool_details": {
     "deliver_result": "Deliver result",
@@ -751,5 +752,32 @@
     "empty": "No Codex conversations found on this device.",
     "no_results": "No matching conversations.",
     "load_more": "Load more"
+  },
+  "phone_use": {
+    "title": "GUI Operation",
+    "enable": "Enable GUI operation",
+    "scope": "Allow GUI apps to be operated on a virtual display",
+    "method": "Authorization method",
+    "disabled": "Off",
+    "disconnected": "Disconnected",
+    "connecting": "Connecting…",
+    "ready": "Available",
+    "unsupported": "Requires Android 15 or later",
+    "unavailable": "Authorization or connection unavailable",
+    "reconnect": "Authorize / reconnect",
+    "disable_effect": "Turning this off can discard unsaved content in apps being operated.",
+    "authorize": "Enable GUI operation",
+    "choose_method": "Choose an authorization method",
+    "advanced": "Advanced",
+    "width": "Width (pixels)",
+    "height": "Height (pixels)",
+    "density": "Display density (DPI)",
+    "display_effect": "Apply changes to resize the virtual displays.",
+    "apply": "Apply",
+    "display_invalid": "Width and height must be integers from 256 to 4096, with at most 8 million pixels. DPI must be an integer from 80 to 640.",
+    "methods": {
+      "shizuku": "Shizuku",
+      "root": "Root"
+    }
   }
 }
