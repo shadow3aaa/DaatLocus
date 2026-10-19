@@ -151,7 +151,7 @@ fn native_launch_prepares_screen_and_claims_only_the_new_window_with_a_clean_env
         );
         Launched(handle)
     };
-    let _launched = current.as_ref().map(&own_fixture);
+    let _launched = current.as_ref().map(own_fixture);
     assert_eq!(reply.payload["status"], "observed", "{}", reply.payload);
     assert_eq!(
         reply.payload["startup_placement"],

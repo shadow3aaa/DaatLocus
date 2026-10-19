@@ -195,6 +195,10 @@ mod tests {
         reply.epoch = 1;
         assert!(fence.observe(&reply, sent, received).is_err());
         assert!(!Fence::default().permits(second, 2, received));
+        reply.epoch = 2;
+        reply.lease.as_mut().unwrap().expires_at_ms = -993_999;
+        assert!(fence.observe(&reply, sent, received).is_err());
+        assert!(!fence.permits(second, 2, received));
         fence.invalidate();
         assert!(!fence.permits(second, 2, received));
     }
