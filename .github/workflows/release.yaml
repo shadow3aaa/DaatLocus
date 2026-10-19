@@ -1,17 +1,27 @@
 name: Release
 on:
   workflow_dispatch:
+    inputs:
+      check_only:
+        description: 'Validate a trusted branch without uploading artifacts or publishing'
+        type: boolean
+        default: true
+        required: true
   push:
     branches: [main]
     tags: ['v*']
 permissions:
   contents: read
+env:
+  # Manual checks execute the selected branch with production signing secrets.
+  # Select only trusted same-repository branches; never trigger on pull_request.
+  CHECK_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.check_only }}
 concurrency:
-  group: release-${{ github.ref }}
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.check_only && 'release-check' || 'release' }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 jobs:
   version:
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' && inputs.check_only) || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +44,15 @@ jobs:
             throw new Error("Service, client and Tauri versions must agree");
           }
           const ref = process.env.GITHUB_REF;
-          if (ref.startsWith("refs/tags/")) {
+          if (process.env.CHECK_ONLY === "true") {
+            // All check jobs use the checked-in versions, without artifact transfer.
+            const packages = Bun.TOML.parse(sources[2]).package.filter(
+              pkg => ["daat-locus", "daat-locus-app"].includes(pkg.name));
+            if (packages.length !== 2 || packages.some(pkg => pkg.version !== base)) {
+              throw new Error("Cargo.lock must match both distribution package versions");
+            }
+            console.log(`Check-only version: ${base}`);
+          } else if (ref.startsWith("refs/tags/")) {
             if (ref !== `refs/tags/v${base}`) throw new Error("Release tag must match the package version");
             console.log(`Release version: ${base}`);
           } else {
@@ -62,6 +80,7 @@ jobs:
           }
           JS
       - uses: actions/upload-artifact@v4
+        if: env.CHECK_ONLY != 'true'
         with:
           name: build-version
           if-no-files-found: error
@@ -73,7 +92,7 @@ jobs:
             clients/app/package.json
   build:
     needs: version
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' && inputs.check_only) || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -85,9 +104,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: oven-sh/setup-bun@v2
       - uses: actions/download-artifact@v4
+        if: env.CHECK_ONLY != 'true'
         with:
           name: build-version
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ env.CHECK_ONLY != 'true' }}
       - run: cargo install wasm-pack --locked
       - name: Restore Windows driver signing
         id: windows-signing
@@ -217,6 +239,7 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo xtask package macos --target "${{ steps.host.outputs.target }}"
       - uses: actions/upload-artifact@v4
+        if: env.CHECK_ONLY != 'true'
         with:
           name: daat-locus-${{ steps.host.outputs.target }}
           if-no-files-found: error
@@ -250,7 +273,7 @@ jobs:
           if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory -Force }
   android:
     needs: version
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' && inputs.check_only) || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -267,9 +290,12 @@ jobs:
           packages: platform-tools
       - uses: oven-sh/setup-bun@v2
       - uses: actions/download-artifact@v4
+        if: env.CHECK_ONLY != 'true'
         with:
           name: build-version
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ env.CHECK_ONLY != 'true' }}
       - run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.0.11902837"
       - run: echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.11902837" >> "$GITHUB_ENV"
       - run: cargo install wasm-pack --locked
@@ -329,6 +355,7 @@ jobs:
           grep -Fxi 'Signer #1 certificate SHA-256 digest: 86f36c309888c3009ff121243b4e0b6e7bcf2514f0116fb082e376db94dd612d' "$RUNNER_TEMP/apk-signature.txt"
           "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$apk"
       - uses: actions/upload-artifact@v4
+        if: env.CHECK_ONLY != 'true'
         with:
           name: daat-locus-aarch64-linux-android
           if-no-files-found: error
@@ -351,12 +378,13 @@ jobs:
           PY
   publish:
     needs: [build, android]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.check_only) && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
+        if: env.CHECK_ONLY != 'true'
         with:
           pattern: daat-locus-*
           path: artifacts
