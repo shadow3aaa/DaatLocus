@@ -28,6 +28,7 @@ fn backend() -> Result<Arc<dyn Backend>> {
         .cloned()
         .ok_or_else(|| miette!("PhoneUse native backend unavailable"))
 }
+#[cfg(target_os = "android")]
 pub(crate) fn reset_resources() -> Result<()> {
     if let Some(backend) = BACKEND.get() {
         backend.reset()?;
@@ -75,9 +76,11 @@ impl Client {
             session: uuid::Uuid::new_v4().to_string(),
         }
     }
+    #[cfg(target_os = "android")]
     pub fn can_passivate(&self) -> bool {
         backend().is_ok_and(|backend| !backend.has_resources(&self.session))
     }
+    #[cfg(target_os = "android")]
     pub fn review(&self, system: &ActorSystem) -> Result<Option<AppReview>> {
         let scope = backend()?.scope()?;
         Ok(Some(AppReview::new(
@@ -86,6 +89,7 @@ impl Client {
             json!({"device":system.store().public_stage_id().map_err(|e|miette!("{e}"))?.to_string(),"connection":scope}),
         )))
     }
+    #[cfg(target_os = "android")]
     pub async fn call(
         &self,
         actor: &str,
@@ -122,6 +126,7 @@ impl Client {
         cancel.armed = false;
         reply
     }
+    #[cfg(target_os = "android")]
     pub async fn shutdown(&self, actor: &str) -> Result<()> {
         self.request(actor, 0, "detach", &json!({})).await?;
         Ok(())
