@@ -412,23 +412,19 @@ impl Envelope {
             return Err(StageError::Invalid("Expired or invalid operation lifetime"));
         }
         match &self.body {
-            Body::DeviceName { label } => {
-                if label.trim().is_empty() || label.len() > 100 {
-                    return Err(StageError::Invalid("Invalid device name"));
-                }
+            Body::DeviceName { label } if label.trim().is_empty() || label.len() > 100 => {
+                return Err(StageError::Invalid("Invalid device name"));
             }
             Body::ActorAdmin { actor, .. } | Body::ActorAdminResult { actor, .. } => {
                 actor.validate()?
             }
-            Body::RevocationsQuery { limit, .. } => {
-                if *limit == 0 || *limit > 32 {
-                    return Err(StageError::Invalid("Invalid revocation page"));
-                }
+            Body::RevocationsQuery { limit, .. } if *limit == 0 || *limit > 32 => {
+                return Err(StageError::Invalid("Invalid revocation page"));
             }
-            Body::Revocations { records, .. } | Body::RevocationsPush { records } => {
-                if records.len() > 32 {
-                    return Err(StageError::Capacity("Revocation page exceeds budget"));
-                }
+            Body::Revocations { records, .. } | Body::RevocationsPush { records }
+                if records.len() > 32 =>
+            {
+                return Err(StageError::Capacity("Revocation page exceeds budget"));
             }
             Body::ResourceUpload {
                 actor,
@@ -448,20 +444,18 @@ impl Envelope {
             Body::ConversationControl { actor, .. } | Body::ConversationResult { actor, .. } => {
                 actor.validate()?
             }
-            Body::ApprovalsQuery { limit, .. } => {
-                if *limit == 0 || *limit > 32 {
-                    return Err(StageError::Invalid("Invalid approval page"));
-                }
+            Body::ApprovalsQuery { limit, .. } if *limit == 0 || *limit > 32 => {
+                return Err(StageError::Invalid("Invalid approval page"));
             }
-            Body::ApprovalQuery { id } | Body::ApprovalResolve { id, .. } => {
-                if id.len() > 128 || id.is_empty() {
-                    return Err(StageError::Invalid("Invalid approval identifier"));
-                }
+            Body::ApprovalQuery { id } | Body::ApprovalResolve { id, .. }
+                if id.len() > 128 || id.is_empty() =>
+            {
+                return Err(StageError::Invalid("Invalid approval identifier"));
             }
-            Body::Notice { record } => {
-                if record.seq <= 0 || record.actor_id.is_empty() || record.actor_id.len() > 128 {
-                    return Err(StageError::Invalid("Invalid notice"));
-                }
+            Body::Notice { record }
+                if record.seq <= 0 || record.actor_id.is_empty() || record.actor_id.len() > 128 =>
+            {
+                return Err(StageError::Invalid("Invalid notice"));
             }
             Body::Authorize { actor } | Body::ActorAccess { actor, .. } => actor.validate()?,
             Body::CoreRequest { content } | Body::CoreResponse { content } => content.validate()?,
@@ -479,10 +473,12 @@ impl Envelope {
                     return Err(StageError::Forbidden("Observation host mismatch"));
                 }
             }
-            Body::DirectoryQuery { after, limit } => {
-                if *limit == 0 || *limit > 32 || after.as_ref().is_some_and(|id| id.len() > 128) {
-                    return Err(StageError::Invalid("Invalid directory query"));
-                }
+            Body::DirectoryQuery { after, limit }
+                if *limit == 0
+                    || *limit > 32
+                    || after.as_ref().is_some_and(|id| id.len() > 128) =>
+            {
+                return Err(StageError::Invalid("Invalid directory query"));
             }
             Body::Directory { actors, .. } => {
                 if actors.len() > 32 {
@@ -497,15 +493,11 @@ impl Envelope {
                     }
                 }
             }
-            Body::MembersQuery { limit, .. } => {
-                if *limit == 0 || *limit > 8 {
-                    return Err(StageError::Invalid("Invalid member query"));
-                }
+            Body::MembersQuery { limit, .. } if *limit == 0 || *limit > 8 => {
+                return Err(StageError::Invalid("Invalid member query"));
             }
-            Body::Members { enrollments, .. } => {
-                if enrollments.len() > 8 {
-                    return Err(StageError::Capacity("Member response exceeds budget"));
-                }
+            Body::Members { enrollments, .. } if enrollments.len() > 8 => {
+                return Err(StageError::Capacity("Member response exceeds budget"));
             }
             Body::Delivery {
                 delivery,
@@ -519,10 +511,8 @@ impl Envelope {
                     return Err(StageError::Forbidden("Invalid delivery origin or lifetime"));
                 }
             }
-            Body::TransferAck { message } => {
-                if message.is_nil() {
-                    return Err(StageError::Invalid("Invalid transfer acknowledgment"));
-                }
+            Body::TransferAck { message } if message.is_nil() => {
+                return Err(StageError::Invalid("Invalid transfer acknowledgment"));
             }
             Body::ActorEvents { actor, page } => {
                 actor.validate()?;
