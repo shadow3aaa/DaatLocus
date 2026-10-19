@@ -12,6 +12,9 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 #[derive(Clone, Debug, Parser)]
 #[command(name = "daat-locus-app", version, about = "Daat Locus desktop client.")]
 pub struct Options {
+    #[cfg(all(target_os = "macos", feature = "native-contract"))]
+    #[arg(long, hide = true, requires = "profile")]
+    pub native_gui_contract: Option<PathBuf>,
     #[arg(long, value_parser = profile)]
     pub profile: Option<String>,
     /// Start in the tray without showing the conversation window.

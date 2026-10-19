@@ -486,12 +486,12 @@ pub async fn native_resource_download(
 pub fn capability(app: &tauri::AppHandle) -> tauri::Result<()> {
     app.add_capability(serde_json::json!({
         "identifier":"native-client", "windows":["main"], "local":true,
-        "permissions":["allow-desktop-account", "allow-desktop-window", "allow-phone-use-status", "allow-phone-use-configure", "allow-phone-use-display-configure", "allow-native-http-start", "allow-native-http-write", "allow-native-http-send", "allow-native-http-read", "allow-native-http-cancel", "allow-native-resource-download"]
+        "permissions":["allow-desktop-account", "allow-desktop-window", "allow-phone-use-status", "allow-phone-use-configure", "allow-phone-use-display-configure", "allow-computer-use-status", "allow-computer-use-configure", "allow-computer-use-permission", "allow-native-http-start", "allow-native-http-write", "allow-native-http-send", "allow-native-http-read", "allow-native-http-cancel", "allow-native-resource-download"]
     }).to_string())
 }
 
 /// Local device capability settings still require the profile's current Owner session.
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "macos"))]
 pub async fn authorize_owner(window: &WebviewWindow) -> Result<()> {
     authorize(window)?;
     let state = window.state::<Transport>();
@@ -557,7 +557,7 @@ fn resource_path(path: &str) -> bool {
         || matches!(parts.as_slice(), ["", "v1", "stages", stage, "actors", actor, "resources", resource] if !stage.is_empty() && !actor.is_empty() && !resource.is_empty())
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(windows)]
 fn read_cookies(window: &WebviewWindow, url: &Url) -> Result<String> {
     Ok(window
         .cookies_for_url(url.clone())
@@ -566,6 +566,37 @@ fn read_cookies(window: &WebviewWindow, url: &Url) -> Result<String> {
         .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
         .collect::<Vec<_>>()
         .join("; "))
+}
+#[cfg(target_os = "macos")]
+fn read_cookies(window: &WebviewWindow, url: &Url) -> Result<String> {
+    // Wry's WKWebView cookies_for_url compares Cookie.domain with Url::domain;
+    // the latter is None for IP hosts. Keep loopback cookies in WebKit's private
+    // store and filter with the exact, already verified service host instead.
+    Ok(window
+        .cookies()
+        .map_err(|_| UNAVAILABLE)?
+        .into_iter()
+        .filter(|cookie| cookie_matches_service(cookie, url))
+        .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+        .collect::<Vec<_>>()
+        .join("; "))
+}
+#[cfg(target_os = "macos")]
+fn cookie_matches_service(cookie: &cookie::Cookie<'_>, url: &Url) -> bool {
+    let path = cookie.path().unwrap_or("/");
+    cookie.domain() == url.host_str()
+        && (url.path() == path
+            || url
+                .path()
+                .strip_prefix(path)
+                .is_some_and(|suffix| path.ends_with('/') || suffix.starts_with('/')))
+        && cookie
+            .expires_datetime()
+            .is_none_or(|expires| expires > cookie::time::OffsetDateTime::now_utc())
+        && (!cookie.secure().unwrap_or(false)
+            || url.scheme() == "https"
+            || matches!(url.host(),Some(url::Host::Ipv4(ip)) if ip.is_loopback())
+            || matches!(url.host(),Some(url::Host::Ipv6(ip)) if ip.is_loopback()))
 }
 #[cfg(not(target_os = "android"))]
 fn write_cookies(window: &WebviewWindow, url: &Url, headers: &HeaderMap) -> Result<()> {
@@ -682,5 +713,39 @@ mod tests {
         assert_eq!(visible.len(), 2);
         assert!(visible.contains(&("retry-after".into(), "2".into())));
         assert!(visible.contains(&("content-type".into(), "text/event-stream".into())));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_cookie_tests {
+    use super::*;
+    #[test]
+    fn profile_cookie_matches_loopback_ip_without_covering_other_hosts_or_paths() {
+        let cookie = cookie::Cookie::build(("session", "fixture"))
+            .domain("127.0.0.1")
+            .path("/v1")
+            .http_only(true)
+            .build();
+        assert!(cookie_matches_service(
+            &cookie,
+            &Url::parse("http://127.0.0.1:45825/v1/access").unwrap()
+        ));
+        for url in [
+            "http://127.0.0.2/v1/access",
+            "http://localhost/v1/access",
+            "http://127.0.0.1/v10/access",
+            "http://example.com/v1/access",
+        ] {
+            assert!(!cookie_matches_service(&cookie, &Url::parse(url).unwrap()));
+        }
+        let expired = cookie::Cookie::build(("session", "fixture"))
+            .domain("127.0.0.1")
+            .path("/")
+            .expires(cookie::time::OffsetDateTime::UNIX_EPOCH)
+            .build();
+        assert!(!cookie_matches_service(
+            &expired,
+            &Url::parse("http://127.0.0.1/v1/access").unwrap()
+        ));
     }
 }

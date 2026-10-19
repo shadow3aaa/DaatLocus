@@ -546,6 +546,60 @@ deletes its owned `TempDir`, including credentials and
 databases; reports remain under ignored `target`. An uncatchable process kill or
 power loss can prevent cleanup. Do not point the driver at an existing profile.
 
+## macOS ComputerUse
+
+The macOS client hosts `daat-locus-computer-use`; the independent service uses
+only `daat-locus-client-protocol::computer_use`. Build with the macOS SDK and
+Swift compiler supplied by Xcode or Command Line Tools. The client still targets
+macOS 11; live window screenshots require macOS 14 or newer. Build the shared
+WebUI/authentication WASM before the client, following the normal build steps.
+
+```bash
+cargo test --locked -p daat-locus-client-protocol -p daat-locus-computer-use
+DAAT_LOCUS_BUILD_WEBUI=0 cargo test --locked -p daat-locus-app
+DAAT_LOCUS_BUILD_WEBUI=0 cargo clippy --locked -p daat-locus-app -p daat-locus-computer-use --all-targets -- -D warnings
+xcrun swift-format lint --strict crates/daat-locus-computer-use/native/macos.swift crates/daat-locus-computer-use/tests/fixtures/NativeFixture.swift
+```
+
+The native GUI check is explicitly opt-in and needs an interactive macOS desktop.
+Use a separate installed test bundle and an isolated `mac-test-*` profile, create
+a disposable account through its native WebUI, enable **GUI operation**, and
+follow both system permission prompts. Grant Accessibility and Screen Recording
+to the installed client bundle, rather than the service or a terminal. Complete
+any system authentication yourself. If macOS requests it, quit and reopen the
+client. Rebuilding an ad-hoc signed bundle can invalidate its previous TCC grant;
+verify the actual permission state after each replacement. Do not edit TCC's
+database, weaken OS protections or reuse a personal account for this check.
+
+Build a separate AppKit fixture from
+`crates/daat-locus-computer-use/tests/fixtures/NativeFixture.swift`, with executable
+`native-fixture` in a normal `.app` bundle. Its bundle identifier must be outside
+`io.daat-locus.*`, for example `io.daatlocus.fixture.macos`. Start exactly one fresh
+fixture window, with its initial editor value and counter, and leave it behind
+another application. The fixture contains no account or workspace access.
+
+```bash
+DAAT_LOCUS_BUILD_WEBUI=0 cargo build --locked --no-default-features -p daat-locus -p daat-locus-app --features daat-locus-app/custom-protocol,daat-locus-app/native-contract
+# Copy these companion binaries into the separate test bundle and sign it.
+open -n -a '/Applications/Daat Locus GUI Test.app' --args --profile mac-test-native --native-gui-contract /private/tmp/dl-native-result.json
+```
+
+The hidden flag exists only with `native-contract`. A test bundle may instead set
+`DAAT_LOCUS_HOME` to an isolated directory whose name starts with `mac-test-`, and
+`DAAT_LOCUS_NATIVE_CONTRACT` to the result path in its `LSEnvironment`. The check
+waits up to five minutes for the actual settings and TCC prerequisites, then
+writes a JSON report. Missing prerequisites or a failed assertion produce
+`passed:false`; the application's successful launch is not a passing test.
+Inspect the report's `passed` field explicitly. It verifies real PNG dimensions,
+Unicode editing and button effects, native scrolling/slider/window geometry,
+actual window closure and a fresh background application launch,
+stale image/epoch refusal, cancellation, Actor scope isolation and reference
+revocation. It also checks the frontmost process and physical pointer throughout
+the run. Do not interact with the desktop while that measurement is running.
+These native checks do not substitute for the App authorization/schema tests.
+Normal CI runs the privilege-free IPC, coordinate and cookie regressions; a GUI
+runner must be separately provisioned with the interactive session and grants.
+
 ## Process management and packaging
 
 Windows ComputerUse is a device App for non-Core Actors. Its single remembered

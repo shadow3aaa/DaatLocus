@@ -42,6 +42,7 @@ members = [
     "crates/daat-locus-client-protocol",
     "crates/daat-locus-virtual-workspace",
     "crates/daat-locus-virtual-workspace/hook",
+    "crates/daat-locus-computer-use",
     "clients/app/src-tauri",
     "xtask",
 ]

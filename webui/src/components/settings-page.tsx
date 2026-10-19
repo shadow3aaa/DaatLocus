@@ -23,6 +23,8 @@ import { PhoneUseSettings } from "@/components/settings/phone-use-settings";
 import { ComputerUseSettings } from "@/components/settings/computer-use-settings";
 import { getComputerUseCapabilities } from "@/lib/computer-use";
 import { isAndroid } from "@/lib/mobile";
+import { isMacDesktop } from "@/lib/macos-computer-use";
+import { MacComputerUseSettings } from "@/components/settings/macos-computer-use-settings";
 
 export type SettingsTab = "general" | "personal" | "account" | "permissions" | "models" | "import" | "gui";
 export type SettingsPageHandle = { close(): void };
@@ -56,7 +58,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
   const [importsSupported, setImportsSupported] = useState(false);
   const [computerUseSupported, setComputerUseSupported] = useState(false);
   useEffect(() => {
-    if (!open || !canManage || isAndroid()) return;
+    if (!open || !canManage || isAndroid() || isMacDesktop()) return;
     const controller = new AbortController();
     void getComputerUseCapabilities({signal: controller.signal}).then(status => {
       if (controller.signal.aborted) return;
@@ -135,7 +137,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
     ...(canManage ? [
       ...(importsSupported ? [{id: "import" as const, label: t("imports.title"), icon: DownloadIcon, keywords: "Codex"}] : []),
       {id: "account" as const, label: t("settings_dialog.configuration"), icon: UserRoundIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), "SSH", t("access_gate.public_connection_service"), t("reset_work.title")].join(" ")},
-      ...(isAndroid() || computerUseSupported ? [{id: "gui" as const, label: t("gui_use.title"), icon: MonitorIcon, keywords: ["Shizuku Root ComputerUse PhoneUse", t("gui_use.advanced"), t("computer_use_settings.resolution")].join(" ")}] : []),
+      ...(isAndroid() || isMacDesktop() || computerUseSupported ? [{id: "gui" as const, label: t("gui_use.title"), icon: MonitorIcon, keywords: ["Shizuku Root ComputerUse PhoneUse macOS", t("gui_use.advanced"), t("computer_use_settings.resolution")].join(" ")}] : []),
       {id: "permissions" as const, label: t("settings_dialog.permissions"), icon: ShieldCheckIcon, keywords: t("settings_dialog.approval_mode")},
       {id: "models" as const, label: t("providers_settings.providers"), icon: SlidersHorizontalIcon, keywords: [t("composer.models"), t("composer.default_model"), t("provider_editor.api_key")].join(" ")},
     ] : []),
@@ -161,7 +163,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
         <div hidden={tab !== "personal"}><AppearanceSettings preferences={preferences} onChange={onPreferencesChanged} /></div>
         {canManage && importsSupported && <div hidden={tab !== "import"}><ImportSettings onViewCore={onViewCore} /></div>}
         {canManage&&<div hidden={tab !== "account"}>{accountVisited && <AccountEditor onChanged={()=>onActorChanged()}/>}</div>}
-        {canManage && (isAndroid() || computerUseSupported) && <div hidden={tab !== "gui"}>{(guiVisited || initialTab === "gui") && (isAndroid() ? <PhoneUseSettings /> : <ComputerUseSettings />)}</div>}
+        {canManage && (isAndroid() || isMacDesktop() || computerUseSupported) && <div hidden={tab !== "gui"}>{(guiVisited || initialTab === "gui") && (isAndroid() ? <PhoneUseSettings /> : isMacDesktop() ? <MacComputerUseSettings /> : <ComputerUseSettings />)}</div>}
         {canManage&&<div hidden={tab !== "permissions"}><SettingsSection title={t("settings_dialog.action_approval")}><SettingsGroup><SettingsRow label={t("settings_dialog.approval_mode")}>
           <ToggleGroup type="single" aria-label={t("settings_dialog.approval_mode")} value={actor?.config?.permissions.approval_mode||"auto"} disabled={locked||loading||!actor} className="dl-settings-options" onValueChange={mode=>{if(mode)void changeMode(mode as ApprovalMode);}}>
             {(["none","ask","auto"] as const).map(mode=><ToggleGroupItem key={mode} value={mode}>{modeLabel(mode)}</ToggleGroupItem>)}

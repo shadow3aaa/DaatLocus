@@ -786,5 +786,18 @@
       "shizuku": "Shizuku",
       "root": "Root"
     }
+  },
+  "macos_computer_use": {
+    "scope": "Allow GUI apps to be operated in the background",
+    "permission_required": "Permission required",
+    "finish_authorization": "Finish authorization",
+    "permission_description": "Allow Accessibility and Screen Recording.",
+    "accessibility": "Accessibility",
+    "accessibility_description": "Operate controls in applications.",
+    "screen_recording": "Screen Recording",
+    "screen_recording_description": "View the selected window.",
+    "granted": "Allowed",
+    "authorize": "Authorize",
+    "restart_hint": "Enable Daat Locus in System Settings. Quit and reopen the app if macOS requests it."
   }
 }

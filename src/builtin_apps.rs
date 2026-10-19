@@ -27,7 +27,7 @@ pub const DEVICE_APPS: &[&str] = &[
     "terminal",
     "browser",
     "artifacts",
-    #[cfg(all(windows, target_arch = "x86_64"))]
+    #[cfg(any(all(windows, target_arch = "x86_64"), target_os = "macos"))]
     "computer_use",
     #[cfg(target_os = "android")]
     "phone_use",
@@ -92,7 +92,11 @@ pub fn create_apps(
             #[cfg(not(target_os = "android"))]
             "browser" => Box::new(BrowserApp::new()),
             "artifacts" => Box::new(ArtifactsApp::new(actor.id.clone(), system.clone())),
-            #[cfg(any(all(windows, target_arch = "x86_64"), target_os = "android"))]
+            #[cfg(any(
+                all(windows, target_arch = "x86_64"),
+                target_os = "android",
+                target_os = "macos"
+            ))]
             "computer_use" | "phone_use" => Box::new(crate::computer_use_app::ComputerUseApp::new(
                 actor.id.clone(),
                 system.clone(),

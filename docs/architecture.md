@@ -230,10 +230,50 @@ capture，因此不承诺用户同时拖拽的独立性。GetFocus/GetCursorPos 
 标准 EDIT/BUTTON/trackbar 的跨进程夹具只验证这些控件；默认触摸兼容转换在 CBT 拦截下
 仍可能移动系统光标，不能作为无干扰鼠标后端。ComputerUse 使用 Hook 或 UIA 输入，不回退到触摸。
 
+## ComputerUse App（macOS）
+
+macOS 与 Windows 共用 `computer_use` 设备 App、工具名称、模型 schema、Actor
+归属检查及设备桌面能力审批。Core 仍仅持有 Actors App；Android 保留 `phone_use`。
+macOS 原生宿主位于独立的 `crates/daat-locus-computer-use` lib，不依赖 Actor、
+账号存储、HTTP 或 Tauri。`daat-locus-client-protocol::computer_use` 定义有界通信
+封包及 macOS Unix socket 客户端，不链接 AppKit / ScreenCaptureKit；服务只依赖此
+协议。Tauri 客户端拥有原生宿主与系统授权身份，退出客户端释放窗口引用，独立服务
+继续运行；GUI 操作必须等待客户端重新打开。此能力不创建或移动窗口到虚拟屏幕。
+
+Owner 在独立的“GUI 操作”设置中启用，再按弹窗授予辅助功能与屏幕录制。
+授权按钮请求系统权限并打开对应隐私设置页，兼容系统不再重复弹出请求的情况。
+三项原生命令仅允许已认证 Owner 的主 WebView 调用，不向 JavaScript 开放截图、
+AX 对象、进程或通用系统调用。启用状态按设备 profile 原子保存；关闭先撤销新的
+输入准入，并在已开始的调用结束后清理引用。OS 授权撤销时后续操作拒绝，不替用户
+修改 TCC、系统安全设置或提示授权。完整后台截图需要 macOS 14+；旧系统仍可运行
+客户端，GUI 功能返回不可用。
+
+原生宿主通过 profile 私有的 `runtime/computer-use.sock` 接受服务请求，socket
+权限为 0600，双方核对 OS UID、`LOCAL_PEERPID` 及伴随可执行文件的精确路径。
+请求不超过 64 KiB，回复不超过 48 MiB，连接有时限及并发上限。每个 Actor 保留独立
+会话、单调执行 epoch、不可猜测的应用/窗口/截图引用；窗口获取不能跨 Actor，
+释放或会话变化使旧引用失效。取消、过期 epoch、权限关闭和陈旧图像在发出下一项
+原生操作前检查；已开始的输入或启动若结果不确定，返回 `outcome_unknown`，禁止重放。
+
+截图使用 ScreenCaptureKit 的单窗口过滤，允许遮挡窗口，隐藏真实光标；最小化
+窗口不作为实时来源。完整窗口、裁剪和放大均有 800 万像素上限，输入从返回图片
+像素映射到 AX 桌面逻辑点。输入前核对原进程启动身份、原生窗口编号、AX 窗口对象、
+几何及可访问控件状态。窗口编号绑定使用可选 `_AXUIElementGetWindow`，系统不提供
+该符号时拒绝精确绑定，不猜测同名窗口。
+
+当前输入路由为 AX 原生控件操作：按钮 Press、显式选定可编辑控件的 Unicode
+插入与受支持的编辑键、可写滚动条、滑块拖动，以及窗口位置、大小、恢复和关闭。
+观察返回有界控件事实与支持的操作；自绘控件、不支持的键或轴拒绝输入，不回退到
+全局 CGEvent、剪贴板、激活窗口或移动物理光标。后台启动使用
+`NSWorkspace.OpenConfiguration.activates=false`，仅获取该次新进程唯一确认的新窗口；
+已运行应用要求先枚举窗口。每项原生调用比较前后台应用及真实指针，变化时报告
+需要重新观察，不做“抢焦点后恢复”的补偿。目标应用主动弹出或激活窗口仍可能
+导致结果不确定，不能据此声称所有应用均支持无干扰输入。
+
 ## ComputerUse App（Windows）
 
 Windows x64 提供 `computer_use` 设备 App，普通 Actor 按现有规则获得，
-Core 仍仅直接持有 Actors App。其他平台在后端实现前不提供这个设备 App。
+Core 仍仅直接持有 Actors App。macOS 复用同一个 App，Android 使用 `phone_use`。
 采用窗口定向的“发现、选定、观察、单次操作、再观察”交互；工具沿用现有 App
 执行机制，不新增 JavaScript REPL、工具引擎或 Actor 类型。
 
@@ -312,7 +352,8 @@ Windows 服务在本机 GUI 操作已启用时，于对外就绪及激活 Agent 
 不等待首次工具调用；默认同一服务进程的全部 Actor/System 复用一个输出。
 驱动不可用时记录启动诊断，其他服务功能继续工作；后续 ComputerUse 操作仍按实际
 驱动状态返回错误，由 Owner 在 GUI 操作设置中重试；不将启动预热当成桌面操作授权。账号维护命令不创建屏幕。
-设置页的 GUI 操作分类按服务能力显示 Windows ComputerUse 或 Android PhoneUse 内容。
+设置页的 GUI 操作分类按服务能力显示 Windows ComputerUse 或 Android PhoneUse 内容；
+macOS 原生客户端显示其辅助功能与屏幕录制授权面板。
 Windows 通过 Owner HTTP `GET/PATCH /v1/device/computer-use` 读取及串行修改本机开关和
 驱动支持的分辨率；沿用账号授权、可信 Origin 与请求头，不新增 WebView 业务命令。
 偏好保存在服务 profile 的 `computer-use.json`，不复制到账号或写入 Actor 配置。

@@ -15,8 +15,8 @@ const OPEN: &str = "open-client";
 const QUIT: &str = "quit-client";
 const HIDE: &str = "hide-client";
 
-struct Client {
-    backend: Backend,
+pub(crate) struct Client {
+    pub(crate) backend: Backend,
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -122,6 +122,11 @@ fn action(app: &tauri::AppHandle, id: &str) {
     }
 }
 pub fn run(options: Options) -> Result<()> {
+    #[cfg(all(target_os = "macos", feature = "native-contract"))]
+    let native_contract = options
+        .native_gui_contract
+        .clone()
+        .or_else(|| std::env::var_os("DAAT_LOCUS_NATIVE_CONTRACT").map(std::path::PathBuf::from));
     let background = options.background;
     let backend = Backend::new(options)?;
     let status = tauri::async_runtime::block_on(backend.start())?;
@@ -139,6 +144,12 @@ pub fn run(options: Options) -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             desktop_account,
             desktop_window,
+            #[cfg(target_os = "macos")]
+            crate::computer_use::computer_use_status,
+            #[cfg(target_os = "macos")]
+            crate::computer_use::computer_use_configure,
+            #[cfg(target_os = "macos")]
+            crate::computer_use::computer_use_permission,
             crate::transport::native_http_start,
             crate::transport::native_http_write,
             crate::transport::native_http_send,
@@ -162,6 +173,23 @@ pub fn run(options: Options) -> Result<()> {
                 backend: backend.clone(),
             });
             app.manage(crate::transport::Transport::new(origin.clone())?);
+            #[cfg(target_os = "macos")]
+            app.manage(std::sync::Arc::new(daat_locus_computer_use::Server::start(
+                &backend.root,
+                &backend.executable,
+            )?));
+            #[cfg(all(target_os = "macos", feature = "native-contract"))]
+            if let Some(output) = native_contract.clone() {
+                let root = backend.root.clone();
+                std::thread::spawn(move || {
+                    let result = daat_locus_computer_use::run_native_contract(&root);
+                    let value = match result {
+                        Ok(value) => serde_json::json!({"passed":true,"checks":value}),
+                        Err(error) => serde_json::json!({"passed":false,"error":error.to_string()}),
+                    };
+                    let _ = std::fs::write(output, value.to_string());
+                });
+            }
             crate::transport::capability(app.handle())?;
             let navigation_app = app.handle().clone();
             let data = backend.root.join("runtime/client-webview");

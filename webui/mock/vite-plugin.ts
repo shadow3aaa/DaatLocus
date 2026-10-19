@@ -18,6 +18,7 @@ export function mockPreviewPlugin(): Plugin {
       responses.clear();
     },
     resolveId(id) {
+      if (process.env.DAAT_LOCUS_MOCK_MACOS === "1" && (id === "@/lib/macos-computer-use" || id.replaceAll("\\", "/").endsWith("/src/lib/macos-computer-use"))) return path.resolve(import.meta.dirname, "macos-computer-use.ts");
       if (process.env.DAAT_LOCUS_MOCK_PHONE === "1") {
         const normalized = id.replaceAll("\\", "/");
         if (id === "@/lib/phone-use" || normalized.endsWith("/src/lib/phone-use")) return path.resolve(import.meta.dirname, "phone-use.ts");

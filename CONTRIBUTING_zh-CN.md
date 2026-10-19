@@ -51,6 +51,48 @@ Cargo `--offline` 本身不会禁止构建脚本联网。详见[模型目录](do
 存储调度回归在单 worker 的多线程 runtime 上暂停事务并排队读取，验证控制任务仍可执行；
 通道回归验证读、写、鉴权错误的首个原因不会被后续关闭覆盖。
 
+## macOS ComputerUse
+
+macOS 与 Windows 使用同一个 `computer_use` App。独立原生库
+`daat-locus-computer-use` 由桌面客户端持有，服务只链接不依赖 GUI 框架的
+`daat-locus-client-protocol::computer_use`。构建需要 Xcode 或 Command Line
+Tools 的 macOS SDK 和 Swift 编译器；先按正常流程构建共享 WebUI/认证 WASM。
+客户端仍支持 macOS 11，实时窗口截图需要 macOS 14+。
+
+```bash
+cargo test --locked -p daat-locus-client-protocol -p daat-locus-computer-use
+DAAT_LOCUS_BUILD_WEBUI=0 cargo test --locked -p daat-locus-app
+DAAT_LOCUS_BUILD_WEBUI=0 cargo clippy --locked -p daat-locus-app -p daat-locus-computer-use --all-targets -- -D warnings
+xcrun swift-format lint --strict crates/daat-locus-computer-use/native/macos.swift crates/daat-locus-computer-use/tests/fixtures/NativeFixture.swift
+```
+
+原生 GUI 实测为显式 opt-in，需要交互式桌面。使用独立安装的测试 `.app` 与
+`mac-test-*` 临时 profile，通过原生界面创建临时账号，在“GUI 操作”中启用并
+授予辅助功能、屏幕录制；授权对象应为安装后的客户端，而非服务或终端。
+系统认证由操作者完成；系统提示重启时退出并重新打开客户端。ad-hoc 签名构建
+替换后可能需要重新授权，必须检查实际状态，不修改 TCC 数据库或降低系统防护。
+
+将 `crates/daat-locus-computer-use/tests/fixtures/NativeFixture.swift` 编译为
+独立 AppKit `.app`，可执行文件为 `native-fixture`，使用例如
+`io.daatlocus.fixture.macos` 的 bundle ID，避免落入自身应用排除前缀
+`io.daat-locus.*`。只打开一个初始状态的测试窗口，并用其他应用遮挡它。
+
+```bash
+DAAT_LOCUS_BUILD_WEBUI=0 cargo build --locked --no-default-features -p daat-locus -p daat-locus-app --features daat-locus-app/custom-protocol,daat-locus-app/native-contract
+# 将 companion 二进制放入独立测试 bundle 并签名后，从 LaunchServices 启动。
+open -n -a '/Applications/Daat Locus GUI Test.app' --args --profile mac-test-native --native-gui-contract /private/tmp/dl-native-result.json
+```
+
+隐藏参数仅在 `native-contract` feature 下提供。测试 bundle 也可以在
+`LSEnvironment` 中设置 `DAAT_LOCUS_HOME` 为以 `mac-test-` 开头的隔离目录，
+并通过 `DAAT_LOCUS_NATIVE_CONTRACT` 指定结果路径。检查最多等待五分钟以完成
+真实设置与 TCC 前置条件，然后写出 JSON；前置条件不可用或断言失败时
+`passed:false`，应用启动成功不能代替检查报告。运行期间不要操作桌面。
+检查覆盖实际 PNG、Unicode 编辑、按钮效果、滚动、滑块、窗口尺寸、实际关闭及
+重新后台启动，以及旧图像和过期 epoch 拒绝、取消、Actor 隔离与引用撤销，并比较前台进程和真实指针。
+这些结果不替代 App 审批和 schema 测试。普通 CI 覆盖无需系统授权的 IPC、坐标
+和 Cookie 回归；GUI runner 必须另行配置交互会话和实际权限。
+
 ## Windows Virtual Workspace
 
 窗口观察按需使用 WGC 捕获目标 HWND，被覆盖也不混入其他窗口像素；取帧后关闭会话。

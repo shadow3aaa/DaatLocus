@@ -1,0 +1,22 @@
+[package]
+name = "daat-locus-computer-use"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Window-directed native GUI operations, independent of Actors and UI clients"
+
+[features]
+native-contract = []
+
+[dependencies]
+daat-locus-client-protocol = {path = "../daat-locus-client-protocol"}
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.23"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -786,5 +786,18 @@
       "shizuku": "Shizuku",
       "root": "Root"
     }
+  },
+  "macos_computer_use": {
+    "scope": "允许在后台操作 GUI 应用",
+    "permission_required": "需要授权",
+    "finish_authorization": "完成授权",
+    "permission_description": "授权辅助功能和屏幕录制。",
+    "accessibility": "辅助功能",
+    "accessibility_description": "操作应用中的控件。",
+    "screen_recording": "屏幕录制",
+    "screen_recording_description": "查看所选窗口的内容。",
+    "granted": "已授权",
+    "authorize": "前往授权",
+    "restart_hint": "在系统设置中启用 Daat Locus；如果系统提示，请退出并重新打开应用。"
   }
 }

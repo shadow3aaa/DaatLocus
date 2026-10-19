@@ -16,6 +16,8 @@ use serde_json::{Value, json};
 #[cfg(any(target_os = "android", test))]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub mod android;
+#[cfg(target_os = "macos")]
+mod macos;
 pub(crate) mod settings;
 #[cfg(windows)]
 mod windows;
@@ -246,6 +248,8 @@ pub struct ComputerUseApp {
     client: Option<windows::Client>,
     #[cfg(target_os = "android")]
     android: android::Client,
+    #[cfg(target_os = "macos")]
+    macos: macos::Client,
 }
 
 impl ComputerUseApp {
@@ -258,12 +262,16 @@ impl ComputerUseApp {
             client: None,
             #[cfg(target_os = "android")]
             android: android::Client::new(),
+            #[cfg(target_os = "macos")]
+            macos: macos::Client::new(),
         }
     }
     fn specifications() -> Vec<AppToolSpec> {
         #[cfg(target_os = "android")]
         return android::specifications();
-        #[cfg(not(target_os = "android"))]
+        #[cfg(target_os = "macos")]
+        return macos::specifications();
+        #[cfg(not(any(target_os = "android", target_os = "macos")))]
         Self::windows_specifications()
     }
     fn windows_specifications() -> Vec<AppToolSpec> {
@@ -375,7 +383,9 @@ impl App for ComputerUseApp {
     fn docs(&self) -> AppDocs {
         #[cfg(target_os = "android")]
         return AppDocs::from_markdown(include_str!("../app_instructions/phone_use.md"));
-        #[cfg(not(target_os = "android"))]
+        #[cfg(target_os = "macos")]
+        return AppDocs::from_markdown(include_str!("../app_instructions/computer_use_macos.md"));
+        #[cfg(not(any(target_os = "android", target_os = "macos")))]
         AppDocs::from_markdown(include_str!("../app_instructions/computer_use.md"))
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
@@ -392,7 +402,11 @@ impl App for ComputerUseApp {
         {
             self.android.can_passivate()
         }
-        #[cfg(not(any(windows, target_os = "android")))]
+        #[cfg(target_os = "macos")]
+        {
+            self.macos.can_passivate()
+        }
+        #[cfg(not(any(windows, target_os = "android", target_os = "macos")))]
         {
             true
         }
@@ -422,7 +436,9 @@ impl App for ComputerUseApp {
         }
         #[cfg(target_os = "android")]
         return self.android.review(&self.system);
-        #[cfg(not(target_os = "android"))]
+        #[cfg(target_os = "macos")]
+        return self.macos.review(&self.system);
+        #[cfg(not(any(target_os = "android", target_os = "macos")))]
         Ok(Some(AppReview::new(
             "computer_use/desktop/v1",
             "Authorize interactive computer operation on this device's Windows user desktop, including screenshots, taking and giving windows, launching supported apps and GUI input. This is one remembered desktop capability and an explicit exception to the project filesystem sandbox: target apps can access files available to this Windows user. It does not change other Apps' sandbox policies. Read-only remote authority and Daat Locus window/process exclusion remain mandatory.",
@@ -473,7 +489,15 @@ impl App for ComputerUseApp {
             let reply = self.android.call(&self.actor_id, call, context).await?;
             self.publish_reply(reply.summary, reply.payload, reply.failure, reply.image)
         }
-        #[cfg(not(any(windows, target_os = "android")))]
+        #[cfg(target_os = "macos")]
+        {
+            let reply = self
+                .macos
+                .call(&self.actor_id, &self.system, call, context)
+                .await?;
+            self.publish_reply(reply.summary, reply.payload, reply.failure, reply.image)
+        }
+        #[cfg(not(any(windows, target_os = "android", target_os = "macos")))]
         {
             let _ = (&self.system, call);
             Err(miette!("ComputerUse requires a supported native backend"))
@@ -486,12 +510,14 @@ impl App for ComputerUseApp {
         }
         #[cfg(target_os = "android")]
         self.android.shutdown(&self.actor_id).await?;
+        #[cfg(target_os = "macos")]
+        self.macos.shutdown(&self.actor_id, &self.system).await?;
         Ok(())
     }
 }
 
 impl ComputerUseApp {
-    #[cfg(any(windows, target_os = "android"))]
+    #[cfg(any(windows, target_os = "android", target_os = "macos"))]
     fn publish_reply(
         &self,
         summary: String,

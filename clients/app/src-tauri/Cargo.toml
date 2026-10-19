@@ -12,6 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+native-contract = ["daat-locus-computer-use/native-contract"]
 
 [dependencies]
 clap = { version = "4.5.38", features = ["derive"] }
@@ -39,6 +40,9 @@ sys-locale = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Controls", "Win32_UI_Accessibility", "Win32_UI_HiDpi", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+daat-locus-computer-use = { path = "../../../crates/daat-locus-computer-use" }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
