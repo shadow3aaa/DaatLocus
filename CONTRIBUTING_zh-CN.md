@@ -115,7 +115,7 @@ capture、引用撤销与物理输出几何。后端不恢复用户光标来掩�
 归档用户解压后只需一次 `sudo ./daat-locus-display-setup.exe install`。
 `--skip-build` 仍执行全部必需签名检查。
 
-驱动和 helper 使用 SHA256 与 RFC3161 时间戳；默认 DigiCert 服务失败后回退 Sectigo。
+发行驱动和 helper 使用 SHA256 与 RFC3161 时间戳；默认 DigiCert 服务失败后回退 Sectigo。
 打包可用 `--windows-timestamp-server <URL>`、单独构建驱动可用
 `--timestamp-server <URL>` 覆盖端点；显式指定其他端点时失败即终止。
 服务/客户端 EXE、MSI 与最外层 setup EXE 不做 Authenticode 签名。
@@ -124,7 +124,7 @@ Windows CI 以 `--features driver-setup` 运行信任保留/回滚测试。管�
 需先关闭工作区，使用上述完整卸载移除捆绑驱动与证书，并在隔离的 Windows 测试环境运行：
 
 ```powershell
-$env:DAAT_LOCUS_SIGNED_IDD_PACKAGE="$PWD/target/virtual-workspace-driver"
+$env:DAAT_LOCUS_SIGNED_IDD_PACKAGE="$PWD/target/virtual-workspace-driver-debug"
 cargo test --locked -p daat-locus-virtual-workspace --features driver-setup --lib windows::driver_trust::tests::native_bundled_installation_rejects_tampering_and_cleans_trust -- --ignored --exact --nocapture --test-threads=1
 ```
 
@@ -159,12 +159,24 @@ libclang 只用于生成 WDK 绑定，不编译 C++ 驱动代码：
 cargo run --locked -p xtask -- idd-driver
 cargo run --locked -p xtask -- idd-driver --check
 cargo fmt --manifest-path crates/daat-locus-virtual-workspace/driver/Cargo.toml -- --check
-# 可使用 CurrentUser/My 中已存在的可信证书签名：
-cargo run --locked -p xtask -- idd-driver --certificate-thumbprint '<thumbprint>'
+# 发行构建必须提供 CurrentUser/My 中已存在的可信证书：
+cargo run --locked -p xtask -- idd-driver --release --certificate-thumbprint '<thumbprint>'
 ```
 
 xtask 将固定版本/SHA256 的微软 WDK NuGet 包还原到 `target/virtual-workspace-deps`，
-编译 UMDF DLL，用 Inf2Cat 校验并生成目录包；产物位于 `target/virtual-workspace-driver`。
+编译 UMDF DLL，用 Inf2Cat 校验并生成目录包。默认生成本机签名的开发驱动及匹配的
+安装 helper，放在 `target/virtual-workspace-driver-debug`。首次构建在已被 Git 忽略的
+`.dev/windows-signing/` 创建代码签名证书和私钥备份，后续复用同一身份。
+目录及文件仅允许当前 Windows 所有者访问；PFX 使用随机密码，密码通过 Windows
+CurrentUser DPAPI 保护，不能直接复制给其他账户或电脑。CurrentUser/My 的私钥缺失时
+从备份恢复；文件不完整、损坏或证书过期时明确报错，不悄悄更换身份。
+日常清理请保留此目录。`--check`/`--test` 不生成证书。两种模式的驱动均使用优化后的
+静态 release CRT 以满足 Universal API 校验；`--release` 选择发行签名及原有的
+`target/virtual-workspace-driver` 输出目录，缺失证书时绝不回退到开发签名。
+开发签名采用 SHA256，不访问时间戳服务；显式传入 `--certificate-thumbprint` 则使用
+该身份，并将对应公钥嵌入 debug helper。直接 debug 构建 `driver-setup` feature
+也复用本机开发身份；release helper 始终嵌入仓库里的发行公钥，忽略
+`DAAT_LOCUS_DEVELOPMENT_CERTIFICATE` 覆盖。
 xtask 同时执行 Universal InfVerif 与 ApiValidator，DLL 使用静态 CRT。
 驱动使用独立 Cargo 构建图和已保存的锁文件，普通 lib 构建不调用 WDK；
 `--wdk-root` 可指定现有 WDK 内容根目录。发行时一起分发
@@ -173,7 +185,9 @@ DLL 签名在生成 CAT 之前完成，使用 SHA256 与 RFC3161 时间戳。捆
 自签名身份，公钥位于 lib 的 `certificates/virtual-display.cer`，由安装器显式建立信任；
 这不等于微软认证，也不消除首次下载提示。须从未信任该证书的干净目标 Windows 开始，
 通过真实安装器验证安装和加载，包括 Secure Boot/内存完整性配置；准确记录不兼容项。
-xtask 不安装驱动、不修改证书存储或 Windows 签名策略。
+构建只将签名私钥导入 CurrentUser/My，不安装驱动、不导入 Root/TrustedPublisher
+或修改 Windows 签名策略。信任仅由提权的安装 helper 建立，按证书分别记录归属。
+构建不会替换本机已安装的驱动。
 
 发行 helper 通过正常管理员授权导入嵌入的固定公钥证书，再创建并绑定持久 PnP 适配器。
 运行时直接打开设备接口，通过 IOCTL 创建归属文件对象的监视器，
@@ -181,8 +195,8 @@ xtask 不安装驱动、不修改证书存储或 Windows 签名策略。
 修改显示设置。下面只有安装命令需要 sudo：
 
 ```powershell
-cargo build --locked -p daat-locus-virtual-workspace --features driver-setup --bin daat-locus-display-setup
-sudo --chdir "$PWD" "$PWD/target/debug/daat-locus-display-setup.exe" install --package "$PWD/target/virtual-workspace-driver"
+# idd-driver 已构建嵌入匹配开发公钥的 helper：
+sudo --chdir "$PWD" "$PWD/target/virtual-workspace-driver-debug/daat-locus-display-setup.exe" install
 cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- screen --width 1920 --height 1080 --seconds 10
 cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- lab
 # 没有配套驱动时，仅验证原生 WM_POINTER 输入：

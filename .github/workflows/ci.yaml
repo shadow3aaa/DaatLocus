@@ -32,6 +32,7 @@ jobs:
           cargo fmt --manifest-path crates/daat-locus-virtual-workspace/driver/Cargo.toml -- --check
           cargo run --locked -p xtask -- idd-driver --check
           cargo run --locked -p xtask -- idd-driver --test
+          cargo run --locked -p xtask -- idd-driver
           cargo build --locked -p daat-locus-workspace-hook
           cargo clippy --locked -p daat-locus-virtual-workspace --features driver-setup --bin daat-locus-display-setup -- -D warnings
           cargo test --locked -p daat-locus-virtual-workspace --features driver-setup --lib windows::driver_trust

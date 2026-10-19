@@ -146,13 +146,29 @@ and libclang (for WDK binding generation). No C++ driver source is compiled:
 cargo run --locked -p xtask -- idd-driver
 cargo run --locked -p xtask -- idd-driver --check
 cargo fmt --manifest-path crates/daat-locus-virtual-workspace/driver/Cargo.toml -- --check
-# Optionally sign with an existing trusted certificate in CurrentUser/My:
-cargo run --locked -p xtask -- idd-driver --certificate-thumbprint '<thumbprint>'
+# Distribution builds require an existing trusted certificate in CurrentUser/My:
+cargo run --locked -p xtask -- idd-driver --release --certificate-thumbprint '<thumbprint>'
 ```
 
 The xtask restores a version/SHA256-pinned Microsoft WDK NuGet package beneath
 `target/virtual-workspace-deps`, compiles the UMDF DLL and validates/generates its
-catalog with Inf2Cat. Outputs stay in `target/virtual-workspace-driver`.
+catalog with Inf2Cat. By default it produces a locally signed development package
+and matching setup helper in `target/virtual-workspace-driver-debug`. The first
+build creates a code-signing certificate and private-key backup in the gitignored
+`.dev/windows-signing/` directory; subsequent builds reuse the same identity.
+The directory/files allow only the current Windows owner. The PFX password is
+random and protected with Windows CurrentUser DPAPI; do not copy these materials
+to another account/machine. A missing CurrentUser/My key is restored from the
+backup. Incomplete, corrupt or expired identities fail rather than silently rotate.
+Do not delete this directory during routine cleanup. `--check`/`--test` do not
+generate signing identities. The driver uses optimized/static release CRT code
+in both modes to satisfy Universal API validation; `--release` selects distribution
+signing and output in `target/virtual-workspace-driver`, not development fallback.
+Development signing uses SHA256 without a network timestamp. Supplying
+`--certificate-thumbprint` overrides the development identity and embeds that
+certificate into the debug helper. A direct debug build of the `driver-setup`
+feature also reuses the local identity; release helpers always embed the checked-in
+distribution certificate and ignore `DAAT_LOCUS_DEVELOPMENT_CERTIFICATE`.
 The xtask also runs Universal InfVerif and ApiValidator; the DLL uses a static CRT.
 The driver is a separate Cargo workspace with a checked-in lockfile: normal lib
 builds never invoke WDK tools. `--wdk-root` can use an existing WDK content root.
@@ -167,7 +183,10 @@ constitute Microsoft certification or eliminate first-download warnings.
 Validate installation and loading on clean supported Windows with Secure Boot and
 memory integrity enabled, starting without the certificate and exercising the
 actual installer's trust provisioning. Record unsupported configurations accurately.
-The xtask never installs drivers or changes Windows trust/signature enforcement.
+Builds import signing keys only into CurrentUser/My; they never install drivers,
+provision Root/TrustedPublisher trust or change Windows signature enforcement.
+Trust is provisioned only by the elevated setup helper, with a separate ownership
+ledger for each certificate. Building does not replace an already installed driver.
 
 On an authorized elevated local connection, provision the signed package once.
 The distribution helper imports only its embedded public identity into machine
@@ -178,8 +197,8 @@ or an extra service. No preexisting virtual screen, manual registry editing or
 display-settings action is required. Elevate only the installation command:
 
 ```powershell
-cargo build --locked -p daat-locus-virtual-workspace --features driver-setup --bin daat-locus-display-setup
-sudo --chdir "$PWD" "$PWD/target/debug/daat-locus-display-setup.exe" install --package "$PWD/target/virtual-workspace-driver"
+# idd-driver already built this helper with the matching development public pin:
+sudo --chdir "$PWD" "$PWD/target/virtual-workspace-driver-debug/daat-locus-display-setup.exe" install
 cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- screen --width 1920 --height 1080 --seconds 10
 cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- lab
 # Without the companion driver, test only native WM_POINTER delivery:
@@ -596,7 +615,7 @@ an explicit compatibility validation requirement.
 Archive users run `sudo ./daat-locus-display-setup.exe install` from the extracted
 directory once. `--skip-build` still verifies all required signatures.
 
-Driver and helper signing use SHA256 and RFC3161 timestamps. The default DigiCert
+Distribution driver and helper signing use SHA256 and RFC3161 timestamps. The default DigiCert
 timestamp service falls back to Sectigo on failure. Override the endpoint with
 `--windows-timestamp-server <URL>` when packaging, or `--timestamp-server <URL>`
 for `idd-driver`; an explicit alternative endpoint fails without a fallback.
@@ -607,7 +626,7 @@ Windows CI. For the opt-in elevated driver roundtrip, close all DL workspaces an
 start with no bundled driver/certificate (use the explicit uninstall above):
 
 ```powershell
-$env:DAAT_LOCUS_SIGNED_IDD_PACKAGE="$PWD/target/virtual-workspace-driver"
+$env:DAAT_LOCUS_SIGNED_IDD_PACKAGE="$PWD/target/virtual-workspace-driver-debug"
 cargo test --locked -p daat-locus-virtual-workspace --features driver-setup --lib windows::driver_trust::tests::native_bundled_installation_rejects_tampering_and_cleans_trust -- --ignored --exact --nocapture --test-threads=1
 ```
 

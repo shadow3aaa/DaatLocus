@@ -88,7 +88,11 @@ Actor 列表在 SQLite 内按 ID 游标分页；容量、模型引用校验和�
 账号存储、WebUI 或 Tauri。Windows ComputerUse App 在服务内使用此库；Core 的
 工具集合仍只有 Actors App。`driver/` 是自有 Rust `cdylib` UMDF 2.25 / IddCx 1.4 驱动，使用独立
 Cargo 构建图；工作区 `xtask idd-driver` 准备固定版本/哈希 WDK、调用 Cargo 编译、
-Inf2Cat 打包并可用已有代码签名证书签名，不使用独立 PowerShell 构建脚本。
+Inf2Cat 打包及签名，不使用独立 PowerShell 构建脚本。开发包默认复用本机
+`.dev/windows-signing/` 中的开发身份，私钥备份仅当前 OS 所有者可读，并通过
+CurrentUser DPAPI 保护随机 PFX 密码。构建只准备 CurrentUser/My 签名身份，
+不建立系统信任；debug 安装 helper 在构建时固定对应公钥。release 构建必须
+提供签名身份，发行 helper 始终固定仓库公钥，不接受开发身份覆盖或自动回退。
 Windows 10 1903+ x64，驱动消费并释放 swap-chain 帧，桌面捕获由 lib 完成。
 `DriverPackage::install` 经正常 PnP 安装一次驱动与持久适配器，需要 OS 管理员
 权限，允许系统发布者确认。先注册根枚举设备节点再安装/绑定，首次安装不依赖旧节点。
@@ -96,7 +100,7 @@ Windows 10 1903+ x64，驱动消费并释放 swap-chain 帧，桌面捕获由 li
 TrustedPublisher 导入嵌入的专用自签名代码签名公钥证书，安装页面说明该行为。
 helper 在导入前用固定公钥验证 CAT 签名，导入后验证 INF/DLL 的目录成员签名；
 不接受包旁边的任意证书或调用方指定的信任身份。私钥不进入源码或安装包。
-机器级互斥与 HKLM 持久记录串行化安装、保留已有信任；失败回滚本次新增信任，
+机器级互斥与按嵌入证书 SHA256 分隔的 HKLM 持久记录串行化安装、保留已有信任；失败回滚本次新增信任，
 PnP 部分部署失败先回收新增驱动包，不能在驱动仍需重启清理时提前撤销信任。
 Burn 按 CAT SHA256 和两处证书存在状态检测已部署版本，客户端 MSI 保持 per-user；
 驱动 ExePackage 的 InstallCondition 在版本与信任均满足时跳过整个永久前置包，

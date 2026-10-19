@@ -30,10 +30,7 @@ use windows_sys::{
     core::{PCWSTR, w},
 };
 
-pub(crate) const CERTIFICATE: &[u8] = include_bytes!("../../certificates/virtual-display.cer");
-const TRUST_KEY: PCWSTR = w!(
-    "SOFTWARE\\DaatLocus\\VirtualDisplay\\E40E701A47B15F108A4D9D4D7152A153EB84A3FED1F7FF287581B98D63062B6B"
-);
+pub(crate) const CERTIFICATE: &[u8] = include_bytes!(env!("DL_DISPLAY_CERTIFICATE"));
 const OWNED_VALUE: PCWSTR = w!("OwnedCertificateStores");
 const PACKAGE_VALUE: PCWSTR = w!("PackageSha256");
 const STORE_NAMES: [PCWSTR; 2] = [w!("Root"), w!("TrustedPublisher")];
@@ -279,12 +276,17 @@ struct Trust {
 }
 impl Trust {
     fn machine() -> Result<Self> {
+        let identity = Sha256::digest(CERTIFICATE)
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<String>();
+        let key = wide(format!("SOFTWARE\\DaatLocus\\VirtualDisplay\\{identity}"));
         Ok(Self {
             stores: [
                 Store::machine(STORE_NAMES[0])?,
                 Store::machine(STORE_NAMES[1])?,
             ],
-            ledger: Ledger::open(HKEY_LOCAL_MACHINE, TRUST_KEY)?,
+            ledger: Ledger::open(HKEY_LOCAL_MACHINE, key.as_ptr())?,
             cert: Certificate::bundled()?,
         })
     }

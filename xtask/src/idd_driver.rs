@@ -13,6 +13,7 @@ pub(crate) fn distribution(
             sdk_root: None,
             check: false,
             test: false,
+            release: true,
             certificate_thumbprint,
             timestamp_server: timestamp_server.into(),
         },
@@ -22,6 +23,9 @@ pub(crate) fn distribution(
 
 #[derive(Args)]
 pub(crate) struct Options {
+    /// Build a distribution package with an explicit certificate; never generate development keys.
+    #[arg(long)]
+    release: bool,
     /// Use an existing WDK instead of restoring the pinned, hash-verified NuGet package.
     #[arg(long)]
     wdk_root: Option<PathBuf>,
@@ -33,7 +37,7 @@ pub(crate) struct Options {
     /// Run driver unit tests with the same WDK and static-CRT configuration.
     #[arg(long, conflicts_with = "check")]
     test: bool,
-    /// Existing CurrentUser/My code-signing certificate; no certificates are created/imported.
+    /// Existing CurrentUser/My code-signing certificate; debug defaults to a reusable local identity.
     #[arg(long)]
     certificate_thumbprint: Option<String>,
     #[arg(long, default_value = crate::computer_use::TIMESTAMP_SERVER)]
@@ -56,7 +60,18 @@ pub(crate) fn build(root: &Path, options: Options) -> crate::Result<()> {
     };
 
     let deps = root.join("target/virtual-workspace-deps");
-    let package = root.join("target/virtual-workspace-driver");
+    if options.release
+        && !options.check
+        && !options.test
+        && options.certificate_thumbprint.is_none()
+    {
+        return Err("Release IDD builds require --certificate-thumbprint; development signing is debug-only".into());
+    }
+    let package = root.join(if options.release {
+        "target/virtual-workspace-driver"
+    } else {
+        "target/virtual-workspace-driver-debug"
+    });
     fs::create_dir_all(&deps)?;
     fs::create_dir_all(&package)?;
     let wdk = match options.wdk_root {
@@ -168,13 +183,15 @@ pub(crate) fn build(root: &Path, options: Options) -> crate::Result<()> {
                 "build"
             },
             "--locked",
-            "--release",
             "--target",
             "x86_64-pc-windows-msvc",
         ])
         .env("DL_IDD_INCLUDE", std::env::join_paths(&includes)?)
         .env("LIB", std::env::join_paths(&libraries)?)
         .env("CARGO_TARGET_DIR", &target);
+    // WDK's Universal API rules require the static release CRT even for the
+    // development package. This selects signing identity/package, not CRT policy.
+    cargo.arg("--release");
     if options.test {
         cargo.args(["--lib", "--", "--test-threads=1"]);
     } else if options.check {
@@ -184,6 +201,20 @@ pub(crate) fn build(root: &Path, options: Options) -> crate::Result<()> {
     if options.check || options.test {
         return Ok(());
     }
+    let development = if !options.release && options.certificate_thumbprint.is_none() {
+        Some(crate::development_certificate::ensure(root)?)
+    } else {
+        None
+    };
+    let certificate = options
+        .certificate_thumbprint
+        .as_deref()
+        .or_else(|| {
+            development
+                .as_ref()
+                .map(|identity| identity.thumbprint.as_str())
+        })
+        .ok_or("Signing certificate unavailable")?;
     let dll = package.join("DaatLocusVirtualDisplay.dll");
     fs::copy(
         target.join("x86_64-pc-windows-msvc/release/daat_locus_idd_driver.dll"),
@@ -224,8 +255,20 @@ pub(crate) fn build(root: &Path, options: Options) -> crate::Result<()> {
     )?;
     let signtool = sdk.join("bin").join(&sdk_version).join("x64/signtool.exe");
     let sign = |path: &Path| -> crate::Result<()> {
-        if let Some(thumbprint) = &options.certificate_thumbprint {
-            crate::computer_use::sign_file(&signtool, path, thumbprint, &options.timestamp_server)?;
+        if options.release {
+            crate::computer_use::sign_file(
+                &signtool,
+                path,
+                certificate,
+                &options.timestamp_server,
+            )?;
+        } else {
+            // Local iteration needs no network timestamp service or machine trust changes.
+            command(
+                Command::new(&signtool)
+                    .args(["sign", "/sha1", certificate, "/fd", "SHA256"])
+                    .arg(path),
+            )?;
         }
         Ok(())
     };
@@ -238,7 +281,7 @@ pub(crate) fn build(root: &Path, options: Options) -> crate::Result<()> {
     )?;
     let cat = package.join("DaatLocusVirtualDisplay.cat");
     sign(&cat)?;
-    if options.certificate_thumbprint.is_some() {
+    if options.release {
         command(
             Command::new(&signtool)
                 .args(["verify", "/pa", "/v", "/c"])
@@ -247,9 +290,54 @@ pub(crate) fn build(root: &Path, options: Options) -> crate::Result<()> {
                 .arg(package.join("DaatLocusVirtualDisplay.inf")),
         )?;
     } else {
+        let public = package.join("SigningCertificate.cer");
+        if let Some(identity) = &development {
+            fs::copy(&identity.certificate, &public)?;
+        } else {
+            // A supplied debug identity must also be compiled into its setup helper.
+            let result = Command::new("powershell.exe")
+                .env_remove("PSModulePath")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; $cert = Get-Item -LiteralPath ('Cert:\\CurrentUser\\My\\' + $env:DL_DEV_THUMBPRINT); Export-Certificate -Cert $cert -FilePath $env:DL_DEV_PUBLIC -Type CERT | Out-Null"])
+                .env("DL_DEV_THUMBPRINT", certificate)
+                .env("DL_DEV_PUBLIC", &public)
+                .status()?;
+            if !result.success() {
+                return Err("Cannot export the debug signing public certificate".into());
+            }
+        }
+        command(
+            Command::new("cargo")
+                .current_dir(root)
+                .args([
+                    "build",
+                    "--locked",
+                    "-p",
+                    "daat-locus-virtual-workspace",
+                    "--features",
+                    "driver-setup",
+                    "--bin",
+                    "daat-locus-display-setup",
+                    "--target",
+                    "x86_64-pc-windows-msvc",
+                ])
+                .env("CARGO_TARGET_DIR", root.join("target"))
+                .env("DAAT_LOCUS_DEVELOPMENT_CERTIFICATE", &public),
+        )?;
+        let setup = package.join("daat-locus-display-setup.exe");
+        fs::copy(
+            root.join("target/x86_64-pc-windows-msvc/debug/daat-locus-display-setup.exe"),
+            &setup,
+        )?;
+        sign(&setup)?;
+        command(
+            Command::new(&setup)
+                .arg("verify")
+                .arg("--package")
+                .arg(&package),
+        )?;
         status(
-            "Unsigned",
-            "sign the package before installation; Windows trust policy is unchanged",
+            "Signed",
+            "local development package and matching setup helper (no machine trust imported)",
         );
     }
     status("Packaged", &package.display().to_string());

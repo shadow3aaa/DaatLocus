@@ -1,6 +1,9 @@
 //! Distribution builds select native assets or an independently embedded browser UI.
 mod android;
 mod computer_use;
+#[cfg(windows)]
+#[path = "../../crates/daat-locus-virtual-workspace/build_support/development_certificate.rs"]
+mod development_certificate;
 mod idd_driver;
 mod reporting;
 
@@ -23,7 +26,7 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Task {
-    /// Build, validate and optionally sign the Rust Windows virtual display driver.
+    /// Build, validate and sign the Rust Windows virtual display driver.
     IddDriver(idd_driver::Options),
     Package {
         #[command(subcommand)]

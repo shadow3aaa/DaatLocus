@@ -1,4 +1,5 @@
 /target
+/.dev/windows-signing/
 
 # WebUI local package manager state and build output
 /webui/dist/
