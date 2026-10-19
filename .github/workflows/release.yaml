@@ -10,7 +10,69 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 jobs:
+  version:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Prepare distribution versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run - <<'JS'
+          import { readFile, writeFile } from "node:fs/promises";
+
+          const paths = ["Cargo.toml", "clients/app/src-tauri/Cargo.toml", "Cargo.lock",
+            "clients/app/src-tauri/tauri.conf.json", "clients/app/package.json"];
+          const sources = await Promise.all(paths.map(path => readFile(path, "utf8")));
+          const base = Bun.TOML.parse(sources[0]).package.version;
+          const app = Bun.TOML.parse(sources[1]).package;
+          const config = JSON.parse(sources[3]);
+          const pkg = JSON.parse(sources[4]);
+          if (app.version !== base || config.version !== base || pkg.version !== base) {
+            throw new Error("Service, client and Tauri versions must agree");
+          }
+          const ref = process.env.GITHUB_REF;
+          if (ref.startsWith("refs/tags/")) {
+            if (ref !== `refs/tags/v${base}`) throw new Error("Release tag must match the package version");
+            console.log(`Release version: ${base}`);
+          } else {
+            if (ref !== "refs/heads/main" || !/^\d+\.\d+\.\d+$/.test(base)) {
+              throw new Error("Development packages require main and a stable base version");
+            }
+            const timestamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+            const version = `${base}-dev.${timestamp}`;
+            const stamp = text => text.replace(/^(version\s*=\s*")[^"]+("\r?$)/m,
+              (_, prefix, suffix) => `${prefix}${version}${suffix}`);
+            let packages = 0;
+            const lock = sources[2].replace(
+              /^(name = "(?:daat-locus|daat-locus-app)"\r?\nversion = ")([^"]+)("\r?$)/gm,
+              (_, prefix, current, suffix) => {
+                if (current !== base) throw new Error("Cargo.lock must match the package version");
+                packages++;
+                return `${prefix}${version}${suffix}`;
+              });
+            if (packages !== 2) throw new Error("Expected both distribution packages in Cargo.lock");
+            config.version = pkg.version = version;
+            const updated = [stamp(sources[0]), stamp(sources[1]), lock,
+              `${JSON.stringify(config, null, 2)}\n`, `${JSON.stringify(pkg, null, 2)}\n`];
+            await Promise.all(paths.map((path, index) => writeFile(path, updated[index])));
+            console.log(`Development version: ${version}`);
+          }
+          JS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-version
+          if-no-files-found: error
+          path: |
+            Cargo.toml
+            Cargo.lock
+            clients/app/src-tauri/Cargo.toml
+            clients/app/src-tauri/tauri.conf.json
+            clients/app/package.json
   build:
+    needs: version
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -22,6 +84,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: oven-sh/setup-bun@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-version
       - uses: Swatinem/rust-cache@v2
       - run: cargo install wasm-pack --locked
       - name: Restore Windows driver signing
@@ -152,7 +217,6 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo xtask package macos --target "${{ steps.host.outputs.target }}"
       - uses: actions/upload-artifact@v4
-        if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: daat-locus-${{ steps.host.outputs.target }}
           if-no-files-found: error
@@ -185,6 +249,7 @@ jobs:
           }
           if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory -Force }
   android:
+    needs: version
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -201,6 +266,9 @@ jobs:
         with:
           packages: platform-tools
       - uses: oven-sh/setup-bun@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-version
       - uses: Swatinem/rust-cache@v2
       - run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.0.11902837"
       - run: echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.11902837" >> "$GITHUB_ENV"
@@ -261,7 +329,6 @@ jobs:
           grep -Fxi 'Signer #1 certificate SHA-256 digest: 86f36c309888c3009ff121243b4e0b6e7bcf2514f0116fb082e376db94dd612d' "$RUNNER_TEMP/apk-signature.txt"
           "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$apk"
       - uses: actions/upload-artifact@v4
-        if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: daat-locus-aarch64-linux-android
           if-no-files-found: error

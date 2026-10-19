@@ -484,8 +484,11 @@ Windows 安装包需要 WiX，macOS 安装包需要原生系统工具。
 `.github/workflows` 只保留两个工作流：`ci.yaml` 检查 debug 编译、测试、警告和格式，
 不使用签名私钥；`release.yaml` 在 main 推送、`v*` 标签推送或对这些 ref 手动触发时，
 对 Linux、macOS、Windows 和 Android 执行 release 构建、打包和签名校验。
-main 检查的产物仅保留在 runner，不上传 artifacts，不发布；版本标签构建全部通过后，
-才上传已校验的安装包并发布 GitHub Release。
+main 构建只在临时 checkout 的 patch 版本后附加 `-dev.YYYYMMDDHHMMSS`（UTC），
+所有平台共用本轮时间戳，已校验安装包上传 Actions artifacts，不发布 GitHub Release。
+程序版本、Android 版本名及产物文件名携带完整后缀；Windows/macOS 安装器数字版本字段
+和 Android versionCode 保留基础版本。版本标签必须匹配仓库版本，保留原版本号，
+全部平台构建通过后发布 GitHub Release。
 
 仓库 Actions Secrets 需要以下四项，二进制文件按 base64 编码：
 
