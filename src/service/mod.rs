@@ -3,6 +3,7 @@ mod admin;
 mod approvals;
 mod apps;
 mod auth;
+mod computer_use;
 mod conversation;
 mod imports;
 mod remote;
@@ -140,6 +141,7 @@ pub fn router(state: ServiceState) -> Router {
             )),
         )
         .merge(admin::routes())
+        .merge(computer_use::routes())
         .merge(apps::routes())
         .merge(imports::routes())
         .merge(stages::routes())

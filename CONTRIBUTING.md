@@ -207,10 +207,17 @@ cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- 
 
 Library consumers use `DriverPackage::open(...).install()` during deployment,
 and service hosts retain `SharedDisplay::global()` independently of Apps. The Windows
-service calls `initialize()` before readiness and worker activation to create and
+service prepares the enabled workspace before readiness and worker activation to create and
 settle one screen without reserving a window region. Missing desktop/driver
 prerequisites are logged without blocking the account service; ComputerUse still
 reports native failures when used. Account maintenance commands do not create a screen.
+Windows exposes its enable switch and supported virtual-display resolutions on
+Settings → GUI Operation, alongside the Android-specific PhoneUse page contents.
+Preferences are local to the service profile (`computer-use.json`), defaulting to
+enabled at 1920×1080. A disabled profile creates no screen at startup. Disabling
+returns controlled windows and removes the output; changing resolution returns
+the windows, invalidates references, then reconfigures the same output. Pending
+handoff or display/persistence failures leave input fenced until Owner retries.
 Ordinary library construction remains lazy: consumers may call `initialize()`
 explicitly or let the first `reserve(width, height)` create it. `DisplayRegion`
 guards reserve nonoverlapping placement space. Releasing the last region leaves the screen active.

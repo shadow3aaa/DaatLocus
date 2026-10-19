@@ -1,6 +1,9 @@
 # ComputerUse
 
 The virtual screen is shared and remains available when windows are released.
+Owner controls availability and resolution in Settings → GUI Operation. Disabling
+or reconfiguring it revokes prior window/state references; discover and observe
+again after it becomes available. Tools cannot enable the desktop capability.
 Taking a window reserves free space without moving other controlled windows.
 If the screen is full, release an unused window before taking another. If a
 window leaves its region or its image is obscured, release/resolve the affected

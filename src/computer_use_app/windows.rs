@@ -24,6 +24,8 @@ use windows_sys::Win32::{
     },
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
+mod settings;
+pub(crate) use settings::Workspace;
 
 pub(super) struct Reply {
     pub payload: Value,
@@ -42,13 +44,19 @@ impl Reply {
     }
 }
 struct Request {
+    reset: bool,
+    generation: u64,
     call: Option<AgentToolCall>,
     context: Option<AppToolExecutionContext>,
     cancelled: Arc<AtomicBool>,
     reply: flume::Sender<Result<Reply>>,
 }
-pub(super) struct Client {
+struct Registration {
     requests: flume::Sender<Request>,
+}
+pub(super) struct Client {
+    registration: Arc<Registration>,
+    workspace: Arc<Workspace>,
     live: Arc<AtomicBool>,
 }
 struct CancelOnDrop(Arc<AtomicBool>);
@@ -59,8 +67,11 @@ impl Drop for CancelOnDrop {
 }
 
 impl Client {
-    pub fn start(actor: String, display: SharedDisplay) -> Result<Self> {
+    pub fn start(actor: String, workspace: Arc<Workspace>) -> Result<Self> {
+        let _permit = workspace.permit(workspace.generation())?;
         let (tx, rx) = flume::bounded::<Request>(1);
+        let registration = Arc::new(Registration { requests: tx });
+        let worker_workspace = workspace.clone();
         let live = Arc::new(AtomicBool::new(false));
         let worker_live = live.clone();
         std::thread::Builder::new()
@@ -73,7 +84,7 @@ impl Client {
                         windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
                     );
                 }
-                let mut host = Host::new(actor, display);
+                let mut host = Host::new(actor, worker_workspace.display.clone());
                 while let Ok(request) = rx.recv() {
                     if request.cancelled.load(Ordering::Acquire) {
                         continue;
@@ -81,9 +92,20 @@ impl Client {
                     let result = match request.call {
                         Some(call) => {
                             let context = request.context.expect("tool context");
-                            ComputerUseApp::check_context(&context)
-                                .and_then(|()| host.execute(&call, &context, &request.cancelled))
+                            worker_workspace
+                                .permit(request.generation)
+                                .and_then(|_permit| {
+                                    ComputerUseApp::check_context(&context).and_then(|()| {
+                                        host.execute(&call, &context, &request.cancelled)
+                                    })
+                                })
                         }
+                        None if request.reset => host.release_all().map(|()| {
+                            host.apps.clear();
+                            host.candidates.clear();
+                            host.generation = id();
+                            Reply::data("ComputerUse references revoked", json!({}))
+                        }),
                         None => {
                             let result = host.release_all();
                             let _ = request.reply.send(
@@ -110,7 +132,13 @@ impl Client {
                 worker_live.store(false, Ordering::Release);
             })
             .into_diagnostic()?;
-        Ok(Self { requests: tx, live })
+        workspace.register(&registration);
+        drop(_permit);
+        Ok(Self {
+            registration,
+            workspace,
+            live,
+        })
     }
     pub fn has_resources(&self) -> bool {
         self.live.load(Ordering::Acquire)
@@ -123,8 +151,11 @@ impl Client {
         let cancelled = Arc::new(AtomicBool::new(false));
         let _guard = CancelOnDrop(cancelled.clone());
         let (tx, rx) = flume::bounded(1);
-        self.requests
+        self.registration
+            .requests
             .send_async(Request {
+                reset: false,
+                generation: self.workspace.generation(),
                 call: Some(call),
                 context: Some(context),
                 cancelled,
@@ -138,8 +169,11 @@ impl Client {
     }
     pub async fn shutdown(self) -> Result<()> {
         let (tx, rx) = flume::bounded(1);
-        self.requests
+        self.registration
+            .requests
             .send_async(Request {
+                reset: false,
+                generation: 0,
                 call: None,
                 context: None,
                 cancelled: Arc::new(AtomicBool::new(false)),

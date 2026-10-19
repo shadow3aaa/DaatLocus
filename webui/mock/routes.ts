@@ -1,4 +1,5 @@
 import { appsRoute } from "./apps";
+import { configureComputerUse, getComputerUseStatus } from "./computer-use";
 import { importsRoute } from "./imports";
 import { advanceActivityPreview } from "./activity";
 /**
@@ -193,6 +194,11 @@ export async function handle(req: Request): Promise<Response> {
 }
 
 async function route(method: string, path: string, url: URL, req: Request): Promise<Response | null> {
+  if (path === "/v1/device/computer-use/capabilities" && method === "GET") return json({supported: true});
+  if (path === "/v1/device/computer-use") {
+    if (method === "GET") return json(getComputerUseStatus());
+    if (method === "PATCH") return json(await configureComputerUse(await req.json()));
+  }
   let match: RegExpMatchArray | null;
 
   if (RE_MESSAGES.test(path) && method === "GET") {

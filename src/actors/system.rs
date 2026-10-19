@@ -57,7 +57,7 @@ struct Worker {
 struct Inner {
     app_registry: Arc<crate::mcp::Registry>,
     #[cfg(windows)]
-    computer_display: Mutex<Option<daat_locus_virtual_workspace::SharedDisplay>>,
+    computer_workspace: Mutex<Option<Arc<crate::computer_use_app::Workspace>>>,
     workspace: PathBuf,
     store: ActorStore,
     config: RwLock<Config>,
@@ -94,24 +94,24 @@ impl ActorSystem {
     /// ActorSystem construction stays independent of native desktop prerequisites.
     #[cfg(windows)]
     pub async fn prepare_computer_workspace(&self) -> Result<()> {
-        let display = self.computer_display()?;
-        tokio::task::spawn_blocking(move || display.initialize())
+        let workspace = self.computer_workspace()?;
+        tokio::task::spawn_blocking(move || workspace.initialize())
             .await
-            .into_diagnostic()?
-            .into_diagnostic()?;
+            .into_diagnostic()??;
         Ok(())
     }
 
     #[cfg(windows)]
-    pub(crate) fn computer_display(&self) -> Result<daat_locus_virtual_workspace::SharedDisplay> {
-        let mut display = self.inner.computer_display.lock();
-        if display.is_none() {
-            *display =
-                Some(daat_locus_virtual_workspace::SharedDisplay::global().into_diagnostic()?);
+    pub(crate) fn computer_workspace(&self) -> Result<Arc<crate::computer_use_app::Workspace>> {
+        let mut workspace = self.inner.computer_workspace.lock();
+        if workspace.is_none() {
+            *workspace = Some(crate::computer_use_app::Workspace::open(
+                &self.inner.data_dir,
+            )?);
         }
-        Ok(display
+        Ok(workspace
             .as_ref()
-            .expect("initialized display service")
+            .expect("initialized workspace service")
             .clone())
     }
     pub(crate) fn shared_core(&self) -> Option<Arc<crate::stage::shared_runtime::Controller>> {
@@ -371,7 +371,7 @@ impl ActorSystem {
         let system = Self {
             inner: Arc::new(Inner {
                 #[cfg(windows)]
-                computer_display: Mutex::new(None),
+                computer_workspace: Mutex::new(None),
                 app_registry: crate::mcp::Registry::open(data_dir.join("apps.json"))?,
                 workspace,
                 store,

@@ -14,9 +14,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 #[cfg(any(target_os = "android", test))]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub mod android;
+pub(crate) mod settings;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+pub(crate) use windows::Workspace;
 
 /// Internal launcher entry point, before service configuration or credentials are read.
 #[cfg(windows)]
@@ -453,7 +457,7 @@ impl App for ComputerUseApp {
             if self.client.is_none() {
                 self.client = Some(windows::Client::start(
                     self.actor_id.clone(),
-                    self.system.computer_display()?,
+                    self.system.computer_workspace()?,
                 )?);
             }
             let reply = self

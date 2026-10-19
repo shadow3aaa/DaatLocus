@@ -753,10 +753,19 @@
     "no_results": "没有匹配的会话。",
     "load_more": "加载更多"
   },
-  "phone_use": {
+  "gui_use": {
     "title": "GUI 操作",
     "enable": "启用 GUI 操作",
     "scope": "允许在虚拟屏幕中操作 GUI 应用",
+    "advanced": "高级",
+    "apply": "应用"
+  },
+  "computer_use_settings": {
+    "resolution": "分辨率（像素）",
+    "unavailable": "虚拟屏幕不可用",
+    "display_effect": "应用新分辨率时，将正在操作的窗口交还到你的桌面。"
+  },
+  "phone_use": {
     "method": "授权方式",
     "disabled": "已关闭",
     "disconnected": "连接已断开",
@@ -768,12 +777,10 @@
     "disable_effect": "关闭后，正在操作的应用中未保存的内容可能丢失。",
     "authorize": "启用 GUI 操作",
     "choose_method": "选择一个授权方式",
-    "advanced": "高级",
     "width": "宽度（像素）",
     "height": "高度（像素）",
     "density": "显示密度（DPI）",
     "display_effect": "点击应用后调整虚拟屏幕。",
-    "apply": "应用",
     "display_invalid": "宽、高须为 256–4096 的整数，总像素不超过 800 万；DPI 须为 80–640 的整数。",
     "methods": {
       "shizuku": "Shizuku",

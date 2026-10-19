@@ -96,7 +96,7 @@ export function PhoneUseSettings() {
   return <>
     {!dialog && <StatusNote text={error} error />}
     <SettingsGroup>
-      <SettingsRow id="dl-phone-use-enabled" label={t("phone_use.enable")} description={t("phone_use.scope")}>
+      <SettingsRow id="dl-phone-use-enabled" label={t("gui_use.enable")} description={t("gui_use.scope")}>
         {enabled && status?.state !== "ready" && <span role="status" className="dl-settings-caption">{t(`phone_use.${pending ? "connecting" : status?.state ?? "disconnected"}`)}</span>}
         {pending && <Spinner />}
         <Switch id="dl-phone-use-enabled" checked={enabled} disabled={pending || savingDisplay || !status} onCheckedChange={value => {
@@ -109,7 +109,7 @@ export function PhoneUseSettings() {
     {!pending && !dialog && (error || enabled && status?.state !== "ready" && status?.state !== "unsupported") &&
       <Button variant="outline" disabled={savingDisplay} onClick={() => {if (!status) void refresh(); else {setError(null);setDialog(true);}}}>{t("phone_use.reconnect")}</Button>}
     <section aria-busy={savingDisplay}>
-      <Button variant="ghost" className="dl-settings-disclosure" aria-expanded={advanced} aria-controls="dl-phone-use-advanced" onClick={() => setAdvanced(!advanced)}>{t("phone_use.advanced")}<ChevronDownIcon data-icon="inline-end" /></Button>
+      <Button variant="ghost" className="dl-settings-disclosure" aria-expanded={advanced} aria-controls="dl-phone-use-advanced" onClick={() => setAdvanced(!advanced)}>{t("gui_use.advanced")}<ChevronDownIcon data-icon="inline-end" /></Button>
       <div id="dl-phone-use-advanced"><CollapsibleContent open={advanced} className="dl-settings-advanced">
         <form noValidate className="flex flex-col gap-4" onSubmit={event => {event.preventDefault();void applyDisplay();}}>
         <p className="dl-settings-caption">{t("phone_use.display_effect")}</p>
@@ -120,7 +120,7 @@ export function PhoneUseSettings() {
           </SettingsRow>)}
         </SettingsGroup>
         <StatusNote text={displayError} error />
-        <Button type="submit" className="self-end" disabled={pending || savingDisplay || !status || !displayDirty}>{savingDisplay && <Spinner data-icon="inline-start" />}{t("phone_use.apply")}</Button>
+        <Button type="submit" className="self-end" disabled={pending || savingDisplay || !status || !displayDirty}>{savingDisplay && <Spinner data-icon="inline-start" />}{t("gui_use.apply")}</Button>
         </form>
       </CollapsibleContent></div>
     </section>

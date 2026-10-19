@@ -3,6 +3,59 @@ use daat_locus_virtual_workspace::{DesktopState, SharedDisplay, displays};
 
 #[test]
 #[ignore = "requires installed signed IDD, unlocked desktop and stationary cursor; run native desktop tests serially"]
+fn settings_resize_reuses_the_output_and_disabling_fences_lazy_recreation() {
+    let before = displays().unwrap();
+    let service = SharedDisplay::new(Default::default()).unwrap();
+    let original = service.initialize().unwrap();
+    let region = service.reserve(600, 400).unwrap();
+    let smaller = daat_locus_virtual_workspace::DisplayOptions {
+        width: 1600,
+        height: 900,
+        ..Default::default()
+    };
+    assert!(service.configure(true, smaller).is_err());
+    region.validate().unwrap();
+    assert_eq!(service.inspect().unwrap().unwrap(), original);
+    drop(region);
+    let resized = service.configure(true, smaller).unwrap().unwrap();
+    assert_eq!(
+        resized.id, original.id,
+        "resize must retain the same monitor"
+    );
+    assert_eq!(
+        (
+            resized.bounds.width().unwrap(),
+            resized.bounds.height().unwrap()
+        ),
+        (1600, 900)
+    );
+    assert_eq!(
+        (resized.bounds.left, resized.bounds.top),
+        (original.bounds.left, original.bounds.top)
+    );
+    let topology = displays().unwrap();
+    let input = DesktopState::read().unwrap();
+    assert_eq!(service.configure(true, smaller).unwrap().unwrap(), resized);
+    assert_eq!(displays().unwrap(), topology);
+    assert_eq!(DesktopState::read().unwrap(), input);
+    assert!(service.configure(false, smaller).unwrap().is_none());
+    assert!(service.inspect().unwrap().is_none());
+    assert!(service.initialize().is_err());
+    assert!(service.reserve(600, 400).is_err());
+    assert_eq!(displays().unwrap(), before);
+    let enabled = service.configure(true, smaller).unwrap().unwrap();
+    assert!(
+        displays()
+            .unwrap()
+            .iter()
+            .any(|display| display.id == enabled.id)
+    );
+    drop(service);
+    assert_eq!(displays().unwrap(), before);
+}
+
+#[test]
+#[ignore = "requires installed signed IDD, unlocked desktop and stationary cursor; run native desktop tests serially"]
 fn idle_and_concurrent_clients_keep_one_screen_until_the_service_and_regions_are_dropped() {
     let service = SharedDisplay::global().unwrap();
     let screen = service.initialize().unwrap();

@@ -205,11 +205,15 @@ cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- 
 
 库调用方通过 `DriverPackage::open(...).install()` 部署驱动，
 服务宿主在 App 外保留 `SharedDisplay::global()`，Windows 服务在对外就绪及激活 worker
-之前调用 `initialize()` 创建屏幕并等待布局稳定，不预占窗口区域。驱动/桌面前置条件
+之前，在本机 GUI 操作已启用时创建屏幕并等待布局稳定，不预占窗口区域。驱动/桌面前置条件
 不可用时记录诊断，账号服务仍可用；ComputerUse 使用时仍返回实际原生错误。
 账号维护命令不创建屏幕。普通库构造保持延迟创建，调用方可显式 `initialize()`，
 也可等首次 `reserve(width, height)` 创建屏幕。`DisplayRegion` 为窗口保留互不重叠的位置，
 直到物理交还完成。
+Windows 的开关和驱动支持的虚拟屏分辨率位于「设置 → GUI 操作」，同一分类在 Android
+显示 PhoneUse 内容。偏好按服务 profile 保存在 `computer-use.json`，缺省启用且使用
+1920×1080；关闭后下次启动不建屏。关闭先归还窗口再拔屏，调整分辨率先归还窗口并
+撤销引用，再在原输出上重配。交还未完成、显示或持久化失败时拒绝新输入，由 Owner 重试。
 App 使用 `region.display().id` attach 借用工作区；最后一个区域释放后屏幕保持启用，
 最后的服务持有者和窗口区域都释放后才移除。这是进程内共享，不是跨 profile
 进程的屏幕代理。在已解锁且装有签名驱动的测试机上，串行运行

@@ -9,6 +9,12 @@ use std::{
 };
 
 enum Request {
+    Inspect(mpsc::SyncSender<Result<Option<Display>>>),
+    Configure(
+        bool,
+        DisplayOptions,
+        mpsc::SyncSender<Result<Option<Display>>>,
+    ),
     Initialize(mpsc::SyncSender<Result<Display>>),
     Reserve(i32, i32, mpsc::SyncSender<Result<(u64, Display, Rect)>>),
     Release(u64),
@@ -39,6 +45,34 @@ impl Drop for Inner {
 #[derive(Clone)]
 pub struct SharedDisplay(Arc<Inner>);
 impl SharedDisplay {
+    /// Read the current output without creating or recovering a monitor.
+    pub fn inspect(&self) -> Result<Option<Display>> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.0
+            .requests
+            .as_ref()
+            .expect("live owner")
+            .send(Request::Inspect(reply))
+            .map_err(|_| Error::InvalidState("shared display owner stopped"))?;
+        response
+            .recv()
+            .map_err(|_| Error::InvalidState("shared display owner stopped"))?
+    }
+    /// Reconfigure the same output after all window regions have been returned.
+    /// Disabling removes the output and fences subsequent reservations.
+    pub fn configure(&self, enabled: bool, options: DisplayOptions) -> Result<Option<Display>> {
+        options.validate()?;
+        let (reply, response) = mpsc::sync_channel(1);
+        self.0
+            .requests
+            .as_ref()
+            .expect("live owner")
+            .send(Request::Configure(enabled, options, reply))
+            .map_err(|_| Error::InvalidState("shared display owner stopped"))?;
+        response
+            .recv()
+            .map_err(|_| Error::InvalidState("shared display owner stopped"))?
+    }
     /// One default screen shared by service owners in this process. Separate
     /// Windows processes/profiles are separate services, not a cross-process broker.
     pub fn global() -> Result<Self> {
@@ -178,20 +212,63 @@ impl Drop for DisplayRegion {
     }
 }
 
-fn run(receiver: mpsc::Receiver<Request>, options: DisplayOptions) {
+fn run(receiver: mpsc::Receiver<Request>, mut options: DisplayOptions) {
+    let mut enabled = true;
     let mut display: Option<VirtualDisplay> = None;
     let mut snapshot: Option<Display> = None;
     let mut regions = BTreeMap::new();
     let mut next = 0u64;
     while let Ok(request) = receiver.recv() {
         match request {
+            Request::Inspect(reply) => {
+                let _ = reply.send(display.as_ref().map(VirtualDisplay::display).transpose());
+            }
+            Request::Configure(next_enabled, next_options, reply) => {
+                let result = (|| {
+                    if !regions.is_empty() {
+                        return Err(Error::InvalidState(
+                            "return all windows before configuring the shared display",
+                        ));
+                    }
+                    if !next_enabled {
+                        enabled = false;
+                        if let Some(owned) = display.take() {
+                            owned.remove()?;
+                        }
+                        snapshot = None;
+                        options = next_options;
+                        return Ok(None);
+                    }
+                    if let Some(owned) = display.as_mut() {
+                        let observed = owned.display()?;
+                        if observed.bounds.width()? as u32 != next_options.width
+                            || observed.bounds.height()? as u32 != next_options.height
+                        {
+                            let mut requested = next_options;
+                            requested.origin = requested.origin.or(Some(Point {
+                                x: observed.bounds.left,
+                                y: observed.bounds.top,
+                            }));
+                            owned.configure(requested)?;
+                            let observed = owned.display()?;
+                            settle_work_area(observed.bounds)?;
+                            snapshot = Some(observed);
+                        }
+                    }
+                    let observed =
+                        prepare_display(&mut display, &mut snapshot, next_options, false)?;
+                    options = next_options;
+                    enabled = true;
+                    Ok(Some(observed))
+                })();
+                let _ = reply.send(result);
+            }
             Request::Initialize(reply) => {
-                let _ = reply.send(prepare_display(
-                    &mut display,
-                    &mut snapshot,
-                    options,
-                    !regions.is_empty(),
-                ));
+                let _ = reply.send(if !enabled {
+                    Err(Error::InvalidState("GUI operation is disabled"))
+                } else {
+                    prepare_display(&mut display, &mut snapshot, options, !regions.is_empty())
+                });
             }
             Request::Replace(token, size, origin, reply) => {
                 let result = (|| {
@@ -263,6 +340,9 @@ fn run(receiver: mpsc::Receiver<Request>, options: DisplayOptions) {
             }
             Request::Reserve(width, height, reply) => {
                 let result = (|| {
+                    if !enabled {
+                        return Err(Error::InvalidState("GUI operation is disabled"));
+                    }
                     let current =
                         prepare_display(&mut display, &mut snapshot, options, !regions.is_empty())?;
                     let bounds = allocate(

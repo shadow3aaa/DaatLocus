@@ -753,10 +753,19 @@
     "no_results": "No matching conversations.",
     "load_more": "Load more"
   },
-  "phone_use": {
+  "gui_use": {
     "title": "GUI Operation",
     "enable": "Enable GUI operation",
     "scope": "Allow GUI apps to be operated on a virtual display",
+    "advanced": "Advanced",
+    "apply": "Apply"
+  },
+  "computer_use_settings": {
+    "resolution": "Resolution (pixels)",
+    "unavailable": "Virtual display unavailable",
+    "display_effect": "Applying a new resolution returns controlled windows to your desktop."
+  },
+  "phone_use": {
     "method": "Authorization method",
     "disabled": "Off",
     "disconnected": "Disconnected",
@@ -768,12 +777,10 @@
     "disable_effect": "Turning this off can discard unsaved content in apps being operated.",
     "authorize": "Enable GUI operation",
     "choose_method": "Choose an authorization method",
-    "advanced": "Advanced",
     "width": "Width (pixels)",
     "height": "Height (pixels)",
     "density": "Display density (DPI)",
     "display_effect": "Apply changes to resize the virtual displays.",
-    "apply": "Apply",
     "display_invalid": "Width and height must be integers from 256 to 4096, with at most 8 million pixels. DPI must be an integer from 80 to 640.",
     "methods": {
       "shizuku": "Shizuku",
