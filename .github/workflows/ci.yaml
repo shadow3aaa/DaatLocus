@@ -58,6 +58,23 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test --locked -p daat-locus --lib file_io::tests::symlink_escape_is_denied -- --ignored --exact
       - run: cargo test --locked -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-macros -p daat-locus-virtual-workspace -p xtask
+      - name: Install WiX for Windows upgrade transaction tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          dotnet tool install --global wix --version 6.0.0
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add WixToolset.BootstrapperApplications.wixext/6.0.0
+      - name: Check service coordination across MSI success and rollback
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo build --locked -p daat-locus --bin daat-locus --no-default-features
+          cargo test --locked -p daat-locus --test installer_upgrade -- --test-threads=1
+          $env:DAAT_LOCUS_TEST_COMPANION = Join-Path $env:GITHUB_WORKSPACE 'target/debug/daat-locus.exe'
+          cargo test --locked -p xtask -- service_lifecycle_surrounds_msi_and_restores_the_service_after_rollback --ignored --nocapture --test-threads=1
   windows-mxc:
     # The public Windows images may not expose PSEC. A provisioned runner is
     # required; skipped means unavailable, never a positive isolation result.

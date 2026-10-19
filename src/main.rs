@@ -105,6 +105,17 @@ async fn dispatch(
     let opening = |status: &control::Status| daemon::open_client(status);
     match command {
         #[cfg(windows)]
+        cli::Command::Installer { action } => match action {
+            cli::InstallerAction::Prepare {
+                installation,
+                transaction,
+            } => daemon::installation::prepare(&namespace, &installation, transaction).await,
+            cli::InstallerAction::Resume {
+                installation,
+                transaction,
+            } => daemon::installation::resume(&namespace, &installation, transaction).await,
+        },
+        #[cfg(windows)]
         cli::Command::ComputerUseLaunch { .. } => unreachable!("handled before service startup"),
         cli::Command::ClientBootstrap => {
             use std::io::Read;
@@ -140,6 +151,11 @@ async fn dispatch(
             Ok(())
         }
         cli::Command::Start { open } | cli::Command::Restart { open } => {
+            #[cfg(windows)]
+            {
+                let _guard = daemon::installation::startup_guard(&namespace).await?;
+                daemon::installation::check_start(&namespace)?;
+            }
             let previous = control::query(&root, Action::Status).await?;
             if matches!(command, cli::Command::Start { .. })
                 && let Some(status) = &previous
@@ -201,6 +217,12 @@ async fn serve(
     namespace: PathBuf,
     account_action: Option<cli::AccountCommand>,
 ) -> Result<()> {
+    #[cfg(windows)]
+    let startup = {
+        let guard = daemon::installation::startup_guard(&namespace).await?;
+        daemon::installation::check_start(&namespace)?;
+        guard
+    };
     let paths = daat_locus_paths().await;
     for path in [
         paths.root().to_path_buf(),
@@ -299,6 +321,8 @@ async fn serve(
         Some(state.clone()),
     )
     .await?;
+    #[cfg(windows)]
+    drop(startup);
     let mut stop_requested = control.stopping();
     println!(
         "Daat Locus API listening on http://{actual}; sign in or create an account in the WebUI"

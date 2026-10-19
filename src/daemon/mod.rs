@@ -6,6 +6,8 @@ pub mod attachments;
 pub mod logs;
 
 pub mod control;
+#[cfg(windows)]
+pub mod installation;
 
 /// Prefer the installed desktop client; browser access stays available on headless installs.
 pub fn open_client(status: &control::Status) -> Result<()> {

@@ -85,7 +85,20 @@ Windows 发行构建同时携带并验签 Hook DLL、部署 helper 与 IDD 包�
 `C2D252AEFAF27171C36AF1BD6DAF2FDC5441E462`；其他身份的 CAT 在导入信任前拒绝。
 签名机需已信任该公钥以完成 SignTool 策略验签；首次引导时可先用 helper 安装
 已生成的签名包，再重新验签。私钥和可恢复备份保存在私有 secrets 仓库，安装包只含公钥。
-WiX Burn 对机器级驱动安装提权，客户端 MSI 保持 per-user。安装页说明将导入
+WiX Burn 对机器级驱动安装提权，客户端 MSI 保持 per-user。执行驱动/MSI 前，缓存的
+非提权 CLI 通过 OS-owner IPC 停止当前安装在默认及命名 profile 中运行的服务，等待
+进程和客户端退出，并阻止安装期间重新启动。完成后按原参数恢复原来运行的服务和
+客户端；回滚时先停止恢复的进程，待 MSI 回滚后恢复旧安装。安装器崩溃不永久阻止
+启动，重试仍保留此前停止的服务参数。其他用户或外部工作区仍可能导致真实重启要求。
+执行 `cargo test --locked -p daat-locus --test installer_upgrade -- --test-threads=1`
+验证进程退出、启动阻止和原参数恢复；该套件的 ignored 用例额外要求可工作的签名 IDD，
+在已解锁且光标静止的桌面单独运行，以核对真实屏幕移除。安装 WiX 6/Bal，将
+`DAAT_LOCUS_TEST_COMPANION` 设为新编译的 `daat-locus.exe` 后执行
+`cargo test --locked -p xtask -- service_lifecycle_surrounds_msi_and_restores_the_service_after_rollback --ignored --nocapture --test-threads=1`，
+验证真实临时 MSI 的成功及失败回滚路径。Windows CI 显式准备并运行此回归，
+不安装驱动、不接触账号 profile。
+使用 setup EXE 完成协调升级；单独运行 MSI 不执行 Bundle 的服务协调和驱动安装步骤。
+安装页说明将导入
 机器 Root/TrustedPublisher 信任；CAT 哈希和证书存在状态检测未变版本。
 InstallCondition 在驱动和信任已满足时跳过整个永久前置包，Repair（Burn action 8）
 仍执行修复，实际部署保留安装文件缓存供维护。跳过路径不请求机器缓存，也不无条件

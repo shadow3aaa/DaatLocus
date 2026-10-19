@@ -511,6 +511,10 @@ fn windows(context: &Context, computer: Option<&computer_use::Assets>) -> Result
         .env_remove("PSModulePath")
         .env("DAAT_LOCUS_WEBVIEW_BOOTSTRAPPER", &webview))?;
     let bundle = work.join("bundle.wxs");
+    let (pause_service, resume_service) = computer_use::service_lifecycle(
+        &context.binary("daat-locus"),
+        "[LocalAppDataFolder]Daat Locus",
+    )?;
     let setup = context.output.join(format!("{}-setup.exe", context.stem()));
     fs::write(
         &bundle,
@@ -528,6 +532,7 @@ fn windows(context: &Context, computer: Option<&computer_use::Assets>) -> Result
 <util:RegistrySearch Id="WebView2User64Search" Variable="WebView2User64" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always64"/>
 {}
 <Chain>
+{}
 <ExePackage Id="WebView2" SourceFile="{}" InstallArguments="/silent /install" DetectCondition="WebView2Machine32 &gt; v0.0.0.0 OR WebView2Machine64 &gt; v0.0.0.0 OR WebView2User32 &gt; v0.0.0.0 OR WebView2User64 &gt; v0.0.0.0" Permanent="yes" PerMachine="no" Vital="yes">
 <ExitCode Value="0" Behavior="success"/>
 <!-- 0x80040828: a concurrent installer has already installed the runtime. -->
@@ -538,6 +543,7 @@ fn windows(context: &Context, computer: Option<&computer_use::Assets>) -> Result
 </ExePackage>
 {}
 <MsiPackage SourceFile="{}" Compressed="yes"/>
+{}
 </Chain>
 </Bundle>
 </Wix>"#,
@@ -550,9 +556,11 @@ fn windows(context: &Context, computer: Option<&computer_use::Assets>) -> Result
             } else {
                 String::new()
             },
+            pause_service,
             xml(&webview.to_string_lossy()),
             computer.map(computer_use::prerequisite).unwrap_or_default(),
-            xml(&msi.to_string_lossy())
+            xml(&msi.to_string_lossy()),
+            resume_service
         ),
     )?;
     command(

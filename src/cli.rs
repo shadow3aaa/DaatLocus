@@ -33,6 +33,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Internal unelevated installer lifecycle; never exposed through HTTP or Apps.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    Installer {
+        #[command(subcommand)]
+        action: InstallerAction,
+    },
     /// Internal credential-free application launcher.
     #[cfg(windows)]
     #[command(hide = true)]
@@ -75,6 +82,22 @@ pub enum Command {
     Account {
         #[command(subcommand)]
         action: AccountCommand,
+    },
+}
+#[cfg(windows)]
+#[derive(Debug, Subcommand)]
+pub enum InstallerAction {
+    Prepare {
+        #[arg(long)]
+        installation: PathBuf,
+        #[arg(long)]
+        transaction: uuid::Uuid,
+    },
+    Resume {
+        #[arg(long)]
+        installation: PathBuf,
+        #[arg(long)]
+        transaction: uuid::Uuid,
     },
 }
 #[derive(Debug, Subcommand)]

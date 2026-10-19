@@ -522,7 +522,26 @@ CAT signed by another identity before provisioning trust. The signing host must
 already trust this public certificate for SignTool policy verification; on first
 bootstrap a signed package can be installed by the helper before re-running that
 verification. WiX Burn elevates the machine driver installer; the client MSI remains
-per-user. The install page discloses machine certificate trust. The CAT hash and
+per-user. Before driver/MSI work, a cached unelevated companion coordinates graceful
+shutdown of this installation's running services in the namespace's default and
+named profiles, waits for their clients to exit, and fences service startup until
+the transaction restores the original launch options. Burn rollback stops restored
+processes before MSI rollback and resumes the old installation afterwards. Only
+previously running services/clients are restored. An installer crash cannot leave
+a live startup fence permanently; retry retains saved restart parameters. Other
+users or external workspace consumers can still cause Windows to require a reboot.
+Run `cargo test --locked -p daat-locus --test installer_upgrade -- --test-threads=1`
+for process shutdown, startup fencing and launch-option restoration. The ignored
+case in that suite additionally requires a working signed IDD and checks actual
+monitor removal; run it separately on an unlocked stationary desktop. Set
+`DAAT_LOCUS_TEST_COMPANION` to a freshly built `daat-locus.exe`, then run
+`cargo test --locked -p xtask -- service_lifecycle_surrounds_msi_and_restores_the_service_after_rollback --ignored --nocapture --test-threads=1`
+with WiX 6/Bal installed to exercise real disposable MSI success and rollback.
+Windows CI explicitly provisions and runs this bundle regression without installing
+a driver or touching the account profile.
+Use the setup EXE for coordinated upgrades; a standalone MSI does not execute the
+bundle's service coordination or driver installation steps.
+The install page discloses machine certificate trust. The CAT hash and
 certificate presence detect an unchanged installed prerequisite. Its InstallCondition
 skips the entire permanent prerequisite when already present during Install, while
 Repair (Burn action 8) still executes the helper. Keep source caching for actual
