@@ -89,6 +89,12 @@ pub enum StageError {
     Unavailable(&'static str),
     #[error("{0}")]
     Capacity(&'static str),
+    #[error("Peer {phase} failed: {source}")]
+    Channel {
+        phase: &'static str,
+        #[source]
+        source: std::sync::Arc<StageError>,
+    },
     #[error("Stage storage failed")]
     Storage(#[source] std::io::Error),
     #[error("Stage database failed")]

@@ -176,7 +176,7 @@ pub struct PeerChannel {
     pub peer: VerifiedPeer,
     pub sender: ChannelSender,
     pub incoming: mpsc::Receiver<Result<Incoming>>,
-    pub closed: watch::Receiver<bool>,
+    pub closed: watch::Receiver<Failure>,
     pub metrics: Arc<parking_lot::Mutex<Traffic>>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -228,7 +228,7 @@ impl PeerChannel {
         let control = Arc::new(Semaphore::new(128 * 1024));
         let (incoming_tx, incoming) = mpsc::channel(8);
         let (outgoing_tx, outgoing) = mpsc::channel::<Outgoing>(32);
-        let (closed_tx, closed) = watch::channel(false);
+        let (closed_tx, closed) = watch::channel(None);
         let write_ready = Arc::new(Notify::new());
         let (bulk_tx, bulk_rx) = mpsc::channel(8);
         let sender = ChannelSender {
@@ -301,12 +301,22 @@ impl PeerChannel {
                         }
                     }
                     Err(error) => {
-                        let _ = incoming_tx.send(Err(error)).await;
+                        let source = fail(&read_closed, "read", error);
+                        // Publish the close reason even if the incoming queue is
+                        // full; consumers with room still receive the read error.
+                        let _ = incoming_tx.try_send(Err(StageError::Channel {
+                            phase: "read",
+                            source,
+                        }));
                         break;
                     }
                 }
             }
-            read_closed.send_replace(true);
+            fail(
+                &read_closed,
+                "read",
+                StageError::Unavailable("Peer reader stopped"),
+            );
         });
         let authorize = Arc::new(authorize);
         let write_task = spawn_writer(
@@ -347,6 +357,15 @@ impl PeerChannel {
             let _ = task.await;
         }
     }
+    pub fn failure(&self) -> Option<StageError> {
+        self.closed
+            .borrow()
+            .as_ref()
+            .map(|(phase, source)| StageError::Channel {
+                phase,
+                source: source.clone(),
+            })
+    }
 }
 impl Drop for PeerChannel {
     fn drop(&mut self) {
@@ -357,86 +376,95 @@ impl Drop for PeerChannel {
 }
 
 type Authorizer = Arc<dyn Fn(&Envelope, &SendScope) -> Result<()> + Send + Sync>;
+type Failure = Option<(&'static str, Arc<StageError>)>;
+
+fn fail(
+    closed: &watch::Sender<Failure>,
+    phase: &'static str,
+    error: StageError,
+) -> Arc<StageError> {
+    let error = Arc::new(error);
+    closed.send_if_modified(|current| {
+        if current.is_some() {
+            return false;
+        }
+        tracing::debug!(phase, reason=?error, "Peer transport stopped");
+        *current = Some((phase, error.clone()));
+        true
+    });
+    error
+}
 
 fn spawn_writer(
     mut writer: Box<dyn FrameWriter>,
     mut outgoing: mpsc::Receiver<Outgoing>,
     metrics: Arc<parking_lot::Mutex<Traffic>>,
-    closed_tx: watch::Sender<bool>,
+    closed_tx: watch::Sender<Failure>,
     write_ready: Arc<Notify>,
     authorize: Authorizer,
     write_timeout: std::time::Duration,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut queue = FairQueue::new(1024 * 1024);
-        let mut held = std::collections::HashMap::new();
-        while let Some(first) = outgoing.recv().await {
-            let mut batch = vec![first];
-            while batch.len() < 32 {
-                match outgoing.try_recv() {
-                    Ok(next) => batch.push(next),
-                    Err(_) => break,
+        let mut phase = "queue";
+        let result: Result<()> = async {
+            let mut queue = FairQueue::new(1024 * 1024);
+            let mut held = std::collections::HashMap::new();
+            while let Some(first) = outgoing.recv().await {
+                let mut batch = vec![first];
+                while batch.len() < 32 {
+                    match outgoing.try_recv() {
+                        Ok(next) => batch.push(next),
+                        Err(_) => break,
+                    }
                 }
-            }
-            for item in batch {
-                let id = item.frame.message_id;
-                if held.contains_key(&id) {
-                    continue;
+                phase = "queue";
+                for item in batch {
+                    let id = item.frame.message_id;
+                    if held.contains_key(&id) {
+                        continue;
+                    }
+                    let class = item.class;
+                    let frame = item.frame.clone();
+                    held.insert(id, item);
+                    queue.push(frame, class)?;
                 }
-                let class = item.class;
-                let frame = item.frame.clone();
-                held.insert(id, item);
-                if queue.push(frame, class).is_err() {
-                    closed_tx.send_replace(true);
-                    writer.close().await;
-                    return;
-                }
-            }
-            while let Some(item) = queue.pop() {
-                let Some(queued) = held.remove(&item.frame.message_id) else {
-                    closed_tx.send_replace(true);
-                    writer.close().await;
-                    return;
-                };
-                // Capacity can take seconds to become available. Check authority
-                // after that wait, immediately before admitting bytes to SCTP.
-                if !matches!(
+                while let Some(item) = queue.pop() {
+                    let queued = held
+                        .remove(&item.frame.message_id)
+                        .ok_or(StageError::Invalid("Peer queued frame disappeared"))?;
+                    phase = "capacity";
                     tokio::time::timeout(write_timeout, writer.writable(item.class == Class::Blob))
-                        .await,
-                    Ok(Ok(()))
-                ) {
-                    closed_tx.send_replace(true);
-                    writer.close().await;
-                    return;
-                }
-                if authorize(&queued.frame, &queued.scope).is_err() {
-                    closed_tx.send_replace(true);
-                    writer.close().await;
-                    return;
-                }
-                match tokio::time::timeout(
-                    write_timeout,
-                    writer.write(&queued.frame, item.class == Class::Blob),
-                )
-                .await
-                {
-                    Ok(Ok(bytes)) => {
+                        .await
+                        .map_err(|_| StageError::Unavailable("Peer send capacity timed out"))??;
+                    // Authority is still checked after backpressure, immediately
+                    // before bytes are admitted. Slow database access yields the
+                    // runtime worker through ActorStore's blocking boundary.
+                    phase = "authorization";
+                    authorize(&queued.frame, &queued.scope)?;
+                    phase = "write";
+                    let bytes = tokio::time::timeout(
+                        write_timeout,
+                        writer.write(&queued.frame, item.class == Class::Blob),
+                    )
+                    .await
+                    .map_err(|_| StageError::Unavailable("Peer frame write timed out"))??;
+                    {
                         let mut metrics = metrics.lock();
                         metrics.record_frame(item.class, &queued.frame, bytes);
                         metrics.queue_peak_bytes =
                             metrics.queue_peak_bytes.max(queue.metrics.queue_peak_bytes);
                     }
-                    _ => {
-                        closed_tx.send_replace(true);
-                        writer.close().await;
-                        return;
-                    }
+                    drop(queued);
+                    write_ready.notify_one();
                 }
-                drop(queued);
-                write_ready.notify_one();
             }
+            phase = "queue";
+            Err(StageError::Unavailable("Peer writer queue closed"))
         }
-        closed_tx.send_replace(true);
+        .await;
+        if let Err(error) = result {
+            fail(&closed_tx, phase, error);
+        }
         writer.close().await;
     })
 }
@@ -444,6 +472,71 @@ fn spawn_writer(
 #[cfg(test)]
 mod liveness_tests {
     use super::*;
+    struct FailingReader(tokio::sync::oneshot::Receiver<()>);
+    #[async_trait]
+    impl FrameReader for FailingReader {
+        async fn read(&mut self) -> Result<(Envelope, usize)> {
+            let _ = (&mut self.0).await;
+            Err(StageError::Unavailable("fixture read failure"))
+        }
+    }
+    struct FailingWriter;
+    #[async_trait]
+    impl FrameWriter for FailingWriter {
+        async fn write(&mut self, _: &Envelope, _: bool) -> Result<usize> {
+            Err(StageError::Unavailable("fixture write failure"))
+        }
+        async fn close(&mut self) {}
+    }
+    #[tokio::test]
+    async fn first_transport_failure_survives_secondary_read_shutdown() {
+        let identity = crate::stage::identity::DeviceIdentity::generate().unwrap();
+        let (release, reader) = tokio::sync::oneshot::channel();
+        let mut channel = PeerChannel::new(
+            VerifiedPeer::signed_dtls(&identity.profile()),
+            Box::new(FailingReader(reader)),
+            Box::new(FailingWriter),
+            None,
+            |_, _| Ok(()),
+        );
+        let frame = Envelope {
+            version: 1,
+            source: crate::stage::StageId::new(),
+            target: identity.profile().stage_id,
+            generation: 1,
+            message_id: uuid::Uuid::new_v4(),
+            invocation_id: None,
+            in_reply_to: None,
+            created_at_ms: 1,
+            expires_at_ms: 10000,
+            body: crate::stage::protocol::Body::Heartbeat,
+        };
+        channel
+            .sender
+            .send(frame, Class::Control, SendScope::Connection)
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            channel.closed.wait_for(|failure| failure.is_some()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        release.send(()).unwrap();
+        let incoming =
+            tokio::time::timeout(std::time::Duration::from_secs(2), channel.incoming.recv())
+                .await
+                .unwrap();
+        assert!(
+            matches!(incoming, Some(Err(StageError::Channel {phase:"read",source}))
+            if matches!(&*source, StageError::Unavailable("fixture read failure")))
+        );
+        assert!(
+            matches!(channel.failure(), Some(StageError::Channel {phase:"write",source})
+            if matches!(&*source, StageError::Unavailable("fixture write failure")))
+        );
+        channel.close().await;
+    }
     struct PendingReader;
     #[async_trait]
     impl FrameReader for PendingReader {
@@ -547,7 +640,7 @@ mod liveness_tests {
         capacity.notify_one();
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            channel.closed.wait_for(|closed| *closed),
+            channel.closed.wait_for(|closed| closed.is_some()),
         )
         .await
         .expect("revocation was not rechecked after capacity wait")
@@ -555,6 +648,10 @@ mod liveness_tests {
         assert!(
             writes.try_recv().is_err(),
             "revoked private content reached the writer"
+        );
+        assert!(
+            matches!(channel.failure(), Some(StageError::Channel { phase: "authorization", source })
+            if matches!(&*source, StageError::Forbidden("revoked")))
         );
         channel.close().await;
     }

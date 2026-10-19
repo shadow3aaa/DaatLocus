@@ -670,7 +670,9 @@ impl PeerLink {
     pub async fn run(mut self) -> Result<()> {
         // A new link exchanges only signed reset facts until both peers agree
         // on the work generation. No old snapshot, delivery or effect can cross it.
-        self.negotiate_reset().await?;
+        self.negotiate_reset()
+            .await
+            .map_err(|error| self.channel.failure().unwrap_or(error))?;
         if self.account_credential_authority().is_ok() {
             self.request(
                 Body::AccountCredentialsQuery {
@@ -772,9 +774,10 @@ impl PeerLink {
                     for id in expired{if let Some((_,Pending::Rpc(response)))=self.pending.remove(&id){let _=response.send(Err(StageError::Unavailable("Peer request timed out")));}}
                     if let Err(error)=self.publish().and_then(|_|self.send(self.frame(Body::Heartbeat),Class::Control,SendScope::Connection)){break Err(error);}
                 },
-                _=self.channel.closed.changed()=>break Err(StageError::Unavailable("Peer channel closed")),
+                _=self.channel.closed.changed()=>break Err(self.channel.failure().unwrap_or(StageError::Unavailable("Peer channel closed"))),
             }
         };
+        let result = result.map_err(|error| self.channel.failure().unwrap_or(error));
         for task in self.core_tasks.drain(..) {
             task.abort();
             let _ = task.await;
