@@ -79,6 +79,22 @@ export function seedOverflowActivityPreview(actor: ActorStore) {
   preview!.overflow = true;
 }
 
+export function seedGuidanceActivityPreview(actor: ActorStore) {
+  seedActivityPreview(actor);
+  const state = preview!;
+  const guide = addMessage(actor,{kind:"steering",source:{kind:"user"},reply_to:{kind:"user"},in_reply_to:state.input.id,content:"无需截图，直接汇报吧。",status:"completed"});
+  emitEvent(actor.summary.id,{type:"message_added",message_id:guide.id});
+  emitEvent(actor.summary.id,{type:"message_updated",message_id:guide.id,status:"completed"});
+  text(state,"assistant","收到，接下来只核对结果并汇报，不再准备截图。");
+  start(state,read("webui/src/layout/result.tsx")); finish(state);
+  start(state,read("webui/src/layout/summary.tsx"));
+  const beginning = now()-60000;
+  actor.events.forEach((record,index) => { record.created_at_ms = beginning+index*100; });
+  const sent = actor.events.find(record => record.event.type === "message_added" && record.event.message_id === guide.id)!;
+  touchMessage(guide,{created_at_ms:sent.created_at_ms,finished_at_ms:sent.created_at_ms+100});
+  touchMessage(state.input,{created_at_ms:beginning-100,started_at_ms:beginning});
+}
+
 // Manual stepping keeps previews and tests deterministic while exercising the
 // mounted WebUI through the same incremental SSE facts as a real running Actor.
 export function advanceActivityPreview(): boolean {

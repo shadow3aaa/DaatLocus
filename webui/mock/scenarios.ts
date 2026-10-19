@@ -1,5 +1,5 @@
 import { resetApps } from "./apps";
-import { advanceActivityPreview, seedActivityPreview, seedOverflowActivityPreview, seedPaginatedActivityPreview } from "./activity";
+import { advanceActivityPreview, seedActivityPreview, seedGuidanceActivityPreview, seedOverflowActivityPreview, seedPaginatedActivityPreview } from "./activity";
 import type { CoreStatus, Device } from "../src/lib/stage-api";
 import { resetStore } from "./fixtures";
 import { addApproval, addMessage, addTool, configHolder, emitEvent, newId, now, ROOT_ACTOR_ID, setActorStatus, STAGE_ID, store, touchMessage, type ActorStore } from "./state";
@@ -21,6 +21,7 @@ export const scenarios = [
   {id:"work", label:"工作对话", actor:"research"},
   {id:"activity-replay", label:"工作活动 · 分步演示", actor:"research"},
   {id:"activity-overflow", label:"工作活动 · 长时间执行与事件补载", actor:"research"},
+  {id:"activity-guidance", label:"工作活动 · 执行中追加引导消息", actor:"research"},
   {id:"activity-thinking", label:"工作活动 · 思考中的连续工具组", actor:"research"},
   {id:"activity-tools", label:"工作活动 · 工具执行中", actor:"research"},
   {id:"activity-complete", label:"工作活动 · 完成与正文交错", actor:"research"},
@@ -79,6 +80,7 @@ export function activateScenario(id: string): boolean {
     clear(work);
     if (id === "activity-pagination") seedPaginatedActivityPreview(work);
     else if (id === "activity-overflow") seedOverflowActivityPreview(work);
+    else if (id === "activity-guidance") seedGuidanceActivityPreview(work);
     else seedActivityPreview(work, id === "thinking-only");
     if (id === "activity-tools") advanceActivityPreview();
     if (id === "activity-complete") while (advanceActivityPreview()) { /* Seed all settled phases. */ }
