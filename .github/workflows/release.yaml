@@ -137,7 +137,9 @@ jobs:
             }
           }
           Invoke-SigningStage 'Validate runner and secret presence' {
-            if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Use only on an ephemeral GitHub runner' }
+            if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Use only on a GitHub-hosted ephemeral runner' }
+            $principal = [System.Security.Principal.WindowsPrincipal]::new([System.Security.Principal.WindowsIdentity]::GetCurrent())
+            if (!$principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Windows signing requires an administrator runner' }
             if (!$env:SIGNING_PFX_BASE64 -or !$env:SIGNING_PFX_PASSWORD) { throw 'Windows signing secrets are required' }
           }
           $thumbprint = 'C2D252AEFAF27171C36AF1BD6DAF2FDC5441E462'
@@ -168,13 +170,14 @@ jobs:
                 throw 'Unexpected Windows signing identity'
               }
             }
-            foreach ($store in @('My', 'Root', 'TrustedPublisher')) {
-              $target = "Cert:\CurrentUser\$store\$thumbprint"
-              Invoke-SigningStage "Check and journal CurrentUser/$store" {
+            # Only the public root uses machine trust, on this disposable hosted VM.
+            foreach ($location in @('CurrentUser\My', 'LocalMachine\Root', 'CurrentUser\TrustedPublisher')) {
+              $target = "Cert:\$location\$thumbprint"
+              Invoke-SigningStage "Check and journal $location" {
                 if (Test-Path -LiteralPath $target) { throw 'Signing identity already exists on this runner' }
-                Add-Content -LiteralPath $journal -Value $store
+                Add-Content -LiteralPath $journal -Value $location
               }
-              if ($store -eq 'My') {
+              if ($location -eq 'CurrentUser\My') {
                 $certificate = Invoke-SigningStage 'Import PFX into CurrentUser/My' {
                   Import-PfxCertificate -FilePath $pfx -Password $password -CertStoreLocation 'Cert:\CurrentUser\My'
                 }
@@ -183,14 +186,18 @@ jobs:
                 }
               } else {
                 $public = Join-Path $env:GITHUB_WORKSPACE 'crates/daat-locus-virtual-workspace/certificates/virtual-display.cer'
-                $certificate = Invoke-SigningStage "Read public certificate for CurrentUser/$store" {
+                $certificate = Invoke-SigningStage "Read public certificate for $location" {
                   [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($public)
                 }
-                Invoke-SigningStage "Validate public identity for CurrentUser/$store" {
+                Invoke-SigningStage "Validate public identity for $location" {
                   if ($certificate.Thumbprint -ne $thumbprint) { throw 'Bundled public certificate differs from signing identity' }
                 }
-                Invoke-SigningStage "Import public certificate into CurrentUser/$store" {
-                  Import-Certificate -FilePath $public -CertStoreLocation "Cert:\CurrentUser\$store" | Out-Null
+                Invoke-SigningStage "Import public certificate into $location" {
+                  Import-Certificate -FilePath $public -CertStoreLocation "Cert:\$location" | Out-Null
+                }
+                Invoke-SigningStage "Validate imported public identity in $location" {
+                  $imported = Get-Item -LiteralPath $target
+                  if ($imported.Thumbprint -ne $thumbprint) { throw 'Unexpected imported public signing identity' }
                 }
               }
             }
@@ -249,27 +256,50 @@ jobs:
             target/${{ steps.host.outputs.target }}/release/package/*-setup.exe
             target/${{ steps.host.outputs.target }}/release/package/*.pkg
       - name: Remove Windows signing identity
+        timeout-minutes: 3
         if: always() && runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Use only on an ephemeral GitHub runner' }
+          if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Use only on a GitHub-hosted ephemeral runner' }
+          $principal = [System.Security.Principal.WindowsPrincipal]::new([System.Security.Principal.WindowsIdentity]::GetCurrent())
+          if (!$principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Windows signing requires an administrator runner' }
           $directory = Join-Path $env:RUNNER_TEMP 'daat-locus-windows-signing'
-          # Remove secret material first, even if certificate-store cleanup later blocks.
+          # A failed PFX deletion must not prevent removal of temporary machine trust.
+          $cleanupFailed = $false
           $pfx = Join-Path $directory 'identity.pfx'
-          if (Test-Path -LiteralPath $pfx) { Remove-Item -LiteralPath $pfx -Force }
+          try {
+            if (Test-Path -LiteralPath $pfx) { Remove-Item -LiteralPath $pfx -Force }
+          } catch {
+            $cleanupFailed = $true
+            Write-Host '[windows-signing] FAILED Cleanup temporary PFX'
+          }
           $journal = Join-Path $directory 'stores.txt'
           if (Test-Path -LiteralPath $journal) {
-            foreach ($store in Get-Content -LiteralPath $journal) {
-              if ($store -notin @('My', 'Root', 'TrustedPublisher')) { throw 'Unexpected signing store in cleanup journal' }
-              $target = "Cert:\CurrentUser\$store\C2D252AEFAF27171C36AF1BD6DAF2FDC5441E462"
-              if (Test-Path -LiteralPath $target) {
-                if ($store -eq 'My') { Remove-Item -LiteralPath $target -DeleteKey -Force }
-                else { Remove-Item -LiteralPath $target -Force }
+            foreach ($location in Get-Content -LiteralPath $journal) {
+              # Journal values must match these exact scope/store pairs before any deletion.
+              if ($location -notin @('CurrentUser\My', 'LocalMachine\Root', 'CurrentUser\TrustedPublisher')) { throw 'Unexpected signing store in cleanup journal' }
+              $target = "Cert:\$location\C2D252AEFAF27171C36AF1BD6DAF2FDC5441E462"
+              $timer = [System.Diagnostics.Stopwatch]::StartNew()
+              Write-Host "[windows-signing] START Cleanup $location"
+              try {
+                if (Test-Path -LiteralPath $target) {
+                  if ($location -eq 'CurrentUser\My') { Remove-Item -LiteralPath $target -DeleteKey -Force }
+                  else { Remove-Item -LiteralPath $target -Force }
+                }
+                if (Test-Path -LiteralPath $target) { throw 'Signing identity remains after cleanup' }
+                Write-Host "[windows-signing] DONE Cleanup $location ($($timer.ElapsedMilliseconds) ms)"
+              } catch {
+                # Attempt the remaining stores even if one deletion fails; retain the journal.
+                $cleanupFailed = $true
+                Write-Host "[windows-signing] FAILED Cleanup $location ($($timer.ElapsedMilliseconds) ms)"
+              } finally {
+                $timer.Stop()
               }
             }
-            Remove-Item -LiteralPath $journal -Force
+            if (!$cleanupFailed) { Remove-Item -LiteralPath $journal -Force }
           }
+          if ($cleanupFailed) { throw 'Windows signing cleanup failed' }
           if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory -Force }
   android:
     needs: version
