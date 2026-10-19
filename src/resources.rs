@@ -12,6 +12,12 @@ pub struct Resource {
     pub content: BlobRef,
 }
 impl Resource {
+    /// An internal locator, interpreted against an Actor ledger on every read.
+    /// This same URI is usable in tool inputs, Markdown and authorized HTTP views.
+    pub fn uri(&self, actor: &str) -> String {
+        format!("/v1/actors/{actor}/resources/{}", self.id)
+    }
+
     pub fn validate(&self) -> Result<()> {
         self.content.validate()?;
         if self.id.is_empty()
@@ -35,6 +41,67 @@ impl Resource {
         }
         Ok(())
     }
+}
+
+/// Resolve an opaque ID or an internal resource URI without granting new access.
+/// Filesystem paths and external URLs are separate source types, never resource IDs.
+pub fn resolve_reference(system: &ActorSystem, actor: &str, reference: &str) -> Result<Resource> {
+    let id = if let Some(path) = reference.strip_prefix("/v1/actors/") {
+        let (owner, id) = path
+            .split_once("/resources/")
+            .ok_or(StageError::Invalid("Invalid internal resource reference"))?;
+        if owner != actor {
+            return Err(StageError::Forbidden("Resource belongs to another Actor"));
+        }
+        id
+    } else {
+        reference
+    };
+    if id.is_empty()
+        || matches!(id, "." | "..")
+        || id.len() > 255
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(StageError::Invalid(
+            "Use an existing resource ID or /v1/actors/<actor>/resources/<id> reference",
+        ));
+    }
+    export(system, actor, id)
+}
+
+/// Resource locators accompanying model images from any App, with no storage paths.
+pub(crate) fn bind_image_resources(
+    system: &ActorSystem,
+    actor: &str,
+    message: &str,
+    images: &[crate::model_protocol::AgentContentPart],
+) -> Result<Vec<serde_json::Value>> {
+    images
+        .iter()
+        .filter_map(|part| match part {
+            crate::model_protocol::AgentContentPart::ResourceImage { resource, .. } => {
+                Some((|| {
+                    let record = system
+                        .store()
+                        .resource(actor, &resource.id)
+                        .map_err(|_| StageError::Forbidden("Image is outside its Actor ledger"))?;
+                    system
+                        .store()
+                        .register_resource_for_message(record, Some(message))
+                        .map_err(|_| {
+                            StageError::Unavailable("Cannot associate image observation")
+                        })?;
+                    Ok(serde_json::json!({
+                        "id":resource.id,"uri":resource.uri(actor),
+                        "name":resource.name,"media_type":resource.media_type
+                    }))
+                })())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Admit bytes under one Actor, then use the same immutable descriptor locally or remotely.
@@ -247,7 +314,8 @@ pub fn bound_output(
         )?;
         Some(format!(
             "Full output resource: {}. Read it with actors__read_resource using resource_id={}, offset=null, limit=4096; follow next_offset.",
-            resource.id, resource.id
+            resource.uri(actor),
+            resource.id
         ))
     };
     Ok(bound_tool_model_content(

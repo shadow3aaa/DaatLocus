@@ -54,13 +54,44 @@ pub fn store_artifact(
     let source = prepare_source_from_args(request, Some(execution_cwd), Some(sandbox_policy))?;
     store_prepared_artifact(request, source)
 }
+
+/// Store bytes already admitted through an Actor resource ledger. Resource
+/// authorization is handled by the caller; no filesystem grant is inferred here.
+pub(crate) fn store_resource_artifact(
+    request: &ArtifactRequest,
+    bytes: Vec<u8>,
+    name: &str,
+) -> Result<ArtifactReference> {
+    if request.path.is_some() || request.content.is_some() || request.url.is_some() {
+        return Err(miette!(
+            "Resource bytes cannot be combined with another artifact source"
+        ));
+    }
+    if let Some(id) = &request.artifact_id {
+        validate_artifact_id(id)?;
+    }
+    if bytes.len() as u64 > MAX_ARTIFACT_FILE_BYTES {
+        return Err(miette!("Resource exceeds the artifact size limit"));
+    }
+    let (kind, mime_type, ext) = classify_file_bytes(&bytes, request.kind)?;
+    store_prepared_artifact(
+        request,
+        PreparedSource::File {
+            bytes,
+            kind,
+            ext,
+            mime_type,
+            default_title: name.into(),
+        },
+    )
+}
 /// Directory (under the artifacts root) that holds presented artifacts.
 pub(crate) const ARTIFACT_PRESENTED_DIR_NAME: &str = "presented";
 
 const ARTIFACT_SIGNING_SECRET_FILE_NAME: &str = "artifact_signing_secret";
 const ARTIFACT_SIGNING_SECRET_LEN: usize = 32;
 const ARTIFACT_MANIFEST_FILE_NAME: &str = "manifest.json";
-const MAX_ARTIFACT_FILE_BYTES: u64 = 20 * 1024 * 1024;
+pub(crate) const MAX_ARTIFACT_FILE_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_ARTIFACT_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 const HMAC_BLOCK_SIZE: usize = 64;
 const HMAC_SHA256_HEX_LEN: usize = 64;

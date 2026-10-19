@@ -670,6 +670,16 @@ Windows Terminal 在后台准备 AppContainer 权限，保留所有显式私有�
 解析成图片内容；模型接口不会重新打开未经验证的路径。完整输出同样归档为
 资源，按 UTF-8 字节分页，保留原始内容。多设备 App 结果转交资源描述和内容块。
 
+内部资源引用统一使用不透明资源 ID 或 `/v1/actors/{actor}/resources/{id}` URI，
+不是本地文件路径或公开 HTTP 地址。引用只定位资源，不授予访问权限；统一解析器
+核对当前 Actor 的账本，拒绝其他 Actor、路径穿越、查询参数或伪造存储位置。
+所有 App 的模型图片经过同一捕获边界，返回 `resource_references`（ID、URI、名称与
+媒体类型）并关联当前输入；原始文件路径和缓存路径不成为模型的资源访问方式。
+图片可直接使用该 URI 在 Markdown 中引用，也可通过 Artifacts 的 `resource` 输入
+交付，或通过 Actors.read_resource 读取；文本与完整工具输出使用同一引用体系。
+Artifacts 的 `path` 仍处理有读取权限的本地图片/SVG/HTML，发布为不可变快照；
+内部资源直接读取经过完整性验证的账本字节，不借用 GUI 权限扩大文件系统范围。
+
 浏览器上传只提交资源 ID；服务端构造来源、回复与权限元数据。下载执行 Actor
 授权与账本路径检查，HTML/SVG 使用无 same-origin 权限的 sandbox CSP。
 签名与链接不能替代授权，凭据不能进入观察、同步公开内容或客户端诊断。

@@ -17,6 +17,69 @@ enum MockReply {
 }
 
 #[tokio::test]
+async fn images_from_any_app_expose_reusable_references_to_the_model() {
+    use base64::Engine;
+    let provider = Arc::new(ReplayProvider::new(vec![
+        MockReply::Calls(vec![AgentToolCall {
+            id: "inspect-image".into(),
+            name: "files__view_image".into(),
+            arguments: json!({"path":"image.png"}),
+        }]),
+        MockReply::Answer("Image inspected"),
+    ]));
+    let (_directory, system) = runtime(provider.clone()).await;
+    let mut config = system.config();
+    config.models.get_mut("mock").unwrap().supports_vision = Some(true);
+    system.update_config(config).await.unwrap();
+    let png = base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        .unwrap();
+    std::fs::write(
+        system
+            .actor("root")
+            .unwrap()
+            .config
+            .workspace
+            .join("image.png"),
+        &png,
+    )
+    .unwrap();
+    let input = system
+        .send_user("root", "Inspect the image".into(), vec![], None)
+        .unwrap();
+    assert_eq!(
+        wait_completed(&system, &input.id).await.status,
+        MessageStatus::Completed
+    );
+    let tools = system
+        .store()
+        .tool_summaries("root", &input.id, None, 10)
+        .unwrap();
+    let observed = system.store().tool_result(&tools.items[0].id).unwrap();
+    assert!(
+        observed.error.is_none(),
+        "image inspection failed: {:?}",
+        observed.error
+    );
+    let reference = &observed.payload["resource_references"][0];
+    let uri = reference["uri"].as_str().unwrap();
+    let resource = crate::resources::resolve_reference(&system, "root", uri).unwrap();
+    assert_eq!(
+        crate::resources::bytes(&system, "root", &resource).unwrap(),
+        png
+    );
+    {
+        let requests = provider.requests.lock();
+        assert!(
+            requests[1].messages.iter().any(
+                |row| matches!(row, AgentMessage::Tool { content, .. } if content.contains(uri))
+            )
+        );
+    }
+    system.shutdown().await;
+}
+
+#[tokio::test]
 async fn app_installation_refreshes_tools_between_protocol_groups_without_replaying_input() {
     let server = crate::mcp::tests::server().await;
     let provider = Arc::new(ReplayProvider::new(vec![

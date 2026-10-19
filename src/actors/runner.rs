@@ -715,10 +715,25 @@ async fn execute_call(
             check_interruption(system, control, message)?;
             Ok(Vec::new())
         }
-        Some(Ok(result)) => {
-            let full_text = result
+        Some(Ok(mut result)) => {
+            let images = crate::resources::capture_images(system, &actor.id, result.model_images)?;
+            let references =
+                crate::resources::bind_image_resources(system, &actor.id, &message.id, &images)?;
+            let custom_content = result.model_content.is_some();
+            let embedded_references = if !references.is_empty()
+                && let Some(payload) = result.payload.as_object_mut()
+            {
+                payload.insert("resource_references".into(), json!(&references));
+                true
+            } else {
+                false
+            };
+            let mut full_text = result
                 .model_content
                 .unwrap_or_else(|| result.payload.to_string());
+            if !references.is_empty() && (custom_content || !embedded_references) {
+                full_text.push_str(&format!("\n{}", json!({"resource_references":references})));
+            }
             let model_content = crate::resources::bound_output(
                 system,
                 &actor.id,
@@ -727,7 +742,6 @@ async fn execute_call(
                 context.tool_output_max_tokens,
                 result.overflow_continuation,
             )?;
-            let images = crate::resources::capture_images(system, &actor.id, result.model_images)?;
             system.store().tool_finished(
                 &actor.id,
                 &message.id,
