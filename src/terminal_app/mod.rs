@@ -1561,14 +1561,6 @@ mod tests {
         }
     }
 
-    fn delayed_output_then_sleep_command(text: &str) -> String {
-        if cfg!(windows) {
-            format!("Start-Sleep -Milliseconds 100; Write-Output '{text}'; Start-Sleep -Seconds 2")
-        } else {
-            format!("sleep 0.1; printf '%s\\n' '{text}'; sleep 2")
-        }
-    }
-
     fn delayed_output_after_ms_then_sleep_command(text: &str, delay_ms: u64) -> String {
         if cfg!(windows) {
             format!(
@@ -1581,14 +1573,6 @@ mod tests {
         }
     }
 
-    fn immediate_output_then_sleep_command(text: &str) -> String {
-        if cfg!(windows) {
-            format!("Write-Output '{text}'; Start-Sleep -Seconds 2")
-        } else {
-            format!("printf '%s\\n' '{text}'; sleep 2")
-        }
-    }
-
     fn interactive_shell_command() -> String {
         if cfg!(windows) {
             "powershell.exe -NoLogo -NoProfile -NoExit -Command -".to_string()
@@ -1597,29 +1581,71 @@ mod tests {
         }
     }
 
-    async fn wait_for_interactive_shell_ready(app: &mut TerminalApp, session_id: &str) {
+    async fn start_stdin_echo_session(
+        app: &mut TerminalApp,
+        sandbox_policy: &RuntimeSandboxPolicy,
+    ) -> String {
         let marker = "daat-locus-shell-ready";
-        let input = if cfg!(windows) {
-            format!("Write-Output '{marker}'\n")
-        } else {
-            format!("printf '%s\\n' '{marker}'\n")
-        };
-        let result = app
-            .write_stdin_with_progress(
-                session_id,
-                input,
-                TerminalWaitMode::AnyOutput,
-                Some(5_000),
-                None,
-                |_session, _delta| {},
+        // Exercise real stdin/stdout in the terminal's existing shell, without a
+        // second PowerShell startup or an interactive prompt racing the output.
+        // After the marker, output is gated by stdin and the process stays alive
+        // awaiting more input rather than relying on a sleep to keep it running.
+        // A short output delay also catches a wait that only polls once.
+        let command = if cfg!(windows) {
+            format!(
+                "[Console]::Out.Write('{marker}'); [Console]::Out.Flush(); \
+                 while (($line = [Console]::ReadLine()) -ne $null) {{ \
+                 Start-Sleep -Milliseconds 100; \
+                 [Console]::Out.WriteLine($line); [Console]::Out.Flush() }}"
             )
-            .await
-            .expect("interactive shell readiness probe should succeed");
-        assert!(
-            result.output.contains(marker),
-            "interactive shell should echo readiness marker before timed tests: {:?}",
-            result.output
-        );
+        } else {
+            format!(
+                "printf '%s' '{marker}'; \
+                 while IFS= read -r line; do sleep 0.1; printf '%s\\n' \"$line\"; done"
+            )
+        };
+        let mut output = String::new();
+        // Startup has its own bounded deadline, outside the wait-mode timing
+        // assertions. AnyOutput can return before the complete marker arrives.
+        let ready = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut result = app
+                .exec_command_with_progress(
+                    TerminalExecCommandRequest {
+                        command,
+                        session_id: None,
+                        workdir: None,
+                        sandbox_policy,
+                        yield_time_ms: Some(50),
+                        max_chars: None,
+                    },
+                    |_session, _delta| {},
+                )
+                .await
+                .expect("stdin echo session should start");
+            loop {
+                output.push_str(&result.output);
+                assert_eq!(
+                    result.session.status, "running",
+                    "stdin echo session must stay alive: {output:?}"
+                );
+                if output.contains(marker) {
+                    break result.session.session_id;
+                }
+                result = app
+                    .write_stdin_with_progress(
+                        &result.session.session_id,
+                        String::new(),
+                        TerminalWaitMode::AnyOutput,
+                        Some(5_000),
+                        None,
+                        |_session, _delta| {},
+                    )
+                    .await
+                    .expect("stdin echo readiness poll should succeed");
+            }
+        })
+        .await;
+        ready.unwrap_or_else(|_| panic!("stdin echo readiness marker timed out: {output:?}"))
     }
 
     fn env_value_command(name: &str) -> String {
@@ -2119,109 +2145,71 @@ mod tests {
     async fn any_output_wait_mode_returns_after_output_update() {
         let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
-
-        let started = app
-            .exec_command_with_progress(
-                TerminalExecCommandRequest {
-                    command: interactive_shell_command(),
-                    session_id: None,
-                    workdir: None,
-                    sandbox_policy: &sandbox_policy,
-                    yield_time_ms: Some(50),
-                    max_chars: None,
-                },
+        let session_id = start_stdin_echo_session(&mut app, &sandbox_policy).await;
+        let started_at = Instant::now();
+        let result = app
+            .write_stdin_with_progress(
+                &session_id,
+                "any-output-mode\n".to_string(),
+                TerminalWaitMode::AnyOutput,
+                Some(5_000),
+                None,
                 |_session, _delta| {},
             )
             .await
-            .expect("exec should succeed");
+            .expect("any_output wait should succeed");
 
-        if started.session.status == "running" {
-            wait_for_interactive_shell_ready(&mut app, &started.session.session_id).await;
-            let input = format!("{}\n", delayed_output_then_sleep_command("any-output-mode"));
-            let started_at = Instant::now();
-            let result = app
-                .write_stdin_with_progress(
-                    &started.session.session_id,
-                    input,
-                    TerminalWaitMode::AnyOutput,
-                    Some(5_000),
-                    None,
-                    |_session, _delta| {},
-                )
-                .await
-                .expect("any_output wait should succeed");
-
-            assert!(
-                result.output.contains("any-output-mode"),
-                "expected output update before timeout: {:?}",
-                result.output
-            );
-            assert!(
-                result.session.status == "running",
-                "process should still be running after first output update: {}",
-                result.session.status
-            );
-            assert!(
-                started_at.elapsed() < Duration::from_secs(2),
-                "any_output mode should return before the full command exits"
-            );
-            app.terminate_session(&result.session.session_id)
-                .expect("terminate should succeed");
-        }
+        assert!(
+            result.output.contains("any-output-mode"),
+            "expected output update before timeout: {:?}",
+            result.output
+        );
+        assert_eq!(
+            result.session.status, "running",
+            "process should still be running after first output update"
+        );
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "any_output mode should return before the full yield window"
+        );
+        app.terminate_session(&result.session.session_id)
+            .expect("terminate should succeed");
     }
 
     #[tokio::test]
     async fn timeout_wait_mode_suppresses_progress_until_timeout() {
         let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
-
-        let started = app
-            .exec_command_with_progress(
-                TerminalExecCommandRequest {
-                    command: interactive_shell_command(),
-                    session_id: None,
-                    workdir: None,
-                    sandbox_policy: &sandbox_policy,
-                    yield_time_ms: Some(50),
-                    max_chars: None,
+        let session_id = start_stdin_echo_session(&mut app, &sandbox_policy).await;
+        let started_at = Instant::now();
+        let mut progress_calls = 0usize;
+        let waited = app
+            .write_stdin_with_progress(
+                &session_id,
+                "timeout-mode\n".to_string(),
+                TerminalWaitMode::Timeout,
+                Some(1_000),
+                None,
+                |_session, _delta| {
+                    progress_calls += 1;
                 },
-                |_session, _delta| {},
             )
             .await
-            .expect("exec should succeed");
+            .expect("timeout wait should succeed");
 
-        if started.session.status == "running" {
-            wait_for_interactive_shell_ready(&mut app, &started.session.session_id).await;
-            let input = format!("{}\n", immediate_output_then_sleep_command("timeout-mode"));
-            let started_at = Instant::now();
-            let mut progress_calls = 0usize;
-            let waited = app
-                .write_stdin_with_progress(
-                    &started.session.session_id,
-                    input,
-                    TerminalWaitMode::Timeout,
-                    Some(1_000),
-                    None,
-                    |_session, _delta| {
-                        progress_calls += 1;
-                    },
-                )
-                .await
-                .expect("timeout wait should succeed");
-
-            assert_eq!(progress_calls, 0, "timeout wait must not stream progress");
-            assert!(
-                started_at.elapsed() >= Duration::from_millis(850),
-                "timeout wait should wait for the requested yield window"
-            );
-            assert!(
-                waited.output.contains("timeout-mode"),
-                "final output should still include data produced while waiting: {:?}",
-                waited.output
-            );
-            app.terminate_session(&waited.session.session_id)
-                .expect("terminate should succeed");
-        }
+        assert_eq!(progress_calls, 0, "timeout wait must not stream progress");
+        assert!(
+            started_at.elapsed() >= Duration::from_millis(850),
+            "timeout wait should wait for the requested yield window"
+        );
+        assert!(
+            waited.output.contains("timeout-mode"),
+            "final output should still include data produced while waiting: {:?}",
+            waited.output
+        );
+        assert_eq!(waited.session.status, "running");
+        app.terminate_session(&waited.session.session_id)
+            .expect("terminate should succeed");
     }
 
     #[test]
