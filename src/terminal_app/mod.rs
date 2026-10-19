@@ -1473,6 +1473,7 @@ mod tests {
     }
     use std::{
         env,
+        sync::atomic::{AtomicBool, Ordering},
         time::{Duration, Instant},
     };
 
@@ -1605,8 +1606,8 @@ mod tests {
             )
         };
         let mut output = String::new();
-        // Startup has its own bounded deadline, outside the wait-mode timing
-        // assertions. AnyOutput can return before the complete marker arrives.
+        // Startup has its own bounded deadline, separate from wait-mode checks.
+        // AnyOutput can return before the complete marker arrives.
         let ready = tokio::time::timeout(Duration::from_secs(30), async {
             let mut result = app
                 .exec_command_with_progress(
@@ -2146,19 +2147,41 @@ mod tests {
         let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
         let session_id = start_stdin_echo_session(&mut app, &sandbox_policy).await;
-        let started_at = Instant::now();
-        let result = app
-            .write_stdin_with_progress(
+        let received_progress = AtomicBool::new(false);
+        let result = {
+            let waiting = app.write_stdin_with_progress(
                 &session_id,
                 "any-output-mode\n".to_string(),
                 TerminalWaitMode::AnyOutput,
-                Some(5_000),
+                Some(30_000),
                 None,
-                |_session, _delta| {},
-            )
+                |_session, _delta| {
+                    received_progress.store(true, Ordering::Relaxed);
+                },
+            );
+            tokio::pin!(waiting);
+            // Native pipe latency and OS scheduling may delay the first output.
+            // Once output is delivered for this live process, AnyOutput must
+            // complete rather than await another timer or input. Record failure
+            // here, but clean up the child before asserting outside the future.
+            std::future::poll_fn(|cx| match waiting.as_mut().poll(cx) {
+                std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
+                std::task::Poll::Pending if received_progress.load(Ordering::Relaxed) => {
+                    std::task::Poll::Ready(None)
+                }
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            })
             .await
-            .expect("any_output wait should succeed");
+        };
 
+        // Clean up before assertions so a regression cannot leave a child pipe
+        // blocking the Windows runtime while the test panic unwinds.
+        let terminated = app.terminate_session(&session_id);
+        let result = result
+            .expect("any_output kept waiting after delivering output")
+            .expect("any_output wait should succeed");
+        terminated.expect("terminate should succeed");
+        assert!(received_progress.load(Ordering::Relaxed));
         assert!(
             result.output.contains("any-output-mode"),
             "expected output update before timeout: {:?}",
@@ -2168,12 +2191,6 @@ mod tests {
             result.session.status, "running",
             "process should still be running after first output update"
         );
-        assert!(
-            started_at.elapsed() < Duration::from_secs(2),
-            "any_output mode should return before the full yield window"
-        );
-        app.terminate_session(&result.session.session_id)
-            .expect("terminate should succeed");
     }
 
     #[tokio::test]
