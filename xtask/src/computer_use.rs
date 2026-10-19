@@ -11,12 +11,14 @@ pub(crate) struct Assets {
 }
 
 pub(crate) const CERTIFICATE_THUMBPRINT: &str = "C2D252AEFAF27171C36AF1BD6DAF2FDC5441E462";
+pub(crate) const TIMESTAMP_SERVER: &str = "http://timestamp.digicert.com";
 const TRUST_KEY: &str = "SOFTWARE\\DaatLocus\\VirtualDisplay\\E40E701A47B15F108A4D9D4D7152A153EB84A3FED1F7FF287581B98D63062B6B";
 
 pub(crate) fn prepare(
     context: &Context,
     driver: Option<PathBuf>,
     certificate: Option<String>,
+    timestamp_server: &str,
     skip: bool,
 ) -> Result<Assets> {
     if context.target != "x86_64-pc-windows-msvc" {
@@ -54,7 +56,9 @@ pub(crate) fn prepare(
     }
     let driver = match driver {
         Some(path) => crate::absolute(&context.root, path),
-        None if !skip => crate::idd_driver::distribution(&context.root, certificate.clone())?,
+        None if !skip => {
+            crate::idd_driver::distribution(&context.root, certificate.clone(), timestamp_server)?
+        }
         None => context.root.join("target/virtual-workspace-driver"),
     };
     let package_hash = Sha256::digest(fs::read(driver.join("DaatLocusVirtualDisplay.cat"))?)
@@ -70,21 +74,7 @@ pub(crate) fn prepare(
     let signtool = sdk_tool("signtool.exe")?;
     if let Some(certificate) = certificate {
         for path in [&assets.hook, &assets.setup] {
-            command(
-                Command::new(&signtool)
-                    .args([
-                        "sign",
-                        "/sha1",
-                        &certificate,
-                        "/fd",
-                        "SHA256",
-                        "/tr",
-                        "http://timestamp.digicert.com",
-                        "/td",
-                        "SHA256",
-                    ])
-                    .arg(path),
-            )?;
+            sign_file(&signtool, path, &certificate, timestamp_server)?;
         }
     }
     for path in [&assets.hook, &assets.setup] {
@@ -111,6 +101,41 @@ pub(crate) fn prepare(
         return Err("IDD redistribution license missing".into());
     }
     Ok(assets)
+}
+
+pub(crate) fn sign_file(
+    signtool: &std::path::Path,
+    path: &std::path::Path,
+    certificate: &str,
+    timestamp_server: &str,
+) -> Result<()> {
+    let servers = std::iter::once(timestamp_server)
+        .chain((timestamp_server == TIMESTAMP_SERVER).then_some("http://timestamp.sectigo.com"));
+    for server in servers {
+        let result = command(
+            Command::new(signtool)
+                .args([
+                    "sign",
+                    "/sha1",
+                    certificate,
+                    "/fd",
+                    "SHA256",
+                    "/tr",
+                    server,
+                    "/td",
+                    "SHA256",
+                ])
+                .arg(path),
+        );
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if server == TIMESTAMP_SERVER => {
+                eprintln!("Timestamped signing failed; retrying with Sectigo: {error}");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err("Timestamped signing failed".into())
 }
 
 pub(crate) fn sdk_tool(name: &str) -> Result<PathBuf> {
@@ -195,6 +220,60 @@ mod tests {
         Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
+
+    #[test]
+    fn timestamp_signing_falls_back_only_for_the_default_and_propagates_failure() {
+        for (server, allow_backup, expected, success) in [
+            (
+                "http://timestamp.digicert.com",
+                true,
+                vec![
+                    "http://timestamp.digicert.com",
+                    "http://timestamp.sectigo.com",
+                ],
+                true,
+            ),
+            (
+                "http://timestamp.digicert.com",
+                false,
+                vec![
+                    "http://timestamp.digicert.com",
+                    "http://timestamp.sectigo.com",
+                ],
+                false,
+            ),
+            (
+                "https://timestamp.example.invalid",
+                true,
+                vec!["https://timestamp.example.invalid"],
+                false,
+            ),
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            let signer = temporary.path().join("signer.cmd");
+            fs::write(
+                &signer,
+                format!(
+                    "@echo off\r\necho %~7>>\"%~dp0attempts.txt\"\r\n{}exit /b 1\r\n",
+                    if allow_backup {
+                        "if \"%~7\"==\"http://timestamp.sectigo.com\" exit /b 0\r\n"
+                    } else {
+                        ""
+                    }
+                ),
+            )
+            .unwrap();
+            let result = sign_file(
+                &signer,
+                &temporary.path().join("artifact.dll"),
+                "fixture",
+                server,
+            );
+            assert_eq!(result.is_ok(), success);
+            let attempts = fs::read_to_string(temporary.path().join("attempts.txt")).unwrap();
+            assert_eq!(attempts.lines().collect::<Vec<_>>(), expected);
+        }
+    }
 
     struct InstalledFixture {
         product: String,

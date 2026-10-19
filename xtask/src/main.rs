@@ -54,6 +54,9 @@ struct Package {
     /// CurrentUser/My code-signing certificate for the driver, Hook DLL and setup helper.
     #[arg(long)]
     windows_certificate_thumbprint: Option<String>,
+    /// RFC3161 timestamp server; the default falls back to Sectigo on failure.
+    #[arg(long, default_value = computer_use::TIMESTAMP_SERVER)]
+    windows_timestamp_server: String,
 }
 #[derive(Deserialize)]
 struct Manifest {
@@ -206,6 +209,7 @@ fn run() -> Result<()> {
             &context,
             args.idd_package,
             args.windows_certificate_thumbprint,
+            &args.windows_timestamp_server,
             args.skip_build,
         )?)
     } else {

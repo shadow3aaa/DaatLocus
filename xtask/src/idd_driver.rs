@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 pub(crate) fn distribution(
     root: &Path,
     certificate_thumbprint: Option<String>,
+    timestamp_server: &str,
 ) -> crate::Result<PathBuf> {
     build(
         root,
@@ -12,7 +13,7 @@ pub(crate) fn distribution(
             sdk_root: None,
             check: false,
             certificate_thumbprint,
-            timestamp_server: "http://timestamp.digicert.com".into(),
+            timestamp_server: timestamp_server.into(),
         },
     )?;
     Ok(root.join("target/virtual-workspace-driver"))
@@ -31,7 +32,7 @@ pub(crate) struct Options {
     /// Existing CurrentUser/My code-signing certificate; no certificates are created/imported.
     #[arg(long)]
     certificate_thumbprint: Option<String>,
-    #[arg(long, default_value = "http://timestamp.digicert.com")]
+    #[arg(long, default_value = crate::computer_use::TIMESTAMP_SERVER)]
     timestamp_server: String,
 }
 
@@ -212,21 +213,7 @@ pub(crate) fn build(root: &Path, options: Options) -> crate::Result<()> {
     let signtool = sdk.join("bin").join(&sdk_version).join("x64/signtool.exe");
     let sign = |path: &Path| -> crate::Result<()> {
         if let Some(thumbprint) = &options.certificate_thumbprint {
-            command(
-                Command::new(&signtool)
-                    .args([
-                        "sign",
-                        "/sha1",
-                        thumbprint,
-                        "/fd",
-                        "SHA256",
-                        "/tr",
-                        &options.timestamp_server,
-                        "/td",
-                        "SHA256",
-                    ])
-                    .arg(path),
-            )?;
+            crate::computer_use::sign_file(&signtool, path, thumbprint, &options.timestamp_server)?;
         }
         Ok(())
     };

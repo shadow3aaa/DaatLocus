@@ -534,6 +534,12 @@ an explicit compatibility validation requirement.
 Archive users run `sudo ./daat-locus-display-setup.exe install` from the extracted
 directory once. `--skip-build` still verifies all required signatures.
 
+Driver and helper signing use SHA256 and RFC3161 timestamps. The default DigiCert
+timestamp service falls back to Sectigo on failure. Override the endpoint with
+`--windows-timestamp-server <URL>` when packaging, or `--timestamp-server <URL>`
+for `idd-driver`; an explicit alternative endpoint fails without a fallback.
+The service/client EXEs, MSI and outer setup EXE are not Authenticode-signed.
+
 Trust rollback/ownership tests run with `--features driver-setup`, including in
 Windows CI. For the opt-in elevated driver roundtrip, close all DL workspaces and
 start with no bundled driver/certificate (use the explicit uninstall above):
@@ -579,8 +585,28 @@ Windows installers require WiX; macOS installers require macOS tools.
 `--skip-build --release-dir <directory>` packages existing verified artifacts.
 Binary archives require the standalone embedded WebUI service. Windows/macOS
 installers require a native WebUI client and an API-only companion service;
-packaging rejects duplicate service assets or a missing native UI. Release CI
-builds each platform natively. Keep generated archives and installers under ignored `target` paths.
+packaging rejects duplicate service assets or a missing native UI.
+
+`.github/workflows` contains two workflows. `ci.yaml` checks debug builds, tests,
+warnings and formatting without private signing keys. `release.yaml` builds and
+validates release packages on Linux, macOS, Windows and Android on main pushes,
+`v*` tag pushes, or manual runs on those refs. Main runs keep outputs only on the
+runner: no artifact upload or publishing. Version-tag runs upload the verified
+packages and publish a GitHub Release after all platform builds pass.
+
+Repository Actions Secrets must contain `WINDOWS_IDD_PFX_BASE64` and
+`WINDOWS_IDD_PFX_PASSWORD` for the pinned distribution PFX, plus
+`ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD` for the Android release
+PKCS12 store. Encode the binary files as base64; keep their recoverable backups in
+the private secrets repository. Missing secrets fail the release checks.
+Windows imports the key into CurrentUser/My and trusts only the public certificate
+in CurrentUser Root/TrustedPublisher for verification. It removes the imported
+entries afterwards, without installing a driver or changing signature enforcement.
+Packaging verifies the driver DLL/CAT, INF catalog membership, Hook/helper
+signatures and pinned driver identity. Android uses temporary signing directories
+with mode 0700 and files with mode 0600, signs with alias `daat-locus`, checks the
+release certificate SHA256 and APK 16 KiB alignment, then deletes the signing files.
+These checks do not establish Windows driver loading or Android startup on a device.
 Review dependency attribution before distribution; see
 [license notes](docs/license-attribution.md).
 

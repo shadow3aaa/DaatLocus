@@ -1,0 +1,252 @@
+name: Release
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-pack --locked
+      - name: Restore Windows driver signing
+        id: windows-signing
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_IDD_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_IDD_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Use only on an ephemeral GitHub runner' }
+          if (!$env:SIGNING_PFX_BASE64 -or !$env:SIGNING_PFX_PASSWORD) { throw 'Windows signing secrets are required' }
+          $thumbprint = 'C2D252AEFAF27171C36AF1BD6DAF2FDC5441E462'
+          $directory = Join-Path $env:RUNNER_TEMP 'daat-locus-windows-signing'
+          New-Item -ItemType Directory -Path $directory -ErrorAction Stop | Out-Null
+          $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+          $acl.SetAccessRuleProtection($true, $false)
+          foreach ($sid in @([System.Security.Principal.WindowsIdentity]::GetCurrent().User, [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
+            $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+          }
+          Set-Acl -LiteralPath $directory -AclObject $acl
+          $journal = Join-Path $directory 'stores.txt'
+          $pfx = Join-Path $directory 'identity.pfx'
+          try {
+            [System.IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+            $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+            $data = Get-PfxData -FilePath $pfx -Password $password
+            if ($data.EndEntityCertificates.Count -ne 1 -or $data.OtherCertificates.Count -ne 0 -or $data.EndEntityCertificates[0].Thumbprint -ne $thumbprint) {
+              throw 'Unexpected Windows signing identity'
+            }
+            foreach ($store in @('My', 'Root', 'TrustedPublisher')) {
+              $target = "Cert:\CurrentUser\$store\$thumbprint"
+              if (Test-Path -LiteralPath $target) { throw 'Signing identity already exists on this runner' }
+              Add-Content -LiteralPath $journal -Value $store
+              if ($store -eq 'My') {
+                $certificate = Import-PfxCertificate -FilePath $pfx -Password $password -CertStoreLocation 'Cert:\CurrentUser\My'
+                if (!$certificate.HasPrivateKey -or $certificate.Thumbprint -ne $thumbprint) { throw 'Signing private key unavailable' }
+              } else {
+                $public = Join-Path $env:GITHUB_WORKSPACE 'crates/daat-locus-virtual-workspace/certificates/virtual-display.cer'
+                $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($public)
+                if ($certificate.Thumbprint -ne $thumbprint) { throw 'Bundled public certificate differs from signing identity' }
+                Import-Certificate -FilePath $public -CertStoreLocation "Cert:\CurrentUser\$store" | Out-Null
+              }
+            }
+            "thumbprint=$thumbprint" >> $env:GITHUB_OUTPUT
+          } finally {
+            if (Test-Path -LiteralPath $pfx) { Remove-Item -LiteralPath $pfx -Force }
+            Remove-Item Env:SIGNING_PFX_BASE64, Env:SIGNING_PFX_PASSWORD -ErrorAction SilentlyContinue
+          }
+      - id: host
+        shell: bash
+        run: |
+          echo "target=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_OUTPUT"
+      - name: Build embedded binary archive
+        if: runner.os != 'Windows'
+        run: cargo xtask package binary --target "${{ steps.host.outputs.target }}"
+      - name: Build signed Windows binary archive
+        if: runner.os == 'Windows'
+        run: cargo xtask package binary --target "${{ steps.host.outputs.target }}" --windows-certificate-thumbprint "${{ steps.windows-signing.outputs.thumbprint }}"
+      - uses: actions/setup-dotnet@v4
+        if: runner.os == 'Windows'
+        with:
+          dotnet-version: '8.x'
+      - name: Install WiX
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 6.0.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add WixToolset.Util.wixext/6.0.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add WixToolset.BootstrapperApplications.wixext/6.0.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package Windows installers
+        if: runner.os == 'Windows'
+        run: cargo xtask package windows --target "${{ steps.host.outputs.target }}" --windows-certificate-thumbprint "${{ steps.windows-signing.outputs.thumbprint }}"
+      - name: Package macOS app and installer
+        if: runner.os == 'macOS'
+        run: cargo xtask package macos --target "${{ steps.host.outputs.target }}"
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: daat-locus-${{ steps.host.outputs.target }}
+          if-no-files-found: error
+          path: |
+            target/${{ steps.host.outputs.target }}/release/package/*.tar.zst
+            target/${{ steps.host.outputs.target }}/release/package/*.msi
+            target/${{ steps.host.outputs.target }}/release/package/*-setup.exe
+            target/${{ steps.host.outputs.target }}/release/package/*.pkg
+      - name: Remove Windows signing identity
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Use only on an ephemeral GitHub runner' }
+          $directory = Join-Path $env:RUNNER_TEMP 'daat-locus-windows-signing'
+          $journal = Join-Path $directory 'stores.txt'
+          if (Test-Path -LiteralPath $journal) {
+            foreach ($store in Get-Content -LiteralPath $journal) {
+              if ($store -notin @('My', 'Root', 'TrustedPublisher')) { throw 'Unexpected signing store in cleanup journal' }
+              $target = "Cert:\CurrentUser\$store\C2D252AEFAF27171C36AF1BD6DAF2FDC5441E462"
+              if (Test-Path -LiteralPath $target) {
+                if ($store -eq 'My') { Remove-Item -LiteralPath $target -DeleteKey -Force }
+                else { Remove-Item -LiteralPath $target -Force }
+              }
+            }
+            Remove-Item -LiteralPath $journal -Force
+          }
+          $pfx = Join-Path $directory 'identity.pfx'
+          if (Test-Path -LiteralPath $pfx) { Remove-Item -LiteralPath $pfx -Force }
+          if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory -Force }
+  android:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,wasm32-unknown-unknown
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.0.11902837"
+      - run: echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.11902837" >> "$GITHUB_ENV"
+      - run: cargo install wasm-pack --locked
+      - run: bun install --frozen-lockfile
+        working-directory: webui
+      - run: bun install --frozen-lockfile
+        working-directory: clients/app
+      - name: Restore Android release signing
+        shell: bash
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          SIGNING_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, os
+          from pathlib import Path
+
+          if os.environ.get('GITHUB_ACTIONS') != 'true':
+              raise RuntimeError('Use only on an ephemeral GitHub runner')
+          encoded = os.environ['SIGNING_KEYSTORE_BASE64']
+          password = os.environ['SIGNING_KEYSTORE_PASSWORD']
+          if not encoded or not password:
+              raise RuntimeError('Android signing secrets are required')
+          directory = Path(os.environ['RUNNER_TEMP']) / 'daat-locus-android-signing'
+          directory.mkdir(mode=0o700)
+
+          def write_private(path, data):
+              with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as file:
+                  file.write(data)
+
+          def property_value(value):
+              encoded = value.encode('utf-16-be')
+              return ''.join('\\u%04x' % int.from_bytes(encoded[i:i+2], 'big') for i in range(0, len(encoded), 2))
+
+          keystore = directory / 'release.p12'
+          properties = directory / 'release.properties'
+          write_private(keystore, base64.b64decode(encoded, validate=True))
+          write_private(properties, ('storeFile=' + property_value(str(keystore)) + '\nkeyAlias=daat-locus\npassword=' + property_value(password) + '\n').encode('ascii'))
+          with open(os.environ['GITHUB_ENV'], 'a') as file:
+              file.write('DAAT_LOCUS_ANDROID_SIGNING=' + str(properties) + '\n')
+          PY
+      - name: Build release APK
+        run: cargo xtask package android
+      - name: Verify release signature and APK alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          apks=(target/aarch64-linux-android/release/package/daat-locus-*.apk)
+          if [ "${#apks[@]}" -ne 1 ] || [ ! -f "${apks[0]}" ]; then
+            echo 'Expected exactly one packaged release APK' >&2
+            exit 1
+          fi
+          apk="${apks[0]}"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/apk-signature.txt"
+          cat "$RUNNER_TEMP/apk-signature.txt"
+          grep -Fxi 'Signer #1 certificate SHA-256 digest: 86f36c309888c3009ff121243b4e0b6e7bcf2514f0116fb082e376db94dd612d' "$RUNNER_TEMP/apk-signature.txt"
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$apk"
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: daat-locus-aarch64-linux-android
+          if-no-files-found: error
+          path: target/aarch64-linux-android/release/package/*.apk
+      - name: Remove Android signing files
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          if os.environ.get('GITHUB_ACTIONS') != 'true':
+              raise RuntimeError('Use only on an ephemeral GitHub runner')
+          directory = Path(os.environ['RUNNER_TEMP']) / 'daat-locus-android-signing'
+          for name in ('release.properties', 'release.p12'):
+              (directory / name).unlink(missing_ok=True)
+          if directory.exists():
+              directory.rmdir()
+          PY
+  publish:
+    needs: [build, android]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: daat-locus-*
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/*

@@ -102,6 +102,11 @@ capture、引用撤销与物理输出几何。后端不恢复用户光标来掩�
 归档用户解压后只需一次 `sudo ./daat-locus-display-setup.exe install`。
 `--skip-build` 仍执行全部必需签名检查。
 
+驱动和 helper 使用 SHA256 与 RFC3161 时间戳；默认 DigiCert 服务失败后回退 Sectigo。
+打包可用 `--windows-timestamp-server <URL>`、单独构建驱动可用
+`--timestamp-server <URL>` 覆盖端点；显式指定其他端点时失败即终止。
+服务/客户端 EXE、MSI 与最外层 setup EXE 不做 Authenticode 签名。
+
 Windows CI 以 `--features driver-setup` 运行信任保留/回滚测试。管理员原生往返测试
 需先关闭工作区，使用上述完整卸载移除捆绑驱动与证书，并在隔离的 Windows 测试环境运行：
 
@@ -468,7 +473,23 @@ Windows 安装包需要 WiX，macOS 安装包需要原生系统工具。
 `--skip-build --release-dir <directory>` 打包既有、已核实的产物：binary 归档需要
 内置 WebUI 的独立服务；Windows/macOS 安装包需要带原生资源的客户端和不重复
 嵌入页面的配套后台。缺失客户端或重复资源都会被拒绝。
-Release CI 在各平台原生构建；产物放进忽略的 `target`。
+`.github/workflows` 只保留两个工作流：`ci.yaml` 检查 debug 编译、测试、警告和格式，
+不使用签名私钥；`release.yaml` 在 main 推送、`v*` 标签推送或对这些 ref 手动触发时，
+对 Linux、macOS、Windows 和 Android 执行 release 构建、打包和签名校验。
+main 检查的产物仅保留在 runner，不上传 artifacts，不发布；版本标签构建全部通过后，
+才上传已校验的安装包并发布 GitHub Release。
+
+仓库 Actions Secrets 需要以下四项，二进制文件按 base64 编码：
+
+- `WINDOWS_IDD_PFX_BASE64`、`WINDOWS_IDD_PFX_PASSWORD`：固定发行身份的 PFX 和密码。
+- `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`：Android release PKCS12 和密码。
+
+签名备份仍保留在专用私有仓库。Windows runner 将私钥导入 CurrentUser/My，公钥只在
+当前用户的 Root/TrustedPublisher 建立验签信任，退出时删除本次导入项；不安装驱动，
+不修改系统签名策略。Windows 构建校验驱动 DLL/CAT、INF 目录成员、Hook/helper 签名和
+固定身份。Android 恢复权限为 0700/0600 的临时目录/文件，使用 `daat-locus` 别名生成
+release APK，验证签名证书 SHA256 与 APK 16 KiB 对齐，最后删除签名文件。
+这些检查不替代 Windows 真机驱动加载或 Android 真机启动验证。
 分发前检查依赖归属与许可证，见[归属说明](docs/license-attribution.md)。
 
 ## 修改与评审
