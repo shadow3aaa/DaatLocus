@@ -505,6 +505,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
+    #[ignore = "requires native Windows MXC/PSEC; run on a supported host"]
     async fn terminal_shell_runs_inside_required_native_isolation() {
         use std::os::windows::ffi::{OsStrExt, OsStringExt};
         use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
@@ -541,7 +542,7 @@ mod tests {
             workdir.to_str(),
             &policy,
         )
-        .expect("absolute system shell must start with required AppContainer isolation");
+        .expect("absolute system shell must start with required MXC/PSEC isolation");
         let status = tokio::time::timeout(std::time::Duration::from_secs(20), async {
             loop {
                 if let Some(status) = process.try_wait().unwrap() {

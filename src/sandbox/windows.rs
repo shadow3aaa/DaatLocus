@@ -1,476 +1,78 @@
+//! Native MXC/PSEC process isolation. No host DACL mutation or legacy fallback.
 use std::{
-    collections::{BTreeMap, HashSet},
-    ffi::{OsStr, OsString, c_void},
+    collections::BTreeMap,
     io,
-    os::windows::{
-        ffi::OsStrExt,
-        io::{FromRawHandle, RawHandle},
-        process::ExitStatusExt,
-    },
+    os::windows::{ffi::OsStringExt, process::ExitStatusExt},
     path::{Path, PathBuf},
     process::ExitStatus,
-    ptr,
+    sync::atomic::Ordering,
 };
 
-use uuid::Uuid;
-static ACL_UPDATES: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
-use windows_sys::Win32::{
-    Foundation::{
-        CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, GENERIC_ALL, GetLastError, HANDLE,
-        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LUID, LocalFree, SetHandleInformation,
-        WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+use appcontainer_common::base_container_runner::BaseContainerRunner;
+use learning_mode_windows::SecurityEnvironmentApi;
+use parking_lot::Mutex;
+use tokio::io::DuplexStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::watch;
+use wxc_common::{
+    cmdline::{CommandLineContext, cmdline_from_argv_for_context},
+    filesystem_object::normalize_object_conflicts,
+    logger::{Logger, Mode},
+    models::{
+        BaseProcessUiConfig, ContainerPolicy, ExecutionRequest, FallbackPolicy, NetworkAction,
+        NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy, UiPolicy,
     },
-    Security::Authorization::{
-        ConvertSidToStringSidW, ConvertStringSidToSidW, DENY_ACCESS, EXPLICIT_ACCESS_W,
-        GetNamedSecurityInfoW, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID,
-        TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
-    },
-    Security::Isolation::{CreateAppContainerProfile, DeleteAppContainerProfile},
-    Security::{
-        ACL, ACL_SIZE_INFORMATION, AclSizeInformation, AddAce, AdjustTokenPrivileges,
-        CONTAINER_INHERIT_ACE, CopySid, CreateRestrictedToken, DACL_SECURITY_INFORMATION,
-        DISABLE_MAX_PRIVILEGE, FreeSid, GetAce, GetAclInformation, GetLengthSid,
-        GetTokenInformation, InitializeAcl, LUA_TOKEN, LookupPrivilegeValueW, OBJECT_INHERIT_ACE,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
-        SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES, TOKEN_ADJUST_SESSIONID,
-        TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_PRIVILEGES, TOKEN_QUERY,
-        TOKEN_USER, TokenDefaultDacl, TokenUser,
-    },
-    Storage::FileSystem::{
-        CreateFileW, DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_DELETE_CHILD,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
-        FILE_WRITE_DATA, FILE_WRITE_EA, GetLongPathNameW, OPEN_EXISTING,
-    },
-    System::{
-        Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
-        JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, TerminateJobObject,
-        },
-        Pipes::CreatePipe,
-        SystemServices::SE_GROUP_ENABLED,
-        Threading::{
-            CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
-            DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
-            GetExitCodeProcess, GetProcessId, InitializeProcThreadAttributeList, OpenProcessToken,
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-            PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
-            TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
-        },
-    },
+    sandbox_process::{SandboxBackend, SandboxProcess, StdioMode},
 };
 
 use super::{
     RuntimeSandboxPolicy, SandboxProcessOptions, SandboxStdio, policy_paths_with_resolved,
 };
 
-const WORKER_READ_ALLOW_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
-const WORKER_WRITE_ALLOW_MASK: u32 =
-    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE | FILE_DELETE_CHILD;
-const WORKER_DENY_WRITE_MASK: u32 = FILE_GENERIC_WRITE
-    | FILE_WRITE_DATA
-    | FILE_APPEND_DATA
-    | FILE_WRITE_EA
-    | FILE_WRITE_ATTRIBUTES
-    | DELETE
-    | FILE_DELETE_CHILD;
-const WORKER_DENY_READ_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+#[link(name = "advapi32")]
+unsafe extern "system" {}
 
 pub struct WindowsSandboxAsyncChild {
-    child: RestrictedWindowsChild,
-    stdin: Option<tokio::fs::File>,
-    stdout: Option<tokio::fs::File>,
-    stderr: Option<tokio::fs::File>,
-}
-
-unsafe impl Send for WindowsSandboxAsyncChild {}
-unsafe impl Sync for WindowsSandboxAsyncChild {}
-
-pub struct RestrictedWindowsChild {
-    process: HANDLE,
-    thread: HANDLE,
-    job: HANDLE,
-    process_id: u32,
-    exit_status: Option<ExitStatus>,
-    acl_guards: Vec<AclGuard>,
-    acl_cleaned: bool,
-    profile: Option<AppContainerProfile>,
-}
-
-unsafe impl Send for RestrictedWindowsChild {}
-unsafe impl Sync for RestrictedWindowsChild {}
-
-struct LocalSid {
-    ptr: PSID,
-}
-
-struct LocalMem<T>(*mut T);
-
-struct OwnedHandle(HANDLE);
-
-struct RestrictedToken {
-    handle: OwnedHandle,
-}
-
-struct AppContainerProfile {
-    name: Vec<u16>,
-    sid: PSID,
-}
-unsafe impl Send for AppContainerProfile {}
-unsafe impl Sync for AppContainerProfile {}
-impl AppContainerProfile {
-    fn create() -> io::Result<Self> {
-        let name = to_wide(format!("DaatLocus.Native.{}", Uuid::new_v4().simple()));
-        let mut sid = ptr::null_mut();
-        let status = unsafe {
-            CreateAppContainerProfile(
-                name.as_ptr(),
-                name.as_ptr(),
-                name.as_ptr(),
-                ptr::null(),
-                0,
-                &mut sid,
-            )
-        };
-        if status < 0 || sid.is_null() {
-            return Err(io::Error::other(format!(
-                "AppContainer profile creation failed: HRESULT 0x{:08x}",
-                status as u32
-            )));
-        }
-        Ok(Self { name, sid })
-    }
-}
-impl Drop for AppContainerProfile {
-    fn drop(&mut self) {
-        unsafe {
-            DeleteAppContainerProfile(self.name.as_ptr());
-            FreeSid(self.sid);
-        }
-    }
-}
-
-struct StartupAttributes {
-    storage: Vec<usize>,
-}
-impl StartupAttributes {
-    fn new() -> io::Result<Self> {
-        let mut size = 0;
-        unsafe {
-            InitializeProcThreadAttributeList(ptr::null_mut(), 2, 0, &mut size);
-        }
-        let mut storage = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
-        if unsafe {
-            InitializeProcThreadAttributeList(storage.as_mut_ptr().cast(), 2, 0, &mut size)
-        } == 0
-        {
-            return Err(last_os_error("InitializeProcThreadAttributeList failed"));
-        }
-        Ok(Self { storage })
-    }
-    fn pointer(&mut self) -> *mut c_void {
-        self.storage.as_mut_ptr().cast()
-    }
-    fn update(&mut self, attribute: u32, value: *mut c_void, size: usize) -> io::Result<()> {
-        if unsafe {
-            UpdateProcThreadAttribute(
-                self.pointer(),
-                0,
-                attribute as usize,
-                value,
-                size,
-                ptr::null_mut(),
-                ptr::null_mut(),
-            )
-        } == 0
-        {
-            return Err(last_os_error("UpdateProcThreadAttribute failed"));
-        }
-        Ok(())
-    }
-}
-impl Drop for StartupAttributes {
-    fn drop(&mut self) {
-        unsafe {
-            DeleteProcThreadAttributeList(self.pointer());
-        }
-    }
-}
-
-struct AclGuard {
-    path: PathBuf,
-    capability_sid: Vec<u8>,
-}
-
-struct StartupHandles {
-    stdin: HANDLE,
-    stdout: HANDLE,
-    stderr: HANDLE,
-    _owned: Vec<OwnedHandle>,
-}
-
-#[derive(Default)]
-struct ParentPipeHandles {
-    stdin: Option<OwnedHandle>,
-    stdout: Option<OwnedHandle>,
-    stderr: Option<OwnedHandle>,
+    process: Mutex<Box<dyn SandboxProcess>>,
+    stdin: Option<DuplexStream>,
+    stdout: Option<DuplexStream>,
+    stderr: Option<DuplexStream>,
+    status: Option<ExitStatus>,
+    shutdown: watch::Sender<()>,
 }
 
 impl WindowsSandboxAsyncChild {
-    pub const fn id(&self) -> u32 {
-        self.child.id()
-    }
-
-    pub const fn take_stdin(&mut self) -> Option<tokio::fs::File> {
+    pub fn take_stdin(&mut self) -> Option<DuplexStream> {
         self.stdin.take()
     }
-
-    pub const fn take_stdout(&mut self) -> Option<tokio::fs::File> {
+    pub fn take_stdout(&mut self) -> Option<DuplexStream> {
         self.stdout.take()
     }
-
-    pub const fn take_stderr(&mut self) -> Option<tokio::fs::File> {
+    pub fn take_stderr(&mut self) -> Option<DuplexStream> {
         self.stderr.take()
     }
-
+    pub fn id(&self) -> u32 {
+        self.process.lock().id()
+    }
     pub fn start_kill(&mut self) -> io::Result<()> {
-        self.child.kill()
+        self.process.get_mut().kill()
     }
-
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.child.try_wait()
-    }
-}
-pub fn spawn_restricted_async(
-    policy: &RuntimeSandboxPolicy,
-    program: &PathBuf,
-    args: Vec<String>,
-    options: SandboxProcessOptions,
-) -> io::Result<WindowsSandboxAsyncChild> {
-    let profile = AppContainerProfile::create()?;
-    let token = create_restricted_token(profile.sid)?;
-    let mut acl_guards = Vec::new();
-    let mut guarded_paths = HashSet::new();
-    let process = match spawn_restricted_async_inner(RestrictedSpawnInput {
-        policy,
-        program,
-        args,
-        options,
-        psid_capability: profile.sid,
-        token: token.handle.raw(),
-        acl_guards: &mut acl_guards,
-        guarded_paths: &mut guarded_paths,
-    }) {
-        Ok(process) => process,
-        Err(err) => {
-            restore_acl_guards(&acl_guards);
-            return Err(err);
+        if self.status.is_none() && self.process.get_mut().try_wait()?.is_some() {
+            // The root has exited. SDK wait kills/reaps remaining descendants before
+            // releasing PSEC. Output pumps continue draining the taken pipes.
+            let code = self.process.get_mut().wait()?;
+            self.status = Some(ExitStatus::from_raw(code as u32));
         }
-    };
-    drop(token);
-    let mut process = process;
-    process.child.profile = Some(profile);
-    Ok(process)
-}
-
-struct RestrictedSpawnInput<'a> {
-    policy: &'a RuntimeSandboxPolicy,
-    program: &'a Path,
-    args: Vec<String>,
-    options: SandboxProcessOptions,
-    psid_capability: PSID,
-    token: HANDLE,
-    acl_guards: &'a mut Vec<AclGuard>,
-    guarded_paths: &'a mut HashSet<PathBuf>,
-}
-
-fn spawn_restricted_async_inner(
-    input: RestrictedSpawnInput<'_>,
-) -> io::Result<WindowsSandboxAsyncChild> {
-    check_spawn_cancelled(&input.options)?;
-    let policy = bounded_acl_policy(input.policy, input.program, &input.options)?;
-    let acl_lock = lock_acl_updates(
-        &ACL_UPDATES,
-        &input.options,
-        std::time::Duration::from_secs(5),
-    )?;
-    // Protect exact credential files as well as framework directories so an
-    // ancestor grant cannot be inherited, while keeping broker access.
-    for root in policy_paths_with_resolved(&policy.filesystem.deny_read_paths) {
-        if root.try_exists()? {
-            protect_private_namespace(&root)?;
-        }
-    }
-    check_spawn_cancelled(&input.options)?;
-    apply_policy_acl_rules(
-        &policy,
-        input.program,
-        input.psid_capability,
-        input.acl_guards,
-        input.guarded_paths,
-    )?;
-    drop(acl_lock);
-    let current_dir = input
-        .options
-        .current_dir
-        .clone()
-        .unwrap_or(std::env::current_dir()?);
-    let argv = command_argv(input.program, input.args);
-    let mut command_line = to_wide(argv_to_command_line(&argv));
-    let program_wide = to_wide(input.program.as_os_str());
-    // PowerShell/.NET expands 8.3 names by inspecting ancestor directories.
-    // The worker may access its workspace but cannot enumerate those parents;
-    // resolve the OS spelling in the broker before entering the AppContainer.
-    let current_dir_wide = working_directory_wide(&current_dir)?;
-    let env_block = environment_block(input.policy, &input.options.environment);
-    let creation = crate::process_spawn::creation_lock()?;
-    let (stdio, parent_pipes) = StartupHandles::new_with_parent_pipes(&input.options)?;
-    let mut attributes = StartupAttributes::new()?;
-    // Networking capabilities authorize network transports, not filesystem
-    // access. Loopback retains Windows AppContainer's OS restrictions.
-    let internet = LocalSid::from_string("S-1-15-3-1")?;
-    let private_network = LocalSid::from_string("S-1-15-3-3")?;
-    let mut network_capabilities = [
-        SID_AND_ATTRIBUTES {
-            Sid: internet.as_ptr(),
-            Attributes: SE_GROUP_ENABLED as u32,
-        },
-        SID_AND_ATTRIBUTES {
-            Sid: private_network.as_ptr(),
-            Attributes: SE_GROUP_ENABLED as u32,
-        },
-    ];
-    let mut capabilities = SECURITY_CAPABILITIES {
-        AppContainerSid: input.psid_capability,
-        Capabilities: network_capabilities.as_mut_ptr(),
-        CapabilityCount: network_capabilities.len() as u32,
-        Reserved: 0,
-    };
-    attributes.update(
-        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-        (&mut capabilities as *mut SECURITY_CAPABILITIES).cast(),
-        std::mem::size_of::<SECURITY_CAPABILITIES>(),
-    )?;
-    let mut handles = vec![stdio.stdin, stdio.stdout, stdio.stderr];
-    handles.retain(|handle| !is_invalid_handle(*handle));
-    handles.sort_by_key(|handle| *handle as usize);
-    handles.dedup();
-    for handle in &handles {
-        if unsafe { SetHandleInformation(*handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
-            return Err(last_os_error("stdio inheritance setup failed"));
-        }
-    }
-    attributes.update(
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-        handles.as_mut_ptr().cast(),
-        handles.len() * std::mem::size_of::<HANDLE>(),
-    )?;
-    let mut startup_info = STARTUPINFOEXW {
-        StartupInfo: startup_info(&stdio),
-        lpAttributeList: attributes.pointer(),
-    };
-    startup_info.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-    let mut process_info = PROCESS_INFORMATION::default();
-
-    check_spawn_cancelled(&input.options)?;
-    let created = unsafe {
-        CreateProcessAsUserW(
-            input.token,
-            program_wide.as_ptr(),
-            command_line.as_mut_ptr(),
-            ptr::null(),
-            ptr::null(),
-            1,
-            CREATE_UNICODE_ENVIRONMENT
-                | CREATE_SUSPENDED
-                | CREATE_NO_WINDOW
-                | EXTENDED_STARTUPINFO_PRESENT,
-            env_block.as_ptr().cast::<c_void>(),
-            current_dir_wide.as_ptr(),
-            &raw const startup_info.StartupInfo,
-            &raw mut process_info,
-        )
-    };
-    if created == 0 {
-        return Err(last_os_error("CreateProcessAsUserW failed"));
-    }
-    drop(stdio);
-    drop(creation);
-
-    let job = match create_kill_on_close_job(process_info.hProcess) {
-        Ok(job) => job,
-        Err(err) => {
-            unsafe {
-                TerminateProcess(process_info.hProcess, 1);
-                CloseHandle(process_info.hThread);
-                CloseHandle(process_info.hProcess);
-            }
-            return Err(err);
-        }
-    };
-    if unsafe { ResumeThread(process_info.hThread) } == u32::MAX {
-        unsafe {
-            TerminateProcess(process_info.hProcess, 1);
-            CloseHandle(job);
-            CloseHandle(process_info.hThread);
-            CloseHandle(process_info.hProcess);
-        }
-        return Err(last_os_error("ResumeThread failed"));
-    }
-
-    let child = RestrictedWindowsChild {
-        process: process_info.hProcess,
-        thread: process_info.hThread,
-        job,
-        process_id: unsafe { GetProcessId(process_info.hProcess) },
-        exit_status: None,
-        acl_guards: std::mem::take(input.acl_guards),
-        acl_cleaned: false,
-        profile: None,
-    };
-    let (child_stdin, child_stdout, child_stderr) = parent_pipes.into_async_files();
-
-    Ok(WindowsSandboxAsyncChild {
-        child,
-        stdin: child_stdin,
-        stdout: child_stdout,
-        stderr: child_stderr,
-    })
-}
-
-fn lock_acl_updates<'a>(
-    updates: &'a parking_lot::Mutex<()>,
-    options: &SandboxProcessOptions,
-    max_wait: std::time::Duration,
-) -> io::Result<parking_lot::MutexGuard<'a, ()>> {
-    let deadline = std::time::Instant::now() + max_wait;
-    loop {
-        check_spawn_cancelled(options)?;
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Timed out waiting to prepare Windows sandbox permissions; no command was started",
-            ));
-        }
-        // Terminal invokes this on a blocking worker. Park between cancellation
-        // checks instead of rejecting ordinary concurrent starts or spinning.
-        if let Some(guard) =
-            updates.try_lock_for(remaining.min(std::time::Duration::from_millis(25)))
-        {
-            check_spawn_cancelled(options)?;
-            return Ok(guard);
-        }
+        Ok(self.status)
     }
 }
 
-fn check_spawn_cancelled(options: &SandboxProcessOptions) -> io::Result<()> {
+fn cancelled(options: &SandboxProcessOptions) -> io::Result<()> {
     if options
         .spawn_cancelled
         .as_ref()
-        .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        .is_some_and(|flag| flag.load(Ordering::Acquire))
     {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
@@ -480,1262 +82,423 @@ fn check_spawn_cancelled(options: &SandboxProcessOptions) -> io::Result<()> {
     Ok(())
 }
 
-fn working_directory_wide(path: &Path) -> io::Result<Vec<u16>> {
-    let path = to_wide(path.as_os_str());
-    let size = unsafe { GetLongPathNameW(path.as_ptr(), ptr::null_mut(), 0) };
-    if size == 0 {
-        return Err(last_os_error("Cannot resolve sandbox working directory"));
-    }
-    let mut expanded = vec![0u16; size as usize];
-    let written = unsafe { GetLongPathNameW(path.as_ptr(), expanded.as_mut_ptr(), size) };
-    if written == 0 {
-        return Err(last_os_error("Cannot resolve sandbox working directory"));
-    }
-    if written >= size {
-        return Err(io::Error::other(
-            "Sandbox working directory changed during setup",
-        ));
-    }
-    expanded.truncate(written as usize + 1);
-    Ok(expanded)
-}
-
-fn bounded_acl_policy(
+pub fn spawn_restricted_async(
     policy: &RuntimeSandboxPolicy,
     program: &Path,
-    options: &SandboxProcessOptions,
-) -> io::Result<RuntimeSandboxPolicy> {
-    bounded_acl_policy_with_budget(
-        policy,
-        program,
-        options,
-        32 * 1024,
-        std::time::Duration::from_secs(5),
-    )
-}
-
-fn bounded_acl_policy_with_budget(
-    policy: &RuntimeSandboxPolicy,
-    program: &Path,
-    options: &SandboxProcessOptions,
-    max_entries: usize,
-    max_scan: std::time::Duration,
-) -> io::Result<RuntimeSandboxPolicy> {
-    use std::os::windows::fs::MetadataExt;
-    if !program.is_absolute() {
+    args: Vec<String>,
+    options: SandboxProcessOptions,
+) -> io::Result<WindowsSandboxAsyncChild> {
+    cancelled(&options)?;
+    if !BaseContainerRunner::is_process_security_environment_usable() {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Windows sandbox requires a resolved absolute executable path",
+            io::ErrorKind::Unsupported,
+            "Windows process isolation requires usable MXC/PSEC; update Windows to a supported build",
         ));
     }
-    let mut candidate = policy.clone();
-    let mut grants = policy_paths_with_resolved(&policy.filesystem.readable_roots);
-    grants.extend(policy_paths_with_resolved(&[
-        program.to_owned(),
-        program.parent().unwrap_or(program).to_owned(),
-    ]));
-    for root in &policy.filesystem.writable_roots {
-        grants.extend(policy_paths_with_resolved(std::slice::from_ref(&root.root)));
-    }
-    // Keep every explicit private boundary: Windows can grant ambient access
-    // through ALL APPLICATION PACKAGES even outside our added read roots.
-    candidate.filesystem.deny_read_paths =
-        policy_paths_with_resolved(&policy.filesystem.deny_read_paths);
-    candidate.filesystem.deny_write_paths =
-        policy_paths_with_resolved(&policy.filesystem.deny_write_paths);
-    let mut roots = grants;
-    roots.extend(candidate.filesystem.deny_read_paths.iter().cloned());
-    roots.extend(candidate.filesystem.deny_write_paths.iter().cloned());
-    roots.sort();
-    roots.dedup();
-    let mut minimal = Vec::<PathBuf>::new();
-    for root in roots {
-        if !minimal.iter().any(|parent| root.starts_with(parent)) {
-            minimal.push(root);
-        }
-    }
-    let began = std::time::Instant::now();
-    let mut count = 0;
-    let mut pending = minimal;
-    while let Some(path) = pending.pop() {
-        check_spawn_cancelled(options)?;
-        count += 1;
-        if count > max_entries || began.elapsed() >= max_scan {
-            return Err(io::Error::other(
-                "Windows sandbox scope is too large to prepare promptly. Use Files for bounded reads or request a narrower Terminal directory; no command was started",
-            ));
-        }
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        if metadata.file_attributes() & 0x400 != 0 {
-            return Err(io::Error::other(
-                "Windows sandbox scope contains a reparse point. Use Files or request its specific resolved directory; no command was started",
-            ));
-        }
-        if metadata.is_dir() {
-            for entry in std::fs::read_dir(&path)? {
-                check_spawn_cancelled(options)?;
-                if count + pending.len() >= max_entries || began.elapsed() >= max_scan {
-                    return Err(io::Error::other(
-                        "Windows sandbox scope is too large to prepare promptly. Use Files for bounded reads or request a narrower Terminal directory; no command was started",
-                    ));
-                }
-                pending.push(entry?.path());
-            }
-        }
-    }
-    Ok(candidate)
-}
-
-fn apply_policy_acl_rules(
-    policy: &RuntimeSandboxPolicy,
-    program: &Path,
-    psid: PSID,
-    acl_guards: &mut Vec<AclGuard>,
-    guarded_paths: &mut HashSet<PathBuf>,
-) -> io::Result<()> {
-    if let Some(parent) = program.parent() {
-        add_program_read_ace(parent, psid, acl_guards, guarded_paths)?;
-    }
-    add_program_read_ace(program, psid, acl_guards, guarded_paths)?;
-
-    for root in policy_paths_with_resolved(&policy.filesystem.readable_roots) {
-        add_guarded_ace(
-            &root,
-            psid,
-            WORKER_READ_ALLOW_MASK,
-            SET_ACCESS,
-            acl_guards,
-            guarded_paths,
-        )?;
-    }
-    for writable_root in &policy.filesystem.writable_roots {
-        for root in policy_paths_with_resolved(std::slice::from_ref(&writable_root.root)) {
-            add_guarded_ace(
-                &root,
-                psid,
-                WORKER_WRITE_ALLOW_MASK,
-                SET_ACCESS,
-                acl_guards,
-                guarded_paths,
-            )?;
-        }
-        for subpath in policy_paths_with_resolved(&writable_root.read_only_subpaths) {
-            add_guarded_ace_recursive(
-                &subpath,
-                psid,
-                WORKER_DENY_WRITE_MASK,
-                DENY_ACCESS,
-                acl_guards,
-                guarded_paths,
-            )?;
-        }
-    }
-    for path in policy_paths_with_resolved(&policy.filesystem.deny_write_paths) {
-        add_guarded_ace_recursive(
-            &path,
-            psid,
-            WORKER_DENY_WRITE_MASK,
-            DENY_ACCESS,
-            acl_guards,
-            guarded_paths,
-        )?;
-    }
-    // Restricting SID checks apply to reads and writes. Only the worker's
-    // capability is denied, so the broker remains able to access private state.
-    let deny_read_entries = [(psid, WORKER_DENY_READ_MASK, DENY_ACCESS)];
-    let deny_read_directory_entries = [(psid, WORKER_DENY_READ_MASK, DENY_ACCESS)];
-    for path in policy_paths_with_resolved(&policy.filesystem.deny_read_paths) {
-        add_guarded_read_denies_recursive(
-            &path,
-            &deny_read_entries,
-            &deny_read_directory_entries,
-            acl_guards,
-            guarded_paths,
-        )?;
-    }
-    Ok(())
-}
-
-fn add_program_read_ace(
-    path: &Path,
-    psid: PSID,
-    acl_guards: &mut Vec<AclGuard>,
-    guarded_paths: &mut HashSet<PathBuf>,
-) -> io::Result<()> {
-    match add_guarded_ace(
-        path,
-        psid,
-        WORKER_READ_ALLOW_MASK,
-        SET_ACCESS,
-        acl_guards,
-        guarded_paths,
-    ) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
-            tracing::warn!(
-                "Windows sandbox could not add read ACE for executable path {}; relying on existing ACLs: {err}",
-                path.display()
-            );
-            Ok(())
-        }
-        Err(err) => Err(err),
-    }
-}
-
-fn add_guarded_ace(
-    path: &Path,
-    psid: PSID,
-    mask: u32,
-    mode: i32,
-    acl_guards: &mut Vec<AclGuard>,
-    guarded_paths: &mut HashSet<PathBuf>,
-) -> io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    ensure_acl_guard(path, psid, acl_guards, guarded_paths)?;
-    add_explicit_aces(path, &[(psid, mask, mode)])?;
-    Ok(())
-}
-
-fn add_guarded_aces(
-    path: &Path,
-    entries: &[(PSID, u32, i32)],
-    acl_guards: &mut Vec<AclGuard>,
-    guarded_paths: &mut HashSet<PathBuf>,
-) -> io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let sid = entries
-        .first()
-        .ok_or_else(|| io::Error::other("missing capability ACL entry"))?
-        .0;
-    ensure_acl_guard(path, sid, acl_guards, guarded_paths)?;
-    add_explicit_aces(path, entries)?;
-    Ok(())
-}
-
-fn add_guarded_ace_recursive(
-    path: &Path,
-    psid: PSID,
-    mask: u32,
-    mode: i32,
-    acl_guards: &mut Vec<AclGuard>,
-    guarded_paths: &mut HashSet<PathBuf>,
-) -> io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    if path.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let child = entry.path();
-            if entry.file_type()?.is_dir() {
-                add_guarded_ace_recursive(&child, psid, mask, mode, acl_guards, guarded_paths)?;
-            } else {
-                add_guarded_ace(&child, psid, mask, mode, acl_guards, guarded_paths)?;
-            }
-        }
-    }
-    add_guarded_ace(path, psid, mask, mode, acl_guards, guarded_paths)?;
-    Ok(())
-}
-
-fn remove_public_app_grants_from_private_path(path: &Path) -> io::Result<()> {
-    let Some(current) = capture_dacl(path)? else {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Private path has no access boundary",
-        ));
-    };
-    let acl = current.as_ptr().cast::<ACL>();
-    for index in 0..unsafe { (*acl).AceCount } {
-        let mut ace = ptr::null_mut();
-        if unsafe { GetAce(acl, index as u32, &mut ace) } == 0 {
-            return Err(last_os_error("GetAce failed"));
-        }
-        let bytes = ace.cast::<u8>();
-        let kind = unsafe { *bytes };
-        if kind == 0 {
-            let sid = sid_text(unsafe { bytes.add(8) }.cast())?;
-            if matches!(sid.as_str(), "S-1-15-2-1" | "S-1-15-2-2") {
-                return protect_private_namespace(path);
-            }
-        } else if kind != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Private path has unsupported conditional/object ACL",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn add_guarded_read_denies_recursive(
-    path: &Path,
-    file_entries: &[(PSID, u32, i32)],
-    directory_entries: &[(PSID, u32, i32)],
-    acl_guards: &mut Vec<AclGuard>,
-    guarded_paths: &mut HashSet<PathBuf>,
-) -> io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    remove_public_app_grants_from_private_path(path)?;
-    if path.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let child = entry.path();
-            if entry.file_type()?.is_dir() {
-                add_guarded_read_denies_recursive(
-                    &child,
-                    file_entries,
-                    directory_entries,
-                    acl_guards,
-                    guarded_paths,
-                )?;
-            } else {
-                remove_public_app_grants_from_private_path(&child)?;
-                add_guarded_aces(&child, file_entries, acl_guards, guarded_paths)?;
-            }
-        }
-        add_guarded_aces(path, directory_entries, acl_guards, guarded_paths)?;
-    } else {
-        add_guarded_aces(path, file_entries, acl_guards, guarded_paths)?;
-    }
-    Ok(())
-}
-
-fn ensure_acl_guard(
-    path: &Path,
-    sid: PSID,
-    acl_guards: &mut Vec<AclGuard>,
-    guarded_paths: &mut HashSet<PathBuf>,
-) -> io::Result<()> {
-    if !guarded_paths.insert(path.to_path_buf()) {
-        return Ok(());
-    }
-    let length = unsafe { GetLengthSid(sid) };
-    let mut capability_sid = vec![0u8; length as usize];
-    if unsafe { CopySid(length, capability_sid.as_mut_ptr().cast(), sid) } == 0 {
-        return Err(last_os_error("CopySid failed"));
-    }
-    acl_guards.push(AclGuard {
-        path: path.to_path_buf(),
-        capability_sid,
-    });
-    Ok(())
-}
-
-fn capture_dacl(path: &Path) -> io::Result<Option<Vec<u32>>> {
-    let path_wide = to_wide(path.as_os_str());
-    let mut security_descriptor: PSID = ptr::null_mut();
-    let mut dacl = ptr::null_mut();
-    let code = unsafe {
-        GetNamedSecurityInfoW(
-            path_wide.as_ptr(),
-            1,
-            DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &raw mut dacl,
-            ptr::null_mut(),
-            &raw mut security_descriptor,
-        )
-    };
-    if code != ERROR_SUCCESS {
-        return Err(win32_error(
-            code,
-            format!("GetNamedSecurityInfoW failed for {}", path.display()),
-        ));
-    }
-    let _security_descriptor = LocalMem(security_descriptor);
-    if dacl.is_null() {
-        return Ok(None);
-    }
-    let mut info = ACL_SIZE_INFORMATION::default();
-    let ok = unsafe {
-        GetAclInformation(
-            dacl.cast::<ACL>(),
-            (&raw mut info).cast::<c_void>(),
-            u32::try_from(std::mem::size_of::<ACL_SIZE_INFORMATION>())
-                .expect("ACL size information size fits in u32"),
-            AclSizeInformation,
-        )
-    };
-    if ok == 0 {
-        return Err(last_os_error("GetAclInformation failed"));
-    }
-    let acl_bytes = usize::try_from(info.AclBytesInUse).expect("ACL byte count fits in usize");
-    let mut words = vec![0u32; acl_bytes.div_ceil(std::mem::size_of::<u32>())];
-    unsafe {
-        ptr::copy_nonoverlapping(
-            dacl.cast::<u8>(),
-            words.as_mut_ptr().cast::<u8>(),
-            acl_bytes,
-        );
-    }
-    Ok(Some(words))
-}
-
-fn add_explicit_aces(path: &Path, entries: &[(PSID, u32, i32)]) -> io::Result<()> {
-    let path_wide = to_wide(path.as_os_str());
-    let mut security_descriptor: PSID = ptr::null_mut();
-    let mut dacl = ptr::null_mut();
-    let code = unsafe {
-        GetNamedSecurityInfoW(
-            path_wide.as_ptr(),
-            1,
-            DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &raw mut dacl,
-            ptr::null_mut(),
-            &raw mut security_descriptor,
-        )
-    };
-    if code != ERROR_SUCCESS {
-        return Err(win32_error(
-            code,
-            format!("GetNamedSecurityInfoW failed for {}", path.display()),
-        ));
-    }
-    let _security_descriptor = LocalMem(security_descriptor);
-    let inheritance = inheritance_for_path(path);
-    let explicits = entries
-        .iter()
-        .map(|(psid, mask, mode)| explicit_access(*psid, *mask, *mode, inheritance))
-        .collect::<Vec<_>>();
-    let mut new_dacl = ptr::null_mut();
-    let code = unsafe {
-        SetEntriesInAclW(
-            u32::try_from(explicits.len()).expect("explicit ACL entry count fits in u32"),
-            explicits.as_ptr(),
-            dacl,
-            &raw mut new_dacl,
-        )
-    };
-    if code != ERROR_SUCCESS {
-        return Err(win32_error(
-            code,
-            format!("SetEntriesInAclW failed for {}", path.display()),
-        ));
-    }
-    let _new_dacl = LocalMem(new_dacl);
-    let code = unsafe {
-        SetNamedSecurityInfoW(
-            path_wide.as_ptr().cast_mut(),
-            1,
-            DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            new_dacl,
-            ptr::null_mut(),
-        )
-    };
-    if code != ERROR_SUCCESS {
-        return Err(win32_error(
-            code,
-            format!("SetNamedSecurityInfoW failed for {}", path.display()),
-        ));
-    }
-    Ok(())
-}
-
-fn restore_acl_guards(guards: &[AclGuard]) {
-    if guards.is_empty() {
-        return;
-    }
-    let _lock = ACL_UPDATES.lock();
-    for guard in guards.iter().rev() {
-        let _ = restore_acl_guard(guard);
-    }
-}
-
-fn sid_text(sid: PSID) -> io::Result<String> {
-    let mut text = ptr::null_mut();
-    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
-        return Err(last_os_error("SID conversion failed"));
-    }
-    let allocation = LocalMem(text);
-    let mut length = 0;
-    unsafe {
-        while *text.add(length) != 0 && length < 1024 {
-            length += 1;
-        }
-    }
-    let value = unsafe { String::from_utf16(std::slice::from_raw_parts(text, length)) }
-        .map_err(|_| io::Error::other("invalid SID encoding"));
-    drop(allocation);
-    value
-}
-
-fn protect_private_namespace(path: &Path) -> io::Result<()> {
-    let Some(current) = capture_dacl(path)? else {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "private namespace has no access boundary",
-        ));
-    };
-    let original = current.as_ptr().cast::<ACL>();
-    let size = current.len() * std::mem::size_of::<u32>();
-    let mut filtered = vec![0u32; current.len()];
-    let acl = filtered.as_mut_ptr().cast::<ACL>();
-    if unsafe { InitializeAcl(acl, size as u32, (*original).AclRevision as u32) } == 0 {
-        return Err(last_os_error("InitializeAcl failed"));
-    }
-    for index in 0..unsafe { (*original).AceCount } {
-        let mut ace = ptr::null_mut();
-        if unsafe { GetAce(original, index as u32, &mut ace) } == 0 {
-            return Err(last_os_error("GetAce failed"));
-        }
-        let bytes = ace.cast::<u8>();
-        let kind = unsafe { *bytes };
-        let length = unsafe { std::ptr::read_unaligned(bytes.add(2).cast::<u16>()) } as u32;
-        if kind == 0 {
-            let sid = unsafe { bytes.add(8) }.cast::<c_void>();
-            if sid_text(sid)?.starts_with("S-1-15-2-") {
-                continue;
-            }
-        } else if kind != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "private namespace has unsupported conditional/object ACL",
-            ));
-        }
-        if unsafe { AddAce(acl, (*original).AclRevision as u32, u32::MAX, ace, length) } == 0 {
-            return Err(last_os_error("AddAce failed"));
-        }
-    }
-    let mut name = to_wide(path.as_os_str());
-    let status = unsafe {
-        SetNamedSecurityInfoW(
-            name.as_mut_ptr(),
-            1,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            acl,
-            ptr::null_mut(),
-        )
-    };
-    if status != 0 {
-        return Err(win32_error(
-            status,
-            "cannot establish protected private namespace",
-        ));
-    }
-    Ok(())
-}
-
-fn restore_acl_guard(guard: &AclGuard) -> io::Result<()> {
-    if !guard.path.exists() {
-        return Ok(());
-    }
-    let path_wide = to_wide(guard.path.as_os_str());
-    let Some(current) = capture_dacl(&guard.path)? else {
-        return Ok(());
-    };
-    let sid = guard.capability_sid.as_ptr().cast::<c_void>().cast_mut();
-    // Rebuild the current ACL, removing this unique package's allow and deny
-    // entries while preserving other workers and OS-owner changes.
-    let original = current.as_ptr().cast::<ACL>();
-    let mut filtered = vec![0u32; current.len()];
-    let dacl = filtered.as_mut_ptr().cast::<ACL>();
-    if unsafe {
-        InitializeAcl(
-            dacl,
-            (current.len() * 4) as u32,
-            (*original).AclRevision as u32,
-        )
-    } == 0
+    let request = build_request(policy, program, args, &options)?;
+    if !request.policy.denied_paths.is_empty()
+        && !SecurityEnvironmentApi::load()
+            .map_err(io::Error::other)?
+            .supports_deny_paths()
+            .map_err(io::Error::other)?
     {
-        return Err(last_os_error("InitializeAcl failed"));
-    }
-    for index in 0..unsafe { (*original).AceCount } {
-        let mut ace = ptr::null_mut();
-        if unsafe { GetAce(original, index as u32, &mut ace) } == 0 {
-            return Err(last_os_error("GetAce failed"));
-        }
-        let bytes = ace.cast::<u8>();
-        let kind = unsafe { *bytes };
-        let length = unsafe { ptr::read_unaligned(bytes.add(2).cast::<u16>()) } as u32;
-        if matches!(kind, 0 | 1)
-            && unsafe { windows_sys::Win32::Security::EqualSid(bytes.add(8).cast(), sid) } != 0
-        {
-            continue;
-        }
-        if unsafe { AddAce(dacl, (*original).AclRevision as u32, u32::MAX, ace, length) } == 0 {
-            return Err(last_os_error("AddAce failed"));
-        }
-    }
-    let code = unsafe {
-        SetNamedSecurityInfoW(
-            path_wide.as_ptr().cast_mut(),
-            1,
-            DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            dacl,
-            ptr::null_mut(),
-        )
-    };
-    if code != ERROR_SUCCESS {
-        return Err(win32_error(
-            code,
-            format!("SetNamedSecurityInfoW failed for {}", guard.path.display()),
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "This Windows MXC/PSEC implementation cannot enforce denied paths",
         ));
     }
-    Ok(())
-}
-
-const fn explicit_access(psid: PSID, mask: u32, mode: i32, inheritance: u32) -> EXPLICIT_ACCESS_W {
-    EXPLICIT_ACCESS_W {
-        grfAccessPermissions: mask,
-        grfAccessMode: mode,
-        grfInheritance: inheritance,
-        Trustee: TRUSTEE_W {
-            pMultipleTrustee: ptr::null_mut(),
-            MultipleTrusteeOperation: 0,
-            TrusteeForm: TRUSTEE_IS_SID,
-            TrusteeType: TRUSTEE_IS_UNKNOWN,
-            ptstrName: psid.cast::<u16>(),
-        },
-    }
-}
-
-fn inheritance_for_path(path: &Path) -> u32 {
-    if path.is_dir() {
-        CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE
-    } else {
-        0
-    }
-}
-
-fn create_restricted_token(package_sid: PSID) -> io::Result<RestrictedToken> {
-    let base = current_token_for_restriction()?;
-    let mut token = ptr::null_mut();
-    let ok = unsafe {
-        CreateRestrictedToken(
-            base.raw(),
-            DISABLE_MAX_PRIVILEGE | LUA_TOKEN,
-            0,
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
-            ptr::null(),
-            &raw mut token,
-        )
-    };
-    if ok == 0 {
-        return Err(last_os_error("CreateRestrictedToken failed"));
-    }
-    let token = OwnedHandle(token);
-    let mut user = token_user_sid_bytes(base.raw())?;
-    set_default_dacl(token.raw(), &[package_sid, user.as_mut_ptr().cast()])?;
-    enable_single_privilege(token.raw(), "SeChangeNotifyPrivilege")?;
-    Ok(RestrictedToken { handle: token })
-}
-
-fn token_user_sid_bytes(token: HANDLE) -> io::Result<Vec<u8>> {
-    let mut size = 0;
-    unsafe {
-        GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut size);
-    }
-    let mut buffer = vec![0usize; (size as usize).div_ceil(std::mem::size_of::<usize>())];
-    if unsafe {
-        GetTokenInformation(
-            token,
-            TokenUser,
-            buffer.as_mut_ptr().cast(),
-            size,
-            &mut size,
-        )
-    } == 0
-    {
-        return Err(last_os_error("TokenUser failed"));
-    }
-    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
-    let length = unsafe { GetLengthSid(user.User.Sid) };
-    let mut sid = vec![0u8; length as usize];
-    if unsafe { CopySid(length, sid.as_mut_ptr().cast(), user.User.Sid) } == 0 {
-        return Err(last_os_error("CopySid failed"));
-    }
-    Ok(sid)
-}
-
-fn current_token_for_restriction() -> io::Result<OwnedHandle> {
-    let desired = TOKEN_DUPLICATE
-        | TOKEN_QUERY
-        | TOKEN_ASSIGN_PRIMARY
-        | TOKEN_ADJUST_DEFAULT
-        | TOKEN_ADJUST_SESSIONID
-        | TOKEN_ADJUST_PRIVILEGES;
-    let mut token = ptr::null_mut();
-    let ok = unsafe { OpenProcessToken(GetCurrentProcess(), desired, &raw mut token) };
-    if ok == 0 {
-        Err(last_os_error("OpenProcessToken failed"))
-    } else {
-        Ok(OwnedHandle(token))
-    }
-}
-
-fn set_default_dacl(token: HANDLE, sids: &[PSID]) -> io::Result<()> {
-    let entries = sids
+    cancelled(&options)?;
+    let inherited = [options.stdin, options.stdout, options.stderr]
         .iter()
-        .map(|sid| explicit_access(*sid, GENERIC_ALL, SET_ACCESS, 0))
-        .collect::<Vec<_>>();
-    let mut new_dacl = ptr::null_mut();
-    let code = unsafe {
-        SetEntriesInAclW(
-            u32::try_from(entries.len()).expect("default DACL entry count fits in u32"),
-            entries.as_ptr(),
-            ptr::null(),
-            &raw mut new_dacl,
-        )
-    };
-    if code != ERROR_SUCCESS {
-        return Err(win32_error(
-            code,
-            "SetEntriesInAclW failed for token default DACL",
+        .all(|mode| *mode == SandboxStdio::Inherit);
+    // Mixing a host console reader into asynchronous pipes cannot be cancelled
+    // reliably. Terminal and MCP always use piped/null stdin.
+    if options.stdin == SandboxStdio::Inherit && !inherited {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "MXC mixed stdio requires piped or null stdin",
         ));
     }
-    let _new_dacl = LocalMem(new_dacl);
-    let info = TOKEN_DEFAULT_DACL {
-        DefaultDacl: new_dacl,
-    };
-    let ok = unsafe {
-        SetTokenInformation(
-            token,
-            TokenDefaultDacl,
-            (&raw const info).cast::<c_void>(),
-            u32::try_from(std::mem::size_of::<TOKEN_DEFAULT_DACL>())
-                .expect("token default DACL size fits in u32"),
-        )
-    };
-    if ok == 0 {
-        Err(last_os_error(
-            "SetTokenInformation(TokenDefaultDacl) failed",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn enable_single_privilege(token: HANDLE, name: &str) -> io::Result<()> {
-    let mut luid = LUID {
-        LowPart: 0,
-        HighPart: 0,
-    };
-    let name_wide = to_wide(name);
-    let ok = unsafe { LookupPrivilegeValueW(ptr::null(), name_wide.as_ptr(), &raw mut luid) };
-    if ok == 0 {
-        return Err(last_os_error("LookupPrivilegeValueW failed"));
-    }
-    let privileges = TOKEN_PRIVILEGES {
-        PrivilegeCount: 1,
-        Privileges: [windows_sys::Win32::Security::LUID_AND_ATTRIBUTES {
-            Luid: luid,
-            Attributes: 0x0000_0002,
-        }],
-    };
-    let ok = unsafe {
-        AdjustTokenPrivileges(
-            token,
-            0,
-            &raw const privileges,
-            0,
-            ptr::null_mut(),
-            ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        Err(last_os_error("AdjustTokenPrivileges failed"))
-    } else {
-        Ok(())
-    }
-}
-
-fn create_kill_on_close_job(process: HANDLE) -> io::Result<HANDLE> {
-    let job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
-    if is_invalid_handle(job) {
-        return Err(last_os_error("CreateJobObjectW failed"));
-    }
-    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    let ok = unsafe {
-        SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            (&raw const limits).cast::<c_void>(),
-            u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
-                .expect("job-object limit information size fits in u32"),
-        )
-    };
-    if ok == 0 {
-        unsafe {
-            CloseHandle(job);
-        }
-        return Err(last_os_error("SetInformationJobObject failed"));
-    }
-    let ok = unsafe { AssignProcessToJobObject(job, process) };
-    if ok == 0 {
-        unsafe {
-            CloseHandle(job);
-        }
-        return Err(last_os_error("AssignProcessToJobObject failed"));
-    }
-    Ok(job)
-}
-
-impl RestrictedWindowsChild {
-    const fn id(&self) -> u32 {
-        self.process_id
-    }
-
-    fn kill(&mut self) -> io::Result<()> {
-        if !is_invalid_handle(self.job) {
-            let ok = unsafe { TerminateJobObject(self.job, 1) };
-            if ok != 0 {
-                return Ok(());
-            }
-        }
-        let ok = unsafe { TerminateProcess(self.process, 1) };
-        if ok == 0 {
-            Err(last_os_error("TerminateProcess failed"))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        if let Some(status) = self.exit_status {
-            return Ok(Some(status));
-        }
-        match unsafe { WaitForSingleObject(self.process, 0) } {
-            WAIT_TIMEOUT => Ok(None),
-            WAIT_OBJECT_0 => {
-                let status = self.finish_after_exit()?;
-                Ok(Some(status))
-            }
-            WAIT_FAILED => Err(last_os_error("WaitForSingleObject failed")),
-            other => Err(io::Error::other(format!("unexpected wait result {other}"))),
-        }
-    }
-
-    fn finish_after_exit(&mut self) -> io::Result<ExitStatus> {
-        let mut code = 1;
-        let ok = unsafe { GetExitCodeProcess(self.process, &raw mut code) };
-        if ok == 0 {
-            return Err(last_os_error("GetExitCodeProcess failed"));
-        }
-        self.close_thread_handle();
-        if !is_invalid_handle(self.job) {
-            unsafe {
-                TerminateJobObject(self.job, 0);
-            }
-        }
-        self.cleanup_acl_guards();
-        let status = ExitStatus::from_raw(code);
-        self.exit_status = Some(status);
-        Ok(status)
-    }
-
-    fn close_thread_handle(&mut self) {
-        if !is_invalid_handle(self.thread) {
-            unsafe {
-                CloseHandle(self.thread);
-            }
-            self.thread = ptr::null_mut();
-        }
-    }
-
-    fn cleanup_acl_guards(&mut self) {
-        if self.acl_cleaned {
-            return;
-        }
-        restore_acl_guards(&self.acl_guards);
-        self.acl_cleaned = true;
-    }
-}
-
-impl Drop for RestrictedWindowsChild {
-    fn drop(&mut self) {
-        self.close_thread_handle();
-        if self.exit_status.is_none() && !is_invalid_handle(self.job) {
-            unsafe {
-                CloseHandle(self.job);
-            }
-            self.job = ptr::null_mut();
-            let _ = unsafe { WaitForSingleObject(self.process, 5000) };
-        }
-        self.cleanup_acl_guards();
-        if !is_invalid_handle(self.process) {
-            unsafe {
-                CloseHandle(self.process);
-            }
-            self.process = ptr::null_mut();
-        }
-        if !is_invalid_handle(self.job) {
-            unsafe {
-                CloseHandle(self.job);
-            }
-            self.job = ptr::null_mut();
-        }
-    }
-}
-
-impl LocalSid {
-    fn from_string(sid: &str) -> io::Result<Self> {
-        let wide = to_wide(sid);
-        let mut ptr = ptr::null_mut();
-        let ok = unsafe { ConvertStringSidToSidW(wide.as_ptr(), &raw mut ptr) };
-        if ok == 0 {
-            Err(last_os_error("ConvertStringSidToSidW failed"))
-        } else {
-            Ok(Self { ptr })
-        }
-    }
-
-    const fn as_ptr(&self) -> PSID {
-        self.ptr
-    }
-}
-
-impl Drop for LocalSid {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe {
-                LocalFree(self.ptr.cast::<c_void>());
-            }
-            self.ptr = ptr::null_mut();
-        }
-    }
-}
-
-impl<T> Drop for LocalMem<T> {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                LocalFree(self.0.cast::<c_void>());
-            }
-            self.0 = ptr::null_mut();
-        }
-    }
-}
-
-impl OwnedHandle {
-    const fn raw(&self) -> HANDLE {
-        self.0
-    }
-
-    fn into_raw(mut self) -> HANDLE {
-        let handle = self.0;
-        self.0 = ptr::null_mut();
-        handle
-    }
-}
-
-impl Drop for OwnedHandle {
-    fn drop(&mut self) {
-        if !is_invalid_handle(self.0) {
-            unsafe {
-                CloseHandle(self.0);
-            }
-            self.0 = ptr::null_mut();
-        }
-    }
-}
-
-impl StartupHandles {
-    fn new_with_parent_pipes(
-        options: &SandboxProcessOptions,
-    ) -> io::Result<(Self, ParentPipeHandles)> {
-        let mut owned = Vec::new();
-        let mut parent = ParentPipeHandles::default();
-        let stdin = match options.stdin {
-            SandboxStdio::Piped => {
-                let (child_read, parent_write) = create_pipe_pair("stdin")?;
-                set_handle_inherit(child_read.raw(), true)?;
-                set_handle_inherit(parent_write.raw(), false)?;
-                let child_handle = child_read.raw();
-                owned.push(child_read);
-                parent.stdin = Some(parent_write);
-                child_handle
-            }
-            mode => stdio_handle(
-                matches!(mode, SandboxStdio::Inherit),
-                STD_INPUT_HANDLE,
-                true,
-                &mut owned,
-            )?,
-        };
-        let stdout = match options.stdout {
-            SandboxStdio::Piped => {
-                let (parent_read, child_write) = create_pipe_pair("stdout")?;
-                set_handle_inherit(child_write.raw(), true)?;
-                set_handle_inherit(parent_read.raw(), false)?;
-                let child_handle = child_write.raw();
-                owned.push(child_write);
-                parent.stdout = Some(parent_read);
-                child_handle
-            }
-            mode => stdio_handle(
-                matches!(mode, SandboxStdio::Inherit),
-                STD_OUTPUT_HANDLE,
-                false,
-                &mut owned,
-            )?,
-        };
-        let stderr = match options.stderr {
-            SandboxStdio::Piped => {
-                let (parent_read, child_write) = create_pipe_pair("stderr")?;
-                set_handle_inherit(child_write.raw(), true)?;
-                set_handle_inherit(parent_read.raw(), false)?;
-                let child_handle = child_write.raw();
-                owned.push(child_write);
-                parent.stderr = Some(parent_read);
-                child_handle
-            }
-            mode => stdio_handle(
-                matches!(mode, SandboxStdio::Inherit),
-                STD_ERROR_HANDLE,
-                false,
-                &mut owned,
-            )?,
-        };
-        Ok((
-            Self {
-                stdin,
-                stdout,
-                stderr,
-                _owned: owned,
+    let mut logger = Logger::new(Mode::Buffer);
+    // SDK pipe handles are briefly inheritable. Coordinate with DL's other
+    // native spawns so they cannot capture these process-private channels.
+    let creation = crate::process_spawn::creation_lock()?;
+    cancelled(&options)?;
+    let mut process = BaseContainerRunner::new()
+        .spawn(
+            &request,
+            &mut logger,
+            if inherited {
+                StdioMode::Inherit
+            } else {
+                StdioMode::Pipes
             },
-            parent,
-        ))
-    }
-}
-
-impl ParentPipeHandles {
-    fn into_async_files(
-        self,
-    ) -> (
-        Option<tokio::fs::File>,
-        Option<tokio::fs::File>,
-        Option<tokio::fs::File>,
-    ) {
-        (
-            owned_handle_to_async_file(self.stdin),
-            owned_handle_to_async_file(self.stdout),
-            owned_handle_to_async_file(self.stderr),
         )
+        .map_err(|error| io::Error::other(error.error_message))?;
+    drop(creation);
+    // Never publish SDK logs: they can contain command/environment secrets.
+    cancelled(&options)?; // SDK Drop kills the tree if startup was cancelled.
+    let (shutdown, stop) = watch::channel(());
+    let stdin = process.take_stdin().and_then(|mut writer| {
+        if options.stdin != SandboxStdio::Piped { return None; }
+        let (client, mut pump) = tokio::io::duplex(64 * 1024);
+        let mut stop = stop.clone();
+        tokio::spawn(async move {
+            let mut buffer = vec![0;8192];
+            loop {
+                let count = tokio::select! { _ = stop.changed() => break, result = pump.read(&mut buffer) => match result { Ok(0)|Err(_) => break, Ok(count) => count } };
+                // No idle blocking reader thread. A cancelled process closes its
+                // native pipe, releasing any currently blocked write as well.
+                let bytes = buffer[..count].to_vec();
+                match tokio::task::spawn_blocking(move || {
+                    io::Write::write_all(&mut writer,&bytes)?;
+                    io::Write::flush(&mut writer)?;
+                    Ok::<_,io::Error>(writer)
+                }).await {
+                    Ok(Ok(returned)) => writer = returned,
+                    _ => break,
+                }
+            }
+        });
+        Some(client)
+    });
+    let stdout = output_pipe(process.take_stdout(), options.stdout, false);
+    let stderr = output_pipe(process.take_stderr(), options.stderr, true);
+    Ok(WindowsSandboxAsyncChild {
+        process: Mutex::new(process),
+        stdin,
+        stdout,
+        stderr,
+        status: None,
+        shutdown,
+    })
+}
+
+impl Drop for WindowsSandboxAsyncChild {
+    fn drop(&mut self) {
+        let _ = self.process.get_mut().kill();
+        let _ = self.shutdown.send(());
     }
 }
 
-fn owned_handle_to_async_file(handle: Option<OwnedHandle>) -> Option<tokio::fs::File> {
-    let handle = handle?;
-    let raw = handle.into_raw();
-    Some(unsafe { tokio::fs::File::from_raw_handle(raw as RawHandle) })
-}
-
-fn startup_info(handles: &StartupHandles) -> STARTUPINFOW {
-    STARTUPINFOW {
-        cb: u32::try_from(std::mem::size_of::<STARTUPINFOW>())
-            .expect("startup information size fits in u32"),
-        dwFlags: STARTF_USESTDHANDLES,
-        hStdInput: handles.stdin,
-        hStdOutput: handles.stdout,
-        hStdError: handles.stderr,
-        ..Default::default()
-    }
-}
-
-fn stdio_handle(
-    inherit: bool,
-    standard_handle: u32,
-    read_access: bool,
-    owned: &mut Vec<OwnedHandle>,
-) -> io::Result<HANDLE> {
-    let handle = if inherit {
-        let inherited = unsafe { GetStdHandle(standard_handle) };
-        if is_invalid_handle(inherited) {
-            open_nul(read_access, owned)?
-        } else {
-            inherited
+fn output_pipe(
+    reader: Option<Box<dyn io::Read + Send>>,
+    mode: SandboxStdio,
+    stderr: bool,
+) -> Option<DuplexStream> {
+    let mut reader = reader?;
+    let (client, mut pump) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        loop {
+            let read = tokio::task::spawn_blocking(move || {
+                let mut buffer = vec![0; 8192];
+                let count = reader.read(&mut buffer)?;
+                buffer.truncate(count);
+                Ok::<_, io::Error>((reader, buffer))
+            });
+            // Taken output streams outlive the process handle. Terminating the
+            // SDK job closes native writers; pending bytes must still drain to
+            // the consumer instead of being cancelled with stdin.
+            let result = read.await;
+            let (returned, bytes) = match result {
+                Ok(Ok(result)) => result,
+                _ => break,
+            };
+            reader = returned;
+            if bytes.is_empty() {
+                break;
+            }
+            if mode == SandboxStdio::Piped {
+                if pump.write_all(&bytes).await.is_err() {
+                    break;
+                }
+            } else if mode == SandboxStdio::Inherit {
+                let result = tokio::task::spawn_blocking(move || {
+                    if stderr {
+                        io::Write::write_all(&mut io::stderr(), &bytes)
+                    } else {
+                        io::Write::write_all(&mut io::stdout(), &bytes)
+                    }
+                })
+                .await;
+                if !matches!(result, Ok(Ok(()))) {
+                    break;
+                }
+            }
         }
-    } else {
-        open_nul(read_access, owned)?
-    };
-    set_handle_inherit(handle, true)?;
-    Ok(handle)
+    });
+    (mode == SandboxStdio::Piped).then_some(client)
 }
 
-fn create_pipe_pair(label: &str) -> io::Result<(OwnedHandle, OwnedHandle)> {
-    let mut read: HANDLE = ptr::null_mut();
-    let mut write: HANDLE = ptr::null_mut();
-    let ok = unsafe { CreatePipe(&raw mut read, &raw mut write, ptr::null_mut(), 0) };
-    if ok == 0 {
-        return Err(last_os_error(&format!("CreatePipe({label}) failed")));
+fn unicode(path: &Path) -> io::Result<String> {
+    path.to_str()
+        .filter(|value| !value.contains('\0'))
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "MXC requires Unicode paths without NUL",
+            )
+        })
+}
+
+fn paths(paths: &[PathBuf]) -> io::Result<Vec<String>> {
+    policy_paths_with_resolved(paths)
+        .iter()
+        .map(|path| unicode(path))
+        .collect()
+}
+
+fn volumes() -> io::Result<Vec<PathBuf>> {
+    let drives = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
+    if drives == 0 {
+        return Err(io::Error::last_os_error());
     }
-    Ok((OwnedHandle(read), OwnedHandle(write)))
+    Ok((0..26)
+        .filter(|bit| drives & (1 << bit) != 0)
+        .map(|bit| PathBuf::from(format!("{}:\\", (b'A' + bit) as char)))
+        .collect())
 }
 
-fn set_handle_inherit(handle: HANDLE, inherit: bool) -> io::Result<()> {
-    let flags = if inherit { HANDLE_FLAG_INHERIT } else { 0 };
-    let ok = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags) };
-    if ok == 0 {
-        Err(last_os_error("SetHandleInformation failed"))
-    } else {
-        Ok(())
+fn expand_volumes(roots: Vec<String>) -> io::Result<Vec<String>> {
+    let mut result = Vec::new();
+    for root in roots {
+        let path = Path::new(&root);
+        if path.parent().is_none() {
+            let entries = match std::fs::read_dir(path) {
+                Ok(entries) => entries,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                    ) || matches!(error.raw_os_error(), Some(21 | 53 | 55 | 1201 | 1167)) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            // A volume grant covers only its root object in PSEC. Expand one
+            // level, never recursively enumerate the workspace.
+            for entry in entries {
+                let path = entry?.path();
+                if wxc_common::filesystem_object::compare_existing_filesystem_objects(&path, &path)
+                    == wxc_common::filesystem_object::ExistingObjectComparison::Same
+                {
+                    result.push(unicode(&path)?);
+                }
+            }
+        }
+        result.push(root);
     }
+    result.sort_by_key(|path| path.to_lowercase());
+    result.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    Ok(result)
 }
 
-fn open_nul(read_access: bool, owned: &mut Vec<OwnedHandle>) -> io::Result<HANDLE> {
-    let name = to_wide("NUL");
-    let access = if read_access {
-        FILE_GENERIC_READ
-    } else {
-        FILE_GENERIC_WRITE
+fn known_folder(folder: &windows::core::GUID) -> io::Result<PathBuf> {
+    use windows::Win32::{
+        System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize},
+        UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath},
     };
-    let handle = unsafe {
-        CreateFileW(
-            name.as_ptr(),
-            access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            ptr::null(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
-            ptr::null_mut(),
+    let status = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    if status.is_err() && status.0 != -2147417850 {
+        return Err(io::Error::other(format!(
+            "COM initialization failed: {status}"
+        )));
+    }
+    struct Com(bool);
+    impl Drop for Com {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe {
+                    CoUninitialize();
+                }
+            }
+        }
+    }
+    let _com = Com(status.is_ok());
+    let path =
+        unsafe { SHGetKnownFolderPath(folder, KF_FLAG_DEFAULT, None) }.map_err(io::Error::other)?;
+    let value = unsafe { path.to_string() }.map_err(io::Error::other);
+    unsafe {
+        CoTaskMemFree(Some(path.0.cast()));
+    }
+    Ok(PathBuf::from(value?))
+}
+
+fn platform_roots() -> io::Result<Vec<PathBuf>> {
+    use windows::Win32::UI::Shell::{
+        FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86,
+    };
+    let mut buffer = vec![0u16; 32768];
+    let length = unsafe {
+        windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW(
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
         )
-    };
-    if is_invalid_handle(handle) {
-        Err(last_os_error("CreateFileW(NUL) failed"))
-    } else {
-        owned.push(OwnedHandle(handle));
-        Ok(handle)
+    } as usize;
+    if length == 0 || length >= buffer.len() {
+        return Err(io::Error::last_os_error());
     }
+    let mut roots = vec![PathBuf::from(std::ffi::OsString::from_wide(
+        &buffer[..length],
+    ))];
+    for folder in [
+        FOLDERID_ProgramFiles,
+        FOLDERID_ProgramFilesX86,
+        FOLDERID_ProgramData,
+    ] {
+        roots.push(known_folder(&folder)?);
+    }
+    Ok(roots)
 }
 
-fn command_argv(program: &Path, args: Vec<String>) -> Vec<String> {
-    let mut command_line = Vec::with_capacity(args.len() + 1);
-    command_line.push(program.to_string_lossy().into_owned());
-    command_line.extend(args);
-    command_line
-}
-
-fn environment_block(policy: &RuntimeSandboxPolicy, explicit: &[(String, String)]) -> Vec<u16> {
-    let mut env = BTreeMap::<OsString, OsString>::new();
-    for (name, value) in std::env::vars_os() {
-        if os_env_name_is_protected(policy, &name) {
+fn build_request(
+    policy: &RuntimeSandboxPolicy,
+    program: &Path,
+    args: Vec<String>,
+    options: &SandboxProcessOptions,
+) -> io::Result<ExecutionRequest> {
+    let fs = &policy.filesystem;
+    let mut read = platform_roots()?;
+    read.extend(fs.readable_roots.clone());
+    let mut write = fs
+        .writable_roots
+        .iter()
+        .map(|root| root.root.clone())
+        .collect::<Vec<_>>();
+    let mut deny = fs.deny_read_paths.clone();
+    if let Some(scope) = &fs.private_delivery {
+        // Native programs cannot safely inherit the Files App's delivery exception.
+        deny.push(scope.root.clone());
+    }
+    if fs.full_disk_read || fs.full_disk_write {
+        read.extend(volumes()?);
+    }
+    if fs.full_disk_write {
+        write.extend(volumes()?);
+    }
+    let mut readonly = fs.deny_write_paths.clone();
+    readonly.extend(
+        fs.writable_roots
+            .iter()
+            .flat_map(|root| root.read_only_subpaths.clone()),
+    );
+    // A read-only restriction must never grant an otherwise unreadable subtree.
+    let carveouts = paths(&readonly)?;
+    for path in readonly {
+        if fs.is_path_readable(&path) {
+            read.push(path);
+        } else {
+            deny.push(path);
+        }
+    }
+    let mut container = ContainerPolicy {
+        capabilities: vec!["registryRead".into()],
+        readwrite_paths: expand_volumes(paths(&write)?)?,
+        readonly_paths: expand_volumes(paths(&read)?)?,
+        denied_paths: paths(&deny)?,
+        fallback: FallbackPolicy {
+            allow_dacl_mutation: false,
+        },
+        default_network_policy: NetworkPolicy::Allow,
+        allow_local_network: true,
+        network_egress: Some(NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        }),
+        network_ingress: Some(NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Allow,
+        }),
+        network_specified: true,
+        network_mode_specified: true,
+        ui: UiPolicy {
+            disable: false,
+            ..Default::default()
+        },
+        base_process_ui: BaseProcessUiConfig {
+            isolation: "desktop".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    container
+        .readwrite_paths
+        .retain(|path| !carveouts.iter().any(|r| r.eq_ignore_ascii_case(path)));
+    container.readonly_paths.retain(|path| {
+        !container
+            .readwrite_paths
+            .iter()
+            .any(|w| w.eq_ignore_ascii_case(path))
+    });
+    // Reconcile object aliases, including hardlinks, rather than trusting strings.
+    if let Some(normalized) = normalize_object_conflicts(&container, &mut Logger::new(Mode::Buffer))
+        .map_err(io::Error::other)?
+    {
+        container = normalized;
+    }
+    let mut env = BTreeMap::new();
+    for (key, value) in std::env::vars_os() {
+        let key = key
+            .into_string()
+            .map_err(|_| io::Error::other("MXC requires Unicode environment names"))?;
+        if policy.is_env_var_protected(&key) {
             continue;
         }
-        env.insert(name, value);
+        let value = value
+            .into_string()
+            .map_err(|_| io::Error::other("MXC requires Unicode environment values"))?;
+        env.insert(key.to_uppercase(), value);
     }
-
-    for (name, value) in explicit {
-        env.retain(|key, _| !key.to_string_lossy().eq_ignore_ascii_case(name));
-        env.insert(name.into(), value.into());
-    }
-    let mut block = Vec::new();
-    for (name, value) in env {
-        let mut item = to_wide(name);
-        item.pop();
-        item.push(u16::from(b'='));
-        let mut value_wide = to_wide(value);
-        value_wide.pop();
-        block.extend(item);
-        block.extend(value_wide);
-        block.push(0);
-    }
-    block.push(0);
-    block
-}
-
-fn os_env_name_is_protected(policy: &RuntimeSandboxPolicy, name: &OsStr) -> bool {
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    policy.is_env_var_protected(name)
-}
-
-fn argv_to_command_line(argv: &[String]) -> String {
-    argv.iter()
-        .map(|arg| quote_windows_arg(arg))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn quote_windows_arg(arg: &str) -> String {
-    let needs_quotes = arg.is_empty()
-        || arg
-            .chars()
-            .any(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '"'));
-    if !needs_quotes {
-        return arg.to_string();
-    }
-
-    let mut quoted = String::with_capacity(arg.len() + 2);
-    quoted.push('"');
-    let mut backslashes = 0;
-    for ch in arg.chars() {
-        match ch {
-            '\\' => backslashes += 1,
-            '"' => {
-                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
-                quoted.push('"');
-                backslashes = 0;
-            }
-            _ => {
-                if backslashes > 0 {
-                    quoted.push_str(&"\\".repeat(backslashes));
-                    backslashes = 0;
-                }
-                quoted.push(ch);
-            }
+    for (key, value) in &options.environment {
+        if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
+            return Err(io::Error::other("Invalid process environment"));
         }
+        env.insert(key.to_uppercase(), value.clone());
     }
-    if backslashes > 0 {
-        quoted.push_str(&"\\".repeat(backslashes * 2));
-    }
-    quoted.push('"');
-    quoted
-}
-
-fn to_wide<S: AsRef<OsStr>>(value: S) -> Vec<u16> {
-    let mut wide = value.as_ref().encode_wide().collect::<Vec<_>>();
-    wide.push(0);
-    wide
-}
-
-fn is_invalid_handle(handle: HANDLE) -> bool {
-    handle.is_null() || handle == INVALID_HANDLE_VALUE
-}
-
-fn last_os_error(context: &str) -> io::Error {
-    let err = unsafe { GetLastError() };
-    io::Error::other(format!(
-        "{context}: {}",
-        io::Error::from_raw_os_error(err.cast_signed())
-    ))
-}
-
-fn win32_error(code: u32, context: impl Into<String>) -> io::Error {
-    let message = format!(
-        "{}: {}",
-        context.into(),
-        io::Error::from_raw_os_error(code.cast_signed())
+    // SDK resolves native NT namespaces through these variables. Bind them to
+    // OS-known directories rather than caller-controlled environment values.
+    let windows = platform_roots()?.remove(0);
+    env.insert(
+        "LOCALAPPDATA".into(),
+        unicode(&known_folder(
+            &windows::Win32::UI::Shell::FOLDERID_LocalAppData,
+        )?)?,
     );
-    if code == ERROR_ACCESS_DENIED {
-        io::Error::new(io::ErrorKind::PermissionDenied, message)
-    } else {
-        io::Error::other(message)
+    env.insert("SYSTEMROOT".into(), unicode(&windows)?);
+    env.insert("WINDIR".into(), unicode(&windows)?);
+    env.insert(
+        "SYSTEMDRIVE".into(),
+        unicode(&windows)?.chars().take(2).collect(),
+    );
+    let cwd = options
+        .current_dir
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(std::env::current_dir)?;
+    if !cwd.is_absolute() {
+        return Err(io::Error::other(
+            "MXC requires an absolute working directory",
+        ));
     }
+    // PSEC's grants use the canonical object spelling. PowerShell otherwise
+    // retains an 8.3 cwd (common in Windows service/CI profiles) and rejects
+    // ordinary commands in an otherwise authorized workspace.
+    let cwd = dunce::canonicalize(cwd)?;
+    let mut argv = vec![unicode(program)?];
+    argv.extend(args);
+    Ok(ExecutionRequest {
+        script_code: cmdline_from_argv_for_context(&argv, CommandLineContext::WindowsCreateProcess)
+            .map_err(io::Error::other)?,
+        working_directory: unicode(&cwd)?,
+        env: env
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect(),
+        policy: container,
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]
@@ -1744,407 +507,390 @@ mod tests {
     use crate::sandbox::{FileSystemSandboxPolicy, StrongFilesystemSandboxMode, WritableRoot};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[test]
-    fn acl_preparation_waits_for_release_and_remains_cancellable_and_bounded() {
-        use std::{sync::mpsc, time::Duration};
-
-        for outcome in ["released", "cancelled", "timed_out"] {
-            let updates = parking_lot::Mutex::new(());
-            let held = updates.lock();
-            let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let options = SandboxProcessOptions {
-                spawn_cancelled: Some(cancelled.clone()),
-                ..Default::default()
-            };
-            let (started_tx, started_rx) = mpsc::channel();
-            let (finished_tx, finished_rx) = mpsc::channel();
-            std::thread::scope(|scope| {
-                scope.spawn(|| {
-                    started_tx.send(()).unwrap();
-                    let wait = if outcome == "timed_out" {
-                        Duration::from_millis(100)
-                    } else {
-                        Duration::from_secs(5)
-                    };
-                    let result = lock_acl_updates(&updates, &options, wait).map(|_| ());
-                    finished_tx.send(result).unwrap();
-                });
-                started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                let result = if outcome != "timed_out" {
-                    let pending = finished_rx.recv_timeout(Duration::from_millis(100));
-                    if pending.is_ok() {
-                        drop(held);
-                        panic!("ACL wait completed before release or cancellation: {pending:?}");
-                    }
-                    assert!(matches!(pending, Err(mpsc::RecvTimeoutError::Timeout)));
-                    if outcome == "cancelled" {
-                        cancelled.store(true, std::sync::atomic::Ordering::Release);
-                        let result = finished_rx.recv_timeout(Duration::from_secs(2));
-                        drop(held);
-                        result.unwrap()
-                    } else {
-                        drop(held);
-                        finished_rx.recv_timeout(Duration::from_secs(5)).unwrap()
-                    }
-                } else {
-                    let result = finished_rx.recv_timeout(Duration::from_secs(2));
-                    drop(held);
-                    result.unwrap()
-                };
-                match outcome {
-                    "released" => result.unwrap(),
-                    "cancelled" => {
-                        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted)
-                    }
-                    "timed_out" => assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut),
-                    _ => unreachable!(),
-                }
-            });
-        }
-    }
-
-    fn quote(path: &Path) -> String {
-        format!("'{}'", path.to_string_lossy().replace('\'', "''"))
-    }
-    fn acl_has_sid(path: &Path, wanted: &str) -> bool {
-        let Some(words) = capture_dacl(path).unwrap() else {
-            return false;
-        };
-        let acl = words.as_ptr().cast::<ACL>();
-        for index in 0..unsafe { (*acl).AceCount } {
-            let mut ace = ptr::null_mut();
-            assert_ne!(unsafe { GetAce(acl, index as u32, &mut ace) }, 0);
-            let bytes = ace.cast::<u8>();
-            if matches!(unsafe { *bytes }, 0 | 1)
-                && sid_text(unsafe { bytes.add(8) }.cast()).unwrap() == wanted
-            {
-                return true;
-            }
-        }
-        false
-    }
-    #[test]
-    fn package_acl_cleanup_preserves_concurrent_package_and_owner_changes() {
-        let temp = tempfile::tempdir().unwrap();
-        let first = AppContainerProfile::create().unwrap();
-        let second = AppContainerProfile::create().unwrap();
-        let first_id = sid_text(first.sid).unwrap();
-        let second_id = sid_text(second.sid).unwrap();
-        let mut a = vec![];
-        let mut b = vec![];
-        add_guarded_ace(
-            temp.path(),
-            first.sid,
-            WORKER_WRITE_ALLOW_MASK,
-            SET_ACCESS,
-            &mut a,
-            &mut HashSet::new(),
-        )
-        .unwrap();
-        add_guarded_ace(
-            temp.path(),
-            second.sid,
-            WORKER_READ_ALLOW_MASK,
-            SET_ACCESS,
-            &mut b,
-            &mut HashSet::new(),
-        )
-        .unwrap();
-        let world = LocalSid::from_string("S-1-1-0").unwrap();
-        add_explicit_aces(
-            temp.path(),
-            &[(world.as_ptr(), FILE_GENERIC_READ, SET_ACCESS)],
-        )
-        .unwrap();
-        restore_acl_guards(&a);
-        assert!(!acl_has_sid(temp.path(), &first_id));
-        assert!(acl_has_sid(temp.path(), &second_id));
-        assert!(acl_has_sid(temp.path(), "S-1-1-0"));
-        restore_acl_guards(&b);
-        assert!(!acl_has_sid(temp.path(), &first_id));
-        assert!(!acl_has_sid(temp.path(), &second_id));
-        assert!(acl_has_sid(temp.path(), "S-1-1-0"));
-    }
-    #[tokio::test]
-    async fn oversized_scope_fails_before_mutation_and_narrow_scope_preserves_private_denials() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        let private = temp.path().join("private");
-        std::fs::create_dir(&workspace).unwrap();
-        std::fs::create_dir(&private).unwrap();
-        let oversized = temp.path().join("oversized");
-        std::fs::create_dir(&oversized).unwrap();
-        for index in 0..4097 {
-            std::fs::write(oversized.join(index.to_string()), "fixture").unwrap();
-        }
-        let private_file = private.join("private.txt");
-        std::fs::write(&private_file, "private").unwrap();
-        let all_apps = LocalSid::from_string("S-1-15-2-1").unwrap();
-        add_explicit_aces(
-            &private_file,
-            &[(all_apps.as_ptr(), FILE_GENERIC_READ, SET_ACCESS)],
-        )
-        .unwrap();
-        let mut policy = RuntimeSandboxPolicy::disabled();
-        policy.strong_filesystem = StrongFilesystemSandboxMode::Required;
-        policy.filesystem.full_disk_read = false;
-        policy.filesystem.full_disk_write = false;
-        policy.filesystem.readable_roots = vec![temp.path().to_owned()];
-        policy.filesystem.writable_roots = vec![];
-        policy.filesystem.deny_read_paths = vec![private.clone()];
-        policy.filesystem.deny_write_paths = vec![private.clone()];
-        let before = capture_dacl(temp.path()).unwrap();
-        let options = SandboxProcessOptions::default();
-        let began = std::time::Instant::now();
-        assert!(
-            bounded_acl_policy_with_budget(
-                &policy,
-                &workspace.join("nonexistent.exe"),
-                &options,
-                4096,
-                std::time::Duration::from_secs(2)
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("too large")
-        );
-        assert!(began.elapsed() < std::time::Duration::from_secs(5));
-        assert_eq!(capture_dacl(temp.path()).unwrap(), before);
-        policy.filesystem.readable_roots = vec![workspace.clone()];
-        let candidate =
-            bounded_acl_policy(&policy, &workspace.join("nonexistent.exe"), &options).unwrap();
-        assert!(!candidate.filesystem.deny_read_paths.is_empty());
-        assert!(!candidate.filesystem.deny_write_paths.is_empty());
-        let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-        let spawn = policy.shell_spawn_spec(
-            powershell.to_str().unwrap(),
-            vec![
-                "-NoProfile".into(),
-                "-NonInteractive".into(),
-                "-Command".into(),
-                format!("$allowed=$false;try{{$null=[IO.File]::ReadAllText({});$allowed=$true}}catch{{}};if($allowed){{exit 61}};Write-Output 'bounded-native-ok'",quote(&private_file)),
-            ],
-        );
-        let child = spawn_restricted_async(
-            &policy,
-            &spawn.program,
-            spawn.args,
-            SandboxProcessOptions {
-                current_dir: Some(workspace),
-                stdin: SandboxStdio::Null,
-                stdout: SandboxStdio::Piped,
-                stderr: SandboxStdio::Piped,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let (status, out, err) = collect(child).await;
-        assert!(
-            status.success(),
-            "status={status}; stdout={out:?}; stderr={err:?}"
-        );
-        assert!(out.contains("bounded-native-ok"));
-    }
-
-    #[test]
-    fn cancelled_startup_never_creates_a_process_or_changes_acl() {
-        let temp = tempfile::tempdir().unwrap();
-        let before = capture_dacl(temp.path()).unwrap();
-        let mut policy = RuntimeSandboxPolicy::disabled();
-        policy.filesystem.readable_roots = vec![temp.path().to_owned()];
-        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        // Cancellation before any ACL mutation must not wait for an unrelated
-        // preparation or cleanup, even though the spawn error takes rollback.
-        let updates = ACL_UPDATES.lock();
-        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                let result = spawn_restricted_async(
-                    &policy,
-                    &PathBuf::from("nonexistent.exe"),
-                    vec![],
-                    SandboxProcessOptions {
-                        spawn_cancelled: Some(flag),
-                        ..Default::default()
-                    },
-                );
-                finished_tx.send(result.map(|_| ())).unwrap();
-            });
-            let result = finished_rx.recv_timeout(std::time::Duration::from_secs(2));
-            drop(updates);
-            let result = result.expect("cancelled startup waited for unrelated ACL updates");
-            assert!(matches!(result, Err(ref error) if error.kind() == io::ErrorKind::Interrupted));
-        });
-        assert_eq!(capture_dacl(temp.path()).unwrap(), before);
-    }
-    async fn collect(mut child: WindowsSandboxAsyncChild) -> (ExitStatus, String, String) {
-        let mut stdout = child.take_stdout();
-        let mut stderr = child.take_stderr();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
-        let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                child.start_kill().unwrap();
-                panic!("native sandbox probe timed out");
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        };
-        let mut out = String::new();
-        let mut err = String::new();
-        if let Some(stdout) = &mut stdout {
-            stdout.read_to_string(&mut out).await.unwrap();
-        }
-        if let Some(stderr) = &mut stderr {
-            stderr.read_to_string(&mut err).await.unwrap();
-        }
-        (status, out, err)
-    }
-    #[tokio::test]
-    async fn appcontainer_enforces_read_write_scope_and_future_private_namespace() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        let private = temp.path().join("private");
-        std::fs::create_dir(&workspace).unwrap();
-        std::fs::create_dir(&private).unwrap();
-        let inside = workspace.join("inside.txt");
-        let outside = temp.path().join("outside.txt");
-        let public = temp.path().join("world.txt");
-        let output = workspace.join("output.txt");
-        let credential = workspace.join("credential.json");
-        let outside_write = temp.path().join("outside-write.txt");
-        std::fs::write(&inside, "inside").unwrap();
-        std::fs::write(&outside, "outside").unwrap();
-        std::fs::write(&public, "world-readable").unwrap();
-        std::fs::write(&credential, "synthetic credential").unwrap();
-        let world = LocalSid::from_string("S-1-1-0").unwrap();
-        add_explicit_aces(&public, &[(world.as_ptr(), FILE_GENERIC_READ, SET_ACCESS)]).unwrap();
-        let mut policy = RuntimeSandboxPolicy {
+    fn policy(root: &Path) -> RuntimeSandboxPolicy {
+        RuntimeSandboxPolicy {
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: false,
                 full_disk_write: false,
-                readable_roots: vec![workspace.clone()],
+                readable_roots: vec![root.to_owned()],
                 writable_roots: vec![WritableRoot {
-                    root: workspace.clone(),
+                    root: root.to_owned(),
                     read_only_subpaths: vec![],
                 }],
-                deny_read_paths: vec![private.clone(), credential.clone()],
-                deny_write_paths: vec![private.clone(), credential.clone()],
+                deny_read_paths: vec![],
+                deny_write_paths: vec![],
                 private_delivery: None,
                 bound_roots: vec![],
             },
             protected_env_vars: vec![],
             strong_filesystem: StrongFilesystemSandboxMode::Required,
-        };
-        let powershell = PathBuf::from(
-            std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from("C:\\Windows")),
+        }
+    }
+    fn quote(path: &Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "''"))
+    }
+    fn launch(
+        policy: &RuntimeSandboxPolicy,
+        root: &Path,
+        script: String,
+        stdin: SandboxStdio,
+    ) -> WindowsSandboxAsyncChild {
+        let shell = platform_roots()
+            .unwrap()
+            .remove(0)
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        spawn_restricted_async(
+            policy,
+            &shell,
+            vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                script,
+            ],
+            SandboxProcessOptions {
+                current_dir: Some(root.to_owned()),
+                stdin,
+                stdout: SandboxStdio::Piped,
+                stderr: SandboxStdio::Piped,
+                ..Default::default()
+            },
         )
-        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        .unwrap()
+    }
+    async fn collect(mut child: WindowsSandboxAsyncChild) -> (ExitStatus, String, String) {
+        let mut out = child.take_stdout().unwrap();
+        let mut err = child.take_stderr().unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::try_join!(
+                async {
+                    let mut value = String::new();
+                    out.read_to_string(&mut value).await?;
+                    Ok::<_, io::Error>(value)
+                },
+                async {
+                    let mut value = String::new();
+                    err.read_to_string(&mut value).await?;
+                    Ok::<_, io::Error>(value)
+                },
+                async {
+                    loop {
+                        if let Some(status) = child.try_wait()? {
+                            return Ok::<_, io::Error>(status);
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
+            )
+        })
+        .await
+        .expect("MXC process timed out")
+        .unwrap();
+        (result.2, result.0, result.1)
+    }
+
+    #[test]
+    fn cancelled_startup_does_not_probe_or_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let result = spawn_restricted_async(
+            &policy(temp.path()),
+            Path::new("missing.exe"),
+            vec![],
+            SandboxProcessOptions {
+                spawn_cancelled: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                    true,
+                ))),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::Interrupted));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires native Windows MXC/PSEC with deny paths; run on a supported host"]
+    async fn mxc_enforces_scopes_and_future_denies_with_streaming_stdio() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        std::fs::create_dir(&root).unwrap();
+        let inside = root.join("inside.txt");
+        let outside = temp.path().join("outside.txt");
+        let secret = root.join("private.txt");
+        let readonly = root.join("readonly.txt");
+        let future = root.join("future").join("secret.txt");
+        let output = root.join("output.txt");
+        for (path, value) in [
+            (&inside, "inside"),
+            (&outside, "outside"),
+            (&secret, "secret"),
+            (&readonly, "fixed"),
+        ] {
+            std::fs::write(path, value).unwrap();
+        }
+        let before = [&root, &inside, &secret, &readonly].map(|path| dacl(path));
+        let mut policy = policy(&root);
+        policy.filesystem.deny_read_paths =
+            vec![secret.clone(), future.parent().unwrap().to_owned()];
+        policy.filesystem.deny_write_paths = policy.filesystem.deny_read_paths.clone();
+        policy.filesystem.writable_roots[0]
+            .read_only_subpaths
+            .push(readonly.clone());
         let script = format!(
-            "$ErrorActionPreference='Stop'; if([IO.File]::ReadAllText({}) -ne 'inside'){{exit 10}}; [IO.File]::WriteAllText({},'allowed'); foreach($p in @({},{})){{ $allowed=$false;try{{$null=[IO.File]::ReadAllText($p);$allowed=$true}}catch{{}};if($allowed){{exit 20}} }}; $allowed=$false;try{{[IO.File]::WriteAllText({},'forbidden');$allowed=$true}}catch{{}};if($allowed){{exit 30}}; [Console]::WriteLine('scope-ok')",
+            r#"$ErrorActionPreference='Stop'; if([IO.File]::ReadAllText({}) -ne 'inside'){{exit 10}}; [IO.File]::WriteAllText({},'persisted'); [Console]::WriteLine('ready'); $null=[Console]::ReadLine(); foreach($p in @({},{},{})){{$ok=$false;try{{$null=[IO.File]::ReadAllText($p);$ok=$true}}catch{{}};if($ok){{exit 20}}}}; $ok=$false;try{{[IO.File]::WriteAllText({},'bad');$ok=$true}}catch{{}};if($ok){{exit 30}}; for($i=0;$i -lt 6000;$i++){{[Console]::Out.Write('abcdefghij');[Console]::Error.Write('0123456789')}}"#,
             quote(&inside),
             quote(&output),
             quote(&outside),
-            quote(&public),
-            quote(&outside_write)
+            quote(&secret),
+            quote(&future),
+            quote(&readonly)
         );
-        let spawn = policy.shell_spawn_spec(
-            powershell.to_str().unwrap(),
-            vec![
-                "-NoProfile".into(),
-                "-NonInteractive".into(),
-                "-Command".into(),
-                script,
-            ],
+        let mut child = launch(&policy, &root, script, SandboxStdio::Piped);
+        // Data created by the host after policy installation must stay denied.
+        std::fs::create_dir(future.parent().unwrap()).unwrap();
+        std::fs::write(&future, "new secret").unwrap();
+        let mut stdin = child.take_stdin().unwrap();
+        stdin.write_all(b"go\n").await.unwrap();
+        drop(stdin);
+        let (status, out, err) = collect(child).await;
+        assert!(status.success(), "{status}; stdout={out}; stderr={err}");
+        assert_eq!(out.trim_end().len(), 60007); // ready + newline + 60k bytes
+        assert_eq!(err.len(), 60000);
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), "persisted");
+        assert_eq!(std::fs::read_to_string(&readonly).unwrap(), "fixed");
+        assert_eq!(std::fs::read_to_string(&future).unwrap(), "new secret");
+        assert_eq!(
+            [&root, &inside, &secret, &readonly].map(|path| dacl(path)),
+            before,
+            "sandbox changed host DACLs"
         );
-        let child = spawn_restricted_async(
+    }
+    #[tokio::test]
+    #[ignore = "requires native Windows MXC/PSEC with deny paths; run on a supported host"]
+    async fn dropping_mxc_kills_descendants_with_open_pipes() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let shell = platform_roots()
+            .unwrap()
+            .remove(0)
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let script = format!(
+            "$p=Start-Process -FilePath {} -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 300' -WindowStyle Hidden -PassThru; [Console]::WriteLine($p.Id); $null=[Console]::ReadLine()",
+            quote(&shell)
+        );
+        let mut child = launch(
+            &policy(temp.path()),
+            temp.path(),
+            script,
+            SandboxStdio::Piped,
+        );
+        let stdin = child.take_stdin().unwrap();
+        let mut output = BufReader::new(child.take_stdout().unwrap());
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            output.read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let pid = line.trim().parse::<u32>().expect("descendant PID");
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        assert!(!handle.is_null());
+        drop(child);
+        let result = unsafe { WaitForSingleObject(handle, 5000) };
+        unsafe {
+            CloseHandle(handle);
+        }
+        assert_eq!(result, WAIT_OBJECT_0, "sandbox descendant survived Drop");
+        // Retained client pipes must not leave blocking I/O threads alive after
+        // process shutdown, including an idle stdin and an undrained stdout.
+        drop(stdin);
+        drop(output);
+    }
+
+    #[tokio::test]
+    async fn auto_mode_never_downgrades_isolation() {
+        let temp = tempfile::tempdir().unwrap();
+        let supported = BaseContainerRunner::is_process_security_environment_usable();
+        let mut policy = policy(temp.path());
+        policy.strong_filesystem = StrongFilesystemSandboxMode::Auto;
+        let result = crate::sandbox::SandboxAsyncChild::spawn_shell(
             &policy,
-            &spawn.program,
-            spawn.args,
+            "cmd.exe",
+            vec!["/d".into(), "/c".into(), "echo isolated".into()],
             SandboxProcessOptions {
-                current_dir: Some(workspace.clone()),
-                environment: Vec::new(),
+                current_dir: Some(temp.path().to_owned()),
                 stdin: SandboxStdio::Null,
                 stdout: SandboxStdio::Piped,
-                stderr: SandboxStdio::Piped,
-                spawn_cancelled: None,
+                stderr: SandboxStdio::Null,
+                ..Default::default()
             },
-        )
-        .unwrap();
-        let first_sid = sid_text(child.child.profile.as_ref().unwrap().sid).unwrap();
-        let (status, out, err) = collect(child).await;
+        );
+        if supported {
+            let mut child = result.unwrap();
+            let mut out = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                child.take_stdout().unwrap().read_to_string(&mut out),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(out.trim(), "isolated");
+            let status = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Some(status) = child.try_wait().unwrap() {
+                        break status;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(status.success());
+        } else {
+            assert!(matches!(result,Err(error) if error.kind()==io::ErrorKind::Unsupported));
+        }
+    }
+
+    #[test]
+    #[ignore = "probe for a CI runner provisioned with native MXC/PSEC"]
+    fn require_native_mxc() {
         assert!(
-            status.success(),
-            "strict native probe {status}; stdout={out:?},stderr={err:?}"
+            BaseContainerRunner::is_process_security_environment_usable(),
+            "This runner needs Windows with usable MXC/PSEC"
         );
-        assert!(out.contains("scope-ok"));
-        assert_eq!(std::fs::read_to_string(&output).unwrap(), "allowed");
-        assert!(!outside_write.exists());
-        assert!(!acl_has_sid(&workspace, &first_sid));
-        assert!(!acl_has_sid(&private, &first_sid));
-        // A broader approved read root must still deny a new sibling created
-        // after the persistent native process has already started.
-        policy.filesystem.readable_roots = vec![temp.path().to_path_buf()];
-        let future = private.join("future-actor/upload.txt");
-        let existing_private = private.join("existing.txt");
-        std::fs::write(&existing_private, "existing private").unwrap();
-        let script = format!(
-            "$ErrorActionPreference='Stop'; if([IO.File]::ReadAllText({}) -ne 'inside'){{exit 37}}; $allowed=$false;try{{$null=[IO.File]::ReadAllText({});$allowed=$true}}catch{{}};if($allowed){{exit 38}}; $allowed=$false;try{{$null=[IO.File]::ReadAllText({});$allowed=$true}}catch{{}};if($allowed){{exit 39}};[Console]::WriteLine('ready'); $null=[Console]::ReadLine(); $allowed=$false;try{{$null=[IO.File]::ReadAllText({});$allowed=$true}}catch{{}};if($allowed){{exit 40}};[Console]::WriteLine('future-denied')",
-            quote(&inside),
-            quote(&credential),
-            quote(&existing_private),
-            quote(&future)
+        assert!(
+            SecurityEnvironmentApi::load()
+                .unwrap()
+                .supports_deny_paths()
+                .unwrap(),
+            "Native deny paths are required"
         );
-        let spawn = policy.shell_spawn_spec(
-            powershell.to_str().unwrap(),
-            vec![
-                "-NoProfile".into(),
-                "-NonInteractive".into(),
-                "-Command".into(),
-                script,
-            ],
-        );
-        let mut child = spawn_restricted_async(
-            &policy,
-            &spawn.program,
-            spawn.args,
-            SandboxProcessOptions {
-                current_dir: Some(workspace),
-                environment: Vec::new(),
-                stdin: SandboxStdio::Piped,
-                stdout: SandboxStdio::Piped,
-                stderr: SandboxStdio::Piped,
-                spawn_cancelled: None,
+    }
+
+    fn dacl(path: &Path) -> Vec<u8> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::{
+                Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
+                DACL_SECURITY_INFORMATION,
             },
-        )
-        .unwrap();
-        std::fs::create_dir(future.parent().unwrap()).unwrap();
-        std::fs::write(&future, "future private data").unwrap();
-        let second_sid = sid_text(child.child.profile.as_ref().unwrap().sid).unwrap();
+        };
+        let name = path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let mut descriptor = std::ptr::null_mut();
+        let mut acl = std::ptr::null_mut();
+        let result = unsafe {
+            GetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut acl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        assert_eq!(result, 0);
+        let bytes = if acl.is_null() {
+            vec![]
+        } else {
+            unsafe {
+                std::slice::from_raw_parts(acl.cast::<u8>(), (*acl).AclSize as usize).to_vec()
+            }
+        };
+        unsafe {
+            LocalFree(descriptor);
+        }
+        bytes
+    }
+    #[tokio::test]
+    #[ignore = "requires native Windows MXC/PSEC with deny paths; run on a supported host"]
+    async fn mxc_socket_cannot_claim_local_owner_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let script = format!(
+            "$ErrorActionPreference='Stop'; $client=[Net.Sockets.TcpClient]::new('127.0.0.1',{}); $null=[Console]::ReadLine(); $client.Dispose()",
+            address.port()
+        );
+        let mut child = launch(
+            &policy(temp.path()),
+            temp.path(),
+            script,
+            SandboxStdio::Piped,
+        );
+        let (_socket, peer) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(
+            !crate::accounts::local_owner_connection(peer, Some(address)),
+            "sandboxed App claimed the OS-owner bootstrap authority"
+        );
         child
             .take_stdin()
             .unwrap()
-            .write_all(b"go\n")
+            .write_all(b"done\n")
             .await
             .unwrap();
         let (status, out, err) = collect(child).await;
-        assert!(
-            status.success(),
-            "future native probe {status}; stdout={out:?},stderr={err:?}"
+        assert!(status.success(), "{status};out={out};err={err}");
+    }
+    #[test]
+    fn unavailable_volumes_do_not_invalidate_an_available_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let unavailable = format!(r"\\?\Volume{{{}}}\", uuid::Uuid::new_v4());
+        let root = temp.path().to_str().unwrap().to_owned();
+        let expanded = expand_volumes(vec![root.clone(), unavailable.clone()]).unwrap();
+        assert!(expanded.contains(&root));
+        assert!(!expanded.contains(&unavailable));
+    }
+    #[tokio::test]
+    #[ignore = "requires native Windows MXC/PSEC with deny paths; run on a supported host"]
+    async fn exited_process_output_survives_dropping_the_process_handle() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut child = launch(
+            &policy(temp.path()),
+            temp.path(),
+            "[Console]::Out.Write(('x' * 65537))".into(),
+            SandboxStdio::Null,
         );
-        assert!(out.contains("future-denied"));
-        assert!(!acl_has_sid(&private, &second_sid));
-        assert!(!acl_has_sid(&credential, &second_sid));
-        assert!(!acl_has_sid(future.parent().unwrap(), &second_sid));
-        assert_eq!(
-            std::fs::read_to_string(&credential).unwrap(),
-            "synthetic credential"
-        );
-        assert_eq!(
-            std::fs::read_to_string(future).unwrap(),
-            "future private data"
-        );
+        let mut stdout = child.take_stdout().unwrap();
+        // Leave the consumer idle until exit. The last output chunk must remain
+        // drainable even while the bounded bridge is applying backpressure.
+        let status = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("root could not finish its buffered output");
+        assert!(status.success());
+        drop(child);
+        tokio::task::yield_now().await;
+        let mut bytes = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stdout.read_to_end(&mut bytes),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(bytes.len(), 65537);
+        assert!(bytes.iter().all(|byte| *byte == b'x'));
     }
 }

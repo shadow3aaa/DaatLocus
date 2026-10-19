@@ -20,6 +20,12 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
+/// The OS-owner maintenance channel is private infrastructure, not an App scope.
+#[cfg(unix)]
+pub(crate) fn unix_control_directory() -> PathBuf {
+    PathBuf::from("/tmp").join(format!("dl-control-{}", unsafe { libc::geteuid() }))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WritableRoot {
     pub root: PathBuf,
@@ -109,6 +115,10 @@ pub struct SandboxAsyncChild {
 }
 
 enum SandboxAsyncChildInner {
+    #[cfg(target_os = "macos")]
+    Macos(macos::MacosSandboxAsyncChild),
+    #[cfg(target_os = "linux")]
+    Linux(linux::LinuxSandboxAsyncChild),
     Tokio(tokio::process::Child),
     #[cfg(target_os = "windows")]
     Windows(windows::WindowsSandboxAsyncChild),
@@ -121,7 +131,7 @@ pub struct SandboxChildStdin {
 enum SandboxChildStdinInner {
     Tokio(tokio::process::ChildStdin),
     #[cfg(target_os = "windows")]
-    File(tokio::fs::File),
+    Pipe(tokio::io::DuplexStream),
 }
 
 pub struct SandboxChildStdout {
@@ -131,7 +141,7 @@ pub struct SandboxChildStdout {
 enum SandboxChildStdoutInner {
     Tokio(tokio::process::ChildStdout),
     #[cfg(target_os = "windows")]
-    File(tokio::fs::File),
+    Pipe(tokio::io::DuplexStream),
 }
 
 pub struct SandboxChildStderr {
@@ -141,7 +151,7 @@ pub struct SandboxChildStderr {
 enum SandboxChildStderrInner {
     Tokio(tokio::process::ChildStderr),
     #[cfg(target_os = "windows")]
-    File(tokio::fs::File),
+    Pipe(tokio::io::DuplexStream),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -180,31 +190,35 @@ impl SandboxAsyncChild {
                 && filesystem_policy_requires_backend(&policy.filesystem)
             {
                 let spawn_spec = policy.shell_spawn_spec(program, args.clone());
-                match windows::spawn_restricted_async(
+                let inner = windows::spawn_restricted_async(
                     policy,
                     &spawn_spec.program,
                     spawn_spec.args,
-                    options.clone(),
-                ) {
-                    Ok(inner) => {
-                        return Ok(Self {
-                            inner: SandboxAsyncChildInner::Windows(inner),
-                        });
-                    }
-                    Err(err)
-                        if policy.strong_filesystem == StrongFilesystemSandboxMode::Required =>
-                    {
-                        return Err(err);
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            "Windows strong filesystem sandbox requested for Terminal in auto mode, but restricted spawn failed: {err}"
-                        );
-                    }
-                }
+                    options,
+                )?;
+                return Ok(Self {
+                    inner: SandboxAsyncChildInner::Windows(inner),
+                });
             }
         }
 
+        #[cfg(target_os = "linux")]
+        if policy.strong_filesystem != StrongFilesystemSandboxMode::Off
+            && linux::requires_backend(&policy.filesystem)
+        {
+            let inner = linux::spawn_restricted_async(policy, Path::new(program), args, options)?;
+            return Ok(Self {
+                inner: SandboxAsyncChildInner::Linux(inner),
+            });
+        }
+        #[cfg(target_os = "macos")]
+        if policy.strong_filesystem != StrongFilesystemSandboxMode::Off {
+            let inner =
+                macos::spawn_restricted_async(policy, PathBuf::from(program), args, options)?;
+            return Ok(Self {
+                inner: SandboxAsyncChildInner::Macos(inner),
+            });
+        }
         Self::spawn_shell_unwrapped(policy, program, args, options)
     }
 
@@ -243,40 +257,64 @@ impl SandboxAsyncChild {
 
     pub fn take_stdin(&mut self) -> Option<SandboxChildStdin> {
         match &mut self.inner {
+            #[cfg(target_os = "macos")]
+            SandboxAsyncChildInner::Macos(child) => child.take_stdin().map(SandboxChildStdin::from),
+            #[cfg(target_os = "linux")]
+            SandboxAsyncChildInner::Linux(child) => child.take_stdin().map(SandboxChildStdin::from),
             SandboxAsyncChildInner::Tokio(child) => child.stdin.take().map(SandboxChildStdin::from),
             #[cfg(target_os = "windows")]
             SandboxAsyncChildInner::Windows(child) => {
-                child.take_stdin().map(SandboxChildStdin::from_file)
+                child.take_stdin().map(SandboxChildStdin::from_pipe)
             }
         }
     }
 
     pub fn take_stdout(&mut self) -> Option<SandboxChildStdout> {
         match &mut self.inner {
+            #[cfg(target_os = "macos")]
+            SandboxAsyncChildInner::Macos(child) => {
+                child.take_stdout().map(SandboxChildStdout::from)
+            }
+            #[cfg(target_os = "linux")]
+            SandboxAsyncChildInner::Linux(child) => {
+                child.take_stdout().map(SandboxChildStdout::from)
+            }
             SandboxAsyncChildInner::Tokio(child) => {
                 child.stdout.take().map(SandboxChildStdout::from)
             }
             #[cfg(target_os = "windows")]
             SandboxAsyncChildInner::Windows(child) => {
-                child.take_stdout().map(SandboxChildStdout::from_file)
+                child.take_stdout().map(SandboxChildStdout::from_pipe)
             }
         }
     }
 
     pub fn take_stderr(&mut self) -> Option<SandboxChildStderr> {
         match &mut self.inner {
+            #[cfg(target_os = "macos")]
+            SandboxAsyncChildInner::Macos(child) => {
+                child.take_stderr().map(SandboxChildStderr::from)
+            }
+            #[cfg(target_os = "linux")]
+            SandboxAsyncChildInner::Linux(child) => {
+                child.take_stderr().map(SandboxChildStderr::from)
+            }
             SandboxAsyncChildInner::Tokio(child) => {
                 child.stderr.take().map(SandboxChildStderr::from)
             }
             #[cfg(target_os = "windows")]
             SandboxAsyncChildInner::Windows(child) => {
-                child.take_stderr().map(SandboxChildStderr::from_file)
+                child.take_stderr().map(SandboxChildStderr::from_pipe)
             }
         }
     }
 
     pub fn start_kill(&mut self) -> std::io::Result<()> {
         match &mut self.inner {
+            #[cfg(target_os = "macos")]
+            SandboxAsyncChildInner::Macos(child) => child.start_kill(),
+            #[cfg(target_os = "linux")]
+            SandboxAsyncChildInner::Linux(child) => child.start_kill(),
             SandboxAsyncChildInner::Tokio(child) => child.start_kill(),
             #[cfg(target_os = "windows")]
             SandboxAsyncChildInner::Windows(child) => child.start_kill(),
@@ -285,6 +323,10 @@ impl SandboxAsyncChild {
 
     pub fn id(&self) -> Option<u32> {
         match &self.inner {
+            #[cfg(target_os = "macos")]
+            SandboxAsyncChildInner::Macos(child) => child.id(),
+            #[cfg(target_os = "linux")]
+            SandboxAsyncChildInner::Linux(child) => child.id(),
             SandboxAsyncChildInner::Tokio(child) => child.id(),
             #[cfg(target_os = "windows")]
             SandboxAsyncChildInner::Windows(child) => Some(child.id()),
@@ -293,10 +335,20 @@ impl SandboxAsyncChild {
 
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         match &mut self.inner {
+            #[cfg(target_os = "macos")]
+            SandboxAsyncChildInner::Macos(child) => child.try_wait(),
+            #[cfg(target_os = "linux")]
+            SandboxAsyncChildInner::Linux(child) => child.try_wait(),
             SandboxAsyncChildInner::Tokio(child) => child.try_wait(),
             #[cfg(target_os = "windows")]
             SandboxAsyncChildInner::Windows(child) => child.try_wait(),
         }
+    }
+}
+
+impl Drop for SandboxAsyncChild {
+    fn drop(&mut self) {
+        let _ = self.start_kill();
     }
 }
 
@@ -326,27 +378,27 @@ impl From<tokio::process::ChildStderr> for SandboxChildStderr {
 
 impl SandboxChildStdin {
     #[cfg(target_os = "windows")]
-    const fn from_file(file: tokio::fs::File) -> Self {
+    const fn from_pipe(file: tokio::io::DuplexStream) -> Self {
         Self {
-            inner: SandboxChildStdinInner::File(file),
+            inner: SandboxChildStdinInner::Pipe(file),
         }
     }
 }
 
 impl SandboxChildStdout {
     #[cfg(target_os = "windows")]
-    const fn from_file(file: tokio::fs::File) -> Self {
+    const fn from_pipe(file: tokio::io::DuplexStream) -> Self {
         Self {
-            inner: SandboxChildStdoutInner::File(file),
+            inner: SandboxChildStdoutInner::Pipe(file),
         }
     }
 }
 
 impl SandboxChildStderr {
     #[cfg(target_os = "windows")]
-    const fn from_file(file: tokio::fs::File) -> Self {
+    const fn from_pipe(file: tokio::io::DuplexStream) -> Self {
         Self {
-            inner: SandboxChildStderrInner::File(file),
+            inner: SandboxChildStderrInner::Pipe(file),
         }
     }
 }
@@ -360,7 +412,7 @@ impl AsyncWrite for SandboxChildStdin {
         match &mut self.inner {
             SandboxChildStdinInner::Tokio(stdin) => Pin::new(stdin).poll_write(cx, buf),
             #[cfg(target_os = "windows")]
-            SandboxChildStdinInner::File(file) => Pin::new(file).poll_write(cx, buf),
+            SandboxChildStdinInner::Pipe(file) => Pin::new(file).poll_write(cx, buf),
         }
     }
 
@@ -368,7 +420,7 @@ impl AsyncWrite for SandboxChildStdin {
         match &mut self.inner {
             SandboxChildStdinInner::Tokio(stdin) => Pin::new(stdin).poll_flush(cx),
             #[cfg(target_os = "windows")]
-            SandboxChildStdinInner::File(file) => Pin::new(file).poll_flush(cx),
+            SandboxChildStdinInner::Pipe(file) => Pin::new(file).poll_flush(cx),
         }
     }
 
@@ -376,7 +428,7 @@ impl AsyncWrite for SandboxChildStdin {
         match &mut self.inner {
             SandboxChildStdinInner::Tokio(stdin) => Pin::new(stdin).poll_shutdown(cx),
             #[cfg(target_os = "windows")]
-            SandboxChildStdinInner::File(file) => Pin::new(file).poll_shutdown(cx),
+            SandboxChildStdinInner::Pipe(file) => Pin::new(file).poll_shutdown(cx),
         }
     }
 }
@@ -390,7 +442,7 @@ impl AsyncRead for SandboxChildStdout {
         match &mut self.inner {
             SandboxChildStdoutInner::Tokio(stdout) => Pin::new(stdout).poll_read(cx, buf),
             #[cfg(target_os = "windows")]
-            SandboxChildStdoutInner::File(file) => Pin::new(file).poll_read(cx, buf),
+            SandboxChildStdoutInner::Pipe(file) => Pin::new(file).poll_read(cx, buf),
         }
     }
 }
@@ -404,7 +456,7 @@ impl AsyncRead for SandboxChildStderr {
         match &mut self.inner {
             SandboxChildStderrInner::Tokio(stderr) => Pin::new(stderr).poll_read(cx, buf),
             #[cfg(target_os = "windows")]
-            SandboxChildStderrInner::File(file) => Pin::new(file).poll_read(cx, buf),
+            SandboxChildStderrInner::Pipe(file) => Pin::new(file).poll_read(cx, buf),
         }
     }
 }
@@ -537,6 +589,57 @@ fn with_path_resolution_cache<T>(check: impl FnOnce() -> T) -> T {
         });
     }
     result
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn validate_native_policy_paths(policy: &FileSystemSandboxPolicy) -> Result<()> {
+    for path in policy
+        .readable_roots
+        .iter()
+        .chain(policy.writable_roots.iter().map(|root| &root.root))
+        .chain(policy.deny_read_paths.iter())
+        .chain(policy.deny_write_paths.iter())
+        .chain(policy.private_delivery.iter().map(|scope| &scope.root))
+        .chain(
+            policy
+                .writable_roots
+                .iter()
+                .flat_map(|root| &root.read_only_subpaths),
+        )
+    {
+        if !path.is_absolute() || path.to_str().is_none() {
+            return Err(miette!(
+                "Native sandbox requires absolute Unicode policy paths"
+            ));
+        }
+    }
+    // A protected spelling cannot be rebound by replacing a writable symlink.
+    for path in policy
+        .deny_read_paths
+        .iter()
+        .chain(&policy.deny_write_paths)
+        .chain(policy.private_delivery.iter().map(|scope| &scope.root))
+        .chain(
+            policy
+                .writable_roots
+                .iter()
+                .flat_map(|root| &root.read_only_subpaths),
+        )
+    {
+        for ancestor in path.ancestors() {
+            if std::fs::symlink_metadata(ancestor).is_ok_and(|md| md.is_symlink())
+                && ancestor
+                    .parent()
+                    .is_some_and(|parent| policy.is_path_writable(parent))
+            {
+                return Err(miette!(
+                    "Cannot protect a path through a writable symlink: {}",
+                    ancestor.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn policy_paths_with_resolved(paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -823,12 +926,13 @@ impl RuntimeSandboxPolicy {
         #[cfg(not(target_os = "linux"))]
         {
             match self.strong_filesystem {
-                StrongFilesystemSandboxMode::Required => Err(miette!(
-                    "strong filesystem sandbox is not supported on this platform"
-                )),
-                StrongFilesystemSandboxMode::Auto | StrongFilesystemSandboxMode::Off => {
+                StrongFilesystemSandboxMode::Auto if self.filesystem.is_unrestricted() => {
                     Ok(SandboxSpawnSpec { program, args })
                 }
+                StrongFilesystemSandboxMode::Required | StrongFilesystemSandboxMode::Auto => Err(
+                    miette!("strong filesystem sandbox is not supported on this platform"),
+                ),
+                StrongFilesystemSandboxMode::Off => Ok(SandboxSpawnSpec { program, args }),
             }
         }
     }
@@ -1080,6 +1184,10 @@ mod tests {
     #[cfg_attr(
         target_os = "linux",
         ignore = "requires bwrap and user namespace support"
+    )]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "requires native Windows MXC/PSEC; run on a supported host"
     )]
     async fn strong_backend_denies_protected_runtime_paths() {
         use tokio::io::AsyncReadExt;

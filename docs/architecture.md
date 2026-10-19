@@ -660,16 +660,33 @@ App 指纹绑定命名空间、审查标准修订和有意义的目标/参数；
 
 文件操作在实际打开目标时验证策略，不依赖提前 canonicalize 后的字符串检查；
 写入用 SHA256 版本校验。受限原生进程隔离不可用时必须拒绝，不能退回宿主执行。
-Linux bwrap 在全部授权绑定挂载之后创建私有 `/dev` 和 PID namespace 对应的 `/proc`，
-再应用只读例外与拒绝规则，避免可写 `/` 或重叠授权覆盖虚拟文件系统与只读例外。
-随后建立全部拒读目录的 tmpfs 和文件遮罩，再将需要禁写的每个目录
-遮罩逐一 remount 为只读；父挂载只读不能替代子 tmpfs 的禁写，也不能提前阻止
-嵌套挂载点创建。Windows ACL 与 macOS Seatbelt 保留对应的父子路径拒绝规则。
-Windows Terminal 在后台准备 AppContainer 权限，保留所有显式私有路径拒绝规则，并封闭私有文件的通用应用容器读取授权；
-创建进程前重新检查启动取消。并发 ACL 准备在后台串行等待至多 5 秒，等待可取消；
-没有权限变更的失败路径直接返回，不等待 ACL 回滚锁。修改 ACL 前先进行至多 32768 项、5 秒的范围检查；
-过宽或含重解析点的范围返回错误，模型改用有界 Files 操作或缩小终端目录，
-不得把沙箱准备失败降级为宿主执行。Chat 兼容流收到 finish_reason 后只短暂收取尾部用量，
+Windows 原生进程使用微软 MXC SDK 的 PSEC 后端，启动前探测实际可用性及 deny-path
+能力；无宿主 ACL 修改、递归文件扫描、AppContainer ACL 兼容后端或宿主执行回退。
+授权目录直接映射为内核读写根，只读例外和私有拒绝路径独立保留；卷根仅枚举第一层
+以适配 PSEC 的卷根语义，不遍历目录树。已批准根的绑定检查仍然生效。系统运行目录
+来自 Windows API，工作目录规范化以兼容 8.3 别名；过滤环境凭据，并将 SDK 依赖的系统目录变量绑定到 OS 查询结果。
+PSEC 保留 AppContainer token 身份，现有本机 Owner/维护通道继续拒绝沙箱进程。
+SDK 持有 Job 与隔离策略直到进程树结束；有界异步管道支持 Terminal/MCP 的流式收发，
+进程句柄释放后，已产生且尚未读取的输出仍可排空。
+Linux 使用 bwrap 的用户、PID、IPC、UTS namespace、能力清理和禁止嵌套 user namespace。
+有限读取策略包含 Shell、动态库及最小系统配置，并在私有 namespace 提供 `/tmp`。所有授权绑定挂载之后创建私有
+`/dev` 和对应 PID namespace 的 `/proc`，再应用只读例外与拒绝规则；祖先拒读遮罩
+直接覆盖后代，不再重开嵌套路径。bwrap 在完成隔离后加载 seccomp；禁止 io_uring、
+AF_VSOCK、按句柄打开文件及其他绕过隔离的内核接口，保留普通 IP 网络。
+不存在的保护路径使用第一个缺失分量的空挂载点，不默许将来创建；只处理策略边界，
+不扫描工作区。挂载点在同服务的并发沙箱间共享，直到最后一个 PID namespace 结束
+才按 inode 检查清理；宿主写入的内容予以保留。跨服务占用冲突明确拒绝。
+Linux 本机 HTTP 初始化权限同时核对 socket inode 所属进程的 user namespace，
+不能将隔离进程的相同 UID 当成 OS-owner。维护 Unix socket 目录对所有 Actor 文件授权
+均为私有路径；macOS 额外显式禁止连接此目录中的 socket，即使模型获批宽泛文件根。
+启动门闩在 pidfd 取得后释放，取消先终止命名空间；Linux 需要支持 pidfd/openat2 的
+内核和支持所用参数的 bwrap，不满足时拒绝运行。可写符号链接上的保护路径拒绝启动。
+macOS 使用参数化 Seatbelt 策略，路径经 `-D` 传递，不插入 SBPL 文本；系统运行、TLS
+及受限系统服务基线参考 Codex。拒绝规则覆盖 literal 和 subpath、缺失路径、祖先
+目录改名与私有 Unix socket，并封闭只读描述符上的危险 fcntl。子进程继承策略，
+取消及根进程退出时清理进程组；Seatbelt 策略不依赖父进程存活。
+原生沙箱不可用时，Auto 和 Required 都不能将受限策略降级为宿主执行。
+Chat 兼容流收到 finish_reason 后只短暂收取尾部用量，
 不依赖 [DONE] 或连接关闭才交回执行权。重连活动视图从 tool_started 恢复未完成调用，
 进入工具阶段后不再把前一段推理标为正在思考。
 只读 Browser 使用有界 HTTP GET，验证 DNS、重定向与地址目标，不运行 Chrome /

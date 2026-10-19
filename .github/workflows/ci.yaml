@@ -50,12 +50,33 @@ jobs:
       - name: Check required Linux native sandbox
         if: runner.os == 'Linux'
         run: |
-          cargo test --locked -p daat-locus --lib sandbox::tests::strong_backend_denies_protected_runtime_paths -- --ignored --exact
-          cargo test --locked -p daat-locus --lib sandbox::linux::tests::writable_root_preserves_private_devices_and_pid_namespace -- --ignored --exact
+          cargo test --locked -p daat-locus --lib sandbox:: -- --include-ignored --test-threads=4
+      - name: Check required macOS private control isolation
+        if: runner.os == 'macOS'
+        run: cargo test --locked -p daat-locus --lib sandbox::macos::tests::owner_control_socket_is_denied_even_with_broad_filesystem_grants -- --ignored --exact
       - name: Check Windows symlink escape protection
         if: runner.os == 'Windows'
         run: cargo test --locked -p daat-locus --lib file_io::tests::symlink_escape_is_denied -- --ignored --exact
       - run: cargo test --locked -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-macros -p daat-locus-virtual-workspace -p xtask
+  windows-mxc:
+    # The public Windows images may not expose PSEC. A provisioned runner is
+    # required; skipped means unavailable, never a positive isolation result.
+    if: ${{ vars.MXC_RUNNER != '' }}
+    runs-on: ${{ vars.MXC_RUNNER }}
+    env:
+      DAAT_LOCUS_BUILD_WEBUI: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Require native MXC/PSEC
+        run: cargo test --locked --no-default-features --lib sandbox::windows::tests::require_native_mxc -- --ignored --exact
+      - name: Check native sandbox boundaries and lifecycle
+        run: cargo test --locked --no-default-features --lib sandbox:: -- --include-ignored --test-threads=4
+      - name: Check native Terminal
+        run: cargo test --locked --no-default-features --lib terminal_app::process::tests::terminal_shell_runs_inside_required_native_isolation -- --ignored --exact
+      - name: Check native MCP transport
+        run: cargo test --locked --no-default-features --lib mcp::tests::stdio_uses_native_sandbox_explicit_environment_and_reaps_processes -- --ignored --exact
   desktop:
     runs-on: ${{ matrix.os }}
     strategy:

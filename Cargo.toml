@@ -13,6 +13,7 @@ include = [
     "/Cargo.lock",
     "/Cargo.toml",
     "/LICENSE",
+    "/NOTICE",
     "/README.md",
     "/README_zh-CN.md",
     "/AGENTS.md",
@@ -148,7 +149,6 @@ features = [
     "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Security_Authorization",
-    "Win32_Security_Isolation",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_JobObjects",
@@ -167,6 +167,10 @@ features = [
 ]
 
 [target.'cfg(windows)'.dependencies]
+appcontainer_common = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
+learning_mode_windows = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
+wxc_common = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
+tracelogging = "=1.2.3"
 daat-locus-virtual-workspace = { path = "crates/daat-locus-virtual-workspace" }
 png = "0.18"
 windows = { version = "0.62.2", features = ["Win32_UI_Shell", "Win32_System_Com", "Win32_Foundation"] }

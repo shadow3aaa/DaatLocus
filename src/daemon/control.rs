@@ -136,9 +136,7 @@ fn endpoint(record: &Status) -> PathBuf {
     #[cfg(unix)]
     {
         // UNIX sun_path has a small platform limit; private endpoint names stay short.
-        PathBuf::from("/tmp")
-            .join(format!("dl-control-{}", unsafe { libc::geteuid() }))
-            .join(format!("{}.sock", record.instance.simple()))
+        crate::sandbox::unix_control_directory().join(format!("{}.sock", record.instance.simple()))
     }
 }
 pub struct Server {

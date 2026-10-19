@@ -1,33 +1,13 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use miette::Result;
+use miette::{Result, miette};
 
 use super::{RuntimeSandboxPolicy, SandboxSpawnSpec, policy_paths_with_resolved};
 
 const SANDBOX_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
-
-const SEATBELT_BASE_POLICY: &str = r#"(version 1)
-(deny default)
-(allow process-exec)
-(allow process-fork)
-(allow signal (target same-sandbox))
-(allow process-info* (target same-sandbox))
-(allow sysctl-read)
-(allow ipc-posix-sem)
-(allow mach-lookup)
-(allow system-socket)
-(allow pseudo-tty)
-(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
-(allow file-read* file-write* (regex "^/dev/ttys[0-9]+$"))
-(allow file-ioctl (regex "^/dev/ttys[0-9]+$"))
-(allow file-read* file-test-existence file-read-metadata (subpath "/dev"))
-(allow file-read* file-write* (literal "/dev/null"))
-(allow file-read* file-write* (literal "/dev/zero"))
-(allow file-read* file-write* (literal "/dev/tty"))
-(allow file-read-data file-write-data (subpath "/dev/fd"))
-(allow network-inbound (local ip))
-(allow network-outbound)
-"#;
+const BASE: &str = include_str!("seatbelt_base_policy.sbpl");
+const NETWORK: &str = include_str!("seatbelt_network_policy.sbpl");
+const PLATFORM: &str = include_str!("seatbelt_read_only_platform_defaults.sbpl");
 
 #[cfg(test)]
 pub fn wrap_shell_command(
@@ -38,28 +18,128 @@ pub fn wrap_shell_command(
     wrap_command(policy, PathBuf::from(program), args)
 }
 
+#[derive(Default)]
+struct Profile {
+    rules: String,
+    parameters: Vec<String>,
+}
+impl Profile {
+    fn filter(&mut self, path: &Path) -> Result<String> {
+        let path = path
+            .to_str()
+            .filter(|value| !value.contains('\0'))
+            .ok_or_else(|| miette!("Seatbelt requires Unicode paths without NUL"))?;
+        let key = format!("DL_PATH_{}", self.parameters.len());
+        self.parameters.push(format!("-D{key}={path}"));
+        // Paths are arguments, never executable SBPL. Literal also covers an
+        // absent path itself (including its first creation), not only children.
+        Ok(format!(
+            "(require-any (literal (param \"{key}\")) (subpath (param \"{key}\")))"
+        ))
+    }
+    fn rule(&mut self, action: &str, operations: &str, path: &Path) -> Result<()> {
+        let filter = self.filter(path)?;
+        self.rules
+            .push_str(&format!("({action} {operations} {filter})\n"));
+        Ok(())
+    }
+}
+
 pub fn wrap_command(
     policy: &RuntimeSandboxPolicy,
     program: PathBuf,
     args: Vec<String>,
 ) -> Result<SandboxSpawnSpec> {
-    let mut sections = vec![SEATBELT_BASE_POLICY.to_string()];
-    sections.push(render_read_policy(policy));
-    sections.push(render_write_policy(policy));
-    sections.push(render_protected_path_denies(policy));
-
-    let profile = sections
-        .into_iter()
-        .filter(|section| !section.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    let mut sandbox_args = vec![
-        "-p".to_string(),
-        profile,
-        "--".to_string(),
-        program.to_string_lossy().into_owned(),
-    ];
+    super::validate_native_policy_paths(&policy.filesystem)?;
+    let fs = &policy.filesystem;
+    let mut profile = Profile {
+        rules: format!(
+            "{BASE}\n{PLATFORM}\n{NETWORK}\n(allow network-outbound)\n(allow network-inbound)\n(allow network-bind (local ip \"*:*\"))\n(allow network-bind (local unix-socket))\n"
+        ),
+        ..Default::default()
+    };
+    let read_ops = "file-read* file-map-executable file-test-existence";
+    if fs.full_disk_read || fs.full_disk_write {
+        profile.rule("allow", read_ops, Path::new("/"))?;
+    } else {
+        let mut roots = fs.readable_roots.clone();
+        roots.extend(fs.writable_roots.iter().map(|root| root.root.clone()));
+        for root in policy_paths_with_resolved(&roots) {
+            profile.rule("allow", read_ops, &root)?;
+        }
+    }
+    if fs.full_disk_write {
+        profile.rule("allow", "file-write*", Path::new("/"))?;
+    }
+    for root in &fs.writable_roots {
+        for root in policy_paths_with_resolved(std::slice::from_ref(&root.root)) {
+            profile.rule("allow", "file-write*", &root)?;
+            profile.filter(&root)?;
+            // Keep authority anchors from being unlinked/replaced while a
+            // sandboxed process (or one of its descendants) is running.
+            let literal_key = profile.parameters.len() - 1;
+            profile.rules.push_str(&format!(
+                "(deny file-write-unlink (literal (param \"DL_PATH_{literal_key}\")))\n"
+            ));
+        }
+        for path in policy_paths_with_resolved(&root.read_only_subpaths) {
+            profile.rule("deny", "file-write*", &path)?;
+        }
+    }
+    let mut deny_read = fs.deny_read_paths.clone();
+    let mut deny_write = fs.deny_write_paths.clone();
+    deny_read.push(super::unix_control_directory());
+    deny_write.push(super::unix_control_directory());
+    if let Some(scope) = &fs.private_delivery {
+        deny_read.push(scope.root.clone());
+        deny_write.push(scope.root.clone());
+    }
+    for path in policy_paths_with_resolved(&deny_read) {
+        profile.rule("deny", read_ops, &path)?;
+        let key = profile.parameters.len() - 1;
+        profile.rules.push_str(&format!(
+            "(deny network-outbound (remote unix-socket (subpath (param \"DL_PATH_{key}\"))))\n(deny network-bind (local unix-socket (subpath (param \"DL_PATH_{key}\"))))\n"
+        ));
+        // Native file writes can reveal private contents and replace protected
+        // state; read denial is also a write boundary for native programs.
+        profile.rule("deny", "file-write*", &path)?;
+    }
+    for path in policy_paths_with_resolved(&deny_write) {
+        profile.rule("deny", "file-write*", &path)?;
+    }
+    let anchors = fs
+        .writable_roots
+        .iter()
+        .map(|root| &root.root)
+        .chain(deny_read.iter())
+        .chain(deny_write.iter())
+        .chain(
+            fs.writable_roots
+                .iter()
+                .flat_map(|root| &root.read_only_subpaths),
+        );
+    let mut ancestors = std::collections::BTreeSet::new();
+    for path in anchors {
+        for path in policy_paths_with_resolved(std::slice::from_ref(path)) {
+            ancestors.extend(path.ancestors().skip(1).map(Path::to_owned));
+        }
+    }
+    for path in ancestors {
+        profile.filter(&path)?;
+        let key = profile.parameters.len() - 1;
+        profile.rules.push_str(&format!("(deny file-write-unlink (require-all (vnode-type DIRECTORY) (literal (param \"DL_PATH_{key}\"))))\n"));
+    }
+    profile.rules.push_str("(deny mach-lookup (xpc-service-name-prefix \"\"))\n(deny system-fcntl (fcntl-command 80 110))\n");
+    let program = program
+        .to_str()
+        .ok_or_else(|| miette!("Seatbelt requires a Unicode executable path"))?;
+    let mut sandbox_args = profile.parameters;
+    sandbox_args.extend([
+        "-p".to_owned(),
+        profile.rules,
+        "--".to_owned(),
+        program.to_owned(),
+    ]);
     sandbox_args.extend(args);
     Ok(SandboxSpawnSpec {
         program: PathBuf::from(SANDBOX_EXECUTABLE),
@@ -67,70 +147,390 @@ pub fn wrap_command(
     })
 }
 
-fn render_read_policy(policy: &RuntimeSandboxPolicy) -> String {
-    let fs = &policy.filesystem;
-    let mut lines = Vec::new();
-    if fs.full_disk_read {
-        lines.push(
-            "(allow file-read* file-map-executable file-test-existence file-read-metadata (subpath \"/\"))"
-                .to_string(),
+pub(super) struct MacosSandboxAsyncChild {
+    child: tokio::process::Child,
+}
+impl MacosSandboxAsyncChild {
+    pub fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
+        self.child.stdin.take()
+    }
+    pub fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+        self.child.stdout.take()
+    }
+    pub fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
+        self.child.stderr.take()
+    }
+    pub fn id(&self) -> Option<u32> {
+        self.child.id()
+    }
+    pub fn start_kill(&mut self) -> std::io::Result<()> {
+        if let Some(pid) = self.child.id() {
+            let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error);
+                }
+            }
+        }
+        self.child.start_kill()
+    }
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        if let Some(pid) = self.child.id() {
+            // Observe without reaping first: the zombie reserves its PID while
+            // we terminate the group, preventing signals to a reused group ID.
+            let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid,
+                    &mut info,
+                    libc::WNOHANG | libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            if result < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if info.si_pid == 0 {
+                return Ok(None);
+            }
+            self.start_kill()?;
+        }
+        self.child.try_wait()
+    }
+}
+impl Drop for MacosSandboxAsyncChild {
+    fn drop(&mut self) {
+        let _ = self.start_kill();
+    }
+}
+
+pub(super) fn spawn_restricted_async(
+    policy: &RuntimeSandboxPolicy,
+    program: PathBuf,
+    args: Vec<String>,
+    options: super::SandboxProcessOptions,
+) -> std::io::Result<MacosSandboxAsyncChild> {
+    let spawn = wrap_command(policy, program, args).map_err(std::io::Error::other)?;
+    let cancelled = options.spawn_cancelled.clone();
+    let mut command = tokio::process::Command::new(spawn.program);
+    command.args(spawn.args).process_group(0).kill_on_drop(true);
+    super::apply_tokio_command_options(policy, &mut command, options);
+    if cancelled
+        .as_ref()
+        .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "Process startup cancelled",
+        ));
+    }
+    let child = MacosSandboxAsyncChild {
+        child: command.spawn()?,
+    };
+    if cancelled
+        .as_ref()
+        .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "Process startup cancelled",
+        ));
+    }
+    Ok(child)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sandbox::{
+        FileSystemSandboxPolicy, SandboxAsyncChild, SandboxProcessOptions, SandboxStdio,
+        StrongFilesystemSandboxMode, WritableRoot,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    fn policy(root: &Path) -> RuntimeSandboxPolicy {
+        RuntimeSandboxPolicy {
+            filesystem: FileSystemSandboxPolicy {
+                full_disk_read: false,
+                full_disk_write: false,
+                readable_roots: vec![root.to_owned()],
+                writable_roots: vec![WritableRoot {
+                    root: root.to_owned(),
+                    read_only_subpaths: vec![root.join(".git")],
+                }],
+                deny_read_paths: vec![
+                    root.join("private"),
+                    root.join("future"),
+                    root.join("ordinary/secret"),
+                ],
+                deny_write_paths: vec![],
+                private_delivery: None,
+                bound_roots: vec![std::fs::canonicalize(root).unwrap()],
+            },
+            protected_env_vars: vec![],
+            strong_filesystem: StrongFilesystemSandboxMode::Required,
+        }
+    }
+    fn quote(path: &Path) -> String {
+        format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"))
+    }
+    #[test]
+    fn policy_paths_are_parameters_and_cannot_be_seatbelt_code() {
+        let temp = tempfile::Builder::new()
+            .prefix("dl-\"(allow default)\n")
+            .tempdir()
+            .unwrap();
+        let spec = wrap_command(
+            &policy(temp.path()),
+            PathBuf::from("/bin/sh"),
+            vec!["-c".into(), "true".into()],
+        )
+        .unwrap();
+        let profile = &spec.args[spec.args.iter().position(|arg| arg == "-p").unwrap() + 1];
+        assert!(!profile.contains(temp.path().to_str().unwrap()));
+        let parameter = spec
+            .args
+            .iter()
+            .find(|arg| {
+                arg.starts_with("-DDL_PATH_") && arg.ends_with(temp.path().to_str().unwrap())
+            })
+            .unwrap();
+        assert_eq!(
+            parameter.split_once('=').unwrap().1,
+            temp.path().to_str().unwrap()
         );
-    } else {
-        for root in policy_paths_with_resolved(&fs.readable_roots) {
-            lines.push(format!(
-                "(allow file-read* file-map-executable file-test-existence file-read-metadata (subpath \"{}\"))",
-                root.display()
-            ));
-        }
-        for root in &fs.writable_roots {
-            for root_path in policy_paths_with_resolved(std::slice::from_ref(&root.root)) {
-                lines.push(format!(
-                "(allow file-read* file-map-executable file-test-existence file-read-metadata (subpath \"{}\"))",
-                root_path.display()
-            ));
+    }
+    #[tokio::test]
+    async fn actor_scope_runs_shell_and_enforces_future_and_ancestor_denies() {
+        let temp = tempfile::Builder::new()
+            .prefix("dl quoted \" (root)\n")
+            .tempdir()
+            .unwrap();
+        let root = temp.path().join("work");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join("private")).unwrap();
+        std::fs::write(root.join("private/secret"), "private").unwrap();
+        std::fs::create_dir(root.join("ordinary")).unwrap();
+        std::fs::write(root.join("ordinary/secret"), "private").unwrap();
+        std::fs::write(root.join("input"), "input").unwrap();
+        std::fs::write(temp.path().join("outside"), "outside").unwrap();
+        std::os::unix::fs::symlink(temp.path().join("outside"), root.join("alias")).unwrap();
+        let script = format!(
+            r#"set -eu
+[ "$(cat input)" = input ]
+[ -c /dev/null ]
+printf probe >/dev/null
+if cat alias >/dev/null 2>&1; then exit 10; fi
+if cat private/secret >/dev/null 2>&1; then exit 11; fi
+if printf bad 2>/dev/null > .git; then exit 12; fi
+if mv ordinary moved 2>/dev/null; then exit 13; fi
+printf allowed > ordinary/allowed
+read command
+if cat future >/dev/null 2>&1; then exit 14; fi
+printf '%s' "$command" > {}
+"#,
+            quote(&root.join("output"))
+        );
+        let mut child = SandboxAsyncChild::spawn_shell(
+            &policy(&root),
+            "/bin/sh",
+            vec!["-c".into(), script],
+            SandboxProcessOptions {
+                current_dir: Some(root.clone()),
+                stdin: SandboxStdio::Piped,
+                stdout: SandboxStdio::Piped,
+                stderr: SandboxStdio::Piped,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        std::fs::write(root.join("future"), "new private").unwrap();
+        child
+            .take_stdin()
+            .unwrap()
+            .write_all(b"persisted\n")
+            .await
+            .unwrap();
+        let mut out = child.take_stdout().unwrap();
+        let mut err = child.take_stderr().unwrap();
+        let (out, err, status) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            tokio::try_join!(
+                async {
+                    let mut text = String::new();
+                    out.read_to_string(&mut text).await?;
+                    Ok::<_, std::io::Error>(text)
+                },
+                async {
+                    let mut text = String::new();
+                    err.read_to_string(&mut text).await?;
+                    Ok::<_, std::io::Error>(text)
+                },
+                async {
+                    loop {
+                        if let Some(status) = child.try_wait()? {
+                            return Ok::<_, std::io::Error>(status);
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
+            )
+        })
+        .await
+        .expect("Seatbelt probe timed out")
+        .unwrap();
+        assert!(status.success(), "{status};out={out};err={err}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("output")).unwrap(),
+            "persisted"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("ordinary/allowed")).unwrap(),
+            "allowed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("future")).unwrap(),
+            "new private"
+        );
+        assert!(!root.join(".git").exists());
+        assert!(!root.join("moved").exists());
+    }
+    #[tokio::test]
+    async fn root_exit_and_drop_close_background_process_pipes() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        for cancel in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let command = if cancel {
+                "sleep 300 & printf 'ready\n'; read command"
+            } else {
+                "sleep 300 & printf 'ready\n'"
+            };
+            let mut child = SandboxAsyncChild::spawn_shell(
+                &policy(temp.path()),
+                "/bin/sh",
+                vec!["-c".into(), command.into()],
+                SandboxProcessOptions {
+                    current_dir: Some(temp.path().to_owned()),
+                    stdin: SandboxStdio::Piped,
+                    stdout: SandboxStdio::Piped,
+                    stderr: SandboxStdio::Null,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut out = BufReader::new(child.take_stdout().unwrap());
+            let mut line = String::new();
+            tokio::time::timeout(std::time::Duration::from_secs(5), out.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(line.trim(), "ready");
+            if cancel {
+                drop(child);
+            } else {
+                let status = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if let Some(status) = child.try_wait().unwrap() {
+                            break status;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(status.success());
             }
+            let mut tail = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                out.read_to_string(&mut tail),
+            )
+            .await
+            .expect("background process retained its output pipe")
+            .unwrap();
         }
     }
-    lines.join("\n")
-}
-
-fn render_write_policy(policy: &RuntimeSandboxPolicy) -> String {
-    let fs = &policy.filesystem;
-    let mut lines = Vec::new();
-    if fs.full_disk_write {
-        lines.push("(allow file-write* (subpath \"/\"))".to_string());
-    } else {
-        for root in &fs.writable_roots {
-            for root_path in policy_paths_with_resolved(std::slice::from_ref(&root.root)) {
-                lines.push(format!(
-                    "(allow file-write* file-read-metadata file-test-existence (subpath \"{}\"))",
-                    root_path.display()
-                ));
-            }
-            for subpath in policy_paths_with_resolved(&root.read_only_subpaths) {
-                lines.push(format!(
-                    "(deny file-write* (subpath \"{}\"))",
-                    subpath.display()
-                ));
-            }
+    #[tokio::test]
+    #[ignore = "native macOS check initializes the OS-owner control directory; CI runs it explicitly"]
+    async fn owner_control_socket_is_denied_even_with_broad_filesystem_grants() {
+        use std::os::unix::{
+            fs::DirBuilderExt,
+            net::{UnixListener, UnixStream},
+        };
+        let parent = super::super::unix_control_directory();
+        match std::fs::DirBuilder::new().mode(0o700).create(&parent) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(error) => panic!("private control fixture: {error}"),
         }
-    }
-    lines.join("\n")
-}
-
-fn render_protected_path_denies(policy: &RuntimeSandboxPolicy) -> String {
-    let mut lines = Vec::new();
-    for path in policy_paths_with_resolved(&policy.filesystem.deny_read_paths) {
-        lines.push(format!(
-            "(deny file-read* file-map-executable file-test-existence file-read-metadata (subpath \"{}\"))",
-            path.display()
+        let path = parent.join(format!(
+            "sandbox-test-{}.sock",
+            uuid::Uuid::new_v4().simple()
         ));
+        struct Fixture {
+            path: PathBuf,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+        let fixture = Fixture { path };
+        let _listener = UnixListener::bind(&fixture.path).unwrap();
+        let _owner = UnixStream::connect(&fixture.path).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let source = root.join("probe.rs");
+        let executable = root.join("probe");
+        std::fs::write(&source,r#"fn main(){let _public=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let error=std::os::unix::net::UnixStream::connect(std::env::args().nth(1).unwrap()).expect_err("sandbox reached owner control socket");assert_eq!(error.kind(),std::io::ErrorKind::PermissionDenied);}"#).unwrap();
+        let built =
+            std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+                .arg(&source)
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .expect("native Seatbelt test requires rustc");
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let mut policy = policy(&root);
+        policy.filesystem.full_disk_read = true;
+        policy.filesystem.full_disk_write = true;
+        let mut child = SandboxAsyncChild::spawn_shell(
+            &policy,
+            executable.to_str().unwrap(),
+            vec![fixture.path.to_str().unwrap().to_owned()],
+            SandboxProcessOptions {
+                current_dir: Some(root),
+                stdin: SandboxStdio::Null,
+                stdout: SandboxStdio::Null,
+                stderr: SandboxStdio::Piped,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut stderr = child.take_stderr().unwrap();
+        let (status, errors) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::try_join!(
+                async {
+                    loop {
+                        if let Some(status) = child.try_wait()? {
+                            return Ok::<_, std::io::Error>(status);
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                },
+                async {
+                    let mut errors = String::new();
+                    stderr.read_to_string(&mut errors).await?;
+                    Ok::<_, std::io::Error>(errors)
+                }
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(status.success(), "{status};{errors}");
     }
-    for path in policy_paths_with_resolved(&policy.filesystem.deny_write_paths) {
-        lines.push(format!(
-            "(deny file-write* (subpath \"{}\"))",
-            path.display()
-        ));
-    }
-    lines.join("\n")
 }

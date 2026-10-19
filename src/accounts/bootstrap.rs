@@ -197,12 +197,69 @@ fn platform_owner(peer: SocketAddr, listener: SocketAddr) -> bool {
     let remote = address(listener);
     table.lines().take(65536).any(|line| {
         let columns: Vec<_> = line.split_whitespace().collect();
-        columns.len() >= 8
+        columns.len() >= 10
             && columns[1] == local
             && columns[2] == remote
             && columns[7].parse::<u32>().ok() == Some(unsafe { libc::geteuid() })
+            && columns[9]
+                .parse::<u64>()
+                .is_ok_and(socket_in_owner_namespace)
     })
 }
+
+#[cfg(target_os = "linux")]
+fn socket_in_owner_namespace(inode: u64) -> bool {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    if inode == 0 {
+        return false;
+    }
+    let Ok(namespace) = std::fs::read_link("/proc/self/ns/user") else {
+        return false;
+    };
+    let target = std::path::PathBuf::from(format!("socket:[{inode}]"));
+    let inspect = |path: &std::path::Path| -> bool {
+        // Pin the proc directory to the process instance, not a reusable PID.
+        let Ok(process) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(path)
+        else {
+            return false;
+        };
+        if !process
+            .metadata()
+            .is_ok_and(|md| md.uid() == unsafe { libc::geteuid() })
+        {
+            return false;
+        }
+        let pinned = std::path::PathBuf::from(format!("/proc/self/fd/{}", process.as_raw_fd()));
+        if std::fs::read_link(pinned.join("ns/user")).ok().as_ref() != Some(&namespace) {
+            return false;
+        }
+        let Ok(descriptors) = std::fs::read_dir(pinned.join("fd")) else {
+            return false;
+        };
+        descriptors
+            .take(65536)
+            .filter_map(Result::ok)
+            .any(|entry| std::fs::read_link(entry.path()).is_ok_and(|path| path == target))
+    };
+    // Native transport and the isolated fixture commonly connect from this
+    // process. Browser first-registration checks use the bounded proc lookup.
+    if inspect(std::path::Path::new("/proc/self")) {
+        return true;
+    }
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    processes
+        .take(65536)
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().parse::<u32>().is_ok())
+        .any(|entry| inspect(&entry.path()))
+}
+
 #[cfg(not(any(windows, target_os = "linux")))]
 fn platform_owner(_: SocketAddr, _: SocketAddr) -> bool {
     false
@@ -237,6 +294,56 @@ mod tests {
                 peer,
                 Some(listener.local_addr().unwrap())
             ));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owner_socket_from_another_process_can_bootstrap() {
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+        const FIXTURE: &str = "DAAT_LOCUS_TEST_OWNER_SOCKET";
+        if let Ok(address) = std::env::var(FIXTURE) {
+            let mut socket = std::net::TcpStream::connect(address).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut ack = [0];
+            socket.read_exact(&mut ack).unwrap();
+            assert_eq!(ack, [1]);
+            return;
+        }
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        for address in ["127.0.0.1:0", "[::1]:0"] {
+            let listener = std::net::TcpListener::bind(address).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let mut child=Child(std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","accounts::bootstrap::tests::owner_socket_from_another_process_can_bootstrap"])
+                .env(FIXTURE,listener.local_addr().unwrap().to_string()).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).spawn().unwrap());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let (mut socket, peer) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("accept local owner fixture: {error}"),
+                }
+                assert!(Instant::now() < deadline, "owner fixture did not connect");
+                assert!(
+                    child.0.try_wait().unwrap().is_none(),
+                    "owner fixture exited before connecting"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            assert!(local_owner_connection(
+                peer,
+                Some(listener.local_addr().unwrap())
+            ));
+            socket.write_all(&[1]).unwrap();
+            assert!(child.0.wait().unwrap().success());
         }
     }
 }

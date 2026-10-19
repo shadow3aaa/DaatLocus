@@ -389,6 +389,7 @@ async fn refresh_preserves_other_app_instances_and_queries_are_exempt() {
 }
 #[cfg(target_os = "windows")]
 #[tokio::test]
+#[ignore = "requires native Windows MXC/PSEC; run on a supported host"]
 async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
     let directory = tempfile::tempdir().unwrap();
     let system = actor_system(directory.path()).await;

@@ -1,0 +1,8 @@
+Daat Locus includes adapted macOS Seatbelt policy resources from OpenAI Codex.
+OpenAI Codex
+Copyright 2025 OpenAI
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+Source: https://github.com/openai/codex
+Revision: 89461ea6833832b0551ce24ee32205824d5c108d
+Adaptations: parameterized DL scope/deny policy, DL process lifecycle and private
+transport protections; platform profiles are bundled in src/sandbox/seatbelt_*.sbpl.

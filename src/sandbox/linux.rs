@@ -1,3 +1,7 @@
+#[path = "linux/process.rs"]
+mod process;
+pub(super) use process::{LinuxSandboxAsyncChild, spawn_restricted_async};
+
 use std::{
     env,
     path::{Path, PathBuf},
@@ -7,7 +11,7 @@ use miette::{Result, miette};
 
 use super::{
     FileSystemSandboxPolicy, RuntimeSandboxPolicy, SandboxSpawnSpec, StrongFilesystemSandboxMode,
-    path_is_denied, policy_paths_with_resolved,
+    policy_paths_with_resolved,
 };
 
 const BWRAP_PROGRAM: &str = "bwrap";
@@ -32,21 +36,9 @@ pub fn wrap_command(
         return Ok(unwrapped_spawn_spec(program, args));
     }
 
-    let Some(bwrap) = find_bwrap_in_path() else {
-        return match policy.strong_filesystem {
-            StrongFilesystemSandboxMode::Auto => {
-                tracing::warn!(
-                    "Linux strong filesystem sandbox requested in auto mode, but `bwrap` was not found on PATH"
-                );
-                Ok(unwrapped_spawn_spec(program, args))
-            }
-            StrongFilesystemSandboxMode::Required => {
-                Err(miette!("Linux filesystem sandbox requires `bwrap` on PATH"))
-            }
-            // Returned above when the mode is Off. Kept so the match is exhaustive.
-            StrongFilesystemSandboxMode::Off => Ok(unwrapped_spawn_spec(program, args)),
-        };
-    };
+    let bwrap = find_bwrap_in_path()
+        .ok_or_else(|| miette!("Linux filesystem sandbox requires `bwrap` on PATH"))?;
+    validate_paths(&policy.filesystem)?;
 
     let mut command = Vec::with_capacity(args.len() + 1);
     command.push(program.to_string_lossy().into_owned());
@@ -61,27 +53,45 @@ fn unwrapped_spawn_spec(program: PathBuf, args: Vec<String>) -> SandboxSpawnSpec
     SandboxSpawnSpec { program, args }
 }
 
-fn requires_backend(policy: &FileSystemSandboxPolicy) -> bool {
+pub(super) fn requires_backend(policy: &FileSystemSandboxPolicy) -> bool {
     !(policy.full_disk_read
         && policy.full_disk_write
         && policy.readable_roots.is_empty()
         && policy.writable_roots.is_empty()
         && policy.deny_read_paths.is_empty()
-        && policy.deny_write_paths.is_empty())
+        && policy.deny_write_paths.is_empty()
+        && policy.private_delivery.is_none())
 }
 
 fn find_bwrap_in_path() -> Option<PathBuf> {
-    let search_path = env::var_os("PATH")?;
-    let cwd = env::current_dir().ok()?;
-    env::split_paths(&search_path)
-        .map(|entry| entry.join(BWRAP_PROGRAM))
-        .filter_map(|candidate| {
-            if !candidate.is_file() {
-                return None;
-            }
-            Some(std::fs::canonicalize(&candidate).unwrap_or(candidate))
+    use std::os::unix::fs::MetadataExt;
+    // Daemons commonly start in `/`; excluding everything beneath cwd would
+    // reject every system executable. Prefer root-managed system locations and
+    // accept PATH alternatives only through root-managed, nonwritable parents.
+    let search = [
+        PathBuf::from("/usr/bin/bwrap"),
+        PathBuf::from("/bin/bwrap"),
+        PathBuf::from("/usr/local/bin/bwrap"),
+    ];
+    let extra = env::var_os("PATH")
+        .map(|value| {
+            env::split_paths(&value)
+                .map(|entry| entry.join(BWRAP_PROGRAM))
+                .collect::<Vec<_>>()
         })
-        .find(|candidate| !candidate.starts_with(&cwd))
+        .unwrap_or_default();
+    search
+        .into_iter()
+        .chain(extra)
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .find(|path| {
+            std::fs::metadata(path).is_ok_and(|md| {
+                md.is_file() && md.uid() == 0 && md.mode() & 0o022 == 0 && md.mode() & 0o111 != 0
+            }) && path.ancestors().skip(1).all(|parent| {
+                std::fs::metadata(parent)
+                    .is_ok_and(|md| md.is_dir() && md.uid() == 0 && md.mode() & 0o022 == 0)
+            })
+        })
 }
 
 fn create_bwrap_args(policy: &FileSystemSandboxPolicy, command: Vec<String>) -> Vec<String> {
@@ -90,6 +100,11 @@ fn create_bwrap_args(policy: &FileSystemSandboxPolicy, command: Vec<String>) -> 
         "--die-with-parent".to_string(),
         "--unshare-user".to_string(),
         "--unshare-pid".to_string(),
+        "--unshare-ipc".to_string(),
+        "--unshare-uts".to_string(),
+        "--cap-drop".to_string(),
+        "ALL".to_string(),
+        "--disable-userns".to_string(),
     ];
 
     push_root_mounts(&mut args, policy);
@@ -114,7 +129,13 @@ fn push_root_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolicy) {
     } else {
         args.push("--tmpfs".to_string());
         args.push("/".to_string());
-        for root in policy_paths_with_resolved(&policy.readable_roots) {
+        // Shells and compilers need scratch space. This tmpfs exposes no host
+        // data; explicit read/write grants beneath /tmp are mounted afterwards.
+        args.extend(["--tmpfs".to_string(), "/tmp".to_string()]);
+        for root in runtime_read_roots()
+            .into_iter()
+            .chain(policy_paths_with_resolved(&policy.readable_roots))
+        {
             push_existing_mount(args, "--ro-bind", &root);
         }
     }
@@ -131,37 +152,81 @@ fn push_writable_root_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxP
 fn push_read_only_subpath_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolicy) {
     for writable_root in &policy.writable_roots {
         for subpath in policy_paths_with_resolved(&writable_root.read_only_subpaths) {
-            push_existing_mount(args, "--ro-bind", &subpath);
+            push_existing_mount(args, "--ro-bind", &protection_boundary(&subpath));
         }
     }
 }
 
 fn push_deny_write_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolicy) {
     for path in policy_paths_with_resolved(&policy.deny_write_paths) {
-        push_existing_mount(args, "--ro-bind", &path);
+        push_existing_mount(args, "--ro-bind", &protection_boundary(&path));
     }
 }
 
 fn push_deny_read_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolicy) {
-    let mut read_only_masks = Vec::new();
+    let mut masked = Vec::<PathBuf>::new();
     for path in policy_paths_with_resolved(&policy.deny_read_paths) {
+        let path = protection_boundary(&path);
+        // An ancestor mask already hides every descendant; reopening a child
+        // would only create needless mounts and risk changing precedence.
+        if masked.iter().any(|parent| path.starts_with(parent)) {
+            continue;
+        }
         if path.is_dir() {
-            args.push("--tmpfs".to_string());
-            args.push(path_to_arg(&path));
-            if path_is_denied(&path, &policy.deny_write_paths) {
-                read_only_masks.push(path);
-            }
+            args.extend([
+                "--perms".into(),
+                "000".into(),
+                "--tmpfs".into(),
+                path_to_arg(&path),
+            ]);
+            masked.push(path);
         } else if path.is_file() {
             push_mount(args, "--ro-bind", Path::new("/dev/null"), &path);
         }
     }
-    // A parent tmpfs hides the original child mountpoints. Let bwrap create all
-    // nested masks before sealing them; sealing a parent alone would also leave
-    // its child tmpfs mounts writable.
-    for path in read_only_masks.into_iter().rev() {
-        args.push("--remount-ro".to_string());
-        args.push(path_to_arg(&path));
+    for path in masked.into_iter().rev() {
+        args.extend(["--remount-ro".into(), path_to_arg(&path)]);
     }
+}
+
+fn protection_boundary(path: &Path) -> PathBuf {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        if prefix.is_file() {
+            return prefix;
+        }
+    }
+    path.to_owned()
+}
+
+fn runtime_read_roots() -> Vec<PathBuf> {
+    [
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/etc/ld.so.cache",
+        "/etc/ld.so.conf",
+        "/etc/ld.so.conf.d",
+        "/etc/alternatives",
+        "/etc/nsswitch.conf",
+        "/etc/passwd",
+        "/etc/group",
+        "/etc/hosts",
+        "/etc/resolv.conf",
+        "/etc/localtime",
+        "/etc/ssl/certs",
+        "/etc/pki/ca-trust",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+fn validate_paths(policy: &FileSystemSandboxPolicy) -> Result<()> {
+    super::validate_native_policy_paths(policy)
 }
 
 fn push_existing_mount(args: &mut Vec<String>, flag: &str, path: &Path) {
@@ -222,54 +287,22 @@ mod tests {
     }
 
     #[test]
-    fn bwrap_args_create_nested_masks_before_sealing_each_directory() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let protected_home = tempdir.path().join(".daat-locus");
-        let protected_config = protected_home.join("config");
-        let secret = protected_config.join("secret.txt");
-        std::fs::create_dir_all(&protected_config).expect("create protected config");
-        std::fs::write(&secret, "secret").expect("write secret");
-        let policy = FileSystemSandboxPolicy {
-            full_disk_read: true,
-            full_disk_write: true,
-            readable_roots: Vec::new(),
-            writable_roots: Vec::new(),
-            deny_read_paths: vec![
-                protected_config.clone(),
-                protected_home.clone(),
-                secret.clone(),
-            ],
-            private_delivery: None,
-            bound_roots: Vec::new(),
-            deny_write_paths: vec![protected_home.clone()],
-        };
-
-        let args = create_bwrap_args(&policy, vec!["sh".to_string()]);
-
-        let first_seal = args.iter().position(|arg| arg == "--remount-ro").unwrap();
-        for directory in [&protected_home, &protected_config] {
-            let path = path_to_arg(directory);
-            let mount = args
-                .windows(2)
-                .position(|pair| pair == ["--tmpfs", &path])
-                .unwrap();
-            assert!(
-                mount < first_seal,
-                "nested mountpoint must exist before sealing"
-            );
-            assert!(
-                contains_pair(&args, "--remount-ro", &path),
-                "every nested tmpfs must deny writes"
-            );
-        }
-        let file_mask = args
-            .windows(3)
-            .position(|triple| triple == ["--ro-bind", "/dev/null", &path_to_arg(&secret)])
-            .unwrap();
-        assert!(
-            file_mask < first_seal,
-            "file mountpoint must exist before sealing"
-        );
+    fn ancestor_read_mask_covers_nested_denies_without_reopening_them() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let private = tempdir.path().join("private");
+        let nested = private.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("secret.txt"), "secret").unwrap();
+        let mut policy = FileSystemSandboxPolicy::unrestricted();
+        policy.deny_read_paths = vec![nested.clone(), private.clone(), nested.join("secret.txt")];
+        let args = create_bwrap_args(&policy, vec!["/bin/sh".into()]);
+        assert!(contains_pair(&args, "--tmpfs", private.to_str().unwrap()));
+        assert!(contains_pair(
+            &args,
+            "--remount-ro",
+            private.to_str().unwrap()
+        ));
+        assert!(!contains_pair(&args, "--tmpfs", nested.to_str().unwrap()));
     }
 
     #[test]

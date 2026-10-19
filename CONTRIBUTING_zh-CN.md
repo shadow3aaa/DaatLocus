@@ -546,3 +546,22 @@ Actor 权限与执行循环的相关测试。Windows 原生 stdio 测试同时�
 私有存储拒绝、显式环境变量和子进程回收，无需真实账号或公网 MCP 服务器。
 WebUI mock 场景包含应用列表、空列表、加载中和加载失败；连接表单使用
 `https://unavailable.example/mcp` 模拟连接失败，mock 不会访问这个地址。
+
+
+## 原生进程沙箱验证
+
+Windows 已改用 MXC/PSEC，不再修改宿主文件 ACL。通用 Windows runner 验证不可用时
+明确拒绝受限执行；原生正反例需要实际支持 PSEC deny paths 的主机。配置仓库变量
+`MXC_RUNNER` 为已准备好的 Windows runner 标签后，CI 的独立原生任务会先探测能力，
+再执行沙箱、Terminal 和 MCP 测试；缺少能力必须失败，跳过任务不算原生验证通过。
+具体本机命令见 CONTRIBUTING.md 的 MCP validation。
+
+Linux CI 安装 bwrap 并允许 user namespace，显式运行全部 ignored 沙箱测试。后端需要
+支持 pidfd/openat2 的 Linux 5.6+、支持 `--disable-userns` 和 `--seccomp` 的 bwrap，
+以及已审核的 x86-64/AArch64 syscall ABI。测试覆盖有限读写根、缺失路径、并发挂载、
+私有设备/procfs、内核接口过滤和子进程清理；syscall 探针使用 rustc 编译。
+macOS 的原生 Seatbelt 测试随正常测试执行，包含特殊路径字符、未来私有路径、
+符号链接越界及祖先目录改名。维护 socket 用例会初始化 OS-owner 控制目录，
+本机显式运行，macOS CI 必须执行；用例只删除自己创建的唯一 socket。
+Linux 同时验证受限进程不能凭相同 UID 获得 HTTP 初始化权限、普通独立 Owner 进程仍可使用。
+交叉编译不等于这些原生行为已通过验证。
