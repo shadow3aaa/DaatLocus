@@ -187,9 +187,14 @@ cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- 
 ```
 
 Library consumers use `DriverPackage::open(...).install()` during deployment,
-and service hosts retain `SharedDisplay::global()` independently of Apps. Its
-first `reserve(width, height)` creates one screen; `DisplayRegion` guards reserve
-nonoverlapping placement space. Releasing the last region leaves the screen active.
+and service hosts retain `SharedDisplay::global()` independently of Apps. The Windows
+service calls `initialize()` before readiness and worker activation to create and
+settle one screen without reserving a window region. Missing desktop/driver
+prerequisites are logged without blocking the account service; ComputerUse still
+reports native failures when used. Account maintenance commands do not create a screen.
+Ordinary library construction remains lazy: consumers may call `initialize()`
+explicitly or let the first `reserve(width, height)` create it. `DisplayRegion`
+guards reserve nonoverlapping placement space. Releasing the last region leaves the screen active.
 Attach per-App `VirtualWorkspace`s to `region.display().id`; keep each region until
 its window has been returned. Dropping the last service/region owner removes the
 screen. These are process-local service owners, not a cross-process profile broker.
@@ -198,6 +203,11 @@ on the unlocked signed-driver test machine to verify idle reuse, concurrent regi
 cursor/topology stability after warmup and final-owner cleanup. Replacement regions
 retain both possible positions until native placement is confirmed; the test also
 checks that other clients cannot reuse either position prematurely.
+The same opt-in test checks initialization before any region and repeated startup
+initialization without topology changes. Run
+`DAAT_LOCUS_BUILD_WEBUI=0 cargo test --locked -p daat-locus --test computer_use_startup -- --ignored --nocapture --test-threads=1`
+on that desktop to verify the real service creates its output before reporting
+readiness, retains it without any Actor tool call, and removes it on shutdown.
 
 For explicitly short-lived diagnostic workspaces use
 `VirtualWorkspace::create(DisplayOptions::default())` for an owned screen,

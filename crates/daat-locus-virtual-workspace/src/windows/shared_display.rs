@@ -9,6 +9,7 @@ use std::{
 };
 
 enum Request {
+    Initialize(mpsc::SyncSender<Result<Display>>),
     Reserve(i32, i32, mpsc::SyncSender<Result<(u64, Display, Rect)>>),
     Release(u64),
     Validate(u64, mpsc::SyncSender<Result<()>>),
@@ -33,8 +34,8 @@ impl Drop for Inner {
 }
 
 /// Keep a handle in service infrastructure, independently of App instances.
-/// The first reservation creates the monitor; releasing the last region leaves
-/// it active. Dropping the last service/region handle removes it normally.
+/// Explicit initialization or the first reservation creates the monitor; releasing
+/// the last region leaves it active. The last service/region handle removes it.
 #[derive(Clone)]
 pub struct SharedDisplay(Arc<Inner>);
 impl SharedDisplay {
@@ -55,7 +56,7 @@ impl SharedDisplay {
     }
 
     /// An independently owned service for native hosts/tests. Does not create a
-    /// monitor until a window actually needs a region.
+    /// monitor until initialize() or a window reservation requests it.
     pub fn new(options: DisplayOptions) -> Result<Self> {
         options.validate()?;
         let (requests, receiver) = mpsc::sync_channel(16);
@@ -70,6 +71,21 @@ impl SharedDisplay {
             requests: Some(requests),
             worker: Some(worker),
         })))
+    }
+
+    /// Create the output and settle its work area before accepting desktop work.
+    /// Repeated calls reuse the existing monitor without reserving window space.
+    pub fn initialize(&self) -> Result<Display> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.0
+            .requests
+            .as_ref()
+            .expect("live owner")
+            .send(Request::Initialize(reply))
+            .map_err(|_| Error::InvalidState("shared display owner stopped"))?;
+        response
+            .recv()
+            .map_err(|_| Error::InvalidState("shared display owner stopped"))?
     }
 
     /// Reserve a nonoverlapping rectangle, retaining it until the window is
@@ -169,6 +185,14 @@ fn run(receiver: mpsc::Receiver<Request>, options: DisplayOptions) {
     let mut next = 0u64;
     while let Ok(request) = receiver.recv() {
         match request {
+            Request::Initialize(reply) => {
+                let _ = reply.send(prepare_display(
+                    &mut display,
+                    &mut snapshot,
+                    options,
+                    !regions.is_empty(),
+                ));
+            }
             Request::Replace(token, size, origin, reply) => {
                 let result = (|| {
                     let old = *regions
@@ -239,34 +263,8 @@ fn run(receiver: mpsc::Receiver<Request>, options: DisplayOptions) {
             }
             Request::Reserve(width, height, reply) => {
                 let result = (|| {
-                    if let Some(owned) = &display {
-                        match owned.display() {
-                            Ok(observed) => {
-                                if !regions.is_empty() && snapshot.as_ref() != Some(&observed) {
-                                    return Err(Error::InvalidState(
-                                        "shared display changed; release existing windows before reacquiring",
-                                    ));
-                                }
-                                snapshot = Some(observed);
-                            }
-                            Err(error) if !regions.is_empty() => return Err(error),
-                            Err(_) => {
-                                display.take();
-                                snapshot = None;
-                            }
-                        }
-                    }
-                    if display.is_none() {
-                        let owned = VirtualDisplay::create(options)?;
-                        let observed = owned.display()?;
-                        // Explorer can establish the secondary taskbar after the
-                        // display mode becomes active. Do not lease space from
-                        // that transient, larger work area on first creation.
-                        settle_work_area(observed.bounds)?;
-                        snapshot = Some(observed);
-                        display = Some(owned);
-                    }
-                    let current = snapshot.as_ref().expect("active display");
+                    let current =
+                        prepare_display(&mut display, &mut snapshot, options, !regions.is_empty())?;
                     let bounds = allocate(
                         work_area(current.bounds)?,
                         width,
@@ -277,7 +275,7 @@ fn run(receiver: mpsc::Receiver<Request>, options: DisplayOptions) {
                         .checked_add(1)
                         .ok_or(Error::InvalidState("shared region token exhausted"))?;
                     regions.insert(next, bounds);
-                    Ok((next, current.clone(), bounds))
+                    Ok((next, current, bounds))
                 })();
                 // A caller disappearing before receipt cannot strand a region.
                 if let Err(mpsc::SendError(Ok((token, _, _)))) = reply.send(result) {
@@ -289,6 +287,41 @@ fn run(receiver: mpsc::Receiver<Request>, options: DisplayOptions) {
     if let Some(display) = display {
         let _ = display.remove();
     }
+}
+
+fn prepare_display(
+    display: &mut Option<VirtualDisplay>,
+    snapshot: &mut Option<Display>,
+    options: DisplayOptions,
+    has_regions: bool,
+) -> Result<Display> {
+    if let Some(owned) = display.as_ref() {
+        match owned.display() {
+            Ok(observed) => {
+                if has_regions && snapshot.as_ref() != Some(&observed) {
+                    return Err(Error::InvalidState(
+                        "shared display changed; release existing windows before reacquiring",
+                    ));
+                }
+                *snapshot = Some(observed);
+            }
+            Err(error) if has_regions => return Err(error),
+            Err(_) => {
+                display.take();
+                *snapshot = None;
+            }
+        }
+    }
+    if display.is_none() {
+        let owned = VirtualDisplay::create(options)?;
+        let observed = owned.display()?;
+        // Explorer may establish the secondary taskbar after the mode is active.
+        // Neither startup readiness nor window leases use that transient work area.
+        settle_work_area(observed.bounds)?;
+        *snapshot = Some(observed);
+        *display = Some(owned);
+    }
+    Ok(snapshot.as_ref().expect("active display").clone())
 }
 
 fn allocate(

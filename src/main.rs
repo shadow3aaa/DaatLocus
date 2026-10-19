@@ -238,6 +238,10 @@ async fn serve(
         lock.release();
         return result;
     }
+    #[cfg(windows)]
+    if let Err(error) = system.prepare_computer_workspace().await {
+        tracing::warn!(reason=%error, "ComputerUse virtual display could not be prepared during service startup");
+    }
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .into_diagnostic()?;

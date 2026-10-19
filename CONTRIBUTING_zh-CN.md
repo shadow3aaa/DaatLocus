@@ -177,14 +177,22 @@ cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- 
 ```
 
 库调用方通过 `DriverPackage::open(...).install()` 部署驱动，
-服务宿主在 App 外保留 `SharedDisplay::global()`。首次 `reserve(width, height)`
-创建一个屏幕，`DisplayRegion` 为窗口保留互不重叠的位置，直到物理交还完成。
+服务宿主在 App 外保留 `SharedDisplay::global()`，Windows 服务在对外就绪及激活 worker
+之前调用 `initialize()` 创建屏幕并等待布局稳定，不预占窗口区域。驱动/桌面前置条件
+不可用时记录诊断，账号服务仍可用；ComputerUse 使用时仍返回实际原生错误。
+账号维护命令不创建屏幕。普通库构造保持延迟创建，调用方可显式 `initialize()`，
+也可等首次 `reserve(width, height)` 创建屏幕。`DisplayRegion` 为窗口保留互不重叠的位置，
+直到物理交还完成。
 App 使用 `region.display().id` attach 借用工作区；最后一个区域释放后屏幕保持启用，
 最后的服务持有者和窗口区域都释放后才移除。这是进程内共享，不是跨 profile
 进程的屏幕代理。在已解锁且装有签名驱动的测试机上，串行运行
 `cargo test --locked -p daat-locus-virtual-workspace --test native_shared_display -- --ignored --nocapture --test-threads=1`
 验证空闲复用、并发区域、首次创建之后的光标/拓扑稳定和最后持有者清理；
 还检查位置尚未确认时新旧区域同时保留，其他客户端不能提前复用任一位置。
+同一用例还验证未申请窗口区域时即可初始化，以及重复初始化不改变显示拓扑。
+在同一桌面设置 `$env:DAAT_LOCUS_BUILD_WEBUI='0'` 后串行运行
+`cargo test --locked -p daat-locus --test computer_use_startup -- --ignored --nocapture --test-threads=1`，
+验证真实服务在报告就绪前创建输出、无需任何 Actor 工具调用即可空闲保持，退出后移除。
 
 短期诊断工作区仍使用
 `VirtualWorkspace::create(DisplayOptions::default())` 创建拥有的屏幕，

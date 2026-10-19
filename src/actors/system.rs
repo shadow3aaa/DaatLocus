@@ -90,6 +90,18 @@ fn forbidden(message: &str) -> miette::Report {
 }
 
 impl ActorSystem {
+    /// Called by the Windows service before readiness/worker activation. Ordinary
+    /// ActorSystem construction stays independent of native desktop prerequisites.
+    #[cfg(windows)]
+    pub async fn prepare_computer_workspace(&self) -> Result<()> {
+        let display = self.computer_display()?;
+        tokio::task::spawn_blocking(move || display.initialize())
+            .await
+            .into_diagnostic()?
+            .into_diagnostic()?;
+        Ok(())
+    }
+
     #[cfg(windows)]
     pub(crate) fn computer_display(&self) -> Result<daat_locus_virtual_workspace::SharedDisplay> {
         let mut display = self.inner.computer_display.lock();

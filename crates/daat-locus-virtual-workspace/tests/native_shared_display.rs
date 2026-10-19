@@ -5,8 +5,16 @@ use daat_locus_virtual_workspace::{DesktopState, SharedDisplay, displays};
 #[ignore = "requires installed signed IDD, unlocked desktop and stationary cursor; run native desktop tests serially"]
 fn idle_and_concurrent_clients_keep_one_screen_until_the_service_and_regions_are_dropped() {
     let service = SharedDisplay::global().unwrap();
+    let screen = service.initialize().unwrap();
+    assert!(
+        displays().unwrap().contains(&screen),
+        "startup initialization must create a monitor before any window reservation"
+    );
+    let initialized = displays().unwrap();
+    assert_eq!(service.initialize().unwrap(), screen);
+    assert_eq!(displays().unwrap(), initialized);
     let first = service.reserve(600, 400).unwrap();
-    let screen = first.display().clone();
+    assert_eq!(first.display(), &screen);
     let area = first.bounds();
     std::thread::sleep(std::time::Duration::from_millis(500));
     let baseline = DesktopState::read().unwrap();
