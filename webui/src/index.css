@@ -436,6 +436,7 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
 .dl-composer-add-menu [data-slot=dropdown-menu-item] { min-height: 40px; }
 .dl-menu-hint { color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); margin-left: 6px; }
 .dl-send-button { width: 36px; height: 36px; min-width: 36px; border-radius: 50%; margin-left: 4px; }
+.dl-composer-toolbar button.dl-stop-button > svg { width: 16px; height: 16px; }
 .dl-jump-bottom { position: absolute; left: 50%; top: -39px; transform: translateX(-50%); border-radius: 50%; background: var(--background); box-shadow: var(--chat-shadow); }
 .dl-client-error { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px 12px; color: var(--destructive); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
 .dl-composer-attachments { display: flex; align-items: flex-start; overflow-x: auto; gap: 12px; padding: 0 1px 12px; }
