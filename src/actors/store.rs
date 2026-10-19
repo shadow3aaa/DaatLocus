@@ -68,7 +68,11 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
             "mime_type",
             "byte_len",
         ],
-        "actors__create" | "actors__import_conversation" | "actors__send" => &[
+        "actors__create"
+        | "actors__import_conversation"
+        | "actors__send"
+        | "actors__archive"
+        | "actors__unarchive" => &[
             "id",
             "actor_id",
             "message_id",
@@ -90,7 +94,11 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
     }
     if matches!(
         domain_name,
-        "actors__create" | "actors__import_conversation" | "actors__send"
+        "actors__create"
+            | "actors__import_conversation"
+            | "actors__send"
+            | "actors__archive"
+            | "actors__unarchive"
     ) {
         // Older Core results retained a host-local URL, but their explicit
         // device argument still identifies the original host after replication.
@@ -262,6 +270,12 @@ pub(crate) fn insert_message(
     tx: &Transaction<'_>,
     mut message: MessageRecord,
 ) -> Result<MessageRecord> {
+    if actor_tx(tx, &message.actor_id)?.status == ActorStatus::Archived {
+        return Err(ActorError::Conflict(
+            "Actor is archived; unarchive it before sending messages".into(),
+        )
+        .into());
+    }
     sql(tx.execute(
         "INSERT INTO messages(id,actor_id,status,record) VALUES(?1,?2,?3,'')",
         params![message.id, message.actor_id, encode(&message.status)?],
@@ -326,6 +340,7 @@ impl ActorStore {
           CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,status TEXT NOT NULL,record TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS mailbox ON messages(actor_id,status,seq);
           CREATE INDEX IF NOT EXISTS queued_actors ON messages(actor_id) WHERE status='\"queued\"';
+          CREATE INDEX IF NOT EXISTS pending_inputs ON messages(id) WHERE status IN ('\"queued\"','\"running\"');
           CREATE TABLE IF NOT EXISTS history(seq INTEGER PRIMARY KEY AUTOINCREMENT,actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,message_id TEXT NOT NULL,record TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS history_actor ON history(actor_id,seq);
           CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,actor_id TEXT NOT NULL,created_at INTEGER NOT NULL,record TEXT NOT NULL);
@@ -489,12 +504,66 @@ impl ActorStore {
         let mut db = self.db.lock();
         let tx = sql(db.transaction())?;
         let mut actor = actor_tx(&tx, id)?;
+        // Worker shutdown/recovery cannot undo an explicit archive.
+        if actor.status == ActorStatus::Archived {
+            return Ok(());
+        }
         if actor.status != status {
             actor.status = status;
             actor.updated_at_ms = now();
             save_actor(&tx, &actor)?;
         }
         self.commit(tx)
+    }
+    pub(crate) fn set_archived(&self, id: &str, archived: bool) -> Result<ActorRecord> {
+        let mut db = self.db.lock();
+        let tx = sql(db.transaction())?;
+        let mut actor = actor_tx(&tx, id)?;
+        if id == crate::stage::shared::ACTOR_ID {
+            return Err(ActorError::Conflict("Core cannot be archived".into()).into());
+        }
+        if archived && actor.status != ActorStatus::Archived {
+            // Include pending collaborator inputs: yielding a turn is not completion
+            // of delegated work. Admission and this check use the same transaction.
+            let pending: bool = sql(tx.query_row(
+                "WITH RECURSIVE inputs(id,actor,request) AS (
+                    SELECT id,actor_id,json_extract(record,'$.reply_to.request_id') FROM messages WHERE status IN ('\"queued\"','\"running\"')
+                    UNION SELECT m.id,m.actor_id,json_extract(m.record,'$.reply_to.request_id') FROM messages m JOIN inputs i ON m.id=i.request
+                ) SELECT EXISTS(SELECT 1 FROM inputs WHERE actor=?1)",
+                [id], |r| r.get(0),
+            ))?;
+            let has_remote: bool = sql(tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='stage_outbox')",
+                [],
+                |r| r.get(0),
+            ))?;
+            let remote_pending = has_remote && sql(tx.query_row(
+                "WITH RECURSIVE inputs(id,actor,request) AS (
+                    SELECT m.id,m.actor_id,json_extract(m.record,'$.reply_to.request_id') FROM stage_sent s JOIN stage_outbox o ON o.invocation=s.invocation AND o.peer=s.peer JOIN messages m ON m.id=json_extract(s.record,'$.request_id') WHERE o.completed=0
+                    UNION SELECT m.id,m.actor_id,json_extract(m.record,'$.reply_to.request_id') FROM messages m JOIN inputs i ON m.id=i.request
+                ) SELECT EXISTS(SELECT 1 FROM inputs WHERE actor=?1)",
+                [id], |r| r.get::<_, bool>(0),
+            ))?;
+            if actor.status != ActorStatus::Idle || pending || remote_pending {
+                return Err(ActorError::Conflict(
+                    "Actor must be idle with no pending inputs or delegated work before archival"
+                        .into(),
+                )
+                .into());
+            }
+        }
+        let status = if archived {
+            ActorStatus::Archived
+        } else {
+            ActorStatus::Idle
+        };
+        if archived != (actor.status == ActorStatus::Archived) {
+            actor.status = status;
+            actor.updated_at_ms = now().max(actor.updated_at_ms + 1);
+            save_actor(&tx, &actor)?;
+        }
+        self.commit(tx)?;
+        Ok(actor)
     }
     pub(crate) fn update_token_estimate(
         &self,
@@ -630,7 +699,7 @@ impl ActorStore {
         let mut db = self.db.lock();
         let tx = sql(db.transaction())?;
         let mut actor = actor_tx(&tx, actor_id)?;
-        if actor.status == ActorStatus::Running {
+        if actor.status != ActorStatus::Idle {
             return Ok(None);
         }
         // A replica/lifecycle transition can leave Actor status idle while its
@@ -1961,7 +2030,7 @@ impl ActorStore {
         let active = {
             let db = self.db.lock();
             let mut stmt = sql(
-                db.prepare("SELECT id FROM actors WHERE json_extract(record,'$.status')!='idle'")
+                db.prepare("SELECT id FROM actors WHERE json_extract(record,'$.status')='running'")
             )?;
             sql(stmt.query_map([], |r| r.get::<_, String>(0)))?
                 .collect::<rusqlite::Result<Vec<_>>>()

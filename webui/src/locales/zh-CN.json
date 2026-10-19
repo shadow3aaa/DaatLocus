@@ -91,6 +91,7 @@
     "copy_failed": "复制失败，请重试"
   },
   "conversation_pane": {
+    "actor_archived": "Actor 已归档",
     "recovery_blocked": "恢复暂时无法完成，对话记录和草稿已保留。",
     "local_recovery": "连接中断，已在此设备继续运行。",
     "offline": "另一台设备已离线，草稿已保留。",
@@ -432,6 +433,8 @@
     "the_folder_contains_duplicate_file_names": "文件夹包含重名文件。"
   },
   "tool_presentation": {
+    "archive_actor": "归档 Actor",
+    "unarchive_actor": "取消归档 Actor",
     "create_actor": "创建 Actor",
     "view_actor": "查看 Actor",
     "read_history": "读取历史",

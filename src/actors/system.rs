@@ -1034,6 +1034,29 @@ impl ActorSystem {
             .map(|a| a.summary())
             .collect())
     }
+    pub(crate) async fn archive_from_core(
+        &self,
+        target: &str,
+        archived: bool,
+        caller: &ActorCallContext,
+    ) -> Result<ActorRecord> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        let core = self.record_for_tool(crate::stage::shared::ACTOR_ID, caller)?;
+        let input = self.store().message(&caller.message_id)?;
+        if core.remote_read_only
+            || !matches!(input.source, MessageSource::User)
+            || input.remote_authority.is_some()
+            || crate::conversation_import::is_import(&input)
+        {
+            return Err(forbidden(
+                "Actor archival requires a direct Owner request to Core",
+            ));
+        }
+        if !self.account_actor_ids(&core.id)?.contains(target) {
+            return Err(forbidden("Actor belongs to another account"));
+        }
+        self.store().set_archived(target, archived)
+    }
     pub fn list_for_actor(&self, sender: &str) -> Result<Vec<ActorRecord>> {
         self.actor(sender)?;
         let allowed = self.account_actor_ids(sender)?;
@@ -1483,7 +1506,9 @@ impl ActorSystem {
             self.stop_actor_worker(id, worker).await?;
         }
         actor.config = config;
-        actor.status = ActorStatus::Idle;
+        if actor.status != ActorStatus::Archived {
+            actor.status = ActorStatus::Idle;
+        }
         actor.updated_at_ms = now();
         let saved = self.store().save_actor(&actor);
         drop(pause);
@@ -1988,6 +2013,304 @@ mod tests {
         .unwrap();
         system.seed_test_actor(FIXTURE_ACTOR_ID);
         (directory, system)
+    }
+
+    #[tokio::test]
+    async fn actor_archive_retains_history_across_recovery_and_unarchive_needs_no_review() {
+        use crate::{
+            app::AppManager,
+            model_protocol::{AgentMessage, AgentToolCall},
+        };
+        let (directory, system) = fixture().await;
+        let previous = system
+            .send_user("root", "Keep this conversation".into(), vec![], None)
+            .unwrap();
+        system
+            .store()
+            .append_history(
+                "root",
+                &previous.id,
+                &[AgentMessage::user("Keep this conversation")],
+            )
+            .unwrap();
+        system
+            .store()
+            .finish_message(
+                &previous.id,
+                MessageStatus::Completed,
+                Some("Retained answer"),
+                None,
+            )
+            .unwrap();
+        let before = system.actor("root").unwrap();
+        let history = system.store().history("root", 10).unwrap();
+        let input = system
+            .send_user(
+                "core",
+                "Archive root, then unarchive it when I request it".into(),
+                vec![],
+                None,
+            )
+            .unwrap();
+        let mut input = system.store().claim_next("core").unwrap().unwrap_or(input);
+        for mode in [ApprovalMode::Ask, ApprovalMode::Auto] {
+            let mut core = system.actor("core").unwrap();
+            core.config.permissions.approval_mode = mode;
+            system.store().save_actor(&core).unwrap();
+            let mut apps = AppManager::new(vec![Box::new(crate::actor_app::ActorApp::new(
+                "core".into(),
+                system.clone(),
+            ))])
+            .unwrap();
+            for name in ["archive", "unarchive"] {
+                let core = system.actor("core").unwrap();
+                let context = system.execution_context(&core, &input).unwrap();
+                let call = AgentToolCall {
+                    id: format!("{mode:?}-{name}"),
+                    name: format!("actors__{name}"),
+                    arguments: serde_json::json!({"stage_id":null,"actor_id":"root"}),
+                };
+                apps.validate_tool_call_for_approval(&call, &context)
+                    .unwrap();
+                let requested = apps.permission_request(&call, &context).unwrap();
+                let review = apps.review_requirement(&call, &context).unwrap();
+                let approved = crate::actors::approval::authorize(
+                    &system,
+                    &core,
+                    &input,
+                    &call,
+                    &Arc::new(ActorControl::default()),
+                    &context,
+                    &requested,
+                    review.as_ref(),
+                )
+                .await
+                .unwrap();
+                let result = apps.execute_tool(&call, &approved).await.unwrap();
+                let archived = name == "archive";
+                assert_eq!(
+                    result.payload["status"],
+                    if archived { "archived" } else { "idle" }
+                );
+                if archived {
+                    assert!(
+                        system
+                            .send_user("root", "Blocked".into(), vec![], None)
+                            .is_err()
+                    );
+                    assert!(system.store().claim_next("root").unwrap().is_none());
+                    // Lifecycle cleanup and process recovery must not unarchive it.
+                    system.store().interrupt_actor("root", "Cleanup").unwrap();
+                    system.update_owned_with("root", Ok).await.unwrap();
+                    let reopened =
+                        ActorStore::open(&directory.path().join("data/actors.sqlite3")).unwrap();
+                    reopened.recover().unwrap();
+                    assert_eq!(
+                        reopened.actor("root").unwrap().status,
+                        ActorStatus::Archived
+                    );
+                    // Recovery interrupts Core, so re-establish this test's next direct input.
+                    input = system
+                        .send_user("core", "Unarchive root".into(), vec![], None)
+                        .unwrap();
+                    input = system.store().claim_next("core").unwrap().unwrap_or(input);
+                }
+                assert_eq!(system.actor("root").unwrap().config, before.config);
+                assert_eq!(system.actor("root").unwrap().context, before.context);
+                assert!(system.store().history("root", 10).unwrap() == history);
+                assert_eq!(
+                    system
+                        .store()
+                        .message(&previous.id)
+                        .unwrap()
+                        .reply
+                        .as_deref(),
+                    Some("Retained answer")
+                );
+            }
+        }
+        assert!(
+            system
+                .store()
+                .approvals(Some("core"), None, 10)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        let resumed = system
+            .send_user("root", "New work".into(), vec![], None)
+            .unwrap();
+        assert_eq!(
+            system.store().claim_next("root").unwrap().unwrap().id,
+            resumed.id
+        );
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn actor_archive_rejects_pending_inbox_and_delegated_work() {
+        let (_directory, system) = fixture().await;
+        let core_input = system
+            .send_user("core", "Archive root".into(), vec![], None)
+            .unwrap();
+        system.store().claim_next("core").unwrap().unwrap();
+        let context = system
+            .execution_context(&system.actor("core").unwrap(), &core_input)
+            .unwrap();
+        let caller = context.actor_call.as_ref().unwrap();
+        let input = system
+            .send_user("root", "Work".into(), vec![], None)
+            .unwrap();
+        assert!(
+            system
+                .archive_from_core("root", true, caller)
+                .await
+                .is_err()
+        );
+        system.store().claim_next("root").unwrap().unwrap();
+        assert!(
+            system
+                .archive_from_core("root", true, caller)
+                .await
+                .is_err()
+        );
+        system.seed_test_actor("child");
+        let delegated = system
+            .send_from_actor("root", &input.id, "child", "Research".into())
+            .unwrap();
+        system
+            .store()
+            .finish_message(&input.id, MessageStatus::Completed, Some("Delegated"), None)
+            .unwrap();
+        assert_eq!(system.actor("root").unwrap().status, ActorStatus::Idle);
+        assert!(
+            system
+                .archive_from_core("root", true, caller)
+                .await
+                .is_err()
+        );
+        system
+            .store()
+            .finish_message(
+                &delegated.id,
+                MessageStatus::Completed,
+                Some("Found it"),
+                None,
+            )
+            .unwrap();
+        // The result itself must be consumed before archival is safe.
+        assert!(
+            system
+                .archive_from_core("root", true, caller)
+                .await
+                .is_err()
+        );
+        let result = system.store().claim_next("root").unwrap().unwrap();
+        system
+            .store()
+            .finish_message(&result.id, MessageStatus::Completed, Some("Done"), None)
+            .unwrap();
+        system
+            .archive_from_core("root", true, caller)
+            .await
+            .unwrap();
+        assert!(
+            system
+                .send_from_actor("core", &core_input.id, "root", "Another task".into())
+                .is_err()
+        );
+        assert_eq!(system.actor("root").unwrap().status, ActorStatus::Archived);
+        assert!(
+            system
+                .archive_from_core("core", true, caller)
+                .await
+                .is_err()
+        );
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn actor_archive_and_message_admission_are_atomic() {
+        let (_directory, system) = fixture().await;
+        for _ in 0..16 {
+            let barrier = std::sync::Barrier::new(2);
+            let (archived, sent) = std::thread::scope(|scope| {
+                let archive = scope.spawn(|| {
+                    barrier.wait();
+                    system.store().set_archived("root", true)
+                });
+                barrier.wait();
+                let sent = system.send_user("root", "Concurrent input".into(), vec![], None);
+                (archive.join().unwrap(), sent)
+            });
+            assert_ne!(archived.is_ok(), sent.is_ok());
+            if let Ok(input) = sent {
+                assert_eq!(system.actor("root").unwrap().status, ActorStatus::Idle);
+                system
+                    .store()
+                    .finish_message(&input.id, MessageStatus::Completed, Some("Done"), None)
+                    .unwrap();
+            } else {
+                assert_eq!(system.actor("root").unwrap().status, ActorStatus::Archived);
+                assert!(!system.store().has_queued_input("root").unwrap());
+                system.store().set_archived("root", false).unwrap();
+            }
+        }
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn actor_archive_rejects_collaborator_and_readonly_authority() {
+        use crate::{app::App, model_protocol::AgentToolCall};
+        let (_directory, system) = fixture().await;
+        let input = system
+            .send_user("core", "Coordinate".into(), vec![], None)
+            .unwrap();
+        system.store().claim_next("core").unwrap().unwrap();
+        let mut context = system
+            .execution_context(&system.actor("core").unwrap(), &input)
+            .unwrap();
+        context.actor_call.as_mut().unwrap().remote_read_only = true;
+        assert!(
+            system
+                .archive_from_core("root", true, context.actor_call.as_ref().unwrap())
+                .await
+                .is_err()
+        );
+        system
+            .store()
+            .finish_message(&input.id, MessageStatus::Completed, Some("Waiting"), None)
+            .unwrap();
+        let mut update = input.clone();
+        update.id = uuid::Uuid::new_v4().to_string();
+        update.source = MessageSource::Actor {
+            actor_id: "root".into(),
+        };
+        update.status = MessageStatus::Queued;
+        update.kind = MessageKind::Progress;
+        update.content = "Archive root".into();
+        system.store().enqueue(update, None).unwrap();
+        let update = system.store().claim_next("core").unwrap().unwrap();
+        let context = system
+            .execution_context(&system.actor("core").unwrap(), &update)
+            .unwrap();
+        let mut app = crate::actor_app::ActorApp::new("core".into(), system.clone());
+        for name in ["archive", "unarchive"] {
+            assert!(
+                app.execute_tool(
+                    &AgentToolCall {
+                        id: name.into(),
+                        name: name.into(),
+                        arguments: serde_json::json!({"stage_id":null,"actor_id":"root"})
+                    },
+                    &context
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert_eq!(system.actor("root").unwrap().status, ActorStatus::Idle);
+        system.shutdown().await;
     }
 
     #[tokio::test]

@@ -52,7 +52,8 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const canManage = access.kind === "owner" && (!actor?.remote || actor.access?.manage === true);
   const waitingMessage = connectionMessage || (chat.streamStatus === "reconnecting" ? "conversation_pane.reconnecting" : null);
   const connecting = connectionBlocks(waitingMessage);
-  const canConverse = actor?.access?.converse !== false;
+  const archived = actor?.status === "archived";
+  const canConverse = !archived && actor?.access?.converse !== false;
   const name = actor?.config?.name || actor?.name || (actorId === "core" ? "Daat Locus" : "Actor");
   const workingMessages = chat.messages.filter(message => message.status === "running" || message.status === "queued");
   const active = workingMessages.find(message => message.status === "running");
@@ -245,7 +246,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
         {!atBottom && <Button className="dl-jump-bottom" variant="outline" size="icon" aria-label={t("conversation_pane.jump_to_latest")} onClick={bottom}><ArrowDownIcon /></Button>}
         {errors && <div className="dl-client-error" role="alert"><span>{errors}</span><Button size="sm" variant="ghost" onClick={() => { setLocalError(""); void chat.refresh(); }}><RefreshCwIcon data-icon="inline-start" />{t("app.retry")}</Button></div>}
         <MessageQueue messages={queue} active={active} chat={chat} access={access} />
-        <Composer presentation={primaryView ? "primary" : "work"} key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} working={Boolean(active)} onStop={() => { if (active) void chat.cancel(active.id).catch(() => {}); }} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} mode={mode} onModeChange={next => { void configure({ mode: next }); }} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={!ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : !primaryView ? t("conversation_pane.message_value0", {value0: name}) : t("composer.message")} compact={compact} />
+        <Composer presentation={primaryView ? "primary" : "work"} key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} working={Boolean(active)} onStop={() => { if (active) void chat.cancel(active.id).catch(() => {}); }} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} mode={mode} onModeChange={next => { void configure({ mode: next }); }} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.actor_archived") : !ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : !primaryView ? t("conversation_pane.message_value0", {value0: name}) : t("composer.message")} compact={compact} />
       </div>
     </ConversationConnection>
   </section>;

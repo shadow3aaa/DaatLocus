@@ -70,7 +70,10 @@ impl ActorApp {
         let caller = self.caller(context)?;
         let message = self.system.store().message(&caller.message_id)?;
         if crate::conversation_import::is_import(&message)
-            && matches!(call.name.as_str(), "create" | "send" | "cancel")
+            && matches!(
+                call.name.as_str(),
+                "create" | "send" | "cancel" | "archive" | "unarchive"
+            )
         {
             return Err(miette!(
                 "Conversation import only prepares an idle Actor. Use import_conversation; do not queue work."
@@ -110,6 +113,14 @@ struct SendActorArgs {
     /// Null addresses an Actor on this Stage.
     stage_id: Option<String>,
     content: String,
+}
+
+#[model_schema]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ArchiveActorArgs {
+    stage_id: Option<String>,
+    actor_id: String,
 }
 
 #[model_schema]
@@ -220,6 +231,10 @@ impl App for ActorApp {
             AppToolSpec { name: "read_resource".into(), description: "Read this Actor's immutable resource by ID or internal resource URI. Text uses UTF-8 byte offsets; null starts at zero. Follow next_offset. Images are attached to model context. A reference never grants access to another Actor.".into(), input_schema: model_schema_for::<ReadResourceArgs>() },
             AppToolSpec { name: "yield".into(), description: "End only this input silently after the current tool group settles. Sends no message or final result and does not complete delegated work. Use while waiting for collaborators or when an update needs no outward response; later results wake you automatically.".into(), input_schema: model_schema_for::<EmptyAppArgs>() },
         ];
+        if self.actor_id == crate::stage::shared::ACTOR_ID {
+            tools.push(AppToolSpec { name: "archive".into(), description: "Archive an idle hosted Actor only when the Owner explicitly asks. Pending inputs or delegated work prevent archival. Preserves identity, configuration and history; rejects new messages until explicitly unarchived. Never archive Core. No approval required. Null stage_id selects the current device.".into(), input_schema: model_schema_for::<ArchiveActorArgs>() });
+            tools.push(AppToolSpec { name: "unarchive".into(), description: "Allow an archived Actor to receive messages again, only when the Owner explicitly asks. Does not send work or replay history. No approval required. Null stage_id selects the current device.".into(), input_schema: model_schema_for::<ArchiveActorArgs>() });
+        }
         tools.push(if self.actor_id == crate::stage::shared::ACTOR_ID {
             AppToolSpec { name: "deliver".into(), description: "Send an immediate durable message to this input's original recipient. Does not complete delegated work. Set finish_turn to true to release the inbox after this tool group; use false only when more coordination is needed now.".into(), input_schema: model_schema_for::<DeliverArgs>() }
         } else {
@@ -350,6 +365,27 @@ impl App for ActorApp {
         let caller = self.caller(context)?;
         self.check_import_operation(call, context)?;
         match call.name.as_str() {
+            "archive" | "unarchive" => {
+                if self.actor_id != crate::stage::shared::ACTOR_ID {
+                    return Err(miette!("Only Core can archive or unarchive Actors"));
+                }
+                let args: ArchiveActorArgs =
+                    serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                self.require_local_stage(args.stage_id.as_deref())?;
+                let actor = self
+                    .system
+                    .archive_from_core(&args.actor_id, call.name == "archive", caller)
+                    .await?;
+                Ok(AppToolExecutionResult::new(
+                    if call.name == "archive" {
+                        "Actor archived"
+                    } else {
+                        "Actor unarchived"
+                    },
+                    json!({"actor_id":actor.id,"name":actor.config.name,"status":actor.status,"conversation_url":self.conversation_url(&actor.id)?}),
+                    None,
+                ))
+            }
             "yield" => {
                 let _: EmptyAppArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|_| miette!("Invalid yield arguments"))?;

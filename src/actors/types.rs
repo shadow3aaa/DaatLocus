@@ -112,6 +112,7 @@ pub struct ActorConfig {
 pub enum ActorStatus {
     Idle,
     Running,
+    Archived,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

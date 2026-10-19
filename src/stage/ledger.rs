@@ -715,6 +715,9 @@ impl<'a> StageLedger<'a> {
             let permission=grant(tx,&peer,&target.actor_id)?;
             if !permission.converse || matches!(origin,super::protocol::Origin::Actor{..})&&!permission.delegate { return Err(StageError::Forbidden("Device cannot invoke this Actor")); }
             if let Some((previous,mut receipt))=receipt(tx,id,invocation)? { if previous!=hash { return Err(StageError::Conflict("Invocation identifier changed content")); }receipt.duplicate=true;return Ok(receipt); }
+            if crate::actors::store::actor_tx(tx, &target.actor_id).map_err(|_| StageError::Forbidden("Actor is unavailable"))?.status == crate::actors::ActorStatus::Archived {
+                return Err(StageError::Conflict("Actor is archived; unarchive it before sending messages"));
+            }
             let pending:i64=tx.query_row("SELECT COALESCE(SUM(length(frame)+COALESCE(json_extract(CAST(frame AS TEXT),'$.body.content.size'),0)+COALESCE((SELECT SUM(json_extract(value,'$.content.size')) FROM json_each(CAST(frame AS TEXT),'$.body.attachments')),0)),0) FROM stage_inbox WHERE finished IS NULL",[],|row|row.get(0))?;
             if (pending as u64).saturating_add(transfer_size(frame,bytes.len()))>self.backlog_bytes { return Err(StageError::Capacity("Persistent inbox is full")); }
             let message_id=if let Some(content)=content {
@@ -1142,6 +1145,127 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn actor_archive_blocks_remote_admission_but_keeps_receipts_and_read_access() {
+        let fixture = Fixture::new();
+        let peer = fixture.remote.profile().stage_id;
+        let first = fixture.request();
+        let received = fixture
+            .ledger()
+            .accept_actor_input(peer, &first, "request".into(), 2000)
+            .unwrap();
+        assert!(fixture.store.set_archived("root", true).is_err());
+        fixture
+            .store
+            .finish_message(
+                received.message_id.as_deref().unwrap(),
+                crate::actors::MessageStatus::Completed,
+                Some("Done"),
+                None,
+            )
+            .unwrap();
+        fixture.store.set_archived("root", true).unwrap();
+        assert!(
+            fixture
+                .ledger()
+                .actor_grant(peer, "root", 2001)
+                .unwrap()
+                .read
+        );
+        assert!(
+            fixture
+                .ledger()
+                .accept_actor_input(peer, &first, "request".into(), 2001)
+                .unwrap()
+                .duplicate
+        );
+        let mut next = fixture.request();
+        next.invocation_id = Some(invocation_id(2001).unwrap());
+        next.created_at_ms = 2001;
+        for received_content in [None, Some("request".to_owned())] {
+            let rejected = fixture
+                .ledger()
+                .accept_inner(peer, &next, received_content, 2001);
+            assert!(
+                matches!(rejected, Err(StageError::Conflict(_))),
+                "{rejected:?}"
+            );
+        }
+        assert_eq!(
+            fixture
+                .store
+                .messages("root", None, 10)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        fixture.store.set_archived("root", false).unwrap();
+        fixture
+            .ledger()
+            .accept_actor_input(peer, &next, "request".into(), 2001)
+            .unwrap();
+        assert_eq!(
+            fixture.store.claim_next("root").unwrap().unwrap().content,
+            "request"
+        );
+    }
+
+    #[test]
+    fn actor_archive_waits_for_remote_delegations_even_after_its_input_finishes() {
+        let fixture = Fixture::new();
+        let peer = fixture.remote.profile().stage_id;
+        let receipt = fixture
+            .ledger()
+            .accept_actor_input(peer, &fixture.request(), "request".into(), 2000)
+            .unwrap();
+        let input = fixture
+            .store
+            .message(receipt.message_id.as_deref().unwrap())
+            .unwrap();
+        let outgoing = super::super::delivery::Deliveries::new(
+            &fixture.store,
+            fixture.local.profile().stage_id,
+        )
+        .queue(
+            &fixture.store.actor("root").unwrap(),
+            Some(&input),
+            ActorAddress {
+                stage_id: peer,
+                actor_id: "collaborator".into(),
+            },
+            ("Research".into(), vec![]),
+            2001,
+            "delegation",
+        )
+        .unwrap();
+        fixture
+            .store
+            .finish_message(
+                &input.id,
+                crate::actors::MessageStatus::Completed,
+                Some("Delegated"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.store.actor("root").unwrap().status,
+            ActorStatus::Idle
+        );
+        assert!(fixture.store.set_archived("root", true).is_err());
+        fixture
+            .ledger()
+            .record_result(
+                peer,
+                outgoing.invocation_id.unwrap(),
+                InvocationState::Completed,
+                None,
+                2002,
+            )
+            .unwrap();
+        fixture.store.set_archived("root", true).unwrap();
+    }
+
     #[test]
     fn remote_actor_sender_ceiling_survives_admission_as_private_server_state() {
         use crate::actors::ApprovalMode;

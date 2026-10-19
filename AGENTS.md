@@ -91,6 +91,11 @@ client are connected.
   reconnecting replicas synchronize. Never expose reset to models or Apps, or add
   individual Actor deletion in the client, HTTP API or native protocol.
   Completion, idleness, restart or worker shutdown must not recycle an Actor.
+  Core may archive/unarchive hosted Actors only on an explicit Owner request,
+  without review. Archive only idle Actors with no pending inputs or delegated
+  work; persist the state and reject new messages on every local/remote path.
+  Preserve identity, configuration, context, history, resources and grants.
+  Unarchive restores message admission without replay; Core cannot be archived.
 - Project, investigation and general Actors use the same core and device Apps.
   Project workspaces grant recursive filesystem access from their top directory.
   Enforce sandbox and authenticated remote restrictions in tools, not only prompts.

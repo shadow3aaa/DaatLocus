@@ -91,6 +91,7 @@
     "copy_failed": "Could not copy. Try again."
   },
   "conversation_pane": {
+    "actor_archived": "Actor archived",
     "recovery_blocked": "Recovery is paused. Conversation records and your draft are retained.",
     "local_recovery": "Continuing on this device while disconnected.",
     "offline": "The other device is offline. Your draft is retained.",
@@ -432,6 +433,8 @@
     "the_folder_contains_duplicate_file_names": "The folder contains duplicate file names."
   },
   "tool_presentation": {
+    "archive_actor": "Archive Actor",
+    "unarchive_actor": "Unarchive Actor",
     "create_actor": "Create Actor",
     "view_actor": "View Actor",
     "read_history": "Read history",

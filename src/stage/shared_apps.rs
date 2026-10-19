@@ -66,6 +66,14 @@ struct RequestArgs {
     message_id: String,
 }
 
+#[model_schema]
+#[derive(Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ArchiveArgs {
+    stage_id: String,
+    actor_id: String,
+}
+
 struct AccountActors {
     controller: Arc<Controller>,
     local: ActorApp,
@@ -90,7 +98,14 @@ impl App for AccountActors {
     fn delegates_approval(&self, call: &AgentToolCall) -> bool {
         matches!(
             call.name.as_str(),
-            "list" | "create" | "import_conversation" | "send" | "status" | "cancel"
+            "list"
+                | "create"
+                | "import_conversation"
+                | "send"
+                | "status"
+                | "cancel"
+                | "archive"
+                | "unarchive"
         )
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
@@ -102,6 +117,7 @@ impl App for AccountActors {
                 "import_conversation" => model_schema_for::<ImportArgs>(),
                 "send" => model_schema_for::<SendArgs>(),
                 "status" | "cancel" => model_schema_for::<RequestArgs>(),
+                "archive" | "unarchive" => model_schema_for::<ArchiveArgs>(),
                 _ => continue,
             };
             spec.description = spec
