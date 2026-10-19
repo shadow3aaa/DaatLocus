@@ -1265,7 +1265,9 @@ async fn two_device_partition_preserves_both_branches_and_does_not_replay_the_lo
 async fn three_device_core_preserves_resources_context_and_effects_across_sequential_takeover() {
     if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
         let _ = tracing_subscriber::fmt()
-            .with_env_filter("daat_locus::stage=debug,openraft=info")
+            .with_env_filter(
+                "daat_locus::stage=debug,daat_locus::actors::store=debug,openraft=info",
+            )
             .with_test_writer()
             .try_init();
     }
@@ -1334,6 +1336,19 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     let address_c = net_c.address.read().unwrap();
     net_a.dial_tcp(host_c.local, address_c, None).await.unwrap();
     net_b.dial_tcp(host_c.local, address_c, None).await.unwrap();
+    // Model exactly these loopback discovery hints, with no ambient LAN. A
+    // transient transport loss must be able to reconnect before planned handoff.
+    let address_a = net_a.address.read().unwrap();
+    for (network, peer, address) in [
+        (&net_a, host_b.local, address),
+        (&net_a, host_c.local, address_c),
+        (&net_b, host_a.local, address_a),
+        (&net_b, host_c.local, address_c),
+        (&net_c, host_a.local, address_a),
+        (&net_c, host_b.local, address),
+    ] {
+        network.account_candidate(peer, address);
+    }
     for _ in 0..100 {
         if net_a
             .core

@@ -50,6 +50,8 @@ neither a dist bundle, Bun nor wasm-pack. `DAAT_LOCUS_MODEL_CATALOG_PATH` can su
 models.dev JSON snapshot for offline builds; Cargo `--offline` does not disable
 build-script network requests. See [model catalog](docs/model-catalog.md).
 
+The sequential takeover fixture supplies only its three loopback discovery hints, so transient links can reconnect without ambient LAN traffic. ActorStore scheduling regressions run on a single multithreaded-runtime worker with a held transaction and a waiting reader; control tasks must remain runnable. Peer channel tests retain the first read/write/authorization failure across shutdown.
+
 ## Source and tests
 
 - `src/actors`: execution, persistence, permissions and approval.

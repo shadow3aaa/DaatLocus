@@ -840,7 +840,7 @@ impl Runtime {
         self.tasks.lock().push(tokio::spawn(async move {
             let result = link.run().await;
             if let Err(error) = &result {
-                tracing::debug!(peer=%peer,generation,error=?error,"Native peer channel stopped");
+                tracing::debug!(stage=%own.host.local,peer=%peer,generation,error=?error,"Native peer channel stopped");
             }
             let mut states = own.states.write();
             // A replaced link can finish after its successor is already online.
@@ -1451,6 +1451,43 @@ mod fallback_tests {
         supervisor.abort();
         let _ = supervisor.await;
         drop(stream);
+        a.stop_abruptly().await;
+        b.stop_abruptly().await;
+        a.host.system.shutdown().await;
+        b.host.system.shutdown().await;
+    }
+    #[tokio::test]
+    async fn loopback_candidates_reconnect_after_an_established_channel_is_lost() {
+        let (_directory, a, b) = hosts().await;
+        a.start().await.unwrap();
+        b.start().await.unwrap();
+        a.account_candidate(b.host.local, b.address.read().unwrap());
+        b.account_candidate(a.host.local, a.address.read().unwrap());
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !a.connected(b.host.local) || !b.connected(a.host.local) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("fixture links did not connect");
+        let generation = a.state(b.host.local).generation;
+        a.disconnect_peers();
+        b.disconnect_peers();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !a.connected(b.host.local)
+                || !b.connected(a.host.local)
+                || a.state(b.host.local).generation <= generation
+                || b.state(a.host.local).generation <= generation
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("established link did not recover from controlled loopback hints");
+        assert_eq!(
+            a.state(b.host.local).generation,
+            b.state(a.host.local).generation
+        );
         a.stop_abruptly().await;
         b.stop_abruptly().await;
         a.host.system.shutdown().await;
