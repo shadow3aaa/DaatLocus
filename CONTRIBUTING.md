@@ -355,10 +355,13 @@ CBT can block activation while compatibility promotion still moves the system
 cursor, so that path is not a cursor-preserving fallback. Unknown effects must be
 observed, never replayed automatically.
 
+Run `cargo xtask idd-driver --test` for driver unit tests, including teardown/error
+classification, with the same WDK and static-CRT configuration as the driver.
+
 For driver-stage diagnostics, enable its ETW provider only for the experiment:
 
 ```powershell
-sudo logman start DaatLocusIdd -p '{70b75adc-3a20-4a68-99a4-bc5249203ca0}' -ets -o "$PWD/target/idd-diagnostics.etl"
+sudo logman start DaatLocusIdd -p '{70b75adc-3a20-4a68-99a4-bc5249203ca0}' -ets -f bincirc -max 64 -o "$PWD/target/idd-diagnostics.etl"
 # Run the install or screen operation being diagnosed.
 sudo logman stop DaatLocusIdd -ets
 ```
@@ -366,6 +369,36 @@ sudo logman stop DaatLocusIdd -ets
 Events contain stages and status codes without application data. `EventWriteString`
 payloads may appear as UTF-16 `EventPayload` in `Get-WinEvent -Path ... -Oldest`
 XML on a machine without provider metadata. Keep traces under ignored `target`.
+The circular capture retains at most 64 MiB. Power callbacks record entry/exit,
+previous/target WDF power states, the diagnostic D0 cycle and lock acquisition.
+Adapter initialization/completion, monitor departure, object deletion and frame
+worker stop/join also have correlated stages. Driver object handles and per-pump
+IDs correlate callbacks; ETW supplies timestamps, process and thread IDs.
+Failures retain their NTSTATUS/HRESULT type and original code. Unexpected
+swapchain failures additionally query the D3D device removal reason when tracing
+is enabled. Stop signals, abandoned swapchains and stopped graphics devices are
+normal teardown events; successful frames and E_PENDING waits are not logged.
+With no capture enabled, events skip formatting/allocation. This instrumentation
+does not change power/ownership/retry policy and requires an updated driver to be
+installed before capturing the new events. It does not itself collect crash dumps.
+To read string events even without a provider manifest (PowerShell 7):
+
+```powershell
+Get-WinEvent -Path "$PWD/target/idd-diagnostics.etl" -Oldest |
+  Where-Object ProviderId -eq ([guid]'70b75adc-3a20-4a68-99a4-bc5249203ca0') |
+  ForEach-Object {
+    $record = $_
+    $eventXml = [xml]$record.ToXml()
+    $payload = $eventXml.Event.ProcessingErrorData.EventPayload
+    $message = if ($payload) {
+      [Text.Encoding]::Unicode.GetString([Convert]::FromHexString($payload)).TrimEnd([char]0)
+    } else { $record.Message }
+    [pscustomobject]@{ Time=$record.TimeCreated; PID=$record.ProcessId; TID=$record.ThreadId; Level=$record.Level; Message=$message }
+  } | Format-Table -Wrap
+```
+
+`ProcessingErrorData` in this fallback describes missing reader metadata, not a
+driver failure; inspect the decoded event's status and severity.
 
 ## Actor orchestration evaluations
 

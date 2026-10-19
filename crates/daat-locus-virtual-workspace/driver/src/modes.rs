@@ -37,13 +37,16 @@ fn signal(width: u32, height: u32, target: bool) -> DISPLAYCONFIG_VIDEO_SIGNAL_I
 }
 
 pub unsafe extern "C" fn description(
-    _: IDDCX_MONITOR,
+    monitor: IDDCX_MONITOR,
     input: *const IDARG_IN_GETDEFAULTDESCRIPTIONMODES,
     output: *mut IDARG_OUT_GETDEFAULTDESCRIPTIONMODES,
 ) -> NTSTATUS {
-    crate::trace::status("default description modes", unsafe {
-        (*input).DefaultMonitorModeBufferInputCount
-    } as i32);
+    crate::trace::event(
+        "modes.description.query",
+        format_args!("monitor={monitor:p} buffer_count={}", unsafe {
+            (*input).DefaultMonitorModeBufferInputCount
+        }),
+    );
     unsafe {
         (*output).DefaultMonitorModeBufferOutputCount = MODES.len() as u32;
         (*output).PreferredMonitorModeIdx = 2;
@@ -64,13 +67,15 @@ pub unsafe extern "C" fn description(
     0
 }
 pub unsafe extern "C" fn target(
-    _: IDDCX_MONITOR,
+    monitor: IDDCX_MONITOR,
     input: *const IDARG_IN_QUERYTARGETMODES,
     output: *mut IDARG_OUT_QUERYTARGETMODES,
 ) -> NTSTATUS {
-    crate::trace::status(
-        "target modes",
-        unsafe { (*input).TargetModeBufferInputCount } as i32,
+    crate::trace::event(
+        "modes.target.query",
+        format_args!("monitor={monitor:p} buffer_count={}", unsafe {
+            (*input).TargetModeBufferInputCount
+        }),
     );
     unsafe {
         (*output).TargetModeBufferOutputCount = MODES.len() as u32;
@@ -95,10 +100,16 @@ pub unsafe extern "C" fn parse(
     _: *const IDARG_IN_PARSEMONITORDESCRIPTION,
     _: *mut IDARG_OUT_PARSEMONITORDESCRIPTION,
 ) -> NTSTATUS {
-    crate::trace::status("parse description", 0);
+    crate::trace::event(
+        "modes.parse_description",
+        format_args!("status_kind=ntstatus status=0xc00000bb reason=use_default_modes"),
+    );
     0xc00000bbu32 as i32
 }
-pub unsafe extern "C" fn commit(_: IDDCX_ADAPTER, _: *const IDARG_IN_COMMITMODES) -> NTSTATUS {
-    crate::trace::status("commit modes", 0);
+pub unsafe extern "C" fn commit(
+    adapter: IDDCX_ADAPTER,
+    _: *const IDARG_IN_COMMITMODES,
+) -> NTSTATUS {
+    crate::trace::event("modes.commit", format_args!("adapter={adapter:p}"));
     0
 }

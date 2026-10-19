@@ -12,6 +12,7 @@ pub(crate) fn distribution(
             wdk_root: None,
             sdk_root: None,
             check: false,
+            test: false,
             certificate_thumbprint,
             timestamp_server: timestamp_server.into(),
         },
@@ -29,6 +30,9 @@ pub(crate) struct Options {
     /// Run strict Clippy for the driver instead of producing a package.
     #[arg(long)]
     check: bool,
+    /// Run driver unit tests with the same WDK and static-CRT configuration.
+    #[arg(long, conflicts_with = "check")]
+    test: bool,
     /// Existing CurrentUser/My code-signing certificate; no certificates are created/imported.
     #[arg(long)]
     certificate_thumbprint: Option<String>,
@@ -156,7 +160,13 @@ pub(crate) fn build(root: &Path, options: Options) -> crate::Result<()> {
     cargo
         .current_dir(&source)
         .args([
-            if options.check { "clippy" } else { "build" },
+            if options.test {
+                "test"
+            } else if options.check {
+                "clippy"
+            } else {
+                "build"
+            },
             "--locked",
             "--release",
             "--target",
@@ -165,11 +175,13 @@ pub(crate) fn build(root: &Path, options: Options) -> crate::Result<()> {
         .env("DL_IDD_INCLUDE", std::env::join_paths(&includes)?)
         .env("LIB", std::env::join_paths(&libraries)?)
         .env("CARGO_TARGET_DIR", &target);
-    if options.check {
+    if options.test {
+        cargo.args(["--lib", "--", "--test-threads=1"]);
+    } else if options.check {
         cargo.args(["--", "-D", "warnings"]);
     }
     command(&mut cargo)?;
-    if options.check {
+    if options.check || options.test {
         return Ok(());
     }
     let dll = package.join("DaatLocusVirtualDisplay.dll");

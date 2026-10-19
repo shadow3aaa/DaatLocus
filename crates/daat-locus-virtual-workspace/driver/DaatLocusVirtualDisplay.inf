@@ -5,7 +5,7 @@ ClassGuid={4d36e968-e325-11ce-bfc1-08002be10318}
 ClassVer=2.0
 Provider=%Provider%
 CatalogFile=DaatLocusVirtualDisplay.cat
-DriverVer=10/18/2026,0.1.0.7
+DriverVer=10/19/2026,0.1.0.8
 PnpLockdown=1
 
 [Manufacturer]

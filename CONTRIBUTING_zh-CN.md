@@ -320,10 +320,13 @@ close/Drop 禁用策略并卸载 Hook，不承诺 DLL 立即完全卸载。仅�
 真实触摸；CBT 可阻止激活，但兼容转换仍可能移动系统光标，不能作为保持光标的
 后备输入路径。未知效果必须先观察，不自动重放。
 
+`cargo xtask idd-driver --test` 使用驱动相同的 WDK 与静态 CRT 配置运行单元测试，
+包括清理/错误状态分类。
+
 定位驱动内部阶段时，仅在实验期间启用 ETW provider：
 
 ```powershell
-sudo logman start DaatLocusIdd -p '{70b75adc-3a20-4a68-99a4-bc5249203ca0}' -ets -o "$PWD/target/idd-diagnostics.etl"
+sudo logman start DaatLocusIdd -p '{70b75adc-3a20-4a68-99a4-bc5249203ca0}' -ets -f bincirc -max 64 -o "$PWD/target/idd-diagnostics.etl"
 # 执行需要诊断的安装或屏幕操作。
 sudo logman stop DaatLocusIdd -ets
 ```
@@ -331,6 +334,32 @@ sudo logman stop DaatLocusIdd -ets
 事件只含阶段与状态码，不含应用数据。没有 provider 元数据时，
 `Get-WinEvent -Path ... -Oldest` 的 XML 可能把 EventWriteString 的 UTF-16
 内容放在 `EventPayload`。跟踪文件保留在已忽略的 `target` 下。
+循环跟踪最多保留 64 MiB。电源回调记录进入/退出、前一/目标 WDF 电源状态、诊断用
+D0 周期与获取锁的位置；适配器初始化/异步完成、屏幕移除、对象删除及帧线程停止/
+join 也有可关联的阶段事件。驱动对象句柄和每个帧线程的编号关联回调，时间、进程与
+线程由 ETW 提供。失败保留 NTSTATUS/HRESULT 类型和原始错误码；异常交换链失败
+在启用跟踪时额外查询 D3D 设备移除原因。停止信号、交换链放弃及图形设备停止作为
+正常清理记录，不逐帧记录成功或 E_PENDING 等待。未启用跟踪时跳过格式化和分配。
+这些日志不改变电源、所有权或重试策略，安装新版驱动后才会产生新增事件；不自动
+收集崩溃 dump。
+没有 provider manifest 时，可用 PowerShell 7 解码字符串事件：
+
+```powershell
+Get-WinEvent -Path "$PWD/target/idd-diagnostics.etl" -Oldest |
+  Where-Object ProviderId -eq ([guid]'70b75adc-3a20-4a68-99a4-bc5249203ca0') |
+  ForEach-Object {
+    $record = $_
+    $eventXml = [xml]$record.ToXml()
+    $payload = $eventXml.Event.ProcessingErrorData.EventPayload
+    $message = if ($payload) {
+      [Text.Encoding]::Unicode.GetString([Convert]::FromHexString($payload)).TrimEnd([char]0)
+    } else { $record.Message }
+    [pscustomobject]@{ Time=$record.TimeCreated; PID=$record.ProcessId; TID=$record.ThreadId; Level=$record.Level; Message=$message }
+  } | Format-Table -Wrap
+```
+
+这种回退中的 `ProcessingErrorData` 表示读取端缺少元数据，不是驱动失败；应查看解码
+后的事件状态和级别。
 
 ## Actor 编排评测
 

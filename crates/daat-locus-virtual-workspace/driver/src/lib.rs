@@ -49,6 +49,8 @@ static MONITOR: TypeInfo = type_info(c"DaatLocusMonitor".as_ptr(), size_of::<usi
 
 struct DeviceState {
     adapter: usize,
+    // Diagnostic D0 entry counter; never used for resource ownership or behavior.
+    power_cycle: u64,
     leases: Leases,
     identities: [(u64, u32); protocol::MAX_MONITORS],
 }
@@ -56,7 +58,10 @@ struct DeviceState {
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // No recoverable operation panics. A poisoned lock indicates an earlier invariant
     // failure; release builds abort within the UMDF host rather than unwind into WDF.
-    mutex.lock().unwrap_or_else(|_| std::process::abort())
+    mutex.lock().unwrap_or_else(|_| {
+        trace::error("driver.abort", format_args!("reason=mutex_poisoned"));
+        std::process::abort()
+    })
 }
 fn attributes(info: &'static TypeInfo) -> WDF_OBJECT_ATTRIBUTES {
     WDF_OBJECT_ATTRIBUTES {
@@ -84,6 +89,10 @@ pub unsafe extern "system" fn DriverEntry(
     path: *mut ffi::UNICODE_STRING,
 ) -> ffi::NTSTATUS {
     trace::register();
+    trace::event(
+        "driver.entry",
+        format_args!("driver={object:p} diagnostics_version=1"),
+    );
     let mut config = WDF_DRIVER_CONFIG {
         Size: size_of::<WDF_DRIVER_CONFIG>() as u32,
         EvtDriverDeviceAdd: Some(add_device),
@@ -92,7 +101,7 @@ pub unsafe extern "system" fn DriverEntry(
     };
     let status =
         unsafe { driver_create(object, path, ptr::null_mut(), &mut config, ptr::null_mut()) };
-    trace::status("driver create", status);
+    trace::status("driver.create", status);
     if status < 0 {
         trace::unregister();
     }
@@ -100,10 +109,12 @@ pub unsafe extern "system" fn DriverEntry(
 }
 
 unsafe extern "C" fn unload(_: WDFDRIVER) {
+    trace::event("driver.unload", format_args!(""));
     trace::unregister();
 }
 
 unsafe extern "C" fn add_device(_: WDFDRIVER, mut init: PWDFDEVICE_INIT) -> NTSTATUS {
+    trace::event("device_add.begin", format_args!("init={init:p}"));
     let mut power = WDF_PNPPOWER_EVENT_CALLBACKS {
         Size: size_of::<WDF_PNPPOWER_EVENT_CALLBACKS>() as u32,
         EvtDeviceD0Entry: Some(power_on),
@@ -138,19 +149,38 @@ unsafe extern "C" fn add_device(_: WDFDRIVER, mut init: PWDFDEVICE_INIT) -> NTST
         set_power(init, &mut power);
         set_files(init, &mut files, &mut file_attr);
         let status = device_init_config(init, &callbacks);
+        trace::result(
+            "device_init_config",
+            "ntstatus",
+            status,
+            format_args!("init={init:p}"),
+        );
         if status < 0 {
             return status;
         }
         let status = device_create(&mut init, &mut attr, &mut device);
+        trace::result(
+            "device_create",
+            "ntstatus",
+            status,
+            format_args!("device={device:p}"),
+        );
         if status < 0 {
             return status;
         }
         *slot(device.cast(), &DEVICE) = Box::into_raw(Box::new(Mutex::new(DeviceState {
             adapter: 0,
+            power_cycle: 0,
             leases: Leases::default(),
             identities: [(0, 0); protocol::MAX_MONITORS],
         })));
         let status = device_initialize(device);
+        trace::result(
+            "device_initialize",
+            "ntstatus",
+            status,
+            format_args!("device={device:p}"),
+        );
         if status < 0 {
             return status;
         }
@@ -162,16 +192,24 @@ unsafe extern "C" fn add_device(_: WDFDRIVER, mut init: PWDFDEVICE_INIT) -> NTST
             Data4: (uuid as u64).to_be_bytes(),
         };
         let status = interface_create(device, &guid, ptr::null());
+        trace::result(
+            "device_interface_create",
+            "ntstatus",
+            status,
+            format_args!("device={device:p}"),
+        );
         if status < 0 {
             return status;
         }
         // IddCx owns the default WDF queue and forwards client IOCTLs through
         // EvtIddCxDeviceIoControl. A second default queue never receives them.
+        trace::event("device_add.end", format_args!("device={device:p}"));
         SUCCESS
     }
 }
 
 unsafe extern "C" fn device_destroy(object: WDFOBJECT) {
+    trace::event("device_destroy.begin", format_args!("device={object:p}"));
     // All child callbacks have finished before WDF destroys their parent context.
     unsafe {
         let pointer = slot::<*mut Mutex<DeviceState>>(object, &DEVICE);
@@ -180,12 +218,30 @@ unsafe extern "C" fn device_destroy(object: WDFOBJECT) {
             *pointer = ptr::null_mut();
         }
     }
+    trace::event("device_destroy.end", format_args!("device={object:p}"));
 }
 
-unsafe extern "C" fn power_on(device: WDFDEVICE, _: WDF_POWER_DEVICE_STATE) -> NTSTATUS {
+unsafe extern "C" fn power_on(device: WDFDEVICE, previous: WDF_POWER_DEVICE_STATE) -> NTSTATUS {
+    trace::event(
+        "d0_entry.begin",
+        format_args!("device={device:p} previous_state={previous}"),
+    );
     let mutex = unsafe { state(device) };
     let mut state = lock(mutex);
+    state.power_cycle = state.power_cycle.wrapping_add(1);
+    let cycle = state.power_cycle;
+    trace::event(
+        "d0_entry.lock_acquired",
+        format_args!(
+            "device={device:p} cycle={cycle} adapter=0x{:x}",
+            state.adapter
+        ),
+    );
     if state.adapter != 0 {
+        trace::event(
+            "d0_entry.end",
+            format_args!("device={device:p} cycle={cycle} reason=adapter_retained"),
+        );
         return SUCCESS;
     }
     let mut version = IDDCX_ENDPOINT_VERSION {
@@ -216,11 +272,29 @@ unsafe extern "C" fn power_on(device: WDFDEVICE, _: WDF_POWER_DEVICE_STATE) -> N
         ObjectAttributes: &mut attr,
     };
     let mut output = IDARG_OUT_ADAPTER_INIT::default();
+    trace::event(
+        "adapter_init.begin",
+        format_args!("device={device:p} cycle={cycle}"),
+    );
     let status = unsafe { adapter_init(&input, &mut output) };
-    trace::status("adapter init", status);
+    trace::result(
+        "adapter_init.end",
+        "ntstatus",
+        status,
+        format_args!(
+            "device={device:p} cycle={cycle} adapter={:p}",
+            output.AdapterObject
+        ),
+    );
     if status >= 0 {
         state.adapter = output.AdapterObject as usize;
     }
+    trace::result(
+        "d0_entry.end",
+        "ntstatus",
+        status,
+        format_args!("device={device:p} cycle={cycle}"),
+    );
     status
 }
 
@@ -229,7 +303,12 @@ unsafe extern "C" fn adapter_ready(
     input: *const IDARG_IN_ADAPTER_INIT_FINISHED,
 ) -> NTSTATUS {
     // The zeroed WDF context is an aligned integer: 0=pending, 1=ready, 2=failed.
-    trace::status("adapter ready", unsafe { (*input).AdapterInitStatus });
+    trace::result(
+        "adapter_ready.begin",
+        "ntstatus",
+        unsafe { (*input).AdapterInitStatus },
+        format_args!("adapter={adapter:p}"),
+    );
     // No context initialization after AdapterInitAsync is needed, so even a very
     // early completion cannot race an uninitialized Rust pointer or take our lock.
     let ready = unsafe { AtomicU32::from_ptr(slot(adapter.cast(), &ADAPTER)) };
@@ -241,27 +320,68 @@ unsafe extern "C" fn adapter_ready(
         },
         Ordering::Release,
     );
+    trace::event("adapter_ready.end", format_args!("adapter={adapter:p}"));
     SUCCESS
 }
 
-unsafe extern "C" fn power_off(device: WDFDEVICE, _: WDF_POWER_DEVICE_STATE) -> NTSTATUS {
-    trace::status("power off", 0);
+unsafe extern "C" fn power_off(device: WDFDEVICE, target: WDF_POWER_DEVICE_STATE) -> NTSTATUS {
+    trace::event(
+        "d0_exit.begin",
+        format_args!("device={device:p} target_state={target}"),
+    );
     let mut state = lock(unsafe { state(device) });
+    let cycle = state.power_cycle;
+    trace::event(
+        "d0_exit.lock_acquired",
+        format_args!(
+            "device={device:p} cycle={cycle} adapter=0x{:x}",
+            state.adapter
+        ),
+    );
     let adapter = std::mem::take(&mut state.adapter);
     let monitors = state.leases.retire();
+    trace::event(
+        "d0_exit.retire",
+        format_args!(
+            "device={device:p} cycle={cycle} monitors={}",
+            monitors.iter().filter(|monitor| **monitor != 0).count()
+        ),
+    );
     // Serialize departure and parent deletion with file cleanup. Otherwise parent
     // removal could delete a monitor that file cleanup has taken out of the pool.
     // Reentrant IddCx callbacks touch only adapter atomics / monitor-local pumps.
     for monitor in monitors.into_iter().filter(|monitor| *monitor != 0) {
         unsafe {
-            monitor_departure(monitor as IDDCX_MONITOR);
+            trace::event(
+                "power_monitor_departure.begin",
+                format_args!("device={device:p} cycle={cycle} monitor=0x{monitor:x}"),
+            );
+            let status = monitor_departure(monitor as IDDCX_MONITOR);
+            trace::result(
+                "power_monitor_departure.end",
+                "ntstatus",
+                status,
+                format_args!("device={device:p} cycle={cycle} monitor=0x{monitor:x}"),
+            );
         }
     }
     if adapter != 0 {
         unsafe {
+            trace::event(
+                "adapter_delete.begin",
+                format_args!("device={device:p} cycle={cycle} adapter=0x{adapter:x}"),
+            );
             delete(adapter as WDFOBJECT);
+            trace::event(
+                "adapter_delete.end",
+                format_args!("device={device:p} cycle={cycle} adapter=0x{adapter:x}"),
+            );
         }
     }
+    trace::event(
+        "d0_exit.end",
+        format_args!("device={device:p} cycle={cycle}"),
+    );
     SUCCESS
 }
 
@@ -275,8 +395,12 @@ unsafe extern "C" fn io_control(
     // No callback unwinds into Windows. Normal failures use NTSTATUS; allocation or
     // invariant failures abort the isolated UMDF host in the release profile.
     let result = unsafe { create_monitor(request, output_len, input_len, code) };
-    trace::status("IOCTL", code as i32);
-    trace::status("IOCTL completion", result.0);
+    trace::result(
+        "ioctl.complete",
+        "ntstatus",
+        result.0,
+        format_args!("request={request:p} ioctl=0x{code:08x} bytes={}", result.1),
+    );
     unsafe {
         complete(request, result.0, result.1);
     }
@@ -298,7 +422,12 @@ unsafe fn create_monitor(
     let mut output = ptr::null_mut();
     // METHOD_BUFFERED buffers may alias: copy the request before writing any response.
     let status = unsafe { ffi::input(request, input_len, &mut input, ptr::null_mut()) };
-    trace::status("input buffer", status);
+    trace::result(
+        "ioctl.input_buffer",
+        "ntstatus",
+        status,
+        format_args!("request={request:p} input_len={input_len}"),
+    );
     if status < 0 {
         return (status, 0);
     }
@@ -376,8 +505,23 @@ unsafe fn create_monitor(
         ObjectAttributes: &mut attr,
     };
     let mut created = IDARG_OUT_MONITORCREATE::default();
+    trace::event(
+        "monitor_create.begin",
+        format_args!(
+            "device={device:p} cycle={} adapter=0x{:x} connector={connector}",
+            state.power_cycle, state.adapter
+        ),
+    );
     let status = unsafe { monitor_create(state.adapter as IDDCX_ADAPTER, &create, &mut created) };
-    trace::status("monitor create", status);
+    trace::result(
+        "monitor_create.end",
+        "ntstatus",
+        status,
+        format_args!(
+            "device={device:p} cycle={} monitor={:p} connector={connector}",
+            state.power_cycle, created.MonitorObject
+        ),
+    );
     if status < 0 {
         return (status, 0);
     }
@@ -386,8 +530,23 @@ unsafe fn create_monitor(
             Box::into_raw(Box::new(Mutex::new(None::<frame::FramePump>)));
     }
     let mut arrival = IDARG_OUT_MONITORARRIVAL::default();
+    trace::event(
+        "monitor_arrival.begin",
+        format_args!("monitor={:p} connector={connector}", created.MonitorObject),
+    );
     let status = unsafe { monitor_arrival(created.MonitorObject, &mut arrival) };
-    trace::status("monitor arrival", status);
+    trace::result(
+        "monitor_arrival.end",
+        "ntstatus",
+        status,
+        format_args!(
+            "monitor={:p} connector={connector} os_luid={:08x}{:08x} target={}",
+            created.MonitorObject,
+            arrival.OsAdapterLuid.HighPart as u32,
+            arrival.OsAdapterLuid.LowPart,
+            arrival.OsTargetId
+        ),
+    );
     if status < 0 {
         unsafe {
             delete(created.MonitorObject.cast());
@@ -408,16 +567,37 @@ unsafe fn create_monitor(
 }
 
 unsafe extern "C" fn file_cleanup(file: WDFFILEOBJECT) {
-    trace::status("file cleanup", 0);
+    trace::event("file_cleanup.begin", format_args!("file={file:p}"));
     let device = unsafe { file_device(file) };
     let mut state = lock(unsafe { state(device) });
+    trace::event(
+        "file_cleanup.lock_acquired",
+        format_args!(
+            "file={file:p} device={device:p} cycle={}",
+            state.power_cycle
+        ),
+    );
     let lease = unsafe { &mut *slot::<Token>(file.cast(), &FILE) };
     let monitor = state.leases.release(lease);
     if let Some(monitor) = monitor {
         unsafe {
-            monitor_departure(monitor as IDDCX_MONITOR);
+            trace::event(
+                "file_monitor_departure.begin",
+                format_args!("file={file:p} monitor=0x{monitor:x}"),
+            );
+            let status = monitor_departure(monitor as IDDCX_MONITOR);
+            trace::result(
+                "file_monitor_departure.end",
+                "ntstatus",
+                status,
+                format_args!("file={file:p} monitor=0x{monitor:x}"),
+            );
         }
     }
+    trace::event(
+        "file_cleanup.end",
+        format_args!("file={file:p} monitor=0x{:x}", monitor.unwrap_or(0)),
+    );
 }
 
 unsafe fn pump<'a>(monitor: IDDCX_MONITOR) -> &'a Mutex<Option<frame::FramePump>> {
@@ -427,16 +607,35 @@ unsafe extern "C" fn assign_chain(
     monitor: IDDCX_MONITOR,
     input: *const IDARG_IN_SETSWAPCHAIN,
 ) -> NTSTATUS {
+    trace::event(
+        "swapchain_assign.begin",
+        format_args!("monitor={monitor:p} chain={:p}", unsafe {
+            (*input).hSwapChain
+        }),
+    );
     let mut pump = lock(unsafe { pump(monitor) });
     drop(pump.take());
-    *pump = unsafe { frame::FramePump::start(&*input) };
+    *pump = unsafe { frame::FramePump::start(monitor as usize, &*input) };
+    trace::event(
+        "swapchain_assign.end",
+        format_args!("monitor={monitor:p} pump_started={}", pump.is_some()),
+    );
     SUCCESS
 }
 unsafe extern "C" fn unassign_chain(monitor: IDDCX_MONITOR) -> NTSTATUS {
+    trace::event(
+        "swapchain_unassign.begin",
+        format_args!("monitor={monitor:p}"),
+    );
     drop(lock(unsafe { pump(monitor) }).take());
+    trace::event(
+        "swapchain_unassign.end",
+        format_args!("monitor={monitor:p}"),
+    );
     SUCCESS
 }
 unsafe extern "C" fn monitor_cleanup(object: WDFOBJECT) {
+    trace::event("monitor_cleanup.begin", format_args!("monitor={object:p}"));
     unsafe {
         let pointer = slot::<*mut Mutex<Option<frame::FramePump>>>(object, &MONITOR);
         if !(*pointer).is_null() {
@@ -444,4 +643,5 @@ unsafe extern "C" fn monitor_cleanup(object: WDFOBJECT) {
             *pointer = ptr::null_mut();
         }
     }
+    trace::event("monitor_cleanup.end", format_args!("monitor={object:p}"));
 }
