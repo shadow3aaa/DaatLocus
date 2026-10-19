@@ -122,9 +122,9 @@ impl SharedDisplay {
             .map_err(|_| Error::InvalidState("shared display owner stopped"))?
     }
 
-    /// Reserve a nonoverlapping rectangle, retaining it until the window is
-    /// physically returned. Oversized windows are fitted to this fixed screen;
-    /// exhausted space is an error and never creates another output.
+    /// Reserve a placement lease, retaining it until the window is physically
+    /// returned. Prefer free space, then cascade without shrinking existing windows.
+    /// Oversized windows fit this fixed screen; reservations never add outputs.
     pub fn reserve(&self, width: i32, height: i32) -> Result<DisplayRegion> {
         if width <= 0 || height <= 0 {
             return Err(Error::InvalidState("invalid shared window size"));
@@ -148,7 +148,7 @@ impl SharedDisplay {
     }
 }
 
-/// Private placement space on the shared output. Keep this guard while a window
+/// Window placement lease on the shared output; bounds may overlap. Keep this guard while a window
 /// is controlled or its handoff is pending. It does not grant input authority.
 pub struct DisplayRegion {
     owner: SharedDisplay,
@@ -158,7 +158,7 @@ pub struct DisplayRegion {
 }
 impl DisplayRegion {
     /// Plan a new region while retaining the old guard. None size selects the
-    /// largest free rectangle. Origin, when supplied, is local to the display.
+    /// screen work area with margins. Origin, when supplied, is local to the display.
     /// Keep both guards until native placement has been observed; a timeout must
     /// not free either possible position while the result remains uncertain.
     pub fn replacement(&self, size: Option<(i32, i32)>, origin: Option<Point>) -> Result<Self> {
@@ -445,9 +445,18 @@ fn allocate(
             }
         }
     }
-    Err(Error::InvalidState(
-        "shared virtual screen is full; release a window before taking another",
-    ))
+    // Free rectangles are a placement preference, not an admission limit. Cycle
+    // a bounded diagonal offset; even a screen-sized window can share the origin.
+    let room_x = area.width()? - 2 * GAP - width;
+    let room_y = area.height()? - 2 * GAP - height;
+    let slots = (room_x.min(room_y) / 32 + 1) as usize;
+    let offset = (occupied.len() % slots) as i32 * 32;
+    Ok(Rect {
+        left: area.left + GAP + offset,
+        top: area.top + GAP + offset,
+        right: area.left + GAP + offset + width,
+        bottom: area.top + GAP + offset + height,
+    })
 }
 fn work_area(bounds: Rect) -> Result<Rect> {
     use windows_sys::Win32::{
@@ -531,12 +540,11 @@ fn layout(
                 right: point.x.checked_add(width)?,
                 bottom: point.y.checked_add(height)?,
             };
-            (usable.contains_rect(bounds) && occupied.iter().all(|r| !overlaps(bounds, *r)))
-                .then_some(bounds)
+            usable.contains_rect(bounds).then_some(bounds)
         };
         if let Some(origin) = origin {
             return at(origin).ok_or(Error::InvalidState(
-                "requested position overlaps another region or leaves the work area",
+                "requested position leaves the work area",
             ));
         }
         if let Some(bounds) = at(Point {
@@ -550,49 +558,17 @@ fn layout(
     if origin.is_some() {
         return Err(Error::InvalidState("fit does not accept a position"));
     }
-    let mut xs = vec![usable.left];
-    let mut ys = vec![usable.top];
-    xs.extend(occupied.iter().filter_map(|r| r.right.checked_add(GAP)));
-    ys.extend(occupied.iter().filter_map(|r| r.bottom.checked_add(GAP)));
-    let mut best: Option<(i64, Rect)> = None;
-    for left in xs {
-        for &top in &ys {
-            let mut rights = vec![usable.right];
-            rights.extend(occupied.iter().filter_map(|r| r.left.checked_sub(GAP)));
-            for right in rights {
-                if right <= left || left < usable.left || top < usable.top || right > usable.right {
-                    continue;
-                }
-                let mut bottom = usable.bottom;
-                for r in occupied {
-                    if left < r.right && r.left < right && r.bottom > top {
-                        bottom = bottom.min(r.top.saturating_sub(GAP));
-                    }
-                }
-                let bounds = Rect {
-                    left,
-                    top,
-                    right,
-                    bottom,
-                };
-                if usable.contains_rect(bounds) && occupied.iter().all(|r| !overlaps(bounds, *r)) {
-                    let score = i64::from(right - left) * i64::from(bottom - top);
-                    if best.as_ref().is_none_or(|(area, _)| score > *area) {
-                        best = Some((score, bounds));
-                    }
-                }
-            }
-        }
-    }
-    best.map(|(_, bounds)| bounds)
-        .ok_or(Error::InvalidState("no free region for this window"))
+    // Fit is independent of other windows: each window can use the full viewport.
+    usable.width()?;
+    usable.height()?;
+    Ok(usable)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn replacement_preserves_exact_sizes_and_fits_around_other_windows() {
+    fn replacement_preserves_position_allows_overlap_and_fits_the_work_area() {
         let area = Rect {
             left: 0,
             top: 0,
@@ -625,7 +601,7 @@ mod tests {
             Rect {
                 left: 20,
                 top: 20,
-                right: 580,
+                right: 980,
                 bottom: 780
             }
         );
@@ -642,7 +618,6 @@ mod tests {
             ((961, 100), None),
             ((100, 761), None),
             ((0, 100), None),
-            ((300, 300), Some(Point { x: 500, y: 20 })),
             ((300, 300), Some(Point { x: -1, y: 20 })),
             ((300, 300), Some(Point { x: i32::MAX, y: 20 })),
         ] {
@@ -674,12 +649,12 @@ mod tests {
             layout(area, old, None, None, &[below]).unwrap(),
             Rect {
                 left: 20,
-                top: 420,
+                top: 20,
                 right: 980,
                 bottom: 780
             }
         );
-        assert!(
+        assert_eq!(
             layout(
                 area,
                 old,
@@ -692,11 +667,27 @@ mod tests {
                     bottom: 780
                 }]
             )
-            .is_err()
+            .unwrap(),
+            Rect {
+                left: 20,
+                top: 20,
+                right: 980,
+                bottom: 780
+            }
+        );
+        assert!(
+            layout(
+                area,
+                old,
+                Some((300, 300)),
+                Some(Point { x: 500, y: 20 }),
+                &[other]
+            )
+            .is_ok()
         );
     }
     #[test]
-    fn regions_do_not_overlap_and_released_space_can_be_reused_without_resizing() {
+    fn reservations_prefer_free_space_then_cascade_without_resizing_peers() {
         let area = Rect {
             left: -1920,
             top: -1080,
@@ -723,7 +714,17 @@ mod tests {
                 bottom: -60
             }
         );
-        assert!(allocate(area, 900, 1000, [a, b].into_iter()).is_err());
+        let c = allocate(area, 900, 1000, [a, b].into_iter()).unwrap();
+        assert_eq!((c.width().unwrap(), c.height().unwrap()), (900, 1000));
+        assert!(area.contains_rect(c));
+        assert!(overlaps(c, a) || overlaps(c, b));
+        let mut occupied = vec![a, b, c];
+        for _ in 0..100 {
+            let next = allocate(area, 900, 1000, occupied.iter().copied()).unwrap();
+            assert!(area.contains_rect(next));
+            assert_eq!((next.width().unwrap(), next.height().unwrap()), (900, 1000));
+            occupied.push(next);
+        }
         assert_eq!(allocate(area, 900, 1000, [b].into_iter()).unwrap(), a);
         assert_eq!(
             allocate(area, 5000, 5000, [].into_iter()).unwrap(),

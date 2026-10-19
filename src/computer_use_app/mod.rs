@@ -290,7 +290,7 @@ impl ComputerUseApp {
             ),
             tool(
                 "open_window",
-                "Take this returned background window into free space on the device's shared virtual screen and return its screenshot. If full, release an unused window. Never select a user's working window merely because its app name matches.",
+                "Take this returned background window onto the device's shared virtual screen and return its screenshot. Placement prefers free space, then cascades overlapping windows without moving other windows. Never select a user's working window merely because its app name matches.",
                 model_schema_for::<WindowArgs>(),
             ),
             tool(
@@ -300,7 +300,7 @@ impl ComputerUseApp {
             ),
             tool(
                 "adjust_window",
-                "Resize, move, fit or restore a taken window without activating it. Resize requires width/height; move requires x/y in virtual-screen pixels; fit uses the largest free region; restore keeps its reserved size. Other parameters must be null. Null state_id allows recovery after capture failure. Returns a fresh full-window image and revokes earlier image coordinates.",
+                "Resize, move, fit or restore a taken window without activating it. Resize requires width/height; move requires x/y in virtual-screen pixels; fit uses the full screen work area; restore keeps its reserved size. Other parameters must be null. Null state_id allows recovery after capture failure. Returns a fresh full-window image and revokes earlier image coordinates.",
                 model_schema_for::<AdjustArgs>(),
             ),
             tool(

@@ -355,7 +355,7 @@ fn calculator_case(
     );
     let frame = Window::inspect(calculator.0.handle)?;
     region.validate()?;
-    frame.validate_unoccluded()?;
+    frame.capture()?;
     let surfaces = frame.input_surfaces()?;
     assert!(
         surfaces.iter().any(|s| s.process_id != frame.process_id),
@@ -384,6 +384,33 @@ fn calculator_case(
 #[ignore = "requires installed Calculator with Store-only DLL policy, signed IDD, matching Hook DLL, unlocked desktop and stationary cursor"]
 fn calculator_cross_process_input_preserves_human_desktop_and_revokes_on_handoff() -> Result<()> {
     calculator_case(|workspace, frame, dll, uia, root, baseline| {
+        // A separate top-level window covers every button. Window-directed HWND
+        // and UIA routing must still operate Calculator, never this overlay.
+        struct Cover(windows_sys::Win32::Foundation::HWND);
+        impl Drop for Cover {
+            fn drop(&mut self) {
+                unsafe {
+                    DestroyWindow(self.0);
+                }
+            }
+        }
+        let cover = Cover(unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                w!("STATIC").as_ptr(),
+                w!("unrelated cover").as_ptr(),
+                WS_POPUP | WS_VISIBLE,
+                frame.bounds.left,
+                frame.bounds.top,
+                frame.bounds.width()?,
+                frame.bounds.height()?,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        });
+        assert!(!cover.0.is_null());
         let surfaces = frame.input_surfaces()?;
         let mut hook = workspace.input(frame, dll)?;
         assert_eq!(hook.backend(), InputBackend::Automation);
@@ -449,6 +476,7 @@ fn calculator_cross_process_input_preserves_human_desktop_and_revokes_on_handoff
         wait_result(uia, root, "12")?;
         assert_desktop(baseline)?;
         drop(hook);
+        drop(cover);
         Ok(())
     })
 }

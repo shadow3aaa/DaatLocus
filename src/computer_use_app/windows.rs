@@ -27,6 +27,11 @@ use windows_sys::Win32::{
 mod settings;
 pub(crate) use settings::Workspace;
 
+fn desktop_operations() -> &'static parking_lot::Mutex<()> {
+    static OPERATIONS: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    &OPERATIONS
+}
+
 pub(super) struct Reply {
     pub payload: Value,
     pub image: Option<Vec<u8>>,
@@ -317,6 +322,13 @@ impl Host {
         context: &AppToolExecutionContext,
         cancelled: &AtomicBool,
     ) -> Result<Reply> {
+        // A native operation includes preparation, validation, dispatch and its
+        // observation. Other Actors cannot change stacking midway through it.
+        let _transaction = (!matches!(
+            call.name.as_str(),
+            "list_apps" | "list_windows" | "launch_app"
+        ))
+        .then(|| desktop_operations().lock());
         self.effect_started = false;
         let result = self.execute_inner(call, context, cancelled);
         match result {
@@ -781,6 +793,9 @@ impl Host {
                 .bounds
                 .contains_rect(candidates[0].window.bounds)
         {
+            // Startup waiting does not monopolize input. Only its confirmed
+            // native takeover joins the same placement/input/capture transaction.
+            let _transaction = desktop_operations().lock();
             let mut reply = self.take_with_region(&candidates[0].id, cancelled, Some(region))?;
             reply.payload["discovered_windows"] = json!(rows);
             reply.payload["startup_placement"] = json!("observed_on_virtual_screen");
@@ -948,7 +963,6 @@ impl Host {
             return Err(miette!("stale window observation; observe again"));
         }
         window.window.validate().into_diagnostic()?;
-        window.window.validate_unoccluded().into_diagnostic()?;
         window.region.validate().into_diagnostic()?;
         if !window.region.bounds().contains_rect(window.window.bounds) {
             return Err(miette!(
@@ -1215,9 +1229,8 @@ impl Host {
             region,
             scale,
         )?;
-        current.validate_unoccluded().into_diagnostic()?;
-        let frame = workspace.capture().into_diagnostic()?;
-        current.validate_unoccluded().into_diagnostic()?;
+        let frame = current.capture().into_diagnostic()?;
+        current.validate().into_diagnostic()?;
         window.region.validate().into_diagnostic()?;
         let image_bounds = Rect {
             left: current.bounds.left + view.region.x,
@@ -1353,6 +1366,7 @@ impl Host {
         ))
     }
     fn release_all(&mut self) -> Result<()> {
+        let _transaction = desktop_operations().lock();
         let ids: Vec<String> = self
             .taken
             .keys()

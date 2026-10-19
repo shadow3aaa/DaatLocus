@@ -300,16 +300,94 @@ impl Window {
     /// Resolve a physical client-image point to the actual child HWND and native
     /// client coordinates. Never redirects to an occluding or sibling window.
     pub fn input_at(&self, local: Point) -> Result<(usize, Point)> {
+        let _dpi = DpiContext::enter()?;
         self.validate()?;
         let screen = self.client_bounds.screen_point(local)?;
-        validate_hit(self, screen)?;
-        let hit = unsafe {
-            WindowFromPoint(POINT {
+        if !self.client_bounds.contains(screen) {
+            return Err(Error::InvalidState(
+                "input must be inside the observed client area",
+            ));
+        }
+        let mut hit = self.handle as HWND;
+        // ChildWindowFromPointEx only visits this parent's children. Overlapping
+        // top-level windows cannot redirect a window-directed Hook operation.
+        for _ in 0..128 {
+            if unsafe { IsWindowEnabled(hit) } == 0 {
+                return Err(Error::InvalidState(
+                    "target control or modal parent is disabled",
+                ));
+            }
+            let mut point = POINT {
                 x: screen.x,
                 y: screen.y,
-            })
-        };
-        Ok((hit as usize, self.control_point(hit as usize, local)?))
+            };
+            if unsafe { windows_sys::Win32::Graphics::Gdi::ScreenToClient(hit, &mut point) } == 0 {
+                return Err(last_error("ScreenToClient(hit test)"));
+            }
+            let child = unsafe {
+                ChildWindowFromPointEx(hit, point, CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT)
+            };
+            if child.is_null() || child == hit {
+                InputSurface::inspect(self, hit as usize)?;
+                return Ok((hit as usize, self.control_point(hit as usize, local)?));
+            }
+            if unsafe { GetAncestor(child, GA_ROOT) } != self.handle as HWND {
+                return Err(Error::InvalidState("hit test left the controlled window"));
+            }
+            hit = child;
+        }
+        Err(Error::InvalidState(
+            "child hit test exceeded its depth bound",
+        ))
+    }
+
+    /// Compatibility preparation for accessibility providers that report covered
+    /// controls as offscreen. Changes stacking only, never activates or sets topmost.
+    pub(super) fn raise_for_accessibility(&self) -> Result<()> {
+        self.validate()?;
+        let before = super::DesktopState::read()?;
+        if self.owns_control(before.foreground) || before.capture != 0 {
+            return Err(Error::InvalidState(
+                "accessibility preparation requires a background window and no pointer capture",
+            ));
+        }
+        if unsafe {
+            SetWindowPos(
+                self.handle as HWND,
+                HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS,
+            )
+        } == 0
+        {
+            return Err(last_error("SetWindowPos(accessibility stacking)"));
+        }
+        // Flush this HWND's asynchronous queue without requesting foreground focus.
+        let mut result = 0;
+        if unsafe {
+            SendMessageTimeoutW(
+                self.handle as HWND,
+                WM_NULL,
+                0,
+                0,
+                SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                1000,
+                &mut result,
+            )
+        } == 0
+        {
+            return Err(last_error("accessibility stacking acknowledgement"));
+        }
+        let after = super::DesktopState::read()?;
+        if before != after {
+            return Err(Error::InvalidState(
+                "accessibility preparation changed the user's desktop input state",
+            ));
+        }
+        self.validate()
     }
 
     pub fn control_point(&self, control: usize, local: Point) -> Result<Point> {

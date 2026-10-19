@@ -189,10 +189,10 @@ fn native_actor_take_input_give_revocation_and_inflight_handoff() {
             wide("STATIC").as_ptr(),
             wide("capture occluder").as_ptr(),
             WS_POPUP | WS_VISIBLE,
-            client.left + 4,
-            client.top + 4,
-            20,
-            8,
+            client.left,
+            client.top,
+            client.width().unwrap(),
+            client.height().unwrap(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -211,15 +211,9 @@ fn native_actor_take_input_give_revocation_and_inflight_handoff() {
     let overlay = Overlay(overlay);
     let observed_state = host.taken[&window_id].state.as_deref().unwrap();
     assert!(
-        host.check_state(&window_id, observed_state).is_err(),
-        "input accepted through a new occluder"
+        host.check_state(&window_id, observed_state).is_ok(),
+        "a covering window invalidated an otherwise current window observation"
     );
-    assert!(
-        host.observe(&window_id).is_err(),
-        "screen capture included an overlapping window"
-    );
-    assert!(host.taken[&window_id].state.is_none());
-    drop(overlay);
     let opened = settle(&mut host, &window_id);
     eprintln!(
         "desktop before take: {before:?}; after take: {:?}",
@@ -319,6 +313,7 @@ fn native_actor_take_input_give_revocation_and_inflight_handoff() {
         String::from_utf16(&actual[..length]).unwrap(),
         "后台窗口中文😀"
     );
+    drop(overlay);
     let before_adjust = DesktopState::read().unwrap();
     let old_state = typed.payload["observation"]["state_id"]
         .as_str()

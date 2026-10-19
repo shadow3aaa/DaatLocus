@@ -220,7 +220,8 @@ the windows, invalidates references, then reconfigures the same output. Pending
 handoff or display/persistence failures leave input fenced until Owner retries.
 Ordinary library construction remains lazy: consumers may call `initialize()`
 explicitly or let the first `reserve(width, height)` create it. `DisplayRegion`
-guards reserve nonoverlapping placement space. Releasing the last region leaves the screen active.
+guards retain placement/lifecycle leases that may overlap. New windows prefer free
+space, then cascade at their own size; fit uses the whole work area. Releasing the last region leaves the screen active.
 Attach per-App `VirtualWorkspace`s to `region.display().id`; keep each region until
 its window has been returned. Dropping the last service/region owner removes the
 screen. These are process-local service owners, not a cross-process profile broker.
@@ -228,12 +229,21 @@ Run `cargo test --locked -p daat-locus-virtual-workspace --test native_shared_di
 on the unlocked signed-driver test machine to verify idle reuse, concurrent regions,
 cursor/topology stability after warmup and final-owner cleanup. Replacement regions
 retain both possible positions until native placement is confirmed; the test also
-checks that other clients cannot reuse either position prematurely.
+checks that both leases remain valid until explicitly dropped, even when their
+bounds overlap other windows.
 The same opt-in test checks initialization before any region and repeated startup
 initialization without topology changes. Run
 `DAAT_LOCUS_BUILD_WEBUI=0 cargo test --locked -p daat-locus --test computer_use_startup -- --ignored --nocapture --test-threads=1`
 on that desktop to verify the real service creates its output before reporting
 readiness, retains it without any Actor tool call, and removes it on shutdown.
+
+Window observations use on-demand Windows Graphics Capture, not a desktop crop.
+Run `cargo test --locked -p daat-locus-virtual-workspace --test native_window_capture -- --ignored --nocapture --test-threads=1`
+on an unlocked desktop with a stationary cursor to verify covered-window pixels,
+window-local child hit testing, disabled/modal refusal, desktop-state preservation
+and repeated capture cleanup. This test needs neither IDD nor the Hook DLL.
+The native Actor and Calculator tests additionally cover input through an unrelated
+covering window using the production Hook/UIA routes; they still require IDD.
 
 For explicitly short-lived diagnostic workspaces use
 `VirtualWorkspace::create(DisplayOptions::default())` for an owned screen,

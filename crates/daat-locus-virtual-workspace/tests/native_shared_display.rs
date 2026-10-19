@@ -147,6 +147,17 @@ fn idle_and_concurrent_clients_keep_one_screen_until_the_service_and_regions_are
         region.validate().unwrap();
         assert_eq!(region.display(), &screen);
     }
+    // Full-size leases stack on the same output; capacity never forces another
+    // monitor, shrinks an existing lease or refuses a new window.
+    let stacked: Vec<_> = (0..20)
+        .map(|_| service.reserve(i32::MAX, i32::MAX).unwrap())
+        .collect();
+    for region in &stacked {
+        region.validate().unwrap();
+        assert_eq!(region.display(), &screen);
+        assert_eq!(region.bounds(), bounds);
+    }
+    drop(stacked);
     assert_eq!(displays().unwrap(), topology);
     assert_eq!(
         DesktopState::read().unwrap(),

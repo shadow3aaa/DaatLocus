@@ -1,5 +1,6 @@
 mod automation;
 mod capture;
+mod capture_window;
 mod display;
 mod driver_device;
 mod driver_install;

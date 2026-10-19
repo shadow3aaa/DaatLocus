@@ -1,11 +1,7 @@
 use super::{DesktopState, InputReceipt, InputSurface, MouseAction, Window, WindowInputReceipt};
 use crate::{Error, Point, Result};
 use ::windows::{
-    Win32::{
-        Foundation::{HWND, POINT},
-        System::Com::*,
-        UI::Accessibility::*,
-    },
+    Win32::{Foundation::HWND, System::Com::*, UI::Accessibility::*},
     core::Interface,
 };
 use std::{marker::PhantomData, path::Path, rc::Rc, time::Duration};
@@ -15,6 +11,17 @@ fn uia_error(source: ::windows::core::Error) -> Error {
     Error::Automation {
         operation: "UI Automation",
         source,
+    }
+}
+fn optional_element(
+    value: ::windows::core::Result<IUIAutomationElement>,
+) -> Result<Option<IUIAutomationElement>> {
+    match value {
+        Ok(value) => Ok(Some(value)),
+        // The COM walker returns S_OK + null at a tree boundary. windows-core's
+        // nonnullable projection represents precisely that as Error::empty().
+        Err(error) if error.code().is_ok() => Ok(None),
+        Err(error) => Err(uia_error(error)),
     }
 }
 struct Com;
@@ -45,6 +52,36 @@ enum Action {
     Close(IUIAutomationWindowPattern),
 }
 impl Action {
+    fn click_pattern(element: &IUIAutomationElement) -> Result<Option<Self>> {
+        unsafe {
+            Ok(Some(
+                if let Ok(p) =
+                    element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                {
+                    Self::Invoke(p)
+                } else if let Ok(p) =
+                    element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                {
+                    Self::Toggle(p)
+                } else if let Ok(p) = element
+                    .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                        UIA_SelectionItemPatternId,
+                    )
+                {
+                    Self::Select(p)
+                } else if let Ok(p) = element
+                    .GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                        UIA_ExpandCollapsePatternId,
+                    )
+                {
+                    let state = p.CurrentExpandCollapseState().map_err(uia_error)?;
+                    Self::Expand(p, state == ExpandCollapseState_Expanded)
+                } else {
+                    return Ok(None);
+                },
+            ))
+        }
+    }
     fn execute(self) -> ::windows::core::Result<()> {
         unsafe {
             match self {
@@ -155,7 +192,7 @@ impl AutomationInput {
         unsafe { options.SetConnectionTimeout(timeout.as_millis() as u32) }.map_err(uia_error)?;
         unsafe { options.SetTransactionTimeout(timeout.as_millis() as u32) }.map_err(uia_error)
     }
-    fn element_at(&self, control: usize, local: Point) -> Result<IUIAutomationElement> {
+    fn element_at(&mut self, control: usize, local: Point) -> Result<IUIAutomationElement> {
         let hwnd = control as windows_sys::Win32::Foundation::HWND;
         let mut point = windows_sys::Win32::Foundation::POINT {
             x: local.x,
@@ -176,20 +213,41 @@ impl AutomationInput {
         {
             return Err(super::last_error("convert accessibility point"));
         }
-        super::window::validate_hit(
-            &self.root,
-            Point {
-                x: point.x,
-                y: point.y,
-            },
-        )?;
-        let target = unsafe {
-            self.uia.ElementFromPoint(POINT {
+        let frame = Window::inspect(unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetAncestor(
+                hwnd,
+                windows_sys::Win32::UI::WindowsAndMessaging::GA_ROOT,
+            )
+        } as usize)?;
+        if !self.root.owns_control(frame.handle)
+            || !frame.client_bounds.contains(Point {
                 x: point.x,
                 y: point.y,
             })
+        {
+            return Err(Error::InvalidState(
+                "accessible point is outside the controlled window",
+            ));
         }
-        .map_err(uia_error)?;
+        let mut target = self.element_in_window(&frame, point.x, point.y)?;
+        if unsafe { target.CurrentIsOffscreen() }
+            .map_err(uia_error)?
+            .as_bool()
+        {
+            if let Err(error) = frame.raise_for_accessibility() {
+                let _ = self.stop();
+                return Err(error);
+            }
+            target = self.element_in_window(&frame, point.x, point.y)?;
+            if unsafe { target.CurrentIsOffscreen() }
+                .map_err(uia_error)?
+                .as_bool()
+            {
+                return Err(Error::UnsupportedInput(
+                    "accessible control remains offscreen",
+                ));
+            }
+        }
         self.validate_element(&target)?;
         if !unsafe { target.CurrentIsEnabled() }
             .map_err(uia_error)?
@@ -198,6 +256,40 @@ impl AutomationInput {
             return Err(Error::UnsupportedInput("accessible control is disabled"));
         }
         Ok(target)
+    }
+    fn element_in_window(&self, frame: &Window, x: i32, y: i32) -> Result<IUIAutomationElement> {
+        let walker = unsafe { self.uia.RawViewWalker() }.map_err(uia_error)?;
+        let mut current =
+            unsafe { self.uia.ElementFromHandle(HWND(frame.handle as _)) }.map_err(uia_error)?;
+        let mut remaining = 4096;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        for _ in 0..128 {
+            let mut child = optional_element(unsafe { walker.GetFirstChildElement(&current) })?;
+            let mut next = None;
+            while let Some(element) = child {
+                if remaining == 0 || std::time::Instant::now() >= deadline {
+                    return Err(Error::Timeout("accessibility window hit test"));
+                }
+                remaining -= 1;
+                let rect = unsafe { element.CurrentBoundingRectangle() }.map_err(uia_error)?;
+                if rect.left <= x && x < rect.right && rect.top <= y && y < rect.bottom {
+                    self.validate_element(&element)?;
+                    next = Some(element);
+                    break;
+                }
+                child = optional_element(unsafe { walker.GetNextSiblingElement(&element) })?;
+            }
+            match next {
+                Some(element) => current = element,
+                None => {
+                    frame.validate()?;
+                    return Ok(current);
+                }
+            }
+        }
+        Err(Error::InvalidState(
+            "accessible hit test exceeded its depth bound",
+        ))
     }
     fn validate_element(&self, element: &IUIAutomationElement) -> Result<()> {
         let pid = unsafe { element.CurrentProcessId() }.map_err(uia_error)? as u32;
@@ -211,15 +303,16 @@ impl AutomationInput {
                 "accessible element is outside the controlled processes",
             ));
         }
-        let root = unsafe { self.uia.ElementFromHandle(HWND(self.root.handle as _)) }
-            .map_err(uia_error)?;
         let walker = unsafe { self.uia.RawViewWalker() }.map_err(uia_error)?;
         let mut current = element.clone();
         for _ in 0..256 {
-            if unsafe { self.uia.CompareElements(&root, &current) }
+            let native = unsafe { current.CurrentNativeWindowHandle() }
                 .map_err(uia_error)?
-                .as_bool()
-            {
+                .0 as usize;
+            // Owned popup roots may sit beside the main window in the UIA tree.
+            // Establish membership through a real HWND, never PID proximity.
+            if native != 0 && self.root.owns_control(native) {
+                InputSurface::inspect(&self.root, native)?;
                 return Ok(());
             }
             current = unsafe { walker.GetParentElement(&current) }.map_err(uia_error)?;
@@ -259,36 +352,49 @@ impl AutomationInput {
     ) -> Result<WindowInputReceipt> {
         self.prepare(control)?;
         self.configure_timeout(timeout)?;
-        let element = self.element_at(control, local)?;
+        let mut element = self.element_at(control, local)?;
         let action = match action {
-            MouseAction::ClickLeft => unsafe {
-                if let Ok(p) =
-                    element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-                {
-                    Action::Invoke(p)
-                } else if let Ok(p) =
-                    element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-                {
-                    Action::Toggle(p)
-                } else if let Ok(p) = element
-                    .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                        UIA_SelectionItemPatternId,
+            MouseAction::ClickLeft => {
+                let walker = unsafe { self.uia.RawViewWalker() }.map_err(uia_error)?;
+                let frame = unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::GetAncestor(
+                        control as _,
+                        windows_sys::Win32::UI::WindowsAndMessaging::GA_ROOT,
                     )
-                {
-                    Action::Select(p)
-                } else if let Ok(p) = element
-                    .GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
-                        UIA_ExpandCollapsePatternId,
-                    )
-                {
-                    let state = p.CurrentExpandCollapseState().map_err(uia_error)?;
-                    Action::Expand(p, state == ExpandCollapseState_Expanded)
-                } else {
-                    return Err(Error::UnsupportedInput(
-                        "this location exposes no accessibility click pattern",
-                    ));
+                };
+                let root = unsafe { self.uia.ElementFromHandle(HWND(frame)) }.map_err(uia_error)?;
+                let mut pattern = None;
+                // Raw trees can expose a button's decorative text as the leaf.
+                // Choose its nearest actionable ancestor, stopping at this HWND.
+                for _ in 0..64 {
+                    self.validate_element(&element)?;
+                    if !unsafe { element.CurrentIsEnabled() }
+                        .map_err(uia_error)?
+                        .as_bool()
+                    {
+                        return Err(Error::UnsupportedInput("accessible control is disabled"));
+                    }
+                    if let Some(action) = Action::click_pattern(&element)? {
+                        pattern = Some(action);
+                        break;
+                    }
+                    if unsafe { self.uia.CompareElements(&root, &element) }
+                        .map_err(uia_error)?
+                        .as_bool()
+                    {
+                        break;
+                    }
+                    let Some(parent) =
+                        optional_element(unsafe { walker.GetParentElement(&element) })?
+                    else {
+                        break;
+                    };
+                    element = parent;
                 }
-            },
+                pattern.ok_or(Error::UnsupportedInput(
+                    "this location exposes no accessibility click pattern",
+                ))?
+            }
             MouseAction::Wheel(delta) => {
                 if delta == 0 || delta % 120 != 0 || delta.unsigned_abs() / 120 > 32 {
                     return Err(Error::UnsupportedInput(

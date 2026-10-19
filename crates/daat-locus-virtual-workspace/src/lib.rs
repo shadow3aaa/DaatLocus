@@ -60,6 +60,9 @@ pub enum Error {
         operation: &'static str,
         source: ::windows::core::Error,
     },
+    #[cfg(windows)]
+    #[error("window capture: {0}")]
+    Capture(#[source] ::windows::core::Error),
     #[error(
         "virtual display device failed to start (PnP problem {0}); install the signed Daat Locus display driver"
     )]

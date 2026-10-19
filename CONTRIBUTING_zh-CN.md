@@ -49,12 +49,23 @@ Cargo `--offline` 本身不会禁止构建脚本联网。详见[模型目录](do
 
 ## Windows Virtual Workspace
 
+窗口观察按需使用 WGC 捕获目标 HWND，被覆盖也不混入其他窗口像素；取帧后关闭会话。
+布局优先空位，空间不足时层叠，fit 使用整个工作区，不缩小或挪动其他窗口。
+在解锁桌面保持光标静止，运行不依赖 IDD/Hook DLL 的原生回归：
+
+```powershell
+cargo test --locked -p daat-locus-virtual-workspace --test native_window_capture -- --ignored --nocapture --test-threads=1
+```
+
+该用例验证覆盖窗口下的已知像素、子控件命中、禁用/模态拒绝、输入状态保持和重复捕获清理。
+下列 Actor 与计算器用例还验证覆盖窗口下的真实 Hook/UIA 输入，仍需签名 IDD。
+
 Windows x64 服务的 ComputerUse 是普通 Actor 的设备 App，Core 不直接持有。
 一项记忆的桌面操作授权明确允许 GUI 越出项目文件沙箱，不扩大 Files/Terminal 权限。
 交还窗口先撤销引用再卸载 Hook 和放置；已开始的命令未结束时保持待交还。
 构建匹配的 Hook DLL 和 hook_lab、安装签名驱动后，在解锁且前台的终端中保持光标
 静止执行真实 App 测试。覆盖完整窗口 PNG 尺寸、放大区域输入命中、尺寸/位置调整、
-适应空闲区域、最大化恢复、旧图像撤权，以及调整期间前台/焦点/捕获/光标不变：
+适应整个工作区、最大化恢复、旧图像撤权，以及调整期间前台/焦点/捕获/光标不变：
 
 ```powershell
 $env:DAAT_LOCUS_BUILD_WEBUI='0'
@@ -208,7 +219,7 @@ cargo run --locked -p daat-locus-virtual-workspace --example workspace-debug -- 
 之前，在本机 GUI 操作已启用时创建屏幕并等待布局稳定，不预占窗口区域。驱动/桌面前置条件
 不可用时记录诊断，账号服务仍可用；ComputerUse 使用时仍返回实际原生错误。
 账号维护命令不创建屏幕。普通库构造保持延迟创建，调用方可显式 `initialize()`，
-也可等首次 `reserve(width, height)` 创建屏幕。`DisplayRegion` 为窗口保留互不重叠的位置，
+也可等首次 `reserve(width, height)` 创建屏幕。`DisplayRegion` 为窗口保留可重叠的放置租约，
 直到物理交还完成。
 Windows 的开关和驱动支持的虚拟屏分辨率位于「设置 → GUI 操作」，同一分类在 Android
 显示 PhoneUse 内容。偏好按服务 profile 保存在 `computer-use.json`，缺省启用且使用
@@ -218,8 +229,8 @@ App 使用 `region.display().id` attach 借用工作区；最后一个区域释�
 最后的服务持有者和窗口区域都释放后才移除。这是进程内共享，不是跨 profile
 进程的屏幕代理。在已解锁且装有签名驱动的测试机上，串行运行
 `cargo test --locked -p daat-locus-virtual-workspace --test native_shared_display -- --ignored --nocapture --test-threads=1`
-验证空闲复用、并发区域、首次创建之后的光标/拓扑稳定和最后持有者清理；
-还检查位置尚未确认时新旧区域同时保留，其他客户端不能提前复用任一位置。
+验证空闲复用、并发与重叠区域、首次创建之后的光标/拓扑稳定和最后持有者清理；
+还检查位置尚未确认时新旧租约均保持有效，其他窗口可以与之重叠。
 同一用例还验证未申请窗口区域时即可初始化，以及重复初始化不改变显示拓扑。
 在同一桌面设置 `$env:DAAT_LOCUS_BUILD_WEBUI='0'` 后串行运行
 `cargo test --locked -p daat-locus --test computer_use_startup -- --ignored --nocapture --test-threads=1`，
