@@ -11,6 +11,9 @@ enum MockReply {
     Answer(&'static str),
     Calls(Vec<AgentToolCall>),
     Pending,
+    // An explicitly unresponsive provider may resume inference any number of
+    // times. Unlike Calls, this tail is never consumed or replayed as an effect.
+    PendingOnEveryRequest,
     FollowUp(&'static str),
     ReasoningOnly,
     Failure(&'static str),
@@ -522,6 +525,7 @@ struct ReplayProvider {
     requests: parking_lot::Mutex<Vec<AgentTurnRequest>>,
     started: tokio::sync::Notify,
     dropped: Arc<AtomicBool>,
+    pending: Arc<std::sync::atomic::AtomicUsize>,
     usage: parking_lot::Mutex<TokenUsageInfo>,
     usage_bias: std::sync::atomic::AtomicUsize,
 }
@@ -533,16 +537,18 @@ impl ReplayProvider {
             requests: parking_lot::Mutex::new(Vec::new()),
             started: tokio::sync::Notify::new(),
             dropped: Arc::new(AtomicBool::new(false)),
+            pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             usage: parking_lot::Mutex::new(TokenUsageInfo::default()),
             usage_bias: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
 
-struct DropMarker(Arc<AtomicBool>);
+struct DropMarker(Arc<AtomicBool>, Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for DropMarker {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
+        self.1.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -568,13 +574,16 @@ impl ModelProvider for ReplayProvider {
         .total_input_tokens;
         self.requests.lock().push(request);
         self.started.notify_one();
-        let reply = self
-            .replies
-            .lock()
-            .pop_front()
-            .expect("mock reply available");
+        let reply = {
+            let mut replies = self.replies.lock();
+            if matches!(replies.front(), Some(MockReply::PendingOnEveryRequest)) {
+                MockReply::PendingOnEveryRequest
+            } else {
+                replies.pop_front().expect("mock reply available")
+            }
+        };
         let bias = self.usage_bias.load(Ordering::Relaxed);
-        if bias > 0 && !matches!(reply, MockReply::Pending) {
+        if bias > 0 && !matches!(reply, MockReply::Pending | MockReply::PendingOnEveryRequest) {
             self.usage
                 .lock()
                 .append_last_usage(crate::core::TokenUsage {
@@ -638,8 +647,9 @@ impl ModelProvider for ReplayProvider {
                     responses_output: Some(output),
                 })
             }
-            MockReply::Pending => {
-                let _marker = DropMarker(self.dropped.clone());
+            MockReply::Pending | MockReply::PendingOnEveryRequest => {
+                self.pending.fetch_add(1, Ordering::AcqRel);
+                let _marker = DropMarker(self.dropped.clone(), self.pending.clone());
                 std::future::pending().await
             }
         }
@@ -1378,7 +1388,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
             id: "remote-image".into(), name: "actors__read_resource".into(),
             arguments: json!({"resource_id":"remote-image","offset":null,"limit":1024}),
         }]),
-        MockReply::Pending, MockReply::Pending,
+        MockReply::PendingOnEveryRequest,
     ]);
     model_a.usage_bias.store(37, Ordering::Relaxed);
     let image = b"\x89PNG\r\n\x1a\nremote view image";
@@ -1547,7 +1557,12 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     // it to supersede speculative inference instead of racing a steering RPC
     // against that intentional turn boundary.
     tokio::time::timeout(Duration::from_secs(10), async {
-        while model_a.requests.lock().len() < 4 {
+        while !model_a.requests.lock().iter().any(|request| {
+            request.messages.iter().any(|message| matches!(message,
+                AgentMessage::User { content }
+                    if content.as_text().contains("Keep the original request and answer in Chinese.")
+            ))
+        }) {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
@@ -1558,7 +1573,10 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     assert!(original.reply.is_none());
     assert!(original.error.is_none());
     let active = a.store().message(&guidance.id).unwrap();
-    assert_eq!(active.status, MessageStatus::Running);
+    assert!(matches!(
+        active.status,
+        MessageStatus::Queued | MessageStatus::Running
+    ));
     assert_eq!(active.kind, MessageKind::Request);
     assert!(
         b.steer_queued(
@@ -1574,9 +1592,15 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     let unchanged = a.store().message(&guidance.id).unwrap();
     assert_eq!(unchanged.kind, MessageKind::Request);
     assert_eq!(unchanged.in_reply_to, active.in_reply_to);
-    assert_eq!(unchanged.updated_at_ms, active.updated_at_ms);
+    // The rejected RPC must not turn this request into steering. Its execution
+    // revision may advance independently if a slow round trip fences and resumes
+    // inference; exact transaction non-mutation is covered with paused workers.
+    assert!(matches!(
+        unchanged.status,
+        MessageStatus::Queued | MessageStatus::Running
+    ));
+    assert!(unchanged.error.is_none());
     assert!(model_a.dropped.load(Ordering::Acquire));
-    model_a.dropped.store(false, Ordering::Release);
     net_a.stop().await;
     let result = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -1594,6 +1618,11 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
         Some("Continued on the next device without repeating Actor creation.")
     );
     assert!(model_a.dropped.load(Ordering::Acquire));
+    assert_eq!(
+        model_a.pending.load(Ordering::Acquire),
+        0,
+        "the retired worker must not retain pending inference"
+    );
     assert_eq!(model_b.requests.lock().len(), 1);
     let retained = b.store().message(&input.id).unwrap();
     assert_eq!(retained.status, MessageStatus::Completed);
@@ -2657,6 +2686,76 @@ async fn app_failures_are_model_observations_and_full_protocol_is_persisted() {
             .any(|item| item["encrypted_content"] == "encrypted reasoning")
     );
     system.shutdown().await;
+}
+
+#[tokio::test]
+async fn rejected_guidance_preserves_revision_and_contents_without_concurrent_workers() {
+    for completed_target in [false, true] {
+        let (_directory, system, _) = paused_runtime().await;
+        let original = system
+            .send_user("root", "Original task".into(), vec![], None)
+            .unwrap();
+        assert_eq!(
+            system.store().claim_next("root").unwrap().unwrap().id,
+            original.id
+        );
+        let guidance = system
+            .send_user("root", "Initial guidance".into(), vec![], None)
+            .unwrap();
+        let current = system
+            .store()
+            .amend_queued_user(
+                "root",
+                &guidance.id,
+                guidance.updated_at_ms,
+                "Revised guidance".into(),
+                vec![],
+                false,
+            )
+            .unwrap();
+        let expected = if completed_target {
+            system
+                .store()
+                .finish_message(
+                    &original.id,
+                    MessageStatus::Completed,
+                    Some("Finished"),
+                    None,
+                )
+                .unwrap();
+            current.updated_at_ms
+        } else {
+            guidance.updated_at_ms
+        };
+        let source_before =
+            serde_json::to_value(system.store().message(&guidance.id).unwrap()).unwrap();
+        let target_before =
+            serde_json::to_value(system.store().message(&original.id).unwrap()).unwrap();
+        let error = system
+            .store()
+            .steer_queued("root", &guidance.id, &original.id, expected)
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<super::super::ActorError>(),
+            Some(super::super::ActorError::Conflict(_))
+        ));
+        assert_eq!(
+            serde_json::to_value(system.store().message(&guidance.id).unwrap()).unwrap(),
+            source_before
+        );
+        assert_eq!(
+            serde_json::to_value(system.store().message(&original.id).unwrap()).unwrap(),
+            target_before
+        );
+        assert!(
+            system
+                .store()
+                .pending_steering("root", &original.id)
+                .unwrap()
+                .is_empty()
+        );
+        system.shutdown().await;
+    }
 }
 
 #[tokio::test]
