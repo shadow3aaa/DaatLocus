@@ -9,7 +9,66 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-#[tokio::test]
+async fn wait_for_account_configuration(
+    source: &Fixture,
+    target: &Fixture,
+    phase: &str,
+    ready: impl Fn(&Config) -> bool,
+) {
+    let expected_revision = source
+        .stage
+        .host
+        .configurations
+        .revision(&source.stage.host)
+        .expect("source configuration revision must be readable")
+        .expect("source must publish its configuration before waiting for synchronization");
+    let started = std::time::Instant::now();
+    // This checks convergence, not a five-second performance contract. Dialing
+    // still leaves reset negotiation and durable configuration import pending.
+    let synchronized = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if ready(&target.system.config())
+                && target
+                    .stage
+                    .host
+                    .configurations
+                    .revision(&target.stage.host)
+                    .expect("target configuration revision must be readable")
+                    .as_ref()
+                    == Some(&expected_revision)
+                && target.auth.current().unwrap().is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        synchronized.is_ok(),
+        "account configuration did not converge during {phase} after {:?}; \
+         expected_revision={expected_revision:?}; target_revision={:?}; \
+         target_models={:?}; source_credentials_present={:?}; target_credentials_present={:?}; \
+         source_link={:?}; source_error={:?}; target_link={:?}; target_error={:?}",
+        started.elapsed(),
+        target
+            .stage
+            .host
+            .configurations
+            .revision(&target.stage.host),
+        target.system.config().models.keys().collect::<Vec<_>>(),
+        source.auth.current().map(|record| record.is_some()),
+        target.auth.current().map(|record| record.is_some()),
+        source.stage.state(target.stage.host.local),
+        source.stage.last_error(target.stage.host.local),
+        target.stage.state(source.stage.host.local),
+        target.stage.last_error(source.stage.host.local),
+    );
+}
+
+// Match the service runtime so one device's synchronous storage does not stall
+// both devices' transport and heartbeat tasks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn account_model_definitions_sync_privately_without_replacing_device_preferences() {
     use daat_locus::stage::ledger::StageLedger;
     let a = Fixture::new().await;
@@ -43,20 +102,10 @@ async fn account_model_definitions_sync_privately_without_replacing_device_prefe
         .dial_tcp(a.stage.host.local, address, None)
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !b.system.config().models.contains_key("mock") {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    wait_for_account_configuration(&a, &b, "initial model and credential import", |config| {
+        config.models.contains_key("mock")
     })
-    .await
-    .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while b.auth.current().unwrap().is_none() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+    .await;
     b.login_cookie().await;
     let readiness: Value = b
         .owner(reqwest::Method::GET, "/v1/config/readiness")
@@ -95,13 +144,10 @@ async fn account_model_definitions_sync_privately_without_replacing_device_prefe
         })
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !b.system.config().models.contains_key("account-model") {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    wait_for_account_configuration(&a, &b, "model addition", |config| {
+        config.models.contains_key("account-model")
     })
-    .await
-    .unwrap();
+    .await;
     assert_eq!(b.system.config().daemon.port, 45990);
     assert!(
         matches!(&b.system.config().providers["mock"],ProviderConfig::OpenaiCompatible {api_key,..} if api_key=="synchronized-private-key")
@@ -162,13 +208,10 @@ async fn account_model_definitions_sync_privately_without_replacing_device_prefe
         })
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !b.system.config().models.is_empty() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    wait_for_account_configuration(&a, &b, "last provider removal", |config| {
+        config.models.is_empty()
     })
-    .await
-    .expect("removing the last provider must synchronize too");
+    .await;
     assert_eq!(b.system.config().daemon.port, 45990);
     assert!(b.system.actor(&child).unwrap().config.model.is_none());
     assert!(b.system.config().validate().is_err());

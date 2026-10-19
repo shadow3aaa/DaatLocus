@@ -91,6 +91,7 @@ jobs:
       - run: cargo install wasm-pack --locked
       - name: Restore Windows driver signing
         id: windows-signing
+        timeout-minutes: 3
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -98,44 +99,91 @@ jobs:
           SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_IDD_PFX_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Use only on an ephemeral GitHub runner' }
-          if (!$env:SIGNING_PFX_BASE64 -or !$env:SIGNING_PFX_PASSWORD) { throw 'Windows signing secrets are required' }
+          # Log only fixed stage labels and durations, never certificate or secret data.
+          function Invoke-SigningStage {
+            param([string]$Name, [scriptblock]$Action)
+            $timer = [System.Diagnostics.Stopwatch]::StartNew()
+            Write-Host "[windows-signing] START $Name"
+            try {
+              & $Action
+              Write-Host "[windows-signing] DONE $Name ($($timer.ElapsedMilliseconds) ms)"
+            } catch {
+              Write-Host "[windows-signing] FAILED $Name ($($timer.ElapsedMilliseconds) ms)"
+              throw
+            } finally {
+              $timer.Stop()
+            }
+          }
+          Invoke-SigningStage 'Validate runner and secret presence' {
+            if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Use only on an ephemeral GitHub runner' }
+            if (!$env:SIGNING_PFX_BASE64 -or !$env:SIGNING_PFX_PASSWORD) { throw 'Windows signing secrets are required' }
+          }
           $thumbprint = 'C2D252AEFAF27171C36AF1BD6DAF2FDC5441E462'
           $directory = Join-Path $env:RUNNER_TEMP 'daat-locus-windows-signing'
-          New-Item -ItemType Directory -Path $directory -ErrorAction Stop | Out-Null
-          $acl = [System.Security.AccessControl.DirectorySecurity]::new()
-          $acl.SetAccessRuleProtection($true, $false)
-          foreach ($sid in @([System.Security.Principal.WindowsIdentity]::GetCurrent().User, [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
-            $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-          }
-          Set-Acl -LiteralPath $directory -AclObject $acl
           $journal = Join-Path $directory 'stores.txt'
           $pfx = Join-Path $directory 'identity.pfx'
           try {
-            [System.IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
-            $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
-            $data = Get-PfxData -FilePath $pfx -Password $password
-            if ($data.EndEntityCertificates.Count -ne 1 -or $data.OtherCertificates.Count -ne 0 -or $data.EndEntityCertificates[0].Thumbprint -ne $thumbprint) {
-              throw 'Unexpected Windows signing identity'
+            Invoke-SigningStage 'Create restricted temporary directory' {
+              New-Item -ItemType Directory -Path $directory -ErrorAction Stop | Out-Null
+              $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+              $acl.SetAccessRuleProtection($true, $false)
+              foreach ($sid in @([System.Security.Principal.WindowsIdentity]::GetCurrent().User, [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
+                $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+              }
+              Set-Acl -LiteralPath $directory -AclObject $acl
+            }
+            Invoke-SigningStage 'Decode temporary PFX' {
+              [System.IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+            }
+            $password = Invoke-SigningStage 'Prepare PFX password' {
+              ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+            }
+            $data = Invoke-SigningStage 'Read PFX metadata' {
+              Get-PfxData -FilePath $pfx -Password $password
+            }
+            Invoke-SigningStage 'Validate PFX identity' {
+              if ($data.EndEntityCertificates.Count -ne 1 -or $data.OtherCertificates.Count -ne 0 -or $data.EndEntityCertificates[0].Thumbprint -ne $thumbprint) {
+                throw 'Unexpected Windows signing identity'
+              }
             }
             foreach ($store in @('My', 'Root', 'TrustedPublisher')) {
               $target = "Cert:\CurrentUser\$store\$thumbprint"
-              if (Test-Path -LiteralPath $target) { throw 'Signing identity already exists on this runner' }
-              Add-Content -LiteralPath $journal -Value $store
+              Invoke-SigningStage "Check and journal CurrentUser/$store" {
+                if (Test-Path -LiteralPath $target) { throw 'Signing identity already exists on this runner' }
+                Add-Content -LiteralPath $journal -Value $store
+              }
               if ($store -eq 'My') {
-                $certificate = Import-PfxCertificate -FilePath $pfx -Password $password -CertStoreLocation 'Cert:\CurrentUser\My'
-                if (!$certificate.HasPrivateKey -or $certificate.Thumbprint -ne $thumbprint) { throw 'Signing private key unavailable' }
+                $certificate = Invoke-SigningStage 'Import PFX into CurrentUser/My' {
+                  Import-PfxCertificate -FilePath $pfx -Password $password -CertStoreLocation 'Cert:\CurrentUser\My'
+                }
+                Invoke-SigningStage 'Validate imported private identity' {
+                  if (!$certificate.HasPrivateKey -or $certificate.Thumbprint -ne $thumbprint) { throw 'Signing private key unavailable' }
+                }
               } else {
                 $public = Join-Path $env:GITHUB_WORKSPACE 'crates/daat-locus-virtual-workspace/certificates/virtual-display.cer'
-                $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($public)
-                if ($certificate.Thumbprint -ne $thumbprint) { throw 'Bundled public certificate differs from signing identity' }
-                Import-Certificate -FilePath $public -CertStoreLocation "Cert:\CurrentUser\$store" | Out-Null
+                $certificate = Invoke-SigningStage "Read public certificate for CurrentUser/$store" {
+                  [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($public)
+                }
+                Invoke-SigningStage "Validate public identity for CurrentUser/$store" {
+                  if ($certificate.Thumbprint -ne $thumbprint) { throw 'Bundled public certificate differs from signing identity' }
+                }
+                Invoke-SigningStage "Import public certificate into CurrentUser/$store" {
+                  Import-Certificate -FilePath $public -CertStoreLocation "Cert:\CurrentUser\$store" | Out-Null
+                }
               }
             }
-            "thumbprint=$thumbprint" >> $env:GITHUB_OUTPUT
+            Invoke-SigningStage 'Publish signing identity output' {
+              "thumbprint=$thumbprint" >> $env:GITHUB_OUTPUT
+            }
           } finally {
-            if (Test-Path -LiteralPath $pfx) { Remove-Item -LiteralPath $pfx -Force }
-            Remove-Item Env:SIGNING_PFX_BASE64, Env:SIGNING_PFX_PASSWORD -ErrorAction SilentlyContinue
+            # A step timeout can terminate PowerShell before finally runs; keep the always() cleanup below.
+            Invoke-SigningStage 'Remove temporary PFX and secret environment variables' {
+              try {
+                if (Test-Path -LiteralPath $pfx) { Remove-Item -LiteralPath $pfx -Force }
+              } finally {
+                Remove-Item Env:SIGNING_PFX_BASE64, Env:SIGNING_PFX_PASSWORD -ErrorAction SilentlyContinue
+              }
+            }
           }
       - id: host
         shell: bash
@@ -184,6 +232,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Use only on an ephemeral GitHub runner' }
           $directory = Join-Path $env:RUNNER_TEMP 'daat-locus-windows-signing'
+          # Remove secret material first, even if certificate-store cleanup later blocks.
+          $pfx = Join-Path $directory 'identity.pfx'
+          if (Test-Path -LiteralPath $pfx) { Remove-Item -LiteralPath $pfx -Force }
           $journal = Join-Path $directory 'stores.txt'
           if (Test-Path -LiteralPath $journal) {
             foreach ($store in Get-Content -LiteralPath $journal) {
@@ -196,8 +247,6 @@ jobs:
             }
             Remove-Item -LiteralPath $journal -Force
           }
-          $pfx = Join-Path $directory 'identity.pfx'
-          if (Test-Path -LiteralPath $pfx) { Remove-Item -LiteralPath $pfx -Force }
           if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory -Force }
   android:
     needs: version
