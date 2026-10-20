@@ -63,9 +63,12 @@ final class PhoneUseTest {
     private JSONObject window(JSONObject observed) throws Exception { return new JSONObject().put("window_id", observed.getString("window_id")); }
     private JSONObject state(JSONObject observed) throws Exception { return window(observed).put("state_id", observed.getString("state_id")); }
     private JSONObject displaySettings() throws Exception {
+        return phoneStatus().getJSONObject("display");
+    }
+    private JSONObject phoneStatus() throws Exception {
         js("window.__displayStatus=null;window.__TAURI_INTERNALS__.invoke('phone_use_status').then(r=>window.__displayStatus=r);null");
         await("window.__displayStatus!==null",10000);
-        return new JSONObject((String)js("JSON.stringify(window.__displayStatus.display)"));
+        return new JSONObject((String)js("JSON.stringify(window.__displayStatus)"));
     }
     private void configureDisplay(JSONObject patch) throws Exception {
         js("window.__displaySaved=null;window.__TAURI_INTERNALS__.invoke('phone_use_display_configure',{patch:"+patch+"}).then(r=>window.__displaySaved=r,e=>window.__displaySaved={error:String(e)});null");
@@ -165,7 +168,27 @@ final class PhoneUseTest {
         if ("true".equals(args.getString("verify_display"))) {
             JSONObject persisted=displaySettings();
             require(persisted.getInt("width")==960 && persisted.getInt("height")==640 && persisted.getInt("density")==200,"Display preference lost after process restart: "+persisted);
-            return "Owner display settings persist across process restart";
+            long deadline=SystemClock.elapsedRealtime()+65000;
+            JSONObject restored=phoneStatus();
+            require(restored.getBoolean("enabled") && method.equals(restored.getString("method")),"Owner's enabled transport choice was lost after restart: "+restored);
+            while (!"ready".equals(restored.getString("state")) && SystemClock.elapsedRealtime()<deadline) {
+                SystemClock.sleep(200); restored=phoneStatus();
+            }
+            require("ready".equals(restored.getString("state")),"Previously granted transport did not restore automatically: "+restored);
+            require(restored.getInt("uid")==("root".equals(method)?0:2000),"Restart changed the privileged identity");
+            require(success("list_apps",new JSONObject().put("query","PhoneUse Test Fixture").put("app_id",JSONObject.NULL).put("cursor",JSONObject.NULL).put("limit",100)).getJSONArray("apps").length()==1,"Restored transport could not access the fixture");
+            js("history.pushState(null,'','/settings/gui');window.dispatchEvent(new PopStateEvent('popstate'));null");
+            await("document.querySelector('#dl-phone-use-enabled')?.getAttribute('aria-checked')==='true'",10000);
+            js("window.__phoneOff=null;window.__TAURI_INTERNALS__.invoke('phone_use_configure',{enabled:false,method:'"+method+"'}).then(r=>window.__phoneOff=r);null");
+            await("window.__phoneOff!==null",15000);
+            return "Owner display settings and authorized transport restore across process restart; explicit disable persists";
+        }
+        if ("true".equals(args.getString("verify_disabled"))) {
+            JSONObject disabled=phoneStatus();
+            require(!disabled.getBoolean("enabled") && "disabled".equals(disabled.getString("state")) && disabled.isNull("uid"),"Restart enabled a transport the Owner disabled: "+disabled);
+            require(method.equals(disabled.getString("method")),"Disabled transport choice was lost");
+            refused(call("list_apps",new JSONObject().put("query",JSONObject.NULL).put("cursor",JSONObject.NULL).put("limit",100)),"Disabled backend after process restart");
+            return "Explicitly disabled PhoneUse stays disabled across process restart";
         }
         js("window.__edgeDisabled=false;window.__TAURI_INTERNALS__.invoke('phone_use_configure',{enabled:false,method:'"+method+"'}).then(()=>window.__edgeDisabled=true);null");
         await("window.__edgeDisabled",10000);
@@ -283,6 +306,9 @@ final class PhoneUseTest {
         await("window.__phoneOff!==null",15000);
         refused(call("list_apps",new JSONObject().put("query",JSONObject.NULL).put("cursor",JSONObject.NULL).put("limit",100)),"Disabled backend");
         configureDisplay(new JSONObject().put("width",960).put("height",640).put("density",200));
+        js("window.__phoneOn=null;window.__TAURI_INTERNALS__.invoke('phone_use_configure',{enabled:true,method:'"+method+"'}).then(r=>window.__phoneOn=r);null");
+        await("window.__phoneOn!==null",75000);
+        require("ready".equals(phoneStatus().getString("state")),"Could not prepare the authorized restart contract");
         return "Edge-to-edge portrait/landscape, drawer/dialog and IME transitions; Owner gate; "+method+" UID; native PNG; Unicode; key input; unchanged main focus/IME; stale state/epoch; cancellation; Actor isolation and task preservation; crop; release/reacquire; close/relaunch; detach/reset; Actor/Rust/JNI/resource integration; disabled gate";
     }
     private JSONObject http(String path,String method,JSONObject body) throws Exception {

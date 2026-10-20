@@ -26,9 +26,13 @@ for apk in (args.app_apk, args.test_apk, args.fixture_apk):
     result = subprocess.run(adb + ["install", "-r", str(apk)], capture_output=True, text=True)
     if result.returncode:
         raise SystemExit(f"APK installation failed: {apk.name}\n{result.stdout}{result.stderr}")
-for persistence in (False, True):
+for option, expected in (
+    (None, "PhoneUse native contract"),
+    ("verify_display", "PhoneUse display persistence"),
+    ("verify_disabled", "PhoneUse disabled persistence"),
+):
     subprocess.run(adb + ["shell", "am", "force-stop", "io.shadow3aaa.daatlocus"], check=True)
-    extra = ["-e", "verify_display", "true"] if persistence else []
+    extra = ["-e", option, "true"] if option else []
     try:
         result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-e", "mode", "phone",
             "-e", "method", args.method, "-e", "account", args.account, "-e", "password", password] + extra + [
@@ -38,6 +42,5 @@ for persistence in (False, True):
         # Do not print subprocess arguments containing the disposable credential.
         raise SystemExit("PhoneUse instrumentation timed out") from None
     print(result.stdout)
-    expected = "PhoneUse display persistence" if persistence else "PhoneUse native contract"
     if result.returncode or f"OK ({expected})" not in result.stdout:
         raise SystemExit(f"{expected} failed or prerequisites were unavailable")

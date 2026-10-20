@@ -12,22 +12,30 @@ import androidx.annotation.Keep
 import be.mygod.librootkotlinx.RootServer
 import be.mygod.librootkotlinx.RootSession
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /** Owner-only configuration is reached through a narrow, origin-checked native command.
- * Tool calls can use an existing connection, but cannot acquire/reacquire privileges. */
+ * Saved Owner preferences restore transports independently of model tool calls. */
 @Keep
 object PhoneUseController {
     private lateinit var context: Context
     private val mutex = Mutex()
     private val main = Handler(Looper.getMainLooper())
+    private val lifecycle = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val revision = AtomicLong()
     @Volatile private var enabled = false
     @Volatile private var method = "shizuku"
     @Volatile private var state = "disabled"
@@ -35,7 +43,7 @@ object PhoneUseController {
     @Volatile private var display = PhoneUseDisplay.DEFAULT
     @Volatile private var binder: IBinder? = null
     private var rootSession: RootSession? = null
-    private var root: RootServer? = null
+    @Volatile private var root: RootServer? = null
     private var binding: Shizuku.UserServiceArgs? = null
     private var connection: ServiceConnection? = null
     private var permission: CompletableDeferred<Boolean>? = null
@@ -55,18 +63,41 @@ object PhoneUseController {
         state = if (enabled) "disconnected" else "disabled"
         Shizuku.addRequestPermissionResultListener(permissionListener)
         Shizuku.addBinderDeadListener { if (method == "shizuku") disconnected() }
+        Shizuku.addBinderReceivedListenerSticky { if (method == "shizuku") resume() }
+        resume()
     }
     private fun disconnected() {
         state = if (enabled) "disconnected" else "disabled"
         binder = null
+        uid = -1
         resources.clear()
         images.clear()
     }
     @JvmStatic fun status(): String {
-        if (state == "ready" && method == "root" && root?.active != true) disconnected()
+        if (state == "ready" && !transportAlive()) {
+            disconnected()
+            resume()
+        }
         return JSONObject().put("enabled", enabled).put("method", method)
             .put("state", state).put("uid", if (uid < 0) JSONObject.NULL else uid).put("display", display.json()).toString()
     }
+
+    /** Recreate the process-local connection, retaining the saved Owner choice.
+     * Shizuku recovery only uses an existing grant; prompts remain explicit configuration. */
+    @JvmStatic fun resume() {
+        if (!::context.isInitialized || !enabled) return
+        if (state == "ready" && !transportAlive()) disconnected()
+        if (state == "ready" || state == "connecting" || state == "unsupported") return
+        val expected = revision.get()
+        lifecycle.launch {
+            mutex.withLock {
+                if (!enabled || revision.get() != expected || state == "ready") return@withLock
+                disconnect()
+                connect(false, expected)
+            }
+        }
+    }
+    private fun transportAlive() = if (method == "root") root?.active == true else binder?.isBinderAlive == true
 
     @JvmStatic fun configureDisplay(request: String): String = runBlocking(Dispatchers.IO) {
         mutex.withLock {
@@ -104,43 +135,57 @@ object PhoneUseController {
     @JvmStatic fun configure(value: Boolean, selected: String): String = runBlocking(Dispatchers.IO) {
         require(selected == "shizuku" || selected == "root")
         // Admission closes before waiting for any in-flight call. Its outcome is never replayed.
+        val expected = revision.incrementAndGet()
         enabled = false
         mutex.withLock {
+            if (revision.get() != expected) return@withLock status()
             disconnect()
-            method = selected
-            enabled = value
             check(context.getSharedPreferences("phone_use", Context.MODE_PRIVATE).edit()
                 .putBoolean("enabled", value).putString("method", selected).commit()) { "Cannot save PhoneUse preference" }
+            method = selected
+            enabled = value
             if (!enabled) { state = "disabled"; return@withLock status() }
-            if (Build.VERSION.SDK_INT < 35) { state = "unsupported"; return@withLock status() }
-            state = "connecting"
-            try {
-                withTimeout(60000) {
-                    if (method == "shizuku") connectShizuku() else {
-                        rootSession = object : RootSession() { override val context get() = PhoneUseController.context }
-                        root = rootSession!!.acquire()
-                    }
-                    val probe = send(JSONObject().put("op", "probe").toString())
-                    probe.image?.close()
-                    val result = JSONObject(probe.json)
-                    check(result.isNull("failure")) { "PhoneUse capability check failed" }
-                    uid = result.getJSONObject("payload").getInt("uid")
-                    state = "ready"
-                }
-            } catch (_: Throwable) {
-                disconnect()
-                state = "unavailable"
-            }
+            connect(true, expected)
             status()
         }
     }
-    private suspend fun connectShizuku() {
+    private suspend fun connect(requestPermission: Boolean, expected: Long) {
+        if (Build.VERSION.SDK_INT < 35) { state = "unsupported"; return }
+        if (method == "shizuku" && !Shizuku.pingBinder()) { state = "disconnected"; return }
+        state = "connecting"
+        try {
+            withTimeout(60000) {
+                if (method == "shizuku") connectShizuku(requestPermission, expected) else {
+                    rootSession = object : RootSession() { override val context get() = PhoneUseController.context }
+                    root = rootSession!!.acquire()
+                }
+                check(enabled && revision.get() == expected) { "PhoneUse configuration changed" }
+                val probe = send(JSONObject().put("op", "probe").toString())
+                probe.image?.close()
+                val result = JSONObject(probe.json)
+                check(result.isNull("failure")) { "PhoneUse capability check failed" }
+                val actualUid = result.getJSONObject("payload").getInt("uid")
+                check(actualUid == if (method == "root") 0 else 2000) { "Unexpected PhoneUse identity" }
+                check(enabled && revision.get() == expected) { "PhoneUse configuration changed" }
+                uid = actualUid
+                state = "ready"
+            }
+        } catch (_: Throwable) {
+            withContext(NonCancellable) { disconnect() }
+            state = if (enabled) "unavailable" else "disabled"
+        }
+    }
+    private suspend fun connectShizuku(requestPermission: Boolean, expected: Long) {
         check(Shizuku.pingBinder()) { "Start Shizuku first" }
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+            check(requestPermission) { "Shizuku permission is no longer granted" }
             val granted = CompletableDeferred<Boolean>()
             permission = granted
             try {
-                main.post { Shizuku.requestPermission(2841) }
+                main.post {
+                    if (enabled && revision.get() == expected) Shizuku.requestPermission(2841)
+                    else granted.complete(false)
+                }
                 check(granted.await()) { "Shizuku permission denied" }
             } finally { permission = null }
         }
@@ -149,14 +194,23 @@ object PhoneUseController {
             .daemon(false).processNameSuffix("phone_use").tag("phone_use_v1").version(BuildConfig.VERSION_CODE)
         val serviceConnection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName, service: IBinder) {
-                service.linkToDeath({ disconnected() }, 0)
+                if (!enabled || revision.get() != expected || binding !== args || connection !== this) return
+                service.linkToDeath({
+                    if (binder === service) { disconnected(); resume() }
+                }, 0)
                 binder = service
                 connected.complete(service)
             }
-            override fun onServiceDisconnected(name: ComponentName) { disconnected() }
+            override fun onServiceDisconnected(name: ComponentName) {
+                if (binding === args && connection === this) { disconnected(); resume() }
+            }
         }
         binding = args; connection = serviceConnection
-        main.post { runCatching { Shizuku.bindUserService(args, serviceConnection) }.onFailure { connected.completeExceptionally(it) } }
+        main.post {
+            if (!enabled || revision.get() != expected || binding !== args || connection !== serviceConnection) {
+                connected.completeExceptionally(IllegalStateException("PhoneUse configuration changed"))
+            } else runCatching { Shizuku.bindUserService(args, serviceConnection) }.onFailure { connected.completeExceptionally(it) }
+        }
         connected.await()
     }
     private suspend fun send(request: String, config: PhoneUseDisplay = display): ComputerReply {
@@ -199,6 +253,7 @@ object PhoneUseController {
                 reply.json
             } catch (_: Throwable) {
                 disconnected()
+                resume()
                 ComputerImages.error("PhoneUse connection lost; observe after reconnecting, do not replay", "outcome_unknown").json
             }
         }

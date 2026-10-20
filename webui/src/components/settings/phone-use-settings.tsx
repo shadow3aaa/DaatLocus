@@ -80,6 +80,17 @@ export function PhoneUseSettings() {
     window.addEventListener("focus", refresh);
     return () => { mounted.current = false; window.removeEventListener("focus", refresh); };
   }, []);
+  useEffect(() => {
+    if (!status?.enabled || status.state === "ready" || status.state === "unsupported") return;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout>;
+    async function next() {
+      await refresh();
+      if (live) timer = setTimeout(() => { void next(); }, 1000);
+    }
+    timer = setTimeout(() => { void next(); }, 1000);
+    return () => { live = false; clearTimeout(timer); };
+  }, [status?.enabled, status?.state]);
   async function update(nextEnabled: boolean, selected = method) {
     if (busy.current) return;
     busy.current = true; revision.current++; setMethod(selected); setPending(true); setError(null);

@@ -94,6 +94,10 @@ class MainActivity : TauriActivity() {
       acquire()
     }
   }
+  override fun onResume() {
+    super.onResume()
+    PhoneUseController.resume()
+  }
   override fun onStop() {
     multicast?.let { if (it.isHeld) it.release() }
     multicast = null

@@ -866,6 +866,10 @@ portrait/landscape, settings and drawer controls, dialog bounds, and real IME
 show/hide transitions without residual padding. Display settings remain drafts until
 Apply; the test verifies in-place resizing preserves display IDs and task contents,
 rejects old observation references, and retains settings across a process restart.
+The runner force-stops the app between three phases: the native contract leaves
+PhoneUse enabled, the first restart verifies automatic transport recovery using
+the existing Root/Shizuku grant and then disables it, and the second restart
+verifies that it stays disabled and refuses tool calls.
 `-PdaatTestBuildType=debug` selects debug instrumentation for iteration; validation
 must also exercise R8. Tests fail when prerequisites are missing. A local deterministic model fixture also drives the real Core/Actor/App/JNI path and checks model image delivery plus the authenticated screenshot resource endpoint; no external model service is used.
 

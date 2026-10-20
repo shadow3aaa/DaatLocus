@@ -683,6 +683,9 @@ Actor 隔离、裁剪、释放/接管、其他 Actor 任务保留、任务关闭
 和关闭开关后的拒绝。还会检查横竖屏 edge-to-edge 几何、设置/抽屉控件、弹窗边界及
 真实键盘展开/收起，验证没有残留或重复留白。显示参数仅在点击应用后生效；测试验证
 原地调整保留屏幕 ID 和任务内容、拒绝旧观察引用，并在进程重启后保留参数。
+运行器分三阶段执行，每阶段之间强制停止 App：原生契约测试结束时保持启用；
+第一次重启验证复用已有 Root/Shizuku 授权自动恢复连接，然后主动关闭；
+第二次重启验证仍保持关闭并拒绝工具调用。
 迭代可用 `-PdaatTestBuildType=debug`，最终还必须覆盖 R8；缺少前提时测试失败。完整链路通过本机确定性模型服务驱动真实 Core 创建普通 Actor，执行 PhoneUse 工具并验证模型图片和认证资源接口；不连接外部模型服务。
 CI 的 `android-phone-use` job 通过 `PHONE_USE_RUNNER`、
 `PHONE_USE_SHIZUKU_SERIAL`、`PHONE_USE_ROOT_SERIAL` 及私有

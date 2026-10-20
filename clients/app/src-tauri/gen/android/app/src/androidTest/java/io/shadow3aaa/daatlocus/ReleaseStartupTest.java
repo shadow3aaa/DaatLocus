@@ -51,7 +51,7 @@ public final class ReleaseStartupTest extends Instrumentation {
             if (arguments != null && "phone".equals(arguments.getString("mode"))) {
                 result.putString("checks", PhoneUseTest.run(this, activity, arguments));
                 sendStatus(0, status);
-                result.putString("stream", "true".equals(arguments.getString("verify_display")) ? "\nOK (PhoneUse display persistence)\n" : "\nOK (PhoneUse native contract)\n");
+                result.putString("stream", "true".equals(arguments.getString("verify_disabled")) ? "\nOK (PhoneUse disabled persistence)\n" : "true".equals(arguments.getString("verify_display")) ? "\nOK (PhoneUse display persistence)\n" : "\nOK (PhoneUse native contract)\n");
                 finish(Activity.RESULT_OK, result);
                 return;
             }

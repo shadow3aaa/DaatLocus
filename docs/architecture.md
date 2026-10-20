@@ -488,8 +488,12 @@ Shizuku UserService 使用已授权的 ADB（UID 2000）身份；Root 使用
 librootkotlinx 的 RootSession/RootCommand（UID 0）。Rust 服务、Files 和其他 App
 仍在普通应用 UID 中运行，不获得 shell、任意 Binder 或 root 文件系统接口。
 原生配置命令只接受可信主 WebView，并逐次检查当前 Owner 会话。
-模型工具不能启用、重新连接或更换授权方式。进程重启、授权丢失或连接断开后，
-由 Owner 在设置中重新连接；不自动请求系统权限或重放操作。
+模型工具不能启用或更换授权方式。设备保存 Owner 的启用选择和授权方式；进程启动、
+回到前台及 Shizuku Binder 重新到达时，基础设施自动恢复已选择的传输，不因进程重启
+关闭开关。RootSession 复用 Magisk 等管理器的持久授权；Shizuku 自动恢复先核对已有
+授权，不主动弹出权限申请。实际授权失效时保留启用选择并显示不可用，由 Owner
+重新授权。显式关闭会持久化并阻止迟到连接恢复；旧 Binder 回调不能改写新连接。
+恢复仅执行能力探测，清除旧图片与资源引用，不重放任何 GUI 操作。
 
 已验证的显示隔离策略要求 Android 15（API 35）以上；旧版本明确拒绝。
 每个 Actor 持有独立的虚拟屏幕，默认 1280×720、160 dpi，启用独立焦点、
