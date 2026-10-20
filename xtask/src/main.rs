@@ -635,7 +635,7 @@ fn macos(context: &Context) -> Result<()> {
     fs::write(
         app.join("Contents/Info.plist"),
         format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleName</key><string>Daat Locus</string><key>CFBundleDisplayName</key><string>Daat Locus</string><key>CFBundleExecutable</key><string>daat-locus-app</string><key>CFBundleIdentifier</key><string>io.daat-locus.app</string><key>CFBundleIconFile</key><string>AppIcon</string><key>CFBundleShortVersionString</key><string>{}</string><key>CFBundleVersion</key><string>{}</string><key>CFBundlePackageType</key><string>APPL</string><key>LSMinimumSystemVersion</key><string>11.0</string></dict></plist>"#,
+            r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleName</key><string>Daat Locus</string><key>CFBundleDisplayName</key><string>Daat Locus</string><key>CFBundleExecutable</key><string>daat-locus-app</string><key>CFBundleIdentifier</key><string>io.shadow3aaa.daatlocus</string><key>CFBundleIconFile</key><string>AppIcon</string><key>CFBundleShortVersionString</key><string>{}</string><key>CFBundleVersion</key><string>{}</string><key>CFBundlePackageType</key><string>APPL</string><key>LSMinimumSystemVersion</key><string>11.0</string></dict></plist>"#,
             xml(context.meta.installer_version()),
             xml(context.meta.installer_version())
         ),
@@ -660,7 +660,7 @@ fn macos(context: &Context) -> Result<()> {
             .arg(stage)
             .args([
                 "--identifier",
-                "io.daat-locus.pkg",
+                "io.shadow3aaa.daatlocus.pkg",
                 "--version",
                 context.meta.installer_version(),
                 "--install-location",

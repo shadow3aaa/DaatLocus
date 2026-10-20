@@ -1,4 +1,4 @@
-package io.daat_locus.app;
+package io.shadow3aaa.daatlocus;
 
 import android.app.Activity;
 import android.content.pm.ActivityInfo;

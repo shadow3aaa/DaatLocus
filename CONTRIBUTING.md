@@ -574,7 +574,8 @@ database, weaken OS protections or reuse a personal account for this check.
 Build a separate AppKit fixture from
 `crates/daat-locus-computer-use/tests/fixtures/NativeFixture.swift`, with executable
 `native-fixture` in a normal `.app` bundle. Its bundle identifier must be outside
-`io.daat-locus.*`, for example `io.daatlocus.fixture.macos`. Start exactly one fresh
+`io.shadow3aaa.daatlocus`, its sub-identifiers and the former `io.daat-locus.*`,
+for example `io.daatlocus.fixture.macos`. Start exactly one fresh
 fixture window, with its initial editor value and counter, and leave it behind
 another application. The fixture contains no account or workspace access.
 
@@ -783,6 +784,12 @@ Keep release changelogs. Commit titles use English and identify the change.
 Do not commit caches, generated artifacts, runtime logs, credentials or experiments.
 
 ## Android builds
+
+The application ID and Java/Kotlin namespace are `io.shadow3aaa.daatlocus`.
+This is a new Android installation identity compared with `io.daat_locus.app`:
+the old installation retains its data, and Android does not automatically move
+private data or grants between packages. Do not uninstall an old personal
+installation as part of build validation; use a dedicated emulator/test device.
 
 Use JDK 17+, Android SDK 37.0 / NDK 27.2.12479018, Bun, wasm-pack and Rust Android targets.
 The maintained Gradle project is `clients/app/src-tauri/gen/android`; generated

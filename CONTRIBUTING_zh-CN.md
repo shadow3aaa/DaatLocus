@@ -75,7 +75,8 @@ xcrun swift-format lint --strict crates/daat-locus-computer-use/native/macos.swi
 将 `crates/daat-locus-computer-use/tests/fixtures/NativeFixture.swift` 编译为
 独立 AppKit `.app`，可执行文件为 `native-fixture`，使用例如
 `io.daatlocus.fixture.macos` 的 bundle ID，避免落入自身应用排除前缀
-`io.daat-locus.*`。只打开一个初始状态的测试窗口，并用其他应用遮挡它。
+`io.shadow3aaa.daatlocus` 及其子标识，也不能使用旧的 `io.daat-locus.*`。
+只打开一个初始状态的测试窗口，并用其他应用遮挡它。
 
 ```bash
 DAAT_LOCUS_BUILD_WEBUI=0 cargo build --locked --no-default-features -p daat-locus -p daat-locus-app --features daat-locus-app/custom-protocol,daat-locus-app/native-contract
@@ -631,6 +632,10 @@ release APK，验证签名证书 SHA256 与 APK 16 KiB 对齐，最后删除签�
 运行日志、凭据或未确认实验。
 
 ## Android 构建
+
+应用 ID 与 Java/Kotlin 命名空间统一为 `io.shadow3aaa.daatlocus`。相较旧包名
+`io.daat_locus.app`，Android 会把它作为新应用安装；旧安装保留数据，系统不会
+自动跨包迁移私有数据或授权。构建验证使用独立模拟器／测试设备，不卸载个人旧安装。
 
 需要 JDK 17+、Android SDK 37.0 / NDK 27.2.12479018、Bun、wasm-pack 和 Rust Android targets。
 项目固定 AGP 9.2.1、Kotlin 2.3.21、Gradle 9.4.1，以满足

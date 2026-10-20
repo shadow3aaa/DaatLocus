@@ -1,4 +1,4 @@
-package io.daat_locus.app
+package io.shadow3aaa.daatlocus
 
 import android.content.Context
 import android.os.Binder
@@ -54,7 +54,7 @@ class PhoneUseService(context: Context) : Binder() {
         return true
     }
     companion object {
-        const val DESCRIPTOR = "io.daat_locus.app.PhoneUse.v1"
+        const val DESCRIPTOR = "io.shadow3aaa.daatlocus.PhoneUse.v1"
         fun call(service: IBinder, request: String): ComputerReply {
             val data = Parcel.obtain()
             val reply = Parcel.obtain()

@@ -1,4 +1,4 @@
-package io.daat_locus.app;
+package io.shadow3aaa.daatlocus;
 
 import android.app.Activity;
 import android.app.Instrumentation;
@@ -46,7 +46,7 @@ public final class ReleaseStartupTest extends Instrumentation {
         try {
             NetworkSecurityTest.check();
             Activity activity = startActivitySync(new Intent(Intent.ACTION_MAIN)
-                .setClassName(getTargetContext(), "io.daat_locus.app.MainActivity")
+                .setClassName(getTargetContext(), "io.shadow3aaa.daatlocus.MainActivity")
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             if (arguments != null && "phone".equals(arguments.getString("mode"))) {
                 result.putString("checks", PhoneUseTest.run(this, activity, arguments));

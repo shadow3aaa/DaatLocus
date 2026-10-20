@@ -132,7 +132,7 @@ pub fn initialize() -> Result<(), Box<dyn std::error::Error>> {
                 &[],
             )?
             .l()?;
-        let name = env.new_string("io.daat_locus.app.PhoneUseController")?;
+        let name = env.new_string("io.shadow3aaa.daatlocus.PhoneUseController")?;
         let class = env
             .call_method(
                 &loader,

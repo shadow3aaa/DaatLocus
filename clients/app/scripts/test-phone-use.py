@@ -27,12 +27,12 @@ for apk in (args.app_apk, args.test_apk, args.fixture_apk):
     if result.returncode:
         raise SystemExit(f"APK installation failed: {apk.name}\n{result.stdout}{result.stderr}")
 for persistence in (False, True):
-    subprocess.run(adb + ["shell", "am", "force-stop", "io.daat_locus.app"], check=True)
+    subprocess.run(adb + ["shell", "am", "force-stop", "io.shadow3aaa.daatlocus"], check=True)
     extra = ["-e", "verify_display", "true"] if persistence else []
     try:
         result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-e", "mode", "phone",
             "-e", "method", args.method, "-e", "account", args.account, "-e", "password", password] + extra + [
-            "io.daat_locus.app.test/io.daat_locus.app.ReleaseStartupTest"],
+            "io.shadow3aaa.daatlocus.test/io.shadow3aaa.daatlocus.ReleaseStartupTest"],
             capture_output=True, text=True, timeout=240)
     except subprocess.TimeoutExpired:
         # Do not print subprocess arguments containing the disposable credential.

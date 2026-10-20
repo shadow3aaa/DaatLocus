@@ -1,4 +1,4 @@
-package io.daat_locus.phoneuse.fixture;
+package io.shadow3aaa.daatlocus.fixture.phoneuse;
 
 import android.app.Activity;
 import android.os.Bundle;

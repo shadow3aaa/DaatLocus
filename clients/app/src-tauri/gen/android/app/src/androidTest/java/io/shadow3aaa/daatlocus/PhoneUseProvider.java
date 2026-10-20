@@ -1,4 +1,4 @@
-package io.daat_locus.app;
+package io.shadow3aaa.daatlocus;
 
 import org.json.JSONArray;
 import org.json.JSONObject;

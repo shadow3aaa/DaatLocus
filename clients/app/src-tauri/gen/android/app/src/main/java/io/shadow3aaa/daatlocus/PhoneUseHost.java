@@ -1,4 +1,4 @@
-package io.daat_locus.app;
+package io.shadow3aaa.daatlocus;
 
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.ActivityManager;
@@ -307,9 +307,13 @@ public final class PhoneUseHost {
             accessThread = null; captureThread = null;
         }
     }
+    static boolean ownPackage(String pkg) {
+        // A previous client may remain installed alongside the renamed package.
+        return pkg.equals(BuildConfig.APPLICATION_ID) || pkg.equals("io.daat_locus.app");
+    }
     static void discoverApps() throws Exception {
         for (ResolveInfo info : shell.getPackageManager().queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)) {
-            if (info.activityInfo.packageName.equals(BuildConfig.APPLICATION_ID) || !info.activityInfo.enabled || !info.activityInfo.exported) continue;
+            if (ownPackage(info.activityInfo.packageName) || !info.activityInfo.enabled || !info.activityInfo.exported) continue;
             ComponentName component = new ComponentName(info.activityInfo.packageName, info.activityInfo.name);
             String existing = null; for (String key : apps.keySet()) if (apps.get(key).equals(component)) existing = key;
             if (existing == null) { existing = id(); apps.put(existing, component); }
@@ -497,7 +501,7 @@ public final class PhoneUseHost {
             Set<String> live = new HashSet<>();
             for (AccessibilityWindowInfo actual : actual()) {
                 AccessibilityNodeInfo root = actual.getRoot();
-                if (root == null || root.getPackageName() == null || root.getPackageName().toString().equals(BuildConfig.APPLICATION_ID)) continue;
+                if (root == null || root.getPackageName() == null || ownPackage(root.getPackageName().toString())) continue;
                 int task = (Integer) AccessibilityWindowInfo.class.getMethod("getTaskId").invoke(actual);
                 if (task < 0 || !taskIds(display).contains(task)) continue;
                 Rect bounds = new Rect(); actual.getBoundsInScreen(bounds);

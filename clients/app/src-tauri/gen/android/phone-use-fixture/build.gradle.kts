@@ -1,9 +1,9 @@
 plugins { id("com.android.application") }
 android {
-    namespace = "io.daat_locus.phoneuse.fixture"
+    namespace = "io.shadow3aaa.daatlocus.fixture.phoneuse"
     compileSdk = 37
     defaultConfig {
-        applicationId = "io.daat_locus.phoneuse.fixture"
+        applicationId = "io.shadow3aaa.daatlocus.fixture.phoneuse"
         minSdk = 35
         targetSdk = 35
         versionCode = 1

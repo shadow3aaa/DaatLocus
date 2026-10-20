@@ -60,15 +60,15 @@ val tauriProperties = Properties().apply {
 android {
     compileSdk = 37
     ndkVersion = "27.2.12479018"
-    namespace = "io.daat_locus.app"
+    namespace = "io.shadow3aaa.daatlocus"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "io.daat_locus.app"
+        applicationId = "io.shadow3aaa.daatlocus"
         minSdk = 24
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
-        testInstrumentationRunner = "io.daat_locus.app.ReleaseStartupTest"
+        testInstrumentationRunner = "io.shadow3aaa.daatlocus.ReleaseStartupTest"
     }
     // Startup tests must exercise the same R8/JNI boundary as the distributed APK.
     testBuildType = providers.gradleProperty("daatTestBuildType").getOrElse("release")

@@ -23,6 +23,6 @@
 *.jks
 *.keystore
 
-/clients/app/src-tauri/gen/android/app/src/main/java/io/daat_locus/app/generated/
+/clients/app/src-tauri/gen/android/app/src/main/java/io/shadow3aaa/daatlocus/generated/
 
 /clients/app/src-tauri/gen/android/app/tauri.properties

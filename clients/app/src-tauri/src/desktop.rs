@@ -134,7 +134,8 @@ pub fn run(options: Options) -> Result<()> {
     let mut context = tauri::generate_context!();
     // Single-instance identity is profile-local, including separately installed OS users.
     let profile = backend::profile_id(&backend.root);
-    context.config_mut().identifier = format!("io.daat-locus.app.p{profile}");
+    let identifier = format!("{}.p{profile}", context.config().identifier);
+    context.config_mut().identifier = identifier;
     let app = crate::transport::resources(tauri::Builder::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if !args.iter().any(|arg| arg == "--background") {

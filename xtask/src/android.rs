@@ -149,7 +149,7 @@ struct Artifact {
 fn artifact(directory: &Path, version: &str, target: Target, debug: bool) -> Result<PathBuf> {
     let metadata: OutputMetadata =
         serde_json::from_slice(&fs::read(directory.join("output-metadata.json"))?)?;
-    if metadata.application_id != "io.daat_locus.app"
+    if metadata.application_id != "io.shadow3aaa.daatlocus"
         || metadata.variant_name
             != if debug {
                 "universalDebug"
@@ -259,7 +259,7 @@ mod tests {
             fs::write(
                 &metadata,
                 serde_json::to_vec(&serde_json::json!({
-                    "applicationId":"io.daat_locus.app", "variantName":"universalDebug",
+                    "applicationId":"io.shadow3aaa.daatlocus", "variantName":"universalDebug",
                     "elements":[{"versionName":"0.5.0","outputFile":filename}]
                 }))
                 .unwrap(),
@@ -280,6 +280,12 @@ mod tests {
         };
         write_apk(NATIVE_UI_MARKER);
         assert_eq!(artifact(&root, "0.5.0", Target::X86_64, true).unwrap(), apk);
+        let mut former: serde_json::Value =
+            serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
+        former["applicationId"] = serde_json::json!("io.daat_locus.app");
+        fs::write(&metadata, serde_json::to_vec(&former).unwrap()).unwrap();
+        assert!(artifact(&root, "0.5.0", Target::X86_64, true).is_err());
+        write_metadata("app.apk");
         assert!(artifact(&root, "0.5.1", Target::X86_64, true).is_err());
         assert!(artifact(&root, "0.5.0", Target::Arm64, true).is_err());
         assert!(artifact(&root, "0.5.0", Target::X86_64, false).is_err());

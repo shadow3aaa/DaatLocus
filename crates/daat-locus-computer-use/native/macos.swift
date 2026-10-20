@@ -68,9 +68,14 @@ private func readRect(_ value: Any?) throws -> CGRect {
     x: number(rectangle, "x"), y: number(rectangle, "y"),
     width: number(rectangle, "width"), height: number(rectangle, "height"))
 }
+private func ownBundle(_ identifier: String) -> Bool {
+  identifier == "io.shadow3aaa.daatlocus" || identifier.hasPrefix("io.shadow3aaa.daatlocus.")
+    // Exclude installed clients from before the bundle identifier changed too.
+    || identifier.hasPrefix("io.daat-locus.")
+}
 private func excluded(_ app: NSRunningApplication) -> Bool {
   let identifier = app.bundleIdentifier ?? ""
-  return app.processIdentifier == getpid() || identifier.hasPrefix("io.daat-locus.")
+  return app.processIdentifier == getpid() || ownBundle(identifier)
     || app.executableURL?.lastPathComponent.hasPrefix("daat-locus") == true
 }
 private func app(_ pid: pid_t) throws -> NSRunningApplication {
@@ -296,7 +301,7 @@ private func adjust(_ lease: Lease, _ request: [String: Any]) throws {
 private func launch(_ path: String) throws -> [String: Any] {
   let url = URL(fileURLWithPath: path).standardizedFileURL
   guard url.pathExtension == "app", let bundle = Bundle(url: url),
-    let identifier = bundle.bundleIdentifier, !identifier.hasPrefix("io.daat-locus."),
+    let identifier = bundle.bundleIdentifier, !ownBundle(identifier),
     bundle.executableURL?.lastPathComponent.hasPrefix("daat-locus") != true
   else { throw Failure(message: "Application unavailable or excluded") }
   try require(
@@ -495,7 +500,7 @@ private func perform(_ request: [String: Any]) throws -> [String: Any] {
           at: URL(fileURLWithPath: parent), includingPropertiesForKeys: nil)) ?? []
       where url.pathExtension == "app" {
         let identifier = Bundle(url: url)?.bundleIdentifier ?? ""
-        if !identifier.hasPrefix("io.daat-locus.") {
+        if !ownBundle(identifier) {
           found[url.path] = [
             "path": url.path, "name": url.deletingPathExtension().lastPathComponent,
             "bundle": identifier,

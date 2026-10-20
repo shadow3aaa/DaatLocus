@@ -979,6 +979,10 @@ OS-owner IPC 管理后台进程，不借用浏览器认证、不删除 Actor 数
 的服务不能被这个自动升级路径停止。`status` 不触发升级，退出客户端仍保留服务。
 
 
+原生客户端的应用标识为 `io.shadow3aaa.daatlocus`；Android 包名、JVM/JNI 类名与
+macOS bundle 使用同一标识，macOS 安装器标识追加 `.pkg`。桌面单实例标识从
+配置标识追加 profile 摘要，服务目录及显式配置的 WebView profile 路径、存储标识不变。
+GUI 操作同时排除新标识和仍可能安装的旧客户端标识。
 Windows/macOS 的共用 Tauri 客户端位于 `clients/app/src-tauri`。窗口从配套 CLI
 的 OS-owner IPC 状态取得并核对 profile、可执行文件与确切 loopback origin，
 加载本地共享 WebUI，以受限原生传输复用后台 HTTP 查询和 SSE，不复制业务接口。

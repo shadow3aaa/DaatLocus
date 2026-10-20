@@ -20,7 +20,7 @@ fn apply_safe_area(window: &tauri::WebviewWindow) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_daat_1locus_app_MainActivity_nativeWindowInsetsChanged(
+pub extern "system" fn Java_io_shadow3aaa_daatlocus_MainActivity_nativeWindowInsetsChanged(
     _env: *mut jni::sys::JNIEnv,
     _activity: jni::sys::jobject,
     top: f32,
@@ -41,7 +41,7 @@ pub extern "system" fn Java_io_daat_1locus_app_MainActivity_nativeWindowInsetsCh
 // An OS connectivity hint only. No WebView/JavaScript command or authority is
 // introduced, and callbacks before service initialization are harmless.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_daat_1locus_app_MainActivity_nativeNetworkChanged(
+pub extern "system" fn Java_io_shadow3aaa_daatlocus_MainActivity_nativeNetworkChanged(
     _env: *mut jni::sys::JNIEnv,
     _activity: jni::sys::jobject,
 ) {
