@@ -150,12 +150,17 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("Cannot initialize Daat Locus");
     app.run(|handle, event| {
+        // Activity onPause/onResume arrive as matching window events.
+        // RunEvent::Resumed belongs to event-loop polling, not Activity resume.
         let active = match event {
             tauri::RunEvent::WindowEvent {
                 event: tauri::WindowEvent::Suspended,
                 ..
             } => Some(false),
-            tauri::RunEvent::Resumed => Some(true),
+            tauri::RunEvent::WindowEvent {
+                event: tauri::WindowEvent::Resumed,
+                ..
+            } => Some(true),
             _ => None,
         };
         if let Some(active) = active

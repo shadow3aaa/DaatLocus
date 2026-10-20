@@ -144,6 +144,94 @@ impl MobileService {
 mod tests {
     use super::*;
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn first_model_and_foreground_resume_enable_local_core_without_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let system = ActorSystem::open_account_gated(
+            directory.path().join("actors"),
+            directory.path().join("workspace"),
+            crate::config::Config::default(),
+        )
+        .await
+        .unwrap();
+        let state = ServiceState::new(system.clone(), "http://127.0.0.1:12345".into()).unwrap();
+        let stage = state.stage.as_ref().unwrap().clone();
+        let (_, logging) = tracing_appender::non_blocking(std::io::sink());
+        let service = MobileService {
+            _logging: logging,
+            origin: "http://127.0.0.1:12345".into(),
+            state,
+            lifecycle: Mutex::new(()),
+            foreground: AtomicBool::new(true),
+        };
+        let mut settings = stage.host.settings();
+        settings.listen = "127.0.0.1:0".into();
+        stage.host.save_settings(settings).unwrap();
+        stage.start().await.unwrap();
+        stage.host.initialize(true).unwrap();
+        stage.start().await.unwrap();
+        system.activate_account_workers().await.unwrap();
+        let core = stage.core.read().clone().unwrap();
+        assert_eq!(core.status()["state"], "model_required");
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while core.status()["synchronized"] != true {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        service.set_foreground(false);
+        service.apply_foreground().await.unwrap();
+        assert!(!system.workers_enabled());
+        let mut config = system.config();
+        config.main_model = "local-test".into();
+        config.providers.insert(
+            "local-test".into(),
+            crate::config::ProviderConfig::OpenaiCompatible {
+                base_url: "http://127.0.0.1:1/v1".into(),
+                api_key: "test".into(),
+            },
+        );
+        config.models.insert(
+            "local-test".into(),
+            crate::config::ModelConfig {
+                provider: "local-test".into(),
+                model_id: "test".into(),
+                ..Default::default()
+            },
+        );
+        let persistent = config.clone();
+        system
+            .update_config_with(config, async {
+                crate::accounts::configuration::persist_device_config(&system, &persistent)?;
+                stage.host.configurations.publish(&stage.host, &persistent)
+            })
+            .await
+            .unwrap();
+        assert!(
+            !system.workers_enabled(),
+            "saving models must respect suspension"
+        );
+        assert_eq!(core.status()["model_ready"], true);
+        service.set_foreground(true);
+        service.apply_foreground().await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while !core.accepts_input() {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        let status = core.status();
+        assert!(stage.host.settings().ssh.is_empty());
+        assert!(stage.host.settings().signaling_origin.is_none());
+        stage.stop().await;
+        system.shutdown().await;
+        assert!(
+            result.is_ok(),
+            "first model left local execution unavailable: {status}"
+        );
+    }
+
     #[tokio::test]
     async fn foreground_resumes_execution_when_device_transport_cannot_start() {
         let directory = tempfile::tempdir().unwrap();
