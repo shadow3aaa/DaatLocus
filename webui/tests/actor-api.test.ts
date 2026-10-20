@@ -96,6 +96,84 @@ describe("incremental SSE", () => {
     expect(revoked).toBe(1);
     expect(calls).toBe(1);
   });
+  for (const pendingConsumer of [false, true]) test(`foreground resumes a stalled stream from its consumed cursor (consumer pending: ${pendingConsumer})`, async () => {
+    const prior = Object.getOwnPropertyDescriptor(globalThis, "document");
+    const visibility = Object.assign(new EventTarget(), {visibilityState: "visible"});
+    Object.defineProperty(globalThis, "document", {configurable: true, value: visibility});
+    const abort = new AbortController();
+    const ids: string[] = [];
+    const seen: number[] = [];
+    let cancelled = false;
+    let consumed!: () => void;
+    const first = new Promise<void>(resolve => { consumed = resolve; });
+    let release!: () => void;
+    const consumer = new Promise<void>(resolve => { release = resolve; });
+    const fetcher = (async (_url, init) => {
+      ids.push(new Headers(init?.headers).get("Last-Event-ID")!);
+      if (ids.length > 1) return response(frame(1) + frame(2));
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(encoder.encode(frame(1))); },
+        cancel() { cancelled = true; },
+      }));
+    }) as typeof fetch;
+    const running = subscribeActorEvents("root", {signal: abort.signal, fetcher, retryMs: 30_000,
+      onEvent: async event => {
+        seen.push(event.seq);
+        if (event.seq === 1 && pendingConsumer) { consumed(); await consumer; }
+        if (event.seq === 2) abort.abort();
+      },
+      onCursor: id => { if (id === 1 && !pendingConsumer) consumed(); },
+    });
+    try {
+      await first;
+      visibility.visibilityState = "hidden";
+      visibility.dispatchEvent(new Event("visibilitychange"));
+      expect(cancelled).toBe(false);
+      visibility.visibilityState = "visible";
+      visibility.dispatchEvent(new Event("visibilitychange"));
+      if (pendingConsumer) {
+        expect(ids).toEqual(["0"]);
+        release();
+      }
+      await running;
+      expect(cancelled).toBe(true);
+      expect(ids).toEqual(["0", "1"]);
+      expect(seen).toEqual([1, 2]);
+    } finally {
+      release(); abort.abort(); await running;
+      if (prior) Object.defineProperty(globalThis, "document", prior);
+      else Reflect.deleteProperty(globalThis, "document");
+    }
+  }, 2000);
+  test("foreground aborts a stalled stream request before response headers arrive", async () => {
+    const prior = Object.getOwnPropertyDescriptor(globalThis, "document");
+    const visibility = Object.assign(new EventTarget(), {visibilityState: "visible"});
+    Object.defineProperty(globalThis, "document", {configurable: true, value: visibility});
+    const abort = new AbortController();
+    let started!: () => void;
+    const first = new Promise<void>(resolve => { started = resolve; });
+    let calls = 0;
+    const fetcher = (async (_url, init) => {
+      if (++calls > 1) return response(frame(2));
+      return new Promise<Response>((_resolve, reject) => {
+        init!.signal!.addEventListener("abort", () => reject(new Error("aborted")), {once:true});
+        started();
+      });
+    }) as typeof fetch;
+    const running = subscribeActorEvents("root", {after:1, signal:abort.signal, fetcher, retryMs:30_000,
+      onEvent: () => { abort.abort(); },
+    });
+    try {
+      await first;
+      visibility.dispatchEvent(new Event("visibilitychange"));
+      await running;
+      expect(calls).toBe(2);
+    } finally {
+      abort.abort(); await running;
+      if (prior) Object.defineProperty(globalThis, "document", prior);
+      else Reflect.deleteProperty(globalThis, "document");
+    }
+  }, 2000);
 });
 describe("cookie-only requests", () => {
   test("accepted cancellation has no response body and still reports denied cancellation", async () => {

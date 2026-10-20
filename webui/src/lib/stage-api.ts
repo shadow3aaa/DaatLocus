@@ -17,16 +17,18 @@ export const saveDeviceSettings = (preferences: DevicePreferences) => request<De
 
 export type CoreStatus = { worker_stage_id: string | null; epoch: number; synchronized: boolean; ready: boolean; model_ready: boolean; state: string; error_code?: string | null; config_revision?: string | null };
 export const getStageStatus = (options?: FetchOptions) => request<{core: CoreStatus | null; public_login: PublicLoginStatus; work_generation?: WorkGeneration | null}>("/v1/stage/status", options);
-export type ConversationConnectionMessage = "conversation_pane.synchronizing" | "conversation_pane.reconnecting" | "conversation_pane.recovering" | "conversation_pane.reconciling" | "conversation_pane.offline" | "conversation_pane.recovery_blocked" | "app.connecting";
-export function connectionBlocks(message: ConversationConnectionMessage | null | undefined): boolean { return Boolean(message); }
+export type ConversationConnectionMessage = "conversation_pane.synchronizing" | "conversation_pane.reconnecting" | "conversation_pane.recovering" | "conversation_pane.reconciling" | "conversation_pane.offline" | "conversation_pane.recovery_blocked" | "conversation_pane.preparing" | "conversation_pane.service_unavailable";
 export function coreConnectionMessage(core: CoreStatus | null | undefined): ConversationConnectionMessage | null {
+  if (core === undefined) return "conversation_pane.preparing";
+  if (core === null) return "conversation_pane.service_unavailable";
   if (core?.ready) return null;
   if (core?.state === "recovering") return "conversation_pane.recovering";
   if (core?.state === "reconciling") return "conversation_pane.reconciling";
   if (core?.state === "offline") return "conversation_pane.offline";
   if (core?.state === "recovery_blocked") return "conversation_pane.recovery_blocked";
   if (core?.state === "model_required") return null;
-  return core?.state === "synchronizing" ? "conversation_pane.synchronizing" : "app.connecting";
+  if (core.state === "synchronizing") return "conversation_pane.synchronizing";
+  return core.state === "connecting" ? "conversation_pane.preparing" : "conversation_pane.service_unavailable";
 }
 
 export type PublicLoginStatus = { state: "not_configured" | "waiting_for_account" | "connecting" | "online" | "reconnecting"; error_code: string | null; changed_at_ms: number; last_confirmed_at_ms: number | null; retry_at_ms: number | null };

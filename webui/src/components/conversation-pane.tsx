@@ -16,7 +16,6 @@ import { useActorConversation } from "@/hooks/use-actor-conversation";
 import { accessKey, actorModelReady, patchActorPreferences, type Access, type ApprovalMode, type ActorDetail } from "@/lib/actor-api";
 import { cn } from "@/lib/utils";
 import type { ConversationConnectionMessage } from "@/lib/stage-api";
-import { connectionBlocks } from "@/lib/stage-api";
 import { useConversationSearch } from "@/hooks/use-conversation-search";
 import { matchingConversationMessages, matchesConversationText } from "@/lib/conversation-search";
 import { ConversationSearchBar } from "@/components/conversation-search";
@@ -51,7 +50,9 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   ready = actorModelReady(actor, ready);
   const canManage = access.kind === "owner" && (!actor?.remote || actor.access?.manage === true);
   const waitingMessage = connectionMessage || (chat.streamStatus === "reconnecting" ? "conversation_pane.reconnecting" : null);
-  const connecting = connectionBlocks(waitingMessage);
+  // Execution readiness gates submission. An interrupted observation stream
+  // does not stop the HTTP endpoint from accepting a new input.
+  const connecting = Boolean(connectionMessage);
   const archived = actor?.status === "archived";
   const canConverse = !archived && actor?.access?.converse !== false;
   const name = actor?.config?.name || actor?.name || (actorId === "core" ? "Daat Locus" : "Actor");
@@ -65,7 +66,12 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const receiptMessageId = primaryView ? [...chat.messages].reverse().find(message => isUserSource(message) && !(message.status === "cancelled" && message.started_at_ms == null))?.id : undefined;
   useEffect(() => { follow.current = true; olderAnchor.current = null; setAtBottom(true); setLocalError(""); filePreparation.current = { actorId, busy: false }; setPreparingFiles(false); }, [actorId]);
   useEffect(() => { if (actor) onActorLoaded?.(actor); }, [actor, onActorLoaded]);
-  useEffect(() => { if (refreshVersion) void chat.refresh(); }, [refreshVersion]);
+  useEffect(() => {
+    if (!refreshVersion) return;
+    let live = true;
+    void chat.refreshActor().catch(error => { if (live) setLocalError(error instanceof Error ? error.message : String(error)); });
+    return () => { live = false; };
+  }, [refreshVersion, chat.refreshActor]);
   useEffect(() => {
     const area = scroll.current;
     if (!area) return;
@@ -221,7 +227,6 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const errors = localError || chat.error;
   return <section ref={pane} className={cn("dl-conversation", primaryView ? "dl-primary-conversation" : "dl-work-conversation", compact && "dl-conversation-compact")} aria-label={t("conversation_pane.value0_conversation", {value0: name})} data-search-open={searchOpen} onKeyDownCapture={event => { if (searchOpen && event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onSearchOpenChange?.(false); } }}>
     <ConversationSearchBar open={searchOpen} query={searchQuery} onQueryChange={setSearchQuery} onClose={() => onSearchOpenChange?.(false)} busy={search.busy} controls={resultsId} />
-    <ConversationConnection message={waitingMessage}>
       {!compact && !primaryView && <header className="dl-conversation-heading"><span>{name}</span><span className={cn("dl-status-dot", active && "dl-status-working")} /><small>{chat.streamStatus === "reconnecting" ? t("conversation_pane.reconnecting") : active ? t("conversation_pane.working") : t("conversation_pane.ready")}</small></header>}
       <div className="dl-conversation-scroll" ref={scroll} onScroll={() => { const area = scroll.current; if (!area) return; const near = area.scrollTop > -110; if (!searchOpen) follow.current = area.scrollTop >= 0; setAtBottom(near); if (!searchOpen) rememberView(); }}>
         <div className="dl-message-list" id={resultsId} aria-busy={filtering && search.busy} aria-live={searchOpen ? "off" : "polite"} aria-relevant="additions">
@@ -241,6 +246,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
       </div>
       {!primaryView && !searchOpen && <ConversationHistory messages={visibleMessages} scroll={scroll} onNavigate={() => {follow.current = false;}} />}
       <div ref={footer} className="dl-conversation-footer">
+        <ConversationConnection message={waitingMessage} />
         {!connecting && !ready && chat.messages.length > 0 && onConfigureModels && <div className="dl-model-required"><span>{t("conversation_pane.model_required")}</span><Button variant="outline" size="sm" onClick={onConfigureModels}>{t("app.settings")}</Button></div>}
         {!compact && canManage && <OwnerApprovalNotice actorId={actorId} onActor={onActor} onAccessRevoked={onAccessRevoked} />}
         {!atBottom && <Button className="dl-jump-bottom" variant="outline" size="icon" aria-label={t("conversation_pane.jump_to_latest")} onClick={bottom}><ArrowDownIcon /></Button>}
@@ -248,6 +254,5 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
         <MessageQueue messages={queue} active={active} chat={chat} access={access} />
         <Composer presentation={primaryView ? "primary" : "work"} key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} working={Boolean(active)} onStop={() => { if (active) void chat.cancel(active.id).catch(() => {}); }} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} mode={mode} onModeChange={next => { void configure({ mode: next }); }} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.actor_archived") : !ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : !primaryView ? t("conversation_pane.message_value0", {value0: name}) : t("composer.message")} compact={compact} />
       </div>
-    </ConversationConnection>
   </section>;
 }

@@ -92,6 +92,8 @@
   },
   "conversation_pane": {
     "actor_archived": "Actor 已归档",
+    "preparing": "正在准备本机执行…",
+    "service_unavailable": "暂时无法获取执行状态。",
     "recovery_blocked": "恢复暂时无法完成，对话记录和草稿已保留。",
     "local_recovery": "连接中断，已在此设备继续运行。",
     "offline": "另一台设备已离线，草稿已保留。",
@@ -102,7 +104,7 @@
     "settings_were_not_saved_try_again": "设置未保存，请重试。",
     "attachment_upload_failed_try_again": "附件上传失败，请重试。",
     "value0_conversation": "{{value0}} 对话",
-    "reconnecting": "重新连接中",
+    "reconnecting": "正在恢复对话更新…",
     "working": "处理中",
     "ready": "就绪",
     "could_not_load_earlier_messages": "较早的记录暂时无法加载。",

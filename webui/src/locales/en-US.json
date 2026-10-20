@@ -92,6 +92,8 @@
   },
   "conversation_pane": {
     "actor_archived": "Actor archived",
+    "preparing": "Preparing execution on this device…",
+    "service_unavailable": "Execution status is temporarily unavailable.",
     "recovery_blocked": "Recovery is paused. Conversation records and your draft are retained.",
     "local_recovery": "Continuing on this device while disconnected.",
     "offline": "The other device is offline. Your draft is retained.",
@@ -102,7 +104,7 @@
     "settings_were_not_saved_try_again": "Settings were not saved. Try again.",
     "attachment_upload_failed_try_again": "Attachment upload failed. Try again.",
     "value0_conversation": "{{value0}} conversation",
-    "reconnecting": "Reconnecting",
+    "reconnecting": "Restoring conversation updates…",
     "working": "Working",
     "ready": "Ready",
     "could_not_load_earlier_messages": "Could not load earlier messages.",

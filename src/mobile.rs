@@ -19,6 +19,7 @@ pub struct MobileService {
     lifecycle: Mutex<()>,
     foreground: AtomicBool,
 }
+
 impl MobileService {
     pub fn connectivity_changed(&self) {
         if let Some(stage) = &self.state.stage {
@@ -123,16 +124,68 @@ impl MobileService {
     pub async fn apply_foreground(&self) -> Result<()> {
         let _guard = self.lifecycle.lock().await;
         if self.foreground.load(Ordering::Acquire) {
+            // Local inference is independent of discovery/public connectivity.
+            // A failed transport restart must not leave Android suspended.
+            self.state.system.resume_execution().await?;
             if let Some(stage) = &self.state.stage {
-                stage
-                    .start()
-                    .await
-                    .map_err(|_| miette::miette!("Device transport unavailable"))?;
                 stage.connectivity_changed();
+                if let Err(error) = stage.start().await {
+                    tracing::warn!(reason = %error, "Device transport could not resume");
+                }
             }
-            self.state.system.resume_execution().await
+            Ok(())
         } else {
             self.state.system.suspend_execution().await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn foreground_resumes_execution_when_device_transport_cannot_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let system = ActorSystem::open(
+            directory.path().join("actors"),
+            workspace,
+            crate::config::Config::default(),
+        )
+        .await
+        .unwrap();
+        let state = ServiceState::new(system.clone(), "http://127.0.0.1:12345".into()).unwrap();
+        let stage = state.stage.as_ref().unwrap().clone();
+        stage.host.initialize(true).unwrap();
+        // Hold the device listener port so the actual startup fails, rather
+        // than mocking the lifecycle result or requiring an external network.
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut settings = stage.host.settings();
+        settings.listen = occupied.local_addr().unwrap().to_string();
+        stage.host.save_settings(settings).unwrap();
+        let (_, logging) = tracing_appender::non_blocking(std::io::sink());
+        let service = MobileService {
+            _logging: logging,
+            origin: "http://127.0.0.1:12345".into(),
+            state,
+            lifecycle: Mutex::new(()),
+            foreground: AtomicBool::new(false),
+        };
+        service.apply_foreground().await.unwrap();
+        assert!(!system.workers_enabled());
+        service.set_foreground(true);
+        let resumed = service.apply_foreground().await;
+        let enabled = system.workers_enabled();
+        let transport_failed = stage.core.read().is_none();
+        stage.stop().await;
+        system.shutdown().await;
+        assert!(
+            transport_failed,
+            "occupied device listener did not fail startup"
+        );
+        assert!(resumed.is_ok(), "foreground transition failed: {resumed:?}");
+        assert!(enabled, "transport failure left local execution suspended");
     }
 }

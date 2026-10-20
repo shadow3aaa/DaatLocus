@@ -25,7 +25,7 @@ pub mod http_client;
 pub mod i18n;
 pub mod logging;
 pub mod mcp;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub mod mobile;
 pub mod model_catalog;
 pub mod model_discovery;

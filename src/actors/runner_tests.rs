@@ -794,6 +794,111 @@ async fn single_device_account_actor_runs_without_cloud_services() {
     system.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn single_device_configuration_updates_keep_local_readiness() {
+    use crate::stage::{host::Host, runtime::Runtime};
+    let model = Arc::new(ReplayProvider::new(vec![]));
+    let (_directory, system) = runtime(model.clone()).await;
+    let host = Host::load(system.clone()).unwrap();
+    host.initialize(true).unwrap();
+    let mut settings = host.settings();
+    settings.listen = "127.0.0.1:0".into();
+    host.save_settings(settings).unwrap();
+    let network = Runtime::new(host);
+    network.start().await.unwrap();
+    let core = network.core.read().clone().unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !core.accepts_input() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("single-device Core did not become ready");
+    let epoch = core.epoch();
+    let mut configuration = system.config();
+    configuration.models.get_mut("mock").unwrap().temperature = 0.4;
+    let alternate = configuration.models["mock"].clone();
+    configuration.models.insert("alternate".into(), alternate);
+    configuration.main_model = "alternate".into();
+    let persistent = configuration.clone();
+    let host = network.host.clone();
+    system
+        .update_config_with(configuration, async move {
+            host.configurations.publish(&host, &persistent)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let configured = core.status();
+    let mut empty = system.config();
+    empty.models.clear();
+    empty.providers.clear();
+    empty.main_model.clear();
+    empty.approval_model = None;
+    system.update_config(empty).await.unwrap();
+    let unconfigured = core.status();
+    network.stop().await;
+    system.shutdown().await;
+    assert_eq!(configured["ready"], true, "{configured}");
+    assert_eq!(configured["epoch"], epoch, "{configured}");
+    assert_eq!(unconfigured["model_ready"], false);
+    assert_eq!(unconfigured["ready"], false);
+    assert_eq!(unconfigured["synchronized"], true);
+    assert_eq!(unconfigured["state"], "model_required", "{unconfigured}");
+    assert!(model.requests.lock().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn single_device_core_resumes_after_foreground_suspend() {
+    use crate::stage::{host::Host, runtime::Runtime, shared};
+    let model = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
+        "Resumed local execution.",
+    )]));
+    let (_directory, system) = runtime(model.clone()).await;
+    let host = Host::load(system.clone()).unwrap();
+    host.initialize(true).unwrap();
+    let mut settings = host.settings();
+    settings.listen = "127.0.0.1:0".into();
+    host.save_settings(settings).unwrap();
+    let network = Runtime::new(host);
+    network.start().await.unwrap();
+    let core = network.core.read().clone().unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+        while !core.accepts_input() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let previous_epoch = core.epoch();
+        system.suspend_execution().await.unwrap();
+        // Wait for the coordinator to observe the suspension and release the
+        // local lease, as it would while Android remains in the background.
+        while core.accepts_input() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        system.resume_execution().await.unwrap();
+        network.connectivity_changed();
+        while !core.accepts_input() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(core.epoch() > previous_epoch);
+        let input = system
+            .send_user(shared::ACTOR_ID, "Continue locally.".into(), vec![], None)
+            .unwrap();
+        while system.store().message(&input.id).unwrap().status != MessageStatus::Completed {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        system.store().message(&input.id).unwrap().reply
+    })
+    .await;
+    let status = core.status();
+    network.stop().await;
+    system.shutdown().await;
+    assert_eq!(
+        outcome.unwrap_or_else(|_| panic!("Core did not resume: {status}")),
+        Some("Resumed local execution.".into())
+    );
+    assert_eq!(model.requests.lock().len(), 1);
+}
+
 async fn device_pair(
     model_a: Arc<ReplayProvider>,
     model_b: Arc<ReplayProvider>,

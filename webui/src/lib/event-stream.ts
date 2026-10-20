@@ -67,51 +67,71 @@ export async function subscribe(path: string, options: StreamOptions): Promise<v
   let cursor = options.after ?? 0;
   let retry = options.retryMs ?? 1000;
   const fetcher = options.fetcher ?? serviceFetch;
-  while (!options.signal?.aborted) {
-    options.onStatus?.(cursor ? "reconnecting" : "connecting");
-    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-    const cancelRead = () => { void reader?.cancel().catch(() => {}); };
-    try {
-      const response = await fetcher(path, {
-        credentials:"same-origin", cache:"no-store", signal:options.signal,
-        headers:{Accept:"text/event-stream", "Last-Event-ID":String(cursor)},
-      });
-      if ([401,403,410].includes(response.status)) { options.onAccessRevoked?.(); return; }
-      if ([409,422].includes(response.status)) { options.onResync?.(); return; }
-      if (!response.ok || !response.body) throw new Error("Event stream unavailable");
-      reader = response.body.getReader();
-      options.signal?.addEventListener("abort", cancelRead, {once:true});
-      if (options.signal?.aborted) { cancelRead(); break; }
-      options.onStatus?.("connected");
-      const parser = new SseParser(), decoder = new TextDecoder();
-      while (!options.signal?.aborted) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        for (const frame of parser.push(decoder.decode(chunk.value,{stream:true}))) {
-          if (options.signal?.aborted) break;
-          if (frame.event === "resync") { options.onResync?.(); return; }
-          if (frame.event === "access_revoked") { options.onAccessRevoked?.(); return; }
-          if (frame.retry != null) retry = Math.min(30_000,Math.max(100,frame.retry));
-          const id = Number(frame.id);
-          if (frame.id == null || !Number.isSafeInteger(id) || id <= cursor) continue;
-          if (frame.event === "activity") {
-            const record = JSON.parse(frame.data) as EventRecord;
-            if (record.seq !== id) throw new Error("Event cursor mismatch");
-            await options.onEvent(record);
-          } else if (frame.event !== "cursor") continue;
-          await options.onCursor?.(id);
-          cursor = id;
+  let attempt: AbortController | undefined;
+  let resumed = false;
+  const visibility = typeof document === "undefined" ? undefined : document;
+  const page = typeof window === "undefined" ? undefined : window;
+  const resume = () => {
+    if (visibility?.visibilityState !== "visible") return;
+    resumed = true;
+    attempt?.abort();
+  };
+  visibility?.addEventListener("visibilitychange", resume);
+  page?.addEventListener("pageshow", resume);
+  try {
+    while (!options.signal?.aborted) {
+      resumed = false;
+      attempt = new AbortController();
+      const signal = options.signal ? AbortSignal.any([options.signal, attempt.signal]) : attempt.signal;
+      options.onStatus?.(cursor ? "reconnecting" : "connecting");
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      const cancelRead = () => { void reader?.cancel().catch(() => {}); };
+      try {
+        const response = await fetcher(path, {
+          credentials:"same-origin", cache:"no-store", signal,
+          headers:{Accept:"text/event-stream", "Last-Event-ID":String(cursor)},
+        });
+        signal.throwIfAborted();
+        if ([401,403,410].includes(response.status)) { options.onAccessRevoked?.(); return; }
+        if ([409,422].includes(response.status)) { options.onResync?.(); return; }
+        if (!response.ok || !response.body) throw new Error("Event stream unavailable");
+        reader = response.body.getReader();
+        signal.addEventListener("abort", cancelRead, {once:true});
+        if (signal.aborted) { cancelRead(); continue; }
+        options.onStatus?.("connected");
+        const parser = new SseParser(), decoder = new TextDecoder();
+        while (!signal.aborted) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          for (const frame of parser.push(decoder.decode(chunk.value,{stream:true}))) {
+            if (signal.aborted) break;
+            if (frame.event === "resync") { options.onResync?.(); return; }
+            if (frame.event === "access_revoked") { options.onAccessRevoked?.(); return; }
+            if (frame.retry != null) retry = Math.min(30_000,Math.max(100,frame.retry));
+            const id = Number(frame.id);
+            if (frame.id == null || !Number.isSafeInteger(id) || id <= cursor) continue;
+            if (frame.event === "activity") {
+              const record = JSON.parse(frame.data) as EventRecord;
+              if (record.seq !== id) throw new Error("Event cursor mismatch");
+              await options.onEvent(record);
+            } else if (frame.event !== "cursor") continue;
+            await options.onCursor?.(id);
+            cursor = id;
+          }
         }
+      } catch (error) {
+        if (options.signal?.aborted) break;
+        options.onStatus?.("reconnecting");
+      } finally {
+        signal.removeEventListener("abort", cancelRead);
+        await reader?.cancel().catch(() => {});
+        reader?.releaseLock();
       }
-    } catch (error) {
-      if (options.signal?.aborted) break;
-      options.onStatus?.("reconnecting");
-    } finally {
-      options.signal?.removeEventListener("abort", cancelRead);
-      await reader?.cancel().catch(() => {});
-      reader?.releaseLock();
+      if (!options.signal?.aborted && !resumed) await pause(retry,signal);
     }
-    if (!options.signal?.aborted) await pause(retry,options.signal);
+  } finally {
+    visibility?.removeEventListener("visibilitychange", resume);
+    page?.removeEventListener("pageshow", resume);
   }
   options.onStatus?.("closed");
 }

@@ -352,14 +352,14 @@ impl Controller {
             "recovery_blocked"
         } else if frozen || failure == Some("reconciling") {
             "reconciling"
+        } else if !model_ready {
+            "model_required"
         } else if worker && recovering {
             "local_recovery"
         } else if worker {
             "worker"
         } else if ready {
             "replica"
-        } else if !model_ready {
-            "model_required"
         } else if failure == Some("quorum_unavailable") {
             "recovering"
         } else if failure == Some("device_offline") {
