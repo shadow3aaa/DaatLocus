@@ -646,12 +646,18 @@ PhoneUse 的显示隔离要求 Android 15/API 35 以上。
 `output-metadata.json` 的其他目录。校验版本、ABI 和内嵌 WebUI 后才报告成功。
 底层继续复用现有 Bun 脚本的 Tauri/Gradle 构建与签名流程。
 
+Gradle 从 Cargo 解析 JVM 验证组件版本，将对应 AAR 的 CRL 域名白名单与
+`app/network_security_config.xml` 中 DL 的精确本地通信规则合并，生成最终资源。
+不要在 `src/main/res` 放置同名静态资源，否则 Android 会覆盖上游 XML，阻断 CRL
+下载。明文默认仍禁止，证书验证与签名吊销信息检查保持启用。
+
 签名配置和 keystore 必须留在仓库外，参见[客户端构建说明](clients/app/README.md#android)。
 使用 Android build-tools 的 `apksigner verify --verbose --print-certs` 验证签名，并检查
 原生库的 16 KiB ELF 页对齐。禁止提交签名凭据。
 
 必须在设备上验证签名并混淆后的发布 APK，调试包启动无法覆盖 R8。
-`ReleaseStartupTest` 仪器测试验证内置登录页加载，不创建账号；请使用独立测试实例。
+`ReleaseStartupTest` 仪器测试验证内置登录页加载、最终 APK 的 CRL／本地域名规则及
+默认禁止明文，不创建账号；请使用独立测试实例。
 先构建对应设备 ABI 的发布包，再从 Gradle 目录执行：
 
 ```sh

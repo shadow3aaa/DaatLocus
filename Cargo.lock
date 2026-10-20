@@ -1486,7 +1486,6 @@ dependencies = [
  "url",
  "uuid",
  "viewpoint-core",
- "webpki-roots 1.0.9",
  "webrtc",
  "windows",
  "windows-sys 0.61.2",

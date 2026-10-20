@@ -1,9 +1,6 @@
-//! Public rendezvous verifies public CA chains and hostnames. Android uses
-//! WebPKI because the JVM verifier's additional OCSP check rejects certificates
-//! without an OCSP responder as revoked. Other platforms use the OS verifier.
+//! Public rendezvous verifies public CA chains and hostnames with the OS verifier.
 //! Peer TLS keeps its separate identity pins.
 use futures_util::{StreamExt, stream::FuturesUnordered};
-#[cfg(not(target_os = "android"))]
 use rustls_platform_verifier::BuilderVerifierExt;
 use std::{collections::VecDeque, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio_tungstenite::{
@@ -30,11 +27,6 @@ pub(crate) async fn connect(endpoint: &str, config: WebSocketConfig) -> Result<S
         ))
         .with_safe_default_protocol_versions()
         .map_err(|error| Error::Tls(TlsError::Rustls(Box::new(error))))?;
-        #[cfg(target_os = "android")]
-        let builder = builder.with_root_certificates(rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        });
-        #[cfg(not(target_os = "android"))]
         let builder = builder
             .with_platform_verifier()
             .map_err(|error| Error::Tls(TlsError::Rustls(Box::new(error))))?;

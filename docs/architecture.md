@@ -623,8 +623,10 @@ Cookie 绑定确切 profile、账号公钥命名空间和凭据修订；最长 1
 账号设备自动发现、连接、同步与重连。LAN 使用 mDNS 和认证 TLS；SSH 需要
 明确目标；可选 CF Worker/DO 仅提供公网会合和 P2P 信令。LAN、SSH 和直连
 不依赖 CF。发现提示只能提供候选，不能授予信任。设备名默认使用系统 hostname API。
-公网 WebSocket 在 Android 上使用 WebPKI 与 Mozilla 公共根证书验证证书链、域名和有效期，
-避免 JVM 验证库将缺少 OCSP 响应地址误判为证书吊销；其他平台使用 OS 证书验证。
+模型 HTTP 与公网 WebSocket 均使用 OS 证书验证。Android 构建从 Cargo 对应版本的
+`rustls-platform-verifier` AAR 提取网络策略，与 DL 的精确本地通信域名规则合并后
+生成最终资源，保留上游 CRL 域名白名单及默认禁止明文的规则，避免同名资源覆盖
+导致吊销信息无法下载；不替换证书验证器或关闭验证。
 设备间 TLS 仍按设备身份固定证书指纹，两种信任边界独立。
 公网连接交错尝试 DNS 返回的 IPv4/IPv6 地址，间隔 250 毫秒并竞速完整 TLS/WebSocket
 握手；单个地址卡住不会耗尽其他地址的连接机会，成功后取消其余尝试。

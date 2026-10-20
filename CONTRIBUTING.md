@@ -811,9 +811,17 @@ HTTP and device transports share ring while HTTPS retains platform certificate
 verification. Host build dependencies may still use another crypto provider and
 do not count toward the APK's runtime dependency graph.
 
+Gradle resolves the JVM verifier version from Cargo and generates the final
+`network_security_config.xml` by combining that AAR's CRL host allowances with
+`app/network_security_config.xml` (DL's exact local hosts). Do not add a same-named
+static resource under `src/main/res`: Android would overlay the upstream XML and
+break CRL retrieval. The default cleartext policy remains denied; certificate
+validation and signed revocation checks remain enabled.
+
 Validate the signed, minified release APK on a device; a debug launch does not
 exercise R8. The `ReleaseStartupTest` instrumentation test loads the embedded
-account login without creating an account. Use a dedicated test installation.
+account login without creating an account and checks the final APK's CRL/local
+network allowances and default cleartext denial. Use a dedicated test installation.
 After building a release APK for that device's ABI, run from the Gradle directory:
 
 ```sh

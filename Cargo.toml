@@ -132,7 +132,6 @@ tempfile = "3.23.0"
 mimalloc = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
-webpki-roots = "1.0.8"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 viewpoint-core = "0.4"

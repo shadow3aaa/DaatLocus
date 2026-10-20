@@ -32,6 +32,24 @@ val verifierVersion = providers.exec {
     verifier["version"] as String
 }
 
+// Use the exact same AAR for implementation and network-policy composition.
+val verifierNetworkPolicy = configurations.create("verifierNetworkPolicy") {
+    isCanBeConsumed = false
+    isTransitive = false
+}
+val mergeNetworkSecurityConfig = tasks.register<MergeNetworkSecurityConfig>("mergeNetworkSecurityConfig") {
+    verifierArchive.set(layout.file(providers.provider { verifierNetworkPolicy.singleFile }))
+    localPolicy.set(layout.projectDirectory.file("network_security_config.xml"))
+    outputDirectory.set(layout.buildDirectory.dir("generated/network-security/res"))
+}
+
+androidComponents.onVariants { variant ->
+    variant.sources.res?.addGeneratedSourceDirectory(
+        mergeNetworkSecurityConfig,
+        MergeNetworkSecurityConfig::outputDirectory,
+    )
+}
+
 val tauriProperties = Properties().apply {
     val propFile = file("tauri.properties")
     if (propFile.exists()) {
@@ -115,6 +133,7 @@ rust {
 
 dependencies {
     implementation(verifierVersion.map { "org.rustls:rustls-platform-verifier:$it" })
+    add(verifierNetworkPolicy.name, verifierVersion.map { "org.rustls:rustls-platform-verifier:$it@aar" })
     implementation("androidx.webkit:webkit:1.17.1")
     implementation("androidx.appcompat:appcompat:1.8.0")
     implementation("androidx.activity:activity-ktx:1.13.0")

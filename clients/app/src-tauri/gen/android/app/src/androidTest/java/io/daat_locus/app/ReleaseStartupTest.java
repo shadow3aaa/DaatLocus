@@ -44,6 +44,7 @@ public final class ReleaseStartupTest extends Instrumentation {
         sendStatus(1, status);
         Bundle result = new Bundle();
         try {
+            NetworkSecurityTest.check();
             Activity activity = startActivitySync(new Intent(Intent.ACTION_MAIN)
                 .setClassName(getTargetContext(), "io.daat_locus.app.MainActivity")
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
