@@ -156,7 +156,7 @@ export function AppsPage({
   return (
     <section className="dl-apps-page" aria-label={t("apps.title")}>
       <div className="dl-apps-content">
-        <header className="dl-apps-header">
+        <header className="dl-apps-header" data-window-drag-region>
           <div className="dl-apps-title">
             <Button
               className="dl-apps-mobile-navigation"

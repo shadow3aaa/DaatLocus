@@ -148,13 +148,13 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
 
   return <section className="dl-settings-page" data-mobile-detail={mobileDetail} data-category={tab} aria-label={t("app.settings")}>
     <aside className="dl-settings-sidebar">
-      <header><Button variant="ghost" size="icon-sm" className="dl-settings-mobile-back" aria-label={t("settings_page.back_to_chat")} onClick={() => requestClose(false)}><ArrowLeftIcon /></Button><h1>{t("app.settings")}</h1></header>
+      <header data-window-drag-region><Button variant="ghost" size="icon-sm" className="dl-settings-mobile-back" aria-label={t("settings_page.back_to_chat")} onClick={() => requestClose(false)}><ArrowLeftIcon /></Button><h1>{t("app.settings")}</h1></header>
       <InputGroup className="dl-settings-search"><InputGroupAddon><SearchIcon /></InputGroupAddon><InputGroupInput type="search" aria-label={t("settings_page.search_settings")} placeholder={t("settings_page.search_placeholder")} value={query} onChange={event => setQuery(event.target.value)} /></InputGroup>
       <nav aria-label={t("settings_dialog.settings_categories")}><p>{t("settings_page.personal")}</p>{filtered.map(category => <Button key={category.id} variant="ghost" disabled={locked} className="dl-settings-category" aria-current={tab === category.id ? "page" : undefined} onClick={() => selectTab(category.id)}><category.icon data-icon="inline-start" />{category.label}</Button>)}{!filtered.length && <p role="status">{t("search_dialog.no_results")}</p>}</nav>
     </aside>
     <div ref={scroll} className="dl-settings-scroll">
       <div className="dl-settings-content">
-        <header className="dl-settings-page-heading"><Button variant="ghost" size="icon-sm" className="dl-settings-mobile-back" aria-label={t("settings_page.back_to_settings")} onClick={() => setMobileDetail(false)}><ArrowLeftIcon /></Button><h1>{categories.find(category => category.id === tab)?.label}</h1></header>
+        <header className="dl-settings-page-heading" data-window-drag-region><Button variant="ghost" size="icon-sm" className="dl-settings-mobile-back" aria-label={t("settings_page.back_to_settings")} onClick={() => setMobileDetail(false)}><ArrowLeftIcon /></Button><h1>{categories.find(category => category.id === tab)?.label}</h1></header>
         <StatusNote text={error} error /><StatusNote text={notice} />
         {error && !loading && (tab === "models" && !config || tab === "permissions" && !actor) && <Button variant="outline" onClick={() => { setError(null); setRetry(value => value + 1); }}>{t("app.retry")}</Button>}
         <div hidden={tab !== "general"}><SettingsGroup>

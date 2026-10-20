@@ -162,6 +162,7 @@ button:not(:disabled), [role=button] { cursor: pointer; }
 :root { --dl-dialog-width: calc(100vw - 32px); --dl-window-bar: 0px; --dl-safe-top: env(safe-area-inset-top,0px); --dl-safe-right: env(safe-area-inset-right,0px); --dl-safe-bottom: env(safe-area-inset-bottom,0px); --dl-safe-left: env(safe-area-inset-left,0px); }
 @media(min-width:640px) { :root { --dl-dialog-width: 24rem; } }
 html[data-desktop-platform] { --dl-window-bar: 36px; }
+html[data-desktop-platform="windows"] { --dl-window-bar: 0px; --dl-caption-width: 138px; }
 .dl-app { height: 100dvh; padding-top: var(--dl-window-bar); background: var(--background); color: var(--chat-text); overflow: hidden; }
 .dl-app-shell { display: flex; height: 100%; min-height: 0; }
 .dl-navigation-rail { width: calc(52px + var(--dl-safe-left)); flex: none; display: flex; flex-direction: column; align-items: center; padding: calc(8px + var(--dl-safe-top)) 0 max(12px,var(--dl-safe-bottom)) var(--dl-safe-left); background: color-mix(in srgb,var(--foreground) 1.5%,var(--background)); }
@@ -186,6 +187,10 @@ html[data-desktop-platform] { --dl-window-bar: 36px; }
 .dl-main-view>.dl-conversation>.dl-conversation-heading { top: calc(23px + var(--dl-safe-top)); }
 .dl-main-search { margin-left: auto; color: var(--muted-foreground); }
 .dl-main-search { background: var(--background); }
+html[data-desktop-platform] :is(.dl-main-search,.dl-actor-dialog-actions) { display: none; }
+@media(min-width:768px) {
+  html:not([data-mobile-platform]) :is(.dl-main-search,.dl-actor-dialog-actions) { display: none; }
+}
 .dl-settings-page { --muted: var(--settings-muted); --border: var(--settings-border); display: grid; grid-template-columns: auto minmax(0,1fr); height: 100%; min-width: 0; background: var(--background); border-radius: 16px 0 0 16px; }
 .dl-settings-sidebar { box-sizing: content-box; display: flex; flex-direction: column; width: 288px; min-height: 0; border-right: 1px solid var(--border); border-radius: 16px 0 0 16px; }
 .dl-settings-sidebar header { display: flex; align-items: center; gap: 8px; padding: calc(14px + var(--dl-safe-top)) 16px 14px; height: calc(52px + var(--dl-safe-top)); flex: none; }
@@ -312,6 +317,20 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
 .dl-window-controls { display: flex; height: 100%; }
 .dl-window-controls [data-slot=button] { width: 46px; height: 100%; border-radius: 0; }
 .dl-window-controls [data-slot=button]:last-child:hover { background: var(--destructive); color: var(--primary-foreground); }
+/* Windows controls overlay the page headers; only the thin top strip intercepts
+   content. Header drag regions keep their buttons and inputs interactive. */
+html[data-desktop-platform="windows"] .dl-window-titlebar { height: 36px; background: transparent; pointer-events: none; z-index: 60; }
+html[data-desktop-platform="windows"] .dl-window-drag-area { position: absolute; inset: 0 var(--dl-caption-width) auto 0; height: 8px; pointer-events: auto; }
+html[data-desktop-platform="windows"] .dl-window-controls { margin-left: auto; pointer-events: auto; background: var(--background); }
+html[data-desktop-platform="windows"] .dl-main-heading { padding-right: calc(var(--dl-caption-width) + 14px); pointer-events: auto; }
+html[data-desktop-platform="windows"] .dl-main-view>.dl-conversation>.dl-floating-search { right: calc(var(--dl-caption-width) + 14px); left: auto; translate: none; width: min(510px,calc(100% - var(--dl-caption-width) - 28px)); }
+html[data-desktop-platform="windows"] :is(.dl-apps-header,.dl-settings-page-heading) { padding-right: var(--dl-caption-width); }
+html[data-desktop-platform="windows"] [data-window-drag-region] { user-select: none; }
+@media(max-width:767px) {
+  html[data-desktop-platform="windows"] .dl-settings-sidebar>header { padding-right: var(--dl-caption-width); }
+  html[data-desktop-platform="windows"] .dl-actor-dialog-heading { padding-right: calc(var(--dl-caption-width) + 52px); }
+  html[data-desktop-platform="windows"] .dl-actor-dialog>[data-slot=dialog-close] { right: calc(var(--dl-caption-width) + 8px); }
+}
 .dl-action-error { position: fixed; top: 74px; left: 50%; transform: translateX(-50%); z-index: 10; display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 30px); border-radius: 15px; background: var(--popover); box-shadow: var(--chat-shadow); padding: 4px 10px; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); color: var(--destructive); }
 .dl-account-menu { width: 240px; padding: 6px; border-radius: 14px; }
 .dl-account-menu [data-slot=dropdown-menu-item] { min-height: 40px; gap: 12px; border-radius: 10px; }
