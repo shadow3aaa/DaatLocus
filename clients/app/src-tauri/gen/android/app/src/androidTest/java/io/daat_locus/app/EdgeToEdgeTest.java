@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.pm.ActivityInfo;
 import android.graphics.Bitmap;
 import android.os.SystemClock;
+import android.os.Build;
 import android.view.View;
 import android.view.MotionEvent;
 import android.view.InputDevice;
@@ -20,6 +21,50 @@ final class EdgeToEdgeTest {
     private final Activity activity;
     private EdgeToEdgeTest(ReleaseStartupTest test, Activity activity) { this.test=test; this.activity=activity; }
     static void run(ReleaseStartupTest test, Activity activity) throws Exception { new EdgeToEdgeTest(test,activity).run(); }
+    static void checkWindow(ReleaseStartupTest test, Activity activity) throws Exception {
+        final float[] expected=new float[4];
+        final String[] failure=new String[1];
+        test.runOnMainSync(()->{
+            View decor=activity.getWindow().getDecorView();
+            View root=activity.findViewById(android.R.id.content);
+            WebView web=ReleaseStartupTest.findWebView(root);
+            int[] outer=new int[2], inner=new int[2];
+            decor.getLocationOnScreen(outer); web.getLocationOnScreen(inner);
+            if (inner[0]!=outer[0] || inner[1]!=outer[1] || web.getWidth()!=decor.getWidth() ||
+                web.getHeight()!=decor.getHeight() || root.getPaddingTop()!=0 || root.getPaddingBottom()!=0) {
+                failure[0]="WebView does not fill the system-bar areas: "+inner[0]+","+inner[1]+" "+web.getWidth()+"x"+web.getHeight()+"; window="+decor.getWidth()+"x"+decor.getHeight();
+            }
+            if (Build.VERSION.SDK_INT>=29 && (activity.getWindow().isNavigationBarContrastEnforced() ||
+                activity.getWindow().isStatusBarContrastEnforced())) {
+                failure[0]="System contrast scrims obscure the WebView background";
+            }
+            WindowInsets insets=root.getRootWindowInsets();
+            float density=activity.getResources().getDisplayMetrics().density;
+            if (Build.VERSION.SDK_INT>=30) {
+                android.graphics.Insets bars=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());
+                expected[0]=bars.top/density; expected[1]=bars.right/density;
+                expected[2]=bars.bottom/density; expected[3]=bars.left/density;
+            } else {
+                expected[0]=insets.getSystemWindowInsetTop()/density; expected[1]=insets.getSystemWindowInsetRight()/density;
+                expected[2]=insets.getSystemWindowInsetBottom()/density; expected[3]=insets.getSystemWindowInsetLeft()/density;
+                if (Build.VERSION.SDK_INT>=28 && insets.getDisplayCutout()!=null) {
+                    android.view.DisplayCutout cutout=insets.getDisplayCutout();
+                    expected[0]=Math.max(expected[0],cutout.getSafeInsetTop()/density);
+                    expected[1]=Math.max(expected[1],cutout.getSafeInsetRight()/density);
+                    expected[2]=Math.max(expected[2],cutout.getSafeInsetBottom()/density);
+                    expected[3]=Math.max(expected[3],cutout.getSafeInsetLeft()/density);
+                }
+            }
+        });
+        if (failure[0]!=null) throw new AssertionError(failure[0]);
+        String values=java.util.Arrays.toString(expected);
+        String matches="(()=>{let s=getComputedStyle(document.documentElement);return ['top','right','bottom','left'].every((k,i)=>Math.abs(parseFloat(s.getPropertyValue('--dl-safe-'+k))-"+values+"[i])<1);})()";
+        long deadline=SystemClock.elapsedRealtime()+5000;
+        while (!Boolean.TRUE.equals(test.evaluate(activity,matches))) {
+            if (SystemClock.elapsedRealtime()>=deadline) throw new AssertionError("Web safe areas differ from actual Android system bars");
+            SystemClock.sleep(50);
+        }
+    }
     private Object js(String script) throws Exception { return test.evaluate(activity,script); }
     private void await(String expression) throws Exception {
         long deadline=SystemClock.elapsedRealtime()+15000;
@@ -56,18 +101,7 @@ final class EdgeToEdgeTest {
         await("(()=>{let e=document.querySelector("+JSONObject.quote(selector)+");if(!e)return false;let r=e.getBoundingClientRect(),s=getComputedStyle(document.documentElement),n=k=>parseFloat(s.getPropertyValue('--dl-safe-'+k))||0;return r.top>=n('top')-1&&r.left>=n('left')-1&&r.right<=innerWidth-n('right')+1&&r.bottom<=innerHeight-n('bottom')+1;})()");
     }
     private void nativeGeometry() throws Exception {
-        final float[] expected=new float[1];
-        final boolean[] edge=new boolean[1];
-        test.runOnMainSync(()->{
-            View root=activity.findViewById(android.R.id.content);
-            WebView web=ReleaseStartupTest.findWebView(root);
-            int[] position=new int[2]; web.getLocationOnScreen(position);
-            edge[0]=root.getPaddingTop()==0 && root.getPaddingLeft()==0 && root.getPaddingRight()==0 && position[1]==0;
-            expected[0]=root.getRootWindowInsets().getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout()).top/activity.getResources().getDisplayMetrics().density;
-        });
-        PhoneUseTest.require(edge[0], "WebView still has outer system-bar padding");
-        float top=((Number)js("parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dl-safe-top'))")).floatValue();
-        PhoneUseTest.require(Math.abs(top-expected[0])<1,"Web safe area differs from actual Android system bars");
+        checkWindow(test,activity);
         await("Math.abs(document.querySelector('.dl-app').getBoundingClientRect().height-innerHeight)<2");
     }
     private void keyboardGeometry() throws Exception {

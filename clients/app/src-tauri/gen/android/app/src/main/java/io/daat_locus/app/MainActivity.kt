@@ -1,6 +1,8 @@
 package io.daat_locus.app
 
 import android.os.Bundle
+import android.os.Build
+import android.graphics.Color
 import android.webkit.WebView
 import androidx.activity.OnBackPressedCallback
 import android.net.wifi.WifiManager
@@ -11,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.annotation.Keep
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.SystemBarStyle
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.graphics.Insets
@@ -34,11 +37,23 @@ class MainActivity : TauriActivity() {
     override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) = queueNetworkChange()
   }
   override fun onCreate(savedInstanceState: Bundle?) {
-    enableEdgeToEdge()
+    enableEdgeToEdge(
+      statusBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
+      // API 24/25 only supports light navigation icons; keep their contrast.
+      navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT,
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Color.TRANSPARENT else 0x801b1b1b.toInt()),
+    )
     super.onCreate(savedInstanceState)
     PhoneUseController.initialize(applicationContext)
     connectivity.registerDefaultNetworkCallback(networkCallback)
     ViewCompat.setOnApplyWindowInsetsListener(findViewById(android.R.id.content)) { view, insets ->
+      // AndroidX's automatic style enables a separate three-button navigation
+      // scrim. The WebView already draws this area and owns its safe spacing.
+      // Insets are reapplied after navigation/configuration changes as well.
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        window.isNavigationBarContrastEnforced = false
+        window.isStatusBarContrastEnforced = false
+      }
       val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
       val keyboard = insets.getInsets(WindowInsetsCompat.Type.ime())
       val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())

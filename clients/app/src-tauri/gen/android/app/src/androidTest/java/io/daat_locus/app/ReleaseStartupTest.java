@@ -81,6 +81,7 @@ public final class ReleaseStartupTest extends Instrumentation {
                 if (!loaded.get()) SystemClock.sleep(100);
             }
             if (!loaded.get()) throw new AssertionError("Release APK did not load native account login");
+            EdgeToEdgeTest.checkWindow(this, activity);
             sendStatus(0, status);
             result.putString("stream", "\nOK (1 test)\n");
             finish(Activity.RESULT_OK, result);
