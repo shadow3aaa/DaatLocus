@@ -189,3 +189,72 @@ fn one_shot_capture_preserves_desktop_state() {
     drop(fixture);
     assert_eq!(DesktopState::read().unwrap(), before);
 }
+
+#[test]
+#[ignore = "requires unlocked interactive Windows desktop and stationary cursor; no IDD or Hook DLL required"]
+fn minimized_window_is_discoverable_without_restoring_or_enabling_input() {
+    use daat_locus_virtual_workspace::windows;
+    let fixture = fixture();
+    let restored = Window::inspect(fixture.root).unwrap();
+    unsafe {
+        ShowWindow(fixture.root as HWND, SW_SHOWMINNOACTIVE);
+    }
+    let minimized = Window::inspect(fixture.root).unwrap();
+    assert!(minimized.minimized);
+    assert!(
+        restored.validate().is_err(),
+        "the old geometry must be stale"
+    );
+    let before = DesktopState::read().unwrap();
+    let mut placement = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    assert_ne!(
+        unsafe { GetWindowPlacement(fixture.root as HWND, &mut placement) },
+        0
+    );
+    let found = windows()
+        .unwrap()
+        .into_iter()
+        .find(|w| w.handle == fixture.root)
+        .expect("discovery must include a minimized visible top-level window");
+    assert_eq!(found, minimized);
+    assert_eq!(found.restored_bounds().unwrap(), restored.bounds);
+    assert!(!found.input_surfaces().unwrap().is_empty());
+    assert!(found.validate().is_err());
+    assert!(found.capture().is_err());
+    assert!(found.input_at(Point { x: 10, y: 10 }).is_err());
+    assert_eq!(DesktopState::read().unwrap(), before);
+    assert!(Window::inspect(fixture.root).unwrap().minimized);
+    let mut after = WINDOWPLACEMENT {
+        length: placement.length,
+        ..Default::default()
+    };
+    assert_ne!(
+        unsafe { GetWindowPlacement(fixture.root as HWND, &mut after) },
+        0
+    );
+    assert_eq!(after.showCmd, placement.showCmd);
+    assert_eq!(
+        (
+            after.rcNormalPosition.left,
+            after.rcNormalPosition.top,
+            after.rcNormalPosition.right,
+            after.rcNormalPosition.bottom
+        ),
+        (
+            placement.rcNormalPosition.left,
+            placement.rcNormalPosition.top,
+            placement.rcNormalPosition.right,
+            placement.rcNormalPosition.bottom
+        )
+    );
+    unsafe {
+        ShowWindow(fixture.root as HWND, SW_HIDE);
+    }
+    assert!(
+        !windows().unwrap().iter().any(|w| w.handle == fixture.root),
+        "hidden helper windows stay excluded"
+    );
+}

@@ -240,6 +240,7 @@ struct Taken {
     pending_region: Option<DisplayRegion>,
     window: Window,
     original: Rect,
+    original_minimized: bool,
     title: String,
     receiver: Option<InputTarget>,
     state: Option<String>,
@@ -403,7 +404,7 @@ impl Host {
                     let rows = self.candidates.values().filter(|c| args.app_id.as_ref().is_none_or(|app| &c.app_id == app)
                         && args.query.as_ref().is_none_or(|q| c.title.to_lowercase().contains(&q.to_lowercase())))
                         .filter(|c| reservations().lock().get(&thread_key(&c.window)).is_none_or(|owner| owner == &self.generation))
-                        .map(|c| json!({"window_id":c.id,"app_id":c.app_id,"title":c.title,"taken":self.taken.contains_key(&c.id),"blocked":unsafe{IsWindowEnabled(c.window.handle as HWND)}==0})).collect();
+                        .map(|c| json!({"window_id":c.id,"app_id":c.app_id,"title":c.title,"minimized":c.window.minimized,"taken":self.taken.contains_key(&c.id),"blocked":unsafe{IsWindowEnabled(c.window.handle as HWND)}==0})).collect();
                     Ok(Reply::data(
                         "Discovered windows",
                         page("windows", rows, args.cursor.as_deref(), args.limit)?,
@@ -830,7 +831,8 @@ impl Host {
             .get(window_id)
             .ok_or_else(|| miette!("unknown or revoked window; list_windows again"))?
             .clone();
-        candidate.window.validate().into_diagnostic()?;
+        candidate.window.validate_discovery().into_diagnostic()?;
+        let original = candidate.window.restored_bounds().into_diagnostic()?;
         if !self.allowed(&candidate.window) {
             return Err(miette!("target window is not accessible"));
         }
@@ -879,8 +881,8 @@ impl Host {
                 None => self
                     .display
                     .reserve(
-                        candidate.window.bounds.width().into_diagnostic()?,
-                        candidate.window.bounds.height().into_diagnostic()?,
+                        original.width().into_diagnostic()?,
+                        original.height().into_diagnostic()?,
                     )
                     .into_diagnostic()?,
             };
@@ -912,7 +914,8 @@ impl Host {
                 region,
                 pending_region: None,
                 window: candidate.window.clone(),
-                original: candidate.window.bounds,
+                original,
+                original_minimized: candidate.window.minimized,
                 title: candidate.title,
                 receiver: None,
                 state: None,
@@ -1349,7 +1352,20 @@ impl Host {
                     Placement::Original
                 },
             )?;
-            let _ = current.relocate(destination).into_diagnostic()?;
+            let return_original = id != window_id || matches!(placement, Placement::Original);
+            let moved = if current.minimized && target.original_minimized && return_original {
+                if current.restored_bounds().into_diagnostic()? != destination {
+                    return Err(miette!(
+                        "minimized window placement is unresolved; observe or release again after the pending restoration settles"
+                    ));
+                }
+                current
+            } else {
+                current.relocate(destination).into_diagnostic()?
+            };
+            if target.original_minimized && return_original {
+                moved.minimize().into_diagnostic()?;
+            }
             returned.push(json!({"title":target.title,"placement":placement,"controlled":false}));
             self.returning.remove(&id);
         }

@@ -15,6 +15,7 @@ pub struct Window {
     pub process_id: u32,
     pub thread_id: u32,
     pub process_started: u64,
+    pub minimized: bool,
     pub bounds: Rect,
     pub client_bounds: Rect,
 }
@@ -31,7 +32,7 @@ pub struct InputSurface {
 }
 impl InputSurface {
     pub fn inspect(frame: &Window, handle: usize) -> Result<Self> {
-        frame.validate()?;
+        frame.validate_discovery()?;
         if !frame.owns_control(handle) {
             return Err(Error::InvalidState(
                 "input surface is no longer inside the controlled window",
@@ -64,7 +65,7 @@ impl InputSurface {
                 "input surface changed during inspection",
             ));
         }
-        frame.validate()?;
+        frame.validate_discovery()?;
         Ok(Self {
             handle,
             process_id,
@@ -199,7 +200,7 @@ impl Window {
 
     /// Enumerate real descendant GUI threads. This does not infer membership from PID.
     pub fn input_surfaces(&self) -> Result<Vec<InputSurface>> {
-        self.validate()?;
+        self.validate_discovery()?;
         unsafe extern "system" fn collect(hwnd: HWND, data: LPARAM) -> i32 {
             unsafe { &mut *(data as *mut Vec<usize>) }.push(hwnd as usize);
             1
@@ -226,8 +227,109 @@ impl Window {
                 surfaces.push(surface);
             }
         }
-        self.validate()?;
+        self.validate_discovery()?;
         Ok(surfaces)
+    }
+
+    /// Normal screen bounds to reserve before taking a minimized window. Windows
+    /// stores normal placement in workspace coordinates except for tool windows.
+    pub fn restored_bounds(&self) -> Result<Rect> {
+        let _dpi = DpiContext::enter()?;
+        self.validate_discovery()?;
+        if !self.minimized {
+            return Ok(self.bounds);
+        }
+        let placement = self.placement()?;
+        let mut bounds = rectangle(placement.rcNormalPosition);
+        let offset = placement_offset(self.handle as HWND, None)?;
+        bounds.left += offset.x;
+        bounds.right += offset.x;
+        bounds.top += offset.y;
+        bounds.bottom += offset.y;
+        bounds.width()?;
+        bounds.height()?;
+        Ok(bounds)
+    }
+
+    /// Return a formerly minimized window without activating it. Already-minimized
+    /// observations are accepted so an interrupted handoff can finish safely.
+    pub fn minimize(&self) -> Result<Self> {
+        self.validate_discovery()?;
+        if self.minimized {
+            return Ok(self.clone());
+        }
+        if unsafe { ShowWindowAsync(self.handle as HWND, SW_SHOWMINNOACTIVE) } == 0 {
+            return Err(last_error("minimize returned window"));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let current = Self::inspect(self.handle)?;
+            if current.process_id != self.process_id
+                || current.process_started != self.process_started
+                || current.thread_id != self.thread_id
+            {
+                return Err(Error::InvalidState(
+                    "window identity changed while minimizing",
+                ));
+            }
+            if current.minimized {
+                return Ok(current);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::Timeout("minimize returned window"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn placement(&self) -> Result<WINDOWPLACEMENT> {
+        let mut placement = WINDOWPLACEMENT {
+            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        if unsafe { GetWindowPlacement(self.handle as HWND, &mut placement) } == 0 {
+            return Err(last_error("GetWindowPlacement"));
+        }
+        Ok(placement)
+    }
+
+    /// Only called with activation guards installed. Change the saved placement
+    /// and restore in one request so no restored frame appears on the user's screen.
+    pub(super) fn restore_at(&self, bounds: Rect) -> Result<Self> {
+        let _dpi = DpiContext::enter()?;
+        self.validate_discovery()?;
+        let offset = placement_offset(self.handle as HWND, Some(bounds))?;
+        let mut placement = self.placement()?;
+        placement.flags = WPF_ASYNCWINDOWPLACEMENT;
+        placement.showCmd = SW_SHOWNOACTIVATE as u32;
+        placement.rcNormalPosition = RECT {
+            left: bounds.left - offset.x,
+            top: bounds.top - offset.y,
+            right: bounds.right - offset.x,
+            bottom: bounds.bottom - offset.y,
+        };
+        if unsafe { SetWindowPlacement(self.handle as HWND, &placement) } == 0 {
+            return Err(last_error("restore window placement"));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let current = Self::inspect(self.handle)?;
+            if current.process_id != self.process_id
+                || current.process_started != self.process_started
+                || current.thread_id != self.thread_id
+            {
+                return Err(Error::InvalidState(
+                    "window identity changed while restoring",
+                ));
+            }
+            if !current.minimized {
+                return current.relocate(bounds);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::Timeout("restore window placement"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
     /// Nonactivating placement outside or inside a workspace. Return a fresh observation;
     /// moving never authorizes input to the new location by itself.
@@ -245,7 +347,7 @@ impl Window {
                 "window identity changed before placement",
             ));
         }
-        if unsafe { IsZoomed(self.handle as HWND) } != 0 {
+        if current.minimized || unsafe { IsZoomed(self.handle as HWND) } != 0 {
             return Err(Error::InvalidState("restore the window before moving it"));
         }
         if unsafe {
@@ -435,13 +537,10 @@ impl Window {
         let _dpi = DpiContext::enter()?;
         let hwnd = handle as HWND;
         if unsafe {
-            IsWindow(hwnd) == 0
-                || IsWindowVisible(hwnd) == 0
-                || IsIconic(hwnd) != 0
-                || GetAncestor(hwnd, GA_ROOT) != hwnd
+            IsWindow(hwnd) == 0 || IsWindowVisible(hwnd) == 0 || GetAncestor(hwnd, GA_ROOT) != hwnd
         } {
             return Err(Error::InvalidState(
-                "target must be a visible, restored top-level window",
+                "target must be a visible top-level window",
             ));
         }
         let mut process_id = 0;
@@ -491,6 +590,7 @@ impl Window {
             process_id,
             thread_id,
             process_started: (created.dwHighDateTime as u64) << 32 | created.dwLowDateTime as u64,
+            minimized: unsafe { IsIconic(hwnd) } != 0,
             bounds: rectangle(bounds),
             client_bounds: Rect {
                 left: top_left.x,
@@ -502,6 +602,18 @@ impl Window {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.validate_discovery()?;
+        if self.minimized {
+            return Err(Error::InvalidState(
+                "restore the window before capture or input",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Read-only discovery and guarded setup accept minimized windows; capture,
+    /// placement of restored frames and input retain validate()'s stricter check.
+    pub fn validate_discovery(&self) -> Result<()> {
         if Self::inspect(self.handle)? != *self {
             return Err(Error::InvalidState(
                 "window identity or geometry changed; inspect again",
@@ -509,6 +621,40 @@ impl Window {
         }
         Ok(())
     }
+}
+
+fn placement_offset(hwnd: HWND, destination: Option<Rect>) -> Result<Point> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, MonitorFromWindow,
+    };
+    if unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOOLWINDOW != 0 {
+        return Ok(Point { x: 0, y: 0 });
+    }
+    let monitor = match destination {
+        Some(bounds) => unsafe {
+            MonitorFromRect(
+                &RECT {
+                    left: bounds.left,
+                    top: bounds.top,
+                    right: bounds.right,
+                    bottom: bounds.bottom,
+                },
+                MONITOR_DEFAULTTONEAREST,
+            )
+        },
+        None => unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) },
+    };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+        return Err(last_error("GetMonitorInfoW(window placement)"));
+    }
+    Ok(Point {
+        x: info.rcWork.left - info.rcMonitor.left,
+        y: info.rcWork.top - info.rcMonitor.top,
+    })
 }
 
 /// Read-only discovery. Inaccessible/protected windows are omitted; inspect explicitly

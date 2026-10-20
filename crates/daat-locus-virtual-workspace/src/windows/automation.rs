@@ -109,7 +109,7 @@ impl Action {
 
 impl AutomationInput {
     pub fn attach(root: &Window, dll: &Path) -> Result<Self> {
-        root.validate()?;
+        root.validate_discovery()?;
         if root
             .input_surfaces()?
             .iter()
@@ -165,6 +165,9 @@ impl AutomationInput {
             ));
         }
         Ok(())
+    }
+    pub fn prepare_placement(&mut self, control: usize) -> Result<()> {
+        self.activation.prepare(control)
     }
     pub fn reobserve(&mut self) -> Result<Window> {
         if !self.enabled {

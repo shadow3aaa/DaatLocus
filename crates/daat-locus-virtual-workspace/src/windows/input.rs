@@ -110,8 +110,11 @@ impl WindowInput {
     pub fn place_window(&mut self, target: &Window, bounds: Rect) -> Result<Window> {
         use windows_sys::Win32::UI::WindowsAndMessaging::{IsZoomed, SW_RESTORE, ShowWindowAsync};
         self.reobserve()?;
-        self.prepare(target.handle)?;
-        target.validate()?;
+        match &mut self.backend {
+            Backend::Hook(h) => h.prepare(target.handle)?,
+            Backend::Automation(a) => a.prepare_placement(target.handle)?,
+        }
+        target.validate_discovery()?;
         let before = super::DesktopState::read()?;
         if target.owns_control(before.foreground) || before.capture != 0 {
             return Err(Error::InvalidState(
@@ -119,6 +122,9 @@ impl WindowInput {
             ));
         }
         let result = (|| {
+            if target.minimized {
+                return target.restore_at(bounds);
+            }
             if unsafe { IsZoomed(target.handle as _) } != 0 {
                 if unsafe { ShowWindowAsync(target.handle as _, SW_RESTORE) } == 0 {
                     return Err(super::last_error("restore controlled window"));

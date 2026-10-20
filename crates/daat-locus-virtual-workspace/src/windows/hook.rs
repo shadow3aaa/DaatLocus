@@ -92,7 +92,7 @@ impl ThreadHook {
     /// Hot-install the explicitly selected DLL on the target's GUI thread. This loads
     /// code in the application. The DLL must come from the matching Cargo build.
     pub fn attach(target: &Window, surface: InputSurface, dll: impl AsRef<Path>) -> Result<Self> {
-        target.validate()?;
+        target.validate_discovery()?;
         surface.validate(target)?;
         if surface.process_id == unsafe { GetCurrentProcessId() } {
             return Err(Error::InvalidState(
@@ -291,7 +291,11 @@ impl ThreadHook {
                 "hook outcome uncertain; close and observe before further input",
             ));
         }
-        self.root.validate()?;
+        if command.kind == PING {
+            self.root.validate_discovery()?;
+        } else {
+            self.root.validate()?;
+        }
         let shared = self.mapping.shared();
         if shared.enabled.load(Ordering::Acquire) == 0 {
             return Err(Error::InvalidState(

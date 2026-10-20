@@ -141,7 +141,7 @@ impl WindowHook {
         if !self.input_enabled() {
             return Err(Error::InvalidState("window input has been revoked"));
         }
-        self.root.validate()?;
+        self.root.validate_discovery()?;
         let surface = InputSurface::inspect(&self.root, handle)?;
         match self.thread_for(surface) {
             Ok(index) => Ok(index),

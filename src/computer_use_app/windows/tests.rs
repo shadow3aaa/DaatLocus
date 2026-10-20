@@ -84,11 +84,25 @@ fn native_actor_take_input_give_revocation_and_inflight_handoff() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+    let initial_bounds = Window::inspect(agent).unwrap().bounds;
+    assert_ne!(
+        unsafe { ShowWindowAsync(agent as HWND, SW_SHOWMINNOACTIVE) },
+        0
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while unsafe { IsIconic(agent as HWND) } == 0 {
+        assert!(Instant::now() < deadline, "fixture did not minimize");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let before = DesktopState::read().unwrap();
     let display = SharedDisplay::new(Default::default()).unwrap();
     let mut host = Host::new("native-actor".into(), display.clone());
     host.hook_dll = dll.clone();
     host.discover().unwrap();
+    assert!(
+        unsafe { IsIconic(agent as HWND) } != 0,
+        "discovery restored the user's window"
+    );
     let window_id = host
         .candidates
         .values()
@@ -114,6 +128,23 @@ fn native_actor_take_input_give_revocation_and_inflight_handoff() {
         name: name.into(),
         arguments,
     };
+    let listed = host
+        .execute(
+            &call(
+                "list_windows",
+                json!({"query":null,"app_id":null,"cursor":null,"limit":100}),
+            ),
+            &context,
+            &cancelled,
+        )
+        .unwrap();
+    assert!(
+        listed.payload["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["window_id"] == window_id && w["minimized"] == true)
+    );
     let settle = |host: &mut Host, window_id: &str| {
         let deadline = Instant::now() + Duration::from_secs(4);
         loop {
@@ -159,6 +190,8 @@ fn native_actor_take_input_give_revocation_and_inflight_handoff() {
     // A physical/IDD DPI transition may still relayout controls after placement.
     // Recover by observing the same lease; never replay open_window or input.
     let opened = settle(&mut host, &window_id);
+    assert!(!host.taken[&window_id].window.minimized);
+    assert_eq!(host.taken[&window_id].original, initial_bounds);
     let dimensions = |reply: &Reply| {
         let decoder = png::Decoder::new(std::io::Cursor::new(reply.image.as_ref().unwrap()))
             .read_info()

@@ -243,7 +243,9 @@ Window observations use on-demand Windows Graphics Capture, not a desktop crop.
 Run `cargo test --locked -p daat-locus-virtual-workspace --test native_window_capture -- --ignored --nocapture --test-threads=1`
 on an unlocked desktop with a stationary cursor to verify covered-window pixels,
 window-local child hit testing, disabled/modal refusal, desktop-state preservation
-and repeated capture cleanup. This test needs neither IDD nor the Hook DLL.
+and repeated capture cleanup. It also checks that minimized windows remain
+discoverable without being restored and still reject capture/input. These tests
+need neither IDD nor the Hook DLL.
 The native Actor and Calculator tests additionally cover input through an unrelated
 covering window using the production Hook/UIA routes; they still require IDD.
 
