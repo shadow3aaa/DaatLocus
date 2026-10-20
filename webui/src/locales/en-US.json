@@ -223,7 +223,6 @@
     "unnamed_device": "Unnamed device",
     "device_signaling_unavailable": "Connection service unavailable",
     "device_connection_timeout": "Device connection timed out",
-    "device_peer_offline": "Other device is offline",
     "device_connection_failed": "Device connection failed",
     "this_device": "This device",
     "name": "Name",

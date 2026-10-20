@@ -223,7 +223,6 @@
     "unnamed_device": "未命名设备",
     "device_signaling_unavailable": "无法连接公网连接服务",
     "device_connection_timeout": "设备连接超时",
-    "device_peer_offline": "对端设备不在线",
     "device_connection_failed": "设备连接失败",
     "this_device": "此设备",
     "name": "名称",

@@ -16,7 +16,6 @@ const connectionKeys: Record<string, string> = {
 const errorKeys: Record<string, string> = {
   device_signaling_unavailable: "account_editor.device_signaling_unavailable",
   device_connection_timeout: "account_editor.device_connection_timeout",
-  device_peer_offline: "account_editor.device_peer_offline",
   device_connection_failed: "account_editor.device_connection_failed",
 };
 
@@ -38,7 +37,7 @@ export function DeviceList({ local, devices, loading, error, hasMore, onMore }: 
         <Badge variant={device.connection.status === "online" && !error ? "secondary" : "outline"}>
           {t(error ? "account_editor.status_unknown" : connectionKeys[device.connection.status] || "account_editor.offline")}
         </Badge>
-        {!error && device.connection.status !== "online" && device.error_code && <StatusNote text={t(errorKeys[device.error_code] || "account_editor.device_connection_failed")} error />}
+        {!error && device.connection.status !== "online" && device.error_code && device.error_code !== "device_peer_offline" && <StatusNote text={t(errorKeys[device.error_code] || "account_editor.device_connection_failed")} error />}
         </div>
       </SettingsRow>)}
     </SettingsGroup>}
