@@ -19,7 +19,9 @@ export function DesktopTitlebar({ platform = desktopPlatform() }: { platform?: D
     if (platform !== "windows") return;
     function drag(event: globalThis.MouseEvent) {
       if (event.defaultPrevented || event.button !== 0 || !(event.target instanceof Element)) return;
-      if (!event.target.closest("[data-window-drag-region]") || event.target.closest("button,a,input,textarea,select,label,[role=button],[role=combobox],[contenteditable],[data-slot=input-group],[data-window-no-drag]")) return;
+      const bar = document.querySelector(".dl-window-titlebar")?.getBoundingClientRect();
+      const inTitlebar = bar && event.clientY >= bar.top && event.clientY < bar.bottom;
+      if ((!inTitlebar && !event.target.closest("[data-window-drag-region]")) || event.target.closest("button,a,input,textarea,select,label,[role=button],[role=combobox],[contenteditable],[data-slot=input-group],[data-window-no-drag]")) return;
       event.preventDefault();
       void controlWindow(event.detail === 2 ? "toggle_maximize" : "drag").catch(() => {});
     }

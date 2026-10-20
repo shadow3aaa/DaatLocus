@@ -317,10 +317,10 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
 .dl-window-controls { display: flex; height: 100%; }
 .dl-window-controls [data-slot=button] { width: 46px; height: 100%; border-radius: 0; }
 .dl-window-controls [data-slot=button]:last-child:hover { background: var(--destructive); color: var(--primary-foreground); }
-/* Windows controls overlay the page headers; only the thin top strip intercepts
-   content. Header drag regions keep their buttons and inputs interactive. */
+/* The full Windows titlebar height is draggable through delegated hit testing,
+   leaving underlying buttons and inputs interactive. */
 html[data-desktop-platform="windows"] .dl-window-titlebar { height: 36px; background: transparent; pointer-events: none; z-index: 60; }
-html[data-desktop-platform="windows"] .dl-window-drag-area { position: absolute; inset: 0 var(--dl-caption-width) auto 0; height: 8px; pointer-events: auto; }
+html[data-desktop-platform="windows"] .dl-window-drag-area { pointer-events: none; }
 html[data-desktop-platform="windows"] .dl-window-controls { margin-left: auto; pointer-events: auto; background: var(--background); }
 html[data-desktop-platform="windows"] .dl-main-heading { padding-right: calc(var(--dl-caption-width) + 14px); pointer-events: auto; }
 html[data-desktop-platform="windows"] .dl-main-view>.dl-conversation>.dl-floating-search { right: calc(var(--dl-caption-width) + 14px); left: auto; translate: none; width: min(510px,calc(100% - var(--dl-caption-width) - 28px)); }
