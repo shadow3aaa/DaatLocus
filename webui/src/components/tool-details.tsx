@@ -15,7 +15,7 @@ function TextOutput({ label, content, command, context, href }: { label: string;
 }
 
 function domainFields(payload: Record<string,JsonValue>): JsonValue {
-  return Object.fromEntries(Object.entries(payload).filter(([key]) => !["private_metadata","model_content","model_transcript","debug","raw_response"].includes(key)).map(([key,value]) => {
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => !["private_metadata","model_content","model_transcript","debug","raw_response","resource_references"].includes(key)).map(([key,value]) => {
     if (typeof value === "string" && /^[\[{]/.test(value.trim())) { try { const decoded: unknown = JSON.parse(value); if (decoded && typeof decoded === "object") return [key, decoded as JsonValue]; } catch { /* Literal content stays literal. */ } }
     return [key,value];
   }));
@@ -37,7 +37,40 @@ function ArtifactView({ result }: { result: ToolResult }) {
   </section>;
 }
 
-export function ToolDetail({ result, onActor }: { result: ToolResult; onActor?(id: string): void }) {
+type ToolDetailProps = { result: ToolResult; onActor?(id: string): void };
+
+function imageReferences(result: ToolResult): { uri: string; name: string }[] {
+  const payload = asObject(result.payload);
+  const observation = asObject(payload.observation);
+  const origin = typeof location === "undefined" ? "http://localhost" : location.href;
+  const fallback = asText(observation.title) || asText(payload.path).split(/[\\/]/).at(-1) || t("markdown.image");
+  const references = asRows(payload.resource_references).filter(reference => asText(reference.media_type).startsWith("image/"));
+  if (["computer_use__", "phone_use__"].some(prefix => domainToolName(result.name).startsWith(prefix))) {
+    references.push({ uri: asText(observation.screenshot_url), name: fallback });
+  }
+  const seen = new Set<string>();
+  return references.flatMap(reference => {
+    const uri = asText(reference.uri);
+    if (!resourceActorId(uri, origin) || seen.has(uri)) return [];
+    seen.add(uri);
+    const name = asText(reference.name);
+    return [{ uri, name: name && name !== "image" ? name : fallback }];
+  });
+}
+
+function ImageThumbnail({ uri, name }: { uri: string; name: string }) {
+  const [failed, setFailed] = useState(false);
+  return <a href={uri} target="_blank" rel="noreferrer" className="block min-w-0 max-w-full" aria-label={t("tool_details.open_value0", { value0: name })}>
+    {failed ? <span className="dl-tool-note">{t("tool_details.image_preview_unavailable")}</span> : <img src={resourceSource(uri)} alt={name} loading="lazy" className="block h-auto max-h-64 max-w-full rounded-xl object-contain" onError={() => setFailed(true)} />}
+  </a>;
+}
+
+export function ToolDetail(props: ToolDetailProps) {
+  const images = approvalNotice(props.result.payload) ? [] : imageReferences(props.result);
+  return <><ToolContent {...props} hasImages={images.length > 0} />{images.length > 0 && <div className="flex min-w-0 flex-wrap items-start gap-3">{images.map(image => <ImageThumbnail key={image.uri} {...image} />)}</div>}</>;
+}
+
+function ToolContent({ result, onActor, hasImages }: ToolDetailProps & { hasImages: boolean }) {
   result = { ...result, name: domainToolName(result.name) };
   const payload = asObject(result.payload);
   const args = asObject(result.arguments);
@@ -61,7 +94,6 @@ export function ToolDetail({ result, onActor }: { result: ToolResult; onActor?(i
   }
   if ((result.name.startsWith("computer_use__") || result.name.startsWith("phone_use__"))) {
     const observation = asObject(payload.observation);
-    const image = asText(observation.screenshot_url);
     const rows = [...asRows(payload.apps), ...asRows(payload.windows), ...asRows(payload.discovered_windows), ...asRows(payload.related_windows)];
     const status = asText(payload.status);
     const statusKeys: Record<string, string> = { observed: "computer_use.observed", dispatched: "computer_use.dispatched", outcome_unknown: "computer_use.outcome_unknown", handoff_pending: "computer_use.handoff_pending", given_to_user: "computer_use.given_to_user" };
@@ -69,7 +101,6 @@ export function ToolDetail({ result, onActor }: { result: ToolResult; onActor?(i
       {result.error && <p className="dl-operation-error">{readableSummary(result.error)}</p>}
       {asText(observation.title) && <p>{asText(observation.title)}</p>}
       {statusKeys[status] && <p className="dl-tool-note">{t(statusKeys[status])}</p>}
-      {image && resourceActorId(image, location.href) && <div className="dl-artifact"><img src={resourceSource(image)} alt={asText(observation.title) || t("computer_use.window_image")} loading="lazy" /></div>}
       {rows.length > 0 && <ul className="dl-tool-result-list">{rows.map((row, index) => <li key={asText(row.window_id) || asText(row.app_id) || index}><strong>{asText(row.title) || asText(row.name)}</strong>{typeof row.taken === "boolean" && <small>{t(row.taken ? "computer_use.controlled" : "computer_use.not_controlled")}</small>}</li>)}</ul>}
     </section>;
   }
@@ -84,7 +115,8 @@ export function ToolDetail({ result, onActor }: { result: ToolResult; onActor?(i
     return <div className="dl-terminal-details"><TextOutput label="Shell" command={command} context={cwd} content={`${output}${stderr ? `\n${stderr}` : ""}`} />{typeof exit === "number" && exit !== 0 && <small>{t("tool_details.exit_code_value", {value:exit})}</small>}{payload.running === true && <small>{t("tool_details.command_is_running")}</small>}</div>;
   }
   if (result.name === "artifacts__present") return <ArtifactView result={result} />;
-  if (result.name === "actors__read_resource") return <p className="dl-tool-note">{t("tool_details.read_attachment_or_complete_output")}</p>;
+  if (result.name === "files__view_image") return hasImages ? null : <p className="dl-tool-note">{t("tool_details.image_preview_unavailable")}</p>;
+  if (result.name === "actors__read_resource") return hasImages ? null : <p className="dl-tool-note">{t("tool_details.read_attachment_or_complete_output")}</p>;
   if (["files__read_file", "files__read_skill"].includes(result.name)) {
     const source = asText(payload.content) || asText(payload.text);
     return <div className="dl-file-details"><CodeBlock code={source} language={path || "text"} startLine={typeof payload.start_line === "number" ? payload.start_line : undefined} />{typeof payload.start_line === "number" && typeof payload.end_line === "number" && <small>{t("tool_details.lines")}{payload.start_line}–{payload.end_line} {t("file_change.lines")}{typeof payload.total_lines === "number" && t("tool_details.value0_lines_total", {value0: payload.total_lines})}</small>}</div>;

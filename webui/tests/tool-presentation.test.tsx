@@ -10,6 +10,47 @@ import type { ToolResult } from "../src/lib/actor-api";
 const result = (patch: Partial<ToolResult>): ToolResult => ({ id: "private-result-id", actor_id: "root", message_id: "message", call_id: "call", name: "extension__inspect", arguments: {}, payload: { private_metadata: "HIDDEN_PAYLOAD" }, model_content: '{"internal":"HIDDEN_MODEL_PROTOCOL"}', summary: "检查已完成", error: null, ...patch });
 
 describe("tool observations are product content, never protocol dumps", () => {
+  test("image tools render resource thumbnails with links to the original instead of metadata", () => {
+    const uri = "/v1/actors/root/resources/image-snapshot";
+    const stage = "12345678-1234-1234-1234-123456789012";
+    for (const name of ["files__view_image", "actors__read_resource", "extension__render", "mcp_00000000000000000000000000000001__lookup", "d_abcdef123456_files__view_image"]) {
+      for (const source of [uri, `/v1/stages/${stage}/actors/root/resources/image-snapshot`]) {
+        const html = renderToStaticMarkup(<ToolDetail result={result({name,payload:{path:"C:/images/photo.png",media_type:"image/png",byte_count:9234,resource_references:[{id:"PRIVATE_RESOURCE_ID",uri:source,name:"photo.png",media_type:"image/png"}]}})} />);
+        expect(html).toContain("<img ");
+        expect(html).toContain(`src="${source}"`);
+        expect(html).toContain(`href="${source}"`);
+        expect(html).toContain('alt="photo.png"');
+        for (const hidden of ["PRIVATE_RESOURCE_ID", "resource_references", "HIDDEN_MODEL_PROTOCOL"]) expect(html).not.toContain(hidden);
+        if (name.endsWith("files__view_image")) {
+          expect(html).not.toContain("9234");
+          expect(html).not.toContain("image/png");
+        }
+      }
+    }
+  });
+  test("image previews deduplicate resource references and never load external or filesystem images", () => {
+    const uri = "/v1/actors/root/resources/image-snapshot";
+    const reference = {uri,name:"photo.png",media_type:"image/png"};
+    const html = renderToStaticMarkup(<ToolDetail result={result({name:"files__view_image",payload:{resource_references:[reference,reference,
+      {uri:"https://outside.example/private.png",name:"EXTERNAL_SENTINEL",media_type:"image/png"},
+      {uri:"file:///C:/private.png",name:"FILE_SENTINEL",media_type:"image/png"},
+      {uri:"/v1/actors/root/resources/document",name:"TEXT_SENTINEL",media_type:"text/plain"}]}})} />);
+    expect(html.match(/<img\b/g)).toHaveLength(1);
+    expect(html).toContain(`src="${uri}"`);
+    for (const hidden of ["outside.example", "file:///", "EXTERNAL_SENTINEL", "FILE_SENTINEL", "TEXT_SENTINEL"]) expect(html).not.toContain(hidden);
+  });
+  test("GUI screenshots retain previews through either screenshot URLs or resource references", () => {
+    const uri = "/v1/actors/root/resources/screenshot";
+    for (const name of ["computer_use__get_window_state", "phone_use__get_window_state"]) {
+      for (const references of [[], [{uri,name:"image",media_type:"image/png"}]]) {
+        const html = renderToStaticMarkup(<ToolDetail result={result({name,payload:{status:"observed",observation:{title:"Observed application",screenshot_url:uri},resource_references:references}})} />);
+        expect(html.match(/<img\b/g)).toHaveLength(1);
+        expect(html).toContain(`src="${uri}"`);
+        expect(html).toContain(`href="${uri}"`);
+        expect(html).toContain('alt="Observed application"');
+      }
+    }
+  });
   test("permission application and grant render as permission states without claiming execution", () => {
     for (const decision of ["application_required", "approved"] as const) {
       const approval = {decision,approval_id:"PRIVATE_APPROVAL_ID",stage_id:"PRIVATE_STAGE_ID",mode:"auto"};

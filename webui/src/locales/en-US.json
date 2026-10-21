@@ -365,6 +365,7 @@
     "set_text": "Replace text"
   },
   "tool_details": {
+    "image_preview_unavailable": "Image preview unavailable.",
     "application_required": "Permission application needed",
     "application_required_reason": "This operation needs new permission and has not run.",
     "permission_approved": "Permission approved",

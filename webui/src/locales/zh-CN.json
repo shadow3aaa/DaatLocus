@@ -365,6 +365,7 @@
     "set_text": "替换文本"
   },
   "tool_details": {
+    "image_preview_unavailable": "图片预览暂时不可用。",
     "application_required": "需要申请授权",
     "application_required_reason": "此操作需要新的授权，尚未执行。",
     "permission_approved": "授权已通过",
