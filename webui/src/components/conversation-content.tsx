@@ -8,7 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { actorIdFromUrl, localActorId } from "@/lib/conversation-links";
 import { getActor, getMessage, listMessages, subscribeActorEvents, getToolResult, resolveApproval, type ApprovalRecord, type Attachment, type ToolResult, type ToolSummary, type MessageStatus } from "@/lib/actor-api";
 import { ToolDetail, ApprovalDetails } from "@/components/tool-details";
-import { asObject as object, asText as string, readableSummary, toolLabel, toolIcon, activitySummary, activityIcon, activityLabel, domainToolName, approvalRejection } from "@/lib/tool-presentation";
+import { asObject as object, asText as string, readableSummary, toolLabel, toolIcon, activitySummary, activityIcon, activityLabel, domainToolName, approvalNotice } from "@/lib/tool-presentation";
 
 
 export function ActorReference({ actorId, label, onOpen, detail, messageId, guidance = false }: { actorId: string; label?: string; onOpen(id: string): void; detail?: string; messageId?: string; guidance?: boolean }) {
@@ -72,8 +72,8 @@ export function Activities({ actorId, tools, onActor, thinking }: { actorId: str
   const pendingDetail = useRef<AbortController | null>(null);
   useEffect(() => () => pendingDetail.current?.abort(), [actorId]);
   const failures = tools.filter(tool => tool.error).length;
-  const actorRef = (tool: ToolSummary & { status?: string }) => !tool.id.startsWith("live:") && tool.status !== "running" && !tool.error && !approvalRejection(tool.outcome) && ["actors__create", "actors__send", "actors__steer"].includes(domainToolName(tool.name));
-  const names = tools.filter(tool => !approvalRejection(tool.outcome)).map(tool => tool.name);
+  const actorRef = (tool: ToolSummary & { status?: string }) => !tool.id.startsWith("live:") && tool.status !== "running" && !tool.error && !approvalNotice(tool.outcome) && ["actors__create", "actors__send", "actors__steer"].includes(domainToolName(tool.name));
+  const names = tools.filter(tool => !approvalNotice(tool.outcome)).map(tool => tool.name);
   const domains = names.map(domainToolName);
   const GroupIcon = domains.some(name => name.startsWith("browser__")) && domains.some(name => !name.startsWith("browser__")) ? ToolGroupIcon : activityIcon(names);
   if (!tools.length) return thinking ? <div className="dl-activities"><div className="dl-activity-heading dl-activity-thinking" role="status"><span className="dl-activity-title">{thinking}</span></div></div> : null;
@@ -87,7 +87,7 @@ export function Activities({ actorId, tools, onActor, thinking }: { actorId: str
   return <div className="dl-activities">
     <button type="button" className={thinking ? "dl-activity-heading dl-activity-thinking" : "dl-activity-heading"} aria-expanded={open} aria-controls={contentId} onClick={() => setOpen(!open)}>
       {!thinking && <GroupIcon aria-hidden="true" />}
-      <span className="dl-activity-title">{thinking || (names.length ? activitySummary(names) : t("tool_details.not_approved"))}</span>
+      <span className="dl-activity-title">{thinking || (names.length ? activitySummary(names) : t("tool_details.permission_status"))}</span>
       {failures > 0 && <span className="dl-step-error-state">{failures} {t("conversation_content.incomplete")}</span>}
       <ChevronRightIcon aria-hidden="true" className={open ? "dl-activity-open" : undefined} />
     </button>
@@ -97,7 +97,7 @@ export function Activities({ actorId, tools, onActor, thinking }: { actorId: str
         const text = activityLabel(tool);
         const outcome = object(tool.outcome);
         const domain = domainToolName(tool.name);
-        const rejected = approvalRejection(tool.outcome);
+        const rejected = approvalNotice(tool.outcome);
         const changed = !rejected && ["files__write_file", "files__edit_file", "files__copy_file"].includes(domain);
         const selected = expanded === tool.id;
         const expandedLabel = rejected ? text.label : changed ? t("tool_presentation.edited_file_details") : domain.startsWith("terminal__") ? t("tool_presentation.command_ran") : text.label;
@@ -120,7 +120,7 @@ export function Approval({ record, canManage, onResolved }: { record: ApprovalRe
   const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const [open, setOpen] = useState(false);
   const actionsRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => { if (open) actionsRef.current?.scrollIntoView({ block: "nearest", behavior: motionScrollBehavior() }); }, [open]);
-  if (record.mode !== "ask") return null;
+    if (record.mode !== "ask" || record.decision === "application_required") return null;
   const awaiting = record.decision === "pending" && record.mode === "ask";
   const explanation = record.decision === "pending" ? canManage ? t("conversation_content.review_the_action_and_requested_access") : t("conversation_content.waiting_for_the_owner_to_approve") : record.decision === "approved" ? t("conversation_content.this_action_was_approved") : record.decision === "denied" ? t("conversation_content.this_action_was_denied") : t("conversation_content.this_action_was_cancelled");
   async function decide(decision: "approve" | "deny") { setBusy(true); setError(""); try { await resolveApproval(record.id, decision); onResolved(); } catch { setError(t("conversation_content.approval_status_changed_refresh_and_try_again")); } finally { setBusy(false); } }

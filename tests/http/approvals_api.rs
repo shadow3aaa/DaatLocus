@@ -79,6 +79,10 @@ async fn auto_review_cannot_be_overridden_and_pending_filter_does_not_starve_ask
     let b = fixture.child("auto-actor").await;
     let ask = fixture.approval(&a, ApprovalMode::Ask).await;
     let auto = fixture.approval(&b, ApprovalMode::Auto).await;
+    let mut draft = ask.clone();
+    draft.id = uuid::Uuid::new_v4().to_string();
+    draft.decision = ApprovalDecision::ApplicationRequired;
+    let draft = fixture.system.store().create_approval(draft).unwrap();
     // Fill newer history with in-flight reviews; the pending query must filter before LIMIT.
     for _ in 0..110 {
         let mut record = auto.clone();
@@ -105,6 +109,20 @@ async fn auto_review_cannot_be_overridden_and_pending_filter_does_not_starve_ask
         fixture.system.store().event_cursor().unwrap()
     );
     assert!(pending["next_cursor"].is_null());
+    let unsubmitted = fixture
+        .owner(
+            reqwest::Method::POST,
+            &format!("/v1/approvals/{}", draft.id),
+        )
+        .json(&json!({"decision":"approve"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsubmitted.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        fixture.system.store().approval(&draft.id).unwrap().decision,
+        ApprovalDecision::ApplicationRequired
+    );
     let resolved = fixture
         .owner(reqwest::Method::POST, &format!("/v1/approvals/{}", auto.id))
         .json(&json!({"decision": "approve"}))

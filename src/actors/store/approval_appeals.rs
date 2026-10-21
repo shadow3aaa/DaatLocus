@@ -90,8 +90,8 @@ impl ActorStore {
             let content = serde_json::json!({
                 "type":"approval_appeal", "approval_id":id, "stage_id":stage,
                 "actor_id":actor, "request_message_id":approval.message_id,
-                "application":approval.call.arguments.get(crate::app::REVIEW_REQUEST_FIELD),
-                "proposed_call":crate::app::without_review_request(&approval.call),
+                "application":approval.application,
+                "proposed_call":approval.call,
                 "requested_access":approval.requested, "app_review":approval.review,
                 "unapproved_scopes":approval.scopes, "denial_reason":approval.reason,
                 "explanation":explanation

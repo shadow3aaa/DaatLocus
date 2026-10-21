@@ -576,6 +576,7 @@ async fn owner_can_open_and_control_created_actors() {
             decision: ApprovalDecision::Pending,
             reason: "Owner approval required".into(),
             appeal: None,
+            application: None,
             created_at_ms: 1,
             resolved_at_ms: None,
         })

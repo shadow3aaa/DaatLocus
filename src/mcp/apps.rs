@@ -279,9 +279,6 @@ pub struct McpApp {
 
 fn direct_model_arguments(schema: &serde_json::Value) -> bool {
     validate_model_facing_schema(schema).is_ok()
-        && schema["properties"]
-            .get(crate::app::REVIEW_REQUEST_FIELD)
-            .is_none()
 }
 impl McpApp {
     pub fn new(

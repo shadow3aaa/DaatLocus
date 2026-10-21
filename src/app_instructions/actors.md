@@ -44,11 +44,13 @@ Creation inherits the current approval mode. Local Actors have no separate App,
 tool, read-only or recipient capability lists. Authenticated remote requests cannot
 use delegation to expand their authority.
 
-For a tool that needs new approval, provide `_review` with the current `task` and
-the `reason` this exact operation and additional scope are needed. Use null for
-ordinary operations or existing remembered permissions. Runtime supplies actual
-arguments, targets, authority and App review criteria; do not invent those facts.
-The task/reason never changes the operation's permission fingerprint.
+Ordinary App tools accept only their declared arguments. If a tool returns
+application_required, it has not executed: keep the exact approval_id and source
+stage_id, then use request_approval with that reference, your current task and the
+reason the recorded operation and scope are needed. Do not add approval fields to
+App calls. Runtime supplies immutable arguments, targets, authority and criteria.
+Approval remembers permission without running the recorded call. Recheck targets
+before retrying the original tool. Existing permissions skip this process.
 
 An automatic denial includes an approval_id. If the task still needs the denied
 operation, appeal_approval can forward that ID and your natural-language explanation

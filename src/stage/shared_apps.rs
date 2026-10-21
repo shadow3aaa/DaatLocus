@@ -209,6 +209,7 @@ impl App for AccountActors {
                 | "deliver"
                 | "yield"
                 | "appeal_approval"
+                | "request_approval"
                 | "resolve_approval_appeal"
         ) {
             return self.local.execute_tool(call, context).await;

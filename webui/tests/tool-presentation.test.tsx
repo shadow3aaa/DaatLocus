@@ -3,13 +3,31 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ToolDetail, ApprovalDetails } from "../src/components/tool-details";
 import { ToolParameters } from "../src/components/tool-parameters";
-import { readableSummary, activityLabel } from "../src/lib/tool-presentation";
+import { readableSummary, activityLabel, approvalNotice } from "../src/lib/tool-presentation";
 import { Activities } from "../src/components/conversation-content";
 import type { ToolResult } from "../src/lib/actor-api";
 
 const result = (patch: Partial<ToolResult>): ToolResult => ({ id: "private-result-id", actor_id: "root", message_id: "message", call_id: "call", name: "extension__inspect", arguments: {}, payload: { private_metadata: "HIDDEN_PAYLOAD" }, model_content: '{"internal":"HIDDEN_MODEL_PROTOCOL"}', summary: "检查已完成", error: null, ...patch });
 
 describe("tool observations are product content, never protocol dumps", () => {
+  test("permission application and grant render as permission states without claiming execution", () => {
+    for (const decision of ["application_required", "approved"] as const) {
+      const approval = {decision,approval_id:"PRIVATE_APPROVAL_ID",stage_id:"PRIVATE_STAGE_ID",mode:"auto"};
+      const key = decision === "approved" ? "permission_approved" : "application_required";
+      const tool = {seq:1,...result({name:"terminal__terminal_exec",payload:{approval,executed:false},outcome:{approval},summary:"PRIVATE_RUNTIME_GUIDANCE"})};
+      expect(approvalNotice(tool.outcome)?.kind).toBe(decision);
+      expect(activityLabel(tool).label).toBe(i18n.t(`tool_details.${key}`));
+      const html = renderToStaticMarkup(<ToolDetail result={tool}/>);
+      expect(html).toContain(`aria-label="${i18n.t(`tool_details.${key}`)}"`);
+      expect(html).toContain(i18n.t(`tool_details.${key}_reason`));
+      const activities = renderToStaticMarkup(<Activities actorId="root" tools={[tool]} onActor={()=>{}}/>);
+      expect(activities).toContain(i18n.t("tool_details.permission_status"));
+      for (const hidden of ["PRIVATE_APPROVAL_ID", "PRIVATE_STAGE_ID", "PRIVATE_RUNTIME_GUIDANCE", "HIDDEN_MODEL_PROTOCOL", 'role="alert"']) {
+        expect(html).not.toContain(hidden);
+        expect(activities).not.toContain(hidden);
+      }
+    }
+  });
   test("approval rejection renders its reason without failures or raw approval metadata for any App", () => {
     const approval = {decision:"denied",approval_id:"PRIVATE_APPROVAL_ID",stage_id:"PRIVATE_STAGE_ID",mode:"auto",reason:"Need confirmation for <output>\nChoose an authorized folder."};
     for (const name of ["files__write_file", "terminal__terminal_exec", "computer_use__click", "actors__create", "mcp_00000000000000000000000000000001__lookup"]) {

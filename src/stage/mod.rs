@@ -84,6 +84,8 @@ pub enum StageError {
     #[error("{0}")]
     ApprovalDenied(crate::actors::approval::ApprovalRejection),
     #[error("{0}")]
+    ApprovalRequired(crate::actors::approval::ApprovalRejection),
+    #[error("{0}")]
     Conflict(&'static str),
     #[error("{0}")]
     Unavailable(&'static str),

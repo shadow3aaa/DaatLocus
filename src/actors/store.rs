@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 mod approval_appeals;
 mod core_guidance;
+mod review_applications;
 
 pub struct ActorStore {
     db: Mutex<Connection>,
@@ -55,7 +56,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
         .get("approval")
         .and_then(|value| value.get("decision"))
         .and_then(Value::as_str)
-        == Some("denied")
+        .is_some_and(|decision| matches!(decision, "denied" | "application_required" | "approved"))
     {
         return Some(serde_json::json!({"approval": payload["approval"]}));
     }
@@ -1446,16 +1447,18 @@ impl ActorStore {
                 "UPDATE approvals SET record=?1 WHERE id=?2",
                 params![encode(&approval)?, approval.id],
             ))?;
-            event(
-                &tx,
-                &approval.actor_id,
-                ActorEvent::ApprovalRequested {
-                    approval_id: approval.id.clone(),
-                    message_id: approval.message_id.clone(),
-                    call_id: approval.call.id.clone(),
-                    name: approval.call.name.clone(),
-                },
-            )?;
+            if approval.decision == ApprovalDecision::Pending {
+                event(
+                    &tx,
+                    &approval.actor_id,
+                    ActorEvent::ApprovalRequested {
+                        approval_id: approval.id.clone(),
+                        message_id: approval.message_id.clone(),
+                        call_id: approval.call.id.clone(),
+                        name: approval.call.name.clone(),
+                    },
+                )?;
+            }
             self.commit(tx)?;
             Ok(approval)
         })
@@ -2017,7 +2020,7 @@ impl ActorStore {
                 save_message(&tx, &guide)?;
             }
             let pending = {
-                let mut stmt=sql(tx.prepare("SELECT record FROM approvals WHERE message_id=?1 AND json_extract(record,'$.decision')='pending'"))?;
+                let mut stmt=sql(tx.prepare("SELECT record FROM approvals WHERE message_id=?1 AND json_extract(record,'$.decision') IN ('pending','application_required')"))?;
                 let rows = sql(stmt.query_map([id], |r| r.get::<_, String>(0)))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
                     .into_diagnostic()?

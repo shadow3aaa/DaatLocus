@@ -8,7 +8,7 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | {
 export type ApprovalMode = "auto" | "ask" | "none";
 export type ActorStatus = "idle" | "running" | "archived";
 export type MessageStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
-export type ApprovalDecision = "pending" | "approved" | "denied" | "cancelled";
+export type ApprovalDecision = "application_required" | "pending" | "approved" | "denied" | "cancelled";
 export type FetchOptions = {
   signal?: AbortSignal;
 };

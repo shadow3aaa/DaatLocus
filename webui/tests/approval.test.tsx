@@ -10,9 +10,10 @@ test("only manual approvals render a decision control", () => {
     requested:{readable_roots:["/reference"],writable_roots:[],operation_details:null},
     mode:"auto",decision:"pending",reason:"private review",created_at_ms:1,resolved_at_ms:null,
   };
-  for (const decision of ["pending", "approved", "denied", "cancelled"] as const) {
+  for (const decision of ["application_required", "pending", "approved", "denied", "cancelled"] as const) {
     expect(renderToStaticMarkup(<Approval record={{...record,decision}} canManage onResolved={()=>{}} />)).toBe("");
   }
+  expect(renderToStaticMarkup(<Approval record={{...record,mode:"ask",decision:"application_required"}} canManage onResolved={()=>{}} />)).toBe("");
   const manual=renderToStaticMarkup(<Approval record={{...record,mode:"ask"}} canManage onResolved={()=>{}} />);
   expect(manual).toContain('type="button"');
   expect(manual).not.toContain('type="checkbox"');

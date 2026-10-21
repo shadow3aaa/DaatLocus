@@ -115,46 +115,6 @@ pub struct AppToolSpec {
 #[serde(deny_unknown_fields)]
 pub struct EmptyAppArgs {}
 
-/// Runtime-owned metadata; never part of an App's arguments or approval fingerprint.
-#[model_schema]
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ToolReviewRequest {
-    pub task: String,
-    pub reason: String,
-}
-
-pub(crate) const REVIEW_REQUEST_FIELD: &str = "_review";
-
-pub(crate) fn without_review_request(call: &AgentToolCall) -> AgentToolCall {
-    let mut call = call.clone();
-    if let Some(arguments) = call.arguments.as_object_mut() {
-        arguments.remove(REVIEW_REQUEST_FIELD);
-    }
-    call
-}
-
-fn model_tool_schema(mut schema: Value) -> Result<Value> {
-    let mut review = crate::schema_utils::model_schema_for::<ToolReviewRequest>();
-    review["type"] = serde_json::json!(["object", "null"]);
-    review["description"] = Value::String("Task and reason when requesting new approval. Use null for ordinary operations or remembered permissions. This metadata never grants permission itself.".into());
-    let properties = schema["properties"]
-        .as_object_mut()
-        .ok_or_else(|| miette!("App tool input must be an object"))?;
-    if properties
-        .insert(REVIEW_REQUEST_FIELD.into(), review)
-        .is_some()
-    {
-        return Err(miette!("App tool uses reserved runtime field `_review`"));
-    }
-    schema["required"]
-        .as_array_mut()
-        .expect("validated schema")
-        .push(Value::String(REVIEW_REQUEST_FIELD.into()));
-    validate_model_facing_schema(&schema)?;
-    Ok(schema)
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppToolExecutionResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -379,7 +339,6 @@ impl AppManager {
                     return Err(miette!("invalid or duplicated tool name in App `{id}`"));
                 }
                 validate_model_facing_schema(&tool.input_schema)?;
-                model_tool_schema(tool.input_schema)?;
             }
             if table.insert(id.clone(), app).is_some() {
                 return Err(miette!("duplicated app id: {id}"));
@@ -437,7 +396,7 @@ impl AppManager {
                     name: id.mangle_tool_name(&tool.name),
                     description: tool.description,
                     input_spec: AgentToolInputSpec::JsonSchema {
-                        schema: model_tool_schema(tool.input_schema)?,
+                        schema: tool.input_schema,
                     },
                 });
             }
@@ -455,12 +414,6 @@ impl AppManager {
             return Err(miette!("unknown App tool `{}`", call.name));
         }
         let app_call = call.with_name(tool);
-        // Device-forwarded calls retain runtime metadata until target-side review.
-        let app_call = if self.apps[&id].delegates_approval(&app_call) {
-            app_call
-        } else {
-            without_review_request(&app_call)
-        };
         Ok((id, app_call))
     }
 
@@ -535,11 +488,7 @@ impl AppManager {
             .find(|tool| tool.name == app_call.name)
             .ok_or_else(|| miette!("App does not own or allow this tool"))?;
         validate_model_facing_schema(&spec.input_schema)?;
-        validate_value_against_schema(
-            &without_review_request(call).arguments,
-            &spec.input_schema,
-            &call.name,
-        )?;
+        validate_value_against_schema(&call.arguments, &spec.input_schema, &call.name)?;
         Ok((id, app_call))
     }
 

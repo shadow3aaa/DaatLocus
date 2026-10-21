@@ -365,6 +365,13 @@
     "set_text": "Replace text"
   },
   "tool_details": {
+    "application_required": "Permission application needed",
+    "application_required_reason": "This operation needs new permission and has not run.",
+    "permission_approved": "Permission approved",
+    "permission_approved_reason": "Permission was remembered. The original operation has not run.",
+    "permission_status": "Permissions",
+    "request_permission": "Request permission",
+    "appeal_permission": "Ask for permission reconsideration",
     "not_approved": "Not approved",
     "deliver_result": "Deliver result",
     "could_not_open_the_result": "Could not open the result.",

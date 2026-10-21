@@ -365,6 +365,13 @@
     "set_text": "替换文本"
   },
   "tool_details": {
+    "application_required": "需要申请授权",
+    "application_required_reason": "此操作需要新的授权，尚未执行。",
+    "permission_approved": "授权已通过",
+    "permission_approved_reason": "授权已记住，原操作尚未执行。",
+    "permission_status": "权限状态",
+    "request_permission": "申请授权",
+    "appeal_permission": "申请重新审议授权",
     "not_approved": "未获批准",
     "deliver_result": "交付结果",
     "could_not_open_the_result": "交付结果暂时无法打开。",

@@ -53,6 +53,12 @@ pub struct Installation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    SubmitApproval {
+        epoch: u64,
+        message: String,
+        approval_id: String,
+        application: crate::actors::ReviewApplication,
+    },
     ReviewApproval {
         epoch: u64,
         facts: String,
@@ -144,6 +150,12 @@ pub enum Request {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
+    ApprovalSubmitted {
+        record: Box<crate::actors::ApprovalRecord>,
+    },
+    ApprovalRequired {
+        reference: crate::actors::approval::ApprovalRejection,
+    },
     ApprovalReview {
         verdict: std::result::Result<
             crate::actors::approval::ReviewVerdict,

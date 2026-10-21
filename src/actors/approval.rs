@@ -136,20 +136,31 @@ pub struct ReviewVerdict {
 
 const REVIEW_INSTRUCTIONS: &str = include_str!("../app_instructions/approval_review.md");
 
-fn review_request(call: &AgentToolCall) -> Result<crate::app::ToolReviewRequest> {
-    let request = call
-        .arguments
-        .get(crate::app::REVIEW_REQUEST_FIELD)
-        .filter(|value| !value.is_null())
-        .cloned()
-        .and_then(|value| serde_json::from_value::<crate::app::ToolReviewRequest>(value).ok())
-        .filter(|request| {
-            !request.task.trim().is_empty()
-                && !request.reason.trim().is_empty()
-                && request.task.len() + request.reason.len() <= 8192
-        });
-    request.ok_or_else(|| super::ActorError::Invalid(
-        "New permission requires _review: {task, reason}. Explain the current task and why this operation and scope are needed, then retry. Remembered permissions and ordinary operations do not require an application.".into()).into())
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("New permission requires an approval application: {0}")]
+pub struct ApprovalRequired(pub ApprovalRejection);
+
+pub(crate) fn required(error: &miette::Report) -> Option<ApprovalRejection> {
+    if let Some(error) = error.downcast_ref::<ApprovalRequired>() {
+        return Some(error.0.clone());
+    }
+    match error.downcast_ref::<crate::stage::StageError>() {
+        Some(crate::stage::StageError::ApprovalRequired(reference)) => Some(reference.clone()),
+        _ => None,
+    }
+}
+
+impl ApprovalRejection {
+    pub(crate) fn required_payload(&self) -> serde_json::Value {
+        json!({"approval":{"decision":"application_required", "approval_id":self.approval_id,
+            "stage_id":self.stage_id,"mode":self.mode}})
+    }
+    pub(crate) fn required_content(&self) -> String {
+        format!(
+            "{}\nThe operation was not executed. Use actors__request_approval with this exact approval_id and stage_id, the current task and your reason. Do not add fields to the original App tool. Approval remembers permission only; after approval recheck the target and call the original tool with its declared arguments. Covered permissions do not require another application.",
+            self.required_payload()
+        )
+    }
 }
 
 /// The caller must first validate the App registry, arguments, and capabilities.
@@ -197,7 +208,6 @@ pub async fn authorize(
     }
     // Only a genuinely new permission needs an application. In particular this
     // must stay after the remembered-grant lookup, not in schema/App validation.
-    review_request(call)?;
     let record = system.store().create_approval(ApprovalRecord {
         seq: 0,
         id: Uuid::new_v4().to_string(),
@@ -208,20 +218,72 @@ pub async fn authorize(
         review: review.cloned(),
         scopes,
         mode,
-        decision: ApprovalDecision::Pending,
-        reason: match mode {
-            ApprovalMode::Ask => "Owner approval is required before this App call".into(),
-            _ => "Independent automatic review is pending".into(),
-        },
+        decision: ApprovalDecision::ApplicationRequired,
+        reason: "An approval application is required".into(),
         created_at_ms: chrono::Utc::now().timestamp_millis(),
         resolved_at_ms: None,
         appeal: None,
+        application: None,
     })?;
-    let result = authorize_record(system, actor, message, call, control, &record).await;
+    Err(ApprovalRequired(ApprovalRejection {
+        approval_id: record.id,
+        stage_id: system.store().public_stage_id()?.to_string(),
+        reason: "An approval application is required".into(),
+        mode,
+    })
+    .into())
+}
+
+/// Submit only a reference and explanation. Stored arguments/scopes are never replaced or executed.
+pub(crate) async fn submit_application(
+    system: &ActorSystem,
+    actor: &ActorRecord,
+    message: &MessageRecord,
+    control: &ActorControl,
+    base: &AppToolExecutionContext,
+    id: &str,
+    application: super::ReviewApplication,
+) -> Result<ApprovalRecord> {
+    if application.task.trim().is_empty()
+        || application.reason.trim().is_empty()
+        || application.task.len() + application.reason.len() > 8192
+    {
+        return Err(super::ActorError::Invalid(
+            "State the current task and a bounded reason for this permission".into(),
+        )
+        .into());
+    }
+    ensure_current(system, actor, message, control)?;
+    let record = system.store().approval(id)?;
+    if record.actor_id != actor.id
+        || record.message_id != message.id
+        || !system.store().native_approval(id)?
+        || record.mode != actor.config.permissions.approval_mode
+    {
+        return Err(super::ActorError::Forbidden(
+            "Approval reference is outside the active Actor authority".into(),
+        )
+        .into());
+    }
+    if record.requested.clone().canonicalized()? != record.requested {
+        return Err(super::ActorError::Forbidden(
+            "Approval targets changed; propose a fresh operation".into(),
+        )
+        .into());
+    }
+    let effective = system.requested_tool_context(base, &record.requested)?;
+    let record =
+        system
+            .store()
+            .submit_review_application(&actor.id, &message.id, id, &application)?;
+    if record.decision != ApprovalDecision::Pending {
+        apply_decision(system, &record)?;
+        return Ok(record);
+    }
+    let result = authorize_record(system, actor, message, &record.call, control, &record).await;
     if result.is_err() && ensure_current(system, actor, message, control).is_err() {
-        // Atomic resolution preserves an owner decision racing interruption.
         let _ = system.store().resolve_approval(
-            &record.id,
+            id,
             ApprovalDecision::Cancelled,
             "Request interrupted or Actor configuration changed",
         );
@@ -229,7 +291,7 @@ pub async fn authorize(
     result?;
     ensure_current(system, actor, message, control)?;
     effective.sandbox_policy.filesystem.ensure_root_bindings()?;
-    Ok(effective)
+    system.store().approval(id)
 }
 
 async fn authorize_record(
@@ -303,6 +365,9 @@ fn apply_decision(system: &ActorSystem, record: &ApprovalRecord) -> Result<()> {
             } else {
                 Err(AutomaticReviewDenied(rejection).into())
             }
+        }
+        ApprovalDecision::ApplicationRequired => {
+            Err(miette!("Submit the approval application first"))
         }
         ApprovalDecision::Cancelled => Err(miette!("App call approval was cancelled")),
         ApprovalDecision::Pending => Err(miette!("App call approval is still pending")),
@@ -395,8 +460,11 @@ async fn automatic_review(
         Ok(facts) => facts,
         Err(_) => return Ok(Err(ReviewFailure::Arguments)),
     };
-    let application = review_request(call)?;
-    let proposed_call = crate::app::without_review_request(call);
+    let application = record
+        .application
+        .as_ref()
+        .ok_or_else(|| miette!("Approval application is missing"))?;
+    let proposed_call = call;
     let input = json!({"actor":{"id":actor.id,"grants":actor.config.permissions,
             "installed_apps":actor.config.apps,"workspace":actor.config.workspace,"remote_read_only":actor.remote_read_only},
             "request":{"content":message.content,"source":message.source,
@@ -666,6 +734,37 @@ mod tests {
         assert_eq!(message.id, queued.id);
         (dir, system, actor, message)
     }
+    #[allow(clippy::too_many_arguments)]
+    async fn authorize_with_application(
+        system: &ActorSystem,
+        actor: &ActorRecord,
+        message: &MessageRecord,
+        call: &AgentToolCall,
+        control: &ActorControl,
+        base: &AppToolExecutionContext,
+        requested: &ToolPermissionRequest,
+        review: Option<&AppReview>,
+    ) -> Result<AppToolExecutionContext> {
+        match super::authorize(
+            system, actor, message, call, control, base, requested, review,
+        )
+        .await
+        {
+            Ok(context) => Ok(context),
+            Err(error) => {
+                let Some(reference) = required(&error) else {
+                    return Err(error);
+                };
+                super::submit_application(system,actor,message,control,base,&reference.approval_id,
+                    super::super::ReviewApplication {task:"Read the requested project evidence".into(),reason:"This operation obtains the source needed to complete the requested task".into()}).await?;
+                super::authorize(
+                    system, actor, message, call, control, base, requested, review,
+                )
+                .await
+            }
+        }
+    }
+
     async fn authorize_reviewed(
         system: &ActorSystem,
         actor: &ActorRecord,
@@ -675,13 +774,13 @@ mod tests {
         base: &AppToolExecutionContext,
         requested: &ToolPermissionRequest,
     ) -> Result<AppToolExecutionContext> {
-        let call = application(call.clone());
+        let call = call.clone();
         let review = AppReview::new(
             "test/review/v1",
             "Review this test operation against the explicit user request.",
-            json!({"tool":call.name,"arguments":crate::app::without_review_request(&call).arguments}),
+            json!({"tool":call.name,"arguments":call.arguments}),
         );
-        super::authorize(
+        authorize_with_application(
             system,
             actor,
             message,
@@ -694,20 +793,12 @@ mod tests {
         .await
     }
     fn call() -> AgentToolCall {
-        application(AgentToolCall {
+        AgentToolCall {
             id: "proposed-call".into(),
             name: "files__read_file".into(),
             arguments: json!({"path":"source.txt","start_line":null,"line_count":null}),
-        })
+        }
     }
-    fn application(mut call: AgentToolCall) -> AgentToolCall {
-        call.arguments[crate::app::REVIEW_REQUEST_FIELD] = json!({
-            "task":"Read the requested project evidence",
-            "reason":"This operation obtains the source needed to complete the requested task"
-        });
-        call
-    }
-
     async fn execute_control(
         system: &ActorSystem,
         actor: &ActorRecord,
@@ -718,7 +809,7 @@ mod tests {
         let base = system.execution_context(actor, message)?;
         let requested = apps.permission_request(call, &base)?;
         let review = apps.review_requirement(call, &base)?;
-        let effective = super::authorize(
+        let effective = authorize_with_application(
             system,
             actor,
             message,
@@ -759,7 +850,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_review_requires_task_and_reason_but_existing_permissions_skip_the_application() {
+    async fn approval_uses_an_immutable_reference_without_changing_tool_arguments() {
         let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
             json!({"decision":"approve","reason":"requested command"}),
         )));
@@ -771,41 +862,138 @@ mod tests {
             id: "new-command".into(),
             name: "terminal__terminal_exec".into(),
             arguments: json!({
-                "command":"echo fixture", "session_id":null,"workdir":null,
-                "additional_read_roots":null,"additional_write_roots":null,"yield_time_ms":null,"max_chars":null,"_review":null
-            }),
+            "command":"echo fixture","session_id":null,"workdir":null,"additional_read_roots":null,
+            "additional_write_roots":null,"yield_time_ms":null,"max_chars":null}),
         };
         let base = system.execution_context(&actor, &message).unwrap();
+        apps.validate_tool_call_for_approval(&call, &base).unwrap();
+        let declared = apps
+            .all_tool_specs()
+            .into_iter()
+            .find(|(id, _)| id.as_str() == "terminal")
+            .unwrap()
+            .1;
+        let declared = declared
+            .into_iter()
+            .find(|tool| tool.name == "terminal_exec")
+            .unwrap();
+        let model = apps
+            .model_tool_specs()
+            .unwrap()
+            .into_iter()
+            .find(|tool| tool.name == call.name)
+            .unwrap();
+        let crate::model_protocol::AgentToolInputSpec::JsonSchema { schema } = model.input_spec
+        else {
+            panic!("expected portable schema")
+        };
+        assert_eq!(
+            schema, declared.input_schema,
+            "ordinary tools must retain exactly their declared schema"
+        );
         let requested = apps.permission_request(&call, &base).unwrap();
         let review = apps.review_requirement(&call, &base).unwrap();
-        assert!(
-            super::authorize(
-                &system,
-                &actor,
-                &message,
-                &call,
-                &ActorControl::default(),
-                &base,
-                &requested,
-                review.as_ref()
-            )
-            .await
-            .err()
-            .unwrap()
-            .downcast_ref::<super::super::ActorError>()
-            .is_some()
-        );
+        let error = super::authorize(
+            &system,
+            &actor,
+            &message,
+            &call,
+            &ActorControl::default(),
+            &base,
+            &requested,
+            review.as_ref(),
+        )
+        .await
+        .err()
+        .unwrap();
+        let reference = required(&error).unwrap();
+        let draft = system.store().approval(&reference.approval_id).unwrap();
+        assert_eq!(draft.decision, ApprovalDecision::ApplicationRequired);
+        assert_eq!(draft.call.arguments, call.arguments);
         assert!(reviewer.requests.lock().is_empty());
         assert!(
             system
                 .store()
-                .approvals(Some(&actor.id), None, 10)
+                .pending_approvals(Some(&actor.id), None, 10)
                 .unwrap()
                 .items
                 .is_empty()
         );
-        call.arguments["_review"] = json!({"task":"Verify the requested shell setup","reason":"Echo a fixed local fixture without changing files"});
-        let review = apps.review_requirement(&call, &base).unwrap();
+        assert!(
+            system
+                .store()
+                .resolve_approval(
+                    &draft.id,
+                    ApprovalDecision::Approved,
+                    "cannot bypass application"
+                )
+                .is_err()
+        );
+        let application = super::super::ReviewApplication {
+            task: "Verify the requested shell setup".into(),
+            reason: "Echo a fixed local fixture without changing files".into(),
+        };
+        system.seed_test_actor("other");
+        let other = system.store().actor("other").unwrap();
+        assert!(
+            super::submit_application(
+                &system,
+                &other,
+                &message,
+                &ActorControl::default(),
+                &base,
+                &draft.id,
+                application.clone()
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            reviewer.requests.lock().is_empty(),
+            "another Actor cannot submit this reference"
+        );
+        let record = super::submit_application(
+            &system,
+            &actor,
+            &message,
+            &ActorControl::default(),
+            &base,
+            &draft.id,
+            application.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(record.decision, ApprovalDecision::Approved);
+        assert_eq!(record.call.arguments, call.arguments);
+        // Repeating the same submitted application is idempotent, but the explanation
+        // cannot be replaced after its decision has been bound to the original call.
+        super::submit_application(
+            &system,
+            &actor,
+            &message,
+            &ActorControl::default(),
+            &base,
+            &draft.id,
+            application.clone(),
+        )
+        .await
+        .unwrap();
+        let mut changed = application;
+        changed.reason = "A different justification".into();
+        assert!(
+            super::submit_application(
+                &system,
+                &actor,
+                &message,
+                &ActorControl::default(),
+                &base,
+                &draft.id,
+                changed
+            )
+            .await
+            .is_err()
+        );
+        call.id = Uuid::new_v4().to_string();
         super::authorize(
             &system,
             &actor,
@@ -818,26 +1006,6 @@ mod tests {
         )
         .await
         .unwrap();
-        for metadata in [
-            serde_json::Value::Null,
-            json!({"task":"A differently phrased task","reason":"The same previously approved effect"}),
-        ] {
-            call.id = Uuid::new_v4().to_string();
-            call.arguments["_review"] = metadata;
-            let review = apps.review_requirement(&call, &base).unwrap();
-            super::authorize(
-                &system,
-                &actor,
-                &message,
-                &call,
-                &ActorControl::default(),
-                &base,
-                &requested,
-                review.as_ref(),
-            )
-            .await
-            .unwrap();
-        }
         assert_eq!(reviewer.requests.lock().len(), 1);
         assert_eq!(
             system
@@ -846,7 +1014,8 @@ mod tests {
                 .unwrap()
                 .items
                 .len(),
-            1
+            1,
+            "remembered grants must not create another application"
         );
         let input: serde_json::Value =
             serde_json::from_str(&reviewer.requests.lock()[0].current_user_message).unwrap();
@@ -858,7 +1027,91 @@ mod tests {
             input["application"]["reason"],
             "Echo a fixed local fixture without changing files"
         );
-        assert!(input["proposed_call"]["arguments"].get("_review").is_none());
+        assert_eq!(input["proposed_call"]["arguments"], call.arguments);
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_unsubmitted_reference_cannot_outlive_its_originating_input() {
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Fail));
+        let (_dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let base = system.execution_context(&actor, &message).unwrap();
+        let review = AppReview::new(
+            "test/input-bound/v1",
+            "Review the requested operation",
+            json!({"target":"fixture"}),
+        );
+        let error = super::authorize(
+            &system,
+            &actor,
+            &message,
+            &call(),
+            &ActorControl::default(),
+            &base,
+            &ToolPermissionRequest::default(),
+            Some(&review),
+        )
+        .await
+        .err()
+        .unwrap();
+        let reference = required(&error).unwrap();
+        let application = super::super::ReviewApplication {
+            task: "Read the requested evidence".into(),
+            reason: "Inspect the requested source".into(),
+        };
+        system.store().request_cancel(&message.id).unwrap();
+        assert!(
+            super::submit_application(
+                &system,
+                &actor,
+                &message,
+                &ActorControl::default(),
+                &base,
+                &reference.approval_id,
+                application.clone()
+            )
+            .await
+            .is_err()
+        );
+        system
+            .store()
+            .finish_message(&message.id, MessageStatus::Cancelled, None, None)
+            .unwrap();
+        assert_eq!(
+            system
+                .store()
+                .approval(&reference.approval_id)
+                .unwrap()
+                .decision,
+            ApprovalDecision::Cancelled
+        );
+        let queued = system
+            .send_user(&actor.id, "A different request".into(), vec![], None)
+            .unwrap();
+        let next = system.store().claim_next(&actor.id).unwrap().unwrap();
+        assert_eq!(next.id, queued.id);
+        let context = system.execution_context(&actor, &next).unwrap();
+        assert!(
+            super::submit_application(
+                &system,
+                &actor,
+                &next,
+                &ActorControl::default(),
+                &context,
+                &reference.approval_id,
+                application
+            )
+            .await
+            .is_err()
+        );
+        assert!(reviewer.requests.lock().is_empty());
+        assert!(
+            system
+                .store()
+                .approval_scopes(&actor.id)
+                .unwrap()
+                .is_empty()
+        );
         system.shutdown().await;
     }
 
@@ -877,11 +1130,11 @@ mod tests {
                 .unwrap();
             std::fs::create_dir(&outside).unwrap();
             let target = outside.join("result.txt");
-            let write = application(AgentToolCall {
+            let write = AgentToolCall {
                 id: "write-output".into(),
                 name: "files__write_file".into(),
                 arguments: json!({"path":target,"content":"verified output","expected_sha256":null}),
-            });
+            };
             let mut apps =
                 crate::builtin_apps::create_apps(&actor, system.clone(), &system.config()).unwrap();
             let error = execute_control(&system, &actor, &message, &mut apps, &write)
@@ -899,7 +1152,7 @@ mod tests {
             let appeal_call = AgentToolCall {
                 id: "appeal-once".into(),
                 name: "actors__appeal_approval".into(),
-                arguments: json!({"stage_id":null,"approval_id":denied.id,"explanation":"The requested deliverable belongs in this output folder; may I write it there?","_review":null}),
+                arguments: json!({"stage_id":null,"approval_id":denied.id,"explanation":"The requested deliverable belongs in this output folder; may I write it there?"}),
             };
             let result = execute_control(&system, &actor, &message, &mut apps, &appeal_call)
                 .await
@@ -928,7 +1181,7 @@ mod tests {
             let local_call = AgentToolCall {
                 id: "continue-work".into(),
                 name: "files__read_file".into(),
-                arguments: json!({"path":local,"start_line":null,"line_count":null,"_review":null}),
+                arguments: json!({"path":local,"start_line":null,"line_count":null}),
             };
             assert_eq!(
                 execute_control(&system, &actor, &message, &mut apps, &local_call)
@@ -951,7 +1204,7 @@ mod tests {
             let resolve = AgentToolCall {
                 id: "owner-decision".into(),
                 name: "actors__resolve_approval_appeal".into(),
-                arguments: json!({"stage_id":null,"approval_id":denied.id,"decision":decision,"reason":"The Owner explicitly answered this request","_review":null}),
+                arguments: json!({"stage_id":null,"approval_id":denied.id,"decision":decision,"reason":"The Owner explicitly answered this request"}),
             };
             // A real appeal is still an Actor input; Core cannot approve it itself.
             assert!(
@@ -1050,7 +1303,6 @@ mod tests {
             if decision == "approve" {
                 let mut retry = write.clone();
                 retry.id = "retry-after-owner-approval".into();
-                retry.arguments["_review"] = serde_json::Value::Null;
                 execute_control(&system, &actor, &resumed, &mut apps, &retry)
                     .await
                     .unwrap();
@@ -1123,7 +1375,7 @@ mod tests {
         std::fs::create_dir(&outside).unwrap();
         let base = source.execution_context(&actor, &message).unwrap();
         assert!(
-            super::authorize(
+            authorize_with_application(
                 &source,
                 &actor,
                 &message,
@@ -1284,11 +1536,11 @@ mod tests {
             };
             let requested = app.permission_request(&call, &base).unwrap();
             let review = app.review_requirement(&call, &base).unwrap();
-            let effective = super::authorize(
+            let effective = authorize_with_application(
                 &system,
                 &actor,
                 &message,
-                &application(call.clone()),
+                &call.clone(),
                 &control,
                 &base,
                 &requested,
@@ -1904,11 +2156,11 @@ mod tests {
             let base = system.execution_context(&actor, &message).unwrap();
             let requested = app.permission_request(&call, &base).unwrap();
             let review = app.review_requirement(&call, &base).unwrap();
-            let effective = super::authorize(
+            let effective = authorize_with_application(
                 &system,
                 &actor,
                 &message,
-                &application(call.clone()),
+                &call.clone(),
                 &ActorControl::default(),
                 &base,
                 &requested,
@@ -1966,7 +2218,7 @@ mod tests {
             let base = system.execution_context(&actor, &message).unwrap();
             let requested = apps.permission_request(&proposed, &base).unwrap();
             let review = apps.review_requirement(&proposed, &base).unwrap();
-            let context = super::authorize(
+            let context = authorize_with_application(
                 &system,
                 &actor,
                 &message,
@@ -2014,7 +2266,7 @@ mod tests {
         let pending = {
             let (system, actor, message) = (system.clone(), actor.clone(), message.clone());
             tokio::spawn(async move {
-                super::authorize(
+                authorize_with_application(
                     &system,
                     &actor,
                     &message,
@@ -2069,7 +2321,7 @@ mod tests {
         let pending = {
             let (system, actor, message) = (system.clone(), actor.clone(), message.clone());
             tokio::spawn(async move {
-                super::authorize(
+                authorize_with_application(
                     &system,
                     &actor,
                     &message,
@@ -2139,7 +2391,7 @@ mod tests {
         let mut proposed = call();
         proposed.arguments["path"] = json!(nested);
         let requested = apps.permission_request(&proposed, &base).unwrap();
-        let context = super::authorize(
+        let context = authorize_with_application(
             &reopened,
             &actor,
             &active,
@@ -2205,7 +2457,7 @@ mod tests {
         );
         let base = system.execution_context(&actor, &message).unwrap();
         assert!(
-            super::authorize(
+            authorize_with_application(
                 &system,
                 &actor,
                 &message,

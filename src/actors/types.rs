@@ -28,6 +28,7 @@ pub enum ApprovalMode {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
+    ApplicationRequired,
     Pending,
     Approved,
     Denied,
@@ -78,6 +79,15 @@ pub struct ApprovalRecord {
     pub resolved_at_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appeal: Option<ApprovalAppeal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application: Option<ReviewApplication>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewApplication {
+    pub task: String,
+    pub reason: String,
 }
 
 /// The automatic denial stays immutable; an Owner appeal is a separate decision.

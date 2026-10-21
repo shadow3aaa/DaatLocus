@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { conversationReducer, initialConversation } from "../src/hooks/use-actor-conversation";
 import { activityTools, extendActivityHistory, mergeActivity, workActivityTimeline } from "../src/lib/work-timeline";
-import { activityLabel } from "../src/lib/tool-presentation";
+import { activityLabel, approvalNotice } from "../src/lib/tool-presentation";
 import type { EventRecord, MessageRecord } from "../src/lib/actor-api";
 
 const message: MessageRecord = {seq:1,id:"request",actor_id:"worker",kind:"request",source:{kind:"user"},reply_to:{kind:"user"},in_reply_to:null,content:"Check both areas",attachments:[],status:"running",cancel_requested:false,reply:null,error:null,created_at_ms:1,updated_at_ms:1};
@@ -25,6 +25,23 @@ test("a live approval rejection keeps its reason after history replaces the even
   for (const tool of [live,restored]) {
     expect(tool.error).toBeNull();
     expect(activityLabel(tool).detail).toBe("The task does not authorize this file");
+  }
+});
+
+test("permission references and grants survive live events being replaced by history pages", () => {
+  for (const decision of ["application_required", "approved"] as const) {
+    const outcome = {approval:{decision,approval_id:"approval",stage_id:"source",mode:"auto"}};
+    const summary = {seq:2,id:"permission-result",message_id:"request",call_id:"permission-call",name:"actors__request_approval",summary:"Permission state",error:null,outcome};
+    const event = record(2,{type:"tool_finished",message_id:summary.message_id,call_id:summary.call_id,name:summary.name,result_id:summary.id,summary:summary.summary,error:null,outcome});
+    let state = conversationReducer(initialConversation("worker"),{type:"event",record:event});
+    const live = activityTools(state.events,message,state.tools)[0];
+    state = conversationReducer(state,{type:"tools",actorId:"worker",messageId:"request",nextCursor:null,tools:[summary]});
+    const restored = activityTools([],message,state.tools)[0];
+    for (const tool of [live,restored]) {
+      expect(tool.error).toBeNull();
+      expect(tool.outcome).toEqual(outcome);
+      expect(approvalNotice(tool.outcome)?.kind).toBe(decision);
+    }
   }
 });
 

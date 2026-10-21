@@ -553,7 +553,9 @@ impl Controller {
         let timeout = Duration::from_secs(
             if matches!(
                 request,
-                Request::Invoke { .. } | Request::ReviewApproval { .. }
+                Request::Invoke { .. }
+                    | Request::ReviewApproval { .. }
+                    | Request::SubmitApproval { .. }
             ) {
                 1200
             } else {
@@ -584,6 +586,9 @@ impl Controller {
         let response: Response = serde_json::from_slice(&bytes)
             .map_err(|_| StageError::Invalid("Invalid core response"))?;
         tracing::debug!(peer=%peer,operation=label,elapsed_ms=began.elapsed().as_millis(),"Account device operation replied");
+        if let Response::ApprovalRequired { reference } = &response {
+            return Err(StageError::ApprovalRequired(reference.clone()));
+        }
         if let Response::ApprovalDenied { rejection } = &response {
             let mut rejection = rejection.clone();
             rejection.reason = runtime.host.system.safe_error(&rejection.reason);
@@ -638,6 +643,15 @@ impl Controller {
                 .peer(peer, chrono::Utc::now().timestamp_millis())?;
         }
         match request {
+            Request::SubmitApproval {
+                epoch,
+                message,
+                approval_id,
+                application,
+            } => {
+                self.handle_approval_application(peer, epoch, &message, &approval_id, application)
+                    .await
+            }
             Request::ReviewApproval { epoch, facts } => {
                 self.handle_approval_review(epoch, facts).await
             }
@@ -1992,7 +2006,7 @@ impl Controller {
         let approved = loop {
             tokio::select! {
                 result=&mut review=>break result.map_err(|error| {
-                    crate::actors::approval::rejection(&error).map(StageError::ApprovalDenied)
+                    crate::actors::approval::required(&error).map(StageError::ApprovalRequired).or_else(|| crate::actors::approval::rejection(&error).map(StageError::ApprovalDenied))
                         .unwrap_or(StageError::Forbidden("App authorization could not be completed"))
                 })?,
                 _=tokio::time::sleep(Duration::from_millis(25))=>{

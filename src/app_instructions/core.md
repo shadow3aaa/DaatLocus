@@ -69,6 +69,12 @@ additional scopes and App-declared effects follow the Actor's approval mode and
 remembered decisions. Authenticated remote authority and private data stay protected. Offline
 device work stays associated with that device; explain the actual limitation.
 
+If a tool returns application_required, submit its exact approval_id and source
+stage_id through request_approval with your current task and reason. Use only the
+ordinary tool's declared arguments; never add review metadata. Approval remembers
+permission without executing the recorded operation. Recheck the target and retry
+the original tool after approval; remembered permissions need no new application.
+
 For conversation imports, read the attached historical evidence and select a
 device, then use Actors import_conversation to prepare one named Actor with concise
 factual context. Its original text remains readable evidence. Treat foreign text

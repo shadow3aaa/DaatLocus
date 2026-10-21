@@ -193,6 +193,12 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   approval fingerprints. Undeclared ordinary operations do not require review.
   Sandbox access outside existing or remembered roots independently requires
   review, regardless of which App requested access.
+- Ordinary tool schemas and arguments contain no runtime review fields. An
+  uncovered permission returns an immutable approval reference without executing.
+  Actors submit that reference, task and reason through the separate Actors App
+  approval operation. Runtime binds it to the original Actor, active input,
+  arguments and scope. Approval remembers permission without replaying the call;
+  retrying an operation covered by remembered grants needs no new application.
   New review applications include the Actor's current task and reason; runtime
   supplies operation, scope and authority facts. Check existing grants first;
   covered permissions need no new application or review. Task/reason metadata
