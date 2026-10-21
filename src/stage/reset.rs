@@ -281,7 +281,10 @@ mod tests {
     use crate::{actors::ActorSystem, config::Config, stage::runtime::Runtime};
     use std::{sync::Arc, time::Duration};
 
-    async fn hosts(directory: &std::path::Path) -> (Arc<Runtime>, Arc<Runtime>) {
+    async fn hosts(
+        directory: &std::path::Path,
+    ) -> (Arc<Runtime>, Arc<Runtime>, crate::stage::test_relay::Relay) {
+        let relay = crate::stage::test_relay::Relay::new().await;
         let mut hosts = Vec::new();
         for name in ["a", "b"] {
             let system = ActorSystem::open_account_gated(
@@ -293,9 +296,10 @@ mod tests {
             .unwrap();
             let host = Host::load(system).unwrap();
             let mut settings = host.settings();
-            settings.listen = "127.0.0.1:0".into();
+            settings.mode = crate::stage::host::Connectivity::Relay;
+            settings.relay_origin = Some(relay.endpoint.clone());
             // Only explicitly dialed loopback addresses are used in this test.
-            settings.interfaces = vec!["fixture-no-lan".into()];
+
             host.save_settings(settings).unwrap();
             hosts.push(host);
         }
@@ -308,13 +312,14 @@ mod tests {
         (
             Runtime::new(hosts[0].clone()),
             Runtime::new(hosts[1].clone()),
+            relay,
         )
     }
 
     #[tokio::test]
     async fn returning_device_applies_reset_before_syncing_its_old_conversation() {
         let directory = tempfile::tempdir().unwrap();
-        let (a, b) = hosts(directory.path()).await;
+        let (a, b, _relay) = hosts(directory.path()).await;
         a.start().await.unwrap();
         b.start().await.unwrap();
         super::super::recovery::mark_synchronized(b.host.system.store()).unwrap();
@@ -324,8 +329,9 @@ mod tests {
             .unwrap();
         let old = b.host.system.store().messages("core", None, 100).unwrap();
         assert_eq!(old.items.len(), 1);
-        let address = a.address.read().unwrap();
-        b.dial_tcp(a.host.local, address, None).await.unwrap();
+        crate::stage::test_relay::wait(|| b.handle(a.host.local).is_ok())
+            .await
+            .unwrap();
         b.stop_abruptly().await;
         let peers_before = StageLedger::attach(b.host.system.store(), b.host.local)
             .peers(chrono::Utc::now().timestamp_millis())
@@ -334,10 +340,9 @@ mod tests {
         let reset = a.reset_account_work(None).await.unwrap();
         assert!(b.host.system.store().message(&old.items[0].id).is_ok());
         b.start().await.unwrap();
-        let address = a.address.read().unwrap();
         // Discovery supplies a retryable address. The first channel intentionally
         // closes while B applies the reset, then the supervisor reconnects it.
-        b.account_candidate(a.host.local, address);
+        b.want(a.host.local);
         tokio::time::timeout(Duration::from_secs(20), async {
             while generation(&b.host).unwrap().as_ref() != Some(&reset)
                 || b.host.system.store().message(&old.items[0].id).is_ok()
@@ -383,7 +388,7 @@ mod tests {
     #[tokio::test]
     async fn interrupted_reset_finishes_resource_cleanup_before_starting_the_new_core() {
         let directory = tempfile::tempdir().unwrap();
-        let (a, b) = hosts(directory.path()).await;
+        let (a, b, _relay) = hosts(directory.path()).await;
         let attachment = a
             .host
             .system
@@ -437,7 +442,7 @@ mod tests {
     #[tokio::test]
     async fn reset_proofs_are_account_bound_and_cleanup_does_not_repeat_on_new_work() {
         let directory = tempfile::tempdir().unwrap();
-        let (a, b) = hosts(directory.path()).await;
+        let (a, b, _relay) = hosts(directory.path()).await;
         let record = issue(&a.host).unwrap();
         let mut forged = record.clone();
         forged.proof.payload.push('x');

@@ -200,14 +200,6 @@ pub enum Body {
     CoreResponse {
         content: BlobRef,
     },
-    ChannelHello {
-        proof: super::identity::SignedProof,
-    },
-    ChannelCommit {
-        phase: String,
-        generation: u64,
-        nonce: Uuid,
-    },
     ReadQuery {
         actor: ActorAddress,
         query: super::observation::Query,

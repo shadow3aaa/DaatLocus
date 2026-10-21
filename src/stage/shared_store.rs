@@ -67,6 +67,18 @@ pub fn initialize(store: &ActorStore, account: &str) -> Result<()> {
         let previous:Option<String>=tx.query_row("SELECT value FROM core_meta WHERE key='account'",[],|r|r.get(0)).optional()?;
         if previous.as_ref().is_some_and(|previous|previous!=account){return Err(StageError::Forbidden("Shared Actor belongs to another account"));}
         tx.execute("INSERT OR IGNORE INTO core_meta VALUES('account',?1)",[account])?;
+        let was_local:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM core_meta WHERE key='local_mode' AND value='1')",[],|row|row.get(0))?;
+        if (previous.is_none() || was_local) && tx.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE actor_id='core')",[],|row|row.get::<_,bool>(0))? {
+            // A purely local Core can already have history before relay mode is
+            // enabled. Seed it once; triggers track subsequent changes.
+            for (entity,key) in [(Entity::Message,"id"),(Entity::History,"seq"),(Entity::Tool,"id"),(Entity::Approval,"id"),(Entity::Event,"seq")] {
+                tx.execute(&format!("INSERT INTO core_dirty(entity,local_key,revision) SELECT ?1,CAST({key} AS TEXT),1 FROM {} WHERE actor_id='core' ON CONFLICT(entity,local_key) DO NOTHING",entity.name()),[entity.name()])?;
+            }
+            tx.execute("INSERT INTO core_dirty VALUES('configuration','core',1) ON CONFLICT DO NOTHING",[])?;
+            tx.execute("INSERT INTO core_meta VALUES('local_history_pending','1') ON CONFLICT(key) DO UPDATE SET value='1'",[])?;
+        }
+
+        tx.execute("DELETE FROM core_meta WHERE key='local_mode'",[])?;
         tx.execute("INSERT OR IGNORE INTO core_meta VALUES('head',?1)",[encode(&Head::default())?])?;
         tx.execute("INSERT OR IGNORE INTO core_meta VALUES('importing','0')",[])?;
         for (entity,key) in [(Entity::Message,"id"),(Entity::History,"seq"),(Entity::Tool,"id"),(Entity::Approval,"id"),(Entity::Event,"seq")] {
@@ -245,10 +257,32 @@ pub fn pending(store: &ActorStore) -> Result<bool> {
         Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM core_dirty)", [], |r| r.get(0))?)
     })
 }
+pub(crate) fn local_history_pending(store: &ActorStore) -> Result<bool> {
+    store.stage_transaction(|tx|Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM core_meta WHERE key='local_history_pending' AND value='1')",[],|row|row.get(0))?))
+}
+pub(crate) fn finish_local_history(store: &ActorStore) -> Result<()> {
+    store.stage_transaction(|tx| {
+        let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM core_dirty)", [], |row| {
+            row.get(0)
+        })?;
+        if pending {
+            return Err(StageError::Conflict(
+                "Local history has not finished committing",
+            ));
+        }
+        tx.execute(
+            "DELETE FROM core_meta WHERE key='local_history_pending'",
+            [],
+        )?;
+        Ok(())
+    })
+}
 pub fn resume(store: &ActorStore) -> Result<()> {
     // Restore committed model/message state before deciding what can resume.
     // Speculative model output is disposable; externally issued calls are not.
     store.stage_transaction(|tx|{
+        let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM core_meta WHERE key='local_history_pending' AND value='1')",[],|row|row.get(0))?;
+        if pending{return Err(StageError::Conflict("Local history must commit before shared recovery"));}
         tx.execute("UPDATE core_meta SET value='1' WHERE key='importing'",[])?;
         tx.execute("DELETE FROM history WHERE actor_id='core' AND CAST(seq AS TEXT) NOT IN (SELECT local_key FROM core_rows WHERE entity='history')",[])?;
         let records=tx.prepare("SELECT entity,remote_key,local_key,record FROM core_rows WHERE entity IN ('messages','history','tools','approvals') ORDER BY CASE entity WHEN 'messages' THEN 0 WHEN 'history' THEN 1 WHEN 'tools' THEN 2 ELSE 3 END")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Vec<u8>>(3)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;

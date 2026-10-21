@@ -74,6 +74,7 @@ struct Inner {
     stopping: AtomicBool,
     idle_timeout: std::time::Duration,
     core: RwLock<Option<std::sync::Weak<crate::stage::shared_runtime::Controller>>>,
+    local_core: AtomicBool,
 }
 #[derive(Clone)]
 pub struct ActorSystem {
@@ -120,6 +121,59 @@ impl ActorSystem {
             .read()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
+    }
+    pub(crate) fn install_local_core(&self) -> Result<()> {
+        self.inner.core.write().take();
+        self.store()
+            .stage_transaction(|tx| {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_meta')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if exists {
+                    tx.execute("UPDATE core_meta SET value='0' WHERE key='active'", [])?;
+                    tx.execute("INSERT INTO core_meta VALUES('local_mode','1') ON CONFLICT(key) DO UPDATE SET value='1'",[])?;
+                }
+                Ok(())
+            })
+            .map_err(|error| miette::miette!("{error}"))?;
+        self.inner.local_core.store(true, Ordering::Release);
+        Ok(())
+    }
+    pub(crate) fn disable_local_core(&self) {
+        self.inner.local_core.store(false, Ordering::Release);
+    }
+    pub(crate) fn local_core(&self) -> bool {
+        self.inner.local_core.load(Ordering::Acquire)
+    }
+    pub(crate) fn core_permitted(&self) -> bool {
+        if self.local_core() {
+            self.workers_enabled()
+                && !self.inner.stopping.load(Ordering::Acquire)
+                && !self.inner.reconfiguring.load(Ordering::Acquire)
+                && self.config().validate().is_ok()
+        } else {
+            self.shared_core().is_some_and(|core| core.permitted())
+        }
+    }
+    pub(crate) fn core_execution_permitted(&self) -> bool {
+        if self.local_core() {
+            self.core_permitted()
+        } else {
+            self.shared_core()
+                .is_some_and(|core| core.execution_permitted())
+        }
+    }
+    pub(crate) async fn checkpoint_core(&self) -> Result<()> {
+        if self.local_core() {
+            return Ok(());
+        }
+        self.shared_core()
+            .ok_or_else(|| miette::miette!("Core worker unavailable"))?
+            .checkpoint()
+            .await
+            .map_err(|error| miette::miette!("{error}"))
     }
     pub(crate) fn install_shared_core(&self, core: &Arc<crate::stage::shared_runtime::Controller>) {
         *self.inner.core.write() = Some(Arc::downgrade(core));
@@ -389,6 +443,7 @@ impl ActorSystem {
                 stopping: AtomicBool::new(false),
                 idle_timeout: std::time::Duration::from_secs(60),
                 core: RwLock::new(None),
+                local_core: AtomicBool::new(false),
             }),
         };
         if system
@@ -649,8 +704,7 @@ impl ActorSystem {
             return Ok(());
         }
         if !self.store().has_queued_input(id)?
-            || (id == crate::stage::shared::ACTOR_ID
-                && self.shared_core().is_none_or(|core| !core.permitted()))
+            || (id == crate::stage::shared::ACTOR_ID && !self.core_permitted())
         {
             return Ok(());
         }
@@ -1173,11 +1227,7 @@ impl ActorSystem {
         call: &str,
         content: &str,
     ) -> Result<MessageRecord> {
-        if sender == crate::stage::shared::ACTOR_ID
-            && self
-                .shared_core()
-                .is_none_or(|core| !core.execution_permitted())
-        {
+        if sender == crate::stage::shared::ACTOR_ID && !self.core_execution_permitted() {
             return Err(forbidden("Core worker no longer owns execution"));
         }
         let delivery = self.store().deliver(sender, input, call, content)?;

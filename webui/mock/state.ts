@@ -85,11 +85,8 @@ export const workReset: {generation: import("../src/lib/stage-api").WorkGenerati
 
 export const stageSettings: DeviceSettings = {
   label: "Mock Device",
-  listen: "0.0.0.0:45826",
-  interfaces: [],
-  signaling_origin: null,
-  stun: [],
-  ssh: {},
+  mode: "local",
+  relay_origin: null,
   compute_priority: 100,
 };
 

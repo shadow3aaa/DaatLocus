@@ -524,15 +524,10 @@ mod tests {
         assert_eq!(finish.status, 204);
         assert!(finish.body.is_null());
         assert_eq!(
-            bootstrap(
-                temp.path(),
-                Operation::Connection {
-                    signaling_origin: None
-                }
-            )
-            .await
-            .unwrap()
-            .status,
+            bootstrap(temp.path(), Operation::Connection { relay_origin: None })
+                .await
+                .unwrap()
+                .status,
             403
         );
         assert_eq!(

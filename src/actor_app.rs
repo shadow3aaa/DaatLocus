@@ -231,6 +231,9 @@ impl App for ActorApp {
             AppToolSpec { name: "read_resource".into(), description: "Read this Actor's immutable resource by ID or internal resource URI. Text uses UTF-8 byte offsets; null starts at zero. Follow next_offset. Images are attached to model context. A reference never grants access to another Actor.".into(), input_schema: model_schema_for::<ReadResourceArgs>() },
             AppToolSpec { name: "yield".into(), description: "End only this input silently after the current tool group settles. Sends no message or final result and does not complete delegated work. Use while waiting for collaborators or when an update needs no outward response; later results wake you automatically.".into(), input_schema: model_schema_for::<EmptyAppArgs>() },
         ];
+        if self.actor_id == crate::stage::shared::ACTOR_ID && self.system.local_core() {
+            tools.push(AppToolSpec{name:"devices".into(),description:"Read the current device identity. This account runs purely locally; hosted Actor operations use this device.".into(),input_schema:model_schema_for::<EmptyAppArgs>()});
+        }
         if self.actor_id == crate::stage::shared::ACTOR_ID {
             tools.push(AppToolSpec { name: "archive".into(), description: "Archive an idle hosted Actor only when the Owner explicitly asks. Pending inputs or delegated work prevent archival. Preserves identity, configuration and history; rejects new messages until explicitly unarchived. Never archive Core. No approval required. Null stage_id selects the current device.".into(), input_schema: model_schema_for::<ArchiveActorArgs>() });
             tools.push(AppToolSpec { name: "unarchive".into(), description: "Allow an archived Actor to receive messages again, only when the Owner explicitly asks. Does not send work or replay history. No approval required. Null stage_id selects the current device.".into(), input_schema: model_schema_for::<ArchiveActorArgs>() });
@@ -365,6 +368,17 @@ impl App for ActorApp {
         let caller = self.caller(context)?;
         self.check_import_operation(call, context)?;
         match call.name.as_str() {
+            "devices"
+                if self.actor_id == crate::stage::shared::ACTOR_ID && self.system.local_core() =>
+            {
+                let _: EmptyAppArgs =
+                    serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                Ok(AppToolExecutionResult::new(
+                    "Local device",
+                    json!({"devices":[{"stage_id":self.system.store().public_stage_id().map_err(|error|miette!("{error}"))?,"label":null,"online":true,"current":true}]}),
+                    None,
+                ))
+            }
             "archive" | "unarchive" => {
                 if self.actor_id != crate::stage::shared::ACTOR_ID {
                     return Err(miette!("Only Core can archive or unarchive Actors"));
@@ -415,12 +429,7 @@ impl App for ActorApp {
                     &content,
                 )?;
                 if self.actor_id == crate::stage::shared::ACTOR_ID {
-                    self.system
-                        .shared_core()
-                        .ok_or_else(|| miette!("Core worker unavailable"))?
-                        .checkpoint()
-                        .await
-                        .map_err(|error| miette!("{error}"))?;
+                    self.system.checkpoint_core().await?;
                 }
                 if self.actor_id == crate::stage::shared::ACTOR_ID {
                     self.system.store().publish_delivery(&delivered.id)?;

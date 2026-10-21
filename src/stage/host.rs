@@ -4,27 +4,26 @@ use super::{
     Result, StageError, StageId,
     identity::{DeviceIdentity, DeviceProfile, Enrollment, JoinRequest, verify_enrollment},
     ledger::StageLedger,
-    transport::ssh::SshTarget,
 };
 use crate::actors::ActorSystem;
 use parking_lot::RwLock;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, HashSet},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Connectivity {
+    #[default]
+    Local,
+    Relay,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     #[serde(default = "super::device_name::device_name")]
     pub label: String,
-    pub listen: String,
-    pub interfaces: Vec<String>,
-    pub signaling_origin: Option<String>,
-    pub stun: Vec<String>,
-    pub ssh: BTreeMap<StageId, SshTarget>,
+    pub mode: Connectivity,
+    pub relay_origin: Option<String>,
     #[serde(default = "default_priority")]
     pub compute_priority: u16,
 }
@@ -35,61 +34,22 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             label: super::device_name::device_name(),
-            listen: "0.0.0.0:0".into(),
-            interfaces: vec![],
-            signaling_origin: None,
-            stun: vec![],
-            ssh: BTreeMap::new(),
+            mode: Connectivity::Local,
+            relay_origin: None,
             compute_priority: 100,
         }
     }
 }
 impl Settings {
-    /// Public rendezvous needs reflexive ICE candidates across NAT. This is
-    /// enabled only with an explicit public connection origin; LAN/SSH stay
-    /// independent of external services. Preserve operator-provided servers.
-    pub(crate) fn public_stun_urls(&self) -> Vec<String> {
-        if self.stun.is_empty()
-            && self
-                .signaling_origin
-                .as_deref()
-                .is_some_and(|origin| origin.starts_with("wss://"))
-        {
-            vec![
-                "stun:stun.cloudflare.com:3478".into(),
-                "stun:stun.l.google.com:19302".into(),
-            ]
-        } else {
-            self.stun.clone()
-        }
-    }
-
     pub fn validate(&self) -> Result<()> {
-        if self.label.trim().is_empty()
-            || self.label.len() > 100
-            || self.listen.parse::<std::net::SocketAddr>().is_err()
-            || self
-                .interfaces
-                .iter()
-                .any(|name| name.is_empty() || name.len() > 100)
-        {
-            return Err(StageError::Invalid("Invalid device settings"));
+        if self.label.trim().is_empty() || self.label.len() > 100 {
+            return Err(StageError::Invalid("Invalid device label"));
         }
-        for target in self.ssh.values() {
-            target.arguments()?;
-        }
-        if self
-            .stun
-            .iter()
-            .any(|url| !url.starts_with("stun:") || url.contains('@') || url.len() > 200)
-        {
-            return Err(StageError::Invalid("Invalid STUN configuration"));
-        }
-        if let Some(value) = self.signaling_origin.as_deref() {
-            let url = url::Url::parse(value)
-                .map_err(|_| StageError::Invalid("Invalid signaling origin"))?;
+        if let Some(value) = self.relay_origin.as_deref() {
+            let url =
+                url::Url::parse(value).map_err(|_| StageError::Invalid("Invalid relay origin"))?;
             if url.scheme() != "wss"
-                && !(cfg!(test) && url.scheme() == "ws" && url.host_str() == Some("127.0.0.1"))
+                && !(url.scheme() == "ws" && url.host_str() == Some("127.0.0.1"))
                 || url.host_str().is_none()
                 || !url.username().is_empty()
                 || url.password().is_some()
@@ -97,9 +57,7 @@ impl Settings {
                 || url.fragment().is_some()
                 || url.path() != "/"
             {
-                return Err(StageError::Invalid(
-                    "Signaling requires an explicit WSS origin",
-                ));
+                return Err(StageError::Invalid("Relay requires an explicit WSS origin"));
             }
         }
         Ok(())
@@ -145,13 +103,56 @@ impl Host {
             let settings:Option<String>=tx.query_row("SELECT value FROM stage_host_config WHERE key='settings'",[],|r|r.get(0)).optional()?;
             let enrollment:Option<String>=tx.query_row("SELECT value FROM stage_host_config WHERE key='enrollment'",[],|r|r.get(0)).optional()?;Ok((settings,enrollment))
         })?;
+        let had_peers = system.store().stage_transaction(|tx| {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='stage_peers')",
+                [],
+                |row| row.get(0),
+            )?;
+            if exists {
+                Ok(
+                    tx.query_row("SELECT EXISTS(SELECT 1 FROM stage_peers)", [], |row| {
+                        row.get::<_, bool>(0)
+                    })?,
+                )
+            } else {
+                Ok(false)
+            }
+        })?;
         let settings = metadata
             .0
             .map(|value| {
                 let mut persisted: serde_json::Value = serde_json::from_str(&value)
                     .map_err(|_| StageError::Invalid("Invalid persisted device settings"))?;
                 if let Some(fields) = persisted.as_object_mut() {
-                    for key in ["enabled", "lan", "public_discovery", "shared_actor"] {
+                    // One-time migration records the old explicit public endpoint
+                    // as a mode. Runtime outages never change this persisted value.
+                    if let Some(origin) = fields.remove("signaling_origin") {
+                        fields.entry("relay_origin").or_insert(origin);
+                    }
+                    if !fields.contains_key("mode") {
+                        let mode = if had_peers
+                            || fields
+                                .get("relay_origin")
+                                .is_some_and(|value| value.is_string())
+                        {
+                            "relay"
+                        } else {
+                            "local"
+                        };
+                        fields.insert("mode".into(), serde_json::json!(mode));
+                    }
+
+                    for key in [
+                        "enabled",
+                        "lan",
+                        "public_discovery",
+                        "shared_actor",
+                        "listen",
+                        "interfaces",
+                        "stun",
+                        "ssh",
+                    ] {
                         fields.remove(key);
                     }
                     if fields.get("label").and_then(|value| value.as_str()) == Some("This device") {
@@ -165,7 +166,14 @@ impl Host {
                     .map_err(|_| StageError::Invalid("Invalid persisted device settings"))
             })
             .transpose()?
-            .unwrap_or_default();
+            .unwrap_or_else(|| Settings {
+                mode: if had_peers {
+                    Connectivity::Relay
+                } else {
+                    Connectivity::Local
+                },
+                ..Settings::default()
+            });
         settings.validate()?;
         let enrollment = metadata
             .1
@@ -228,6 +236,7 @@ impl Host {
             work_reset: Default::default(),
         });
         super::reset::initialize(&host)?;
+        host.persist("settings", &host.settings())?;
         Ok(host)
     }
     pub fn identity(&self) -> Result<Arc<DeviceIdentity>> {
@@ -425,10 +434,16 @@ impl Host {
         Ok(())
     }
     pub fn save_settings(&self, candidate: Settings) -> Result<()> {
-        candidate.validate()?;
-        self.persist("settings", &candidate)?;
-        *self.settings.write() = candidate;
+        self.prepare_settings(&candidate)?;
+        self.publish_settings(candidate);
         Ok(())
+    }
+    pub(crate) fn prepare_settings(&self, candidate: &Settings) -> Result<()> {
+        candidate.validate()?;
+        self.persist("settings", candidate)
+    }
+    pub(crate) fn publish_settings(&self, candidate: Settings) {
+        *self.settings.write() = candidate;
     }
     pub fn device_label(&self, peer: StageId) -> Result<Option<String>> {
         self.system.store().coordination_transaction(|tx|{
@@ -451,20 +466,70 @@ impl Host {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn legacy_settings_migration_preserves_account_history_and_connected_identity() {
+        for (peer, origin, mode) in [
+            (false, None, Connectivity::Local),
+            (false, Some("wss://relay.example"), Connectivity::Relay),
+            (true, None, Connectivity::Relay),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let system = ActorSystem::open_account_gated(
+                directory.path().join("actors"),
+                directory.path().join("workspace"),
+                crate::config::Config::default(),
+            )
+            .await
+            .unwrap();
+            let host = Host::load(system.clone()).unwrap();
+            host.initialize(true).unwrap();
+            let account = host.account_id().unwrap();
+            let profile = host.profile().unwrap();
+            if peer {
+                let device = DeviceIdentity::generate().unwrap();
+                host.enroll_authenticated_device(
+                    &device
+                        .join_request(chrono::Utc::now().timestamp_millis())
+                        .unwrap(),
+                )
+                .unwrap();
+            }
+            let input = system
+                .send_user("core", "Preserve this queued input.".into(), vec![], None)
+                .unwrap();
+            let legacy = serde_json::json!({"label":"Existing device","listen":"0.0.0.0:0","interfaces":[],"stun":[],"ssh":{},"signaling_origin":origin,"compute_priority":100});
+            host.persist("settings", &legacy).unwrap();
+            let migrated = Host::load(system.clone()).unwrap();
+            assert_eq!(migrated.settings().mode, mode);
+            assert_eq!(migrated.settings().relay_origin.as_deref(), origin);
+            assert_eq!(migrated.account_id().as_deref(), Some(account.as_str()));
+            assert_eq!(migrated.profile().unwrap(), profile);
+            assert_eq!(
+                system.store().message(&input.id).unwrap().content,
+                "Preserve this queued input."
+            );
+            let reopened = Host::load(system.clone()).unwrap();
+            assert_eq!(reopened.settings().mode, mode);
+            system.shutdown().await;
+        }
+    }
+
     #[test]
-    fn public_origin_enables_stun_without_an_external_dependency_for_lan() {
-        let mut settings = Settings::default();
-        assert!(settings.public_stun_urls().is_empty());
-        settings.signaling_origin = Some("wss://connection.example".into());
-        let servers = settings.public_stun_urls();
-        assert!(
-            servers.iter().collect::<HashSet<_>>().len() >= 2,
-            "mapping classification needs observations from distinct STUN targets"
-        );
-        settings.stun = vec!["stun:operator.example:3478".into()];
-        assert_eq!(settings.public_stun_urls(), settings.stun);
-        settings.stun.clear();
-        settings.signaling_origin = Some("ws://127.0.0.1:45827".into());
-        assert!(settings.public_stun_urls().is_empty());
+    fn relay_mode_requires_a_credential_free_secure_origin() {
+        let mut settings = Settings {
+            mode: Connectivity::Relay,
+            ..Settings::default()
+        };
+        assert!(settings.validate().is_ok());
+        for endpoint in [
+            "wss://relay.example/path",
+            "wss://user:secret@relay.example/",
+            "http://relay.example/",
+        ] {
+            settings.relay_origin = Some(endpoint.into());
+            assert!(settings.validate().is_err());
+        }
+        settings.relay_origin = Some("wss://relay.example".into());
+        assert!(settings.validate().is_ok());
     }
 }

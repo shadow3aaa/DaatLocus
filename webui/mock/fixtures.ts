@@ -49,7 +49,7 @@ export function resetStore(): void {
     label: "Mock Device",
     listen: "0.0.0.0:45826",
     interfaces: [],
-    signaling_origin: null,
+    relay_origin: null,
     stun: [],
     ssh: {},
     compute_priority: 100,

@@ -11,9 +11,7 @@ use uuid::Uuid;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Route {
-    Lan,
-    Ssh,
-    P2p,
+    Relay,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,10 +43,7 @@ impl Default for LinkState {
     }
 }
 impl LinkState {
-    pub fn attempt(&mut self, route: Route, now: i64, explicit_ssh: bool) -> Result<()> {
-        if explicit_ssh && route != Route::Ssh {
-            return Err(StageError::Forbidden("Explicit SSH route must be retained"));
-        }
+    pub fn attempt(&mut self, route: Route, now: i64) -> Result<()> {
         if self.status == ConnectionStatus::Online {
             return Err(StageError::Conflict("Healthy connection is already active"));
         }
@@ -74,12 +69,6 @@ impl LinkState {
         self.retries = self.retries.saturating_add(1);
         let delay = 1000i64.saturating_mul(1i64 << self.retries.min(6));
         self.retry_at_ms = now.saturating_add(delay.min(10_000));
-    }
-    pub fn can_migrate(&self, preferred: Route, now: i64, explicit_ssh: bool) -> bool {
-        self.status == ConnectionStatus::Online
-            && !explicit_ssh
-            && self.route != Some(preferred)
-            && now.saturating_sub(self.since_ms) >= 30_000
     }
 }
 pub fn automatic_dialer(local: StageId, remote: StageId) -> bool {
@@ -124,28 +113,7 @@ async fn read<S: AsyncRead + Unpin, T: serde::de::DeserializeOwned>(stream: &mut
     stream.read_exact(&mut bytes).await?;
     serde_json::from_slice(&bytes).map_err(|_| StageError::Invalid("Invalid link handshake"))
 }
-/// Only the deterministic dialer chooses a path. The other device waits for
-/// its signed preface before taking the commit lock, so crossed LAN/RTC races
-/// cannot each hold a lock while waiting on a different physical connection.
-pub(crate) async fn read_preface<S: AsyncRead + Unpin>(stream: &mut S) -> Result<SignedProof> {
-    tokio::time::timeout(std::time::Duration::from_secs(10), read(stream))
-        .await
-        .map_err(|_| StageError::Unavailable("Peer path selection timed out"))?
-}
-pub(crate) async fn read_p2p_preface(
-    channel: &mut super::transport::p2p::P2pChannel,
-) -> Result<SignedProof> {
-    let (frame, _) = tokio::time::timeout(std::time::Duration::from_secs(10), channel.receive())
-        .await
-        .map_err(|_| StageError::Unavailable("Peer path selection timed out"))??;
-    let super::protocol::Body::ChannelHello { proof } = frame.body else {
-        return Err(StageError::Forbidden(
-            "Expected channel identity confirmation",
-        ));
-    };
-    Ok(proof)
-}
-/// `binding` is a TLS exporter or the verified signed DTLS negotiation binding.
+/// `binding` is a TLS exporter of the end-to-end device stream.
 /// No business traffic is admitted until both sides confirm their durable commit.
 pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
@@ -156,7 +124,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     now: i64,
     preface: Option<SignedProof>,
 ) -> Result<(u64, Uuid)> {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let current = ledger.peer(verified.stage_id(), now)?;
         if current.device.tls_sha256 != verified.certificate_hash() || binding.len() != 64 {
             return Err(StageError::Forbidden("Link identity binding changed"));
@@ -227,67 +195,6 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     .await
     .map_err(|_| StageError::Unavailable("Link handshake timed out"))?
 }
-pub async fn handshake_p2p(
-    channel: &mut super::transport::p2p::P2pChannel,
-    identity: &DeviceIdentity,
-    ledger: &StageLedger<'_>,
-    attempt: super::transport::p2p::Attempt,
-    now: i64,
-    preface: Option<SignedProof>,
-) -> Result<(u64, Uuid)> {
-    use super::protocol::{Body, Envelope};
-    let verified = channel.verified_peer()?;
-    let current = ledger.peer(verified.stage_id(), now)?;
-    let local = identity.profile().stage_id;
-    let binding = super::digest(
-        format!(
-            "{}:{}:{}:{}",
-            local.min(verified.stage_id()),
-            local.max(verified.stage_id()),
-            attempt.generation,
-            attempt.nonce
-        )
-        .as_bytes(),
-    );
-    let hello = Hello {
-        version: 1,
-        source: local,
-        target: verified.stage_id(),
-        nonce: attempt.nonce,
-        generation: current.generation,
-        committed_nonce: current.connection_nonce,
-        binding: binding.clone(),
-        expires_at_ms: now + 30000,
-    };
-    let frame = |body| Envelope {
-        version: 1,
-        source: local,
-        target: verified.stage_id(),
-        generation: attempt.generation,
-        message_id: Uuid::new_v4(),
-        invocation_id: None,
-        in_reply_to: None,
-        created_at_ms: now,
-        expires_at_ms: now + 60000,
-        body,
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(10),async {
-        channel.send(&frame(Body::ChannelHello{proof:identity.sign("stage-channel",&hello)?}),false).await?;
-        let proof=match preface {Some(proof)=>proof,None=>read_p2p_preface(channel).await?};
-        let foreign:Hello=proof.verify("stage-channel",&current.device.public_key)?;
-        if foreign.version!=1||foreign.source!=verified.stage_id()||foreign.target!=local||foreign.binding!=binding||foreign.nonce!=attempt.nonce||foreign.expires_at_ms<=now||foreign.expires_at_ms>now+60000{return Err(StageError::Forbidden("Invalid DTLS channel confirmation"));}
-        let recovered=ledger.recover_connection(verified.stage_id(),foreign.generation,foreign.committed_nonce,now)?;
-        let next=recovered.max(foreign.generation)+1;if next!=attempt.generation{return Err(StageError::Conflict("Negotiated generation requires recovery"));}
-        ledger.prepare_connection(verified.stage_id(),next,attempt.nonce,now)?;
-        for phase in ["prepared","committed"] {
-            if phase=="committed"{ledger.commit_generation(verified.stage_id(),recovered,next,attempt.nonce,now)?;}
-            channel.send(&frame(Body::ChannelCommit{phase:phase.into(),generation:next,nonce:attempt.nonce}),false).await?;
-            let (response,_)=channel.receive().await?;
-            if !matches!(response.body,Body::ChannelCommit{phase:received,generation,nonce}if received==phase&&generation==next&&nonce==attempt.nonce){return Err(StageError::Conflict("Peer did not confirm DTLS generation"));}
-        }Ok((next,attempt.nonce))
-    }).await.map_err(|_|StageError::Unavailable("DTLS channel confirmation timed out"))?
-}
-
 #[cfg(test)]
 mod availability_tests {
     use super::*;
@@ -298,8 +205,8 @@ mod availability_tests {
         state.failed(200);
         assert_eq!(state.status, ConnectionStatus::Unreachable);
         assert_eq!(state.retry_at_ms, 2200);
-        assert!(state.attempt(Route::P2p, 2199, false).is_err());
-        state.attempt(Route::P2p, 2200, false).unwrap();
+        assert!(state.attempt(Route::Relay, 2199).is_err());
+        state.attempt(Route::Relay, 2200).unwrap();
         assert_eq!(state.status, ConnectionStatus::Connecting);
         state.failed(2300);
         assert_eq!(state.status, ConnectionStatus::Unreachable);

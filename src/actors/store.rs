@@ -22,6 +22,24 @@ fn delivery_id(actor: &str, input: &str, call: &str) -> String {
     let bytes = hex::decode(hash).expect("SHA256 hex");
     Uuid::from_bytes(bytes[..16].try_into().expect("SHA256 prefix")).to_string()
 }
+fn core_requires_commit(db: &Connection) -> Result<bool> {
+    let exists: bool = sql(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_rows')",
+        [],
+        |row| row.get(0),
+    ))?;
+    if !exists {
+        return Ok(false);
+    }
+    // Missing mode metadata must retain the conservative shared-store contract.
+    // Only installing a local Core explicitly opts out of distributed commits.
+    let local: bool = sql(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM core_meta WHERE key='local_mode' AND value='1')",
+        [],
+        |row| row.get(0),
+    ))?;
+    Ok(!local)
+}
 fn turn_yielded(db: &Connection, actor: &str, message: &str) -> Result<bool> {
     sql(db.query_row("SELECT EXISTS(SELECT 1 FROM tools WHERE actor_id=?1 AND message_id=?2 AND done=1 AND json_extract(record,'$.name')='actors__yield' AND json_extract(record,'$.error') IS NULL AND json_extract(record,'$.payload.finish_turn')=1)", params![actor, message], |r|r.get(0)))
 }
@@ -1121,7 +1139,7 @@ impl ActorStore {
             let shared = id == crate::stage::shared::ACTOR_ID
             && sql(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_order')", [], |r| r.get::<_,bool>(0)))?;
             let query = if shared {
-                "SELECT m.record,COALESCE(o.ordinal,4503599627370496+m.seq) AS position FROM messages m LEFT JOIN core_order o ON o.entity='messages' AND o.remote_key=m.id WHERE m.actor_id=?1 AND (json_extract(m.record,'$.kind')!='delivery' OR EXISTS(SELECT 1 FROM core_rows r WHERE r.entity='messages' AND r.remote_key=m.id)) AND position<?2 ORDER BY position DESC LIMIT ?3"
+                "SELECT m.record,COALESCE(o.ordinal,4503599627370496+m.seq) AS position FROM messages m LEFT JOIN core_order o ON o.entity='messages' AND o.remote_key=m.id WHERE m.actor_id=?1 AND (json_extract(m.record,'$.kind')!='delivery' OR EXISTS(SELECT 1 FROM core_meta WHERE key='local_mode' AND value='1') OR EXISTS(SELECT 1 FROM core_rows r WHERE r.entity='messages' AND r.remote_key=m.id)) AND position<?2 ORDER BY position DESC LIMIT ?3"
             } else {
                 "SELECT record,seq FROM messages WHERE actor_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3"
             };
@@ -1755,11 +1773,7 @@ impl ActorStore {
     ) -> Result<Option<MessageRecord>> {
         database_io(|| {
             let db = self.db.lock();
-            let shared: bool = sql(db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_rows')",
-            [],
-            |r| r.get(0),
-        ))?;
+            let shared = core_requires_commit(&db)?;
             let data: Option<String> = if actor == crate::stage::shared::ACTOR_ID && shared {
                 sql(db.query_row("SELECT CAST(record AS TEXT) FROM core_rows WHERE entity='messages' AND remote_key=?1",[delivery_id(actor,input,call)],|r|r.get(0)).optional())?
             } else {
@@ -1786,13 +1800,12 @@ impl ActorStore {
             {
                 return Ok(());
             }
-            let committed: bool = sql(tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM core_rows WHERE entity='messages' AND remote_key=?1)",
-                [id],
-                |r| r.get(0),
-            ))?;
-            if !committed {
-                return Err(ActorError::Unavailable("Delivery has not committed".into()).into());
+            let shared = core_requires_commit(&tx)?;
+            if shared {
+                let committed:bool=sql(tx.query_row("SELECT EXISTS(SELECT 1 FROM core_rows WHERE entity='messages' AND remote_key=?1)",[id],|r|r.get(0)))?;
+                if !committed {
+                    return Err(ActorError::Unavailable("Delivery has not committed".into()).into());
+                }
             }
             let published:bool=sql(tx.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE actor_id='core' AND json_extract(record,'$.type')='message_added' AND json_extract(record,'$.message_id')=?1)",[id],|r|r.get(0)))?;
             if !published {

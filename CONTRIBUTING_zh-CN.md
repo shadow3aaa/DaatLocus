@@ -47,7 +47,7 @@ Cargo `--offline` 本身不会禁止构建脚本联网。详见[模型目录](do
 避免一台设备的同步存储操作阻塞所有设备的心跳。从并行测试池中排除此用例时，必须保留这个
 显式执行步骤，不能减少协调回归覆盖。
 
-顺序接管夹具仅提供自身三个回环地址的发现提示，允许瞬时断链自动重连，不依赖外部 LAN。
+多设备测试使用隔离的回环中转，复用生产通道复用和设备 TLS。Rust 中转夹具只模拟注册；Worker 与普通服务器测试验证真实中转认证。
 存储调度回归在单 worker 的多线程 runtime 上暂停事务并排队读取，验证控制任务仍可执行；
 通道回归验证读、写、鉴权错误的首个原因不会被后续关闭覆盖。
 
@@ -467,11 +467,8 @@ Actor 历史或已修改的代码目录，同一样本内保留相关 Actor 上�
 
 ## 设备连接测量
 
-连接性能测量可启用 `daat_locus::stage` 的 debug 日志；`native_dial`、
-`offer_candidates`、`answer_candidates` 和 `ice_dtls_sctp` 分阶段记录耗时和结果，
-不记录 SDP 或凭据。内容完成日志记录原始字节与耗时，传输计数区分原始内容字节和
-编码后的协议字节。同一网络重复比较成功率、建链耗时中位数／尾部值与校验后的
-内容吞吐，并记录发起方向、IPv4／IPv6、网络切换和丢包；本机回环测试不能代表蜂窝性能。
+连接测量启用 `daat_locus::stage` debug 日志，比较成功率、建链延迟和校验后的内容吞吐。
+覆盖断网重连、网络切换与慢接收方，不记录帧正文或凭据；回环测试不能代表蜂窝性能。
 
 ## 后端资源压力测试
 
@@ -551,7 +548,7 @@ Working Set；两种内存指标的峰值/P95 均来自采样，可能漏掉短�
 | `webui/src/components` | 可组合界面、设置与两种固定对话呈现 |
 | `webui/src/locales` | 中文、英文资源，新增文案同步维护两份 |
 | `tests/http_api.rs`、`tests/http`、`tests/support` | 单一真实 HTTP 测试入口、分领域用例、隔离 OPAQUE 账号与临时存储 |
-| `workers/signaling` | 可选公网 P2P 会合与信令，不掌握执行或密码授权 |
+| `workers/signaling` | 公网中转的 CF Worker/DO 与普通服务器实现，不掌握执行或密码授权 |
 | `xtask` | 原生归档与安装包，无需 Git 子模块 |
 
 按改动运行相应检查：
@@ -567,15 +564,28 @@ bun test
 bun run build
 ```
 
-信令修改另在 `workers/signaling` 执行 `bun install --frozen-lockfile`、`bun test`。
+中转修改另在 `workers/signaling` 执行 `bun install --frozen-lockfile`、`bun test`。
 测试不能调用真实模型。保留有效的操作系统隔离正反例、HTTP 认证、CSRF、队列版本、
 资源授权与断线续传用例。外部环境测试保持显式启用，报告前提和实际失败；不能通过
 弱化隔离或私有 ACL 让受限环境的检查通过。库测试不证明完整产品或所有平台可用。
 
-公网信令与账号同步检查使用临时身份和模拟模型。显式设置
-`DAAT_LOCUS_TEST_STAGE_SIGNALING` 为待验证的 WSS 地址，再执行
-`cargo test --locked --lib public_ -- --ignored --nocapture`，验证 SDP 转发、
-认证 P2P 连接、消息复制和私密模型配置同步。这些检查不能证明所有 NAT 下都能直连。
+在 `workers/signaling` 运行 `bun run typecheck` 和 `bun test`，验证普通服务器版。
+设置 `DAAT_LOCUS_TEST_RELAY_WORKER=1` 后运行 `bun test tests/local.test.ts`，验证本地真实 DO。
+测试使用独立临时目录和回环端口。公网验证显式设置 `DAAT_LOCUS_TEST_RELAY`，执行
+`cargo test --locked --lib public_ -- --ignored --nocapture`，覆盖设备认证通道、消息与模型配置同步。
+密码登录加入测试另外使用 `DAAT_LOCUS_TEST_ACCOUNT_RELAY`，不依赖真实账号或模型。
+仅诊断 fake-IP DNS 时，可用 `DAAT_LOCUS_TEST_RELAY_RESOLVE=relay.example=203.0.113.1`
+覆盖库测试中该主机的解析地址；仍使用原域名、TLS SNI 和证书校验。
+必须比较两条路径，并单独报告默认路径的失败。
+
+CF 部署在 `workers/signaling` 执行 `bunx wrangler deploy`。保留原有 `SignalGroup`、
+`AccountRoom` 绑定和撤销存储，协议 2 使用有界字节通道替换 SDP 信令。旧客户端需要升级，
+迁移时停止旧直连版本。普通服务器在相同目录执行 `bun run server.ts`，前方配置支持
+WebSocket Upgrade 的 HTTPS 反向代理。`PORT` 默认 8787，`RELAY_LISTEN` 默认回环，
+`RELAY_DATABASE` 指定持久 SQLite 路径，重启保留数据库并限制其 OS 访问权限。
+`GROUP_ROOTS` 和 `REVOKED_STAGES` 提供与 CF 相同的可选准入策略。
+两种实现均提供 `/health` 协议版本查询。DL 显式配置 `mode=relay` 和公网 WSS origin；
+`mode=local` 不启动任何跨设备基础设施。中转不保存 Actor 历史、租约或业务提交。
 
 浏览器偏好留在客户端，账号配置私密同步。界面文案使用翻译键，不内联双语选择函数；
 语言切换即时刷新已有界面，用户消息、文件和命令原文保持不变。验证语言资源一致、

@@ -1,5 +1,5 @@
-//! Device-owned execution metadata. Raft runs on authenticated native channels,
-//! independently of LAN, SSH or public rendezvous. It never stores App payloads.
+//! Device-owned execution metadata. Raft runs on authenticated device channels
+//! through the relay; the relay never owns votes, leases or App payloads.
 mod network;
 mod store;
 use crate::stage::{Result, StageError, StageId, runtime::Runtime, shared};

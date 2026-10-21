@@ -332,6 +332,9 @@ pub fn archives(store: &ActorStore, after: Option<i64>, limit: usize) -> Result<
         return Err(StageError::Invalid("Invalid recovery archive page"));
     }
     store.stage_transaction(|tx| {
+        let initialized:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_recovery_archives')",[],|row|row.get(0))?;
+        if !initialized{return Ok(Page{items:vec![],next_cursor:None});}
+
         let rows = tx.prepare("SELECT seq,id,device,head,created,(SELECT COUNT(*) FROM core_recovery_rows WHERE archive=a.id AND entity='messages') FROM core_recovery_archives a WHERE seq>?1 ORDER BY seq LIMIT ?2")?
             .query_map(params![after.unwrap_or(0), limit as i64 + 1], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,i64>(4)?, r.get::<_,i64>(5)?)))?
             .collect::<std::result::Result<Vec<_>,_>>()?;
@@ -356,6 +359,9 @@ pub fn messages(
         return Err(StageError::Invalid("Invalid archived message page"));
     }
     store.stage_transaction(|tx| {
+        let initialized:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_recovery_archives')",[],|row|row.get(0))?;
+        if !initialized{return Err(StageError::Invalid("Recovery archive does not exist"));}
+
         let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM core_recovery_archives WHERE id=?1)", [archive], |r| r.get(0))?;
         if !exists { return Err(StageError::Invalid("Recovery archive does not exist")); }
         let rows = tx.prepare("SELECT ordinal,record FROM core_recovery_rows WHERE archive=?1 AND entity='messages' AND ordinal>?2 ORDER BY ordinal LIMIT ?3")?

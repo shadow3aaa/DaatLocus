@@ -103,7 +103,10 @@ client are connected.
   Project workspaces grant recursive filesystem access from their top directory.
   Enforce sandbox and authenticated remote restrictions in tools, not only prompts.
 - Guest conversation sharing, PIN sessions and quick-tunnel publication are removed.
-  Retain optional CF P2P signaling; it is not a conversation-sharing service.
+  Accounts run either purely locally or interconnect through one public relay.
+  Remove device-direct LAN, SSH, WebRTC, ICE/STUN and hole-punching paths.
+  The relay uses one portable WSS protocol on Cloudflare Workers/DO or an ordinary
+  public server; it is transport infrastructure, not an execution authority.
 - Keep one shared WebUI for native and browser clients. Core shows explicit user deliveries,
   compact task links, decisions and outcomes; it excludes intermediate model
   text and tool pipelines. Other Actors use plain work prose, chronological
@@ -128,9 +131,12 @@ The account's core Actor is shared across devices. Devices share its identity,
 inbox, model context and conversation,
 provide App instances, and temporarily host its worker. Keep healthy affinity;
 automatically hand off in stable order to a synchronized eligible device on loss.
-Execution coordination belongs to account devices and must work over LAN or SSH
-without external services. Worker/DO is optional public rendezvous and signaling;
-it must not own execution leases, fencing epochs or business commits. Device
+Purely local accounts run the same Actor core without cross-device transport,
+consensus, replication or partition-recovery branches. Preserve local crash
+recovery, durable inputs and uncertain-effect protection. Interconnected accounts
+keep execution coordination on account devices over authenticated, end-to-end
+encrypted logical channels carried exclusively by the public relay. Worker/DO or
+an ordinary relay server must not own execution leases, fencing epochs or business commits. Device
 OpenRaft metadata uses persistent votes and joint membership, with authenticated
 native RPCs. New devices remain learners rather than permanent voting dependencies.
 Normal shutdown synchronizes and transfers authority through the existing quorum.
@@ -243,8 +249,11 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   Browser builds compile the shared authentication crate to WASM with wasm-pack;
   backend-only builds must not invoke this toolchain.
 
-- Same-account device discovery/sync is automatic, with no enabled/LAN/public/core
-  toggles. Keep an optional public connection origin and explicit SSH targets.
+- Account connectivity has two explicit persisted modes: local and relay.
+  Relay accounts discover/synchronize authenticated devices automatically through
+  the configured public WSS endpoint. Never infer a mode switch from a transient
+  outage or silently turn a relay account into an independent local account.
+  Keep no LAN, SSH, STUN, direct-address or per-feature connection controls.
   Default device labels come from OS APIs. Non-model settings auto-save through
   serialized narrow patches; keep failed input and pending edits. Model/provider
   edits retain Save. UI text states fields, actual status and actions, without

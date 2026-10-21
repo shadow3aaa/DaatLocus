@@ -35,7 +35,7 @@ async fn renew(State(state): State<ServiceState>, headers: HeaderMap) -> ApiResu
     let runtime = runtime(&state)?;
     let _lifecycle = runtime.host.lifecycle.lock().await;
     let enrollment = runtime.host.renew_account_authority().map_err(failure)?;
-    runtime.signal_changed();
+    runtime.relay_changed();
     Ok(Json(json!({"enrollment":enrollment})))
 }
 pub(super) fn failure(error: StageError) -> ApiError {
@@ -62,14 +62,14 @@ async fn info(State(state): State<ServiceState>, headers: HeaderMap) -> ApiResul
     let host = &runtime.host;
     let public_login = runtime.public_login_status().await;
     Ok(Json(
-        json!({"stage_id":host.local,"account_id":host.account_id(),"name":host.accounts.current().ok().flatten().map(|record|record.name.clone()),"profile":host.profile(),"settings":host.settings(),"address":*runtime.address.read(),"primary_actor_id":crate::stage::shared::ACTOR_ID,"core":runtime.core.read().as_ref().map(|core|core.status()),"public_login":public_login}),
+        json!({"stage_id":host.local,"account_id":host.account_id(),"name":host.accounts.current().ok().flatten().map(|record|record.name.clone()),"profile":host.profile(),"settings":host.settings(),"primary_actor_id":crate::stage::shared::ACTOR_ID,"core":runtime.core_status(),"public_login":public_login}),
     ))
 }
 // A bounded volatile status query; no configuration or conversation snapshots.
 async fn status(State(state): State<ServiceState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     owner(&state, &headers).await?;
     let runtime = runtime(&state)?;
-    let core = runtime.core.read().as_ref().map(|core| core.status());
+    let core = runtime.core_status();
     let public_login = runtime.public_login_status().await;
     Ok(Json(json!({"core": core,"public_login": public_login,
         "work_generation": crate::stage::reset::generation(&runtime.host).map_err(failure)?})))
@@ -122,7 +122,7 @@ async fn save_settings(
     manage(&state, &headers).await?;
     let runtime = runtime(&state)?;
     runtime
-        .patch_settings(input.label, input.signaling_origin, input.ssh)
+        .patch_settings(input.label, input.relay_origin, input.mode)
         .await
         .map_err(failure)?;
     Ok(Json(runtime.host.settings()))
@@ -132,8 +132,8 @@ async fn save_settings(
 struct DevicePreferences {
     label: Option<String>,
     #[serde(default, deserialize_with = "nullable_origin")]
-    signaling_origin: Option<Option<String>>,
-    ssh: Option<std::collections::BTreeMap<StageId, crate::stage::transport::ssh::SshTarget>>,
+    relay_origin: Option<Option<String>>,
+    mode: Option<crate::stage::host::Connectivity>,
 }
 fn nullable_origin<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -185,8 +185,8 @@ async fn revoke(
             handle.refresh_members();
         }
     }
-    if let Some(signal) = runtime.signals.read().clone() {
-        let _ = signal.try_send(crate::stage::signaling::SignalCommand::Revoke(change));
+    if let Some(signal) = runtime.relay_tx.read().clone() {
+        let _ = signal.try_send(crate::stage::relay::Command::Revoke(change));
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

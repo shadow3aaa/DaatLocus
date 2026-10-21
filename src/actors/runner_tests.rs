@@ -676,10 +676,16 @@ impl ModelProvider for ReplayProvider {
 struct ReplayFactory(Arc<ReplayProvider>);
 
 #[tokio::test]
-#[ignore = "requires DAAT_LOCUS_TEST_STAGE_SIGNALING with a WSS rendezvous"]
+#[ignore = "requires DAAT_LOCUS_TEST_RELAY with a WSS relay"]
 async fn public_account_connection_syncs_messages_and_model_configuration() {
+    if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("daat_locus::stage=debug,daat_locus::accounts=debug,openraft=warn")
+            .with_test_writer()
+            .try_init();
+    }
     use crate::stage::{connection::Route, host::Host, runtime::Runtime, shared};
-    let endpoint = std::env::var("DAAT_LOCUS_TEST_STAGE_SIGNALING").unwrap();
+    let endpoint = std::env::var("DAAT_LOCUS_TEST_RELAY").unwrap();
     let (_a_dir, a) = runtime(Arc::new(ReplayProvider::new(vec![MockReply::Answer(
         "Public sync fixture reply",
     )])))
@@ -693,8 +699,9 @@ async fn public_account_connection_syncs_messages_and_model_configuration() {
     a_host.initialize(true).unwrap();
     for host in [&a_host, &b_host] {
         let mut settings = host.settings();
-        settings.signaling_origin = Some(endpoint.clone());
-        settings.interfaces = vec!["fixture-no-lan-interface".into()];
+        settings.mode = crate::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(endpoint.clone());
+
         host.save_settings(settings).unwrap();
     }
     let a_runtime = Runtime::new(a_host.clone());
@@ -726,7 +733,7 @@ async fn public_account_connection_syncs_messages_and_model_configuration() {
         .unwrap();
     let b_runtime = Runtime::new(b_host.clone());
     b_runtime.start().await.unwrap();
-    let synced = tokio::time::timeout(Duration::from_secs(45), async {
+    let synced = tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             if b.store()
                 .message(&input.id)
@@ -744,13 +751,19 @@ async fn public_account_connection_syncs_messages_and_model_configuration() {
     .await;
     let a_state = a_runtime.state(b_host.local);
     let b_state = b_runtime.state(a_host.local);
+    let errors = (
+        a_runtime.last_error(b_host.local),
+        b_runtime.last_error(a_host.local),
+    );
     a_runtime.stop().await;
     b_runtime.stop().await;
     a.shutdown().await;
     b.shutdown().await;
     assert!(
-        synced.is_ok() && a_state.route == Some(Route::P2p) && b_state.route == Some(Route::P2p),
-        "messages and configuration did not synchronize automatically over public P2P: {a_state:?}, {b_state:?}"
+        synced.is_ok()
+            && a_state.route == Some(Route::Relay)
+            && b_state.route == Some(Route::Relay),
+        "messages and configuration did not synchronize automatically over public relay: {a_state:?}, {b_state:?}, {errors:?}"
     );
 }
 impl ModelFactory for ReplayFactory {
@@ -771,14 +784,15 @@ async fn single_device_account_actor_runs_without_cloud_services() {
     let network = Runtime::new(host);
     network.start().await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
-        while !network.core.read().as_ref().unwrap().permitted() {
+        while !system.core_permitted() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
     .unwrap();
-    assert!(network.address.read().is_some());
-    assert!(network.signals.read().is_none());
+    assert!(network.coordination.read().is_none());
+    assert!(network.core.read().is_none());
+    assert!(network.relay_tx.read().is_none());
     let input = system
         .send_user(shared::ACTOR_ID, "Work locally.".into(), vec![], None)
         .unwrap();
@@ -805,20 +819,16 @@ async fn single_device_configuration_updates_keep_local_readiness() {
     let (_directory, system) = runtime(model.clone()).await;
     let host = Host::load(system.clone()).unwrap();
     host.initialize(true).unwrap();
-    let mut settings = host.settings();
-    settings.listen = "127.0.0.1:0".into();
-    host.save_settings(settings).unwrap();
     let network = Runtime::new(host);
     network.start().await.unwrap();
-    let core = network.core.read().clone().unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
-        while !core.accepts_input() {
+        while !system.core_permitted() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
     .expect("single-device Core did not become ready");
-    let epoch = core.epoch();
+    let epoch = network.core_status().unwrap()["epoch"].clone();
     let mut configuration = system.config();
     configuration.models.get_mut("mock").unwrap().temperature = 0.4;
     let alternate = configuration.models["mock"].clone();
@@ -833,14 +843,14 @@ async fn single_device_configuration_updates_keep_local_readiness() {
         })
         .await
         .unwrap();
-    let configured = core.status();
+    let configured = network.core_status().unwrap();
     let mut empty = system.config();
     empty.models.clear();
     empty.providers.clear();
     empty.main_model.clear();
     empty.approval_model = None;
     system.update_config(empty).await.unwrap();
-    let unconfigured = core.status();
+    let unconfigured = network.core_status().unwrap();
     network.stop().await;
     system.shutdown().await;
     assert_eq!(configured["ready"], true, "{configured}");
@@ -861,29 +871,24 @@ async fn single_device_core_resumes_after_foreground_suspend() {
     let (_directory, system) = runtime(model.clone()).await;
     let host = Host::load(system.clone()).unwrap();
     host.initialize(true).unwrap();
-    let mut settings = host.settings();
-    settings.listen = "127.0.0.1:0".into();
-    host.save_settings(settings).unwrap();
     let network = Runtime::new(host);
     network.start().await.unwrap();
-    let core = network.core.read().clone().unwrap();
     let outcome = tokio::time::timeout(Duration::from_secs(30), async {
-        while !core.accepts_input() {
+        while !system.core_permitted() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let previous_epoch = core.epoch();
+        let previous_epoch = network.core_status().unwrap()["epoch"].clone();
         system.suspend_execution().await.unwrap();
-        // Wait for the coordinator to observe the suspension and release the
-        // local lease, as it would while Android remains in the background.
-        while core.accepts_input() {
+        // Local execution pauses immediately without acquiring a distributed lease.
+        while system.core_permitted() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         system.resume_execution().await.unwrap();
         network.connectivity_changed();
-        while !core.accepts_input() {
+        while !system.core_permitted() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(core.epoch() > previous_epoch);
+        assert_eq!(network.core_status().unwrap()["epoch"], previous_epoch);
         let input = system
             .send_user(shared::ACTOR_ID, "Continue locally.".into(), vec![], None)
             .unwrap();
@@ -893,7 +898,7 @@ async fn single_device_core_resumes_after_foreground_suspend() {
         system.store().message(&input.id).unwrap().reply
     })
     .await;
-    let status = core.status();
+    let status = network.core_status().unwrap();
     network.stop().await;
     system.shutdown().await;
     assert_eq!(
@@ -901,6 +906,107 @@ async fn single_device_core_resumes_after_foreground_suspend() {
         Some("Resumed local execution.".into())
     );
     assert_eq!(model.requests.lock().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn switching_local_core_to_relay_preserves_existing_history_without_replay() {
+    if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("daat_locus::stage=debug,openraft=warn")
+            .with_test_writer()
+            .try_init();
+    }
+
+    use crate::stage::{
+        host::{Connectivity, Host},
+        runtime::Runtime,
+        shared,
+    };
+    let model = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
+        "A result created before enabling relay.",
+    )]));
+    let (_a_dir, a) = runtime(model.clone()).await;
+    let host = Host::load(a.clone()).unwrap();
+    host.initialize(true).unwrap();
+    let original_id = host.local;
+    let account = host.account_id().unwrap();
+    let network = Runtime::new(host.clone());
+    network.start().await.unwrap();
+    let input = a
+        .send_user(shared::ACTOR_ID, "Keep this history.".into(), vec![], None)
+        .unwrap();
+    assert_eq!(
+        wait_completed(&a, &input.id).await.reply.as_deref(),
+        Some("A result created before enabling relay.")
+    );
+    let relay = crate::stage::test_relay::Relay::new().await;
+    let mut settings = host.settings();
+    settings.mode = Connectivity::Relay;
+    settings.relay_origin = Some(relay.endpoint.clone());
+    network.reconfigure(settings).await.unwrap();
+    crate::stage::test_relay::wait(|| a.core_permitted())
+        .await
+        .unwrap();
+    let mut local = host.settings();
+    local.mode = Connectivity::Local;
+    network.reconfigure(local).await.unwrap();
+    model
+        .replies
+        .lock()
+        .push_back(MockReply::Answer("A result between relay connections."));
+    let additional = a
+        .send_user(
+            shared::ACTOR_ID,
+            "Continue locally once more.".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        wait_completed(&a, &additional.id).await.reply.as_deref(),
+        Some("A result between relay connections.")
+    );
+    let mut connected = host.settings();
+    connected.mode = Connectivity::Relay;
+    network.reconfigure(connected).await.unwrap();
+    assert_eq!(host.local, original_id);
+    assert_eq!(host.account_id().as_deref(), Some(account.as_str()));
+    let (_b_dir, b) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
+    let remote = Host::load(b.clone()).unwrap();
+    let request = remote.initialize(false).unwrap();
+    remote
+        .join(
+            fixture_enrollment(&host, &request, true, vec![]).unwrap(),
+            &account,
+        )
+        .unwrap();
+    remote.discover_member(host.enrollment().unwrap()).unwrap();
+    let mut settings = remote.settings();
+    settings.mode = Connectivity::Relay;
+    settings.relay_origin = Some(relay.endpoint.clone());
+    settings.compute_priority = 200;
+    remote.save_settings(settings).unwrap();
+    let second = Runtime::new(remote);
+    second.start().await.unwrap();
+    crate::stage::test_relay::wait(|| {
+        b.store().message(&input.id).is_ok_and(|message| {
+            message.reply.as_deref() == Some("A result created before enabling relay.")
+        }) && b.store().message(&additional.id).is_ok_and(|message|message.reply.as_deref()==Some("A result between relay connections."))
+    })
+    .await
+    .unwrap_or_else(|error|panic!("{error}; source={:?}; target={:?}; source_link={:?}; target_link={:?}; source_error={:?}; target_error={:?}",network.core_status(),second.core_status(),network.state(second.host.local),second.state(network.host.local),network.last_error(second.host.local),second.last_error(network.host.local)));
+    assert_eq!(
+        model.requests.lock().len(),
+        2,
+        "enabling relay must not repeat a completed request"
+    );
+    let restarted = Host::load(a.clone()).unwrap();
+    assert_eq!(restarted.settings().mode, Connectivity::Relay);
+    assert_eq!(restarted.local, original_id);
+    second.stop().await;
+    network.stop().await;
+    a.shutdown().await;
+    b.shutdown().await;
 }
 
 async fn device_pair(
@@ -917,7 +1023,9 @@ async fn device_pair(
         ActorSystem,
         Arc<crate::stage::runtime::Runtime>,
     ),
+    crate::stage::test_relay::Relay,
 ) {
+    let relay = crate::stage::test_relay::Relay::new().await;
     use crate::stage::{host::Host, ledger::StageLedger, runtime::Runtime};
     if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
         let _ = tracing_subscriber::fmt()
@@ -946,7 +1054,8 @@ async fn device_pair(
         .unwrap();
     for (host, priority) in [(&host_a, 100), (&host_b, 200)] {
         let mut settings = host.settings();
-        settings.listen = "127.0.0.1:0".into();
+        settings.mode = crate::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(relay.endpoint.clone());
         settings.compute_priority = priority;
         host.save_settings(settings).unwrap();
     }
@@ -954,9 +1063,7 @@ async fn device_pair(
     let net_b = Runtime::new(host_b);
     net_a.start().await.unwrap();
     net_b.start().await.unwrap();
-    let address = net_a.address.read().unwrap();
-    net_b
-        .dial_tcp(net_a.host.local, address, None)
+    crate::stage::test_relay::wait(|| net_b.handle(net_a.host.local).is_ok())
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -968,7 +1075,7 @@ async fn device_pair(
     })
     .await
     .expect("device pair did not synchronize");
-    ((a_dir, a, net_a), (b_dir, b, net_b))
+    ((a_dir, a, net_a), (b_dir, b, net_b), relay)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -978,7 +1085,8 @@ async fn an_unresponsive_learner_does_not_block_the_existing_worker_renewal_or_i
         "The worker remained usable.",
     )]));
     let model_b = Arc::new(ReplayProvider::new(vec![]));
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b)) = device_pair(model_a.clone(), model_b).await;
+    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
+        device_pair(model_a.clone(), model_b).await;
     let coordinator = net_b.coordination.read().clone().unwrap();
     coordinator.stop().await;
     let core = net_a.core.read().clone().unwrap();
@@ -1014,7 +1122,8 @@ async fn two_device_graceful_exit_transfers_authority_and_keeps_the_remaining_de
     let model_b = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
         "Continued after the other device exited.",
     )]));
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b)) = device_pair(model_a, model_b.clone()).await;
+    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
+        device_pair(model_a, model_b.clone()).await;
     assert_eq!(
         net_b.voting_member(net_b.host.local),
         Some(false),
@@ -1063,7 +1172,7 @@ async fn two_device_abrupt_loss_runs_locally_and_reconnects_without_repeating_co
     let model_b = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
         "Completed while disconnected.",
     )]));
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b)) =
+    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
         device_pair(model_a.clone(), model_b.clone()).await;
     let first = a
         .send_user(
@@ -1117,9 +1226,7 @@ async fn two_device_abrupt_loss_runs_locally_and_reconnects_without_repeating_co
         Some("Completed while disconnected.")
     );
     net_a.start().await.unwrap();
-    let address = net_a.address.read().unwrap();
-    net_b
-        .dial_tcp(net_a.host.local, address, None)
+    crate::stage::test_relay::wait(|| net_b.handle(net_a.host.local).is_ok())
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -1155,7 +1262,7 @@ async fn connected_learners_continue_after_authority_loss_and_rejoin_without_rep
     let model_c = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
         "The second surviving replica completed its request.",
     )]));
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b)) =
+    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
         device_pair(model_a.clone(), model_b.clone()).await;
     let (_c_dir, c) = runtime(model_c.clone()).await;
     let host_c = Host::load(c.clone()).unwrap();
@@ -1176,19 +1283,16 @@ async fn connected_learners_continue_after_authority_loss_and_rejoin_without_rep
         host.discover_member(host_c.enrollment().unwrap()).unwrap();
     }
     let mut settings = host_c.settings();
-    settings.listen = "127.0.0.1:0".into();
+    settings.mode = crate::stage::host::Connectivity::Relay;
+    settings.relay_origin = net_a.host.settings().relay_origin;
     settings.compute_priority = 300;
     host_c.save_settings(settings).unwrap();
     let net_c = Runtime::new(host_c);
     net_c.start().await.unwrap();
-    let address_a = net_a.address.read().unwrap();
-    let address_b = net_b.address.read().unwrap();
-    net_c
-        .dial_tcp(net_a.host.local, address_a, None)
+    crate::stage::test_relay::wait(|| net_c.handle(net_a.host.local).is_ok())
         .await
         .unwrap();
-    net_c
-        .dial_tcp(net_b.host.local, address_b, None)
+    crate::stage::test_relay::wait(|| net_c.handle(net_b.host.local).is_ok())
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -1233,10 +1337,8 @@ async fn connected_learners_continue_after_authority_loss_and_rejoin_without_rep
         );
     }
     net_a.start().await.unwrap();
-    let address_a = net_a.address.read().unwrap();
     for network in [&net_b, &net_c] {
-        network
-            .dial_tcp(net_a.host.local, address_a, None)
+        crate::stage::test_relay::wait(|| network.handle(net_a.host.local).is_ok())
             .await
             .unwrap();
     }
@@ -1294,8 +1396,10 @@ async fn two_device_partition_preserves_both_branches_and_does_not_replay_the_lo
     let model_b = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
         "The second offline outcome.",
     )]));
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b)) =
+    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
         device_pair(model_a.clone(), model_b.clone()).await;
+    _relay.isolate(net_a.host.local);
+    _relay.isolate(net_b.host.local);
     net_a.disconnect_peers();
     net_b.disconnect_peers();
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -1327,9 +1431,9 @@ async fn two_device_partition_preserves_both_branches_and_does_not_replay_the_lo
         shared_store::head(a.store()).unwrap(),
         shared_store::head(b.store()).unwrap()
     );
-    let address = net_a.address.read().unwrap();
-    net_b
-        .dial_tcp(net_a.host.local, address, None)
+    _relay.allow(net_a.host.local);
+    _relay.allow(net_b.host.local);
+    crate::stage::test_relay::wait(|| net_b.handle(net_a.host.local).is_ok())
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -1372,6 +1476,7 @@ async fn two_device_partition_preserves_both_branches_and_does_not_replay_the_lo
 // their heartbeats runnable while another device performs synchronous I/O.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_device_core_preserves_resources_context_and_effects_across_sequential_takeover() {
+    let relay = crate::stage::test_relay::Relay::new().await;
     if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
@@ -1427,11 +1532,11 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
         .unwrap();
     for (host, priority) in [(&host_a, 100), (&host_b, 200), (&host_c, 300)] {
         let mut settings = host.settings();
-        // This case controls its three links explicitly; ambient discovery
-        // must not race those dials or introduce unrelated LAN traffic.
-        settings.interfaces = vec!["fixture-no-lan-interface".into()];
+        // All three devices reconnect through this isolated relay.
+
         settings.compute_priority = priority;
-        settings.listen = "127.0.0.1:0".into();
+        settings.mode = crate::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(relay.endpoint.clone());
         host.save_settings(settings).unwrap();
     }
     let net_a = Runtime::new(host_a.clone());
@@ -1440,24 +1545,15 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     net_a.start().await.unwrap();
     net_b.start().await.unwrap();
     net_c.start().await.unwrap();
-    let address = net_b.address.read().unwrap();
-    net_a.dial_tcp(host_b.local, address, None).await.unwrap();
-    let address_c = net_c.address.read().unwrap();
-    net_a.dial_tcp(host_c.local, address_c, None).await.unwrap();
-    net_b.dial_tcp(host_c.local, address_c, None).await.unwrap();
-    // Model exactly these loopback discovery hints, with no ambient LAN. A
-    // transient transport loss must be able to reconnect before planned handoff.
-    let address_a = net_a.address.read().unwrap();
-    for (network, peer, address) in [
-        (&net_a, host_b.local, address),
-        (&net_a, host_c.local, address_c),
-        (&net_b, host_a.local, address_a),
-        (&net_b, host_c.local, address_c),
-        (&net_c, host_a.local, address_a),
-        (&net_c, host_b.local, address),
-    ] {
-        network.account_candidate(peer, address);
-    }
+    crate::stage::test_relay::wait(|| net_a.handle(host_b.local).is_ok())
+        .await
+        .unwrap();
+    crate::stage::test_relay::wait(|| net_a.handle(host_c.local).is_ok())
+        .await
+        .unwrap();
+    crate::stage::test_relay::wait(|| net_b.handle(host_c.local).is_ok())
+        .await
+        .unwrap();
     for _ in 0..100 {
         if net_a
             .core
@@ -1879,12 +1975,11 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     returning.compute_priority = 999;
     host_a.save_settings(returning).unwrap();
     net_a.start().await.unwrap();
-    let address_c = net_c.address.read().unwrap();
-    let connected = net_a.dial_tcp(host_c.local, address_c, None).await;
+    let connected = crate::stage::test_relay::wait(|| net_a.handle(host_c.local).is_ok()).await;
     if connected.is_err() {
         tokio::time::timeout(Duration::from_secs(5), async {
             while !net_a.connected(host_c.local) {
-                let _ = net_a.dial_tcp(host_c.local, address_c, None).await;
+                let _ = crate::stage::test_relay::wait(|| net_a.handle(host_c.local).is_ok()).await;
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
@@ -2117,6 +2212,7 @@ async fn wait_completed(system: &ActorSystem, id: &str) -> MessageRecord {
 
 #[tokio::test]
 async fn native_stage_tcp_routes_durable_user_work_and_resumes_a_shared_actor_view() {
+    let relay = crate::stage::test_relay::Relay::new().await;
     use crate::stage::{
         ActorAddress,
         host::Host,
@@ -2156,15 +2252,17 @@ async fn native_stage_tcp_routes_durable_user_work_and_resumes_a_shared_actor_vi
     for host in [&host_a, &host_b] {
         let mut settings = host.settings();
 
-        settings.listen = "127.0.0.1:0".into();
+        settings.mode = crate::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(relay.endpoint.clone());
         host.save_settings(settings).unwrap();
     }
     let net_a = Runtime::new(host_a.clone());
     let net_b = Runtime::new(host_b.clone());
     net_a.start().await.unwrap();
     net_b.start().await.unwrap();
-    let b_address = net_b.address.read().unwrap();
-    net_a.dial_tcp(host_b.local, b_address, None).await.unwrap();
+    crate::stage::test_relay::wait(|| net_a.handle(host_b.local).is_ok())
+        .await
+        .unwrap();
     let target = ActorAddress {
         stage_id: host_b.local,
         actor_id: "root".into(),
@@ -4109,13 +4207,10 @@ async fn start_core_fixture(system: &ActorSystem) -> Arc<crate::stage::runtime::
     system.store().save_actor(&core).unwrap();
     let host = crate::stage::host::Host::load(system.clone()).unwrap();
     host.initialize(true).unwrap();
-    let mut settings = host.settings();
-    settings.interfaces = vec!["fixture-no-lan-interface".into()];
-    host.save_settings(settings).unwrap();
     let network = crate::stage::runtime::Runtime::new(host);
     network.start().await.unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
-        while !network.core.read().as_ref().unwrap().permitted() {
+        while !system.core_permitted() {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
@@ -4307,7 +4402,7 @@ async fn core_delivery_is_visible_before_the_originating_turn_finishes() {
     ]));
     let (_dir, system) = runtime(provider.clone()).await;
     let network = start_core_fixture(&system).await;
-    assert!(network.core.read().as_ref().unwrap().accepts_input());
+    assert!(system.core_permitted());
     let input = system
         .send_user("core", "Start".into(), vec![], None)
         .unwrap();

@@ -19,7 +19,8 @@ pub struct VerifiedPeer {
     certificate_hash: String,
 }
 impl VerifiedPeer {
-    pub(crate) fn signed_dtls(profile: &DeviceProfile) -> Self {
+    #[cfg(test)]
+    pub(crate) fn test_peer(profile: &DeviceProfile) -> Self {
         Self {
             stage: profile.stage_id,
             certificate_hash: profile.tls_sha256.clone(),
@@ -238,36 +239,6 @@ pub fn client(identity: &DeviceIdentity, peer: &DeviceProfile) -> Result<TlsConn
 pub fn server_name(peer: StageId) -> Result<ServerName<'static>> {
     ServerName::try_from(format!("{peer}.dl.invalid"))
         .map_err(|_| StageError::Invalid("Invalid Stage TLS name"))
-}
-/// Isolated password-login listener. No Stage RPC is admitted on this ALPN.
-pub fn account_server(identity: &DeviceIdentity) -> Result<TlsAcceptor> {
-    let mut config =
-        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|_| StageError::Unavailable("TLS 1.3 unavailable"))?
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![CertificateDer::from(identity.tls_certificate().to_vec())],
-                key(identity),
-            )
-            .map_err(|_| StageError::Invalid("Invalid account TLS identity"))?;
-    config.alpn_protocols = vec![b"daat-locus-account/1".to_vec()];
-    Ok(TlsAcceptor::from(Arc::new(config)))
-}
-pub fn account_client(peer: &DeviceProfile) -> Result<TlsConnector> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let verifier = Pins {
-        hashes: HashSet::from([peer.tls_sha256.clone()]),
-        provider: provider.clone(),
-    };
-    let mut config = ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|_| StageError::Unavailable("TLS 1.3 unavailable"))?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(verifier))
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"daat-locus-account/1".to_vec()];
-    Ok(TlsConnector::from(Arc::new(config)))
 }
 pub async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
     acceptor: &TlsAcceptor,

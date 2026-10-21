@@ -17,7 +17,7 @@ The WebUI supplies messages, attachments, queue guidance, compact activity and
 results. Account/settings live in a floating menu, conversation search in the
 opposite corner. Chinese and English are supported; language follows the browser
 by default and can be selected in Appearance. Guest sharing and public tunnels
-are removed; same-account devices connect through authenticated P2P channels.
+are removed; accounts run locally or connect devices through authenticated, end-to-end encrypted public relay channels.
 
 ## Run
 
@@ -35,8 +35,9 @@ toolchains. Use `--no-default-features` for a headless service. Open
 the printed address and create an account locally, or sign in with the same
 account name and password on another device. OPAQUE keeps passwords in the client;
 browser sessions use HttpOnly cookies. `--profile NAME` isolates local accounts.
-Discovery and synchronization are automatic. LAN and SSH need no external relay;
-CF Worker/DO is an optional public rendezvous/signaling transport.
+Local mode starts no cross-device infrastructure. In relay mode, discovery and
+synchronization are automatic through a public WSS service, deployable on
+Cloudflare Workers/DO or an ordinary server. Devices retain execution authority.
 
 Use `daat-locus --help` for clap help and the original character logo.
 `serve` runs in the foreground; `start --open`, `status --json`, `stop` and

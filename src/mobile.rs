@@ -164,17 +164,13 @@ mod tests {
             lifecycle: Mutex::new(()),
             foreground: AtomicBool::new(true),
         };
-        let mut settings = stage.host.settings();
-        settings.listen = "127.0.0.1:0".into();
-        stage.host.save_settings(settings).unwrap();
         stage.start().await.unwrap();
         stage.host.initialize(true).unwrap();
         stage.start().await.unwrap();
         system.activate_account_workers().await.unwrap();
-        let core = stage.core.read().clone().unwrap();
-        assert_eq!(core.status()["state"], "model_required");
+        assert_eq!(stage.core_status().unwrap()["state"], "model_required");
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while core.status()["synchronized"] != true {
+            while stage.core_status().unwrap()["synchronized"] != true {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         })
@@ -212,18 +208,18 @@ mod tests {
             !system.workers_enabled(),
             "saving models must respect suspension"
         );
-        assert_eq!(core.status()["model_ready"], true);
+        assert_eq!(stage.core_status().unwrap()["model_ready"], true);
         service.set_foreground(true);
         service.apply_foreground().await.unwrap();
         let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            while !core.accepts_input() {
+            while !system.core_permitted() {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         })
         .await;
-        let status = core.status();
-        assert!(stage.host.settings().ssh.is_empty());
-        assert!(stage.host.settings().signaling_origin.is_none());
+        let status = stage.core_status().unwrap();
+        assert!(stage.coordination.read().is_none());
+        assert!(stage.host.settings().relay_origin.is_none());
         stage.stop().await;
         system.shutdown().await;
         assert!(
@@ -233,7 +229,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foreground_resumes_execution_when_device_transport_cannot_start() {
+    async fn foreground_resumes_execution_while_relay_is_unreachable() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -247,11 +243,12 @@ mod tests {
         let state = ServiceState::new(system.clone(), "http://127.0.0.1:12345".into()).unwrap();
         let stage = state.stage.as_ref().unwrap().clone();
         stage.host.initialize(true).unwrap();
-        // Hold the device listener port so the actual startup fails, rather
-        // than mocking the lifecycle result or requiring an external network.
+        // A closed loopback endpoint fails without contacting an external service.
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut settings = stage.host.settings();
-        settings.listen = occupied.local_addr().unwrap().to_string();
+        settings.mode = crate::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(format!("ws://{}", occupied.local_addr().unwrap()));
+        drop(occupied);
         stage.host.save_settings(settings).unwrap();
         let (_, logging) = tracing_appender::non_blocking(std::io::sink());
         let service = MobileService {
@@ -266,12 +263,12 @@ mod tests {
         service.set_foreground(true);
         let resumed = service.apply_foreground().await;
         let enabled = system.workers_enabled();
-        let transport_failed = stage.core.read().is_none();
+        let transport_started = stage.coordination.read().is_some();
         stage.stop().await;
         system.shutdown().await;
         assert!(
-            transport_failed,
-            "occupied device listener did not fail startup"
+            transport_started,
+            "relay startup must remain independent of execution suspension"
         );
         assert!(resumed.is_ok(), "foreground transition failed: {resumed:?}");
         assert!(enabled, "transport failure left local execution suspended");

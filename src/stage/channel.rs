@@ -4,11 +4,7 @@ use super::{
     Result, StageError,
     protocol::Envelope,
     scheduler::{Class, FairQueue, Traffic},
-    transport::{
-        self,
-        p2p::{P2pChannel, P2pSender},
-        tls::VerifiedPeer,
-    },
+    transport::{self, tls::VerifiedPeer},
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -23,14 +19,15 @@ pub trait FrameReader: Send {
 }
 #[async_trait]
 pub trait FrameWriter: Send {
-    async fn writable(&mut self, _bulk: bool) -> Result<()> {
+    async fn writable(&mut self) -> Result<()> {
         Ok(())
     }
-    async fn write(&mut self, frame: &Envelope, bulk: bool) -> Result<usize>;
+    async fn write(&mut self, frame: &Envelope) -> Result<usize>;
     async fn close(&mut self);
 }
-// Three missed two-second heartbeats end the channel, including half-open
-// TCP/RTC links. A timed-out partial frame is discarded with the whole channel.
+// Allow transient public-relay stalls before retiring a half-open stream.
+// Execution authority still expires independently. A timed-out partial frame
+// is discarded with the whole channel.
 async fn read_live_frame(
     reader: &mut dyn FrameReader,
     timeout: std::time::Duration,
@@ -49,30 +46,12 @@ impl<R: AsyncRead + Send + Unpin> FrameReader for StreamReader<R> {
 }
 #[async_trait]
 impl<W: AsyncWrite + Send + Unpin> FrameWriter for StreamWriter<W> {
-    async fn write(&mut self, frame: &Envelope, _: bool) -> Result<usize> {
+    async fn write(&mut self, frame: &Envelope) -> Result<usize> {
         transport::write_frame_with(&mut self.0, frame, self.1).await
     }
     async fn close(&mut self) {
         use tokio::io::AsyncWriteExt;
         let _ = self.0.shutdown().await;
-    }
-}
-#[async_trait]
-impl FrameReader for P2pChannel {
-    async fn read(&mut self) -> Result<(Envelope, usize)> {
-        self.receive().await
-    }
-}
-#[async_trait]
-impl FrameWriter for P2pSender {
-    async fn writable(&mut self, bulk: bool) -> Result<()> {
-        self.wait_writable(bulk).await
-    }
-    async fn write(&mut self, frame: &Envelope, bulk: bool) -> Result<usize> {
-        self.send(frame, bulk).await
-    }
-    async fn close(&mut self) {
-        let _ = P2pSender::close(self).await;
     }
 }
 #[derive(Clone)]
@@ -99,19 +78,11 @@ struct Outgoing {
 #[derive(Clone)]
 pub struct ChannelSender {
     queue: mpsc::Sender<Outgoing>,
-    bulk: Option<mpsc::Sender<Outgoing>>,
     budget: Arc<Semaphore>,
     control: Arc<Semaphore>,
     write_ready: Arc<Notify>,
 }
 impl ChannelSender {
-    fn queue_for(&self, class: Class) -> &mpsc::Sender<Outgoing> {
-        if class == Class::Blob {
-            self.bulk.as_ref().unwrap_or(&self.queue)
-        } else {
-            &self.queue
-        }
-    }
     pub(crate) fn write_notification(&self) -> Arc<Notify> {
         self.write_ready.clone()
     }
@@ -134,7 +105,7 @@ impl ChannelSender {
                 .await
                 .map_err(|_| StageError::Unavailable("Peer queue closed"))?,
         };
-        self.queue_for(class)
+        self.queue
             .send(Outgoing {
                 frame,
                 class,
@@ -155,7 +126,7 @@ impl ChannelSender {
             self.budget.clone().try_acquire_many_owned(bytes as u32)
         }
         .map_err(|_| StageError::Capacity("Peer queue byte budget reached"))?;
-        self.queue_for(class)
+        self.queue
             .try_send(Outgoing {
                 frame,
                 class,
@@ -199,21 +170,6 @@ impl PeerChannel {
             peer,
             Box::new(StreamReader(reader, format)),
             Box::new(StreamWriter(writer, format)),
-            None,
-            authorize,
-        )
-    }
-    pub fn p2p(
-        peer: VerifiedPeer,
-        channel: P2pChannel,
-        authorize: impl Fn(&Envelope, &SendScope) -> Result<()> + Send + Sync + 'static,
-    ) -> Self {
-        let writer = channel.sender();
-        Self::new(
-            peer,
-            Box::new(channel),
-            Box::new(writer.clone()),
-            Some(Box::new(writer)),
             authorize,
         )
     }
@@ -221,7 +177,6 @@ impl PeerChannel {
         peer: VerifiedPeer,
         mut reader: Box<dyn FrameReader>,
         writer: Box<dyn FrameWriter>,
-        bulk_writer: Option<Box<dyn FrameWriter>>,
         authorize: impl Fn(&Envelope, &SendScope) -> Result<()> + Send + Sync + 'static,
     ) -> Self {
         let budget = Arc::new(Semaphore::new(896 * 1024));
@@ -230,10 +185,8 @@ impl PeerChannel {
         let (outgoing_tx, outgoing) = mpsc::channel::<Outgoing>(32);
         let (closed_tx, closed) = watch::channel(None);
         let write_ready = Arc::new(Notify::new());
-        let (bulk_tx, bulk_rx) = mpsc::channel(8);
         let sender = ChannelSender {
             queue: outgoing_tx,
-            bulk: bulk_writer.as_ref().map(|_| bulk_tx),
             budget: budget.clone(),
             control: control.clone(),
             write_ready: write_ready.clone(),
@@ -245,7 +198,7 @@ impl PeerChannel {
         let incoming_control = Arc::new(Semaphore::new(128 * 1024));
         let read_task = tokio::spawn(async move {
             loop {
-                match read_live_frame(reader.as_mut(), std::time::Duration::from_secs(6)).await {
+                match read_live_frame(reader.as_mut(), std::time::Duration::from_secs(30)).await {
                     Ok((frame, bytes)) => {
                         let is_control = matches!(
                             frame.body,
@@ -328,27 +281,13 @@ impl PeerChannel {
             authorize.clone(),
             std::time::Duration::from_secs(4),
         );
-        let bulk_task = bulk_writer.map(|writer| {
-            spawn_writer(
-                writer,
-                bulk_rx,
-                metrics.clone(),
-                closed_tx,
-                write_ready,
-                authorize,
-                std::time::Duration::from_secs(20),
-            )
-        });
         Self {
             peer,
             sender,
             incoming,
             closed,
             metrics,
-            tasks: std::iter::once(read_task)
-                .chain(std::iter::once(write_task))
-                .chain(bulk_task)
-                .collect(),
+            tasks: vec![read_task, write_task],
         }
     }
     pub async fn close(&mut self) {
@@ -433,7 +372,7 @@ fn spawn_writer(
                         .remove(&item.frame.message_id)
                         .ok_or(StageError::Invalid("Peer queued frame disappeared"))?;
                     phase = "capacity";
-                    tokio::time::timeout(write_timeout, writer.writable(item.class == Class::Blob))
+                    tokio::time::timeout(write_timeout, writer.writable())
                         .await
                         .map_err(|_| StageError::Unavailable("Peer send capacity timed out"))??;
                     // Authority is still checked after backpressure, immediately
@@ -442,12 +381,9 @@ fn spawn_writer(
                     phase = "authorization";
                     authorize(&queued.frame, &queued.scope)?;
                     phase = "write";
-                    let bytes = tokio::time::timeout(
-                        write_timeout,
-                        writer.write(&queued.frame, item.class == Class::Blob),
-                    )
-                    .await
-                    .map_err(|_| StageError::Unavailable("Peer frame write timed out"))??;
+                    let bytes = tokio::time::timeout(write_timeout, writer.write(&queued.frame))
+                        .await
+                        .map_err(|_| StageError::Unavailable("Peer frame write timed out"))??;
                     {
                         let mut metrics = metrics.lock();
                         metrics.record_frame(item.class, &queued.frame, bytes);
@@ -483,7 +419,7 @@ mod liveness_tests {
     struct FailingWriter;
     #[async_trait]
     impl FrameWriter for FailingWriter {
-        async fn write(&mut self, _: &Envelope, _: bool) -> Result<usize> {
+        async fn write(&mut self, _: &Envelope) -> Result<usize> {
             Err(StageError::Unavailable("fixture write failure"))
         }
         async fn close(&mut self) {}
@@ -493,10 +429,9 @@ mod liveness_tests {
         let identity = crate::stage::identity::DeviceIdentity::generate().unwrap();
         let (release, reader) = tokio::sync::oneshot::channel();
         let mut channel = PeerChannel::new(
-            VerifiedPeer::signed_dtls(&identity.profile()),
+            VerifiedPeer::test_peer(&identity.profile()),
             Box::new(FailingReader(reader)),
             Box::new(FailingWriter),
-            None,
             |_, _| Ok(()),
         );
         let frame = Envelope {
@@ -544,21 +479,6 @@ mod liveness_tests {
             std::future::pending().await
         }
     }
-    struct ObservedWriter {
-        output: mpsc::Sender<(uuid::Uuid, bool)>,
-        stall: Option<Arc<Notify>>,
-    }
-    #[async_trait]
-    impl FrameWriter for ObservedWriter {
-        async fn write(&mut self, frame: &Envelope, bulk: bool) -> Result<usize> {
-            self.output.send((frame.message_id, bulk)).await.unwrap();
-            if let Some(stall) = &self.stall {
-                stall.notified().await;
-            }
-            Ok(frame.encode()?.len())
-        }
-        async fn close(&mut self) {}
-    }
     struct CapacityWriter {
         waiting: Option<tokio::sync::oneshot::Sender<()>>,
         capacity: Arc<Notify>,
@@ -566,14 +486,14 @@ mod liveness_tests {
     }
     #[async_trait]
     impl FrameWriter for CapacityWriter {
-        async fn writable(&mut self, _: bool) -> Result<()> {
+        async fn writable(&mut self) -> Result<()> {
             if let Some(waiting) = self.waiting.take() {
                 let _ = waiting.send(());
             }
             self.capacity.notified().await;
             Ok(())
         }
-        async fn write(&mut self, frame: &Envelope, _: bool) -> Result<usize> {
+        async fn write(&mut self, frame: &Envelope) -> Result<usize> {
             self.written.send(frame.message_id).await.unwrap();
             Ok(frame.encode()?.len())
         }
@@ -589,14 +509,13 @@ mod liveness_tests {
         let (written, mut writes) = mpsc::channel(1);
         let capacity = Arc::new(Notify::new());
         let mut channel = PeerChannel::new(
-            VerifiedPeer::signed_dtls(&identity.profile()),
+            VerifiedPeer::test_peer(&identity.profile()),
             Box::new(PendingReader),
             Box::new(CapacityWriter {
                 waiting: Some(waiting),
                 capacity: capacity.clone(),
                 written,
             }),
-            None,
             move |_, _| {
                 if current.load(Ordering::Acquire) {
                     Ok(())
@@ -653,59 +572,6 @@ mod liveness_tests {
             matches!(channel.failure(), Some(StageError::Channel { phase: "authorization", source })
             if matches!(&*source, StageError::Forbidden("revoked")))
         );
-        channel.close().await;
-    }
-    #[tokio::test]
-    async fn blocked_content_writer_does_not_block_control_emission() {
-        let identity = crate::stage::identity::DeviceIdentity::generate().unwrap();
-        let (tx, mut output) = mpsc::channel(8);
-        let release = Arc::new(Notify::new());
-        let mut channel = PeerChannel::new(
-            VerifiedPeer::signed_dtls(&identity.profile()),
-            Box::new(PendingReader),
-            Box::new(ObservedWriter {
-                output: tx.clone(),
-                stall: None,
-            }),
-            Some(Box::new(ObservedWriter {
-                output: tx,
-                stall: Some(release.clone()),
-            })),
-            |_, _| Ok(()),
-        );
-        let frame = Envelope {
-            version: 1,
-            source: crate::stage::StageId::new(),
-            target: identity.profile().stage_id,
-            generation: 1,
-            message_id: uuid::Uuid::new_v4(),
-            invocation_id: None,
-            in_reply_to: None,
-            created_at_ms: 1,
-            expires_at_ms: 10000,
-            body: crate::stage::protocol::Body::Heartbeat,
-        };
-        channel
-            .sender
-            .send(frame.clone(), Class::Blob, SendScope::Connection)
-            .unwrap();
-        assert_eq!(output.recv().await.unwrap(), (frame.message_id, true));
-        let control = Envelope {
-            message_id: uuid::Uuid::new_v4(),
-            ..frame
-        };
-        channel
-            .sender
-            .send(control.clone(), Class::Control, SendScope::Connection)
-            .unwrap();
-        assert_eq!(
-            tokio::time::timeout(std::time::Duration::from_secs(1), output.recv())
-                .await
-                .expect("control waited for content writer")
-                .unwrap(),
-            (control.message_id, false)
-        );
-        release.notify_one();
         channel.close().await;
     }
     #[tokio::test]

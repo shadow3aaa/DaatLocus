@@ -133,7 +133,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
     {id: "personal" as const, label: t("settings_dialog.appearance"), icon: SunIcon, keywords: [t("settings_dialog.theme"), t("settings_dialog.light"), t("settings_dialog.dark"), t("settings_dialog.system"), t("appearance.code_theme"), t("appearance.accent"), t("appearance.interface_size"), t("appearance.content_size"), t("appearance.full_width")].join(" ")},
     ...(canManage ? [
       ...(importsSupported ? [{id: "import" as const, label: t("imports.title"), icon: DownloadIcon, keywords: "Codex"}] : []),
-      {id: "account" as const, label: t("settings_dialog.configuration"), icon: UserRoundIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), "SSH", t("access_gate.public_connection_service"), t("reset_work.title")].join(" ")},
+      {id: "account" as const, label: t("settings_dialog.configuration"), icon: UserRoundIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), t("account_editor.connectivity"), t("access_gate.public_connection_service"), t("reset_work.title")].join(" ")},
       ...(isAndroid() || isMacDesktop() || computerUseSupported ? [{id: "gui" as const, label: t("gui_use.title"), icon: MonitorIcon, keywords: ["Shizuku Root ComputerUse PhoneUse macOS", t("gui_use.advanced"), t("computer_use_settings.resolution")].join(" ")}] : []),
       {id: "permissions" as const, label: t("settings_dialog.permissions"), icon: ShieldCheckIcon, keywords: t("settings_dialog.approval_mode")},
       {id: "models" as const, label: t("providers_settings.providers"), icon: SlidersHorizontalIcon, keywords: [t("composer.models"), t("composer.default_model"), t("provider_editor.api_key")].join(" ")},

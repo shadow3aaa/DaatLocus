@@ -25,7 +25,7 @@ pub enum BootstrapRequest {
         record: String,
     },
     Connection {
-        signaling_origin: Option<String>,
+        relay_origin: Option<String>,
     },
 }
 #[derive(Serialize, Deserialize)]
@@ -43,7 +43,7 @@ mod tests {
             r#"{"kind":"stop"}"#,
             r#"{"kind":"login_finish","id":"x","message":"x"}"#,
             r#"{"kind":"info","path":"/v1/actors/root"}"#,
-            r#"{"kind":"connection","signaling_origin":null,"owner":true}"#,
+            r#"{"kind":"connection","relay_origin":null,"owner":true}"#,
         ] {
             assert!(serde_json::from_str::<BootstrapRequest>(value).is_err());
         }

@@ -14,7 +14,7 @@ const connectionKeys: Record<string, string> = {
   disabled: "account_editor.offline",
 };
 const errorKeys: Record<string, string> = {
-  device_signaling_unavailable: "account_editor.device_signaling_unavailable",
+  device_relay_unavailable: "account_editor.device_relay_unavailable",
   device_connection_timeout: "account_editor.device_connection_timeout",
   device_connection_failed: "account_editor.device_connection_failed",
 };

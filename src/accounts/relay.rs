@@ -93,7 +93,7 @@ struct Timings {
     retry_cap: Duration,
 }
 const TIMINGS: Timings = Timings {
-    registration: Duration::from_secs(10),
+    registration: Duration::from_secs(40),
     tick: Duration::from_secs(5),
     heartbeat: Duration::from_secs(15),
     pong: Duration::from_secs(30),
@@ -141,8 +141,7 @@ async fn register_inner(
     label: String,
 ) -> std::result::Result<(Socket, Vec<Candidate>), Failure> {
     let mut url = url::Url::parse(endpoint).map_err(|_| Failure::Protocol)?;
-    if url.scheme() != "wss"
-        && !(cfg!(test) && url.scheme() == "ws" && url.host_str() == Some("127.0.0.1"))
+    if url.scheme() != "wss" && !(url.scheme() == "ws" && url.host_str() == Some("127.0.0.1"))
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -163,7 +162,7 @@ async fn register_inner(
     config.max_write_buffer_size = 128 * 1024;
     config.write_buffer_size = 16 * 1024;
     let mut socket = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(20),
         websocket::connect(url.as_str(), config),
     )
     .await
@@ -219,10 +218,8 @@ async fn register_inner(
             profile: peer.device,
             account_id: peer.account_id,
             name_hash: hash.clone(),
-            addresses: vec![],
             label: peer.label,
-            relay: Some(endpoint.to_owned()),
-            seen: Instant::now(),
+            relay: endpoint.to_owned(),
         });
     }
     candidates.sort_by_key(|candidate| candidate.profile.stage_id);
@@ -339,7 +336,7 @@ async fn serve_with_timings(network: Arc<Network>, timings: Timings) {
         tokio::pin!(credentials_changed, settings_changed);
         credentials_changed.as_mut().enable();
         settings_changed.as_mut().enable();
-        let endpoint = runtime.host.settings().signaling_origin;
+        let endpoint = runtime.host.settings().relay_origin;
         let network_epoch = runtime.network_generation();
         let result = if let Some(endpoint) = &endpoint {
             match (
@@ -455,7 +452,7 @@ async fn published(
         if runtime.host.enrollment().is_err() {
             return Err(Failure::Authority);
         }
-        if settings.signaling_origin.as_deref() != Some(endpoint)
+        if settings.relay_origin.as_deref() != Some(endpoint)
             || runtime.network_generation() != network_epoch
             || settings.label != label
             || !runtime
@@ -642,8 +639,9 @@ mod tests {
             )
             .unwrap();
         let mut settings = runtime.host.settings();
-        settings.listen = "127.0.0.1:0".into();
-        settings.signaling_origin = Some(endpoint);
+
+        settings.mode = crate::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(endpoint);
         runtime.host.save_settings(settings).unwrap();
         let network = Network::start_without_publication(&runtime).await.unwrap();
         (directory, system, runtime, network)
@@ -779,7 +777,7 @@ mod tests {
         assert_eq!(status.error_code, None);
         assert!(status.last_confirmed_at_ms.is_some());
         let mut settings = runtime.host.settings();
-        settings.signaling_origin = None;
+        settings.relay_origin = None;
         runtime.host.save_settings(settings).unwrap();
         network.publication_wake.notify_waiters();
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -800,16 +798,16 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires DAAT_LOCUS_TEST_ACCOUNT_RELAY pointing to a local Worker"]
     async fn unpaired_password_login_crosses_a_real_local_relay_without_disclosing_credentials() {
-        password_login_over_relay(false).await;
+        password_login_over_relay().await;
     }
 
-    #[tokio::test]
-    #[ignore = "requires DAAT_LOCUS_TEST_ACCOUNT_RELAY pointing to a local Worker"]
-    async fn unreachable_lan_candidate_falls_back_to_relay_login() {
-        password_login_over_relay(true).await;
-    }
-
-    async fn password_login_over_relay(unreachable_lan: bool) {
+    async fn password_login_over_relay() {
+        if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter("daat_locus::stage=debug,daat_locus::accounts=debug,openraft=warn")
+                .with_test_writer()
+                .try_init();
+        }
         let endpoint =
             std::env::var("DAAT_LOCUS_TEST_ACCOUNT_RELAY").expect("local Worker endpoint");
         let a_dir = tempfile::tempdir().unwrap();
@@ -878,15 +876,20 @@ mod tests {
             )
             .unwrap();
         let mut settings = source.host.settings();
-        settings.signaling_origin = Some(endpoint.clone());
-        settings.interfaces = vec!["daat-locus-test-no-interface".into()];
+        settings.mode = crate::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(endpoint.clone());
+
         settings.label = "Login test desktop".into();
         source.host.save_settings(settings).unwrap();
         source.start().await.unwrap();
         a.activate_account_workers().await.unwrap();
+        let mut settings = target.host.settings();
+        settings.mode = crate::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(endpoint.clone());
+        target.host.save_settings(settings).unwrap();
         target.start().await.unwrap();
         let identity = target.host.identity().unwrap();
-        let candidate = tokio::time::timeout(Duration::from_secs(20), async {
+        let candidate = tokio::time::timeout(Duration::from_secs(90), async {
             loop {
                 if let Ok(peers) = discover(&endpoint, &identity, "alice").await
                     && let Some(candidate) =
@@ -899,30 +902,8 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(candidate.addresses.is_empty());
-        assert!(candidate.relay.is_some());
         let client = daat_locus_auth::LoginClient::start(password.to_vec()).unwrap();
-        let login = if unreachable_lan {
-            let mut settings = target.host.settings();
-            settings.signaling_origin = Some(endpoint.clone());
-            target.host.save_settings(settings).unwrap();
-            let network = target.account_network().await.unwrap();
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let mut lan = candidate.clone();
-            lan.addresses = vec![listener.local_addr().unwrap()];
-            lan.relay = None;
-            drop(listener);
-            network.add_test_candidate(lan);
-            network
-                .login(
-                    "alice",
-                    &URL_SAFE_NO_PAD.encode(client.request()),
-                    "http://127.0.0.1:45826",
-                    &[],
-                )
-                .await
-                .unwrap()
-        } else {
+        let login = {
             crate::accounts::network::RemoteLogin::connect(
                 &target,
                 candidate,
@@ -968,7 +949,7 @@ mod tests {
             target.host.profile().unwrap()
         );
         // Login must lead to automatic private synchronization, without a
-        // manual dial or an artificial signaling command from the test.
+        // manual dial or an artificial relay command from the test.
         target.host.join(imported.enrollment, &account).unwrap();
         target
             .host
@@ -980,13 +961,14 @@ mod tests {
             .record_device_label(source.host.local, &imported.label)
             .unwrap();
         let mut settings = target.host.settings();
-        settings.signaling_origin = Some(endpoint.clone());
-        settings.interfaces = vec!["daat-locus-test-no-interface".into()];
+        settings.mode = crate::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(endpoint.clone());
+
         settings.label = "Login test phone".into();
         target.host.save_settings(settings).unwrap();
         target.start().await.unwrap();
         target.want(source.host.local);
-        tokio::time::timeout(Duration::from_secs(40), async {
+        tokio::time::timeout(Duration::from_secs(120), async {
             while source
                 .host
                 .device_label(target.host.local)
@@ -1004,11 +986,11 @@ mod tests {
         b.activate_account_workers().await.unwrap();
         assert_eq!(
             source.state(target.host.local).route,
-            Some(crate::stage::connection::Route::P2p)
+            Some(crate::stage::connection::Route::Relay)
         );
         assert_eq!(
             target.state(source.host.local).route,
-            Some(crate::stage::connection::Route::P2p)
+            Some(crate::stage::connection::Route::Relay)
         );
         let message = a
             .send_user("core", "Private sync test message".into(), vec![], None)

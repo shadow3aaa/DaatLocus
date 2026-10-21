@@ -70,6 +70,7 @@ async fn wait_for_account_configuration(
 // both devices' transport and heartbeat tasks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn account_model_definitions_sync_privately_without_replacing_device_preferences() {
+    let relay = crate::support::relay::Relay::new().await;
     use daat_locus::stage::ledger::StageLedger;
     let a = Fixture::new().await;
     let mut local = Config::default();
@@ -93,13 +94,12 @@ async fn account_model_definitions_sync_privately_without_replacing_device_prefe
     for fixture in [&a, &b] {
         let mut settings = fixture.stage.host.settings();
 
-        settings.listen = "127.0.0.1:0".into();
+        settings.mode = daat_locus::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(relay.endpoint.clone());
         fixture.stage.host.save_settings(settings).unwrap();
         fixture.stage.start().await.unwrap();
     }
-    let address = a.stage.address.read().unwrap();
-    b.stage
-        .dial_tcp(a.stage.host.local, address, None)
+    crate::support::relay::wait(|| b.stage.handle(a.stage.host.local).is_ok())
         .await
         .unwrap();
     wait_for_account_configuration(&a, &b, "initial model and credential import", |config| {
@@ -224,6 +224,7 @@ async fn account_model_definitions_sync_privately_without_replacing_device_prefe
 
 #[tokio::test]
 async fn a_paired_device_without_enrollment_authority_cannot_import_login_credentials() {
+    let relay = crate::support::relay::Relay::new().await;
     use daat_locus::stage::{ledger::StageLedger, protocol::Body};
     let a = Fixture::new().await;
     let b = Fixture::with_config_and_account(a.system.config(), false).await;
@@ -243,13 +244,12 @@ async fn a_paired_device_without_enrollment_authority_cannot_import_login_creden
     for fixture in [&a, &b] {
         let mut settings = fixture.stage.host.settings();
 
-        settings.listen = "127.0.0.1:0".into();
+        settings.mode = daat_locus::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(relay.endpoint.clone());
         fixture.stage.host.save_settings(settings).unwrap();
         fixture.stage.start().await.unwrap();
     }
-    let address = a.stage.address.read().unwrap();
-    b.stage
-        .dial_tcp(a.stage.host.local, address, None)
+    crate::support::relay::wait(|| b.stage.handle(a.stage.host.local).is_ok())
         .await
         .unwrap();
     let peer = b.stage.handle(a.stage.host.local).unwrap();
@@ -297,6 +297,7 @@ async fn a_paired_device_without_enrollment_authority_cannot_import_login_creden
 
 #[tokio::test]
 async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_account_grants() {
+    let relay = crate::support::relay::Relay::new().await;
     use daat_locus::stage::ledger::StageLedger;
     let a = Fixture::new().await;
     let b = Fixture::with_config_and_account(a.system.config(), false).await;
@@ -327,13 +328,12 @@ async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_ac
     for fixture in [&a, &b] {
         let mut settings = fixture.stage.host.settings();
 
-        settings.listen = "127.0.0.1:0".into();
+        settings.mode = daat_locus::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(relay.endpoint.clone());
         fixture.stage.host.save_settings(settings).unwrap();
         fixture.stage.start().await.unwrap();
     }
-    let address = a.stage.address.read().unwrap();
-    b.stage
-        .dial_tcp(a.stage.host.local, address, None)
+    crate::support::relay::wait(|| b.stage.handle(a.stage.host.local).is_ok())
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -584,6 +584,7 @@ async fn recovery_record_queries_require_owner_access_and_bounded_cursors() {
 }
 #[tokio::test]
 async fn joining_devices_are_replicas_and_offline_replicas_do_not_block_the_account_authority() {
+    let relay = crate::support::relay::Relay::new().await;
     use daat_locus::stage::{ledger::StageLedger, shared::Operation};
     let desktop = Fixture::new().await;
     let phone = Fixture::with_config_and_account(desktop.system.config(), false).await;
@@ -605,14 +606,12 @@ async fn joining_devices_are_replicas_and_offline_replicas_do_not_block_the_acco
         .unwrap();
     for fixture in [&desktop, &phone] {
         let mut settings = fixture.stage.host.settings();
-        settings.listen = "127.0.0.1:0".into();
+        settings.mode = daat_locus::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(relay.endpoint.clone());
         fixture.stage.host.save_settings(settings).unwrap();
         fixture.stage.start().await.unwrap();
     }
-    let address = desktop.stage.address.read().unwrap();
-    phone
-        .stage
-        .dial_tcp(desktop.stage.host.local, address, None)
+    crate::support::relay::wait(|| phone.stage.handle(desktop.stage.host.local).is_ok())
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {

@@ -27,7 +27,7 @@ fn login_error(error: LoginError) -> ApiError {
     };
     // Display contains only the fixed public reason, never a transport/provider diagnostic.
     let message = match error {
-        LoginError::ConnectionRequired => "Configure a connection service or use the local network",
+        LoginError::ConnectionRequired => "Configure a public connection service",
         LoginError::RelayUnavailable => "Cannot reach the public connection service",
         LoginError::NoOnlineDevice => "No online account device found",
         LoginError::DeviceUnreachable => "Cannot connect to the account device",
@@ -324,12 +324,12 @@ pub(crate) async fn native_bootstrap(
                 )
                 .await
             }
-            Operation::Connection { signaling_origin } => {
+            Operation::Connection { relay_origin } => {
                 connection(
                     State(state),
                     headers,
                     ConnectInfo(peer),
-                    Json(Connection { signaling_origin }),
+                    Json(Connection { relay_origin }),
                 )
                 .await
             }
@@ -375,7 +375,7 @@ async fn info(
             .identity()
             .is_ok_and(|identity| identity.has_group_authority());
     Ok(Json(
-        json!({"registered":registered,"account_id":host.account_id(),"name":host.accounts.current().ok().flatten().map(|record|record.name.clone()),"can_create":!registered&&local&&authority,"signaling_origin":host.settings().signaling_origin}),
+        json!({"registered":registered,"account_id":host.account_id(),"name":host.accounts.current().ok().flatten().map(|record|record.name.clone()),"can_create":!registered&&local&&authority,"relay_origin":host.settings().relay_origin}),
     ))
 }
 #[derive(Deserialize)]
@@ -831,12 +831,6 @@ async fn login_import(
         .await
         .map_err(|_| login_error(LoginError::Unavailable))?;
     runtime.want(member.device.stage_id);
-    if let Some(port) = imported.stage_port.filter(|port| *port > 0) {
-        for mut address in pending.candidate.addresses {
-            address.set_port(port);
-            runtime.account_candidate(member.device.stage_id, address);
-        }
-    }
     state
         .system
         .activate_account_workers()
@@ -847,7 +841,7 @@ async fn login_import(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Connection {
-    signaling_origin: Option<String>,
+    relay_origin: Option<String>,
 }
 async fn connection(
     State(state): State<ServiceState>,
@@ -868,8 +862,13 @@ async fn connection(
     } else if !local_browser_origin(&headers) || !local_owner(&state, peer) {
         return Err(ApiError::forbidden());
     }
+    let mode = if input.relay_origin.is_some() {
+        crate::stage::host::Connectivity::Relay
+    } else {
+        crate::stage::host::Connectivity::Local
+    };
     runtime
-        .patch_settings(None, Some(input.signaling_origin), None)
+        .patch_settings(None, Some(input.relay_origin), Some(mode))
         .await
         .map_err(super::stages::failure)?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -947,7 +946,6 @@ mod tests {
     #[tokio::test]
     async fn password_login_automatically_joins_an_unpaired_device_without_enrollment_controls() {
         use crate::{
-            accounts::network::{Candidate, lookup},
             actors::ActorSystem,
             config::Config,
             daemon::control::{self, LaunchOptions, Server},
@@ -1000,23 +998,15 @@ mod tests {
                 &group,
             )
             .unwrap();
+        let relay = crate::stage::test_relay::Relay::new().await;
+        for runtime in [&source_runtime, &target_runtime] {
+            let mut settings = runtime.host.settings();
+            settings.mode = crate::stage::host::Connectivity::Relay;
+            settings.relay_origin = Some(relay.endpoint.clone());
+            runtime.host.save_settings(settings).unwrap();
+        }
         source_runtime.start().await.unwrap();
         target_runtime.start().await.unwrap();
-        let source_network = source_runtime.account_network().await.unwrap();
-        let target_network = target_runtime.account_network().await.unwrap();
-        // Inject only a public discovery hint, never membership or private records.
-        target_network.add_test_candidate(Candidate {
-            profile: source_runtime.host.profile().unwrap(),
-            account_id: group.clone(),
-            name_hash: lookup(&name),
-            addresses: vec![SocketAddr::new(
-                std::net::Ipv4Addr::LOCALHOST.into(),
-                source_network.address.port(),
-            )],
-            label: "source".into(),
-            relay: None,
-            seen: std::time::Instant::now(),
-        });
         // Initial native login/import uses OS-owner IPC on every desktop OS.
         // macOS deliberately has no browser TCP owner-proof implementation.
         let control_root = b_dir.path().canonicalize().unwrap().join("control");
@@ -1215,16 +1205,13 @@ mod tests {
         };
         let (label, origin) = tokio::join!(
             patch(json!({"label":"automatic-hostname"})).send(),
-            patch(json!({"signaling_origin":"wss://127.0.0.1:9"})).send()
+            patch(json!({"relay_origin":"wss://127.0.0.1:9"})).send()
         );
         assert_eq!(label.unwrap().status(), StatusCode::OK);
         assert_eq!(origin.unwrap().status(), StatusCode::OK);
         let settings = target_runtime.host.settings();
         assert_eq!(settings.label, "automatic-hostname");
-        assert_eq!(
-            settings.signaling_origin.as_deref(),
-            Some("wss://127.0.0.1:9")
-        );
+        assert_eq!(settings.relay_origin.as_deref(), Some("wss://127.0.0.1:9"));
         assert_eq!(
             patch(json!({"enabled":false}))
                 .send()

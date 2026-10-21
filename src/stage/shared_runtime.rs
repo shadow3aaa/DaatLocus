@@ -2219,6 +2219,10 @@ impl Controller {
             .permits(runtime.host.local, epoch, Instant::now())
             && self.recovered_epoch.load(Ordering::Acquire) != epoch
         {
+            if shared_store::local_history_pending(system.store())? {
+                self.checkpoint().await?;
+                shared_store::finish_local_history(system.store())?;
+            }
             shared_store::resume(system.store())?;
             self.repair_protocol().await?;
             self.recovered_epoch.store(epoch, Ordering::Release);

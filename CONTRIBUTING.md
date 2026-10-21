@@ -50,7 +50,7 @@ neither a dist bundle, Bun nor wasm-pack. `DAAT_LOCUS_MODEL_CATALOG_PATH` can su
 models.dev JSON snapshot for offline builds; Cargo `--offline` does not disable
 build-script network requests. See [model catalog](docs/model-catalog.md).
 
-The sequential takeover fixture supplies only its three loopback discovery hints, so transient links can reconnect without ambient LAN traffic. ActorStore scheduling regressions run on a single multithreaded-runtime worker with a held transaction and a waiting reader; control tasks must remain runnable. Peer channel tests retain the first read/write/authorization failure across shutdown.
+Multi-device tests use an isolated loopback relay; devices reconnect through the same production multiplexing and mutual TLS code. The in-process relay mocks registration; Worker/standalone tests cover real relay authentication. ActorStore scheduling regressions run on a single multithreaded-runtime worker with a held transaction and a waiting reader; control tasks must remain runnable. Peer channel tests retain the first read/write/authorization failure across shutdown.
 
 ## Source and tests
 
@@ -62,7 +62,7 @@ The sequential takeover fixture supplies only its three loopback discovery hints
 - `webui/src/locales`: matching Chinese/English catalogs; add keys to both files.
 - `tests/http_api.rs`, `tests/http`, `tests/support`: one actual loopback HTTP
   harness, suites by contract, isolated real OPAQUE accounts and temporary stores.
-- `workers/signaling`: optional public P2P signaling only; no business execution or password authority.
+- `workers/signaling`: portable public relay, with Cloudflare Workers/DO and ordinary-server adapters; no execution or password authority.
 - `xtask`: native archives and installers. No Git submodules are required.
 
 Relevant checks:
@@ -76,7 +76,7 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 bun run typecheck
 bun test
 bun run build
-# In workers/signaling, when signaling changes:
+# In workers/signaling, when relay changes:
 bun install --frozen-lockfile
 bun test
 ```
@@ -97,20 +97,37 @@ this explicit execution when excluding it from the parallel test pool.
 Multi-device fixtures use multithreaded Tokio runtimes, like the service;
 one device's synchronous storage work must not block every device's heartbeats.
 
-Public signaling and account-sync checks use disposable identities and mock models.
-Set `DAAT_LOCUS_TEST_STAGE_SIGNALING` to an explicitly chosen WSS origin, then run
-`cargo test --locked --lib public_ -- --ignored --nocapture`. These opt-in checks
-exercise SDP forwarding, authenticated P2P connections, message replication and
-private model-configuration sync; they do not establish reachability through every NAT.
+Relay checks use disposable identities and mock models. In `workers/signaling`, run
+`bun run typecheck` and `bun test` for the ordinary-server adapter. Set
+`DAAT_LOCUS_TEST_RELAY_WORKER=1` and run `bun test tests/local.test.ts` to exercise
+real local Durable Objects. Fixtures use unique temporary storage and loopback ports.
+For an explicitly chosen public endpoint, set `DAAT_LOCUS_TEST_RELAY` and run
+`cargo test --locked --lib public_ -- --ignored --nocapture`; these checks exercise
+end-to-end device channels, message replication and private model configuration.
+The password-device-join check additionally uses `DAAT_LOCUS_TEST_ACCOUNT_RELAY`.
+For fake-IP DNS diagnostics only, `DAAT_LOCUS_TEST_RELAY_RESOLVE=relay.example=203.0.113.1`
+overrides that host's address in library tests; the original hostname, TLS SNI
+and certificate verification remain required. Compare both paths and report any
+default-route failure separately.
 
-For connection measurements, enable debug logs for `daat_locus::stage`. The
-`native_dial`, `offer_candidates`, `answer_candidates` and `ice_dtls_sctp` phase
-records report elapsed milliseconds and outcomes without SDP or credentials.
-Content completion reports original bytes and elapsed time; transport counters
-separate content payload bytes from encoded protocol bytes. Compare repeated
-attempts on the same network using connection success rate, median/tail setup
-latency and verified content throughput. Include initiation direction, IPv4/IPv6,
-network changes and loss; local loopback tests do not measure cellular performance.
+Deploy the CF adapter from `workers/signaling` with `bunx wrangler deploy`.
+The existing `SignalGroup`/`AccountRoom` Durable Object bindings and revocation
+storage are retained; protocol 2 replaces SDP signaling with bounded byte channels.
+Old protocol clients must upgrade; do not run old direct-connection clients during migration.
+For an ordinary server, run `bun run server.ts` in the same directory behind an
+HTTPS reverse proxy that forwards WebSocket upgrades. Configure `PORT` (default
+8787), `RELAY_LISTEN` (default loopback), and `RELAY_DATABASE` (persistent SQLite
+path). Optional `GROUP_ROOTS` and `REVOKED_STAGES` apply the same admission policy
+as the Worker. Protect the database and keep it across restarts. Both adapters
+serve `GET /health` with relay protocol version 2. Configure DL with `mode=relay`
+and the public WSS origin; `mode=local` starts no cross-device infrastructure.
+The relay only carries encrypted device streams; persistent Actor state, leases,
+quorum, checkpoints and uncertain-effect records stay on account devices.
+
+For connection measurements, enable `daat_locus::stage` debug logs. Compare
+repeated attempts by success rate, setup latency and verified content throughput,
+including network changes and slow receivers. Keep credentials and frame content
+out of diagnostics. Loopback tests do not measure cellular performance.
 
 Keep browser preferences local and account configuration private. UI strings
 use translation keys; language switching must update existing views without

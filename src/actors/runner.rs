@@ -49,9 +49,7 @@ pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<Actor
         if control.stop.load(Ordering::Acquire) {
             break;
         }
-        if actor_id == crate::stage::shared::ACTOR_ID
-            && system.shared_core().is_none_or(|core| !core.permitted())
-        {
+        if actor_id == crate::stage::shared::ACTOR_ID && !system.core_permitted() {
             passivated = true;
             break;
         }
@@ -89,15 +87,17 @@ pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<Actor
                 || installed_config.as_ref() != Some(&actor.config)
             {
                 shutdown_apps(&mut apps).await;
-                apps = Some(if actor_id == crate::stage::shared::ACTOR_ID {
-                    system
-                        .shared_core()
-                        .ok_or_else(|| miette!("Shared Actor worker is unavailable"))?
-                        .model_apps()
-                        .await?
-                } else {
-                    builtin_apps::create_apps(&actor, system.clone(), &system.config())?
-                });
+                apps = Some(
+                    if actor_id == crate::stage::shared::ACTOR_ID && !system.local_core() {
+                        system
+                            .shared_core()
+                            .ok_or_else(|| miette!("Shared Actor worker is unavailable"))?
+                            .model_apps()
+                            .await?
+                    } else {
+                        builtin_apps::create_apps(&actor, system.clone(), &system.config())?
+                    },
+                );
                 installed_config = Some(actor.config.clone());
             }
             execute_message(
@@ -113,11 +113,7 @@ pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<Actor
 
         // Check once more after the final provider/tool future resolves. A
         // cancellation racing the final chunk must not deliver success.
-        if actor_id == crate::stage::shared::ACTOR_ID
-            && system
-                .shared_core()
-                .is_none_or(|core| !core.execution_permitted())
-        {
+        if actor_id == crate::stage::shared::ACTOR_ID && !system.core_execution_permitted() {
             shutdown_apps(&mut apps).await;
             installed_config = None;
             continue;
@@ -197,10 +193,7 @@ fn check_interruption(
     message: &MessageRecord,
 ) -> Result<()> {
     if interruption(control, message).is_some()
-        || message.actor_id == crate::stage::shared::ACTOR_ID
-            && system
-                .shared_core()
-                .is_none_or(|core| !core.execution_permitted())
+        || message.actor_id == crate::stage::shared::ACTOR_ID && !system.core_execution_permitted()
     {
         Err(miette!("Execution interrupted"))
     } else {
@@ -370,12 +363,7 @@ async fn execute_message(
             }
         }
         if actor.id == crate::stage::shared::ACTOR_ID {
-            system
-                .shared_core()
-                .ok_or_else(|| miette!("Shared Actor worker is unavailable"))?
-                .checkpoint()
-                .await
-                .map_err(|error| miette!("{error}"))?;
+            system.checkpoint_core().await?;
         }
         let baseline = context_baseline(system, &actor.id, &binding)?;
         let request = match model_window(provider.as_ref(), &prompt, &history, &tools, &baseline) {
@@ -674,12 +662,7 @@ async fn execute_call(
     // interrupted call, and does not replay it as an apparently fresh request.
     system.store().tool_started(&actor.id, &message.id, call)?;
     if actor.id == crate::stage::shared::ACTOR_ID {
-        system
-            .shared_core()
-            .ok_or_else(|| miette!("Shared Actor worker is unavailable"))?
-            .checkpoint()
-            .await
-            .map_err(|error| miette!("{error}"))?;
+        system.checkpoint_core().await?;
     }
     let future = apps.execute_tool(call, &context);
     tokio::pin!(future);
@@ -687,7 +670,7 @@ async fn execute_call(
         tokio::select! {
             result = &mut future => break Some(result),
             () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
-                if interruption(control,message).is_some() || actor.id==crate::stage::shared::ACTOR_ID && system.shared_core().is_none_or(|core|!core.execution_permitted()){break None;}
+                if interruption(control,message).is_some() || actor.id==crate::stage::shared::ACTOR_ID && !system.core_execution_permitted(){break None;}
             }
         }
     };

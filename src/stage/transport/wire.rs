@@ -5,7 +5,6 @@ use crate::stage::{
 };
 
 pub const ALPN: &[u8] = b"daat-locus-stage/2";
-pub const SDP: &str = "a=x-daat-wire:2";
 const MAGIC: &[u8; 4] = b"DLB2";
 const HEADER: usize = 11;
 

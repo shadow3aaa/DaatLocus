@@ -6,9 +6,9 @@ let ready:Promise<unknown>|undefined;
 const prepare=()=>ready??=initialize().catch(()=>{ready=undefined;throw accountError("login_client_unavailable");});
 const encode=(value:Uint8Array)=>btoa(Array.from(value,byte=>String.fromCharCode(byte)).join("")).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/g,"");
 const decode=(value:string)=>Uint8Array.from(atob(value.replace(/-/g,"+").replace(/_/g,"/")),char=>char.charCodeAt(0));
-export type AccountInfo={registered:boolean;account_id:string|null;name:string|null;can_create:boolean;signaling_origin:string|null};
+export type AccountInfo={registered:boolean;account_id:string|null;name:string|null;can_create:boolean;relay_origin:string|null};
 export const accountInfo=()=>accountRequest<AccountInfo>("/v1/account");
-export const saveAccountConnection=(signaling_origin:string|null)=>accountRequest<void>("/v1/account/connection","PUT",{signaling_origin});
+export const saveAccountConnection=(relay_origin:string|null)=>accountRequest<void>("/v1/account/connection","PUT",{relay_origin});
 type Start={id:string;response:string;context?:string;remote?:boolean;account_id?:string;device_id?:string};
 export async function loginAccount(name:string,password:string) {
   await prepare();const bytes=new TextEncoder().encode(password);const exclude:string[]=[];

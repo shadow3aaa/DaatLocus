@@ -33,7 +33,7 @@ pub(crate) async fn connect(endpoint: &str, config: WebSocketConfig) -> Result<S
         let tls = builder.with_no_client_auth();
         Some(Connector::Rustls(Arc::new(tls)))
     } else {
-        None // Callers allow plaintext only for explicit local test fixtures.
+        None // Callers allow WS only for a literal 127.0.0.1 endpoint.
     };
     let url = url::Url::parse(endpoint)
         .map_err(|error| Error::Io(io::Error::new(io::ErrorKind::InvalidInput, error)))?;
@@ -51,6 +51,27 @@ pub(crate) async fn connect(endpoint: &str, config: WebSocketConfig) -> Result<S
     let port = url
         .port()
         .unwrap_or(if url.scheme() == "wss" { 443 } else { 80 });
+    // Opt-in public endpoint diagnostics can bypass a local fake-IP DNS route
+    // while retaining the original URL, TLS SNI and OS certificate verifier.
+    #[cfg(test)]
+    if let Ok(mapping) = std::env::var("DAAT_LOCUS_TEST_RELAY_RESOLVE")
+        && let Some((name, address)) = mapping.split_once('=')
+        && name == host
+    {
+        let address = address.parse::<std::net::IpAddr>().map_err(|_| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid test relay IP",
+            ))
+        })?;
+        return connect_addresses(
+            endpoint,
+            config,
+            connector,
+            vec![SocketAddr::new(address, port)],
+        )
+        .await;
+    }
     let addresses = tokio::net::lookup_host((host.as_str(), port)).await?;
     connect_addresses(endpoint, config, connector, addresses.collect()).await
 }

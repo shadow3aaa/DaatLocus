@@ -64,11 +64,10 @@ mod backpressure_tests {
             .commit_generation(remote.profile().stage_id, 0, 1, nonce, now())
             .unwrap();
         let (local, mut stream) = tokio::io::duplex(1024 * 1024);
-        let channel = PeerChannel::stream(
-            VerifiedPeer::signed_dtls(&remote.profile()),
-            local,
-            |_, _| Ok(()),
-        );
+        let channel =
+            PeerChannel::stream(VerifiedPeer::test_peer(&remote.profile()), local, |_, _| {
+                Ok(())
+            });
         let (mut link, _) = PeerLink::new(host.clone(), channel, 1);
         link.work_generation = crate::stage::reset::generation(&host).unwrap();
         let payload = (0..CHUNK_BYTES * 20)
@@ -229,7 +228,7 @@ mod backpressure_tests {
             .unwrap();
         let (local_stream, remote_stream) = tokio::io::duplex(64);
         let channel = PeerChannel::stream(
-            transport::tls::VerifiedPeer::signed_dtls(&remote.profile()),
+            transport::tls::VerifiedPeer::test_peer(&remote.profile()),
             local_stream,
             |_, _| Ok(()),
         );
@@ -571,7 +570,7 @@ impl PeerLink {
             SendScope::Connection,
         )?;
         let incoming = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             self.channel.incoming.recv(),
         )
         .await

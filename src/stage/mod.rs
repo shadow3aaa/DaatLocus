@@ -16,6 +16,7 @@ pub mod peer;
 pub mod protocol;
 pub mod receiver;
 pub mod recovery;
+pub mod relay;
 pub mod reset;
 pub mod revocation;
 pub mod runtime;
@@ -25,7 +26,6 @@ pub mod shared_apps;
 pub mod shared_runtime;
 pub mod shared_snapshot;
 pub mod shared_store;
-pub mod signaling;
 pub mod sync;
 pub mod transport;
 
@@ -116,3 +116,7 @@ pub fn digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/relay.rs"]
+pub(crate) mod test_relay;

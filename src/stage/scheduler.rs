@@ -1,4 +1,4 @@
-//! Bounded application queues; priority does not remove TCP/SCTP head-of-line blocking.
+//! Bounded application queues; priority does not remove stream head-of-line blocking.
 use super::{Result, StageError, protocol::Envelope};
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -9,7 +9,6 @@ pub enum Class {
     Event,
     Snapshot,
     Blob,
-    Signaling,
     Retransmission,
 }
 #[derive(Clone, Debug, Default, Serialize)]
@@ -18,7 +17,6 @@ pub struct Traffic {
     pub event_bytes: u64,
     pub snapshot_bytes: u64,
     pub blob_bytes: u64,
-    pub signaling_bytes: u64,
     pub retransmission_bytes: u64,
     pub frames: u64,
     pub queue_peak_bytes: usize,
@@ -36,14 +34,13 @@ impl Traffic {
         }
     }
     /// Protocol bytes, including a TCP frame prefix where the adapter adds one.
-    /// These counters deliberately do not claim to measure IP/DTLS/TLS overhead.
+    /// These counters deliberately do not claim to measure IP/TLS overhead.
     pub fn record(&mut self, class: Class, bytes: usize) {
         let target = match class {
             Class::Control => &mut self.control_bytes,
             Class::Event => &mut self.event_bytes,
             Class::Snapshot => &mut self.snapshot_bytes,
             Class::Blob => &mut self.blob_bytes,
-            Class::Signaling => &mut self.signaling_bytes,
             Class::Retransmission => &mut self.retransmission_bytes,
         };
         *target = target.saturating_add(bytes as u64);

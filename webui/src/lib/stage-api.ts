@@ -4,11 +4,11 @@ export type WorkGeneration = {revision: number; writer: string};
 export type ResetStatus = {account_id: string; name: string; generation: WorkGeneration | null; resetting: boolean};
 export const getResetStatus = (options?: FetchOptions) => request<ResetStatus>("/v1/account/reset", options);
 export const resetAccountWork = (status: ResetStatus) => request<void>("/v1/account/reset", {method: "POST", body: {account_id: status.account_id, expected_generation: status.generation}});
-export type SshTarget = { host: string; user: string | null; ssh_port: number; stage_port: number };
-export type DeviceSettings = { label: string; listen: string; interfaces: string[]; signaling_origin: string | null; stun: string[]; compute_priority: number; ssh: Record<string,SshTarget> };
-export type DevicePreferences = Partial<Pick<DeviceSettings,"label"|"signaling_origin"|"ssh">>;
+export type Connectivity = "local" | "relay";
+export type DeviceSettings = { label: string; mode: Connectivity; relay_origin: string | null; compute_priority: number };
+export type DevicePreferences = Partial<Pick<DeviceSettings,"label"|"relay_origin"|"mode">>;
 export type Device = { stage_id: string; label: string | null; error_code?: string | null; connection: { status: string; route: string | null; generation: number; retry_at_ms: number } };
-export type StageInfo = { stage_id: string; account_id: string | null; name: string | null; settings: DeviceSettings; address: string | null; primary_actor_id: string; core: CoreStatus | null; public_login: PublicLoginStatus };
+export type StageInfo = { stage_id: string; account_id: string | null; name: string | null; settings: DeviceSettings; primary_actor_id: string; core: CoreStatus | null; public_login: PublicLoginStatus };
 export const getStage = (options?: FetchOptions) => request<StageInfo>("/v1/stage", options);
 export const getDevices = (options: FetchOptions & { after?: string } = {}) => request<Page<Device,string>>(
   `/v1/stage/devices?limit=64${options.after ? `&after=${encodeURIComponent(options.after)}` : ""}`, options,

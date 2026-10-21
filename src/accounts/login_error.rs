@@ -3,7 +3,7 @@ use crate::stage::StageError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum LoginError {
-    #[error("Configure a public connection service or connect to a device on the local network")]
+    #[error("Configure a public connection service")]
     ConnectionRequired,
     #[error("Cannot reach the public connection service")]
     RelayUnavailable,

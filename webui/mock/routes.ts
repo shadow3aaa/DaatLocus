@@ -51,7 +51,7 @@ export type AccountInfo = {
   account_id: string | null;
   name: string | null;
   can_create: boolean;
-  signaling_origin: string | null;
+  relay_origin: string | null;
 };
 
 const ACCESS: Access = {
@@ -249,7 +249,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
       account_id: ACCOUNT_ID,
       name: ACCOUNT_NAME,
       can_create: true,
-      signaling_origin: null,
+      relay_origin: null,
     };
     return json(account);
   }
@@ -280,7 +280,6 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
       account_id: ACCOUNT_ID,
       name: ACCOUNT_NAME,
       settings: { ...stageSettings },
-      address: `127.0.0.1:${MOCK_PORT}`,
       primary_actor_id: ROOT_ACTOR_ID,
       core: coreStatus(),
       public_login: publicLogin(),
@@ -304,8 +303,8 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     if (!body) return invalidRequest("Expected a JSON body");
     const merged: DeviceSettings = { ...stageSettings };
     if (typeof body.label === "string") merged.label = body.label;
-    if (body.signaling_origin === null || typeof body.signaling_origin === "string") merged.signaling_origin = body.signaling_origin;
-    if (body.ssh && typeof body.ssh === "object") merged.ssh = { ...merged.ssh, ...(body.ssh as DeviceSettings["ssh"]) };
+    if (body.relay_origin === null || typeof body.relay_origin === "string") merged.relay_origin = body.relay_origin;
+    if (body.mode === "local" || body.mode === "relay") merged.mode = body.mode;
     Object.assign(stageSettings, merged);
     return json({ ...stageSettings });
   }

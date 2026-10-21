@@ -626,15 +626,7 @@ async fn send_message(
     Json(request): Json<SendRequest>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     access_actor(&state, &headers, &actor, true).await?;
-    if actor == crate::stage::shared::ACTOR_ID
-        && !state.stage.as_ref().is_some_and(|runtime| {
-            runtime
-                .core
-                .read()
-                .as_ref()
-                .is_some_and(|core| core.accepts_input())
-        })
-    {
+    if actor == crate::stage::shared::ACTOR_ID && !state.system.core_permitted() {
         return Err(ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "core_not_ready",

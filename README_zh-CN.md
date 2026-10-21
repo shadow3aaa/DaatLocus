@@ -14,7 +14,8 @@ TUI、Workflow 或 Sleep 框架。
 
 WebUI 提供消息、附件、排队引导、紧凑活动与结果。浮动菜单承载账号和设置，另一角
 保留对话搜索。界面支持中英文，默认跟随浏览器，也可在个性化中手动选择。
-访客分享与公开隧道已移除，同账号设备使用认证 P2P 通道。
+访客分享与公开隧道已移除。账号支持纯本地运行，或通过公网中转连接同账号设备；
+中转通道保留设备认证与端到端加密，执行与协调仍属于设备。
 
 ## 运行
 
@@ -29,8 +30,8 @@ cargo run -- serve
 先独立构建共享 WebUI 及认证 WASM，Cargo 再以 zstd 压缩嵌入 dist；Rust 构建脚本
 不调用前端工具链。纯无头服务关闭默认 feature。打开输出地址，在本机创建账号，或在新设备
 使用相同账号名和密码登录。OPAQUE 将密码留在客户端，浏览器使用 HttpOnly cookie。
-`--profile NAME` 隔离本机账号。设备发现、连接和同步自动运行；LAN 与 SSH 不依赖
-外部服务，CF Worker/DO 仅是可选的公网会合与信令途径。
+`--profile NAME` 隔离本机账号。纯本地模式不启动跨设备基础设施；互联模式通过公网 WSS
+中转自动发现、连接和同步。中转可部署在 CF Worker/DO 或普通服务器。
 
 `daat-locus --help` 显示原有字符 Logo 与 clap 帮助。`serve` 前台运行；
 `start --open`、`status --json`、`stop`、`restart` 通过本机 OS-owner IPC 管理

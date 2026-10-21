@@ -38,7 +38,7 @@ export function AccessGate({ onAuthenticated }: { onAuthenticated(): void | Prom
     setError(null);
     void accountInfo().then(value => {
       if (!live) return;
-      setInfo(value); setConnection(value.signaling_origin ?? "");
+      setInfo(value); setConnection(value.relay_origin ?? "");
       if (value.name) setName(value.name);
     }).catch(cause => { if (live) setError(accountErrorCode(cause)); });
     return () => { live = false; };

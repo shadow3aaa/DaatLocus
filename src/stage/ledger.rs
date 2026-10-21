@@ -202,10 +202,7 @@ pub(crate) fn grant(tx: &Transaction<'_>, peer: &PeerRecord, actor: &str) -> Res
 pub fn inherit_account_ownership(store: &ActorStore, parent: &str, actor: &str) -> Result<()> {
     store.stage_transaction(|tx|{
         tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
-        let account:Option<String>=if parent==super::shared::ACTOR_ID {
-            let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_meta')",[],|r|r.get(0))?;
-            if exists {tx.query_row("SELECT value FROM core_meta WHERE key='account'",[],|r|r.get(0)).optional()?}else{None}
-        }else {tx.query_row("SELECT account FROM stage_account_actors WHERE actor=?1",[parent],|r|r.get(0)).optional()?};
+        let account:Option<String>=tx.query_row("SELECT account FROM stage_account_actors WHERE actor=?1",[parent],|r|r.get(0)).optional()?;
         if let Some(account)=account{tx.execute("INSERT INTO stage_account_actors VALUES(?1,?2)",params![actor,account])?;}Ok(())
     })
 }
@@ -216,11 +213,13 @@ pub(crate) fn initialize_account_ownership(store: &ActorStore, account: &str) ->
         let trusted: TrustRoot = decode(tx.query_row(
             "SELECT value FROM stage_meta WHERE key='root'", [], |r| r.get(0),
         )?)?;
-        let core: String = tx.query_row(
-            "SELECT value FROM core_meta WHERE key='account'", [], |r| r.get(0),
-        )?;
-        if trusted.group_id != account || core != account {
+        if trusted.group_id != account {
             return Err(StageError::Forbidden("Actor account does not match device trust"));
+        }
+        let shared:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_meta')",[],|row|row.get(0))?;
+        if shared {
+            let bound:Option<String>=tx.query_row("SELECT value FROM core_meta WHERE key='account'",[],|row|row.get(0)).optional()?;
+            if bound.as_deref().is_some_and(|bound|bound!=account){return Err(StageError::Forbidden("Core belongs to another account"));}
         }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
         tx.execute(

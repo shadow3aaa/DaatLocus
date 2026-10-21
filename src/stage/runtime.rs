@@ -4,35 +4,18 @@ use super::{
     channel::{PeerChannel, SendScope},
     connection::{LinkState, Route},
     peer::{PeerHandle, PeerLink},
-    transport::{lan::LanDiscovery, ssh::SshTarget, tls},
+    transport::tls,
 };
 use parking_lot::{Mutex, RwLock};
 use rusqlite::params;
 use std::{
     collections::{HashMap, HashSet},
-    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::{sync::Notify, task::JoinHandle};
-#[derive(Default)]
-struct Candidates(Vec<(SocketAddr, std::time::Instant)>);
-impl Candidates {
-    fn add(&mut self, address: SocketAddr) {
-        self.0
-            .retain(|(old, seen)| *old != address && seen.elapsed().as_secs() < 120);
-        self.0.push((address, std::time::Instant::now()));
-        if self.0.len() > 16 {
-            self.0.remove(0);
-        }
-    }
-    fn live(&mut self) -> Vec<SocketAddr> {
-        self.0.retain(|(_, seen)| seen.elapsed().as_secs() < 120);
-        self.0.iter().map(|(address, _)| *address).collect()
-    }
-}
 #[cfg(not(target_os = "android"))]
 fn network_addresses(
     networks: &sysinfo::Networks,
@@ -47,30 +30,6 @@ fn network_addresses(
         })
         .collect()
 }
-fn dual_stack_candidates(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
-    let mut seen = HashSet::new();
-    let mut ipv6 = std::collections::VecDeque::new();
-    let mut ipv4 = std::collections::VecDeque::new();
-    for address in addresses {
-        if seen.insert(address) {
-            if address.is_ipv6() {
-                ipv6.push_back(address);
-            } else {
-                ipv4.push_back(address);
-            }
-        }
-    }
-    let mut ordered = Vec::new();
-    while ordered.len() < 8 && (!ipv6.is_empty() || !ipv4.is_empty()) {
-        for family in [&mut ipv6, &mut ipv4] {
-            if let Some(address) = family.pop_front() {
-                ordered.push(address);
-            }
-        }
-    }
-    ordered.truncate(8);
-    ordered
-}
 pub struct Runtime {
     pub host: Arc<Host>,
     account_network: tokio::sync::Mutex<Option<Arc<crate::accounts::network::Network>>>,
@@ -80,8 +39,6 @@ pub struct Runtime {
     errors: RwLock<HashMap<StageId, String>>,
     handles: RwLock<HashMap<StageId, PeerHandle>>,
     states: RwLock<HashMap<StageId, LinkState>>,
-    candidates: RwLock<HashMap<StageId, Candidates>>,
-    attempts: Mutex<HashSet<StageId>>,
     wanted: RwLock<HashSet<StageId>>,
     dialing: Mutex<HashMap<StageId, Arc<tokio::sync::Mutex<()>>>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -89,10 +46,8 @@ pub struct Runtime {
     stopped: AtomicBool,
     network_epoch: AtomicU64,
     wake: Notify,
-    signal_wake: Notify,
-    pub(crate) signals: RwLock<Option<tokio::sync::mpsc::Sender<super::signaling::SignalCommand>>>,
-    pub address: RwLock<Option<SocketAddr>>,
-    listener: RwLock<Option<Arc<tokio::net::TcpListener>>>,
+    relay_wake: Notify,
+    pub(crate) relay_tx: RwLock<Option<tokio::sync::mpsc::Sender<super::relay::Command>>>,
     public_connection: Mutex<Option<JoinHandle<()>>>,
 }
 impl Runtime {
@@ -102,7 +57,6 @@ impl Runtime {
     /// OS interface changes and native resume are hints, never trust grants.
     pub fn connectivity_changed(self: &Arc<Self>) {
         self.network_epoch.fetch_add(1, Ordering::AcqRel);
-        self.candidates.write().clear();
         for state in self.states.write().values_mut() {
             if state.status != super::connection::ConnectionStatus::Online {
                 state.status = super::connection::ConnectionStatus::Unreachable;
@@ -113,7 +67,7 @@ impl Runtime {
         for peer in peers {
             self.probe(peer);
         }
-        self.signal_changed();
+        self.relay_changed();
         self.wake.notify_waiters();
         tracing::debug!("Network changed; refreshing authenticated device paths");
     }
@@ -151,24 +105,21 @@ impl Runtime {
             .get(&peer)
             .is_some_and(PeerHandle::is_connected)
     }
-    pub(crate) fn clear_signal(&self) {
-        self.signals.write().take();
+    pub(crate) fn clear_relay(&self) {
+        self.relay_tx.write().take();
     }
-    pub(crate) fn install_signal(
-        &self,
-        tx: tokio::sync::mpsc::Sender<super::signaling::SignalCommand>,
-    ) {
-        *self.signals.write() = Some(tx);
+    pub(crate) fn install_relay(&self, tx: tokio::sync::mpsc::Sender<super::relay::Command>) {
+        *self.relay_tx.write() = Some(tx);
         for peer in self.wanted.read().iter().copied() {
             self.fresh_candidate(peer);
         }
         self.wake.notify_waiters();
     }
-    pub(crate) async fn signal_notification(&self) {
-        self.signal_wake.notified().await;
+    pub(crate) async fn relay_notification(&self) {
+        self.relay_wake.notified().await;
     }
-    pub(crate) fn signal_changed(&self) {
-        self.signal_wake.notify_one();
+    pub(crate) fn relay_changed(&self) {
+        self.relay_wake.notify_one();
         self.wake.notify_waiters();
         if let Ok(network) = self.account_network.try_lock()
             && let Some(network) = network.as_ref()
@@ -194,8 +145,6 @@ impl Runtime {
             errors: RwLock::new(HashMap::new()),
             handles: RwLock::new(HashMap::new()),
             states: RwLock::new(HashMap::new()),
-            candidates: RwLock::new(HashMap::new()),
-            attempts: Mutex::new(HashSet::new()),
             wanted: RwLock::new(HashSet::new()),
             dialing: Mutex::new(HashMap::new()),
             tasks: Mutex::new(vec![]),
@@ -203,10 +152,8 @@ impl Runtime {
             stopped: AtomicBool::new(false),
             network_epoch: AtomicU64::new(0),
             wake: Notify::new(),
-            signal_wake: Notify::new(),
-            signals: RwLock::new(None),
-            address: RwLock::new(None),
-            listener: RwLock::new(None),
+            relay_wake: Notify::new(),
+            relay_tx: RwLock::new(None),
             public_connection: Mutex::new(None),
         })
     }
@@ -218,42 +165,33 @@ impl Runtime {
     }
     pub fn connection_error_code(&self, peer: StageId) -> Option<&'static str> {
         self.last_error(peer).map(|error| {
-            if error.contains("Signaling") {
-                "device_signaling_unavailable"
+            if error.contains("Relay") {
+                "device_relay_unavailable"
             } else if error.contains("timed out") || error.contains("expired") {
                 "device_connection_timeout"
-            } else if error.contains("Public peer is not available") {
+            } else if error.contains("Relay peer is offline") {
                 "device_peer_offline"
             } else {
                 "device_connection_failed"
             }
         })
     }
-    pub(crate) fn signaling_failed(&self, error: &StageError) {
+    pub(crate) fn relay_failed(&self, error: &StageError) {
         for peer in self.wanted.read().iter().copied().collect::<Vec<_>>() {
-            let state = self.state(peer);
-            if !self.connected(peer) && (state.route == Some(Route::P2p) || state.route.is_none()) {
-                self.p2p_failed(peer, error);
-            }
+            self.peer_failed(peer, error);
         }
     }
-    pub(crate) fn begin_p2p(&self, peer: StageId) -> Result<()> {
-        let mut states = self.states.write();
-        let state = states.entry(peer).or_default();
-        if state.status == super::connection::ConnectionStatus::Connecting
-            && (state.route != Some(Route::Lan) || self.host.settings().ssh.contains_key(&peer))
-        {
-            return Err(StageError::Unavailable(
-                "Device connection is already in progress",
-            ));
-        }
-        state.attempt(Route::P2p, chrono::Utc::now().timestamp_millis(), false)
+    pub(crate) fn begin_relay(&self, peer: StageId) -> Result<()> {
+        self.states
+            .write()
+            .entry(peer)
+            .or_default()
+            .attempt(Route::Relay, chrono::Utc::now().timestamp_millis())
     }
-    pub(crate) fn p2p_failed(&self, peer: StageId, error: &StageError) {
+    pub(crate) fn peer_failed(&self, peer: StageId, error: &StageError) {
         if self.connected(peer) {
             return;
         }
-        tracing::debug!(%peer, reason = %error, "Public device connection failed");
         self.errors.write().insert(peer, error.to_string());
         self.states
             .write()
@@ -282,7 +220,9 @@ impl Runtime {
         self.wake.notify_waiters();
     }
     pub async fn start(self: &Arc<Self>) -> Result<()> {
-        self.account_network().await?;
+        if self.host.settings().mode == super::host::Connectivity::Relay {
+            self.account_network().await?;
+        }
         if self.host.account_id().is_none() {
             return Ok(());
         }
@@ -303,6 +243,28 @@ impl Runtime {
         self.host.identity()?;
         self.host.enrollment()?;
         super::reset::cleanup(&self.host.system)?;
+        if settings.mode == super::host::Connectivity::Local {
+            self.host
+                .system
+                .install_local_core()
+                .map_err(|_| StageError::Unavailable("Cannot initialize local Core"))?;
+            let account = self
+                .host
+                .account_id()
+                .ok_or(StageError::Unavailable("Account unavailable"))?;
+            super::ledger::initialize_account_ownership(self.host.system.store(), &account)?;
+            self.host
+                .system
+                .ensure_core_actor()
+                .map_err(|_| StageError::Unavailable("Cannot initialize local Core"))?;
+            let own = self.clone();
+            self.spawn(async move {
+                own.supervise().await;
+            });
+            return Ok(());
+        }
+        self.host.system.disable_local_core();
+
         if self
             .host
             .configurations
@@ -352,57 +314,6 @@ impl Runtime {
             *self.core.write() = Some(core.clone());
             *self.core_task.lock() = Some(tokio::spawn(core.run()));
         }
-        let prepared = self.listener.read().clone();
-        let listener = if let Some(listener) = prepared {
-            listener
-        } else {
-            match tokio::net::TcpListener::bind(&settings.listen).await {
-                Ok(listener) => Arc::new(listener),
-                Err(error) => {
-                    self.running.store(false, Ordering::Release);
-                    return Err(error.into());
-                }
-            }
-        };
-        *self.listener.write() = Some(listener.clone());
-        let actual = listener.local_addr()?;
-        *self.address.write() = Some(actual);
-        if settings
-            .listen
-            .parse::<SocketAddr>()
-            .map_err(|_| StageError::Invalid("Invalid Stage listener"))?
-            .port()
-            == 0
-        {
-            let mut persisted = settings.clone();
-            persisted.listen = actual.to_string();
-            self.host.save_settings(persisted)?;
-        }
-        let own = self.clone();
-        self.tasks.lock().push(tokio::spawn(async move {
-            let permits=Arc::new(tokio::sync::Semaphore::new(8));
-            while !own.stopped.load(Ordering::Acquire){let connection=tokio::select!{result=listener.accept()=>result,_=own.wake.notified()=>{if own.stopped.load(Ordering::Acquire){break;}continue;}};
-                let Ok((socket,_))=connection else{break;};let Ok(permit)=permits.clone().try_acquire_owned()else{continue;};let owner=own.clone();
-                own.tasks.lock().push(tokio::spawn(async move{let _permit=permit;let _=owner.accept(socket).await;}));
-            }
-        }));
-        {
-            let known = StageLedger::attach(self.host.system.store(), self.host.local)
-                .peers(chrono::Utc::now().timestamp_millis())?
-                .iter()
-                .map(|peer| peer.device.stage_id)
-                .collect();
-            let mut discovery =
-                LanDiscovery::start(self.host.local, actual, known, settings.interfaces.clone())?;
-            let own = self.clone();
-            self.tasks.lock().push(tokio::spawn(async move{while !own.stopped.load(Ordering::Acquire){tokio::select! {
-                candidate=discovery.next()=>match candidate{Ok(candidate)=>{own.discovered(candidate);},Err(_)=>break},
-                _=own.wake.notified()=>{let known=StageLedger::attach(own.host.system.store(),own.host.local).peers(chrono::Utc::now().timestamp_millis()).unwrap_or_default().iter().map(|peer|peer.device.stage_id).collect();let _=discovery.update_known(known);}
-            }}}));
-        }
-        for peer in self.host.settings().ssh.keys() {
-            self.wanted.write().insert(*peer);
-        }
         let own = self.clone();
         self.tasks.lock().push(tokio::spawn(async move {
             own.supervise().await;
@@ -436,10 +347,23 @@ impl Runtime {
                 }
             });
         }
-        if settings.signaling_origin.is_some() {
+        if settings.relay_origin.is_some() {
             self.ensure_public_connection();
         }
         Ok(())
+    }
+    pub fn core_status(&self) -> Option<serde_json::Value> {
+        if self.host.settings().mode == super::host::Connectivity::Local
+            && self.host.account_id().is_some()
+            && self.host.system.local_core()
+        {
+            let model_ready = self.host.system.config().validate().is_ok();
+            Some(
+                serde_json::json!({"worker_stage_id":self.host.local,"epoch":0,"synchronized":true,"ready":self.host.system.core_permitted(),"model_ready":model_ready,"state":if model_ready{"local"}else{"model_required"},"error_code":null,"config_revision":null}),
+            )
+        } else {
+            self.core.read().as_ref().map(|core| core.status())
+        }
     }
     pub async fn public_login_status(
         &self,
@@ -450,7 +374,7 @@ impl Runtime {
             .map(|network| network.publication_status())
             .unwrap_or_else(|| {
                 crate::accounts::public_connection::PublicationStatus::initial(
-                    self.host.settings().signaling_origin.is_some(),
+                    self.host.settings().relay_origin.is_some(),
                     self.host.account_id().is_some(),
                 )
             })
@@ -466,36 +390,12 @@ impl Runtime {
         *network = Some(created.clone());
         Ok(created)
     }
-    pub fn account_candidate(&self, peer: StageId, address: SocketAddr) {
-        self.candidates
-            .write()
-            .entry(peer)
-            .or_default()
-            .add(address);
-        self.fresh_candidate(peer);
-        self.want(peer);
-    }
     fn fresh_candidate(&self, peer: StageId) {
-        let mut states = self.states.write();
-        if let Some(state) = states.get_mut(&peer)
+        if let Some(state) = self.states.write().get_mut(&peer)
             && state.status == super::connection::ConnectionStatus::Unreachable
         {
             state.retry_at_ms = 0;
         }
-    }
-    fn discovered(self: &Arc<Self>, candidate: super::transport::lan::Candidate) {
-        if candidate.addresses.is_empty() {
-            self.candidates.write().remove(&candidate.stage);
-            self.probe(candidate.stage);
-        } else {
-            let mut addresses = Candidates::default();
-            for address in candidate.addresses {
-                addresses.add(address);
-            }
-            self.candidates.write().insert(candidate.stage, addresses);
-            self.fresh_candidate(candidate.stage);
-        }
-        self.want(candidate.stage);
     }
     pub(crate) fn probe(self: &Arc<Self>, peer: StageId) {
         let Some(handle) = self.handles.read().get(&peer).cloned() else {
@@ -515,100 +415,77 @@ impl Runtime {
             }
         });
     }
-    fn dial_failed(&self, peer: StageId, error: &StageError) {
-        if !self.connected(peer) {
-            let state = self.state(peer);
-            if state.status == super::connection::ConnectionStatus::Connecting
-                && state.route == Some(Route::P2p)
-            {
-                // A losing LAN probe cannot mark an active public attempt offline.
-                return;
-            }
-            self.errors.write().insert(peer, error.to_string());
-            self.states
-                .write()
-                .entry(peer)
-                .or_default()
-                .failed(chrono::Utc::now().timestamp_millis());
-        }
-        self.wake.notify_waiters();
-    }
-    async fn accept(self: Arc<Self>, socket: tokio::net::TcpStream) -> Result<()> {
-        let network_epoch = self.network_generation();
-        let peers = StageLedger::attach(self.host.system.store(), self.host.local)
-            .peers(chrono::Utc::now().timestamp_millis())?;
-        let profiles = peers
-            .iter()
-            .map(|peer| peer.device.clone())
-            .collect::<Vec<_>>();
-        if profiles.is_empty() {
-            return Err(StageError::Forbidden(
-                "No authenticated devices are enrolled",
-            ));
-        }
-        let identity = self.host.identity()?;
-        let acceptor = tls::server(&identity, &profiles)?;
-        let mut stream = tls::accept(&acceptor, socket).await?;
-        let peer = tls::identify_client(&stream, &profiles)?;
-        let preface = if !super::connection::automatic_dialer(self.host.local, peer.stage_id()) {
-            Some(super::connection::read_preface(&mut stream).await?)
-        } else {
-            None
-        };
-        let lock = self.peer_lock(peer.stage_id());
-        // If both ends dial simultaneously, the lower Stage's outgoing channel
-        // wins. Rejecting its competing incoming channel releases the other
-        // end's outgoing lock instead of deadlocking both handshakes.
-        let _guard = if self.host.local < peer.stage_id() {
-            lock.try_lock()
-                .map_err(|_| StageError::Conflict("Concurrent outgoing channel has priority"))?
-        } else {
-            lock.lock().await
-        };
-        if self.network_generation() != network_epoch {
-            return Err(StageError::Unavailable(
-                "Network changed during native negotiation",
-            ));
-        }
-        if self.handles.read().contains_key(&peer.stage_id()) {
-            return Err(StageError::Conflict(
-                "Healthy peer channel is already connected",
-            ));
-        }
-        let binding = hex::encode(
-            stream
-                .get_ref()
-                .1
-                .export_keying_material([0; 32], b"EXPORTER-DaatLocus-Stage-v1", None)
-                .map_err(|_| StageError::Forbidden("TLS exporter unavailable"))?,
-        );
+    pub(crate) async fn establish_relay(
+        self: &Arc<Self>,
+        peer: StageId,
+        socket: tokio::io::DuplexStream,
+        outgoing: bool,
+        network_epoch: u64,
+    ) -> Result<()> {
         let ledger = StageLedger::attach(self.host.system.store(), self.host.local);
-        let (generation, _) = super::connection::handshake(
-            &mut stream,
-            &identity,
-            &ledger,
-            &peer,
-            &binding,
-            chrono::Utc::now().timestamp_millis(),
-            preface,
-        )
-        .await?;
-        if self.network_generation() != network_epoch {
-            return Err(StageError::Unavailable(
-                "Network changed during native negotiation",
-            ));
+        let record = ledger.peer(peer, chrono::Utc::now().timestamp_millis())?;
+        let identity = self.host.identity()?;
+        let lock = self.peer_lock(peer);
+        let _guard = lock.lock().await;
+        if self.connected(peer) {
+            return Err(StageError::Conflict("Device channel is already connected"));
         }
-        let owner = self.clone();
-        let authenticated = peer.clone();
-        let format = if stream.get_ref().1.alpn_protocol() == Some(super::transport::wire::ALPN) {
-            super::transport::wire::Format::BinaryZstd
+        if self.network_generation() != network_epoch || self.is_stopped() {
+            return Err(StageError::Unavailable("Relay connection changed"));
+        }
+        if outgoing {
+            let connector = tls::client(&identity, &record.device)?;
+            let mut stream = tls::connect(&connector, peer, socket).await?;
+            self.authenticate_stream(peer, &mut stream, &record.device, &identity, &ledger, None)
+                .await?;
+            if self.network_generation() != network_epoch || self.is_stopped() {
+                return Err(StageError::Unavailable("Relay connection changed"));
+            }
+            let verified = tls::identify_server(&stream, &record.device)?;
+            let generation = ledger
+                .peer(peer, chrono::Utc::now().timestamp_millis())?
+                .generation;
+            self.attach_stream(verified, stream, generation, Route::Relay);
         } else {
-            super::transport::wire::Format::Json
-        };
-        let channel = PeerChannel::stream_format(peer, stream, format, move |frame, scope| {
-            owner.authorize_send(&authenticated, frame, scope)
-        });
-        self.attach(channel, generation, Route::Lan);
+            let acceptor = tls::server(&identity, std::slice::from_ref(&record.device))?;
+            let mut stream = tls::accept(&acceptor, socket).await?;
+            let verified = tls::identify_client(&stream, std::slice::from_ref(&record.device))?;
+            let binding = hex::encode(
+                stream
+                    .get_ref()
+                    .1
+                    .export_keying_material([0; 32], b"EXPORTER-DaatLocus-Stage-v1", None)
+                    .map_err(|_| StageError::Forbidden("TLS exporter unavailable"))?,
+            );
+            let (generation, _) = super::connection::handshake(
+                &mut stream,
+                &identity,
+                &ledger,
+                &verified,
+                &binding,
+                chrono::Utc::now().timestamp_millis(),
+                None,
+            )
+            .await?;
+            if self.network_generation() != network_epoch || self.is_stopped() {
+                return Err(StageError::Unavailable("Relay connection changed"));
+            }
+            let format = if stream.get_ref().1.alpn_protocol() == Some(super::transport::wire::ALPN)
+            {
+                super::transport::wire::Format::BinaryZstd
+            } else {
+                super::transport::wire::Format::Json
+            };
+            let owner = self.clone();
+            let check = verified.clone();
+            self.attach(
+                PeerChannel::stream_format(verified, stream, format, move |frame, scope| {
+                    owner.authorize_send(&check, frame, scope)
+                }),
+                generation,
+                Route::Relay,
+            );
+        }
         Ok(())
     }
     pub(crate) fn peer_lock(&self, peer: StageId) -> Arc<tokio::sync::Mutex<()>> {
@@ -617,163 +494,6 @@ impl Runtime {
             .entry(peer)
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
-    }
-    pub async fn dial_tcp(
-        self: &Arc<Self>,
-        peer: StageId,
-        address: SocketAddr,
-        ssh: Option<SshTarget>,
-    ) -> Result<()> {
-        self.dial(peer, vec![address], ssh).await
-    }
-    async fn dial(
-        self: &Arc<Self>,
-        peer: StageId,
-        addresses: Vec<SocketAddr>,
-        ssh: Option<SshTarget>,
-    ) -> Result<()> {
-        let started = std::time::Instant::now();
-        let network_epoch = self.network_generation();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(12),
-            self.dial_prepared(peer, addresses, ssh),
-        )
-        .await
-        .map_err(|_| StageError::Unavailable("Device connection timed out"))
-        .and_then(|result| result);
-        if let Err(error) = &result
-            && self.network_generation() == network_epoch
-        {
-            self.dial_failed(peer, error);
-        }
-        tracing::debug!(%peer, phase = "native_dial", elapsed_ms = started.elapsed().as_millis() as u64, success = result.is_ok(), "Device connection phase completed");
-        result
-    }
-    async fn dial_prepared(
-        self: &Arc<Self>,
-        peer: StageId,
-        addresses: Vec<SocketAddr>,
-        ssh: Option<SshTarget>,
-    ) -> Result<()> {
-        let network_epoch = self.network_generation();
-        if self.connected(peer) {
-            return Ok(());
-        }
-        let ledger = StageLedger::attach(self.host.system.store(), self.host.local);
-        let record = ledger.peer(peer, chrono::Utc::now().timestamp_millis())?;
-        let identity = self.host.identity()?;
-        let connector = tls::client(&identity, &record.device)?;
-        let route = if ssh.is_some() {
-            Route::Ssh
-        } else {
-            Route::Lan
-        };
-        self.states.write().entry(peer).or_default().attempt(
-            route,
-            chrono::Utc::now().timestamp_millis(),
-            self.host.settings().ssh.contains_key(&peer),
-        )?;
-        if let Some(target) = ssh {
-            let socket = super::transport::ssh::open(&target)?;
-            let mut stream = tls::connect(&connector, peer, socket).await?;
-            let preface = if !super::connection::automatic_dialer(self.host.local, peer) {
-                Some(super::connection::read_preface(&mut stream).await?)
-            } else {
-                None
-            };
-            let lock = self.peer_lock(peer);
-            let _guard = lock.lock().await;
-            if self.network_generation() != network_epoch {
-                return Err(StageError::Unavailable(
-                    "Network changed during native negotiation",
-                ));
-            }
-            if self.connected(peer) {
-                return Ok(());
-            }
-            self.authenticate_stream(
-                peer,
-                &mut stream,
-                &record.device,
-                &identity,
-                &ledger,
-                preface,
-            )
-            .await?;
-            if self.network_generation() != network_epoch {
-                return Err(StageError::Unavailable(
-                    "Network changed during native negotiation",
-                ));
-            }
-            let verified = tls::identify_server(&stream, &record.device)?;
-            let generation = ledger
-                .peer(peer, chrono::Utc::now().timestamp_millis())?
-                .generation;
-            self.attach_stream(verified, stream, generation, route);
-        } else {
-            use futures_util::StreamExt;
-            let mut attempts = futures_util::stream::iter(dual_stack_candidates(addresses))
-                .map(|address| {
-                    let connector = &connector;
-                    async move {
-                        tokio::time::timeout(std::time::Duration::from_secs(4), async {
-                            let socket = super::transport::lan::connect(address).await?;
-                            tls::connect(connector, peer, socket).await
-                        })
-                        .await
-                        .map_err(|_| StageError::Unavailable("LAN connection timed out"))?
-                    }
-                })
-                .buffer_unordered(4);
-            let mut last = StageError::Unavailable("No reachable LAN address");
-            let mut connected = None;
-            while let Some(result) = attempts.next().await {
-                match result {
-                    Ok(stream) => {
-                        connected = Some(stream);
-                        break;
-                    }
-                    Err(error) => last = error,
-                }
-            }
-            drop(attempts);
-            let mut stream = connected.ok_or(last)?;
-            let preface = if !super::connection::automatic_dialer(self.host.local, peer) {
-                Some(super::connection::read_preface(&mut stream).await?)
-            } else {
-                None
-            };
-            let lock = self.peer_lock(peer);
-            let _guard = lock.lock().await;
-            if self.network_generation() != network_epoch {
-                return Err(StageError::Unavailable(
-                    "Network changed during native negotiation",
-                ));
-            }
-            if self.connected(peer) {
-                return Ok(());
-            }
-            self.authenticate_stream(
-                peer,
-                &mut stream,
-                &record.device,
-                &identity,
-                &ledger,
-                preface,
-            )
-            .await?;
-            if self.network_generation() != network_epoch {
-                return Err(StageError::Unavailable(
-                    "Network changed during native negotiation",
-                ));
-            }
-            let verified = tls::identify_server(&stream, &record.device)?;
-            let generation = ledger
-                .peer(peer, chrono::Utc::now().timestamp_millis())?
-                .generation;
-            self.attach_stream(verified, stream, generation, route);
-        }
-        Ok(())
     }
     async fn authenticate_stream<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         &self,
@@ -958,39 +678,9 @@ impl Runtime {
                 if self.state(peer).status == super::connection::ConnectionStatus::Connecting {
                     continue;
                 }
-                let ssh = self.host.settings().ssh.get(&peer).cloned();
-                let addresses = self
-                    .candidates
-                    .write()
-                    .get_mut(&peer)
-                    .map(Candidates::live)
-                    .unwrap_or_default();
-                if ssh.is_none() && addresses.is_empty() {
-                    if self.host.settings().signaling_origin.is_some()
-                        && let Some(signal) = self.signals.read().clone()
-                    {
-                        let _ = signal.try_send(super::signaling::SignalCommand::Connect(peer));
-                    }
-                    continue;
+                if let Some(relay) = self.relay_tx.read().clone() {
+                    let _ = relay.try_send(super::relay::Command::Connect(peer));
                 }
-                if !self.attempts.lock().insert(peer) {
-                    continue;
-                }
-                let own = self.clone();
-                self.tasks.lock().push(tokio::spawn(async move {
-                    let allow_public = ssh.is_none();
-                    let dial = own.dial(peer, addresses, ssh);
-                    tokio::pin!(dial);
-                    tokio::select! {
-                        result = &mut dial => { if result.is_err() && allow_public { own.request_public_fallback(peer); } },
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(300)), if allow_public => {
-                            own.request_public_fallback(peer);
-                            let _ = dial.await;
-                        }
-                    };
-                    own.attempts.lock().remove(&peer);
-                    own.wake.notify_waiters();
-                }));
             }
             self.tasks.lock().retain(|task| !task.is_finished());
             let delay = self
@@ -1007,27 +697,6 @@ impl Runtime {
                 tokio::select! {_=wake=>{},_=changed=>{},_=tokio::time::sleep(std::time::Duration::from_secs(5))=>{}}
             }
         }
-    }
-    fn request_public_fallback(&self, peer: StageId) -> bool {
-        if self.host.settings().signaling_origin.is_none() {
-            return false;
-        }
-        let Some(signal) = self.signals.read().clone() else {
-            return false;
-        };
-        {
-            let mut states = self.states.write();
-            let state = states.entry(peer).or_default();
-            if state.route == Some(Route::Lan)
-                && state.status != super::connection::ConnectionStatus::Connecting
-            {
-                state.status = super::connection::ConnectionStatus::Unreachable;
-                state.retry_at_ms = 0;
-            }
-        }
-        signal
-            .try_send(super::signaling::SignalCommand::Connect(peer))
-            .is_ok()
     }
     pub async fn stop(&self) {
         self.stop_inner(true).await;
@@ -1096,8 +765,19 @@ impl Runtime {
             chrono::Utc::now().timestamp_millis(),
             &super::revocation::removed(self.host.system.store())?,
         )?;
-        let core = member
-            .can_enroll
+        let local = self.host.settings().mode == super::host::Connectivity::Local;
+        if local {
+            self.host
+                .system
+                .install_local_core()
+                .map_err(|_| StageError::Unavailable("Cannot restart local Core"))?;
+            let account = self
+                .host
+                .account_id()
+                .ok_or(StageError::Unavailable("Account unavailable"))?;
+            super::ledger::initialize_account_ownership(self.host.system.store(), &account)?;
+        }
+        let core = (member.can_enroll && !local)
             .then(|| super::shared_runtime::Controller::new(self))
             .transpose()?;
         if let Some(core) = &core {
@@ -1160,8 +840,8 @@ impl Runtime {
         self.stopped.store(true, Ordering::Release);
         self.running.store(false, Ordering::Release);
         self.wake.notify_waiters();
-        self.signal_wake.notify_waiters();
-        self.signals.write().take();
+        self.relay_wake.notify_waiters();
+        self.relay_tx.write().take();
         let public = self.public_connection.lock().take();
         if let Some(public) = public {
             public.abort();
@@ -1173,11 +853,9 @@ impl Runtime {
             let _ = task.await;
         }
         self.handles.write().clear();
-        self.attempts.lock().clear();
         // Online is a live-channel fact. Durable generations stay in the ledger.
         self.states.write().clear();
-        *self.address.write() = None;
-        self.listener.write().take();
+        self.host.system.disable_local_core();
     }
     pub async fn reconfigure(self: &Arc<Self>, settings: super::host::Settings) -> Result<()> {
         let _guard = self.host.lifecycle.lock().await;
@@ -1186,19 +864,19 @@ impl Runtime {
     pub async fn patch_settings(
         self: &Arc<Self>,
         label: Option<String>,
-        signaling_origin: Option<Option<String>>,
-        ssh: Option<std::collections::BTreeMap<StageId, SshTarget>>,
+        relay_origin: Option<Option<String>>,
+        mode: Option<super::host::Connectivity>,
     ) -> Result<super::host::Settings> {
         let _guard = self.host.lifecycle.lock().await;
         let mut settings = self.host.settings();
         if let Some(label) = label {
             settings.label = label;
         }
-        if let Some(origin) = signaling_origin {
-            settings.signaling_origin = origin;
+        if let Some(origin) = relay_origin {
+            settings.relay_origin = origin;
         }
-        if let Some(ssh) = ssh {
-            settings.ssh = ssh;
+        if let Some(mode) = mode {
+            settings.mode = mode;
         }
         self.reconfigure_prepared(settings).await?;
         Ok(self.host.settings())
@@ -1206,32 +884,38 @@ impl Runtime {
     async fn reconfigure_prepared(self: &Arc<Self>, settings: super::host::Settings) -> Result<()> {
         settings.validate()?;
         let old = self.host.settings();
-        let base_unchanged = old.listen == settings.listen && old.interfaces == settings.interfaces;
-        if base_unchanged {
+        if old.mode == settings.mode && old.relay_origin == settings.relay_origin {
             self.host.save_settings(settings)?;
-            for peer in self.host.settings().ssh.keys() {
-                self.wanted.write().insert(*peer);
-            }
-            self.ensure_public_connection();
-            self.signal_changed();
             return Ok(());
         }
-        let prepared = if self.host.account_id().is_some() {
-            if settings.listen == old.listen {
-                self.listener.read().clone()
-            } else {
-                Some(Arc::new(
-                    tokio::net::TcpListener::bind(&settings.listen).await?,
-                ))
+        if old.mode == super::host::Connectivity::Relay
+            && settings.mode == super::host::Connectivity::Local
+            && self.host.account_id().is_some()
+        {
+            let peers = StageLedger::attach(self.host.system.store(), self.host.local)
+                .peers(chrono::Utc::now().timestamp_millis())?;
+            if !peers.is_empty() {
+                return Err(StageError::Conflict(
+                    "A multi-device account cannot become purely local",
+                ));
             }
-        } else {
-            None
-        };
-        // Persist the complete candidate before interrupting a working transport.
-        // An OS/database permission failure leaves the old service untouched.
-        self.host.save_settings(settings)?;
+        }
+        self.host.prepare_settings(&settings)?;
         self.stop().await;
-        *self.listener.write() = prepared;
+        self.host
+            .system
+            .quiesce_core()
+            .await
+            .map_err(|_| StageError::Unavailable("Cannot stop Core during connection change"))?;
+        self.host
+            .system
+            .store()
+            .interrupt_actor(
+                super::shared::ACTOR_ID,
+                "Connection settings changed; uncertain effects were not replayed",
+            )
+            .map_err(|_| StageError::Unavailable("Cannot preserve interrupted Core input"))?;
+        self.host.publish_settings(settings);
         if let Err(error) = self.start().await {
             self.stop().await;
             self.host.save_settings(old)?;
@@ -1241,14 +925,14 @@ impl Runtime {
         Ok(())
     }
     fn ensure_public_connection(self: &Arc<Self>) {
-        if self.host.settings().signaling_origin.is_none() {
+        if self.host.settings().relay_origin.is_none() {
             return;
         }
         let mut task = self.public_connection.lock();
         if task.as_ref().is_none_or(JoinHandle::is_finished) {
             let runtime = self.clone();
             *task = Some(tokio::spawn(async move {
-                super::signaling::run(runtime).await;
+                super::relay::run(runtime).await;
             }));
         }
     }
@@ -1272,348 +956,4 @@ pub fn directory(host: &Host, peer: StageId) -> Result<Vec<RemoteActor>> {
         let rows=tx.prepare("SELECT record FROM stage_directory WHERE stage=?1 ORDER BY actor")?.query_map([peer.to_string()],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
         rows.into_iter().map(|value|serde_json::from_str(&value).map_err(|_|StageError::Invalid("Invalid Actor directory cache"))).collect()
     })
-}
-
-#[cfg(test)]
-mod fallback_tests {
-    use super::*;
-    async fn hosts() -> (tempfile::TempDir, Arc<Runtime>, Arc<Runtime>) {
-        let directory = tempfile::tempdir().unwrap();
-        let mut hosts = vec![];
-        for name in ["a", "b"] {
-            let system = crate::actors::ActorSystem::open_account_gated(
-                directory.path().join(name).join("actors"),
-                directory.path().join(name).join("workspace"),
-                crate::config::Config::default(),
-            )
-            .await
-            .unwrap();
-            hosts.push(Host::load(system).unwrap());
-        }
-        hosts[0].initialize(true).unwrap();
-        let request = hosts[1].initialize(false).unwrap();
-        let enrollment = hosts[0].enroll_authenticated_device(&request).unwrap();
-        hosts[1]
-            .join(enrollment, &hosts[0].account_id().unwrap())
-            .unwrap();
-        for host in &hosts {
-            let mut settings = host.settings();
-            settings.listen = "127.0.0.1:0".into();
-            host.save_settings(settings).unwrap();
-        }
-        (
-            directory,
-            Runtime::new(hosts[0].clone()),
-            Runtime::new(hosts[1].clone()),
-        )
-    }
-    #[tokio::test]
-    async fn crossed_lan_and_rtc_readiness_commit_only_the_selected_path() {
-        use crate::stage::transport::p2p::{Attempt, P2pChannel};
-        let (_directory, a, b) = hosts().await;
-        let (low, high) = if a.host.local < b.host.local {
-            (a, b)
-        } else {
-            (b, a)
-        };
-        let mut left = P2pChannel::new(vec![], true).await.unwrap();
-        let mut right = P2pChannel::new(vec![], true).await.unwrap();
-        let attempt = Attempt {
-            generation: 1,
-            nonce: uuid::Uuid::new_v4(),
-        };
-        let root = low.host.enrollment().unwrap().root;
-        let offer = left
-            .offer(
-                &low.host.identity().unwrap(),
-                &root,
-                high.host.local,
-                attempt,
-                chrono::Utc::now().timestamp_millis(),
-            )
-            .await
-            .unwrap();
-        right
-            .apply_signal(
-                &offer,
-                &low.host.identity().unwrap().profile(),
-                &root,
-                high.host.local,
-                attempt,
-                chrono::Utc::now().timestamp_millis(),
-            )
-            .await
-            .unwrap();
-        let answer = right
-            .answer(
-                &high.host.identity().unwrap(),
-                &root,
-                low.host.local,
-                attempt,
-                chrono::Utc::now().timestamp_millis(),
-            )
-            .await
-            .unwrap();
-        left.apply_signal(
-            &answer,
-            &high.host.identity().unwrap().profile(),
-            &root,
-            low.host.local,
-            attempt,
-            chrono::Utc::now().timestamp_millis(),
-        )
-        .await
-        .unwrap();
-        let (l, r) = tokio::join!(left.connected(), right.connected());
-        l.unwrap();
-        r.unwrap();
-        let lower = low.clone();
-        let left_finish =
-            tokio::spawn(
-                async move { super::super::signaling::finish(lower, left, attempt, 0).await },
-            );
-        let lock = low.peer_lock(high.host.local);
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while lock.try_lock().is_ok() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let lower = low.clone();
-        let upper = high.clone();
-        let native_dial =
-            tokio::spawn(async move { lower.dial_tcp(upper.host.local, address, None).await });
-        let (socket, _) = listener.accept().await.unwrap();
-        let upper = high.clone();
-        let native_accept = tokio::spawn(async move { upper.accept(socket).await });
-        // Give the upper peer's TLS candidate time to arrive first. It must
-        // leave its commit lock available for the path chosen by the lower peer.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let upper = high.clone();
-        let right_finish =
-            tokio::spawn(
-                async move { super::super::signaling::finish(upper, right, attempt, 0).await },
-            );
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            left_finish.await.unwrap().unwrap();
-            right_finish.await.unwrap().unwrap();
-            native_dial.await.unwrap().unwrap();
-            let _ = native_accept.await.unwrap();
-        })
-        .await
-        .expect("crossed transports deadlocked their commit locks");
-        assert!(low.connected(high.host.local) && high.connected(low.host.local));
-        assert_eq!(low.state(high.host.local).route, Some(Route::P2p));
-        assert_eq!(high.state(low.host.local).route, Some(Route::P2p));
-        assert_eq!(low.state(high.host.local).generation, 1);
-        assert_eq!(high.state(low.host.local).generation, 1);
-        low.stop_abruptly().await;
-        high.stop_abruptly().await;
-        low.host.system.shutdown().await;
-        high.host.system.shutdown().await;
-    }
-    #[tokio::test]
-    async fn stalled_lan_starts_public_dial_without_waiting_for_timeout() {
-        let (_directory, a, b) = hosts().await;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut settings = a.host.settings();
-        settings.signaling_origin = Some("wss://fixture.invalid".into());
-        a.host.save_settings(settings).unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        a.install_signal(tx);
-        a.account_candidate(b.host.local, listener.local_addr().unwrap());
-        let supervisor = tokio::spawn(a.clone().supervise());
-        let (stream, _) =
-            tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
-                .await
-                .unwrap()
-                .unwrap();
-        let command = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("public dialing waited for stalled LAN")
-            .unwrap();
-        assert!(
-            matches!(command,super::super::signaling::SignalCommand::Connect(peer) if peer==b.host.local)
-        );
-        assert!(
-            a.attempts.lock().contains(&b.host.local),
-            "LAN attempt should still be pending"
-        );
-        a.begin_p2p(b.host.local).unwrap();
-        let before = a.network_generation();
-        a.connectivity_changed();
-        assert!(a.network_generation() > before);
-        assert!(a.candidates.read().is_empty());
-        assert_eq!(a.state(b.host.local).retry_at_ms, 0);
-        supervisor.abort();
-        let _ = supervisor.await;
-        drop(stream);
-        a.stop_abruptly().await;
-        b.stop_abruptly().await;
-        a.host.system.shutdown().await;
-        b.host.system.shutdown().await;
-    }
-    #[tokio::test]
-    async fn loopback_candidates_reconnect_after_an_established_channel_is_lost() {
-        let (_directory, a, b) = hosts().await;
-        a.start().await.unwrap();
-        b.start().await.unwrap();
-        a.account_candidate(b.host.local, b.address.read().unwrap());
-        b.account_candidate(a.host.local, a.address.read().unwrap());
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while !a.connected(b.host.local) || !b.connected(a.host.local) {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("fixture links did not connect");
-        let generation = a.state(b.host.local).generation;
-        a.disconnect_peers();
-        b.disconnect_peers();
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while !a.connected(b.host.local)
-                || !b.connected(a.host.local)
-                || a.state(b.host.local).generation <= generation
-                || b.state(a.host.local).generation <= generation
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("established link did not recover from controlled loopback hints");
-        assert_eq!(
-            a.state(b.host.local).generation,
-            b.state(a.host.local).generation
-        );
-        a.stop_abruptly().await;
-        b.stop_abruptly().await;
-        a.host.system.shutdown().await;
-        b.host.system.shutdown().await;
-    }
-    #[tokio::test]
-    async fn failed_initial_dial_retries_without_actor_or_discovery_wakes() {
-        let (_directory, a, b) = hosts().await;
-        let endpoint = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = endpoint.local_addr().unwrap();
-        drop(endpoint);
-        let mut settings = b.host.settings();
-        settings.listen = address.to_string();
-        b.host.save_settings(settings).unwrap();
-        a.account_candidate(b.host.local, address);
-        let supervisor = tokio::spawn(a.clone().supervise());
-        tokio::time::timeout(std::time::Duration::from_secs(4), async {
-            while a.state(b.host.local).retries == 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        assert!(a.last_error(b.host.local).is_some());
-        b.start().await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_millis(2800), async {
-            while !a.connected(b.host.local) {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("dial failure did not schedule an independent retry");
-        supervisor.abort();
-        let _ = supervisor.await;
-        a.stop_abruptly().await;
-        b.stop_abruptly().await;
-        a.host.system.shutdown().await;
-        b.host.system.shutdown().await;
-    }
-    #[tokio::test]
-    async fn a_working_address_connects_while_other_addresses_stall_during_tls() {
-        let (_directory, a, b) = hosts().await;
-        b.start().await.unwrap();
-        let mut listeners = vec![];
-        let mut addresses = vec![];
-        for _ in 0..3 {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            addresses.push(listener.local_addr().unwrap());
-            listeners.push(listener);
-        }
-        addresses.push(b.address.read().unwrap());
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            a.dial(b.host.local, addresses, None),
-        )
-        .await
-        .expect("a stalled address blocked the working route")
-        .unwrap();
-        assert!(a.connected(b.host.local));
-        a.stop_abruptly().await;
-        b.stop_abruptly().await;
-        a.host.system.shutdown().await;
-        b.host.system.shutdown().await;
-        drop(listeners);
-    }
-    #[test]
-    fn discovery_candidates_expire_and_repeated_announcements_do_not_duplicate_addresses() {
-        let address = "127.0.0.1:12345".parse().unwrap();
-        let mut candidates = Candidates(vec![(
-            address,
-            std::time::Instant::now() - std::time::Duration::from_secs(121),
-        )]);
-        assert!(candidates.live().is_empty());
-        candidates.add(address);
-        candidates.add(address);
-        assert_eq!(candidates.live(), vec![address]);
-    }
-    #[tokio::test]
-    async fn failed_lan_attempt_does_not_block_or_back_off_public_fallback() {
-        let directory = tempfile::tempdir().unwrap();
-        let system = crate::actors::ActorSystem::open_account_gated(
-            directory.path().join("actors"),
-            directory.path().join("workspace"),
-            crate::config::Config::default(),
-        )
-        .await
-        .unwrap();
-        let host = Host::load(system.clone()).unwrap();
-        let mut settings = host.settings();
-        settings.signaling_origin = Some("wss://example.invalid".into());
-        host.save_settings(settings).unwrap();
-        let runtime = Runtime::new(host);
-        let peer = StageId::new();
-        runtime
-            .states
-            .write()
-            .entry(peer)
-            .or_default()
-            .attempt(Route::Lan, chrono::Utc::now().timestamp_millis(), false)
-            .unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::channel(1);
-        runtime.install_signal(sender);
-        assert!(runtime.request_public_fallback(peer));
-        assert!(
-            matches!(commands.recv().await, Some(super::super::signaling::SignalCommand::Connect(id)) if id == peer)
-        );
-        runtime.begin_p2p(peer).unwrap();
-        let state = runtime.state(peer);
-        assert_eq!(
-            state.status,
-            super::super::connection::ConnectionStatus::Connecting
-        );
-        assert_eq!(state.route, Some(Route::P2p));
-        assert_eq!(state.retries, 0);
-        assert_eq!(state.retry_at_ms, 0);
-        // Signal loss marks a pending public peer retryable; it cannot remain connecting.
-        runtime.want(peer);
-        runtime.signaling_failed(&StageError::Unavailable("Signaling heartbeat timed out"));
-        assert_eq!(
-            runtime.state(peer).status,
-            super::super::connection::ConnectionStatus::Unreachable
-        );
-        assert_eq!(
-            runtime.connection_error_code(peer),
-            Some("device_signaling_unavailable")
-        );
-        system.shutdown().await;
-    }
 }

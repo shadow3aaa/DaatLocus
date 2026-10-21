@@ -373,8 +373,7 @@ async fn login_errors_distinguish_discovery_failure_and_expired_attempts() {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
     let f = Fixture::with_config_and_account(Default::default(), false).await;
     let mut settings = f.stage.host.settings();
-    settings.interfaces = vec!["fixture-no-discovery".into()];
-    settings.listen = "127.0.0.1:0".into();
+
     f.stage.host.save_settings(settings.clone()).unwrap();
     let client = daat_locus_auth::LoginClient::start(b"never sent in HTTP".to_vec()).unwrap();
     let response = f
@@ -388,7 +387,8 @@ async fn login_errors_distinguish_discovery_failure_and_expired_attempts() {
     let error = response.body;
     assert_eq!(error["code"], "login_connection_required");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    settings.signaling_origin = Some(format!("wss://{}", listener.local_addr().unwrap()));
+    settings.mode = daat_locus::stage::host::Connectivity::Relay;
+    settings.relay_origin = Some(format!("wss://{}", listener.local_addr().unwrap()));
     drop(listener);
     f.stage.host.save_settings(settings).unwrap();
     let response = f
