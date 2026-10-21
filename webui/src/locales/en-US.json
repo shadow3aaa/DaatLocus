@@ -799,5 +799,17 @@
     "granted": "Allowed",
     "authorize": "Authorize",
     "restart_hint": "Enable Daat Locus in System Settings. Quit and reopen the app if macOS requests it."
+  },
+  "virtual_displays": {
+    "title": "Virtual displays",
+    "display": "Virtual display {{number}}",
+    "select": "Select display",
+    "read_only": "View only",
+    "disabled": "GUI use is off",
+    "connecting": "Connecting to virtual displays",
+    "unavailable": "Virtual display unavailable",
+    "unsupported": "Virtual displays are not supported on this device",
+    "empty": "No virtual displays",
+    "waiting": "Waiting for an image"
   }
 }

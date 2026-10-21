@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 pub mod android;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod preview;
 pub(crate) mod settings;
 #[cfg(windows)]
 mod windows;

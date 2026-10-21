@@ -194,6 +194,8 @@ export async function handle(req: Request): Promise<Response> {
 }
 
 async function route(method: string, path: string, url: URL, req: Request): Promise<Response | null> {
+  if (path === "/v1/device/virtual-displays/capabilities" && method === "GET") return json({ supported: process.env.DAAT_LOCUS_MOCK_MACOS !== "1" });
+  if (path === "/v1/device/virtual-displays" && method === "GET") return json({ supported: true, state: getComputerUseStatus().enabled ? "ready" : "disabled", displays: [] });
   if (path === "/v1/device/computer-use/capabilities" && method === "GET") return json({supported: true});
   if (path === "/v1/device/computer-use") {
     if (method === "GET") return json(getComputerUseStatus());

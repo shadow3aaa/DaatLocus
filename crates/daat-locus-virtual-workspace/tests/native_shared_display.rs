@@ -76,11 +76,18 @@ fn settings_resize_reuses_the_output_and_disabling_fences_lazy_recreation() {
     );
     let topology = displays().unwrap();
     let input = DesktopState::read().unwrap();
+    let preview = service.capture().unwrap().unwrap();
+    assert_eq!(preview.bounds, resized.bounds);
+    assert_eq!((preview.width, preview.height), (1600, 900));
+    assert_eq!(preview.bgra.len(), 1600 * 900 * 4);
+    assert_eq!(displays().unwrap(), topology);
+    assert_eq!(DesktopState::read().unwrap(), input);
     assert_eq!(service.configure(true, smaller).unwrap().unwrap(), resized);
     assert_eq!(displays().unwrap(), topology);
     assert_eq!(DesktopState::read().unwrap(), input);
     assert!(service.configure(false, smaller).unwrap().is_none());
     assert!(service.inspect().unwrap().is_none());
+    assert!(service.capture().unwrap().is_none());
     assert!(service.initialize().is_err());
     assert!(service.reserve(600, 400).is_err());
     assert_eq!(displays().unwrap(), before);

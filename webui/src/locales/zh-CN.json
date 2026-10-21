@@ -799,5 +799,17 @@
     "granted": "已授权",
     "authorize": "前往授权",
     "restart_hint": "在系统设置中启用 Daat Locus；如果系统提示，请退出并重新打开应用。"
+  },
+  "virtual_displays": {
+    "title": "虚拟屏幕",
+    "display": "虚拟屏幕 {{number}}",
+    "select": "选择屏幕",
+    "read_only": "仅供查看",
+    "disabled": "GUI 操作已关闭",
+    "connecting": "正在连接虚拟屏幕",
+    "unavailable": "虚拟屏幕暂不可用",
+    "unsupported": "此设备不支持虚拟屏幕",
+    "empty": "暂无虚拟屏幕",
+    "waiting": "等待屏幕画面"
   }
 }

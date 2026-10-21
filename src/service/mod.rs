@@ -11,6 +11,7 @@ mod reset;
 mod resources;
 mod stages;
 mod stream;
+mod virtual_displays;
 mod webui;
 pub(crate) use auth::native_bootstrap;
 
@@ -142,6 +143,7 @@ pub fn router(state: ServiceState) -> Router {
         )
         .merge(admin::routes())
         .merge(computer_use::routes())
+        .merge(virtual_displays::routes())
         .merge(apps::routes())
         .merge(imports::routes())
         .merge(stages::routes())

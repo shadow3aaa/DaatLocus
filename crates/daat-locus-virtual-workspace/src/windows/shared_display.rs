@@ -10,6 +10,7 @@ use std::{
 
 enum Request {
     Inspect(mpsc::SyncSender<Result<Option<Display>>>),
+    Capture(mpsc::SyncSender<Result<Option<super::Frame>>>),
     Configure(
         bool,
         DisplayOptions,
@@ -45,6 +46,19 @@ impl Drop for Inner {
 #[derive(Clone)]
 pub struct SharedDisplay(Arc<Inner>);
 impl SharedDisplay {
+    /// Observe only an existing owned output. Never creates or recovers a screen.
+    pub fn capture(&self) -> Result<Option<super::Frame>> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.0
+            .requests
+            .as_ref()
+            .expect("live owner")
+            .send(Request::Capture(reply))
+            .map_err(|_| Error::InvalidState("shared display owner stopped"))?;
+        response
+            .recv()
+            .map_err(|_| Error::InvalidState("shared display owner stopped"))?
+    }
     /// Read the current output without creating or recovering a monitor.
     pub fn inspect(&self) -> Result<Option<Display>> {
         let (reply, response) = mpsc::sync_channel(1);
@@ -222,6 +236,25 @@ fn run(receiver: mpsc::Receiver<Request>, mut options: DisplayOptions) {
         match request {
             Request::Inspect(reply) => {
                 let _ = reply.send(display.as_ref().map(VirtualDisplay::display).transpose());
+            }
+            Request::Capture(reply) => {
+                let result = (|| {
+                    let Some(output) = display.as_ref().filter(|_| enabled) else {
+                        return Ok(None);
+                    };
+                    let observed = output.display()?;
+                    if snapshot.as_ref() != Some(&observed) {
+                        return Err(Error::InvalidState(
+                            "shared display changed; observation unavailable",
+                        ));
+                    }
+                    let frame = super::capture::capture(observed.bounds)?;
+                    if output.display()? != observed {
+                        return Err(Error::InvalidState("shared display changed during capture"));
+                    }
+                    Ok(Some(frame))
+                })();
+                let _ = reply.send(result);
             }
             Request::Configure(next_enabled, next_options, reply) => {
                 let result = (|| {
@@ -567,6 +600,15 @@ fn layout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn observation_of_an_uninitialized_owner_never_creates_an_output() {
+        let owner = SharedDisplay::new(Default::default()).unwrap();
+        assert!(owner.capture().unwrap().is_none());
+        assert!(owner.inspect().unwrap().is_none());
+        owner.configure(false, Default::default()).unwrap();
+        assert!(owner.capture().unwrap().is_none());
+        assert!(owner.inspect().unwrap().is_none());
+    }
     #[test]
     fn replacement_preserves_position_allows_overlap_and_fits_the_work_area() {
         let area = Rect {

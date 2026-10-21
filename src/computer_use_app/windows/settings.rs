@@ -15,6 +15,59 @@ pub(crate) struct Workspace {
     path: PathBuf,
 }
 impl Workspace {
+    pub fn preview_catalog(&self) -> Result<crate::computer_use_app::preview::Catalog> {
+        use crate::computer_use_app::preview::{Catalog, Display, State};
+        let status = self.status();
+        let ready = matches!(
+            status.state,
+            crate::computer_use_app::settings::State::Ready
+        );
+        Ok(Catalog {
+            supported: true,
+            state: if !status.enabled {
+                State::Disabled
+            } else if ready {
+                State::Ready
+            } else {
+                State::Unavailable
+            },
+            displays: if ready {
+                vec![Display {
+                    id: "workspace".into(),
+                    actor_id: None,
+                    name: None,
+                    width: status.display.width,
+                    height: status.display.height,
+                }]
+            } else {
+                vec![]
+            },
+        })
+    }
+    pub fn preview_frame(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        if id != "workspace" {
+            return Ok(None);
+        }
+        let _guard = self.permit(self.generation())?;
+        let Some(frame) = self.display.capture().into_diagnostic()? else {
+            return Ok(None);
+        };
+        let mut rgba = frame.bgra;
+        for pixel in rgba.as_chunks_mut::<4>().0 {
+            pixel.swap(0, 2);
+            pixel[3] = 255;
+        }
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, frame.width, frame.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .into_diagnostic()?
+            .write_image_data(&rgba)
+            .into_diagnostic()?;
+        Ok(Some(bytes))
+    }
     pub fn open(directory: &Path) -> Result<Arc<Self>> {
         let path = directory.join("computer-use.json");
         let preferences = Preferences::load(&path)?;

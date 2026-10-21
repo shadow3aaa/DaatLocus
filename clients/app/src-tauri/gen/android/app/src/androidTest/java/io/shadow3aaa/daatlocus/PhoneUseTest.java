@@ -243,6 +243,23 @@ final class PhoneUseTest {
         mainUnchanged();
         require(!tapped.isNull("input_target"), "Fixture editable receiver was not selected");
         refused(call("set_text",state(observed).put("text","stale")), "Stale state");
+        // Owner observation must neither create a display nor invalidate the
+        // Agent's current image/state or selected text receiver.
+        java.util.Set<Integer> beforePreview = displayIds();
+        JSONArray previews = new JSONObject(PhoneUseController.virtualDisplays()).getJSONArray("displays");
+        JSONObject ownPreview = null;
+        for (int i = 0; i < previews.length(); i++) {
+            JSONObject candidate = previews.getJSONObject(i);
+            if (actor.equals(candidate.getString("actor_id"))) ownPreview = candidate;
+        }
+        require(ownPreview != null, "Owner catalog omitted the existing Actor display");
+        byte[] previewImage = PhoneUseController.virtualDisplayImage(ownPreview.getString("id"));
+        Bitmap previewBitmap = BitmapFactory.decodeByteArray(previewImage, 0, previewImage.length);
+        require(previewBitmap != null && previewBitmap.getWidth() == 1024 && previewBitmap.getHeight() == 640,
+            "Owner preview did not contain the full virtual display");
+        previewBitmap.recycle();
+        require(beforePreview.equals(displayIds()), "Owner observation changed virtual display topology");
+        mainUnchanged();
         String text = "虚拟屏幕测试 Android 🚀 " + method;
         observed = observation(success("set_text",state(tapped).put("text",text)));
         require(text.equals(observed.getJSONObject("input_target").getString("text")), "Unicode replacement did not reach the actual editable control");

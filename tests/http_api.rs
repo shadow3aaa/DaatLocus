@@ -22,3 +22,5 @@ mod resources;
 #[path = "http/stream_api.rs"]
 mod stream;
 mod support;
+#[path = "http/virtual_displays_api.rs"]
+mod virtual_displays;

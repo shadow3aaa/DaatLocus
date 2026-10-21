@@ -12,10 +12,15 @@ client are connected.
 
 - Core has the fixed IM presentation; every other Actor has the work presentation,
   including when opened in the main window. Reuse data/control hooks, not a
-  container-dependent rendering mode. A narrow app navigation rail contains Home, Apps
-  and the account menu; mobile uses a modal navigation drawer. There is one Core
+  container-dependent rendering mode. A narrow app navigation rail contains Home,
+  Apps, device-local Virtual Displays on Windows/Android, and the account menu;
+  mobile uses a modal navigation drawer. There is one Core
   entry, no session/chat catalog or permanent Actor sidebar. Actor references
   open a conversation dialog. Settings use full-page categories.
+- Virtual Displays is an Owner-only observation of existing device outputs, with
+  transient image bytes rather than Actor resources. Viewing never creates or
+  reconfigures screens, reconnects privileged transports, requests permissions or
+  grants input control. Stop refreshing while the view is closed or backgrounded.
 - Use a rounded multiline composer with attachments, a model selector
   and send/cancel controls. Preserve drafts when a send or upload fails.
 - Derive local message/activity views from semantic events. Fetch heavy details

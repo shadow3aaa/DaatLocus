@@ -40,7 +40,7 @@ import java.util.concurrent.TimeUnit;
 public final class PhoneUseHost {
     private static final Object LOCK = new Object();
     private static final int FLAGS = 0x1fd4b;
-    private static final Map<String, Workspace> spaces = new HashMap<>();
+    private static final Map<String, Workspace> spaces = new LinkedHashMap<>();
     private static final Set<String> cancelled = ConcurrentHashMap.newKeySet();
     private static final Map<String, ComponentName> apps = new LinkedHashMap<>();
     private static final Map<String, String> names = new HashMap<>();
@@ -77,6 +77,23 @@ public final class PhoneUseHost {
                 Workspace space = null;
                 String requestId = cmd.optString("id");
                 try {
+                    // Owner observation never initializes, acquires or switches a display.
+                    if (op.equals("preview_list")) {
+                        JSONArray rows = new JSONArray();
+                        for (Map.Entry<String, Workspace> entry : spaces.entrySet()) {
+                            Workspace current = entry.getValue(); current.validate();
+                            rows.put(object("id", current.previewId, "actor_id", entry.getKey(), "name", null,
+                                "width", current.width, "height", current.height));
+                        }
+                        return reply(object("displays", rows), null, null, !spaces.isEmpty());
+                    }
+                    if (op.equals("preview_frame")) {
+                        String selected = cmd.getString("display_id");
+                        for (Workspace current : spaces.values()) if (current.previewId.equals(selected)) {
+                            return reply(object("status", "observed"), current.preview(), null, !spaces.isEmpty());
+                        }
+                        throw new IllegalStateException("Virtual display no longer exists");
+                    }
                     if (op.equals("stop")) { close(); return reply(object("status", "stopped"), null, null, false); }
                     initialize(context);
                     if (op.equals("probe")) {
@@ -401,6 +418,7 @@ public final class PhoneUseHost {
         final int display;
         int width, height, density;
         final String uniqueId;
+        final String previewId = id();
         final Map<String, Window> windows = new LinkedHashMap<>();
         String session;
         long epoch;
@@ -531,6 +549,18 @@ public final class PhoneUseHost {
                 Rect bounds = new Rect(); other.getBoundsInScreen(bounds);
                 require(other.getId() == target.getId() || other.getLayer() <= target.getLayer() || !Rect.intersects(window.bounds, bounds), "Window obscured; select its dialog or observe the top window");
             }
+        }
+        byte[] preview() throws Exception {
+            validate();
+            byte[] bytes;
+            synchronized (this) {
+                if (latest == null) return null;
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                latest.compress(Bitmap.CompressFormat.PNG, 100, output);
+                bytes = output.toByteArray();
+            }
+            validate();
+            return bytes;
         }
         ComputerReply observe(Window window, Rect region, int scale, String status) throws Exception {
             window.state = null; unobscured(window);

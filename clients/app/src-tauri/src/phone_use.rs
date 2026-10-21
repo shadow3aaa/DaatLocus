@@ -11,6 +11,26 @@ struct Bridge {
     class: Global<JClass<'static>>,
 }
 impl Bridge {
+    fn bytes(&self, method: &str, argument: &str) -> miette::Result<Vec<u8>> {
+        let context = ndk_context::android_context();
+        let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };
+        vm.attach_current_thread(|env| -> jni::errors::Result<Vec<u8>> {
+            let argument = env.new_string(argument)?;
+            let bytes = env.call_static_method(
+                &self.class,
+                jni::strings::JNIString::new(method),
+                jni_sig!("(Ljava/lang/String;)[B"),
+                &[(&argument).into()],
+            );
+            if bytes.is_err() && env.exception_check() {
+                env.exception_clear();
+            }
+            let bytes = bytes?.l()?;
+            let bytes = env.cast_local::<JByteArray>(bytes)?;
+            env.convert_byte_array(&bytes)
+        })
+        .map_err(|_| miette::miette!("PhoneUse display image unavailable"))
+    }
     fn invoke(&self, method: &str, argument: Option<&str>) -> Result<String, String> {
         let context = ndk_context::android_context();
         let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };
@@ -41,6 +61,18 @@ impl Bridge {
     }
 }
 impl Backend for Bridge {
+    fn preview_catalog(&self) -> miette::Result<daat_locus::computer_use_app::preview::Catalog> {
+        serde_json::from_str(
+            &self
+                .invoke("virtualDisplays", None)
+                .map_err(|e| miette::miette!("{e}"))?,
+        )
+        .map_err(|_| miette::miette!("Invalid virtual display catalog"))
+    }
+    fn preview_frame(&self, id: &str) -> miette::Result<Option<Vec<u8>>> {
+        let bytes = self.bytes("virtualDisplayImage", id)?;
+        Ok((!bytes.is_empty()).then_some(bytes))
+    }
     fn reset(&self) -> miette::Result<()> {
         self.invoke("reset", None)
             .map(|_| ())

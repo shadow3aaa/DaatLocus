@@ -220,6 +220,47 @@ object PhoneUseController {
         } else checkNotNull(root) { "Root disconnected" }.execute(ComputerRootCommand(configured), ComputerRootCommand::class.java.classLoader)
     }
 
+    /** Read existing screens only; observation never reconnects or requests a grant. */
+    @JvmStatic fun virtualDisplays(): String = runBlocking(Dispatchers.IO) {
+        mutex.withLock {
+            var current = when {
+                !enabled -> "disabled"
+                state == "unsupported" -> "unsupported"
+                state == "connecting" -> "connecting"
+                state == "ready" && transportAlive() -> "ready"
+                else -> "unavailable"
+            }
+            var displays = org.json.JSONArray()
+            if (current == "ready") {
+                runCatching {
+                    val reply = send(JSONObject().put("op", "preview_list").toString())
+                    reply.image?.close()
+                    val result = JSONObject(reply.json)
+                    check(result.isNull("failure"))
+                    displays = result.getJSONObject("payload").getJSONArray("displays")
+                }.onFailure { current = "unavailable" }
+            }
+            JSONObject().put("supported", true).put("state", current).put("displays", displays).toString()
+        }
+    }
+    @JvmStatic fun virtualDisplayImage(id: String): ByteArray = runBlocking(Dispatchers.IO) {
+        mutex.withLock {
+            if (!enabled || state != "ready" || !transportAlive()) return@withLock byteArrayOf()
+            val reply = send(JSONObject().put("op", "preview_frame").put("display_id", id).toString())
+            if (!JSONObject(reply.json).isNull("failure")) {
+                reply.image?.close()
+                error("Virtual display unavailable")
+            }
+            reply.image?.let { fd ->
+                android.os.ParcelFileDescriptor.AutoCloseInputStream(fd).use { input ->
+                    val bytes = input.readNBytes(32 * 1024 * 1024 + 1)
+                    check(bytes.size <= 32 * 1024 * 1024) { "Screenshot exceeds limit" }
+                    bytes
+                }
+            } ?: byteArrayOf()
+        }
+    }
+
     private suspend fun disconnect() {
         runCatching { if (binder != null || root != null) send(JSONObject().put("op", "stop").toString()).image?.close() }
         binding?.let { args -> connection?.let { conn -> runCatching { Shizuku.unbindUserService(args, conn, true) } } }

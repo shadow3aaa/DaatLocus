@@ -10,6 +10,16 @@ pub struct Reply {
 }
 
 pub trait Backend: Send + Sync {
+    fn preview_catalog(&self) -> Result<super::preview::Catalog> {
+        Ok(super::preview::Catalog {
+            supported: true,
+            state: super::preview::State::Unavailable,
+            displays: vec![],
+        })
+    }
+    fn preview_frame(&self, _id: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
     fn call(&self, request: &str) -> Result<Reply>;
     fn cancel(&self, request_id: &str);
     fn scope(&self) -> Result<Value>;
@@ -27,6 +37,14 @@ fn backend() -> Result<Arc<dyn Backend>> {
         .get()
         .cloned()
         .ok_or_else(|| miette!("PhoneUse native backend unavailable"))
+}
+#[cfg(target_os = "android")]
+pub(crate) fn preview_catalog() -> Result<super::preview::Catalog> {
+    backend()?.preview_catalog()
+}
+#[cfg(target_os = "android")]
+pub(crate) fn preview_frame(id: &str) -> Result<Option<Vec<u8>>> {
+    backend()?.preview_frame(id)
 }
 #[cfg(target_os = "android")]
 pub(crate) fn reset_resources() -> Result<()> {
