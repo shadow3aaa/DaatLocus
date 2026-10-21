@@ -260,9 +260,11 @@ fn ensure_current(
     } else {
         system.execution_actor(&current_message)?
     };
-    if current_actor.config != actor.config
-        && !(actor.id == crate::stage::shared::ACTOR_ID
-            && super::permissions::check_recipient(&current_actor.config, &actor.config).is_ok())
+    if current_actor.config.permissions.approval_mode != actor.config.permissions.approval_mode
+        || (current_actor.config != actor.config
+            && !(actor.id == crate::stage::shared::ACTOR_ID
+                && super::permissions::check_recipient(&current_actor.config, &actor.config)
+                    .is_ok()))
     {
         return Err(miette!(
             "Actor configuration changed while awaiting approval"
@@ -519,10 +521,12 @@ mod tests {
         )
         .await
         .unwrap();
+        system
+            .patch_owned_preferences("core", None, Some(mode))
+            .await
+            .unwrap();
         system.seed_test_actor("root");
-        let mut actor = system.store().actor("root").unwrap();
-        actor.config.permissions.approval_mode = mode;
-        system.store().save_actor(&actor).unwrap();
+        let actor = system.store().actor("root").unwrap();
         let now = chrono::Utc::now().timestamp_millis();
         let queued = system
             .store()
@@ -648,8 +652,9 @@ mod tests {
     }
     async fn approval(system: &ActorSystem, message_id: &str) -> ApprovalRecord {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let actor = system.store().message(message_id).unwrap().actor_id;
         loop {
-            for event in system.store().events(0, Some("root"), false, 100).unwrap() {
+            for event in system.store().events(0, Some(&actor), false, 100).unwrap() {
                 if let super::super::ActorEvent::ApprovalRequested {
                     approval_id,
                     message_id: id,
@@ -1030,6 +1035,122 @@ mod tests {
         assert_eq!(
             system.store().approval(&record.id).unwrap().decision,
             ApprovalDecision::Cancelled
+        );
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn account_full_access_applies_to_reused_and_new_executors_without_review() {
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Fail));
+        let (_dir, system, original, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        system
+            .patch_owned_preferences("core", None, Some(ApprovalMode::None))
+            .await
+            .unwrap();
+        let actor = system.execution_actor(&message).unwrap();
+        assert_eq!(actor.config.permissions.approval_mode, ApprovalMode::None);
+        let mut config = actor.config.clone();
+        config.name = "New executor".into();
+        let child = system.create_owned(&actor.id, config).unwrap();
+        assert_eq!(child.config.permissions.approval_mode, ApprovalMode::None);
+        let base = system.execution_context(&actor, &message).unwrap();
+        authorize_reviewed(
+            &system,
+            &actor,
+            &message,
+            &call(),
+            &ActorControl::default(),
+            &base,
+            &ToolPermissionRequest::default(),
+        )
+        .await
+        .unwrap();
+        assert!(reviewer.requests.lock().is_empty());
+        assert!(
+            system
+                .store()
+                .approvals(Some(&original.id), None, 10)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn account_mode_changes_cancel_existing_executor_reviews() {
+        for mode in [ApprovalMode::Auto, ApprovalMode::Ask] {
+            for target in ["root", "core"] {
+                let reviewer = Arc::new(Reviewer::new(ReviewReply::Pending));
+                let (_dir, system, mut actor, mut message) = fixture(mode, reviewer.clone()).await;
+                if target == "core" {
+                    let queued = system
+                        .send_user("core", "Review this operation".into(), vec![], None)
+                        .unwrap();
+                    message = system.store().claim_next("core").unwrap().unwrap();
+                    assert_eq!(message.id, queued.id);
+                    actor = system.core_device_actor().unwrap();
+                }
+                let pending = gate(
+                    &system,
+                    &actor,
+                    &message,
+                    Arc::new(ActorControl::default()),
+                    call(),
+                );
+                let record = approval(&system, &message.id).await;
+                if mode == ApprovalMode::Auto {
+                    tokio::time::timeout(Duration::from_secs(2), reviewer.started.notified())
+                        .await
+                        .unwrap();
+                }
+                system
+                    .patch_owned_preferences("core", None, Some(ApprovalMode::None))
+                    .await
+                    .unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(2), pending)
+                        .await
+                        .expect("account mode change left the old review waiting")
+                        .unwrap()
+                        .is_err()
+                );
+                assert_eq!(
+                    system.store().approval(&record.id).unwrap().decision,
+                    ApprovalDecision::Cancelled
+                );
+                if mode == ApprovalMode::Auto {
+                    assert!(reviewer.dropped.load(Ordering::Acquire));
+                }
+                system.shutdown().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn account_tightening_reviews_an_existing_full_access_executor() {
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Fail));
+        let (_dir, system, _, message) = fixture(ApprovalMode::None, reviewer.clone()).await;
+        system
+            .patch_owned_preferences("core", None, Some(ApprovalMode::Auto))
+            .await
+            .unwrap();
+        let actor = system.execution_actor(&message).unwrap();
+        let error = gate(
+            &system,
+            &actor,
+            &message,
+            Arc::new(ActorControl::default()),
+            call(),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.downcast_ref::<AutomaticReviewDenied>().is_some());
+        assert_eq!(reviewer.requests.lock().len(), 1);
+        assert_eq!(
+            approval(&system, &message.id).await.decision,
+            ApprovalDecision::Denied
         );
         system.shutdown().await;
     }

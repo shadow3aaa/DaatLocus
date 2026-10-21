@@ -2,7 +2,7 @@ import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { isAndroid } from "@/lib/mobile";
-import { ArrowUpIcon, ChevronDownIcon, FileIcon, FolderIcon, HandIcon, PaperclipIcon, PlusIcon, ShieldCheckIcon, ShieldIcon, SquareIcon, XIcon } from "lucide-react";
+import { ArrowUpIcon, ChevronDownIcon, FileIcon, FolderIcon, PaperclipIcon, PlusIcon, SquareIcon, XIcon } from "lucide-react";
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
@@ -14,19 +14,17 @@ export function modeLabel(mode: ApprovalMode): string {
   return t({auto:"composer.auto_approval", ask:"composer.ask_for_approval", none:"composer.full_access"}[mode]);
 }
 function effortLabel(value?: string): string { return value && ["none","minimal","low","medium","high","xhigh","max"].includes(value) ? t(`effort.${value}`) : value || ""; }
-const ModeIcons = { auto: ShieldCheckIcon, ask: HandIcon, none: ShieldIcon };
 
-export function Composer({ value, onValueChange, onSubmit, attachments, onFiles, onRemoveAttachment, uploading, busy, working, onStop, disabled, submissionDisabled, canManage, mode, onModeChange, models, modelName, onModelChange, placeholder = t("composer.message"), compact = false, presentation = "work" }: {
+export function Composer({ value, onValueChange, onSubmit, attachments, onFiles, onRemoveAttachment, uploading, busy, working, onStop, disabled, submissionDisabled, canManage, models, modelName, onModelChange, placeholder = t("composer.message"), compact = false, presentation = "work" }: {
   value: string; onValueChange(value: string): void; onSubmit(): void; attachments: Attachment[]; onFiles(files: File[]): void;
   onRemoveAttachment(id: string): void; uploading: boolean; busy: boolean; working: boolean; onStop(): void;
-  disabled?: boolean; submissionDisabled?: boolean; canManage: boolean; mode: ApprovalMode; onModeChange(mode: ApprovalMode): void;
+  disabled?: boolean; submissionDisabled?: boolean; canManage: boolean;
   models: ComposerModel[]; modelName: string; onModelChange(name: string): void; placeholder?: string; compact?: boolean; presentation?: "primary" | "work";
 }) {
   const text = useRef<HTMLTextAreaElement>(null);
   const file = useRef<HTMLInputElement>(null);
   const folder = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
-  const ModeIcon = ModeIcons[mode];
   const preference = models.some(model => model.name === modelName) ? modelName : "";
   const selected = models.find(model => model.name === preference) || models.find(model => model.isDefault);
   const canSend = !disabled && !submissionDisabled && !busy && !uploading && (Boolean(value.trim()) || attachments.length > 0);
@@ -62,10 +60,6 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
             {!isAndroid() && <DropdownMenuItem onSelect={() => folder.current?.click()}><FolderIcon data-icon="inline-start" />{t("composer.folder")}<span className="dl-menu-hint">{t("composer.attach_folder")}</span></DropdownMenuItem>}
           </DropdownMenuGroup></DropdownMenuContent>
         </DropdownMenu>
-        {canManage && presentation === "work" && <DropdownMenu><DropdownMenuTrigger asChild><InputGroupButton disabled={disabled || busy || working} className="dl-mode-trigger" aria-label={modeLabel(mode)} title={modeLabel(mode)}><ModeIcon data-icon="inline-start" /><span className="dl-mode-label">{modeLabel(mode)}</span></InputGroupButton></DropdownMenuTrigger>
-          <DropdownMenuContent align="start" side="top" className="dl-mode-menu"><DropdownMenuLabel>{t("composer.action_approval")}</DropdownMenuLabel><DropdownMenuRadioGroup value={mode} onValueChange={next => onModeChange(next as ApprovalMode)}>
-            {(["ask", "auto", "none"] as const).map(key => <DropdownMenuRadioItem value={key} key={key}>{modeLabel(key)}</DropdownMenuRadioItem>)}
-          </DropdownMenuRadioGroup></DropdownMenuContent></DropdownMenu>}
         <div className="dl-composer-toolbar-spacer" />
         {canManage && presentation === "work" && <DropdownMenu><DropdownMenuTrigger asChild><InputGroupButton disabled={disabled || busy || working} className="dl-model-trigger"><span className="dl-model-name">{selected?.label || t("composer.default_model")}</span>{selected?.effort && <span className="dl-model-effort">{effortLabel(selected.effort)}</span>}<ChevronDownIcon data-icon="inline-end" /></InputGroupButton></DropdownMenuTrigger>
           <DropdownMenuContent align="end" side="top" className="dl-model-menu"><DropdownMenuLabel>{t("composer.models")}</DropdownMenuLabel><DropdownMenuRadioGroup value={preference} onValueChange={onModelChange}>

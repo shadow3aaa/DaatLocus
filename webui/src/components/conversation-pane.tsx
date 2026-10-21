@@ -13,7 +13,7 @@ import { MessageQueue, queuedUserInput } from "@/components/message-queue";
 import { isPrimaryActor, isUserDelivery, isUserSource } from "@/lib/work-timeline";
 import { OwnerApprovalNotice } from "@/components/owner-approval-notice";
 import { useActorConversation } from "@/hooks/use-actor-conversation";
-import { accessKey, actorModelReady, patchActorPreferences, type Access, type ApprovalMode, type ActorDetail } from "@/lib/actor-api";
+import { accessKey, actorModelReady, patchActorPreferences, type Access, type ActorDetail } from "@/lib/actor-api";
 import { cn } from "@/lib/utils";
 import type { ConversationConnectionMessage } from "@/lib/stage-api";
 import { useConversationSearch } from "@/hooks/use-conversation-search";
@@ -58,7 +58,6 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const name = actor?.config?.name || actor?.name || (actorId === "core" ? "Daat Locus" : "Actor");
   const workingMessages = chat.messages.filter(message => message.status === "running" || message.status === "queued");
   const active = workingMessages.find(message => message.status === "running");
-  const mode = actor?.config?.permissions.approval_mode || "auto";
   const queue = primaryView ? [] : chat.messages.filter(queuedUserInput);
   const sourceMessages = useMemo(() => filtering ? matchingConversationMessages(search.ready && !search.failed ? search.items : [], chat.messages, searchQuery) : chat.messages, [filtering, search.ready, search.failed, search.items, chat.messages, searchQuery]);
   const visibleMessages = useMemo(() => sourceMessages.filter(message => (primaryView || !queuedUserInput(message)) && !(message.status === "cancelled" && message.started_at_ms == null && ["user", "remote_user"].includes(message.source.kind)) && !(!primaryView && !searchOpen && message.kind === "steering" && message.status === "completed" && sourceMessages.some(parent => parent.id === message.in_reply_to)) && (!filtering || !primaryView || (isUserSource(message) && matchesConversationText(message.content, searchQuery)) || (isUserDelivery(message) && matchesConversationText(message.reply || "", searchQuery)))), [sourceMessages, primaryView, filtering, searchOpen, searchQuery]);
@@ -172,10 +171,10 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
     const animation = list?.animate([{opacity: .4, transform: "translateY(5px)"}, {opacity: 1, transform: "translateY(0)"}], {duration: 180, easing: "cubic-bezier(.2,.8,.2,1)"});
     return () => animation?.cancel();
   }, [visibleMessages, searchOpen]);
-  async function configure(next: { model?: string | null; mode?: ApprovalMode }) {
+  async function configure(next: { model: string | null }) {
     if (!actor?.config || active) return;
     setChanging(true); setLocalError("");
-    try { await patchActorPreferences(actorId, { ...(next.model !== undefined ? { model: next.model } : {}), ...(next.mode ? { approval_mode: next.mode } : {}) }); await chat.refreshActor(); }
+    try { await patchActorPreferences(actorId, { model: next.model }); await chat.refreshActor(); }
     catch { setLocalError(t("conversation_pane.settings_were_not_saved_try_again")); } finally { setChanging(false); }
   }
   async function files(selected: File[]) {
@@ -252,7 +251,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
         {!atBottom && <Button className="dl-jump-bottom" variant="outline" size="icon" aria-label={t("conversation_pane.jump_to_latest")} onClick={bottom}><ArrowDownIcon /></Button>}
         {errors && <div className="dl-client-error" role="alert"><span>{errors}</span><Button size="sm" variant="ghost" onClick={() => { setLocalError(""); void chat.refresh(); }}><RefreshCwIcon data-icon="inline-start" />{t("app.retry")}</Button></div>}
         <MessageQueue messages={queue} active={active} chat={chat} access={access} />
-        <Composer presentation={primaryView ? "primary" : "work"} key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} working={Boolean(active)} onStop={() => { if (active) void chat.cancel(active.id).catch(() => {}); }} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} mode={mode} onModeChange={next => { void configure({ mode: next }); }} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.actor_archived") : !ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : !primaryView ? t("conversation_pane.message_value0", {value0: name}) : t("composer.message")} compact={compact} />
+        <Composer presentation={primaryView ? "primary" : "work"} key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} working={Boolean(active)} onStop={() => { if (active) void chat.cancel(active.id).catch(() => {}); }} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.actor_archived") : !ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : !primaryView ? t("conversation_pane.message_value0", {value0: name}) : t("composer.message")} compact={compact} />
       </div>
   </section>;
 }

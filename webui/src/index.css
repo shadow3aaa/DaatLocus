@@ -444,15 +444,11 @@ html[data-desktop-platform="windows"] [data-window-drag-region] { user-select: n
 .dl-composer-toolbar button[data-size=icon-sm]>svg { width: 24px; height: 24px; }
 .dl-composer-toolbar-spacer { flex: 1; }
 .dl-composer [data-slot=input-group-addon] { cursor: default; }
-.dl-mode-trigger { border-radius: 20px; height: 36px; padding: 0 8px; font-size: calc(var(--ui-font-size, 14px) * 14 / 14); color: var(--chat-subtle); }
-.dl-mode-trigger>svg { width: 20px; height: 20px; }
 .dl-model-trigger { height: 36px; padding: 0 6px; font-size: calc(var(--ui-font-size, 14px) * 14 / 14); border-radius: 20px; }
 .dl-model-name { min-width: 0; max-width: 220px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .dl-model-effort { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); color: var(--muted-foreground); }
 .dl-menu-choice { display: flex; flex-direction: column; gap: 3px; }
 .dl-menu-choice small { color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
-.dl-mode-menu { min-width: 220px; border-radius: 12px; padding: 6px; }
-.dl-mode-menu [data-slot=dropdown-menu-radio-item] { min-height: 38px; border-radius: 7px; }
 .dl-composer-add-menu, .dl-model-menu { border-radius: 16px; min-width: 240px; padding: 8px; }
 .dl-composer-add-menu [data-slot=dropdown-menu-item] { min-height: 40px; }
 .dl-menu-hint { color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); margin-left: 6px; }
@@ -741,7 +737,7 @@ button.dl-activity-heading:hover { color: var(--foreground); }
   .dl-message-list { padding: calc(var(--dl-header-space) + 22px) 14px calc(var(--dl-footer-space) + 15px); } .dl-bubble { max-width: 94%; padding: 12px 16px; font-size: calc(var(--ui-font-size, 14px) * 14 / 14); border-radius: 22px; } .dl-bubble-user { max-width: 88%; }
   .dl-message-turn { margin-bottom: 22px; } .dl-conversation-footer { padding: 7px 12px max(8px,var(--dl-safe-bottom)); }
   .dl-composer [data-slot=input-group-control] { font-size: calc(var(--ui-font-size, 14px) * 16 / 14); } .dl-composer-toolbar { gap: 2px; } .dl-model-trigger { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); max-width: 135px; } .dl-model-effort { display: none; }
-  .dl-mode-trigger { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); padding: 0 5px; } .dl-reference-action { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); padding-left: 7px; }
+  .dl-reference-action { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); padding-left: 7px; }
   .dl-actor-reference { min-width: 0; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
   .dl-actor-dialog { inset: var(--dl-window-bar) 0 0; translate: none; width: 100%; max-width: none; height: calc(100dvh - var(--dl-window-bar)); max-height: none; border-radius: 0; box-shadow: none; animation: none; background: var(--background); }
   .dl-actor-dialog-heading { padding: calc(12px + var(--dl-safe-top)) max(14px,var(--dl-safe-right)) 12px max(14px,var(--dl-safe-left)); }
@@ -849,7 +845,7 @@ html[data-reduced-motion=true] *, html[data-reduced-motion=true] *::before, html
 .dl-attachment { margin-top: 7px; }
 .dl-composer-attachments { padding-right: 8px; }
 .dl-attachment-file span { cursor: default; }
-.dl-mode-menu, .dl-composer-add-menu, .dl-model-menu { max-width: calc(100vw - 24px); }
+.dl-composer-add-menu, .dl-model-menu { max-width: calc(100vw - 24px); }
 .dl-model-menu { max-height: min(420px,60dvh,var(--radix-dropdown-menu-content-available-height,100dvh)); overflow: auto; }
 .dl-model-menu .dl-menu-choice { min-width: 0; overflow-wrap: anywhere; }
 .dl-primary-composer .dl-composer:has(.dl-stop-button):not(:has(.dl-stop-button + button)) { grid-template-columns: 44px minmax(0,1fr) 44px; }
@@ -863,8 +859,6 @@ html[data-reduced-motion=true] *, html[data-reduced-motion=true] *::before, html
   .dl-access-gate { padding: max(32px,calc(var(--dl-safe-top) + 16px)) max(24px,var(--dl-safe-right)) max(32px,calc(var(--dl-safe-bottom) + 16px)) max(24px,var(--dl-safe-left)); }
   .dl-composer [data-slot=input-group-control] { font-size: calc(var(--ui-font-size, 14px) * 16 / 14); }
   .dl-composer-wrap:not(.dl-primary-composer) .dl-composer-toolbar { gap: 3px; }
-  .dl-composer-wrap:not(.dl-primary-composer) .dl-mode-trigger { flex: none; height: 32px; }
-  .dl-composer-wrap:not(.dl-primary-composer) .dl-mode-label { display: none; }
   .dl-composer-wrap:not(.dl-primary-composer) .dl-model-trigger { min-width: 0; max-width: 160px; flex-shrink: 1; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
   .dl-composer-wrap:not(.dl-primary-composer) .dl-send-button { margin-left: 0; }
   .dl-actor-dialog-heading { gap: 8px; }

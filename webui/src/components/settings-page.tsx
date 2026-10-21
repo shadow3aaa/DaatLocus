@@ -35,12 +35,12 @@ export function settingsTabFromPath(path: string): SettingsTab | null {
 }
 
 export const SettingsPage = forwardRef<SettingsPageHandle, {
-  open: boolean; onOpenChange: (open: boolean) => void; actorId: string;
+  open: boolean; onOpenChange: (open: boolean) => void;
   onActorChanged: (actorId?: string) => void;
   onViewCore(): void;
   preferences: Preferences; onPreferencesChanged: (preferences: Preferences) => void;
   initialTab?: SettingsTab; canManage?: boolean; onTabChange(tab: SettingsTab): void;
-}>(function SettingsPage({open, onOpenChange, actorId, onActorChanged, onViewCore, preferences, onPreferencesChanged, initialTab = "general", canManage = true, onTabChange}, ref) {
+}>(function SettingsPage({open, onOpenChange, onActorChanged, onViewCore, preferences, onPreferencesChanged, initialTab = "general", canManage = true, onTabChange}, ref) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [actor, setActor] = useState<ActorDetail | null>(null);
   const [config, setConfig] = useState<SetupConfigRequest | null>(null);
@@ -77,12 +77,9 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
     }).catch(()=>{if(!controller.signal.aborted){setImportsSupported(false);if(initialTab==="import"){setTab("general");onTabChange("general");}}});
     return ()=>controller.abort();
   }, [open, canManage]);
-  const actorRef = useRef(actorId);
   const scroll = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => { if (scroll.current) scroll.current.scrollTop = 0; }, [tab]);
   const savedConfig = useRef("");
-  actorRef.current = actorId;
-  useEffect(() => { setActor(null); }, [actorId]);
 
   useEffect(() => {
     if (!open) return;
@@ -93,7 +90,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
     if (!open || !canManage || tab!=="models"&&tab!=="permissions" || tab==="models"&&config!==null || tab==="permissions"&&actor!==null) return;
     const controller = new AbortController();
     setLoading(true);
-    void Promise.allSettled([tab==="permissions"?getActor(actorId, { signal: controller.signal }):Promise.resolve(null), tab==="models"?getConfig({ signal: controller.signal }):Promise.resolve(null)]).then(([actorResult, configResult]) => {
+    void Promise.allSettled([tab==="permissions"?getActor("core", { signal: controller.signal }):Promise.resolve(null), tab==="models"?getConfig({ signal: controller.signal }):Promise.resolve(null)]).then(([actorResult, configResult]) => {
       if (controller.signal.aborted) return;
       if (actorResult.status === "fulfilled"&&actorResult.value) setActor(actorResult.value);
       if (configResult.status === "fulfilled"&&configResult.value) { setConfig(configResult.value); savedConfig.current = JSON.stringify(configResult.value); }
@@ -102,13 +99,13 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
       setLoading(false);
     });
     return () => controller.abort();
-  }, [open, canManage, actorId, tab, config===null, actor===null, retry]);
+  }, [open, canManage, tab, config===null, actor===null, retry]);
 
   async function changeMode(approval_mode: ApprovalMode) {
     if (!actor || pending) return;
-    const targetActor=actorId;setPending("mode");setError(null);setNotice(null);
-    try {const result=await patchActorPreferences(targetActor,{approval_mode});if(actorRef.current===targetActor){setActor(result);onActorChanged(targetActor);}}
-    catch(cause){if(actorRef.current===targetActor)setError(errorText(cause));}
+    setPending("mode");setError(null);setNotice(null);
+    try {const result=await patchActorPreferences("core",{approval_mode});setActor(result);onActorChanged("core");}
+    catch(cause){setError(errorText(cause));}
     finally{setPending(null);}
   }
   async function submitConfig(): Promise<boolean> {

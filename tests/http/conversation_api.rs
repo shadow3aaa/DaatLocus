@@ -449,6 +449,7 @@ async fn actor_creation_constraints_cannot_be_rewritten_through_client_managemen
         json!({"apps":["terminal"]}),
         json!({"instructions":"replace identity"}),
         json!({"name":"changed"}),
+        json!({"approval_mode":"none"}),
         json!({"approval_mode":"none","permissions":{"allow_children":true}}),
     ] {
         assert_eq!(
@@ -465,7 +466,7 @@ async fn actor_creation_constraints_cannot_be_rewritten_through_client_managemen
     assert_eq!(fixture.system.actor(&actor).unwrap().config, original);
     for mode in ["none", "ask", "auto"] {
         let response = fixture
-            .owner(reqwest::Method::PATCH, &endpoint)
+            .owner(reqwest::Method::PATCH, "/v1/actors/core")
             .json(&json!({"approval_mode":mode}))
             .send()
             .await

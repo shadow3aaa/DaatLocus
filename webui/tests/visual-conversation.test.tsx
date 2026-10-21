@@ -28,7 +28,7 @@ describe("fixed presentation and chronological source", () => {
     expect(render([old,latest], true, "")).not.toContain('role="status"');
   });
   test("a busy Core remains an IM composer while a work Actor retains stop controls", () => {
-    const props: Parameters<typeof Composer>[0] = {value:"",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,working:true,onStop:()=>{},canManage:false,mode:"auto",onModeChange:()=>{},models:[],modelName:"",onModelChange:()=>{}};
+    const props: Parameters<typeof Composer>[0] = {value:"",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,working:true,onStop:()=>{},canManage:false,models:[],modelName:"",onModelChange:()=>{}};
     const render = (presentation: "primary" | "work", value = "") => renderToStaticMarkup(<Composer {...props} presentation={presentation} value={value} />);
     const stop = `aria-label="${i18n.t("composer.stop_task")}"`;
     const send = `aria-label="${i18n.t("composer.send_message")}"`;

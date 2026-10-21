@@ -193,12 +193,32 @@ fn event(tx: &Transaction<'_>, actor_id: &str, value: ActorEvent) -> Result<i64>
     Ok(id)
 }
 pub(crate) fn actor_tx(tx: &Transaction<'_>, id: &str) -> Result<ActorRecord> {
-    decode(
-        sql(tx
-            .query_row("SELECT record FROM actors WHERE id=?1", [id], |r| r.get(0))
-            .optional())?
-        .ok_or_else(|| missing("Actor"))?,
-    )
+    read_actor(tx, id)
+}
+fn read_actor(db: &Connection, id: &str) -> Result<ActorRecord> {
+    let record = sql(db
+        .query_row("SELECT record FROM actors WHERE id=?1", [id], |r| r.get(0))
+        .optional())?
+    .ok_or_else(|| missing("Actor"))?;
+    account_actor(db, decode(record)?)
+}
+fn account_actor(db: &Connection, mut actor: ActorRecord) -> Result<ActorRecord> {
+    // Core's replicated preference is the single account-wide review mode.
+    // Old hosted records can retain creation snapshots but cannot override it.
+    if actor.id != crate::stage::shared::ACTOR_ID {
+        let core: Option<String> = sql(db
+            .query_row("SELECT record FROM actors WHERE id='core'", [], |r| {
+                r.get(0)
+            })
+            .optional())?;
+        if let Some(core) = core {
+            actor.config.permissions.approval_mode = decode::<ActorRecord>(core)?
+                .config
+                .permissions
+                .approval_mode;
+        }
+    }
+    Ok(actor)
 }
 fn save_actor(tx: &Transaction<'_>, actor: &ActorRecord) -> Result<()> {
     let mut data = serde_json::to_value(actor).into_diagnostic()?;
@@ -425,23 +445,14 @@ impl ActorStore {
         Ok(())
     }
     pub fn actor(&self, id: &str) -> Result<ActorRecord> {
-        database_io(|| {
-            decode(
-                sql(self
-                    .db
-                    .lock()
-                    .query_row("SELECT record FROM actors WHERE id=?1", [id], |r| r.get(0))
-                    .optional())?
-                .ok_or_else(|| missing("Actor"))?,
-            )
-        })
+        database_io(|| read_actor(&self.db.lock(), id))
     }
     pub fn actors(&self) -> Result<Vec<ActorRecord>> {
         database_io(|| {
             let db = self.db.lock();
             let mut stmt = sql(db.prepare("SELECT record FROM actors ORDER BY depth,id"))?;
             let rows = sql(stmt.query_map([], |r| r.get::<_, String>(0)))?;
-            rows.map(|r| decode(sql(r)?)).collect()
+            rows.map(|r| account_actor(&db, decode(sql(r)?)?)).collect()
         })
     }
     pub(crate) fn actor_page(

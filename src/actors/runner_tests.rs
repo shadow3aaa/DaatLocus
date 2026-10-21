@@ -146,9 +146,10 @@ async fn apps_manager_queries_and_refresh_complete_in_ask_mode_without_approval(
         MockReply::Answer("Done"),
     ]));
     let (_dir, system) = runtime(provider).await;
-    let mut actor = system.actor("root").unwrap();
-    actor.config.permissions.approval_mode = super::super::ApprovalMode::Ask;
-    system.store().save_actor(&actor).unwrap();
+    system
+        .patch_owned_preferences("core", None, Some(super::super::ApprovalMode::Ask))
+        .await
+        .unwrap();
     let input = system
         .send_user("root", "Inspect available Apps".into(), vec![], None)
         .unwrap();
@@ -190,8 +191,11 @@ async fn yield_skips_review_but_malformed_calls_do_not_silence_a_reply() {
         let (_dir, system) = runtime(provider.clone()).await;
         let mut actor = system.actor("root").unwrap();
         actor.config.permissions.writable_roots.clear();
-        actor.config.permissions.approval_mode = super::super::ApprovalMode::Ask;
         system.store().save_actor(&actor).unwrap();
+        system
+            .patch_owned_preferences("core", None, Some(super::super::ApprovalMode::Ask))
+            .await
+            .unwrap();
         let input = system
             .send_user("root", "Process this update".into(), vec![], None)
             .unwrap();
@@ -1959,9 +1963,10 @@ async fn runtime(provider: Arc<ReplayProvider>) -> (tempfile::TempDir, ActorSyst
     .await
     .unwrap();
     system.seed_test_actor("root");
-    let mut actor = system.store().actor("root").unwrap();
-    actor.config.permissions.approval_mode = super::super::ApprovalMode::None;
-    system.store().save_actor(&actor).unwrap();
+    system
+        .patch_owned_preferences("core", None, Some(super::super::ApprovalMode::None))
+        .await
+        .unwrap();
     (directory, system)
 }
 
@@ -3051,9 +3056,10 @@ async fn paused_runtime() -> (tempfile::TempDir, ActorSystem, Arc<ReplayProvider
     .await
     .unwrap();
     system.seed_test_actor("root");
-    let mut root = system.actor("root").unwrap();
-    root.config.permissions.approval_mode = super::super::ApprovalMode::None;
-    system.store().save_actor(&root).unwrap();
+    system
+        .patch_owned_preferences("core", None, Some(super::super::ApprovalMode::None))
+        .await
+        .unwrap();
     (directory, system, provider)
 }
 
@@ -3197,8 +3203,11 @@ async fn delegated_and_direct_inputs_keep_their_original_reply_targets() {
 async fn actor_identity_history_and_queued_work_survive_crash_recovery() {
     use super::super::{ApprovalDecision, ApprovalMode, ApprovalRecord, ToolPermissionRequest};
     let (directory, system, provider) = paused_runtime().await;
-    let mut config = project_config(&system, "persistent");
-    config.permissions.approval_mode = ApprovalMode::Ask;
+    system
+        .patch_owned_preferences("core", None, Some(ApprovalMode::Ask))
+        .await
+        .unwrap();
+    let config = project_config(&system, "persistent");
     let child = system.create_owned("root", config).unwrap();
     let completed = system
         .send_user(
@@ -3611,63 +3620,75 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
 
 #[tokio::test]
 async fn reconfiguration_stops_active_work_preserves_queue_and_keeps_one_worker() {
-    let provider = Arc::new(ReplayProvider::new(vec![
-        MockReply::Pending,
-        MockReply::Answer("queued completed after reconfiguration"),
-    ]));
-    let (_directory, system) = runtime(provider.clone()).await;
-    let active = enqueue_root(&system, "Active request before configuration change");
-    tokio::time::timeout(Duration::from_secs(3), provider.started.notified())
-        .await
-        .unwrap();
-    let before = system.actor("root").unwrap();
-    let mut invalid = before.config.clone();
-    invalid.workspace = system.actor_state_dir("root");
-    assert!(system.update_owned("root", invalid).await.is_err());
-    assert_eq!(system.actor("root").unwrap().config, before.config);
-    assert_eq!(
-        system.store().message(&active.id).unwrap().status,
-        MessageStatus::Running
-    );
-    assert!(
-        !provider.dropped.load(Ordering::Acquire),
-        "an invalid update must leave the old worker intact"
-    );
-    let queued = enqueue_root(&system, "Queued request before configuration change");
-    let mut next = before.config;
-    next.instructions = "Updated instructions".into();
-    tokio::time::timeout(
-        Duration::from_secs(3),
-        system.update_owned("root", next.clone()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(provider.dropped.load(Ordering::Acquire));
-    assert_eq!(
-        system.store().message(&active.id).unwrap().status,
-        MessageStatus::Interrupted
-    );
-    assert_eq!(
-        wait_completed(&system, &queued.id).await.reply.as_deref(),
-        Some("queued completed after reconfiguration")
-    );
-    assert_eq!(system.actor("root").unwrap().config, next);
-    {
-        let requests = provider.requests.lock();
+    for account_mode in [false, true] {
+        let provider = Arc::new(ReplayProvider::new(vec![
+            MockReply::Pending,
+            MockReply::Answer("queued completed after reconfiguration"),
+        ]));
+        let (_directory, system) = runtime(provider.clone()).await;
+        let active = enqueue_root(&system, "Active request before configuration change");
+        tokio::time::timeout(Duration::from_secs(3), provider.started.notified())
+            .await
+            .unwrap();
+        let before = system.actor("root").unwrap();
+        let mut invalid = before.config.clone();
+        invalid.workspace = system.actor_state_dir("root");
+        assert!(system.update_owned("root", invalid).await.is_err());
+        assert_eq!(system.actor("root").unwrap().config, before.config);
         assert_eq!(
-            requests.len(),
-            2,
-            "exactly one execution per input, without replaying interrupted work"
+            system.store().message(&active.id).unwrap().status,
+            MessageStatus::Running
         );
         assert!(
-            matches!(requests[0].messages.last(), Some(AgentMessage::User { content }) if content.as_text().contains(&active.id))
+            !provider.dropped.load(Ordering::Acquire),
+            "an invalid update must leave the old worker intact"
         );
-        assert!(
-            matches!(requests[1].messages.last(), Some(AgentMessage::User { content }) if content.as_text().contains(&queued.id))
+        let queued = enqueue_root(&system, "Queued request before configuration change");
+        let mut next = before.config;
+        if account_mode {
+            next.permissions.approval_mode = super::super::ApprovalMode::Ask;
+        } else {
+            next.instructions = "Updated instructions".into();
+        }
+        let update = async {
+            if account_mode {
+                system
+                    .patch_owned_preferences("core", None, Some(super::super::ApprovalMode::Ask))
+                    .await
+            } else {
+                system.update_owned("root", next.clone()).await
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(3), update)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(provider.dropped.load(Ordering::Acquire));
+        assert_eq!(
+            system.store().message(&active.id).unwrap().status,
+            MessageStatus::Interrupted
         );
+        assert_eq!(
+            wait_completed(&system, &queued.id).await.reply.as_deref(),
+            Some("queued completed after reconfiguration")
+        );
+        assert_eq!(system.actor("root").unwrap().config, next);
+        {
+            let requests = provider.requests.lock();
+            assert_eq!(
+                requests.len(),
+                2,
+                "exactly one execution per input, without replaying interrupted work"
+            );
+            assert!(
+                matches!(requests[0].messages.last(), Some(AgentMessage::User { content }) if content.as_text().contains(&active.id))
+            );
+            assert!(
+                matches!(requests[1].messages.last(), Some(AgentMessage::User { content }) if content.as_text().contains(&queued.id))
+            );
+        }
+        system.shutdown().await;
     }
-    system.shutdown().await;
 }
 use async_trait::async_trait;
 

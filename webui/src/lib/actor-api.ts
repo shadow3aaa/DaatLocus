@@ -341,6 +341,7 @@ export const listActors = (options: FetchOptions & {
 export const getActor = (id: string, options?: FetchOptions) => request<ActorDetail>(actorPath(id), options);
 export const patchActorPreferences = (id: string, preferences: {
   model?: string | null;
+  // Account-wide; accepted only for Core.
   approval_mode?: ApprovalMode;
 }, options?: FetchOptions) => request<ActorDetail>(actorPath(id), { ...options, method: "PATCH", body: preferences });
 export const listMessages = (actor: string, options: FetchOptions & {

@@ -44,7 +44,6 @@
     "files_and_images": "文件与图片",
     "folder": "文件夹",
     "attach_folder": "打包为附件",
-    "action_approval": "如何批准操作？",
     "default_model": "默认模型",
     "models": "模型",
     "use_default_model": "跟随默认模型",

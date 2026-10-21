@@ -180,7 +180,7 @@ impl ActorSystem {
         Ok(receipt)
     }
     pub(crate) fn execution_actor(&self, message: &MessageRecord) -> Result<ActorRecord> {
-        let mut actor = self.store().actor(&message.actor_id)?;
+        let mut actor = self.actor(&message.actor_id)?;
         let external = matches!(
             message.source,
             MessageSource::RemoteUser { .. } | MessageSource::RemoteActor { .. }
@@ -454,6 +454,7 @@ impl ActorSystem {
         Ok(permissions)
     }
     fn hosted_config(&self, mut config: ActorConfig) -> Result<ActorConfig> {
+        config.permissions.approval_mode = self.account_approval_mode()?;
         config.apps = crate::builtin_apps::DEVICE_APPS
             .iter()
             .map(|app| (*app).to_owned())
@@ -543,6 +544,14 @@ impl ActorSystem {
     }
     pub fn actor(&self, id: &str) -> Result<ActorRecord> {
         self.store().actor(id)
+    }
+    pub(crate) fn account_approval_mode(&self) -> Result<ApprovalMode> {
+        Ok(self
+            .store()
+            .actor(crate::stage::shared::ACTOR_ID)?
+            .config
+            .permissions
+            .approval_mode)
     }
     pub fn actor_data_dir(&self, id: &str) -> PathBuf {
         self.inner.delivery_dir.join(id)
@@ -1439,13 +1448,18 @@ impl ActorSystem {
         self.update_owned_with(id, |_| normalize_config(config))
             .await
     }
-    /// Apply composer preferences to the latest grants under the lifecycle lock.
+    /// Apply conversation model/account approval preferences under the lifecycle lock.
     pub async fn patch_owned_preferences(
         &self,
         id: &str,
         model: Option<Option<String>>,
         approval_mode: Option<ApprovalMode>,
     ) -> Result<ActorRecord> {
+        if approval_mode.is_some() && id != crate::stage::shared::ACTOR_ID {
+            return Err(invalid(
+                "Approval mode is an account preference; update Core",
+            ));
+        }
         if id == crate::stage::shared::ACTOR_ID
             && let Some(core) = self.shared_core()
         {
@@ -1462,6 +1476,11 @@ impl ActorSystem {
         model: Option<Option<String>>,
         approval_mode: Option<ApprovalMode>,
     ) -> Result<ActorRecord> {
+        if approval_mode.is_some() && id != crate::stage::shared::ACTOR_ID {
+            return Err(invalid(
+                "Approval mode is an account preference; update Core",
+            ));
+        }
         self.update_owned_with(id, |mut config| {
             if let Some(model) = model {
                 config.model = model;
@@ -1490,6 +1509,8 @@ impl ActorSystem {
         let _lifecycle = self.inner.lifecycle.lock().await;
         let mut actor = self.actor(id)?;
         let config = update(actor.config.clone())?;
+        let account_mode_changed = id == crate::stage::shared::ACTOR_ID
+            && config.permissions.approval_mode != actor.config.permissions.approval_mode;
         let config = if id == crate::stage::shared::ACTOR_ID {
             config
         } else {
@@ -1503,9 +1524,24 @@ impl ActorSystem {
             &config.workspace,
         )?;
         let pause = Reconfiguration::begin(&self.inner.reconfiguring, &self.inner.metadata);
-        let worker = self.inner.workers.lock().remove(id);
-        if let Some(worker) = worker {
-            self.stop_actor_worker(id, worker).await?;
+        let affected = if account_mode_changed {
+            self.account_actor_ids(id)?
+        } else {
+            std::collections::HashSet::from([id.to_owned()])
+        };
+        let workers: Vec<_> = {
+            let mut workers = self.inner.workers.lock();
+            affected
+                .iter()
+                .filter_map(|id| workers.remove(id).map(|worker| (id.clone(), worker)))
+                .collect()
+        };
+        for (_, worker) in &workers {
+            worker.control.stop.store(true, Ordering::Release);
+            worker.control.wake.notify_one();
+        }
+        for (id, worker) in workers {
+            self.stop_actor_worker(&id, worker).await?;
         }
         actor.config = config;
         if actor.status != ActorStatus::Archived {
@@ -2117,7 +2153,9 @@ mod tests {
                         .unwrap();
                     input = system.store().claim_next("core").unwrap().unwrap_or(input);
                 }
-                assert_eq!(system.actor("root").unwrap().config, before.config);
+                let mut expected_config = before.config.clone();
+                expected_config.permissions.approval_mode = mode;
+                assert_eq!(system.actor("root").unwrap().config, expected_config);
                 assert_eq!(system.actor("root").unwrap().context, before.context);
                 assert!(system.store().history("root", 10).unwrap() == history);
                 assert_eq!(

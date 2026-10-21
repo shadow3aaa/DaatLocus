@@ -38,7 +38,7 @@ test("core readiness distinguishes local startup, unavailable status and remote 
 test("submissionDisabled leaves the textarea editable and disables the send control", () => {
   const html = renderToStaticMarkup(<TooltipProvider><Composer value="Retained draft" onValueChange={()=>{}} onSubmit={()=>{}}
     attachments={[]} onFiles={()=>{}} onRemoveAttachment={()=>{}} uploading={false} busy={false} working={false}
-    onStop={()=>{}} submissionDisabled canManage={false} mode="ask" onModeChange={()=>{}} models={[]} modelName="" onModelChange={()=>{}} /></TooltipProvider>);
+    onStop={()=>{}} submissionDisabled canManage={false} models={[]} modelName="" onModelChange={()=>{}} /></TooltipProvider>);
   const textarea = html.match(/<textarea\b[^>]*>/)?.[0];
   const label = i18n.t("composer.send_message");
   const send = [...html.matchAll(/<button\b[^>]*>/g)].map(match => match[0]).find(button => button.includes(`aria-label="${label}"`));

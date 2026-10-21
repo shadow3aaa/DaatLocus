@@ -117,6 +117,11 @@ async fn composer_preferences_patch_preserves_latest_grants_and_unspecified_mode
         .models
         .insert("alternate".into(), config.models["mock"].clone());
     fixture.system.update_config(config).await.unwrap();
+    fixture
+        .system
+        .patch_owned_preferences("core", None, Some(ApprovalMode::Ask))
+        .await
+        .unwrap();
     let mut tightened = fixture.system.actor(&actor).unwrap().config;
     let extra = fixture.system.device_workspace().join("extra-read-access");
     std::fs::create_dir(&extra).unwrap();
@@ -140,7 +145,7 @@ async fn composer_preferences_patch_preserves_latest_grants_and_unspecified_mode
     assert_eq!(saved.permissions, tightened.permissions);
     assert_eq!(saved.model.as_deref(), Some("alternate"));
     let response = fixture
-        .owner(reqwest::Method::PATCH, &format!("/v1/actors/{actor}"))
+        .owner(reqwest::Method::PATCH, "/v1/actors/core")
         .json(&json!({"approval_mode":"none"}))
         .send()
         .await

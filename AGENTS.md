@@ -16,7 +16,7 @@ client are connected.
   and the account menu; mobile uses a modal navigation drawer. There is one Core
   entry, no session/chat catalog or permanent Actor sidebar. Actor references
   open a conversation dialog. Settings use full-page categories.
-- Use a rounded multiline composer with attachments, approval/model selectors
+- Use a rounded multiline composer with attachments, a model selector
   and send/cancel controls. Preserve drafts when a send or upload fails.
 - Derive local message/activity views from semantic events. Fetch heavy details
   on expansion and reconnect streams from the last consumed event cursor.
@@ -82,7 +82,8 @@ client are connected.
 - Actor configuration is internal creation/persistence state, not a user management
   surface. Do not expose editors or client/native RPCs that rewrite Apps, workspace,
   instructions or filesystem roots.
-  User permission controls only switch Full access / Ask / Auto; model selection
+  Owner settings switch one account-wide Full access / Ask / Auto mode for all existing
+  and future Actors; executors have no individual approval-mode selector. Model selection
   stays a composer preference. Actor creation happens through the Actors App,
   with inherited creation constraints. Actors have no individual deletion operation.
 - All Actors retain identity, configuration, context, and history outside an
@@ -178,9 +179,10 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   configuration and reclaim them when Actor data is removed by account reset.
   Never broaden authenticated remote authority, framework credential access or
   other Actors' private data through review or remembered grants.
-- Models cannot set their approval mode or change a child's inherited mode.
-  Only Owner configuration changes mode. Cancellation/reconfiguration must
-  invalidate waiting approvals. Owner HTTP resolution is only for Ask Pending.
+- Models cannot change the account approval mode. Only Owner settings change it;
+  execution resolves the current account mode rather than an Actor's creation snapshot.
+  Cancellation/reconfiguration must invalidate waiting approvals.
+  Owner HTTP resolution is only for Ask Pending.
 - Opened filesystem targets must stay within the effective policy; an earlier
   canonical-path check alone does not justify unsafe symlink-following I/O.
 - Restrictive native process isolation needs platform-specific positive and
@@ -195,7 +197,7 @@ Every effect still requires device-side epoch, authorization, approval and sandb
 - Re-check authorization for every live-stream emission and heartbeat, including
   expired/revoked account sessions. Register wakes before queries and
   respect consumer backpressure. No repeated full-runtime snapshots.
-- Owner accesses any Actor; only approval mode and conversation model
+- Owner accesses any Actor; account approval mode and conversation model
   preferences are user-editable. Core is the default entry; no Actor has a deletion
   control. Conversation URLs locate an Actor and never grant access.
   Global Owner approvals aggregate action controls. No guest share authorization exists.

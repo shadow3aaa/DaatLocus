@@ -390,7 +390,7 @@ async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_ac
             .await
             .unwrap()
             .status(),
-        StatusCode::OK
+        StatusCode::UNPROCESSABLE_ENTITY
     );
     assert_eq!(
         b.owner(reqwest::Method::PUT, &path)

@@ -144,6 +144,9 @@ async fn patch(
         .map(|value| serde_json::from_value(value.clone()))
         .transpose()
         .map_err(|_| ApiError::invalid())?;
+    if approval_mode.is_some() && id != crate::stage::shared::ACTOR_ID {
+        return Err(ApiError::invalid());
+    }
     Ok(Json(
         administer(
             state,

@@ -344,10 +344,12 @@ mod tests {
         )
         .await
         .unwrap();
+        system
+            .patch_owned_preferences("core", None, Some(ApprovalMode::Ask))
+            .await
+            .unwrap();
         system.seed_test_actor("root");
-        let mut parent = system.actor("root").unwrap();
-        parent.config.permissions.approval_mode = ApprovalMode::Ask;
-        system.store().save_actor(&parent).unwrap();
+        let parent = system.actor("root").unwrap();
         let transcript = parse_codex(&rollout(&[json!({"type":"event_msg","payload":{"type":"user_message","message":"Preserve this context; do not run commands."}})])).unwrap();
         let bytes = serde_json::to_vec(&transcript).unwrap();
         let resource =
