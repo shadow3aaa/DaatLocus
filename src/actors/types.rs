@@ -76,6 +76,33 @@ pub struct ApprovalRecord {
     pub reason: String,
     pub created_at_ms: i64,
     pub resolved_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appeal: Option<ApprovalAppeal>,
+}
+
+/// The automatic denial stays immutable; an Owner appeal is a separate decision.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApprovalAppeal {
+    pub core_message_id: String,
+    pub request_message_id: String,
+    pub explanation: String,
+    pub decision: ApprovalDecision,
+    pub owner_message_id: Option<String>,
+    pub notification_id: Option<String>,
+}
+
+/// Native runtime decision produced only after Core validates an Owner reply.
+/// The source device needs this bounded proof, never Core's execution context.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalAppealAuthorization {
+    pub approval_id: String,
+    pub core_message_id: String,
+    pub question_message_id: String,
+    pub owner_message_id: String,
+    pub scopes_digest: String,
+    pub decision: ApprovalDecision,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

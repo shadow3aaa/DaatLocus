@@ -1120,6 +1120,172 @@ impl ActorSystem {
         }
         self.store().set_archived(target, archived)
     }
+
+    pub(crate) fn appeal_from_actor(
+        &self,
+        caller: &ActorCallContext,
+        approval_id: &str,
+        explanation: &str,
+    ) -> Result<ApprovalRecord> {
+        let actor = self.record_for_tool(&caller.actor_id, caller)?;
+        if actor.remote_read_only
+            || actor.config.permissions.approval_mode != ApprovalMode::Auto
+            || !self
+                .account_actor_ids(&actor.id)?
+                .contains(crate::stage::shared::ACTOR_ID)
+        {
+            return Err(forbidden("Appeal is outside the Actor's account authority"));
+        }
+        let record = self.store().appeal_approval(
+            &actor.id,
+            &caller.message_id,
+            approval_id,
+            &self.safe_error(explanation),
+            self.store()
+                .public_stage_id()
+                .map_err(|error| miette::miette!("{error}"))?,
+            false,
+        )?;
+        self.wake(crate::stage::shared::ACTOR_ID);
+        if let Some(core) = self.shared_core() {
+            core.notify();
+        }
+        Ok(record)
+    }
+
+    pub(crate) async fn resolve_appeal_from_core(
+        &self,
+        caller: &ActorCallContext,
+        approval_id: &str,
+        decision: ApprovalDecision,
+        reason: &str,
+    ) -> Result<ApprovalRecord> {
+        let record = self.core_approval_appeal(approval_id)?;
+        let authorization = self.prepare_appeal_authorization(caller, &record, decision, reason)?;
+        self.apply_appeal_authorization(&authorization).await
+    }
+
+    pub(crate) fn core_approval_appeal(&self, approval_id: &str) -> Result<ApprovalRecord> {
+        let record = self.store().approval(approval_id)?;
+        if !self
+            .account_actor_ids(crate::stage::shared::ACTOR_ID)?
+            .contains(&record.actor_id)
+            || !self.store().native_approval(approval_id)?
+        {
+            return Err(forbidden("Appeal does not belong to this account device"));
+        }
+        Ok(record)
+    }
+
+    pub(crate) fn prepare_appeal_authorization(
+        &self,
+        caller: &ActorCallContext,
+        record: &ApprovalRecord,
+        decision: ApprovalDecision,
+        reason: &str,
+    ) -> Result<ApprovalAppealAuthorization> {
+        let core = self.record_for_tool(crate::stage::shared::ACTOR_ID, caller)?;
+        if core.remote_read_only {
+            return Err(forbidden("Read-only Core authority cannot resolve appeals"));
+        }
+        let appeal = record
+            .appeal
+            .as_ref()
+            .ok_or_else(|| invalid("Approval has no appeal"))?;
+        let question = self
+            .store()
+            .owner_appeal_reply(&caller.message_id, &appeal.core_message_id)?;
+        Ok(ApprovalAppealAuthorization {
+            approval_id: record.id.clone(),
+            core_message_id: appeal.core_message_id.clone(),
+            question_message_id: question,
+            owner_message_id: caller.message_id.clone(),
+            scopes_digest: super::approval::scopes_digest(record)?,
+            decision,
+            reason: self.safe_error(reason),
+        })
+    }
+
+    /// Invoked only by the authenticated current Core runtime, never a model tool
+    /// on this device. Applying a grant does not construct or run a Core worker.
+    pub(crate) async fn apply_appeal_authorization(
+        &self,
+        authorization: &ApprovalAppealAuthorization,
+    ) -> Result<ApprovalRecord> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        let record = self.core_approval_appeal(&authorization.approval_id)?;
+        let decision = authorization.decision;
+        let original = self.store().message(&record.message_id)?;
+        let actor = self.execution_actor(&original)?;
+        if actor.remote_read_only || actor.config.permissions.approval_mode != ApprovalMode::Auto {
+            return Err(forbidden("Appeal permission mode or authority changed"));
+        }
+        if decision == ApprovalDecision::Approved {
+            // An appeal intentionally outlives its inbox input. Build the current
+            // hard policy only; never resurrect that input as tool authority.
+            let base =
+                self.build_app_context(actor.clone(), &original.id, original.seq as u64, None)?;
+            if record.requested.clone().canonicalized()? != record.requested {
+                return Err(forbidden(
+                    "Appeal filesystem targets changed; submit a fresh operation",
+                ));
+            }
+            for (roots, denied) in [
+                (
+                    &record.requested.readable_roots,
+                    &base.sandbox_policy.filesystem.deny_read_paths,
+                ),
+                (
+                    &record.requested.writable_roots,
+                    &base.sandbox_policy.filesystem.deny_write_paths,
+                ),
+            ] {
+                if roots
+                    .iter()
+                    .any(|path| denied.iter().any(|deny| path.starts_with(deny)))
+                {
+                    return Err(forbidden(
+                        "Appeal cannot override protected credentials or Actor resources",
+                    ));
+                }
+            }
+        }
+        let record = self.store().resolve_approval_appeal(authorization)?;
+        self.wake(&record.actor_id);
+        if record.actor_id == crate::stage::shared::ACTOR_ID
+            && let Some(core) = self.shared_core()
+        {
+            core.notify();
+        }
+        Ok(record)
+    }
+
+    pub(crate) fn appeal_from_current_core(
+        &self,
+        approval_id: &str,
+        explanation: &str,
+    ) -> Result<ApprovalRecord> {
+        let record = self.core_approval_appeal(approval_id)?;
+        if record.actor_id != crate::stage::shared::ACTOR_ID {
+            return Err(forbidden(
+                "Core cannot appeal another Actor's denial on its behalf",
+            ));
+        }
+        let record = self.store().appeal_approval(
+            crate::stage::shared::ACTOR_ID,
+            &record.message_id,
+            approval_id,
+            &self.safe_error(explanation),
+            self.store()
+                .public_stage_id()
+                .map_err(|error| miette::miette!("{error}"))?,
+            true,
+        )?;
+        if let Some(core) = self.shared_core() {
+            core.notify();
+        }
+        Ok(record)
+    }
     pub fn list_for_actor(&self, sender: &str) -> Result<Vec<ActorRecord>> {
         self.actor(sender)?;
         let allowed = self.account_actor_ids(sender)?;
@@ -1212,7 +1378,7 @@ impl ActorSystem {
         let message = self.store().message(id)?;
         if !matches!(&message.source, MessageSource::Actor { actor_id } if actor_id == sender)
             || !matches!(&message.reply_to, ReplyTarget::Actor { actor_id, .. } if actor_id == sender)
-            || message.kind != MessageKind::Request
+            || !matches!(message.kind, MessageKind::Request | MessageKind::Steering)
         {
             return Err(forbidden("Request was not delegated by this Actor"));
         }
@@ -1242,6 +1408,58 @@ impl ActorSystem {
         content: String,
     ) -> Result<MessageRecord> {
         self.send_from_actor_with_context(sender, current_id, target, content, None)
+    }
+    pub(crate) fn steer_from_core(
+        &self,
+        caller: &crate::app::ActorCallContext,
+        target: &str,
+        content: String,
+    ) -> Result<MessageRecord> {
+        let core = crate::stage::shared::ACTOR_ID;
+        if caller.actor_id != core
+            || self.inner.reconfiguring.load(Ordering::Acquire)
+            || self.inner.stopping.load(Ordering::Acquire)
+        {
+            return Err(forbidden("Core guidance is not currently authorized"));
+        }
+        let source = self.record_for_tool(core, caller)?;
+        let input = self.store().message(&caller.message_id)?;
+        // Guidance uses an existing task's authority. An externally scoped input
+        // must not borrow broader authority by steering an unrelated request.
+        if source.remote_read_only || input.remote_authority.is_some() {
+            return Err(forbidden(
+                "Remote-authority inputs must queue work under their own authority",
+            ));
+        }
+        if content.trim().is_empty() || content.len() > 64 * 1024 {
+            return Err(invalid("Invalid guidance size"));
+        }
+        let original = self.delegated_request(core, target)?;
+        if original.kind != MessageKind::Request
+            || original.actor_id == core
+            || !self.account_actor_ids(core)?.contains(&original.actor_id)
+        {
+            return Err(forbidden(
+                "Guidance target is not an account request delegated by Core",
+            ));
+        }
+        let mut guide = self.make_message(
+            &original.actor_id,
+            MessageSource::Actor {
+                actor_id: core.into(),
+            },
+            ReplyTarget::Actor {
+                actor_id: core.into(),
+                request_id: input.id.clone(),
+            },
+            content,
+            vec![],
+        );
+        guide.kind = MessageKind::Steering;
+        guide.in_reply_to = Some(original.id);
+        let guide = self.store().enqueue_core_guidance(&input.id, guide)?;
+        self.wake(&guide.actor_id);
+        Ok(guide)
     }
     pub(crate) fn send_from_actor_with_context(
         &self,

@@ -10,6 +10,9 @@ use std::{path::Path, sync::Arc};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+mod approval_appeals;
+mod core_guidance;
+
 pub struct ActorStore {
     db: Mutex<Connection>,
     changed: Arc<Notify>,
@@ -48,6 +51,14 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
         return None;
     }
     let payload = result.payload.as_object()?;
+    if payload
+        .get("approval")
+        .and_then(|value| value.get("decision"))
+        .and_then(Value::as_str)
+        == Some("denied")
+    {
+        return Some(serde_json::json!({"approval": payload["approval"]}));
+    }
     let domain_name = result
         .name
         .strip_prefix("d_")
@@ -89,6 +100,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
         "actors__create"
         | "actors__import_conversation"
         | "actors__send"
+        | "actors__steer"
         | "actors__archive"
         | "actors__unarchive" => &[
             "id",
@@ -98,6 +110,8 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
             "conversation_url",
             "stage_id",
             "status",
+            "kind",
+            "target_message_id",
         ],
         "files__write_file" | "files__edit_file" | "files__copy_file" => {
             &["path", "created", "byte_count", "sha256"]
@@ -115,6 +129,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
         "actors__create"
             | "actors__import_conversation"
             | "actors__send"
+            | "actors__steer"
             | "actors__archive"
             | "actors__unarchive"
     ) {
@@ -1021,6 +1036,7 @@ impl ActorStore {
                 || current.kind != MessageKind::Steering
                 || current.in_reply_to.as_deref() != Some(target)
                 || current.status != MessageStatus::Queued
+                || current.cancel_requested
                 || current.updated_at_ms != input.updated_at_ms
             {
                 return Ok(false);
@@ -1048,9 +1064,9 @@ impl ActorStore {
             let limit = limit.clamp(1, 100);
             let shared = actor == crate::stage::shared::ACTOR_ID && sql(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_order')",[],|r|r.get::<_,bool>(0)))?;
             let query = if shared {
-                "SELECT m.record,COALESCE(o.ordinal,4503599627370496+m.seq) AS position FROM messages m LEFT JOIN core_order o ON o.entity='messages' AND o.remote_key=m.id WHERE m.actor_id=?1 AND m.status='\"queued\"' AND json_extract(m.record,'$.source.kind') IN ('user','remote_user') AND position>?2 ORDER BY position LIMIT ?3"
+                "SELECT m.record,COALESCE(o.ordinal,4503599627370496+m.seq) AS position FROM messages m LEFT JOIN core_order o ON o.entity='messages' AND o.remote_key=m.id WHERE m.actor_id=?1 AND m.status='\"queued\"' AND json_extract(m.record,'$.kind')!='delivery' AND position>?2 ORDER BY position LIMIT ?3"
             } else {
-                "SELECT record,seq FROM messages WHERE actor_id=?1 AND status='\"queued\"' AND json_extract(record,'$.source.kind') IN ('user','remote_user') AND seq>?2 ORDER BY seq LIMIT ?3"
+                "SELECT record,seq FROM messages WHERE actor_id=?1 AND status='\"queued\"' AND json_extract(record,'$.kind')!='delivery' AND seq>?2 ORDER BY seq LIMIT ?3"
             };
             let mut statement = sql(db.prepare(query))?;
             let rows = sql(statement.query_map(
@@ -1984,11 +2000,17 @@ impl ActorStore {
                 message.final_generation = sql(tx.query_row("SELECT MAX(json_extract(record,'$.generation')) FROM events WHERE actor_id=?1 AND json_extract(record,'$.message_id')=?2 AND json_extract(record,'$.type')='generation_started'", params![message.actor_id, message.id], |row| row.get(0)))?;
             }
             save_message(&tx, &message)?;
-            // A guide arriving after the last model response still becomes normal
-            // queued work. Never discard it because its selected execution ended.
+            // User guides retain their queued input. Core guides bind an exact
+            // delegation and report non-application rather than becoming new work.
+            let mut unapplied = None;
             let guides = sql(tx.prepare("SELECT record FROM messages WHERE actor_id=?1 AND status='\"queued\"' AND json_extract(record,'$.kind')='steering' AND json_extract(record,'$.in_reply_to')=?2"))?.query_map(params![message.actor_id,message.id],|r|r.get::<_,String>(0)).map_err(|error|miette::miette!("{error}"))?.collect::<rusqlite::Result<Vec<_>>>().into_diagnostic()?;
             for data in guides {
                 let mut guide: MessageRecord = decode(data)?;
+                if matches!(&guide.source, MessageSource::Actor { actor_id } if actor_id == crate::stage::shared::ACTOR_ID)
+                {
+                    unapplied = Some(core_guidance::not_applied(&tx, &mut guide)?);
+                    continue;
+                }
                 guide.kind = MessageKind::Request;
                 guide.in_reply_to = None;
                 guide.updated_at_ms = now().max(guide.updated_at_ms + 1);
@@ -2150,7 +2172,7 @@ impl ActorStore {
                 None
             };
             self.commit(tx)?;
-            Ok(routed)
+            Ok(routed.or(unapplied))
         })
     }
     pub fn request_cancel(&self, id: &str) -> Result<MessageRecord> {

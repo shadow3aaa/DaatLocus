@@ -119,6 +119,10 @@
     "start_conversation": "Send a message to start a conversation."
   },
   "conversation_turns": {
+    "guidance_pending": "Guidance awaiting application",
+    "guidance_applied": "Guidance applied",
+    "guidance_not_applied": "Guidance not applied",
+    "guidance_from_core_applied": "Guidance from Daat Locus applied",
     "model_authentication_failed": "Model credentials are invalid or expired. Update the provider settings.",
     "model_access_denied": "The provider denied access. Check the credentials and model permissions.",
     "model_certificate_revoked": "The model service certificate was revoked. Check the service address or network proxy.",
@@ -137,7 +141,6 @@
     "task_stopped_completed_actions_are_retained": "Task stopped. Completed actions are retained.",
     "delivered": "Delivered",
     "working": "Working",
-    "collaboration_reply": "Collaboration reply",
     "delegate_task": "Delegate task",
     "delivered_time": "Delivered {{time}}"
   },
@@ -362,6 +365,7 @@
     "set_text": "Replace text"
   },
   "tool_details": {
+    "not_approved": "Not approved",
     "deliver_result": "Deliver result",
     "could_not_open_the_result": "Could not open the result.",
     "open_value0": "Open {{value0}}",
@@ -429,6 +433,7 @@
     "the_folder_contains_duplicate_file_names": "The folder contains duplicate file names."
   },
   "tool_presentation": {
+    "action_not_approved": "{{action}} · Not approved",
     "archive_actor": "Archive Actor",
     "unarchive_actor": "Unarchive Actor",
     "create_actor": "Create Actor",

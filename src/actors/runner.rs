@@ -350,7 +350,7 @@ async fn execute_message(
         for guide in system.store().pending_steering(&actor.id, &message.id)? {
             let mut update = guide.clone();
             update.content = format!(
-                "User guidance for the current task. Apply this update with the original task's authority and grants unchanged.\n{}",
+                "Guidance for the current task. Preserve the source below; this does not confer Owner approval or change the original task's authority and grants.\n{}",
                 guide.content
             );
             let input =
@@ -623,6 +623,11 @@ async fn execute_call(
         )
         .await
     {
+        if let Some(rejection) = super::approval::rejection(&error) {
+            record_tool_rejection(system, actor, message, call, &rejection, history)?;
+            check_interruption(system, control, message)?;
+            return Ok(Vec::new());
+        }
         record_tool_error(
             system,
             actor,
@@ -632,22 +637,17 @@ async fn execute_call(
             history,
         )?;
         if error
-            .downcast_ref::<super::approval::AutomaticReviewDenied>()
-            .is_some()
-            || error
-                .downcast_ref::<super::ActorError>()
-                .is_some_and(|error| {
-                    matches!(
-                        error,
-                        super::ActorError::Forbidden(_) | super::ActorError::Invalid(_)
-                    )
-                })
+            .downcast_ref::<super::ActorError>()
+            .is_some_and(|error| {
+                matches!(
+                    error,
+                    super::ActorError::Forbidden(_) | super::ActorError::Invalid(_)
+                )
+            })
         {
             check_interruption(system, control, message)?;
             return Ok(Vec::new());
         }
-        // An Ask-mode owner denial ends this request. Auto denies only this
-        // operation, permitting the Actor to choose a different safe approach.
         return Err(error);
     }
     check_interruption(system, control, message)?;
@@ -687,6 +687,11 @@ async fn execute_call(
             Err(miette!("Execution interrupted"))
         }
         Some(Err(error)) => {
+            if let Some(rejection) = super::approval::rejection(&error) {
+                record_tool_rejection(system, actor, message, call, &rejection, history)?;
+                check_interruption(system, control, message)?;
+                return Ok(Vec::new());
+            }
             record_tool_error(
                 system,
                 actor,
@@ -740,6 +745,28 @@ async fn execute_call(
             Ok(images)
         }
     }
+}
+
+fn record_tool_rejection(
+    system: &ActorSystem,
+    actor: &ActorRecord,
+    message: &MessageRecord,
+    call: &AgentToolCall,
+    rejection: &super::approval::ApprovalRejection,
+    history: &mut Vec<AgentMessage>,
+) -> Result<()> {
+    let content = rejection.model_content();
+    system.store().tool_finished(
+        &actor.id,
+        &message.id,
+        call,
+        rejection.payload(),
+        &content,
+        "App operation was not approved",
+        None,
+    )?;
+    history.push(AgentMessage::tool(&call.id, &call.name, content));
+    Ok(())
 }
 
 fn record_tool_error(

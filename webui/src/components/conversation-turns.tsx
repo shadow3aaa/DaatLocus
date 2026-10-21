@@ -35,10 +35,10 @@ export function PrimaryTranscript({ messages, working, receiptMessageId, ...prop
 export function PrimaryTurn({ message, chat, access, onActor, receiptMessageId, searchQuery }: Props & { receiptMessageId?: string }) {
   const user = isUserSource(message);
   const tools = chat.tools.filter(tool => tool.message_id === message.id);
-  const tasks = tools.filter(tool => !tool.error && ["actors__create", "actors__import_conversation", "actors__send"].includes(domainToolName(tool.name)) && tool.outcome);
+  const tasks = tools.filter(tool => !tool.error && ["actors__create", "actors__import_conversation", "actors__send", "actors__steer"].includes(domainToolName(tool.name)) && tool.outcome);
   const taskTarget = (tool: typeof tasks[number]) => { const info = asObject(tool.outcome); return actorIdFromUrl(asText(info.conversation_url), typeof location === "undefined" ? undefined : location.href) || asText(info.actor_id) || asText(info.id); };
   const delegated = new Set(tasks.filter(tool => domainToolName(tool.name) === "actors__send").map(taskTarget));
-  const references = tasks.filter(tool => taskTarget(tool) && (domainToolName(tool.name) === "actors__send" || !delegated.has(taskTarget(tool))));
+  const references = tasks.filter(tool => taskTarget(tool) && (["actors__send", "actors__steer"].includes(domainToolName(tool.name)) || !delegated.has(taskTarget(tool))));
   if (!user && message.reply_to.kind !== "user" && !(message.reply_to.kind === "remote" && message.reply_to.user)) return null;
   const filtering = Boolean(searchQuery?.trim());
   const input = (user && (!filtering || matchesConversationText(messageDisplayText(message), searchQuery!)));
@@ -52,7 +52,7 @@ export function PrimaryTurn({ message, chat, access, onActor, receiptMessageId, 
     </div>}
     {response && <div className="dl-primary-response">
     {reply && <div className="dl-message dl-message-assistant"><div className="dl-primary-bubble-row"><div className="dl-bubble dl-bubble-assistant"><Markdown content={message.reply || ""} onActor={onActor} /></div><CopyMessage content={message.reply || ""} /></div></div>}
-    {!filtering && references.map(tool => { const info = asObject(tool.outcome); const target = taskTarget(tool); return target ? <ActorReference key={tool.id} actorId={target} label={asText(info.name)} messageId={asText(info.message_id)} onOpen={onActor} /> : null; })}
+    {!filtering && references.map(tool => { const info = asObject(tool.outcome); const target = taskTarget(tool); return target ? <ActorReference key={tool.id} actorId={target} label={asText(info.name)} messageId={asText(info.message_id)} guidance={info.kind === "steering"} detail={info.kind === "steering" ? t("conversation_turns.guidance_for_the_current_task") : undefined} onOpen={onActor} /> : null; })}
     {!filtering && (outcomes.artifacts.length > 0 || outcomes.changes.length > 0) && <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />}
     {!filtering && <Decisions message={message} chat={chat} access={access} />}
     {!filtering && user && <OutcomeStatus message={message} />}
@@ -69,8 +69,8 @@ export function WorkTurn({ message, chat, access, onActor, searchQuery }: Props)
   const replyMatches = !searchQuery || matchesConversationText(message.reply || "", searchQuery);
   const tools = chat.tools.filter(tool => tool.message_id === message.id);
   return <article className="dl-message-turn dl-work-turn" id={`message-${message.actor_id}-${message.id}`}>
-    {inputMatches && message.kind === "steering" && <small className="dl-guidance-label">{t("conversation_turns.guidance_for_the_current_task")}</small>}
-    {inputMatches && (message.content || message.attachments.length > 0) && <div className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}>{!user && message.source.kind === "actor" && <ActorReference actorId={message.source.actor_id} onOpen={onActor} detail={["result", "progress"].includes(message.kind) ? t("conversation_turns.collaboration_reply") : t("conversation_turns.delegate_task")} />}<div className={cn(user && "dl-work-prompt")}>{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</div>{user && message.content && <div className="dl-work-user-actions"><CopyMessage content={messageDisplayText(message)} /></div>}</div>}
+    {inputMatches && message.kind === "steering" && <small className="dl-guidance-label" role="status">{t(message.status === "completed" ? "conversation_turns.guidance_applied" : "conversation_turns.guidance_not_applied")}</small>}
+    {inputMatches && (message.content || message.attachments.length > 0) && <div className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}><div className={cn(user && "dl-work-prompt")}>{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</div>{user && message.content && <div className="dl-work-user-actions"><CopyMessage content={messageDisplayText(message)} /></div>}</div>}
     {!searchMode && !["delivery", "steering"].includes(message.kind) && <WorkRound message={message} events={chat.events} tools={tools} guidance={chat.messages.filter(item => item.kind === "steering" && item.status === "completed" && item.in_reply_to === message.id)} onActor={onActor} />}
     {!searchMode && <Decisions message={message} chat={chat} access={access} />}
     {replyMatches && message.reply && <div className="dl-work-final"><Markdown content={message.reply} onActor={onActor} /><CopyMessage content={message.reply} /></div>}

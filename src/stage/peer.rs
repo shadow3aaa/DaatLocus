@@ -1521,15 +1521,14 @@ impl PeerLink {
                     .await;
                     let response = result.unwrap_or_else(|error| {
                         tracing::debug!(peer=%peer,reason=%error,"Shared Actor request rejected");
-                        if let StageError::ApprovalDenied(reason) = error {
-                            return super::core_wire::Response::ApprovalDenied {
-                                reason: host
-                                    .system
-                                    .safe_error(&reason)
-                                    .chars()
-                                    .take(1000)
-                                    .collect(),
-                            };
+                        if let StageError::ApprovalDenied(mut rejection) = error {
+                            rejection.reason = host
+                                .system
+                                .safe_error(&rejection.reason)
+                                .chars()
+                                .take(1000)
+                                .collect();
+                            return super::core_wire::Response::ApprovalDenied { rejection };
                         }
                         super::core_wire::Response::Error {
                             code: "core_operation_rejected".into(),

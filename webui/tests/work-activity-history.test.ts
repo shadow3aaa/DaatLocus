@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { conversationReducer, initialConversation } from "../src/hooks/use-actor-conversation";
 import { activityTools, extendActivityHistory, mergeActivity, workActivityTimeline } from "../src/lib/work-timeline";
+import { activityLabel } from "../src/lib/tool-presentation";
 import type { EventRecord, MessageRecord } from "../src/lib/actor-api";
 
 const message: MessageRecord = {seq:1,id:"request",actor_id:"worker",kind:"request",source:{kind:"user"},reply_to:{kind:"user"},in_reply_to:null,content:"Check both areas",attachments:[],status:"running",cancel_requested:false,reply:null,error:null,created_at_ms:1,updated_at_ms:1};
@@ -14,6 +15,18 @@ const later = [
   ...Array.from({length:400},(_,index)=>record(index+8,{type:"generation_delta",message_id:"request",generation:7,channel:"reasoning",text:"Checking.\n\n"})),
   started(408,"second"),finished(409,"second"),
 ];
+
+test("a live approval rejection keeps its reason after history replaces the event window", () => {
+  const outcome = {approval:{decision:"denied",reason:"The task does not authorize this file",approval_id:"approval",stage_id:"source",mode:"auto"}};
+  const event = record(2,{type:"tool_finished",message_id:"request",call_id:"denied",name:"files__read_file",result_id:"result-denied",summary:"App operation was not approved",error:null,outcome});
+  const live = activityTools([event],message,[])[0];
+  const restored = activityTools([],message,[{seq:2,id:"result-denied",message_id:"request",call_id:"denied",name:"files__read_file",summary:"App operation was not approved",error:null,outcome}])[0];
+  expect(live.status).toBe("completed");
+  for (const tool of [live,restored]) {
+    expect(tool.error).toBeNull();
+    expect(activityLabel(tool).detail).toBe("The task does not authorize this file");
+  }
+});
 
 test("expanded activity preserves completed groups when the conversation stream drops its old window", () => {
   let state = initialConversation("worker");

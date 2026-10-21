@@ -69,9 +69,37 @@ struct RequestArgs {
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct SteerArgs {
+    stage_id: String,
+    message_id: String,
+    content: String,
+}
+
+#[model_schema]
+#[derive(Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ArchiveArgs {
     stage_id: String,
     actor_id: String,
+}
+
+#[model_schema]
+#[derive(Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ResolveAppealArgs {
+    stage_id: String,
+    approval_id: String,
+    decision: crate::actor_app::AppealDecision,
+    reason: String,
+}
+
+#[model_schema]
+#[derive(Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AppealArgs {
+    stage_id: String,
+    approval_id: String,
+    explanation: String,
 }
 
 struct AccountActors {
@@ -102,6 +130,7 @@ impl App for AccountActors {
                 | "create"
                 | "import_conversation"
                 | "send"
+                | "steer"
                 | "status"
                 | "cancel"
                 | "archive"
@@ -116,8 +145,11 @@ impl App for AccountActors {
                 "create" => model_schema_for::<CreateArgs>(),
                 "import_conversation" => model_schema_for::<ImportArgs>(),
                 "send" => model_schema_for::<SendArgs>(),
+                "steer" => model_schema_for::<SteerArgs>(),
                 "status" | "cancel" => model_schema_for::<RequestArgs>(),
                 "archive" | "unarchive" => model_schema_for::<ArchiveArgs>(),
+                "resolve_approval_appeal" => model_schema_for::<ResolveAppealArgs>(),
+                "appeal_approval" => model_schema_for::<AppealArgs>(),
                 _ => continue,
             };
             spec.description = spec
@@ -172,7 +204,12 @@ impl App for AccountActors {
         }
         if matches!(
             call.name.as_str(),
-            "read_history" | "read_resource" | "deliver" | "yield"
+            "read_history"
+                | "read_resource"
+                | "deliver"
+                | "yield"
+                | "appeal_approval"
+                | "resolve_approval_appeal"
         ) {
             return self.local.execute_tool(call, context).await;
         }
@@ -221,7 +258,7 @@ impl App for AccountActors {
                 },
             )
             .await
-            .map_err(|error| miette::miette!("{error}"))?
+            .map_err(miette::Report::new)?
         {
             Response::ToolResult {
                 result: Some(mut result),

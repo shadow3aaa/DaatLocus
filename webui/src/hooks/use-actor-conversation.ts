@@ -62,6 +62,7 @@ function mergeMessages(current: api.MessageRecord[], incoming: api.MessageRecord
   const values = new Map(current.map(message => [message.id, message]));
   for (const message of incoming) {
     const previous = values.get(message.id);
+    if (previous?.status === "running" && message.status === "queued" && message.updated_at_ms === previous.updated_at_ms) continue;
     if (!previous || message.updated_at_ms > previous.updated_at_ms ||
       (message.updated_at_ms === previous.updated_at_ms && (!terminal(previous.status) || terminal(message.status))))
       values.set(message.id, message);

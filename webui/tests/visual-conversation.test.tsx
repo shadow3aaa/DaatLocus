@@ -42,6 +42,29 @@ describe("fixed presentation and chronological source", () => {
     const chat = {messages:[message,queued],tools:[],approvals:[],events:[]} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
     expect(renderToStaticMarkup(<PrimaryTurn message={queued} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />)).toContain("NEW_IM_INPUT");
   });
+  test("work history identifies applied and unapplied guidance", () => {
+    const chat = {messages:[],tools:[],approvals:[],events:[],toolNext:{}} as unknown as Parameters<typeof WorkTurn>[0]["chat"];
+    for (const [kind,status,key] of [
+      ["steering","completed","conversation_turns.guidance_applied"],
+      ["steering","cancelled","conversation_turns.guidance_not_applied"],
+    ] as const) {
+      const input = {...message,source:{kind:"actor" as const,actor_id:"core"},kind,status,reply:null,content:"Added constraint CORE_GUIDANCE"};
+      const html = renderToStaticMarkup(<WorkTurn message={input} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
+      expect(html).toContain(`role="status">${i18n.t(key)}`);
+      expect(html).toContain("CORE_GUIDANCE");
+      expect(html).not.toContain(i18n.t("conversation_content.ready"));
+    }
+  });
+  test("Core presents guidance as a compact request reference instead of its tool pipeline", () => {
+    const stage="00000000-0000-4000-8000-000000000002";
+    const update={...message,actor_id:"core",status:"completed" as const,reply:null};
+    const tool={seq:1,id:"guide-result",message_id:update.id,call_id:"guide-call",name:"actors__steer",summary:"Guidance awaiting application",error:null,outcome:{actor_id:"worker",conversation_url:`/stages/${stage}/actors/worker`,message_id:"guide",target_message_id:"original",kind:"steering",status:"queued"}};
+    const chat={messages:[update],tools:[tool],approvals:[],events:[]} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
+    const html=renderToStaticMarkup(<PrimaryTurn message={update} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
+    expect(html).toContain('class="dl-actor-reference"');
+    expect(html).toContain(i18n.t("conversation_turns.guidance_for_the_current_task"));
+    expect(html).not.toContain("Guidance awaiting application");
+  });
   test("search filters individual conversation sides and work presentation hides intermediate disclosures", () => {
     const record = {...message, content:"UNMATCHED_USER_INPUT", reply:"MATCHED_FINAL_REPLY",status:"completed" as const};
     const chat = {messages:[],tools:[],approvals:[],events:[],toolNext:{}} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
@@ -57,6 +80,27 @@ describe("fixed presentation and chronological source", () => {
     const chat = {queueCursor:null} as unknown as Parameters<typeof MessageQueue>[0]["chat"];
     const html = renderToStaticMarkup(<TooltipProvider><MessageQueue messages={[queued]} active={message} chat={chat} access={{kind:"owner",manage:true}} /></TooltipProvider>);
     expect(html).toContain("/v1/actors/root/resources/image-id");expect(html).not.toContain("untrusted.example");
+  });
+  test("collaborator requests share queue rows while only user inputs expose mutation controls", () => {
+    const chat = {queueCursor:null} as unknown as Parameters<typeof MessageQueue>[0]["chat"];
+    const owner = {...message,id:"owner-queued",status:"queued" as const,content:"OWNER_QUEUE_TEXT"};
+    const collaborator = {...owner,id:"actor-queued",source:{kind:"actor" as const,actor_id:"core"},content:"ACTOR_QUEUE_TEXT"};
+    const guide = {...collaborator,id:"guide-queued",kind:"steering" as const,content:"GUIDE_QUEUE_TEXT",in_reply_to:message.id};
+    const render = (messages:MessageRecord[]) => renderToStaticMarkup(<TooltipProvider><MessageQueue messages={messages} active={message} chat={chat} access={{kind:"owner",manage:true}} /></TooltipProvider>);
+    const queued = render([collaborator,guide]);
+    expect(queued).toContain("ACTOR_QUEUE_TEXT");
+    expect(queued).toContain("GUIDE_QUEUE_TEXT");
+    expect(queued).toContain(i18n.t("message_queue.applying_guidance"));
+    expect(queued).not.toContain(`aria-label="${i18n.t("message_queue.withdraw_queued_message_value0",{value0:collaborator.content})}"`);
+    expect(queued).not.toContain(`aria-label="${i18n.t("message_queue.guide_task_value0",{value0:collaborator.content})}"`);
+    const own = render([owner]);
+    expect(own).toContain(`aria-label="${i18n.t("message_queue.withdraw_queued_message_value0",{value0:owner.content})}"`);
+    expect(own).toContain(`aria-label="${i18n.t("message_queue.guide_task_value0",{value0:owner.content})}"`);
+  });
+  test("queue pagination stays available after all loaded inputs start running", () => {
+    const chat = {queueCursor:24} as unknown as Parameters<typeof MessageQueue>[0]["chat"];
+    const html = renderToStaticMarkup(<TooltipProvider><MessageQueue messages={[]} active={message} chat={chat} access={{kind:"owner",manage:true}} /></TooltipProvider>);
+    expect(html).toContain(i18n.t("message_queue.show_more_queued_messages"));
   });
   test("primary IM excludes live model text, reasoning and tool pipeline", () => {
     const chat = {messages:[],tools:[],approvals:[],generations:{m:{assistant:"INTERNAL_STAGE",reasoning:"INTERNAL_THOUGHT"}},events:[],amend:async()=>{},refresh:async()=>{}} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];

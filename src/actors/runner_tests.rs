@@ -20,6 +20,107 @@ enum MockReply {
 }
 
 #[tokio::test]
+async fn approval_rejection_is_not_a_tool_or_input_failure() {
+    use super::super::{ApprovalDecision, ApprovalMode};
+    for mode in [ApprovalMode::Auto, ApprovalMode::Ask] {
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("not-authorized.txt");
+        let reason = "The requested output folder is not authorized <private>";
+        let provider = Arc::new(ReplayProvider::new(vec![
+            MockReply::Calls(vec![AgentToolCall {
+                id: "rejected-write".into(),
+                name: "files__write_file".into(),
+                arguments: json!({"path":target,"content":"must not be written","expected_sha256":null,
+                    "_review":{"task":"Produce the requested file","reason":"Write to the proposed output folder"}}),
+            }]),
+            MockReply::Answer("I will use an authorized alternative."),
+        ]));
+        provider
+            .review_replies
+            .lock()
+            .push_back(json!({"decision":"deny","reason":reason}));
+        let (_dir, system) = runtime(provider.clone()).await;
+        system.install_local_core().unwrap();
+        system
+            .patch_owned_preferences("core", None, Some(mode))
+            .await
+            .unwrap();
+        let input = system
+            .send_user("root", "Create the output".into(), vec![], None)
+            .unwrap();
+        if mode == ApprovalMode::Ask {
+            let pending = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(record) = system
+                        .store()
+                        .pending_approvals(Some("root"), None, 10)
+                        .unwrap()
+                        .items
+                        .pop()
+                    {
+                        break record;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            system
+                .store()
+                .resolve_approval(&pending.id, ApprovalDecision::Denied, reason)
+                .unwrap();
+        }
+        let finished = wait_completed(&system, &input.id).await;
+        assert_eq!(
+            finished.status,
+            MessageStatus::Completed,
+            "{:?}",
+            finished.error
+        );
+        assert!(finished.error.is_none());
+        assert!(!target.exists(), "rejection must prevent the effect");
+        assert!(system.store().approval_scopes("root").unwrap().is_empty());
+        let record = system
+            .store()
+            .approvals(Some("root"), None, 10)
+            .unwrap()
+            .items
+            .pop()
+            .unwrap();
+        let tools = system
+            .store()
+            .tool_summaries("root", &input.id, None, 10)
+            .unwrap()
+            .items;
+        assert_eq!(tools.len(), 1, "the denied operation must not be retried");
+        let tool = &tools[0];
+        let expected = json!({"approval":{"decision":"denied","approval_id":record.id,
+            "stage_id":system.store().public_stage_id().unwrap().to_string(),"mode":mode,"reason":reason}});
+        assert!(tool.error.is_none());
+        assert_eq!(tool.outcome.as_ref(), Some(&expected));
+        let detail = system.store().tool_result(&tool.id).unwrap();
+        assert!(detail.error.is_none());
+        assert!(
+            detail.started_at_ms.is_none(),
+            "denied calls never start effects"
+        );
+        assert_eq!(detail.payload, expected);
+        let events = system.store().events(0, Some("root"), false, 100).unwrap();
+        assert!(events.iter().any(|event| matches!(&event.event,
+            ActorEvent::ToolFinished {call_id, error:None, outcome:Some(outcome), ..}
+                if call_id == "rejected-write" && outcome == &expected)));
+        {
+            let requests = provider.requests.lock();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1].messages.iter().any(|row| matches!(row,
+                AgentMessage::Tool {content,..} if content.contains(&record.id)
+                    && content.contains(reason) && !content.starts_with("App error:"))));
+        }
+        system.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn images_from_any_app_expose_reusable_references_to_the_model() {
     use base64::Engine;
     let provider = Arc::new(ReplayProvider::new(vec![
@@ -532,6 +633,8 @@ struct ReplayProvider {
     pending: Arc<std::sync::atomic::AtomicUsize>,
     usage: parking_lot::Mutex<TokenUsageInfo>,
     usage_bias: std::sync::atomic::AtomicUsize,
+    review_requests: parking_lot::Mutex<Vec<PromptRequest>>,
+    review_replies: parking_lot::Mutex<VecDeque<serde_json::Value>>,
 }
 
 impl ReplayProvider {
@@ -544,6 +647,8 @@ impl ReplayProvider {
             pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             usage: parking_lot::Mutex::new(TokenUsageInfo::default()),
             usage_bias: std::sync::atomic::AtomicUsize::new(0),
+            review_requests: parking_lot::Mutex::new(Vec::new()),
+            review_replies: parking_lot::Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -560,10 +665,15 @@ impl Drop for DropMarker {
 impl ModelProvider for ReplayProvider {
     async fn complete_json(
         &self,
-        _: PromptRequest,
+        request: PromptRequest,
         _: ModelRequestOptions,
     ) -> Result<serde_json::Value> {
-        panic!("Actor runner must only use agent-turn protocol");
+        self.review_requests.lock().push(request);
+        Ok(self
+            .review_replies
+            .lock()
+            .pop_front()
+            .expect("Unexpected independent review model request"))
     }
     async fn complete_agent_turn(
         &self,
@@ -1076,6 +1186,303 @@ async fn device_pair(
     .await
     .expect("device pair did not synchronize");
     ((a_dir, a, net_a), (b_dir, b, net_b), relay)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn core_guidance_routes_to_a_busy_worker_on_another_device() {
+    let core_model = Arc::new(ReplayProvider::new(vec![]));
+    let worker_model = Arc::new(ReplayProvider::new(vec![
+        MockReply::Pending,
+        MockReply::Answer("Remote task updated"),
+    ]));
+    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
+        device_pair(core_model.clone(), worker_model.clone()).await;
+    core_model.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall {id:"remote-delegation".into(), name:"actors__send".into(),
+            arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","content":"Original remote task"})}]),
+        MockReply::Pending,
+    ]);
+    let original = a
+        .send_user("core", "Delegate remotely".into(), vec![], None)
+        .unwrap();
+    let target = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if core_model.requests.lock().len() >= 2
+                && !worker_model.requests.lock().is_empty()
+                && let Some(target) = b
+                    .store()
+                    .messages("root", None, 10)
+                    .unwrap()
+                    .items
+                    .into_iter()
+                    .find(|message| {
+                        message.status == MessageStatus::Running
+                            && message.content == "Original remote task"
+                    })
+            {
+                break target;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let epoch = net_a.core.read().as_ref().unwrap().epoch();
+    let policy = b.execution_actor(&target).unwrap().config;
+    core_model.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall {id:"remote-guidance".into(),name:"actors__steer".into(),
+            arguments:json!({"stage_id":net_b.host.local,"message_id":target.id,"content":"REMOTE_CORE_GUIDANCE"})}]),
+        MockReply::Answer("Guidance sent"),
+        MockReply::PendingOnEveryRequest,
+    ]);
+    let update = a
+        .send_user(
+            "core",
+            "Add the new constraint to that task".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        wait_completed(&a, &update.id).await.reply.as_deref(),
+        Some("Guidance sent")
+    );
+    assert_eq!(
+        wait_completed(&b, &target.id).await.reply.as_deref(),
+        Some("Remote task updated")
+    );
+    let guides = b.store().messages("root", None, 10).unwrap().items;
+    let guide = guides
+        .iter()
+        .find(|message| message.kind == MessageKind::Steering)
+        .unwrap();
+    assert_eq!(guide.status, MessageStatus::Completed);
+    assert_eq!(guide.in_reply_to.as_deref(), Some(target.id.as_str()));
+    assert!(worker_model.dropped.load(Ordering::Acquire));
+    assert!(worker_model.requests.lock()[1].messages.iter().any(|row| matches!(row,AgentMessage::User {content} if content.as_text().contains("REMOTE_CORE_GUIDANCE") && content.as_text().contains("Source: Actor core"))));
+    assert_eq!(b.execution_actor(&target).unwrap().config, policy);
+    let result = a
+        .store()
+        .tool_summaries("core", &update.id, None, 10)
+        .unwrap()
+        .items;
+    assert_eq!(result.len(), 1);
+    assert!(result[0].error.is_none());
+    let outcome = result[0].outcome.as_ref().unwrap();
+    assert_eq!(outcome["stage_id"], net_b.host.local.to_string());
+    assert_eq!(outcome["target_message_id"], target.id);
+    assert_eq!(outcome["kind"], "steering");
+    assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
+    assert_eq!(
+        a.store().message(&original.id).unwrap().status,
+        MessageStatus::Completed
+    );
+    net_a.stop().await;
+    net_b.stop().await;
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_approval_rejection_preserves_reason_and_source_without_failing_core() {
+    use super::super::ApprovalMode;
+    let core_model = Arc::new(ReplayProvider::new(vec![]));
+    let device_model = Arc::new(ReplayProvider::new(vec![]));
+    let ((_a_dir, a, net_a), (b_dir, b, net_b), _relay) =
+        device_pair(core_model.clone(), device_model.clone()).await;
+    a.patch_owned_preferences("core", None, Some(ApprovalMode::Auto))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while b.account_approval_mode().unwrap() != ApprovalMode::Auto {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let workspace = b_dir.path().join("unapproved-project");
+    std::fs::create_dir(&workspace).unwrap();
+    let reason = "The proposed workspace needs the Owner's confirmation";
+    core_model
+        .review_replies
+        .lock()
+        .push_back(json!({"decision":"deny","reason":reason}));
+    core_model.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall {
+            id:"create-on-b".into(), name:"actors__create".into(),
+            arguments:json!({"stage_id":net_b.host.local,"name":"Unapproved project",
+                "workspace":workspace,"instructions":null,"model":null,
+                "_review":{"task":"Create a project on the other device","reason":"Use the proposed project directory"}}),
+        }]),
+        MockReply::Answer("The workspace was not approved."),
+    ]);
+    let epoch = net_a.core.read().as_ref().unwrap().epoch();
+    let input = a
+        .send_user("core", "Create the project".into(), vec![], None)
+        .unwrap();
+    let finished = wait_completed(&a, &input.id).await;
+    assert_eq!(
+        finished.status,
+        MessageStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert!(finished.error.is_none());
+    let tools = a
+        .store()
+        .tool_summaries("core", &input.id, None, 10)
+        .unwrap()
+        .items;
+    assert_eq!(tools.len(), 1);
+    assert!(tools[0].error.is_none());
+    let denial = b
+        .store()
+        .approvals(Some("core"), None, 10)
+        .unwrap()
+        .items
+        .pop()
+        .unwrap();
+    assert_eq!(
+        tools[0].outcome,
+        Some(json!({"approval":{"decision":"denied",
+        "approval_id":denial.id,"stage_id":net_b.host.local.to_string(),"reason":reason,"mode":"auto"}}))
+    );
+    assert!(
+        b.store()
+            .actors()
+            .unwrap()
+            .iter()
+            .all(|actor| actor.config.name != "Unapproved project")
+    );
+    assert!(b.store().approval_scopes("core").unwrap().is_empty());
+    assert_eq!(core_model.review_requests.lock().len(), 1);
+    assert!(device_model.review_requests.lock().is_empty());
+    assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
+    net_a.stop().await;
+    net_b.stop().await;
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_automatic_review_uses_busy_core_worker_without_moving_it_or_sharing_device_grants()
+{
+    use super::super::ApprovalMode;
+    let core_model = Arc::new(ReplayProvider::new(vec![MockReply::Pending]));
+    let device_model = Arc::new(ReplayProvider::new(vec![]));
+    let ((_a_dir, a, net_a), (b_dir, b, net_b), _relay) =
+        device_pair(core_model.clone(), device_model.clone()).await;
+    a.patch_owned_preferences("core", None, Some(ApprovalMode::Auto))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while b.account_approval_mode().unwrap() != ApprovalMode::Auto {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let thinking = a
+        .send_user(
+            "core",
+            "Think while the other device works".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), core_model.started.notified())
+        .await
+        .unwrap();
+    let before_epoch = net_a.core.read().as_ref().unwrap().epoch();
+    let outside = b_dir.path().join("requested-output");
+    std::fs::create_dir(&outside).unwrap();
+    let target = outside.join("result.txt");
+    core_model
+        .review_replies
+        .lock()
+        .push_back(json!({"decision":"approve","reason":"Write the requested output folder"}));
+    device_model.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall{id:"write-on-device-b".into(),name:"files__write_file".into(),arguments:json!({"path":target,"content":"device B output","expected_sha256":null,"_review":{"task":"Create the requested output","reason":"The deliverable belongs in this folder"}})}]),
+        MockReply::Answer("Output created")
+    ]);
+    let request = b
+        .send_user(
+            "root",
+            "Create the requested output file".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    let finished = wait_completed(&b, &request.id).await;
+    assert_eq!(
+        finished.status,
+        MessageStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "device B output");
+    assert_eq!(core_model.review_requests.lock().len(), 1);
+    assert!(
+        device_model.review_requests.lock().is_empty(),
+        "the App device must not run the review model"
+    );
+    {
+        let reviews = core_model.review_requests.lock();
+        assert!(reviews[0].history_messages.is_empty());
+        let facts: serde_json::Value =
+            serde_json::from_str(&reviews[0].current_user_message).unwrap();
+        assert_eq!(facts["application"]["task"], "Create the requested output");
+        assert_eq!(facts["proposed_call"]["arguments"]["path"], json!(target));
+    }
+    assert!(!b.store().approval_scopes("root").unwrap().is_empty());
+    assert!(a.store().approval_scopes("root").unwrap().is_empty());
+    assert_eq!(
+        a.store().message(&thinking.id).unwrap().status,
+        MessageStatus::Running
+    );
+    assert_eq!(
+        core_model.requests.lock().len(),
+        1,
+        "review must not enter the Core inbox"
+    );
+    assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), before_epoch);
+    assert!(net_a.core.read().as_ref().unwrap().permitted());
+    assert!(!net_b.core.read().as_ref().unwrap().permitted());
+    device_model.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall {
+            id: "read-after-grant".into(),
+            name: "files__read_file".into(),
+            arguments: json!({"path":target,"start_line":null,"line_count":null,"_review":null}),
+        }]),
+        MockReply::Answer("Read through remembered permission"),
+    ]);
+    let repeat = b
+        .send_user("root", "Read the output again".into(), vec![], None)
+        .unwrap();
+    assert_eq!(
+        wait_completed(&b, &repeat.id).await.status,
+        MessageStatus::Completed
+    );
+    let tool = b
+        .store()
+        .tool_summaries("root", &repeat.id, None, 10)
+        .unwrap()
+        .items
+        .pop()
+        .unwrap();
+    assert_eq!(
+        b.store().tool_result(&tool.id).unwrap().payload["content"],
+        "device B output"
+    );
+    assert_eq!(
+        core_model.review_requests.lock().len(),
+        1,
+        "remembered permissions must not invoke the account reviewer again"
+    );
+    net_b.stop_abruptly().await;
+    net_a.stop_abruptly().await;
+    a.shutdown().await;
+    b.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3037,6 +3444,228 @@ async fn queued_guidance_updates_the_active_task_without_replaying_completed_too
     );
     system.shutdown().await;
 }
+
+#[tokio::test]
+async fn core_guidance_updates_a_previous_delegation_while_send_stays_queued() {
+    let (directory, system, provider) = paused_runtime().await;
+    provider.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall {id:"write-once".into(),name:"files__write_file".into(),
+            arguments:json!({"path":"core-guided.txt","content":"one effect","expected_sha256":null})}]),
+        MockReply::Pending,
+        MockReply::Answer("Updated original task"),
+        MockReply::Answer("Separate queued task"),
+    ]);
+    let first = system
+        .send_user("core", "Delegate the original task".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next("core").unwrap().unwrap();
+    let target = system
+        .send_from_actor("core", &first.id, "root", "Original task".into())
+        .unwrap();
+    system
+        .store()
+        .finish_message(&first.id, MessageStatus::Completed, None, None)
+        .unwrap();
+    let followup = system
+        .send_user("core", "Add constraints".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next("core").unwrap().unwrap();
+    let core = system.actor("core").unwrap();
+    let context = system
+        .execution_context(&core, &system.store().message(&followup.id).unwrap())
+        .unwrap();
+    let policy = system.execution_actor(&target).unwrap().config;
+    system.resume_execution().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while provider.requests.lock().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let queued = system
+        .send_from_actor("core", &followup.id, "root", "Independent task".into())
+        .unwrap();
+    assert_eq!(
+        system.store().message(&queued.id).unwrap().status,
+        MessageStatus::Queued
+    );
+    assert!(!provider.dropped.load(Ordering::Acquire));
+    let mut apps =
+        crate::builtin_apps::create_apps(&core, system.clone(), &system.config()).unwrap();
+    let accepted = apps.execute_tool(&AgentToolCall {id:"guide-target".into(),name:"actors__steer".into(),
+        arguments:json!({"stage_id":null,"message_id":target.id,"content":"Keep the original task; add constraint CORE_GUIDANCE"})}, &context).await.unwrap();
+    assert_eq!(accepted.payload["status"], "queued");
+    let guide_id = accepted.payload["message_id"].as_str().unwrap();
+    let completed = wait_completed(&system, &target.id).await;
+    assert_eq!(completed.reply.as_deref(), Some("Updated original task"));
+    let guide = system.store().message(guide_id).unwrap();
+    assert_eq!(guide.status, MessageStatus::Completed);
+    assert_eq!(guide.in_reply_to.as_deref(), Some(target.id.as_str()));
+    assert_eq!(
+        guide.source,
+        MessageSource::Actor {
+            actor_id: "core".into()
+        }
+    );
+    assert_eq!(system.execution_actor(&target).unwrap().config, policy);
+    assert_eq!(
+        wait_completed(&system, &queued.id).await.reply.as_deref(),
+        Some("Separate queued task")
+    );
+    assert!(provider.dropped.load(Ordering::Acquire));
+    {
+        let requests = provider.requests.lock();
+        assert_eq!(requests.len(), 4);
+        let guided = &requests[2].messages;
+        assert!(guided.iter().any(|row| matches!(row,AgentMessage::User {content} if content.as_text().contains("CORE_GUIDANCE") && content.as_text().contains("Source: Actor core"))));
+        assert!(guided.iter().any(
+            |row| matches!(row,AgentMessage::Tool {tool_call_id,..} if tool_call_id == "write-once")
+        ));
+        assert!(!guided.iter().any(|row| matches!(row,AgentMessage::User {content} if content.as_text().contains("Independent task"))));
+    }
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("workspace/core-guided.txt")).unwrap(),
+        "one effect"
+    );
+    assert_eq!(
+        system
+            .store()
+            .tool_summaries("root", &target.id, None, 10)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    let results = system.store().messages("core", None, 30).unwrap().items;
+    assert!(
+        results
+            .iter()
+            .any(|message| message.kind == MessageKind::Result
+                && message.in_reply_to.as_deref() == Some(first.id.as_str())
+                && message.content.contains("Updated original task"))
+    );
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn core_guidance_applies_before_a_queued_request_first_inference() {
+    let (_directory, system, provider) = paused_runtime().await;
+    provider
+        .replies
+        .lock()
+        .push_back(MockReply::Answer("Guided from the start"));
+    let input = system
+        .send_user("core", "Delegate".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next("core").unwrap().unwrap();
+    let target = system
+        .send_from_actor("core", &input.id, "root", "Original queued task".into())
+        .unwrap();
+    let core = system.actor("core").unwrap();
+    let context = system
+        .execution_context(&core, &system.store().message(&input.id).unwrap())
+        .unwrap();
+    let guide = system
+        .steer_from_core(
+            context.actor_call.as_ref().unwrap(),
+            &target.id,
+            "QUEUED_CORE_GUIDANCE".into(),
+        )
+        .unwrap();
+    assert_eq!(guide.status, MessageStatus::Queued);
+    system.resume_execution().await.unwrap();
+    assert_eq!(
+        wait_completed(&system, &target.id).await.reply.as_deref(),
+        Some("Guided from the start")
+    );
+    assert_eq!(
+        system.store().message(&guide.id).unwrap().status,
+        MessageStatus::Completed
+    );
+    assert!(provider.requests.lock()[0].messages.iter().any(|row| matches!(row, AgentMessage::User {content} if content.as_text().contains("QUEUED_CORE_GUIDANCE"))));
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn core_guidance_rejects_wrong_authority_and_notifies_when_a_target_ends() {
+    let (_directory, system, _provider) = paused_runtime().await;
+    let input = system
+        .send_user("core", "Coordinate".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next("core").unwrap().unwrap();
+    let target = system
+        .send_from_actor("core", &input.id, "root", "Original task".into())
+        .unwrap();
+    let core = system.actor("core").unwrap();
+    let context = system
+        .execution_context(&core, &system.store().message(&input.id).unwrap())
+        .unwrap();
+    let caller = context.actor_call.unwrap();
+    let mut forbidden = caller.clone();
+    forbidden.actor_id = "root".into();
+    assert!(
+        system
+            .steer_from_core(&forbidden, &target.id, "Invalid sender".into())
+            .is_err()
+    );
+    forbidden = caller.clone();
+    forbidden.remote_read_only = true;
+    assert!(
+        system
+            .steer_from_core(&forbidden, &target.id, "Read-only source".into())
+            .is_err()
+    );
+    let unrelated = system
+        .send_user("root", "An Owner's separate task".into(), vec![], None)
+        .unwrap();
+    assert!(
+        system
+            .steer_from_core(&caller, &unrelated.id, "Wrong request".into())
+            .is_err()
+    );
+    let guide = system
+        .steer_from_core(&caller, &target.id, "Update for the original only".into())
+        .unwrap();
+    let routed = system
+        .store()
+        .finish_message(
+            &target.id,
+            MessageStatus::Completed,
+            Some("Finished before guidance"),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(routed.actor_id, "core");
+    let unapplied = system.store().message(&guide.id).unwrap();
+    assert_eq!(unapplied.kind, MessageKind::Steering);
+    assert_eq!(unapplied.status, MessageStatus::Cancelled);
+    assert!(unapplied.error.is_none());
+    assert!(
+        system
+            .steer_from_core(&caller, &target.id, "Too late".into())
+            .is_err()
+    );
+    assert!(
+        system
+            .store()
+            .messages("core", None, 30)
+            .unwrap()
+            .items
+            .iter()
+            .any(|message| message.kind == MessageKind::Result
+                && message.in_reply_to.as_deref() == Some(input.id.as_str())
+                && message.content.contains(&guide.id)
+                && message.content.contains("not applied"))
+    );
+    assert_eq!(
+        system.store().claim_next("root").unwrap().unwrap().id,
+        unrelated.id,
+        "unapplied guidance must not turn into a separate executable task"
+    );
+    system.shutdown().await;
+}
 #[tokio::test]
 async fn shutdown_interrupts_model_wait_and_restart_never_replays_it() {
     let provider = Arc::new(ReplayProvider::new(vec![MockReply::Pending]));
@@ -3383,6 +4012,7 @@ async fn actor_identity_history_and_queued_work_survive_crash_recovery() {
             mode: ApprovalMode::Ask,
             decision: ApprovalDecision::Pending,
             reason: "Pending owner approval".into(),
+            appeal: None,
             created_at_ms: chrono::Utc::now().timestamp_millis(),
             resolved_at_ms: None,
         })

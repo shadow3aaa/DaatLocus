@@ -276,6 +276,13 @@ pub struct McpApp {
     registry: Arc<Registry>,
     session: Option<transport::Session>,
 }
+
+fn direct_model_arguments(schema: &serde_json::Value) -> bool {
+    validate_model_facing_schema(schema).is_ok()
+        && schema["properties"]
+            .get(crate::app::REVIEW_REQUEST_FIELD)
+            .is_none()
+}
 impl McpApp {
     pub fn new(
         entry: Installation,
@@ -298,7 +305,7 @@ impl McpApp {
     }
     fn arguments(&self, call: &AgentToolCall) -> Result<Value> {
         let tool = self.tool(&call.name)?;
-        let value = if validate_model_facing_schema(&tool.input_schema).is_ok() {
+        let value = if direct_model_arguments(&tool.input_schema) {
             call.arguments.clone()
         } else {
             let a = args::<JsonArguments>(call)?;
@@ -346,7 +353,7 @@ impl App for McpApp {
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         self.entry.tools.iter().map(|tool| {
-            let direct = validate_model_facing_schema(&tool.input_schema).is_ok();
+            let direct = direct_model_arguments(&tool.input_schema);
             let mut description = format!("{} · {}\n{}", self.entry.name, tool.name, tool.description);
             if !direct {
                 description.push_str(&format!("\nPass the original JSON object in arguments_json. Inspect the original schema with apps_manager__inspect: id={}, tool={}", self.entry.id, tool.name));

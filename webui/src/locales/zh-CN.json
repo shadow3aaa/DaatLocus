@@ -119,6 +119,10 @@
     "start_conversation": "发送消息，开始对话。"
   },
   "conversation_turns": {
+    "guidance_pending": "引导等待应用",
+    "guidance_applied": "引导已应用",
+    "guidance_not_applied": "引导未应用",
+    "guidance_from_core_applied": "Daat Locus 的引导已应用",
     "model_authentication_failed": "模型凭据无效或已过期，请更新提供商设置。",
     "model_access_denied": "提供商拒绝了访问，请检查凭据及模型权限。",
     "model_certificate_revoked": "模型服务的证书已被吊销，请检查服务地址或网络代理。",
@@ -137,7 +141,6 @@
     "task_stopped_completed_actions_are_retained": "任务已停止，已经完成的操作会保留。",
     "delivered": "已送达",
     "working": "正在处理",
-    "collaboration_reply": "协作返回",
     "delegate_task": "委派任务",
     "delivered_time": "已送达 {{time}}"
   },
@@ -362,6 +365,7 @@
     "set_text": "替换文本"
   },
   "tool_details": {
+    "not_approved": "未获批准",
     "deliver_result": "交付结果",
     "could_not_open_the_result": "交付结果暂时无法打开。",
     "open_value0": "打开 {{value0}}",
@@ -429,6 +433,7 @@
     "the_folder_contains_duplicate_file_names": "文件夹包含重名文件。"
   },
   "tool_presentation": {
+    "action_not_approved": "{{action}} · 未获批准",
     "archive_actor": "归档 Actor",
     "unarchive_actor": "取消归档 Actor",
     "create_actor": "创建 Actor",

@@ -5,13 +5,13 @@ import { useEffect, useId, useRef, useState } from "react";
 import { CheckIcon, ChevronRightIcon, CopyIcon, DownloadIcon, MessageCircleIcon, ShieldCheckIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { localActorId } from "@/lib/conversation-links";
+import { actorIdFromUrl, localActorId } from "@/lib/conversation-links";
 import { getActor, getMessage, listMessages, subscribeActorEvents, getToolResult, resolveApproval, type ApprovalRecord, type Attachment, type ToolResult, type ToolSummary, type MessageStatus } from "@/lib/actor-api";
 import { ToolDetail, ApprovalDetails } from "@/components/tool-details";
-import { asObject as object, asText as string, readableSummary, toolLabel, toolIcon, activitySummary, activityIcon, activityLabel, domainToolName } from "@/lib/tool-presentation";
+import { asObject as object, asText as string, readableSummary, toolLabel, toolIcon, activitySummary, activityIcon, activityLabel, domainToolName, approvalRejection } from "@/lib/tool-presentation";
 
 
-export function ActorReference({ actorId, label, onOpen, detail, messageId }: { actorId: string; label?: string; onOpen(id: string): void; detail?: string; messageId?: string }) {
+export function ActorReference({ actorId, label, onOpen, detail, messageId, guidance = false }: { actorId: string; label?: string; onOpen(id: string): void; detail?: string; messageId?: string; guidance?: boolean }) {
   const targetId = localActorId(actorId);
   const [name, setName] = useState(label || t("actor_dialog.actor_conversation"));
   const [status, setStatus] = useState<MessageStatus | "ready" | "unknown">("unknown");
@@ -36,7 +36,7 @@ export function ActorReference({ actorId, label, onOpen, detail, messageId }: { 
     })().catch(() => {});
     return () => controller.abort();
   }, [targetId, label, messageId]);
-  const stateLabel = { queued: t("conversation_content.queued"), running: t("conversation_content.in_progress"), completed: t("conversation_content.completed"), failed: t("conversation_content.incomplete"), cancelled: t("conversation_content.stopped"), interrupted: t("conversation_content.interrupted"), ready: t("conversation_content.ready"), unknown: t("conversation_content.view_conversation") }[status];
+  const stateLabel = guidance && ["queued", "running", "completed", "cancelled", "interrupted"].includes(status) ? t(status === "completed" ? "conversation_turns.guidance_applied" : ["queued", "running"].includes(status) ? "conversation_turns.guidance_pending" : "conversation_turns.guidance_not_applied") : { queued: t("conversation_content.queued"), running: t("conversation_content.in_progress"), completed: t("conversation_content.completed"), failed: t("conversation_content.incomplete"), cancelled: t("conversation_content.stopped"), interrupted: t("conversation_content.interrupted"), ready: t("conversation_content.ready"), unknown: t("conversation_content.view_conversation") }[status];
   return <button type="button" className="dl-actor-reference" data-status={status} onClick={() => onOpen(actorId)} aria-label={t("conversation_content.view_value0_value1", {value0: name, value1: stateLabel})}>
     <MessageCircleIcon aria-hidden="true" /><span><strong>{name}</strong>{detail && <small>{detail}</small>}</span><span className="dl-reference-action"><span>{stateLabel}</span><i className="dl-task-state" aria-hidden="true" /></span>
   </button>;
@@ -55,7 +55,8 @@ function ActorToolReference({ actorId, tool, onActor }: { actorId: string; tool:
   if (!result) return <Skeleton className="h-12 w-64 rounded-xl" />;
   const payload = object(result.payload);
   const target = string(payload.actor_id) || string(payload.id);
-  return target ? <ActorReference actorId={target} label={string(payload.name)} messageId={string(payload.message_id)} onOpen={onActor} detail={tool.name === "actors__send" ? t("conversation_content.delegated") : t("conversation_content.created")} /> : <span className="dl-step-label">{readableSummary(tool.summary) || toolLabel(tool.name)}</span>;
+  const reference = actorIdFromUrl(string(payload.conversation_url), typeof location === "undefined" ? undefined : location.href) || target;
+  return reference ? <ActorReference actorId={reference} label={string(payload.name)} messageId={string(payload.message_id)} guidance={payload.kind === "steering"} onOpen={onActor} detail={domainToolName(tool.name) === "actors__steer" ? t("conversation_turns.guidance_for_the_current_task") : domainToolName(tool.name) === "actors__send" ? t("conversation_content.delegated") : t("conversation_content.created")} /> : <span className="dl-step-label">{readableSummary(tool.summary) || toolLabel(tool.name)}</span>;
 }
 
 function ToolGroupIcon() {
@@ -71,8 +72,8 @@ export function Activities({ actorId, tools, onActor, thinking }: { actorId: str
   const pendingDetail = useRef<AbortController | null>(null);
   useEffect(() => () => pendingDetail.current?.abort(), [actorId]);
   const failures = tools.filter(tool => tool.error).length;
-  const actorRef = (tool: ToolSummary & { status?: string }) => !tool.id.startsWith("live:") && tool.status !== "running" && !tool.error && ["actors__create", "actors__send"].includes(domainToolName(tool.name));
-  const names = tools.map(tool => tool.name);
+  const actorRef = (tool: ToolSummary & { status?: string }) => !tool.id.startsWith("live:") && tool.status !== "running" && !tool.error && !approvalRejection(tool.outcome) && ["actors__create", "actors__send", "actors__steer"].includes(domainToolName(tool.name));
+  const names = tools.filter(tool => !approvalRejection(tool.outcome)).map(tool => tool.name);
   const domains = names.map(domainToolName);
   const GroupIcon = domains.some(name => name.startsWith("browser__")) && domains.some(name => !name.startsWith("browser__")) ? ToolGroupIcon : activityIcon(names);
   if (!tools.length) return thinking ? <div className="dl-activities"><div className="dl-activity-heading dl-activity-thinking" role="status"><span className="dl-activity-title">{thinking}</span></div></div> : null;
@@ -86,7 +87,7 @@ export function Activities({ actorId, tools, onActor, thinking }: { actorId: str
   return <div className="dl-activities">
     <button type="button" className={thinking ? "dl-activity-heading dl-activity-thinking" : "dl-activity-heading"} aria-expanded={open} aria-controls={contentId} onClick={() => setOpen(!open)}>
       {!thinking && <GroupIcon aria-hidden="true" />}
-      <span className="dl-activity-title">{thinking || activitySummary(tools.map(tool => tool.name))}</span>
+      <span className="dl-activity-title">{thinking || (names.length ? activitySummary(names) : t("tool_details.not_approved"))}</span>
       {failures > 0 && <span className="dl-step-error-state">{failures} {t("conversation_content.incomplete")}</span>}
       <ChevronRightIcon aria-hidden="true" className={open ? "dl-activity-open" : undefined} />
     </button>
@@ -96,9 +97,10 @@ export function Activities({ actorId, tools, onActor, thinking }: { actorId: str
         const text = activityLabel(tool);
         const outcome = object(tool.outcome);
         const domain = domainToolName(tool.name);
-        const changed = ["files__write_file", "files__edit_file", "files__copy_file"].includes(domain);
+        const rejected = approvalRejection(tool.outcome);
+        const changed = !rejected && ["files__write_file", "files__edit_file", "files__copy_file"].includes(domain);
         const selected = expanded === tool.id;
-        const expandedLabel = changed ? t("tool_presentation.edited_file_details") : domain.startsWith("terminal__") ? t("tool_presentation.command_ran") : text.label;
+        const expandedLabel = rejected ? text.label : changed ? t("tool_presentation.edited_file_details") : domain.startsWith("terminal__") ? t("tool_presentation.command_ran") : text.label;
         return actorRef(tool) ? <ActorToolReference key={tool.id} actorId={actorId} tool={tool} onActor={onActor} /> : <div key={tool.id} className="dl-step">
           <button type="button" className="dl-step-label" disabled={tool.status === "running" || tool.id.startsWith("live:")} onClick={() => { void expand(tool); }} aria-expanded={selected}>
             <Icon aria-hidden="true" /><span className="dl-step-text">{selected ? expandedLabel : text.label}{!selected && text.detail && <> <span className={changed ? "dl-step-summary dl-step-file" : "dl-step-summary"} title={text.detail}>{changed ? text.detail.replace(/\\/g,"/").split("/").at(-1) : text.detail}</span></>}</span>

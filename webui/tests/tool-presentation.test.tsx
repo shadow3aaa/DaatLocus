@@ -10,6 +10,19 @@ import type { ToolResult } from "../src/lib/actor-api";
 const result = (patch: Partial<ToolResult>): ToolResult => ({ id: "private-result-id", actor_id: "root", message_id: "message", call_id: "call", name: "extension__inspect", arguments: {}, payload: { private_metadata: "HIDDEN_PAYLOAD" }, model_content: '{"internal":"HIDDEN_MODEL_PROTOCOL"}', summary: "检查已完成", error: null, ...patch });
 
 describe("tool observations are product content, never protocol dumps", () => {
+  test("approval rejection renders its reason without failures or raw approval metadata for any App", () => {
+    const approval = {decision:"denied",approval_id:"PRIVATE_APPROVAL_ID",stage_id:"PRIVATE_STAGE_ID",mode:"auto",reason:"Need confirmation for <output>\nChoose an authorized folder."};
+    for (const name of ["files__write_file", "terminal__terminal_exec", "computer_use__click", "actors__create", "mcp_00000000000000000000000000000001__lookup"]) {
+      const tool = {seq:1,...result({name,payload:{approval},outcome:{approval}})};
+      expect(activityLabel(tool).detail).toBe(approval.reason);
+      const html = renderToStaticMarkup(<ToolDetail result={tool}/>);
+      expect(html).toContain("Need confirmation for &lt;output&gt;");
+      expect(html).toContain("Choose an authorized folder.");
+      for (const hidden of ["PRIVATE_APPROVAL_ID", "PRIVATE_STAGE_ID", "HIDDEN_MODEL_PROTOCOL", 'role="alert"']) expect(html).not.toContain(hidden);
+      const activities = renderToStaticMarkup(<Activities actorId="root" tools={[tool]} onActor={()=>{}}/>);
+      expect(activities).not.toContain('class="dl-step-error-state"');
+    }
+  });
   test("ComputerUse renders source window facts without raw input or observation identifiers", () => {
     const html = renderToStaticMarkup(<ToolDetail result={result({name:"computer_use__give_window",arguments:{text:"PRIVATE_TYPED_TEXT"},payload:{status:"given_to_user",windows:[{title:"Returned document",controlled:false}],private_metadata:"PRIVATE_DRIVER_METADATA",state_id:"PRIVATE_STATE_TOKEN"}})}/>);
     expect(html).toContain("Returned document");

@@ -201,6 +201,43 @@ async fn queued_clear_preserves_actor_requests_and_started_work() {
         .system
         .send_user(&actor, "user input".into(), vec![], None)
         .unwrap();
+    let first_page = fixture
+        .owner(
+            reqwest::Method::GET,
+            &format!("/v1/actors/{actor}/queue?limit=1"),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(first_page["items"][0]["id"], delegated.id);
+    assert_eq!(first_page["items"][0]["source"]["kind"], "actor");
+    let cursor = first_page["next_cursor"]
+        .as_i64()
+        .expect("mixed queue must retain its continuation");
+    let second_page = fixture
+        .owner(
+            reqwest::Method::GET,
+            &format!("/v1/actors/{actor}/queue?limit=1&after={cursor}"),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(second_page["items"][0]["id"], own.id);
+    assert!(second_page["next_cursor"].is_null());
+    let edit_actor = fixture.owner(reqwest::Method::POST, &format!("/v1/actors/{actor}/messages/{}/edit", delegated.id))
+        .json(&json!({"content":"spoofed user input","attachments":[],"expected_updated_at_ms":delegated.updated_at_ms}))
+        .send().await.unwrap();
+    assert_eq!(
+        edit_actor.status(),
+        StatusCode::FORBIDDEN,
+        "displaying collaborator inputs in the queue must not allow rewriting their source"
+    );
     assert_eq!(
         fixture.system.store().clear_queued_users(&actor).unwrap(),
         1
@@ -538,6 +575,7 @@ async fn owner_can_open_and_control_created_actors() {
             mode: ApprovalMode::Ask,
             decision: ApprovalDecision::Pending,
             reason: "Owner approval required".into(),
+            appeal: None,
             created_at_ms: 1,
             resolved_at_ms: None,
         })

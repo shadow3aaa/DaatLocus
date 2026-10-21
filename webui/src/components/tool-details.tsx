@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { CodeBlock, Markdown } from "@/components/markdown";
 import type { ApprovalScope, JsonValue, ToolResult } from "@/lib/actor-api";
 import { resourceActorId, safeLink } from "@/lib/conversation-links";
-import { asObject, asRows, asText, readableSummary, domainToolName } from "@/lib/tool-presentation";
+import { asObject, asRows, asText, readableSummary, domainToolName, approvalRejection } from "@/lib/tool-presentation";
 import { FileChangeView } from "@/components/file-change";
 import { ToolParameters } from "@/components/tool-parameters";
 
@@ -42,6 +42,8 @@ export function ToolDetail({ result, onActor }: { result: ToolResult; onActor?(i
   const payload = asObject(result.payload);
   const args = asObject(result.arguments);
   const path = asText(payload.path) || asText(args.path);
+  const rejection = approvalRejection(result.payload);
+  if (rejection) return <section className="dl-tool-details" aria-label={t("tool_details.not_approved")}><p className="dl-tool-note">{t("tool_details.not_approved")}</p><p className="whitespace-pre-wrap break-words">{rejection.reason}</p></section>;
   if (/^mcp_[a-f0-9]{32}__/.test(result.name)) {
     const resources = asRows(payload.resources);
     return <div className="dl-tool-details dl-mcp-details">

@@ -6,11 +6,16 @@ export const asObject = (value: JsonValue | undefined): Record<string, JsonValue
 export const asText = (value: JsonValue | undefined): string => typeof value === "string" ? value : "";
 export const asRows = (value: JsonValue | undefined): Record<string, JsonValue>[] => Array.isArray(value) ? value.map(asObject) : [];
 
+export function approvalRejection(value: JsonValue | null | undefined): { reason: string } | null {
+  const approval = asObject(asObject(value ?? undefined).approval);
+  return approval.decision === "denied" && typeof approval.reason === "string" ? { reason: approval.reason } : null;
+}
+
 const labels: Record<string, string> = {
   phone_use__list_apps: "computer_use.list_apps", phone_use__list_windows: "computer_use.list_windows", phone_use__launch_app: "computer_use.launch_app", phone_use__open_window: "computer_use.open_window", phone_use__get_window_state: "computer_use.observe", phone_use__click: "computer_use.click", phone_use__set_text: "computer_use.set_text", phone_use__press_key: "computer_use.press_key", phone_use__scroll: "computer_use.scroll", phone_use__drag: "computer_use.drag", phone_use__release_window: "computer_use.release_window", phone_use__close_window: "computer_use.close_window",
   computer_use__adjust_window: "computer_use.adjust_window",
   computer_use__list_apps: "computer_use.list_apps", computer_use__list_windows: "computer_use.list_windows", computer_use__launch_app: "computer_use.launch_app", computer_use__open_window: "computer_use.open_window", computer_use__get_window_state: "computer_use.observe", computer_use__click: "computer_use.click", computer_use__type_text: "computer_use.type_text", computer_use__press_key: "computer_use.press_key", computer_use__scroll: "computer_use.scroll", computer_use__drag: "computer_use.drag", computer_use__give_window: "computer_use.give_window", computer_use__release_window: "computer_use.release_window", computer_use__close_window: "computer_use.close_window",
-  actors__archive: "tool_presentation.archive_actor", actors__unarchive: "tool_presentation.unarchive_actor",
+  actors__archive: "tool_presentation.archive_actor", actors__unarchive: "tool_presentation.unarchive_actor", actors__steer: "conversation_turns.guidance_for_the_current_task",
   actors__create: "tool_presentation.create_actor", actors__import_conversation: "imports.bubble_title", actors__send: "conversation_turns.delegate_task", actors__list: "tool_presentation.view_actor", actors__read_history: "tool_presentation.read_history",
   files__read_file: "tool_presentation.read_file", files__write_file: "tool_presentation.write_file", files__edit_file: "tool_presentation.edit_file", files__copy_file: "tool_presentation.copy_file", files__list_directory: "tool_presentation.browse_folder", files__search_text: "tool_presentation.search_files", files__read_skill: "tool_presentation.read_skill", files__list_skills: "tool_presentation.view_skills", files__view_image: "tool_presentation.view_image",
   terminal__terminal_exec: "tool_presentation.run_command", terminal__terminal_write_stdin: "tool_presentation.terminal_input", terminal__terminal_terminate: "tool_presentation.stop_process",
@@ -68,6 +73,8 @@ export function activityIcon(names: string[]) {
 
 export function activityLabel(tool: ToolSummary & { status?: "running" | "completed" | "unknown" }) {
   const name = domainToolName(tool.name);
+  const rejection = approvalRejection(tool.outcome);
+  if (rejection) return { label: t("tool_presentation.action_not_approved", { action: toolLabel(tool.name) }), detail: rejection.reason };
   if (tool.status === "unknown") return { label: toolLabel(tool.name), detail: "" };
   const active = tool.status === "running";
   const outcome = asObject(tool.outcome ?? undefined);

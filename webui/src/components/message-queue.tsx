@@ -10,13 +10,12 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { resourceUrl, type Access, type MessageRecord } from "@/lib/actor-api";
 import type { useActorConversation } from "@/hooks/use-actor-conversation";
 type Chat = ReturnType<typeof useActorConversation>;
-export function queuedUserInput(message: MessageRecord) { return message.status === "queued" && ["user", "remote_user"].includes(message.source.kind); }
 function QueueMessage({ message, active, chat, access }: {message: MessageRecord; active?: MessageRecord; chat: Chat; access: Access}) {
   const [editing, setEditing] = useState(false), [text, setText] = useState(message.content), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const original = useRef(message);
   useEffect(() => { if (!editing) setText(message.content); }, [message.content, editing]);
   const pendingGuide = message.kind === "steering";
-  const controls = access.kind === "owner";
+  const controls = access.kind === "owner" && ["user", "remote_user"].includes(message.source.kind);
   const importing = !!importedConversation(message);
   const canGuide = controls && active && !pendingGuide && !importing;
   const summary = messageDisplayText(message).trim() || message.attachments.map(item => item.name).join("、");
@@ -46,7 +45,7 @@ function QueueMessage({ message, active, chat, access }: {message: MessageRecord
 }
 export function MessageQueue({ messages, active, chat, access }: {messages: MessageRecord[]; active?: MessageRecord; chat: Chat; access: Access}) {
   const [error, setError] = useState("");
-  if (!messages.length) return null;
+  if (!messages.length && chat.queueCursor == null) return null;
   return <section className="dl-message-queue" aria-label={t("message_queue.queued_messages")}><ul>{messages.map(message => <QueueMessage key={message.id} message={message} active={active} chat={chat} access={access} />)}</ul>
     {chat.queueCursor != null && <Button variant="ghost" size="sm" onClick={() => { void chat.loadQueue(chat.queueCursor ?? undefined).catch(() => setError(t("message_queue.could_not_load_the_queue"))); }}>{t("message_queue.show_more_queued_messages")}</Button>}
     {error && <p role="alert" className="dl-operation-error">{error}</p>}

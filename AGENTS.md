@@ -155,6 +155,10 @@ Every effect still requires device-side epoch, authorization, approval and sandb
 
 - Actor inboxes are serial; Actors advance concurrently. Preserve durable input,
   tool protocol groups, origin, replies and delivery references across delegation.
+  Core chooses send for queued work or steer for guidance bound to its exact
+  delegated request. Apply guidance only at settled tool-group boundaries under
+  the original authority; never promote Core prose to Owner approval. Report
+  unapplied Core guidance if its target ends; do not create another task from it.
 - Core handles short coordination turns. Explicit durable deliveries can precede
   turn completion; yielding waits for the current tool protocol group to settle.
   Completing an input does not complete its delegated work. Progress and results
@@ -168,14 +172,32 @@ Every effect still requires device-side epoch, authorization, approval and sandb
 - Record interrupted executions. Do not automatically replay App effects after
   restart, cancellation, configuration changes or resource shutdown.
 - Auto uses an independent model request without worker history or execution
-  tools. Its only decisions are approve/deny. Errors, timeouts and invalid
-  responses deny the operation; Auto cannot fall back to human approval.
+  tools on the current account Core worker, including for operations hosted on
+  another device. Review never changes Core affinity or uses its serial inbox.
+  Its only decisions are approve/deny. Errors, timeouts and invalid
+  responses deny the operation without blocking for human approval. After a denial,
+  the originating Actor may explicitly appeal its immutable approval ID to Core.
+  Core asks the Owner in natural language; only a later direct Owner reply may
+  resolve that appeal, remember the exact scopes and asynchronously notify the
+  Actor. Never automatically replay the denied call or treat worker prose as approval.
+  Core validates Owner replies on its current host and sends a bounded native
+  decision to the operation device. That device checks the original scope and
+  hard authority, records its local grant and notifies the Actor; it must not
+  run a Core App tool or require Core execution-context replication for approval.
 - Apps declare operations requiring review, their review criteria and semantic
   approval fingerprints. Undeclared ordinary operations do not require review.
   Sandbox access outside existing or remembered roots independently requires
   review, regardless of which App requested access.
+  New review applications include the Actor's current task and reason; runtime
+  supplies operation, scope and authority facts. Check existing grants first;
+  covered permissions need no new application or review. Task/reason metadata
+  never changes semantic fingerprints. Appeal control operations do not require review.
 - Ask waits for Owner approval of immutable arguments and requested scope. None
   omits review and can use the operation's requested extra filesystem scope.
+  Ask/Auto rejection is a structured permission decision, not a tool or input
+  execution failure. Preserve its reason and source approval reference across
+  devices and activity/history views; prevent the denied effect while allowing
+  authorized alternatives. Never automatically retry the denied operation.
   Approval memory is automatic, with no opt-in control or reminder. Display review
   cards only for Ask; automatic review stays out of the conversation UI.
   Approved fingerprints persist per Actor. Reuse equivalent approved actions;
@@ -188,9 +210,15 @@ Every effect still requires device-side epoch, authorization, approval and sandb
 - Models cannot change the account approval mode. Only Owner settings change it;
   execution resolves the current account mode rather than an Actor's creation snapshot.
   Cancellation/reconfiguration must invalidate waiting approvals.
-  Owner HTTP resolution is only for Ask Pending.
+  Owner HTTP resolution is only for Ask Pending; Auto appeals use the Core-mediated
+  conversation path and remain separate from the original denied decision.
 - Opened filesystem targets must stay within the effective policy; an earlier
   canonical-path check alone does not justify unsafe symlink-following I/O.
+- Runtime directory names and roots, including `.daat-locus`, have no built-in
+  filesystem blacklist. Apply ordinary scoped filesystem review and remembered
+  grants to these paths; Terminal must not infer path permissions from command text.
+  Explicit OAuth-file, Actor-resource and native maintenance authority boundaries
+  remain independent of filesystem scope.
 - Restrictive native process isolation needs platform-specific positive and
   negative tests. Never replace an unavailable sandbox with host execution.
 - Read-only Browser uses bounded HTTP GET without Chrome/page JavaScript,

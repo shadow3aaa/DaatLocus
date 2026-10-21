@@ -82,7 +82,7 @@ pub enum StageError {
     #[error("{0}")]
     Forbidden(&'static str),
     #[error("{0}")]
-    ApprovalDenied(String),
+    ApprovalDenied(crate::actors::approval::ApprovalRejection),
     #[error("{0}")]
     Conflict(&'static str),
     #[error("{0}")]

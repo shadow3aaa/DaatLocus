@@ -53,6 +53,23 @@ pub struct Installation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    ReviewApproval {
+        epoch: u64,
+        facts: String,
+    },
+    ApprovalAppeal {
+        epoch: u64,
+        approval_id: String,
+    },
+    BeginApprovalAppeal {
+        epoch: u64,
+        approval_id: String,
+        explanation: String,
+    },
+    ApplyApprovalAppeal {
+        epoch: u64,
+        authorization: crate::actors::ApprovalAppealAuthorization,
+    },
     RecoveryStatus,
     RecoveryArchives {
         after: Option<i64>,
@@ -127,6 +144,15 @@ pub enum Request {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
+    ApprovalReview {
+        verdict: std::result::Result<
+            crate::actors::approval::ReviewVerdict,
+            crate::actors::approval::ReviewFailure,
+        >,
+    },
+    ApprovalAppeal {
+        record: Box<crate::actors::ApprovalRecord>,
+    },
     RecoveryArchives {
         entries: Vec<super::recovery::ArchivedChange>,
         next_cursor: Option<i64>,
@@ -162,7 +188,7 @@ pub enum Response {
         code: String,
     },
     ApprovalDenied {
-        reason: String,
+        rejection: crate::actors::approval::ApprovalRejection,
     },
 }
 

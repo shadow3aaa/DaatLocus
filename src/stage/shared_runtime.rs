@@ -25,6 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Notify;
+mod approval;
 pub struct Controller {
     runtime: Weak<Runtime>,
     fence: Mutex<Fence>,
@@ -549,11 +550,16 @@ impl Controller {
         if peer == runtime.host.local {
             return Box::pin(self.handle(peer, request)).await;
         }
-        let timeout = Duration::from_secs(if matches!(request, Request::Invoke { .. }) {
-            1200
-        } else {
-            20
-        });
+        let timeout = Duration::from_secs(
+            if matches!(
+                request,
+                Request::Invoke { .. } | Request::ReviewApproval { .. }
+            ) {
+                1200
+            } else {
+                20
+            },
+        );
         let bytes = serde_json::to_vec(&request)
             .map_err(|_| StageError::Invalid("Cannot encode core request"))?;
         let content = ContentStore::new(runtime.host.system.store())
@@ -578,10 +584,10 @@ impl Controller {
         let response: Response = serde_json::from_slice(&bytes)
             .map_err(|_| StageError::Invalid("Invalid core response"))?;
         tracing::debug!(peer=%peer,operation=label,elapsed_ms=began.elapsed().as_millis(),"Account device operation replied");
-        if let Response::ApprovalDenied { reason } = &response {
-            return Err(StageError::ApprovalDenied(
-                runtime.host.system.safe_error(reason),
-            ));
+        if let Response::ApprovalDenied { rejection } = &response {
+            let mut rejection = rejection.clone();
+            rejection.reason = runtime.host.system.safe_error(&rejection.reason);
+            return Err(StageError::ApprovalDenied(rejection));
         }
         if matches!(response, Response::Error { .. }) {
             return Err(StageError::Forbidden("Shared Actor operation was rejected"));
@@ -632,6 +638,47 @@ impl Controller {
                 .peer(peer, chrono::Utc::now().timestamp_millis())?;
         }
         match request {
+            Request::ReviewApproval { epoch, facts } => {
+                self.handle_approval_review(epoch, facts).await
+            }
+            Request::ApprovalAppeal { epoch, approval_id } => {
+                self.require_worker(peer, epoch).await?;
+                if approval_id.is_empty() || approval_id.len() > 128 {
+                    return Err(StageError::Invalid("Invalid approval reference"));
+                }
+                let record = system
+                    .core_approval_appeal(&approval_id)
+                    .map_err(|_| StageError::Forbidden("Appeal is outside account authority"))?;
+                Ok(Response::ApprovalAppeal {
+                    record: Box::new(record),
+                })
+            }
+            Request::BeginApprovalAppeal {
+                epoch,
+                approval_id,
+                explanation,
+            } => {
+                self.require_worker(peer, epoch).await?;
+                let record = system
+                    .appeal_from_current_core(&approval_id, &explanation)
+                    .map_err(|_| StageError::Forbidden("Core appeal could not be recorded"))?;
+                Ok(Response::ApprovalAppeal {
+                    record: Box::new(record),
+                })
+            }
+            Request::ApplyApprovalAppeal {
+                epoch,
+                authorization,
+            } => {
+                self.require_worker(peer, epoch).await?;
+                let record = system
+                    .apply_appeal_authorization(&authorization)
+                    .await
+                    .map_err(|_| StageError::Forbidden("Appeal decision could not be recorded"))?;
+                Ok(Response::ApprovalAppeal {
+                    record: Box::new(record),
+                })
+            }
             Request::RecoveryArchives { after } => {
                 self.require_authority(peer).await?;
                 self.touch_recovery(peer)?;
@@ -1944,7 +1991,10 @@ impl Controller {
         tokio::pin!(review);
         let approved = loop {
             tokio::select! {
-                result=&mut review=>break result.map_err(|error|StageError::ApprovalDenied(system.safe_error(&error.to_string())))?,
+                result=&mut review=>break result.map_err(|error| {
+                    crate::actors::approval::rejection(&error).map(StageError::ApprovalDenied)
+                        .unwrap_or(StageError::Forbidden("App authorization could not be completed"))
+                })?,
                 _=tokio::time::sleep(Duration::from_millis(25))=>{
                     if Instant::now() >= deadline || !self.fence.lock().permits(peer,epoch,Instant::now())
                         || system.store().message(message).is_ok_and(|input| input.cancel_requested || input.status != MessageStatus::Running) {

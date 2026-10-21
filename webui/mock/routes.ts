@@ -492,7 +492,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     if (!actor) return notFound("Unknown actor");
     let cancelled = 0;
     for (const message of actor.messages)
-      if (message.status === "queued") {
+      if (message.status === "queued" && ["user", "remote_user"].includes(message.source.kind)) {
         touchMessage(message, { status: "cancelled", finished_at_ms: now() });
         emitEvent(actor.summary.id, { type: "message_updated", message_id: message.id, status: "cancelled" });
         cancelled += 1;
@@ -502,7 +502,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
   if ((match = RE_QUEUE.exec(path)) && method === "GET") {
     const actor = getActor(decodeSegment(match[1]));
     if (!actor) return notFound("Unknown actor");
-    const queued = actor.messages.filter(message => message.status === "queued");
+    const queued = actor.messages.filter(message => message.status === "queued" && message.kind !== "delivery");
     const active = actor.messages.find(message => message.status === "running" && message.kind === "request") ?? null;
     const limit = limitParam(url, "limit", 24);
     if (limit === null) return invalidRequest();
