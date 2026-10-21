@@ -133,7 +133,7 @@ jobs:
       - name: Verify default embedded build
         run: cargo build --locked -p daat-locus
 
-  signaling:
+  relay:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -144,6 +144,9 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun test
+      - run: bun test tests/local.test.ts
+        env:
+          DAAT_LOCUS_TEST_RELAY_WORKER: "1"
 
   android:
     runs-on: ubuntu-latest

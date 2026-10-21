@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "types": ["bun"],
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["server.ts", "src/runtime.ts", "src/group.ts", "src/accounts.ts", "src/auth.ts"]
+}

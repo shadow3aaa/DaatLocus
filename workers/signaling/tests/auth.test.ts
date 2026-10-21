@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { hash, membership, registration, negotiation, type Proof, type Root, type Device } from "../src/auth";
+import { hash, membership, registration, type Proof, type Root, type Device } from "../src/auth";
 const encoder = new TextEncoder();
 function b64(bytes: ArrayBuffer | Uint8Array): string { return Buffer.from(bytes).toString("base64url"); }
 async function key() { return await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]) as CryptoKeyPair; }
@@ -16,15 +16,15 @@ async function setup() {
   const proof = await sign(authority, "membership", { version: 1, group_id: root.group_id, issuer: null, device, join_id: crypto.randomUUID(), issued_at_ms: 1000, expires_at_ms: 100000, can_enroll: true });
   return { authority, deviceKey, root, device, enrollment: { root, chain: [proof] } };
 }
-describe("signaling authentication", () => {
+describe("relay authentication", () => {
   test("independent device registration binds purpose, challenge and expiry", async () => {
     const fixture = await setup(); const member = await membership(fixture.enrollment, fixture.root, new Set(), 2000);
-    const challenge = crypto.randomUUID(); const value = { version: 1, group_id: fixture.root.group_id, stage_id: fixture.device.stage_id, challenge, expires_at_ms: 10000 };
-    const proof = await sign(fixture.deviceKey, "signal-register", value);
-    await registration(proof, member, fixture.root.group_id, challenge, 2000);
-    await expect(registration(proof, member, fixture.root.group_id, crypto.randomUUID(), 2000)).rejects.toThrow();
-    await expect(registration(await sign(fixture.deviceKey, "membership", value), member, fixture.root.group_id, challenge, 2000)).rejects.toThrow();
-    await expect(registration(proof, member, fixture.root.group_id, challenge, 10000)).rejects.toThrow();
+    const challenge = crypto.randomUUID(); const value = { version: 2, group_id: fixture.root.group_id, stage_id: fixture.device.stage_id, challenge, expires_at_ms: 10000 };
+    const proof = await sign(fixture.deviceKey, "relay-register", value);
+    await registration(proof, member, fixture.root.group_id, challenge, 2000,10000);
+    await expect(registration(proof, member, fixture.root.group_id, crypto.randomUUID(), 2000,10000)).rejects.toThrow();
+    await expect(registration(await sign(fixture.deviceKey, "membership", value), member, fixture.root.group_id, challenge, 2000,10000)).rejects.toThrow();
+    await expect(registration(proof, member, fixture.root.group_id, challenge, 10000,10000)).rejects.toThrow();
   });
   test("revoked members and forged group roots are rejected", async () => {
     const fixture = await setup();
@@ -47,12 +47,5 @@ describe("signaling authentication", () => {
       await expect(membership(enrollment, fixture.root, new Set(), now)).rejects.toThrow();
     }
     await expect(membership(enrollment, fixture.root, new Set([fixture.device.stage_id]), issued - 1000)).rejects.toThrow();
-  });
-  test("only signed SDP with the same DTLS fingerprint is forwarded", async () => {
-    const fixture = await setup(); const fingerprint = Array(32).fill("ab").join(":");
-    const value = { version: 1, group_id: fixture.root.group_id, source: fixture.device.stage_id, target: crypto.randomUUID(), generation: 1, nonce: crypto.randomUUID(), expires_at_ms: 10000, description: { type: "offer", sdp: `v=0\r\na=fingerprint:sha-256 ${fingerprint}\r\n` }, fingerprint };
-    const proof = await sign(fixture.deviceKey, "rtc-negotiation", value);
-    expect((await negotiation(proof, fixture.device, fixture.root.group_id, 2000)).nonce).toBe(value.nonce);
-    await expect(negotiation(await sign(fixture.deviceKey, "rtc-negotiation", { ...value, fingerprint: "cd".repeat(32) }), fixture.device, fixture.root.group_id, 2000)).rejects.toThrow();
   });
 });

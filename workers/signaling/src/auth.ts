@@ -12,11 +12,6 @@ export interface Registration {
   version: number; group_id: string; stage_id: string; challenge: string;
   expires_at_ms: number;
 }
-export interface Negotiation {
-  version: number; group_id: string; source: string; target: string;
-  generation: number; nonce: string; expires_at_ms: number;
-  description: { type: "offer" | "answer"; sdp: string }; fingerprint: string;
-}
 const encode = new TextEncoder();
 const decode = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -62,19 +57,8 @@ export async function membership(bundle: Enrollment, trusted: Root, revoked: Set
   }
   assert(last); return last;
 }
-export async function registration(proof: Proof, member: Membership, group: string, challenge: string, now: number): Promise<void> {
-  const value = await verify<Registration>(proof, "signal-register", member.device.public_key);
-  assert(value.version === 1 && value.group_id === group && value.stage_id === member.device.stage_id && value.challenge === challenge);
-  assert(Number.isSafeInteger(value.expires_at_ms) && value.expires_at_ms > now && value.expires_at_ms <= now + 30000);
-}
-export async function negotiation(proof: Proof, device: Device, group: string, now: number): Promise<Negotiation> {
-  const value = await verify<Negotiation>(proof, "rtc-negotiation", device.public_key);
-  assert(value.version === 1 && value.group_id === group && value.source === device.stage_id && uuid.test(value.target) && uuid.test(value.nonce));
-  assert(Number.isSafeInteger(value.generation) && value.generation > 0 && Number.isSafeInteger(value.expires_at_ms) && value.expires_at_ms > now && value.expires_at_ms <= now + 120000);
-  assert(value.description && ["offer", "answer"].includes(value.description.type) && typeof value.description.sdp === "string");
-  assert(encode.encode(value.description.sdp).length <= 6144 && value.description.sdp.startsWith("v=0"));
-  const fingerprints = value.description.sdp.split(/\r?\n/).filter((line) => line.startsWith("a=fingerprint:sha-256 ")).map((line) => line.slice(22).trim());
-  assert(fingerprints.length > 0 && fingerprints.every((item) => item === value.fingerprint));
-  assert(/^([0-9a-f]{2}:){31}[0-9a-f]{2}$/i.test(value.fingerprint));
-  return value;
+export async function registration(proof: Proof, member: Membership, group: string, challenge: string, now: number, deadline:number): Promise<void> {
+  const value = await verify<Registration>(proof, "relay-register", member.device.public_key);
+  assert(value.version === 2 && value.group_id === group && value.stage_id === member.device.stage_id && value.challenge === challenge);
+  assert(Number.isSafeInteger(value.expires_at_ms) && value.expires_at_ms > now && value.expires_at_ms <= now + 30000 && value.expires_at_ms===deadline);
 }

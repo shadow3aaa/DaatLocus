@@ -1,89 +1,89 @@
-# Stage signaling
+# Daat Locus Relay
 
-This Worker and Durable Objects provide **online** rendezvous, signed WebRTC
-offer/answer forwarding, and password-login message forwarding for new devices.
-OPAQUE and its encrypted enrollment result terminate on devices. The Worker never
-verifies passwords, decrypts or stores credential records, coordinates execution,
-or receives Actor invocations, history, resources or offline mail. No TURN relay
-is included.
+This service connects account devices through public WebSockets. Deploy the same
+relay on Cloudflare Workers/Durable Objects or an ordinary server. Devices retain
+all Actor execution, Raft coordination, leases, checkpoints and durable delivery.
+The relay carries bounded end-to-end TLS streams and OPAQUE login exchanges; it
+never executes Apps, validates passwords or stores Actor history.
 
-The Durable Object uses the Hibernation WebSocket API. Attachments contain only
-challenge/identity, membership expiry, issuer IDs and bounded rate counters.
-An alarm removes expired registrations/challenges; ordinary WebSocket ping/pong
-does not require a business poll. The server rechecks group configuration,
-revocation and membership expiry before every forwarding operation.
-Membership issuance accepts at most 30 seconds of future clock skew; expiration,
-revocation, signatures and authorization chains remain strictly checked.
+## Run and deploy
 
-Requirements: Node 22 or newer and Bun. Node 24 was used for local verification.
-
-```powershell
+```sh
 bun install --frozen-lockfile
 bun run typecheck
 bun test
-```
-
-## Deployment
-
-The deployment configuration binds `daat-locus-signaling` to `dl.shadow3.work`.
-For another installation, change `account_id` and the custom domain in
-`wrangler.jsonc` to match an active Cloudflare zone in your account.
-
-```powershell
-bunx wrangler login --device --browser=false
+# Real local Cloudflare adapter (environment variable set in the current shell):
+# DAAT_LOCUS_TEST_RELAY_WORKER=1 bun test tests/local.test.ts
+bunx wrangler dev --local
 bunx wrangler deploy
 ```
 
-Wrangler creates the `SignalGroup` and `AccountRoom` SQLite Durable Objects from
-the migrations and binds the custom domain. Set DL's optional public connection
-service to `wss://dl.shadow3.work`, without a path. The root HTTPS path returns
-404 because this service exposes only WebSocket endpoints.
+The existing deployment uses `dl.shadow3.work`. Preserve the `SignalGroup` and
+`AccountRoom` Durable Object bindings/migrations: existing revocation records
+remain authoritative. Protocol 2 replaces the previous signaling protocol;
+upgrade clients before using the new service. No direct-device fallback exists.
 
-When a proxy is required, set `HTTPS_PROXY` before running Wrangler; it does not
-automatically use the Windows system proxy. Keep localhost out of the proxy with
-`NO_PROXY=localhost,127.0.0.1,::1`.
+On an ordinary server, run `bun run server.ts` behind a TLS reverse proxy with
+WebSocket Upgrade support. Environment variables:
 
-## Verification
+| Variable | Meaning |
+| --- | --- |
+| `PORT` | HTTP port, default 8787 |
+| `RELAY_LISTEN` | Listen address, default 127.0.0.1 |
+| `RELAY_DATABASE` | Persistent SQLite file, default relay.sqlite |
+| `GROUP_ROOTS` | Optional JSON object mapping permitted account IDs to root public keys |
+| `REVOKED_STAGES` | JSON array of administratively denied device IDs, default [] |
 
-The explicit local-runtime test creates disposable signing keys in memory and
-writes only public group configuration and test runtime state under the ignored
-repository `target/stage-signaling-test` directory. It starts a local Workers
-runtime on port 45827, tests registration/forwarding and rejection of business
-messages, and closes the test process and WebSockets.
+Restrict OS access to the SQLite file and preserve it on restart. It contains
+revocation records, not Actor data or account passwords. `/health` returns
+`{"service":"daat-locus-relay","protocol":2}`. Clients use the public WSS
+origin with explicit `mode=relay` (the native transport also permits an explicit
+`ws://127.0.0.1` local endpoint for loopback fixtures/proxies); purely local accounts start no relay, device
+listener, discovery, Raft, replication or partition recovery.
 
-```powershell
-$env:DAAT_LOCUS_TEST_SIGNALING='1'
-# Set DAAT_LOCUS_TEST_NODE to an absolute Node 22+ executable if needed.
-bun test tests/local.test.ts
-```
+## Transport protocol 2
 
-For an operator-configured installation, `GROUP_ROOTS` is a JSON object mapping
-allowed Group IDs to their independently pinned public authority keys. The
-checked-in empty object allows self-authenticated public-key namespaces. A
-nonempty map restricts who can use this connection service; it does not define
-account or Actor authority. `REVOKED_STAGES` is a JSON array of
-Stage IDs, including revoked issuers. These values contain no device private keys.
-The custom domain is configured in `wrangler.jsonc`.
+`/connect/<account-public-key-hash>` opens a device connection. The relay sends
+`challenge` with a nonce, expiry and protocol 2. The client sends `register` with
+protocol 2, enrollment and an Ed25519 `relay-register` proof. Its signed version-2
+payload binds account, device, exact challenge and expiry. Membership signatures,
+expiry, revoked issuers and configured account roots are checked before admission.
+`registered` lists online devices; `presence` only advertises hints, never trust.
+Devices validate the member ledger again before opening a channel.
 
-A native Stage connects to `wss://<configured-origin>/connect/<group-id>` and
-signs the socket's fresh challenge with purpose `signal-register`. Membership
-chains use exactly the signed bytes and domain from `src/stage/identity.rs`.
-Only purpose `rtc-negotiation` forwards signed SDP, with device/group, target,
-generation, nonce, expiry and consistent SHA256 DTLS fingerprint binding.
-Native peers independently verify membership and SDP before admitting data.
+The lower device ID opens a channel using `open {channel,target}` with a new UUID.
+The recipient receives `incoming {channel,source}`, constructs its bounded byte
+stream, and replies `accept {channel}`. The opener receives `opened {channel}`.
+Both sides then perform their existing pinned mutual TLS and durable generation
+handshake over this stream. Relay routing is not proof of peer identity.
+`close {channel}` and `closed {channel}` retire a channel without affecting others.
+Device replacement, revocation and transport loss close its associated channels.
+After reconnect, use new channel UUIDs and the existing durable protocol cursors;
+a forwarding acknowledgement is never a delivery receipt.
 
-`/accounts/<account-name-hash>` is an online lookup and transient login path.
-Fresh device signatures register clients; existing account publishers additionally
-prove their signed membership. Clients can send only login start/finish, publishers
-only challenge/encrypted result/rejection. Lookup is not account authority: the
-device-side OPAQUE exchange and bound encrypted result establish trust. Anonymous
-login sockets cannot send Actor or coordination traffic. The ACCOUNTS binding and
-v2 migration are included in the deployment configuration.
+Binary messages contain: version byte 2, kind byte, 16 raw UUID bytes, body.
+Kind 0 carries 1..16384 bytes. Each direction starts with 65536 bytes of credit.
+Kind 1 carries one big-endian u32 granting consumed bytes back to the opposite
+sender. Credits cannot exceed outstanding received bytes or the fixed window.
+Each connection has at most 32 logical channels; registration/control messages
+are limited to 64 KiB and 64 messages/second. Device-side queues and flow control
+bound memory and prevent slow receivers from blocking the relay event loop.
+All sends recheck current membership and revocation. There is no durable relay
+message queue, tool retry, cloud execution lease or business commit.
 
-Local Worker tests and native loopback WebRTC tests are separate evidence. They
-do not prove cloud deployment, domain routing or public NAT traversal. Stage
-native connection supervision and device management use the same authenticated
-peer protocol over LAN, SSH and WebRTC. The shared Actor is coordinated on devices;
-it keeps working over healthy direct channels when this optional service is lost.
+`revoke` carries the existing signed account revocation record; the relay
+persists it and broadcasts `revocations`, including to reconnecting clients.
+The `/accounts/<login-name-hash>` room retains the OPAQUE device-join exchange:
+public discovery, `start`/`finish` towards an authorized device and
+`challenge`/`accepted`/`rejected` back. Device enrollment/private credential
+records remain sealed with the one-login key and are verified before local import.
 
-API reference: [Cloudflare WebSocket Hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/).
+## Verification boundaries
+
+`bun test` exercises real standalone sockets, signatures, registration,
+replacement, channel forwarding/credits, revocation, OPAQUE packet routing and
+rejection of execution-authority requests. The Worker opt-in runs the same
+contracts against real local Durable Objects. Rust unit/HTTP tests use an
+in-process mock relay while retaining production device TLS, multiplexing,
+replication and coordination. Public endpoint checks are explicitly opt-in and
+use disposable identities; they do not access an existing account.

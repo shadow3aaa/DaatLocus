@@ -1,21 +1,19 @@
-import {DurableObject} from "cloudflare:workers";
+import type {RelayContext,RelaySocket,RelayEnv} from "./runtime";
 import {verify,membership,bytes,hash,type Device,type Enrollment,type Proof} from "./auth";
-interface Env {GROUP_ROOTS?:string;REVOKED_STAGES:string}
 interface Attachment {name:string;challenge:string;deadline:number;device?:Device;account?:string;label?:string;expiry?:number;window:number;messages:number}
 type Packet={kind:string;[key:string]:unknown};
 function require(value:unknown):asserts value{if(!value)throw Error("Invalid account rendezvous");}
-function removed(env:Env){const list=JSON.parse(env.REVOKED_STAGES||"[]") as string[];require(Array.isArray(list)&&list.length<=1024);return new Set(list);}
-export class AccountRoom extends DurableObject<Env> {
-  private active(socket:WebSocket,now:number){if(socket.readyState!==WebSocket.OPEN)return;const value=socket.deserializeAttachment() as Attachment;return value.device&&value.expiry&&value.expiry>now&&!removed(this.env).has(value.device.stage_id)?value:undefined;}
-  async fetch(request:Request):Promise<Response>{
-    if(this.ctx.getWebSockets().length>=64)return new Response("Busy",{status:503});
-    const pair=new WebSocketPair();const now=Date.now();const challenge=crypto.randomUUID();
-    pair[1].serializeAttachment({name:new URL(request.url).pathname.split("/").pop()!,challenge,deadline:now+30000,window:now,messages:0} satisfies Attachment);
-    this.ctx.acceptWebSocket(pair[1]);await this.ctx.storage.setAlarm(now+30000);
-    pair[1].send(JSON.stringify({type:"challenge",nonce:challenge,expires_at_ms:now+30000}));
-    return new Response(null,{status:101,webSocket:pair[0]});
+function removed(env:RelayEnv){const list=JSON.parse(env.REVOKED_STAGES||"[]") as string[];require(Array.isArray(list)&&list.length<=1024);return new Set(list);}
+export class AccountRelay {
+  constructor(private ctx:RelayContext,private env:RelayEnv){}
+  private active(socket:RelaySocket,now:number){if(socket.readyState!==1)return;const value=socket.deserializeAttachment() as Attachment;return value.device&&value.expiry&&value.expiry>now&&!removed(this.env).has(value.device.stage_id)?value:undefined;}
+  async connect(socket:RelaySocket,name:string):Promise<void>{
+    const now=Date.now();const challenge=crypto.randomUUID();
+    socket.serializeAttachment({name,challenge,deadline:now+30000,window:now,messages:0} satisfies Attachment);
+    await this.ctx.storage.setAlarm(now+30000);
+    socket.send(JSON.stringify({type:"challenge",nonce:challenge,expires_at_ms:now+30000}));
   }
-  async webSocketMessage(socket:WebSocket,message:string|ArrayBuffer){
+  async webSocketMessage(socket:RelaySocket,message:string|ArrayBuffer){
     try{
       require(typeof message==="string"&&new TextEncoder().encode(message).length<=64*1024);
       const now=Date.now();let state=socket.deserializeAttachment() as Attachment;
@@ -35,7 +33,7 @@ export class AccountRoom extends DurableObject<Env> {
           account=enrollment.root.group_id;expiry=member.expires_at_ms;
         }else require(registration.account_id===null);
         require(typeof input.label==="string"&&new TextEncoder().encode(input.label).length<=100);
-        for(const previous of this.ctx.getWebSockets())if(previous!==socket&&previous.readyState===WebSocket.OPEN&&(previous.deserializeAttachment() as Attachment)?.device?.stage_id===device.stage_id)previous.close(1000,"Replaced");
+        for(const previous of this.ctx.getWebSockets())if(previous!==socket&&previous.readyState===1&&(previous.deserializeAttachment() as Attachment)?.device?.stage_id===device.stage_id)previous.close(1000,"Replaced");
         state={...state,device,account,label:input.label,expiry};socket.serializeAttachment(state);
         const peers=this.ctx.getWebSockets().filter(peer=>peer!==socket).map(peer=>this.active(peer,now)).filter(peer=>peer?.account).map(peer=>({device:peer!.device,account_id:peer!.account,label:peer!.label}));
         socket.send(JSON.stringify({type:"registered",peers}));return;
@@ -49,6 +47,6 @@ export class AccountRoom extends DurableObject<Env> {
     }catch{socket.close(1008,"Rejected");}
   }
   async alarm(){const now=Date.now();for(const socket of this.ctx.getWebSockets()){const state=socket.deserializeAttachment() as Attachment;if(state.device?!this.active(socket,now):state.deadline<=now)socket.close(1008,"Expired");}if(this.ctx.getWebSockets().length)await this.ctx.storage.setAlarm(now+30000);}
-  webSocketClose(socket:WebSocket){socket.close(1000,"Closed");}
-  webSocketError(socket:WebSocket){socket.close(1011,"Connection failed");}
+  webSocketClose(socket:RelaySocket){socket.close(1000,"Closed");}
+  webSocketError(socket:RelaySocket){socket.close(1011,"Connection failed");}
 }
