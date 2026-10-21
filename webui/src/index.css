@@ -321,7 +321,7 @@ html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
    leaving underlying buttons and inputs interactive. */
 html[data-desktop-platform="windows"] .dl-window-titlebar { height: 36px; background: transparent; pointer-events: none; z-index: 60; }
 html[data-desktop-platform="windows"] .dl-window-drag-area { pointer-events: none; }
-html[data-desktop-platform="windows"] .dl-window-controls { margin-left: auto; pointer-events: auto; background: var(--background); }
+html[data-desktop-platform="windows"] .dl-window-controls { margin-left: auto; pointer-events: auto; }
 html[data-desktop-platform="windows"] .dl-main-heading { padding-right: calc(var(--dl-caption-width) + 14px); pointer-events: auto; }
 html[data-desktop-platform="windows"] .dl-main-view>.dl-conversation>.dl-floating-search { right: calc(var(--dl-caption-width) + 14px); left: auto; translate: none; width: min(510px,calc(100% - var(--dl-caption-width) - 28px)); }
 html[data-desktop-platform="windows"] :is(.dl-apps-header,.dl-settings-page-heading) { padding-right: var(--dl-caption-width); }
