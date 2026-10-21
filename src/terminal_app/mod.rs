@@ -794,106 +794,6 @@ fn tokenize_powershell_words(input: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
-fn command_mentions_protected_paths(context: &AppToolExecutionContext, text: &str) -> bool {
-    if context.sandbox_policy.is_disabled() {
-        return false;
-    }
-    let Some(words) = tokenize_shell_words(text).or_else(|| tokenize_powershell_words(text)) else {
-        return command_mentions_protected_paths_fallback(context, text);
-    };
-    let roots = context.sandbox_policy.protected_paths();
-    words
-        .iter()
-        .any(|word| shell_word_mentions_protected_path(word, &roots))
-}
-
-fn command_mentions_protected_paths_fallback(
-    context: &AppToolExecutionContext,
-    text: &str,
-) -> bool {
-    let lowered = text.to_ascii_lowercase();
-    if lowered.contains(".daat-locus") {
-        return true;
-    }
-    context.sandbox_policy.protected_paths().iter().any(|root| {
-        let rendered = root.display().to_string();
-        !rendered.is_empty() && text.contains(&rendered)
-    })
-}
-
-fn shell_word_mentions_protected_path(word: &str, roots: &[std::path::PathBuf]) -> bool {
-    path_candidate_mentions_protected_path(word, roots)
-        || option_attached_path(word)
-            .is_some_and(|path| path_candidate_mentions_protected_path(path, roots))
-}
-
-fn path_candidate_mentions_protected_path(word: &str, roots: &[std::path::PathBuf]) -> bool {
-    if !word_looks_like_path(word) {
-        return false;
-    }
-    if word.to_ascii_lowercase().contains(".daat-locus") {
-        return true;
-    }
-    let candidate = Path::new(word);
-    roots
-        .iter()
-        .any(|root| path_is_within_protected_root(candidate, root))
-}
-
-/// Path glued to a flag: `--file=<path>` or a short option cluster `-o<path>`.
-fn option_attached_path(word: &str) -> Option<&str> {
-    let rest = word.strip_prefix('-')?;
-    if rest.starts_with('-') {
-        let body = rest.strip_prefix('-')?;
-        let (_, value) = body.split_once('=')?;
-        return (!value.is_empty()).then_some(value);
-    }
-    let mut chars = rest.chars();
-    let _flag = chars.next()?;
-    let value = chars.as_str();
-    (!value.is_empty()).then_some(value)
-}
-
-fn word_looks_like_path(word: &str) -> bool {
-    if word.is_empty() || word.starts_with('-') {
-        return false;
-    }
-    word.contains('/')
-        || word.contains('\\')
-        || word.to_ascii_lowercase().contains(".daat-locus")
-        || Path::new(word).is_absolute()
-        || word.starts_with('.')
-        || word.starts_with('~')
-}
-
-fn path_is_within_protected_root(path: &Path, root: &Path) -> bool {
-    let path = normalize_terminal_path(path);
-    let root = normalize_terminal_path(root);
-    if root.as_os_str().is_empty() {
-        return false;
-    }
-    path == root || path.starts_with(&root)
-}
-
-fn normalize_terminal_path(path: &Path) -> std::path::PathBuf {
-    use std::path::Component;
-    let mut normalized = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
-}
-
-fn terminal_protection_error(label: &str) -> miette::Report {
-    miette!("terminal access to protected runtime path is not allowed ({label})")
-}
-
 fn compact_terminal_model_content(
     summary: &str,
     session: &TerminalSessionState,
@@ -1104,18 +1004,7 @@ impl App for TerminalApp {
                 );
                 context
                     .sandbox_policy
-                    .ensure_path_readable(&effective_workdir, "terminal workdir")
-                    .map_err(|_| {
-                        terminal_protection_error(&format!(
-                            "workdir={}",
-                            effective_workdir.display()
-                        ))
-                    })?;
-                if command_mentions_protected_paths(context, &args.command) {
-                    return Err(terminal_protection_error(
-                        "command references protected path",
-                    ));
-                }
+                    .ensure_path_readable(&effective_workdir, "terminal workdir")?;
                 let effective_workdir = args
                     .workdir
                     .clone()
@@ -1192,16 +1081,7 @@ impl App for TerminalApp {
                     let resolved_cwd = resolve_terminal_path(context, cwd, None);
                     context
                         .sandbox_policy
-                        .ensure_path_readable(&resolved_cwd, "terminal session cwd")
-                        .map_err(|_| {
-                            terminal_protection_error(&format!(
-                                "session cwd={}",
-                                resolved_cwd.display()
-                            ))
-                        })?;
-                }
-                if command_mentions_protected_paths(context, &args.text) {
-                    return Err(terminal_protection_error("stdin references protected path"));
+                        .ensure_path_readable(&resolved_cwd, "terminal session cwd")?;
                 }
                 let result = self
                     .write_stdin_with_progress(
@@ -2264,67 +2144,48 @@ mod tests {
         assert!(TerminalApp::forbidden_input_reason("GH AUTH LOGIN extra").is_some());
     }
 
-    #[test]
-    fn protected_path_mention_uses_path_components() {
-        let protected = std::path::Path::new("/tmp/protected-root");
-        assert!(path_is_within_protected_root(
-            std::path::Path::new("/tmp/protected-root/secret"),
-            protected
-        ));
-        assert!(path_is_within_protected_root(
-            std::path::Path::new("/tmp/protected-root/../protected-root/secret"),
-            protected
-        ));
-        assert!(!path_is_within_protected_root(
-            std::path::Path::new("/tmp/protected-root-other/secret"),
-            protected
-        ));
-        assert!(!word_looks_like_path("protected-root"));
-        assert!(word_looks_like_path(".daat-locus/config"));
-        assert!(shell_word_mentions_protected_path(
-            ".daat-locus/config",
-            &[]
-        ));
-        assert!(!shell_word_mentions_protected_path(
-            "just-text",
-            &[protected.to_path_buf()]
-        ));
-        let mut policy = test_sandbox_policy();
-        policy
-            .filesystem
-            .deny_read_paths
-            .push(protected.to_path_buf());
-        let context = AppToolExecutionContext {
-            execution_cwd: std::path::PathBuf::from("/tmp"),
-            sandbox_policy: policy,
-            tool_output_max_tokens: 0,
-            turn_epoch: 0,
-            actor_call: None,
-        };
-        assert!(command_mentions_protected_paths(
-            &context,
-            "cat 'unterminated .daat-locus"
-        ));
-        assert!(!command_mentions_protected_paths(
-            &context,
-            "echo protected-root is just text"
-        ));
-        assert!(command_mentions_protected_paths(
-            &context,
-            "cat /tmp/protected-root/secret"
-        ));
-        assert!(command_mentions_protected_paths(
-            &context,
-            "cmd --file=/tmp/protected-root/.daat-locus/config.toml"
-        ));
-        assert!(command_mentions_protected_paths(
-            &context,
-            "cmd -o/tmp/protected-root"
-        ));
-        assert!(!command_mentions_protected_paths(
-            &context,
-            "echo --note=protected-root is just text"
-        ));
+    #[tokio::test]
+    async fn terminal_reads_granted_runtime_and_signing_paths_without_a_name_blacklist() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        for name in [".daat-locus", ".daat-locus-signing"] {
+            let root = directory.path().join(name);
+            std::fs::create_dir(&root).unwrap();
+            let file = root.join("fixture.txt");
+            std::fs::write(&file, "granted runtime fixture").unwrap();
+            let mut policy = test_sandbox_policy();
+            policy.filesystem.full_disk_read = false;
+            policy.filesystem.full_disk_write = false;
+            policy.filesystem.readable_roots = vec![workspace.clone(), root];
+            let context = AppToolExecutionContext {
+                execution_cwd: workspace.clone(),
+                sandbox_policy: policy,
+                tool_output_max_tokens: 1000,
+                turn_epoch: 0,
+                actor_call: None,
+            };
+            let command = if cfg!(windows) {
+                format!("Get-Content -Raw -LiteralPath '{}'", file.display())
+            } else {
+                format!("cat '{}'", file.display())
+            };
+            let call = AgentToolCall {
+                id: "read-fixture".into(),
+                name: "terminal_exec".into(),
+                arguments: json!({"command":command,"session_id":null,"workdir":null,
+                    "additional_read_roots":null,"additional_write_roots":null,
+                    "yield_time_ms":5000,"max_chars":2000}),
+            };
+            let mut app = TerminalApp::new();
+            let result = app.execute_tool(&call, &context).await.unwrap();
+            assert_eq!(result.payload["session"]["exit_code"], 0);
+            assert_eq!(
+                result.payload["output"].as_str().unwrap().trim(),
+                "granted runtime fixture"
+            );
+            app.shutdown().await.unwrap();
+        }
     }
 }
 #[test]

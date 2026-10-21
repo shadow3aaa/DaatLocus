@@ -33,7 +33,6 @@ async fn replacing_a_running_executable_preserves_control_and_rejects_a_stale_pr
         .arg(temp.path().join("workspace"))
         .env("DAAT_LOCUS_HOME", &root)
         .env_remove("DAAT_LOCUS_PROFILE_NAME")
-        .env_remove("DAAT_LOCUS_ACCOUNT_STORAGE_ROOT")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -76,7 +75,6 @@ async fn replacing_a_running_executable_preserves_control_and_rejects_a_stale_pr
             .arg(action)
             .env("DAAT_LOCUS_HOME", &root)
             .env_remove("DAAT_LOCUS_PROFILE_NAME")
-            .env_remove("DAAT_LOCUS_ACCOUNT_STORAGE_ROOT")
             .stdin(Stdio::null())
             .kill_on_drop(true);
         #[cfg(windows)]

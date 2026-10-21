@@ -22,7 +22,6 @@ fn command(binary: &Path, namespace: &Path) -> Command {
     command
         .env("DAAT_LOCUS_HOME", namespace)
         .env_remove("DAAT_LOCUS_PROFILE_NAME")
-        .env_remove("DAAT_LOCUS_ACCOUNT_STORAGE_ROOT")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

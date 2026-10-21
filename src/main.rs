@@ -59,9 +59,6 @@ fn main() {
             .expect("current directory")
             .join(profile_base)
     };
-    unsafe {
-        std::env::set_var("DAAT_LOCUS_ACCOUNT_STORAGE_ROOT", &profile_base);
-    }
     let namespace = profile_base.clone();
     let selected_root = arguments.profile.as_ref().map_or_else(
         || namespace.clone(),
@@ -74,7 +71,6 @@ fn main() {
         // A storage name confers no account authority. Every profile has separate
         // account credentials, membership, keys, configuration and durable Actor state.
         unsafe {
-            std::env::set_var("DAAT_LOCUS_ACCOUNT_STORAGE_ROOT", &base);
             std::env::set_var("DAAT_LOCUS_HOME", base.join("profiles").join(name));
             std::env::set_var("DAAT_LOCUS_PROFILE_NAME", name);
         }

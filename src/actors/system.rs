@@ -941,9 +941,7 @@ impl ActorSystem {
         Ok(context)
     }
     fn validate_config(&self, config: &ActorConfig) -> Result<()> {
-        if config.workspace.starts_with(&self.inner.data_dir)
-            || config.workspace.starts_with(&self.inner.delivery_dir)
-        {
+        if config.workspace.starts_with(&self.inner.delivery_dir) {
             return Err(invalid(
                 "Private service storage cannot be an Actor workspace",
             ));
@@ -1731,29 +1729,10 @@ impl ActorSystem {
         device_policy: Option<ActorConfig>,
     ) -> Result<AppToolExecutionContext> {
         let config = self.config();
-        let paths = daat_locus_paths_sync();
-        let mut denied = vec![
-            self.inner.data_dir.clone(),
-            paths.config_dir(),
-            paths.runtime_dir(),
-            paths.state_dir(),
-            paths.codex_auth_dir(),
-            paths.opencode_auth_dir(),
-            paths.artifacts_dir(),
-            paths.logs_dir(),
-        ];
-        let mut private_roots = vec![
-            self.inner.data_dir.clone(),
-            self.inner.delivery_dir.clone(),
-            paths.root().to_path_buf(),
-        ];
-        if let Some(root) = std::env::var_os("DAAT_LOCUS_ACCOUNT_STORAGE_ROOT") {
-            let root = canonical_path(std::path::Path::new(&root))?;
-            denied.push(root.clone());
-            private_roots.push(root);
-        }
-        // Delivery files are separate from state/credentials and are actor-local.
-        denied.retain(|path| !self.actor_data_dir(&actor.id).starts_with(path));
+        // Runtime paths have no ambient filesystem blacklist. Only explicit
+        // credential/resource boundaries below survive an approved scope.
+        let mut denied = Vec::new();
+        let mut private_roots = vec![self.inner.delivery_dir.clone()];
         for id in self.store().actor_ids()? {
             if id != actor.id {
                 denied.push(self.actor_data_dir(&id));
@@ -1781,6 +1760,7 @@ impl ActorSystem {
         let mut protected_env = config.protected_secret_env_vars();
         #[cfg(target_os = "android")]
         if let Some(application_dir) = daat_locus_paths_sync().root().parent() {
+            let paths = daat_locus_paths_sync();
             // Native WebView cookies and platform stores share the app UID. Full
             // access to an App operation never grants these framework credentials.
             for entry in std::fs::read_dir(application_dir).into_diagnostic()? {
@@ -1824,20 +1804,12 @@ impl ActorSystem {
             .models
             .get(config.actor_model_name(actor.config.model.as_deref()))
             .map_or(4096, |model| model.tool_output_max_tokens);
-        let mut sandbox_policy = super::permissions::policy(
+        let sandbox_policy = super::permissions::policy(
             &actor.config,
             &self.actor_data_dir(&actor.id),
             denied,
             protected_env,
         );
-        if let Some(base) = std::env::var_os("DAAT_LOCUS_ACCOUNT_STORAGE_ROOT") {
-            // Protect the entire namespace, including profiles created after
-            // this context. Only this Actor's immutable deliveries are readable.
-            // Enumerating sibling profiles would leave a creation-time race.
-            if let Some(scope) = sandbox_policy.filesystem.private_delivery.as_mut() {
-                scope.root = canonical_path(std::path::Path::new(&base))?;
-            }
-        }
         let mut context = AppToolExecutionContext {
             execution_cwd: actor.config.workspace.clone(),
             sandbox_policy,

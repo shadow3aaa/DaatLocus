@@ -720,21 +720,6 @@ impl FileSystemSandboxPolicy {
         Ok(())
     }
 
-    pub fn protected_paths(&self) -> Vec<PathBuf> {
-        with_path_resolution_cache(|| {
-            let mut paths = self
-                .deny_read_paths
-                .iter()
-                .chain(self.deny_write_paths.iter())
-                .chain(self.private_delivery.iter().map(|scope| &scope.root))
-                .flat_map(|path| [normalize_path(path), resolve_path_for_check(path)])
-                .collect::<Vec<_>>();
-            paths.sort();
-            paths.dedup();
-            paths
-        })
-    }
-
     pub fn is_path_readable(&self, path: &Path) -> bool {
         with_path_resolution_cache(|| {
             if self.ensure_root_bindings().is_err() {
@@ -802,63 +787,6 @@ impl RuntimeSandboxPolicy {
             && self.strong_filesystem == StrongFilesystemSandboxMode::Off
     }
 
-    #[cfg(test)]
-    pub fn protect_daat_locus_runtime(daat_locus_home: &Path) -> Self {
-        Self::protect_daat_locus_runtime_with_options(daat_locus_home, None, Vec::<String>::new())
-    }
-
-    #[cfg(test)]
-    pub fn protect_daat_locus_runtime_with_options(
-        daat_locus_home: &Path,
-        daat_locus_source_root: Option<&Path>,
-        protected_env_vars: Vec<String>,
-    ) -> Self {
-        Self::protect_daat_locus_runtime_with_strong_filesystem(
-            daat_locus_home,
-            daat_locus_source_root,
-            protected_env_vars,
-            StrongFilesystemSandboxMode::Off,
-        )
-    }
-
-    pub fn protect_daat_locus_runtime_with_strong_filesystem(
-        daat_locus_home: &Path,
-        daat_locus_source_root: Option<&Path>,
-        protected_env_vars: Vec<String>,
-        strong_filesystem: StrongFilesystemSandboxMode,
-    ) -> Self {
-        let protected_runtime_paths = vec![normalize_path(daat_locus_home)];
-        let mut deny_write_paths = protected_runtime_paths.clone();
-        if let Some(source_root) = daat_locus_source_root {
-            deny_write_paths.push(normalize_path(source_root));
-        }
-        deny_write_paths.sort();
-        deny_write_paths.dedup();
-
-        let mut protected_env_vars = protected_env_vars
-            .into_iter()
-            .map(|name| name.trim().to_string())
-            .filter(|name| !name.is_empty())
-            .collect::<Vec<_>>();
-        protected_env_vars.sort_by_key(|name| name.to_ascii_uppercase());
-        protected_env_vars.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-
-        Self {
-            filesystem: FileSystemSandboxPolicy {
-                full_disk_read: true,
-                full_disk_write: true,
-                readable_roots: Vec::new(),
-                writable_roots: Vec::new(),
-                deny_read_paths: protected_runtime_paths,
-                deny_write_paths,
-                private_delivery: None,
-                bound_roots: Vec::new(),
-            },
-            protected_env_vars,
-            strong_filesystem,
-        }
-    }
-
     pub fn resolve_path(path: &Path, base: Option<&Path>) -> PathBuf {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
@@ -866,10 +794,6 @@ impl RuntimeSandboxPolicy {
             base.unwrap_or_else(|| Path::new("/")).join(path)
         };
         normalize_path(&absolute)
-    }
-
-    pub fn protected_paths(&self) -> Vec<PathBuf> {
-        self.filesystem.protected_paths()
     }
 
     pub fn is_env_var_protected(&self, name: &str) -> bool {
@@ -1098,61 +1022,21 @@ mod tests {
     }
 
     #[test]
-    fn default_runtime_policy_protects_private_home_without_locking_machine() {
-        let repo_dir = Path::new("/workspace/daat-locus");
-        let workspace_dir = Path::new("/Users/test/daat-locus-workspace");
-        let daat_locus_home = Path::new("/Users/test/.daat-locus");
-        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime(daat_locus_home);
-        let writable_tmp = std::env::temp_dir().join("daat-locus-sandbox-test");
-
-        assert!(!policy.is_path_readable(daat_locus_home));
-        assert!(!policy.is_path_writable(daat_locus_home));
-        assert!(policy.is_path_readable(repo_dir));
-        assert!(policy.is_path_writable(repo_dir));
-        assert!(policy.is_path_readable(workspace_dir));
-        assert!(policy.is_path_writable(workspace_dir));
-        assert!(policy.is_path_readable(&writable_tmp));
-        assert!(policy.is_path_writable(&writable_tmp));
-    }
-
-    #[test]
-    fn runtime_policy_protects_source_writes_and_secret_env_names() {
-        let source_root = Path::new("/workspace/daat-locus");
-        let workspace_dir = Path::new("/Users/test/daat-locus-workspace");
-        let daat_locus_home = Path::new("/Users/test/.daat-locus");
-        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime_with_options(
-            daat_locus_home,
-            Some(source_root),
-            vec![
-                "CUSTOM_PROVIDER_TOKEN".to_string(),
-                "custom_provider_token".to_string(),
-            ],
-        );
-
-        assert!(policy.is_path_readable(source_root));
-        assert!(!policy.is_path_writable(source_root));
-        assert!(!policy.is_path_writable(&source_root.join("src/main.rs")));
-        assert!(policy.is_path_readable(workspace_dir));
-        assert!(policy.is_path_writable(workspace_dir));
-        assert!(!policy.is_path_readable(daat_locus_home));
-        assert!(!policy.is_path_writable(daat_locus_home));
-
-        assert!(policy.is_env_var_protected("CUSTOM_PROVIDER_TOKEN"));
+    fn explicit_secret_env_names_are_case_insensitive() {
+        let policy = RuntimeSandboxPolicy {
+            protected_env_vars: vec!["CUSTOM_PROVIDER_TOKEN".into()],
+            ..RuntimeSandboxPolicy::disabled()
+        };
+        assert!(policy.is_env_var_protected("custom_provider_token"));
         assert!(policy.is_env_var_protected("OPENAI_API_KEY"));
         assert!(policy.is_env_var_protected("aws_secret_access_key"));
         assert!(!policy.is_env_var_protected("PATH"));
         assert!(!policy.is_env_var_protected("SSH_AUTH_SOCK"));
-        assert_eq!(policy.protected_env_vars, vec!["CUSTOM_PROVIDER_TOKEN"]);
     }
 
     #[test]
     fn strong_command_spawn_spec_is_passthrough_when_disabled() {
-        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime_with_strong_filesystem(
-            Path::new("/Users/test/.daat-locus"),
-            None,
-            Vec::<String>::new(),
-            StrongFilesystemSandboxMode::Off,
-        );
+        let policy = RuntimeSandboxPolicy::disabled();
 
         let spec = policy
             .strong_command_spawn_spec(Path::new("/bin/echo").to_path_buf(), vec!["ok".into()])
@@ -1169,7 +1053,6 @@ mod tests {
         assert!(policy.is_disabled());
         assert_eq!(policy.strong_filesystem, StrongFilesystemSandboxMode::Off);
         assert!(policy.protected_env_vars.is_empty());
-        assert!(policy.protected_paths().is_empty());
         assert!(policy.is_path_readable(Path::new("/home/user/.daat-locus/config.toml")));
         assert!(policy.is_path_writable(Path::new("/repo/src/main.rs")));
         assert!(!policy.is_env_var_protected("OPENAI_API_KEY"));
@@ -1400,7 +1283,7 @@ exit 42
 
     #[cfg(unix)]
     #[test]
-    fn runtime_policy_denies_symlink_to_private_home() {
+    fn explicit_denial_covers_symlink_targets() {
         use std::os::unix::fs::symlink;
 
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -1412,7 +1295,15 @@ exit 42
         let linked_home = workspace_dir.join("linked-home");
         symlink(&daat_locus_home, &linked_home).expect("symlink protected home");
 
-        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime(&daat_locus_home);
+        let mut policy = RuntimeSandboxPolicy::disabled();
+        policy
+            .filesystem
+            .deny_read_paths
+            .push(daat_locus_home.clone());
+        policy
+            .filesystem
+            .deny_write_paths
+            .push(daat_locus_home.clone());
 
         assert!(!policy.is_path_readable(&linked_home));
         assert!(!policy.is_path_readable(&linked_home.join("config.toml")));
@@ -1421,7 +1312,7 @@ exit 42
 
     #[cfg(unix)]
     #[test]
-    fn runtime_policy_denies_source_writes_through_symlink() {
+    fn explicit_write_denial_covers_symlink_targets() {
         use std::os::unix::fs::symlink;
 
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -1435,11 +1326,8 @@ exit 42
         let linked_source = workspace_dir.join("linked-source");
         symlink(&source_root, &linked_source).expect("symlink source");
 
-        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime_with_options(
-            &daat_locus_home,
-            Some(&source_root),
-            Vec::<String>::new(),
-        );
+        let mut policy = RuntimeSandboxPolicy::disabled();
+        policy.filesystem.deny_write_paths.push(source_root.clone());
 
         assert!(policy.is_path_readable(&linked_source.join("src/main.rs")));
         assert!(!policy.is_path_writable(&linked_source));
@@ -1481,8 +1369,10 @@ exit 42
     #[cfg(target_os = "macos")]
     #[test]
     fn shell_spawn_spec_uses_sandbox_exec_on_macos() {
-        let policy =
-            RuntimeSandboxPolicy::protect_daat_locus_runtime(Path::new("/Users/test/.daat-locus"));
+        let policy = RuntimeSandboxPolicy {
+            strong_filesystem: StrongFilesystemSandboxMode::Required,
+            ..RuntimeSandboxPolicy::disabled()
+        };
         let spawn_spec =
             policy.shell_spawn_spec("bash", vec!["-lc".to_string(), "pwd".to_string()]);
         assert_eq!(spawn_spec.program, Path::new("/usr/bin/sandbox-exec"));

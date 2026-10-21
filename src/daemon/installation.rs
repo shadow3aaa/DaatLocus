@@ -336,7 +336,6 @@ async fn restore(namespace: &Path, installation: &Path, transaction: &Transactio
             .arg(&status.options.workspace)
             .env("DAAT_LOCUS_HOME", namespace)
             .env_remove("DAAT_LOCUS_PROFILE_NAME")
-            .env_remove("DAAT_LOCUS_ACCOUNT_STORAGE_ROOT")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -364,7 +363,6 @@ async fn restore(namespace: &Path, installation: &Path, transaction: &Transactio
         command
             .env("DAAT_LOCUS_HOME", namespace)
             .env_remove("DAAT_LOCUS_PROFILE_NAME")
-            .env_remove("DAAT_LOCUS_ACCOUNT_STORAGE_ROOT")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

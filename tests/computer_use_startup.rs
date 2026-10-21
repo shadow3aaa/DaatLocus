@@ -28,7 +28,6 @@ async fn service_readiness_includes_a_virtual_display_without_any_computer_tool_
             .arg(temporary.path().join("workspace"))
             .env("DAAT_LOCUS_HOME", &profile)
             .env_remove("DAAT_LOCUS_PROFILE_NAME")
-            .env_remove("DAAT_LOCUS_ACCOUNT_STORAGE_ROOT")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

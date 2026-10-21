@@ -3087,12 +3087,15 @@ async fn shutdown_interrupts_model_wait_and_restart_never_replays_it() {
 }
 
 #[tokio::test]
-async fn actor_uses_real_files_app_and_cannot_read_private_runtime_state() {
+async fn files_allow_runtime_scope_but_deny_another_actors_resources() {
     let provider = Arc::new(ReplayProvider::new(Vec::new()));
     let (_directory, system) = runtime(provider.clone()).await;
     let workspace = system.store().actor("root").unwrap().config.workspace;
     std::fs::write(workspace.join("inside.txt"), "authorized content\n").unwrap();
-    let outside = system.actor_state_dir("root").join("outside.txt");
+    let runtime = system.actor_state_dir("root").join("runtime.txt");
+    std::fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+    std::fs::write(&runtime, "requested runtime content\n").unwrap();
+    let outside = system.actor_data_dir("core").join("outside.txt");
     std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
     std::fs::write(&outside, "ungranted confidential content\n").unwrap();
     let arguments = |path: String| json!({"path":path,"start_line":null,"line_count":null});
@@ -3104,6 +3107,11 @@ async fn actor_uses_real_files_app_and_cannot_read_private_runtime_state() {
                 arguments: arguments("inside.txt".into()),
             },
             AgentToolCall {
+                id: "runtime-call".into(),
+                name: "files__read_file".into(),
+                arguments: arguments(runtime.display().to_string()),
+            },
+            AgentToolCall {
                 id: "outside-call".into(),
                 name: "files__read_file".into(),
                 arguments: arguments(outside.display().to_string()),
@@ -3111,7 +3119,7 @@ async fn actor_uses_real_files_app_and_cannot_read_private_runtime_state() {
         ]),
         MockReply::Answer("read available data"),
     ]);
-    let input = enqueue_root(&system, "read the two paths");
+    let input = enqueue_root(&system, "read the requested paths");
     let completed = wait_completed(&system, &input.id).await;
     assert_eq!(
         completed.status,
@@ -3122,6 +3130,10 @@ async fn actor_uses_real_files_app_and_cannot_read_private_runtime_state() {
     {
         let requests = provider.requests.lock();
         let follow_up = &requests[1].messages;
+        assert!(follow_up.iter().any(
+            |row| matches!(row, AgentMessage::Tool { tool_call_id, content, .. }
+        if tool_call_id == "runtime-call" && content.contains("requested runtime content"))
+        ));
         assert!(follow_up.iter().any(
             |row| matches!(row, AgentMessage::Tool { tool_call_id, content, .. }
         if tool_call_id == "inside-call" && content.contains("authorized content"))

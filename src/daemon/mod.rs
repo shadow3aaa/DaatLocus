@@ -144,8 +144,7 @@ pub fn spawn_detached_daemon_process(
     // Pass the original namespace, never a root which has already applied --profile.
     command
         .env("DAAT_LOCUS_HOME", namespace)
-        .env_remove("DAAT_LOCUS_PROFILE_NAME")
-        .env_remove("DAAT_LOCUS_ACCOUNT_STORAGE_ROOT");
+        .env_remove("DAAT_LOCUS_PROFILE_NAME");
     command
         .stdin(Stdio::null())
         .stdout(stdout_log)
