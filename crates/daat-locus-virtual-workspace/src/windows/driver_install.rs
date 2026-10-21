@@ -17,7 +17,7 @@ use windows_sys::{
 };
 
 const DISPLAY_CLASS: GUID = GUID::from_u128(0x4d36e968_e325_11ce_bfc1_08002be10318);
-const HARDWARE_ID: &str = "Root\\DaatLocusVirtualDisplay";
+pub(super) const HARDWARE_ID: &str = "Root\\DaatLocusVirtualDisplay";
 
 pub struct DriverPackage {
     pub(super) directory: PathBuf,

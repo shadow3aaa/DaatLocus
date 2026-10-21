@@ -241,6 +241,7 @@ struct Taken {
     window: Window,
     original: Rect,
     original_minimized: bool,
+    handoff_placement: Option<Placement>,
     title: String,
     receiver: Option<InputTarget>,
     state: Option<String>,
@@ -341,7 +342,7 @@ impl Host {
                     "outcome_unknown"
                 };
                 Ok(Reply {
-                    payload: json!({"status":status,"window_id":window_id,"error":error.to_string(),"input_revoked":window_id.is_some_and(|id|!self.taken.contains_key(id))}),
+                    payload: json!({"status":status,"window_id":window_id,"error":error.to_string(),"input_revoked":window_id.is_some_and(|id| self.taken.get(id).and_then(|t| self.hooks.get(&thread_key(&t.window))).is_none_or(|hook| !hook.input_enabled()))}),
                     image: None,
                     summary: "ComputerUse effect requires observation".into(),
                     failure: Some(error.to_string()),
@@ -404,7 +405,7 @@ impl Host {
                     let rows = self.candidates.values().filter(|c| args.app_id.as_ref().is_none_or(|app| &c.app_id == app)
                         && args.query.as_ref().is_none_or(|q| c.title.to_lowercase().contains(&q.to_lowercase())))
                         .filter(|c| reservations().lock().get(&thread_key(&c.window)).is_none_or(|owner| owner == &self.generation))
-                        .map(|c| json!({"window_id":c.id,"app_id":c.app_id,"title":c.title,"minimized":c.window.minimized,"taken":self.taken.contains_key(&c.id),"blocked":unsafe{IsWindowEnabled(c.window.handle as HWND)}==0})).collect();
+                        .map(|c| json!({"window_id":c.id,"app_id":c.app_id,"title":c.title,"minimized":c.window.minimized,"taken":self.taken.contains_key(&c.id),"handoff_pending":self.returning.contains_key(&c.id),"blocked":unsafe{IsWindowEnabled(c.window.handle as HWND)}==0})).collect();
                     Ok(Reply::data(
                         "Discovered windows",
                         page("windows", rows, args.cursor.as_deref(), args.limit)?,
@@ -576,6 +577,7 @@ impl Host {
         id
     }
     fn discover(&mut self) -> Result<()> {
+        self.reconcile_returns()?;
         if self.apps.is_empty() {
             for (name, launch) in installed_apps()? {
                 self.register_app(name, launch);
@@ -585,12 +587,6 @@ impl Host {
         let mut alive = Vec::new();
         for window in windows {
             if !self.allowed(&window) {
-                continue;
-            }
-            if self.returning.values().any(|target| {
-                target.window.handle == window.handle
-                    && target.window.process_started == window.process_started
-            }) {
                 continue;
             }
             alive.push((window.handle, window.process_started));
@@ -610,8 +606,18 @@ impl Host {
                 .to_string_lossy()
                 .into_owned();
             let app_id = self.register_app(name, path.to_string_lossy().into_owned());
+            let reference = self
+                .returning
+                .iter()
+                .find(|(_, target)| {
+                    target.window.handle == window.handle
+                        && target.window.process_started == window.process_started
+                        && target.window.thread_id == window.thread_id
+                })
+                .map(|(id, _)| id.clone())
+                .unwrap_or_else(id);
             let candidate = Candidate {
-                id: id(),
+                id: reference,
                 title: title(window.handle),
                 window,
                 app_id,
@@ -620,6 +626,71 @@ impl Host {
         }
         self.candidates
             .retain(|_, c| alive.contains(&(c.window.handle, c.window.process_started)));
+        Ok(())
+    }
+    /// Observe completed handoffs without replaying a placement request. A window
+    /// can have reached a physical display despite an earlier asynchronous timeout.
+    fn reconcile_returns(&mut self) -> Result<()> {
+        if self.returning.is_empty() {
+            return Ok(());
+        }
+        let physical: Vec<Rect> = displays()
+            .into_diagnostic()?
+            .into_iter()
+            .filter(|d| !d.workspace)
+            .map(|d| d.bounds)
+            .collect();
+        let mut completed = Vec::new();
+        for (id, target) in &self.returning {
+            let key = thread_key(&target.window);
+            // Failed Hook shutdown still owns the thread; never drop it early.
+            if self.hooks.contains_key(&key) {
+                continue;
+            }
+            if unsafe { IsWindow(target.window.handle as HWND) } == 0 {
+                completed.push((id.clone(), key));
+                continue;
+            }
+            let Ok(current) = Window::inspect(target.window.handle) else {
+                continue;
+            };
+            if ensure_identity(&target.window, &current).is_err() {
+                completed.push((id.clone(), key));
+                continue;
+            }
+            let minimized = target.original_minimized
+                && matches!(target.handoff_placement, Some(Placement::Original));
+            if current.minimized != minimized {
+                continue;
+            }
+            let Ok(bounds) = current.restored_bounds() else {
+                continue;
+            };
+            if handoff_visible(bounds, &physical) {
+                completed.push((id.clone(), key));
+            }
+        }
+        for (id, key) in completed {
+            self.returning.remove(&id);
+            self.candidates.remove(&id);
+            if !self
+                .taken
+                .values()
+                .chain(self.returning.values())
+                .any(|t| thread_key(&t.window) == key)
+            {
+                let mut registry = reservations().lock();
+                if registry.get(&key) == Some(&self.generation) {
+                    registry.remove(&key);
+                }
+            }
+        }
+        if self.taken.is_empty()
+            && self.returning.is_empty()
+            && let Some(workspace) = self.workspace.take()
+        {
+            workspace.close().into_diagnostic()?;
+        }
         Ok(())
     }
     fn allowed(&self, window: &Window) -> bool {
@@ -786,9 +857,9 @@ impl Host {
             || before.capture != after.capture
             || before.cursor != after.cursor;
         let rows: Vec<Value> = candidates.iter().map(|c| json!({"window_id":c.id,"title":c.title,"app_id":c.app_id,"on_virtual_screen":region.display().bounds.contains_rect(c.window.bounds)})).collect();
-        if !changed
-            && !cancelled.load(Ordering::Acquire)
+        if !cancelled.load(Ordering::Acquire)
             && candidates.len() == 1
+            && !candidates[0].window.owns_control(after.foreground)
             && region
                 .display()
                 .bounds
@@ -807,8 +878,8 @@ impl Host {
             "Application launch requested",
             json!({"status":"outcome_unknown","discovered_windows":rows,"desktop_changed":changed,"startup_placement":if candidates.iter().any(|c| !region.display().bounds.contains_rect(c.window.bounds)){"application_ignored_placement"}else{"unconfirmed"}}),
         );
-        reply.failure = Some(if changed {
-            "Application changed the user desktop during startup; observe before continuing, do not replay launch."
+        reply.failure = Some(if candidates.iter().any(|c| c.window.owns_control(after.foreground)) {
+            "A discovered application window is on the user's foreground desktop; it was not automatically taken. Observe before continuing; do not replay launch."
         } else {
             "No unique new window was confirmed on the virtual screen. The app may have ignored startup placement, used a broker or reused an existing window. List windows; do not replay launch or assume ownership of an existing window."
         }.into());
@@ -823,6 +894,11 @@ impl Host {
         cancelled: &AtomicBool,
         reserved: Option<DisplayRegion>,
     ) -> Result<Reply> {
+        if self.returning.contains_key(window_id) {
+            return Err(miette!(
+                "window handoff is pending; release_window with this window_id before taking it again"
+            ));
+        }
         if self.taken.contains_key(window_id) {
             return self.observe(window_id);
         }
@@ -916,6 +992,7 @@ impl Host {
                 window: candidate.window.clone(),
                 original,
                 original_minimized: candidate.window.minimized,
+                handoff_placement: None,
                 title: candidate.title,
                 receiver: None,
                 state: None,
@@ -1051,7 +1128,7 @@ impl Host {
         hook.prepare(control).into_diagnostic()?;
         let previous_state = window.state.take();
         self.effect_started = true;
-        let receipt = match action(hook) {
+        match action(hook) {
             Err(error @ daat_locus_virtual_workspace::Error::UnsupportedInput(_)) => {
                 self.effect_started = false;
                 window.state = previous_state;
@@ -1059,11 +1136,6 @@ impl Host {
             }
             result => result.into_diagnostic()?,
         };
-        if receipt.desktop.focus_changed() || receipt.desktop.capture_changed() {
-            return Err(miette!(
-                "input outcome unknown: desktop focus/capture changed; input stopped"
-            ));
-        }
         Ok(())
     }
     fn observe(&mut self, window_id: &str) -> Result<Reply> {
@@ -1179,6 +1251,17 @@ impl Host {
         region: Option<ImageRegion>,
         scale: Option<u32>,
     ) -> Result<Reply> {
+        if self.returning.contains_key(window_id) {
+            self.reconcile_returns()?;
+            return Ok(Reply::data(
+                "Window handoff observation",
+                json!({
+                    "status": if self.returning.contains_key(window_id) { "handoff_pending" } else { "given_to_user" },
+                    "window_id":window_id,"input_revoked":true,"references_revoked":true,
+                "supported_actions": if self.returning.contains_key(window_id) { vec!["release_window"] } else { vec![] }
+                }),
+            ));
+        }
         let current = {
             let window = self
                 .taken
@@ -1265,16 +1348,24 @@ impl Host {
         } else {
             window.receiver = None;
         }
-        let receiver = window
-            .receiver
-            .as_ref()
-            .map(|r| json!({"class":r.surface.class,"kind":match hook.backend(){InputBackend::Hook=>"message_receiver",InputBackend::Automation=>"accessible_control"}}));
+        let backend = match &window.receiver {
+            Some(receiver) => hook.backend_for(receiver.hwnd).into_diagnostic()?,
+            None => hook.backend(),
+        };
+        let supported_actions = match &window.receiver {
+            Some(receiver) => hook
+                .supported_actions_for(receiver.hwnd)
+                .into_diagnostic()?,
+            None => hook.supported_actions(),
+        };
+        let receiver = window.receiver.as_ref().map(|r| json!({"class":r.surface.class,
+            "kind":match backend{InputBackend::Hook=>"message_receiver",InputBackend::Automation=>"accessible_control"}}));
         let observation = json!({"window_id":window_id,"state_id":state,"title":window.title,"width":view.width(),"height":view.height(),
             "window_width":window.window.bounds.width().into_diagnostic()?,"window_height":window.window.bounds.height().into_diagnostic()?,
             "workspace":{"width":workspace.display().bounds.width().into_diagnostic()?,"height":workspace.display().bounds.height().into_diagnostic()?,"window_x":window.window.bounds.left-workspace.display().bounds.left,"window_y":window.window.bounds.top-workspace.display().bounds.top},
             "client_area":{"x":window.window.client_bounds.left-window.window.bounds.left,"y":window.window.client_bounds.top-window.window.bounds.top,"width":window.window.client_bounds.width().into_diagnostic()?,"height":window.window.client_bounds.height().into_diagnostic()?},
             "view":{"region":view.region,"scale":view.scale},
-            "input_target":receiver,"supported_actions":hook.supported_actions(),"screenshot":null,"screenshot_url":null});
+            "input_target":receiver,"supported_actions":supported_actions,"screenshot":null,"screenshot_url":null});
         self.discover()?;
         let base = self.taken.get(window_id).expect("controlled window");
         let related: Vec<Value> = self.candidates.values().filter(|c| c.id != window_id && base.window.owns_control(c.window.handle)).map(|c| json!({"window_id":c.id,"title":c.title,"taken":self.taken.contains_key(&c.id)})).collect();
@@ -1322,8 +1413,16 @@ impl Host {
             target.receiver = None;
             target.state = None;
             target.view = None;
+            target.handoff_placement = Some(if id == window_id {
+                placement
+            } else {
+                Placement::Original
+            });
             self.candidates.remove(&id);
             self.returning.insert(id, target);
+        }
+        if let Some(target) = self.returning.get_mut(window_id) {
+            target.handoff_placement = Some(placement);
         }
         if let Some(hook) = self.hooks.get_mut(&key) {
             hook.stop().into_diagnostic()?;
@@ -1344,15 +1443,9 @@ impl Host {
             }
             let current = Window::inspect(target.window.handle).into_diagnostic()?;
             ensure_identity(&target.window, &current)?;
-            let destination = placement_bounds(
-                target.original,
-                if id == window_id {
-                    placement
-                } else {
-                    Placement::Original
-                },
-            )?;
-            let return_original = id != window_id || matches!(placement, Placement::Original);
+            let selected = target.handoff_placement.unwrap_or(Placement::Original);
+            let destination = placement_bounds(target.original, selected)?;
+            let return_original = matches!(selected, Placement::Original);
             let moved = if current.minimized && target.original_minimized && return_original {
                 if current.restored_bounds().into_diagnostic()? != destination {
                     return Err(miette!(
@@ -1361,12 +1454,14 @@ impl Host {
                 }
                 current
             } else {
-                current.relocate(destination).into_diagnostic()?
+                current
+                    .relocate_for_handoff(destination)
+                    .into_diagnostic()?
             };
             if target.original_minimized && return_original {
                 moved.minimize().into_diagnostic()?;
             }
-            returned.push(json!({"title":target.title,"placement":placement,"controlled":false}));
+            returned.push(json!({"title":target.title,"placement":selected,"controlled":false}));
             self.returning.remove(&id);
         }
         reservations().lock().remove(&key);
@@ -1383,6 +1478,7 @@ impl Host {
     }
     fn release_all(&mut self) -> Result<()> {
         let _transaction = desktop_operations().lock();
+        self.reconcile_returns()?;
         let ids: Vec<String> = self
             .taken
             .keys()
@@ -1540,17 +1636,28 @@ fn crop_png_scaled(
     Ok(bytes)
 }
 
+fn handoff_visible(bounds: Rect, physical: &[Rect]) -> bool {
+    let (Ok(width), Ok(height)) = (bounds.width(), bounds.height()) else {
+        return false;
+    };
+    let center = Point {
+        x: bounds.left + width / 2,
+        y: bounds.top + height / 2,
+    };
+    physical.iter().any(|screen| screen.contains(center))
+}
+
 fn placement_bounds(original: Rect, placement: Placement) -> Result<Rect> {
     let physical = displays()
         .into_diagnostic()?
         .into_iter()
-        .filter(|d| !d.indirect && !d.cloned)
+        .filter(|d| !d.workspace)
         .collect::<Vec<_>>();
     let screen = physical
         .iter()
         .find(|d| d.bounds.contains_rect(original))
         .or_else(|| physical.first())
-        .ok_or_else(|| miette!("no physical display available for handoff"))?;
+        .ok_or_else(|| miette!("no user display available for handoff"))?;
     let rect = RECT {
         left: screen.bounds.left,
         top: screen.bounds.top,
@@ -1563,7 +1670,7 @@ fn placement_bounds(original: Rect, placement: Placement) -> Result<Rect> {
         ..Default::default()
     };
     if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
-        return Err(miette!("physical work area unavailable"));
+        return Err(miette!("user display work area unavailable"));
     }
     let area = Rect {
         left: info.rcWork.left,

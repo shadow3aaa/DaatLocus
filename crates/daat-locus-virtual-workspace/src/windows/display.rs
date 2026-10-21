@@ -2,7 +2,14 @@ use super::{DpiContext, path_modes::source_index, status_error};
 use crate::{Display, DisplayId, Error, Rect, Result};
 use std::mem::size_of;
 use windows_sys::Win32::{
-    Devices::Display::*,
+    Devices::{
+        DeviceAndDriverInstallation::*,
+        Display::*,
+        Properties::{
+            DEVPKEY_Device_HardwareIds, DEVPKEY_Device_InstanceId, DEVPROP_TYPE_STRING,
+            DEVPROP_TYPE_STRING_LIST,
+        },
+    },
     Foundation::{ERROR_INSUFFICIENT_BUFFER, LUID},
 };
 
@@ -48,6 +55,7 @@ pub fn displays() -> Result<Vec<Display>> {
         }
         paths.truncate(path_count as usize);
         modes.truncate(mode_count as usize);
+        let mut adapters = std::collections::BTreeMap::new();
         return paths
             .iter()
             .map(|path| {
@@ -86,6 +94,15 @@ pub fn displays() -> Result<Vec<Display>> {
                     .ok()
                     .and_then(|h| mode.position.y.checked_add(h))
                     .ok_or(Error::InvalidState("display height overflow"))?;
+                let adapter = luid(path.targetInfo.adapterId);
+                let workspace = match adapters.get(&adapter) {
+                    Some(value) => *value,
+                    None => {
+                        let value = workspace_adapter(path.targetInfo.adapterId)?;
+                        adapters.insert(adapter, value);
+                        value
+                    }
+                };
                 Ok(Display {
                     id: DisplayId {
                         adapter: luid(path.targetInfo.adapterId),
@@ -103,6 +120,7 @@ pub fn displays() -> Result<Vec<Display>> {
                     rotation: path.targetInfo.rotation,
                     output_technology: path.targetInfo.outputTechnology,
                     indirect: is_indirect(path)?,
+                    workspace,
                     cloned: paths
                         .iter()
                         .filter(|p| {
@@ -118,6 +136,71 @@ pub fn displays() -> Result<Vec<Display>> {
     Err(Error::InvalidState(
         "display topology kept changing during enumeration",
     ))
+}
+
+fn workspace_adapter(adapter: LUID) -> Result<bool> {
+    let mut name = DISPLAYCONFIG_ADAPTER_NAME::default();
+    name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME;
+    name.header.size = size_of::<DISPLAYCONFIG_ADAPTER_NAME>() as u32;
+    name.header.adapterId = adapter;
+    let status = unsafe { DisplayConfigGetDeviceInfo(&mut name.header) };
+    if status != 0 {
+        return Err(status_error("identify display adapter interface", status));
+    }
+    let mut instance = [0u16; 512];
+    let mut bytes = size_of_val(&instance) as u32;
+    let mut kind = 0;
+    let status = unsafe {
+        CM_Get_Device_Interface_PropertyW(
+            name.adapterDevicePath.as_ptr(),
+            &DEVPKEY_Device_InstanceId,
+            &mut kind,
+            instance.as_mut_ptr().cast(),
+            &mut bytes,
+            0,
+        )
+    };
+    if status != CR_SUCCESS
+        || kind != DEVPROP_TYPE_STRING
+        || bytes as usize > size_of_val(&instance)
+        || !instance.contains(&0)
+    {
+        return Err(Error::InvalidState(
+            "cannot identify display adapter device",
+        ));
+    }
+    let mut node = 0;
+    if unsafe { CM_Locate_DevNodeW(&mut node, instance.as_mut_ptr(), CM_LOCATE_DEVNODE_NORMAL) }
+        != CR_SUCCESS
+    {
+        return Err(Error::InvalidState("display adapter device is unavailable"));
+    }
+    let mut hardware = [0u16; 1024];
+    bytes = size_of_val(&hardware) as u32;
+    let status = unsafe {
+        CM_Get_DevNode_PropertyW(
+            node,
+            &DEVPKEY_Device_HardwareIds,
+            &mut kind,
+            hardware.as_mut_ptr().cast(),
+            &mut bytes,
+            0,
+        )
+    };
+    if status != CR_SUCCESS
+        || kind != DEVPROP_TYPE_STRING_LIST
+        || bytes as usize > size_of_val(&hardware)
+        || !bytes.is_multiple_of(2)
+    {
+        return Err(Error::InvalidState(
+            "cannot inspect display adapter hardware identity",
+        ));
+    }
+    Ok(hardware[..bytes as usize / 2]
+        .split(|unit| *unit == 0)
+        .any(|id| {
+            String::from_utf16_lossy(id).eq_ignore_ascii_case(super::driver_install::HARDWARE_ID)
+        }))
 }
 
 fn is_indirect(path: &DISPLAYCONFIG_PATH_INFO) -> Result<bool> {

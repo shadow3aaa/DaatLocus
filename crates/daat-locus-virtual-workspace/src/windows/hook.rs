@@ -274,7 +274,7 @@ impl ThreadHook {
         session.dispatch(Command::default(), Duration::from_secs(3))?;
         if session.poisoned {
             return Err(Error::InvalidState(
-                "desktop state changed during hook handshake",
+                "target hook handshake did not remain enabled",
             ));
         }
         Ok(session)
@@ -351,10 +351,9 @@ impl ThreadHook {
         // A failed post-effect observation must also stop further input.
         self.poisoned = true;
         let after = DesktopState::read()?;
-        self.poisoned = error != 0
-            || before.foreground != after.foreground
-            || before.focus != after.focus
-            || before.capture != after.capture;
+        // The Owner may switch windows, focus or capture while the target handles
+        // messages. Only the target protocol outcome can poison this route.
+        self.poisoned = error != 0;
         if error != 0 {
             return Err(Error::Windows {
                 operation: "target-thread hook command (may be partially applied)",

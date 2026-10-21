@@ -1,4 +1,7 @@
-use super::{DesktopState, InputReceipt, InputSurface, MouseAction, Window, WindowInputReceipt};
+use super::{
+    DesktopState, HookReceipt, InputBackend, InputReceipt, InputSurface, MouseAction, Window,
+    WindowHook, WindowInputReceipt,
+};
 use crate::{Error, Point, Result};
 use ::windows::{
     Win32::{Foundation::HWND, System::Com::*, UI::Accessibility::*},
@@ -37,6 +40,7 @@ pub(super) struct AutomationInput {
     root: Window,
     uia: IUIAutomation,
     activation: super::WindowHook,
+    prefer_hook: bool,
     enabled: bool,
     _thread: PhantomData<Rc<()>>,
     // Release COM interfaces before balancing this thread's initialization.
@@ -108,7 +112,7 @@ impl Action {
 }
 
 impl AutomationInput {
-    pub fn attach(root: &Window, dll: &Path) -> Result<Self> {
+    pub fn attach(root: &Window, dll: &Path, prefer_hook: bool) -> Result<Self> {
         root.validate_discovery()?;
         if root
             .input_surfaces()?
@@ -138,6 +142,7 @@ impl AutomationInput {
             root: root.clone(),
             uia,
             activation,
+            prefer_hook,
             enabled: true,
             _thread: PhantomData,
             _com: com,
@@ -168,6 +173,29 @@ impl AutomationInput {
     }
     pub fn prepare_placement(&mut self, control: usize) -> Result<()> {
         self.activation.prepare(control)
+    }
+    pub fn backend_for(&mut self, control: usize) -> Result<InputBackend> {
+        self.prepare(control)?;
+        if self.prefer_hook {
+            match self.activation.prepare(control) {
+                Ok(()) => return Ok(InputBackend::Hook),
+                Err(error) if super::input::signature_restriction(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(InputBackend::Automation)
+    }
+    pub fn native_input(
+        &mut self,
+        control: usize,
+        action: impl FnOnce(&mut WindowHook) -> Result<HookReceipt>,
+    ) -> Result<WindowInputReceipt> {
+        if self.backend_for(control)? != InputBackend::Hook {
+            return Err(Error::UnsupportedInput(
+                "this input surface requires accessibility patterns; native text, keys and dragging are unavailable",
+            ));
+        }
+        action(&mut self.activation).map(|r| WindowInputReceipt { desktop: r.desktop })
     }
     pub fn reobserve(&mut self) -> Result<Window> {
         if !self.enabled {
@@ -232,7 +260,7 @@ impl AutomationInput {
                 "accessible point is outside the controlled window",
             ));
         }
-        let mut target = self.element_in_window(&frame, point.x, point.y)?;
+        let mut target = self.element_in_window(&frame, control, point.x, point.y)?;
         if unsafe { target.CurrentIsOffscreen() }
             .map_err(uia_error)?
             .as_bool()
@@ -241,7 +269,7 @@ impl AutomationInput {
                 let _ = self.stop();
                 return Err(error);
             }
-            target = self.element_in_window(&frame, point.x, point.y)?;
+            target = self.element_in_window(&frame, control, point.x, point.y)?;
             if unsafe { target.CurrentIsOffscreen() }
                 .map_err(uia_error)?
                 .as_bool()
@@ -252,18 +280,21 @@ impl AutomationInput {
             }
         }
         self.validate_element(&target)?;
-        if !unsafe { target.CurrentIsEnabled() }
-            .map_err(uia_error)?
-            .as_bool()
-        {
-            return Err(Error::UnsupportedInput("accessible control is disabled"));
-        }
         Ok(target)
     }
-    fn element_in_window(&self, frame: &Window, x: i32, y: i32) -> Result<IUIAutomationElement> {
+    fn element_in_window(
+        &self,
+        frame: &Window,
+        control: usize,
+        x: i32,
+        y: i32,
+    ) -> Result<IUIAutomationElement> {
         let walker = unsafe { self.uia.RawViewWalker() }.map_err(uia_error)?;
         let mut current =
-            unsafe { self.uia.ElementFromHandle(HWND(frame.handle as _)) }.map_err(uia_error)?;
+            // Start at the HWND already selected by native hit testing. Starting
+            // at the frame can redirect to an overlapping hosted sibling whose
+            // UIA rectangle happens to contain the same physical point.
+            unsafe { self.uia.ElementFromHandle(HWND(control as _)) }.map_err(uia_error)?;
         let mut remaining = 4096;
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         for _ in 0..128 {
@@ -277,6 +308,18 @@ impl AutomationInput {
                 let rect = unsafe { element.CurrentBoundingRectangle() }.map_err(uia_error)?;
                 if rect.left <= x && x < rect.right && rect.top <= y && y < rect.bottom {
                     self.validate_element(&element)?;
+                    // Chromium may expose a disabled compositor pane alongside
+                    // its live document at the same bounds. It is not an input
+                    // target. A disabled actionable control still blocks input.
+                    if !unsafe { element.CurrentIsEnabled() }
+                        .map_err(uia_error)?
+                        .as_bool()
+                        && Action::click_pattern(&element)?.is_none()
+                    {
+                        child =
+                            optional_element(unsafe { walker.GetNextSiblingElement(&element) })?;
+                        continue;
+                    }
                     next = Some(element);
                     break;
                 }
@@ -331,19 +374,15 @@ impl AutomationInput {
     ) -> Result<WindowInputReceipt> {
         self.prepare(self.root.handle)?;
         self.validate_element(element)?;
+        Self::require_enabled(element)?;
         let before = DesktopState::read()?;
-        if before.capture != 0 {
-            return Err(Error::UnsupportedInput(
-                "release the existing pointer capture before accessibility input",
-            ));
-        }
         // A COM failure/timeout or failed post-effect observation is uncertain.
         // Keep the lease disabled, and never send the same action through Hook.
         self.enabled = false;
         action.execute().map_err(uia_error)?;
         let after = DesktopState::read()?;
         let desktop = InputReceipt { before, after };
-        self.enabled = !desktop.focus_changed() && !desktop.capture_changed();
+        self.enabled = self.activation.input_enabled();
         Ok(WindowInputReceipt { desktop })
     }
     pub fn mouse(
@@ -353,7 +392,9 @@ impl AutomationInput {
         local: Point,
         timeout: Duration,
     ) -> Result<WindowInputReceipt> {
-        self.prepare(control)?;
+        if self.backend_for(control)? == InputBackend::Hook {
+            return self.native_input(control, |hook| hook.mouse(control, action, local, timeout));
+        }
         self.configure_timeout(timeout)?;
         let mut element = self.element_at(control, local)?;
         let action = match action {
@@ -371,13 +412,8 @@ impl AutomationInput {
                 // Choose its nearest actionable ancestor, stopping at this HWND.
                 for _ in 0..64 {
                     self.validate_element(&element)?;
-                    if !unsafe { element.CurrentIsEnabled() }
-                        .map_err(uia_error)?
-                        .as_bool()
-                    {
-                        return Err(Error::UnsupportedInput("accessible control is disabled"));
-                    }
                     if let Some(action) = Action::click_pattern(&element)? {
+                        Self::require_enabled(&element)?;
                         pattern = Some(action);
                         break;
                     }
@@ -416,7 +452,9 @@ impl AutomationInput {
                         .map_err(uia_error)?
                         .as_bool()
                     {
+                        Self::require_enabled(&current)?;
                         pattern = Some(p);
+                        element = current.clone();
                         break;
                     }
                     if unsafe { current.CurrentNativeWindowHandle() }
@@ -454,7 +492,9 @@ impl AutomationInput {
         window: usize,
         timeout: Duration,
     ) -> Result<WindowInputReceipt> {
-        self.prepare(window)?;
+        if self.backend_for(window)? == InputBackend::Hook {
+            return self.native_input(window, |hook| hook.request_close(window, timeout));
+        }
         self.configure_timeout(timeout)?;
         let element =
             unsafe { self.uia.ElementFromHandle(HWND(window as _)) }.map_err(uia_error)?;
@@ -464,6 +504,15 @@ impl AutomationInput {
         }
         .map_err(|_| Error::UnsupportedInput("window exposes no accessibility close pattern"))?;
         self.perform(&element, Action::Close(pattern))
+    }
+    fn require_enabled(element: &IUIAutomationElement) -> Result<()> {
+        if !unsafe { element.CurrentIsEnabled() }
+            .map_err(uia_error)?
+            .as_bool()
+        {
+            return Err(Error::UnsupportedInput("accessible control is disabled"));
+        }
+        Ok(())
     }
 }
 impl Drop for AutomationInput {

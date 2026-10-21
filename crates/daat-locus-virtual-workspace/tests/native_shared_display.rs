@@ -2,6 +2,47 @@
 use daat_locus_virtual_workspace::{DesktopState, SharedDisplay, displays};
 
 #[test]
+#[ignore = "requires installed signed IDD and an unlocked desktop; run native desktop tests serially"]
+fn workspace_adapter_identity_preserves_user_outputs_including_indirect_displays() {
+    let before = displays().unwrap();
+    let user = before
+        .iter()
+        .filter(|display| !display.workspace)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(!user.is_empty(), "an active user output is required");
+    let service = SharedDisplay::new(Default::default()).unwrap();
+    let owned = service.initialize().unwrap();
+    assert!(
+        owned.workspace,
+        "our output must be identified by adapter hardware identity"
+    );
+    let workspace = daat_locus_virtual_workspace::VirtualWorkspace::attach(&owned.id).unwrap();
+    assert_eq!(workspace.capture().unwrap().bounds, owned.bounds);
+    let during = displays().unwrap();
+    assert_eq!(
+        during
+            .iter()
+            .filter(|display| !display.workspace)
+            .cloned()
+            .collect::<Vec<_>>(),
+        user
+    );
+    assert!(
+        during
+            .iter()
+            .any(|display| display.id == owned.id && display.workspace)
+    );
+    drop(workspace);
+    drop(service);
+    assert_eq!(
+        displays().unwrap(),
+        before,
+        "workspace cleanup must retain every existing output"
+    );
+}
+
+#[test]
 #[ignore = "requires installed signed IDD, unlocked desktop and stationary cursor; run native desktop tests serially"]
 fn settings_resize_reuses_the_output_and_disabling_fences_lazy_recreation() {
     let before = displays().unwrap();

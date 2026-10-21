@@ -97,16 +97,17 @@ impl DesktopState {
     pub fn read() -> Result<Self> {
         let _dpi = DpiContext::enter()?;
         let foreground = unsafe { GetForegroundWindow() };
-        if foreground.is_null() {
-            return Err(Error::InvalidState("no interactive foreground window"));
-        }
-        let thread = unsafe { GetWindowThreadProcessId(foreground, std::ptr::null_mut()) };
         let mut gui = GUITHREADINFO {
             cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
             ..Default::default()
         };
-        if unsafe { GetGUIThreadInfo(thread, &mut gui) } == 0 {
-            return Err(last_error("GetGUIThreadInfo"));
+        // Windows can temporarily have no foreground window while the Owner
+        // switches apps. This is a valid observation, not target protocol failure.
+        if !foreground.is_null() {
+            let thread = unsafe { GetWindowThreadProcessId(foreground, std::ptr::null_mut()) };
+            if unsafe { GetGUIThreadInfo(thread, &mut gui) } == 0 {
+                return Err(last_error("GetGUIThreadInfo"));
+            }
         }
         let mut cursor = Default::default();
         if unsafe { GetCursorPos(&mut cursor) } == 0 {
@@ -204,9 +205,9 @@ impl VirtualWorkspace {
                 "workspace requires an extended IDD display",
             ));
         }
-        if !active.iter().any(|d| !d.indirect && !d.cloned) {
+        if !active.iter().any(|d| d.id != display.id && !d.workspace) {
             return Err(Error::InvalidState(
-                "a separate physical display must remain active",
+                "a separate user display must remain active",
             ));
         }
         Ok(Self {
@@ -266,8 +267,11 @@ impl VirtualWorkspace {
                     .map(Box::new),
             });
         }
-        if !active.iter().any(|d| !d.indirect && !d.cloned) {
-            return Err(Error::InvalidState("physical display is no longer active"));
+        if !active
+            .iter()
+            .any(|d| d.id != self.display.id && !d.workspace)
+        {
+            return Err(Error::InvalidState("user display is no longer active"));
         }
         Ok(())
     }

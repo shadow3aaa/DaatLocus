@@ -378,11 +378,19 @@ DLL 默认取 examples 目录同一 profile 下的构建产物。原生 GUI 线�
 来让测试通过。普通测试将这些外部环境用例标为 ignored；显式运行时，缺少应用、驱动
 或交互前置条件会明确失败。
 
-`WindowInput` 通常选择 Hook，仅在接管时遇到签名策略限制才选择 UIA。UIA 显式关闭
+`WindowInput` 通常选择 Hook；接管时发现签名策略限制，则仅为受限接收者选择 UIA，
+其他表面保留 Hook 输入。`backend_for` / `supported_actions_for` 在输入前解析接收者。
+UIA 显式关闭
 AutoSetFocus，保留允许安装的 CBT 守卫，支持可访问性点击、垂直滚动和关闭；不声称
 支持通用按键、插入位置文本或拖曳。失败/未知效果不触发后端重试。应用仍可能不兼容，
 必须检查实际结果与桌面回执。`native_hosted` 除跨进程 Hook 路由外，也验证真实 Win32
 BUTTON 上的 UIA 操作。
+无需 IDD 的 `native_hosted` 用例
+`restricted_child_keeps_native_routes_and_skips_disabled_uia_decoration` 对临时子进程
+设置真实 Microsoft-only 签名策略，检查普通兄弟表面的中文输入、禁用装饰层下的
+UIA 命中、重叠宿主兄弟窗口的正确路由，以及禁用按钮仍被拒绝。
+`native_window_capture` 的 DPI 缩小用例检查应用重排后的实际截图尺寸，并拒绝超出
+预留区域的窗口。
 
 调用方持有 `WindowHook::attach(&window, absolute_dll_path)` 或初始
 `workspace.hook(...)`，用 `text`、`key`、`mouse` 向明确控件 HWND 派发操作。

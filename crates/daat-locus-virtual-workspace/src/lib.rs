@@ -43,6 +43,10 @@ pub enum Error {
     },
     #[error("{0} timed out")]
     Timeout(&'static str),
+    #[error(
+        "window placement did not settle at {requested:?}; last observed bounds: {observed:?}; observe before retrying"
+    )]
+    PlacementUnsettled { requested: Rect, observed: Rect },
     #[error("input surface {class} (process {process_id}, thread {thread_id}): {source}")]
     InputSurface {
         process_id: u32,
@@ -82,7 +86,7 @@ pub const DISPLAY_MODES: &[(u32, u32)] = &[
 pub struct DisplayOptions {
     pub width: u32,
     pub height: u32,
-    /// None chooses an unoccupied position adjacent to a physical display,
+    /// None chooses an unoccupied position adjacent to a user display,
     /// preferring its right edge. Explicit coordinates are validated by Windows.
     pub origin: Option<Point>,
     /// Applies to each bounded PnP/topology transition.
@@ -251,6 +255,9 @@ pub struct Display {
     /// Raw DisplayConfig output technology for diagnostics.
     pub output_technology: i32,
     pub indirect: bool,
+    /// The adapter is bound to our IDD hardware ID, independently of its name
+    /// or output technology. Other indirect/remote displays belong to the user.
+    pub workspace: bool,
     /// A mirrored source shares pixels with another target and cannot be a workspace.
     pub cloned: bool,
 }

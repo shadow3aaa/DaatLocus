@@ -1,6 +1,56 @@
 use super::*;
 
 #[test]
+fn handoff_visibility_accepts_constrained_windows_and_excludes_virtual_or_offscreen_frames() {
+    let physical = [Rect {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    }];
+    for (bounds, visible) in [
+        (
+            Rect {
+                left: 100,
+                top: 100,
+                right: 1100,
+                bottom: 800,
+            },
+            true,
+        ),
+        (
+            Rect {
+                left: -200,
+                top: -20,
+                right: 2000,
+                bottom: 1180,
+            },
+            true,
+        ),
+        (
+            Rect {
+                left: 1920,
+                top: 100,
+                right: 2700,
+                bottom: 800,
+            },
+            false,
+        ),
+        (
+            Rect {
+                left: -1000,
+                top: -1000,
+                right: -200,
+                bottom: -200,
+            },
+            false,
+        ),
+    ] {
+        assert_eq!(handoff_visible(bounds, &physical), visible, "{bounds:?}");
+    }
+}
+
+#[test]
 #[ignore = "requires installed signed IDD, built hook_lab/Hook DLL, unlocked desktop and stationary cursor"]
 fn native_actor_take_input_give_revocation_and_inflight_handoff() {
     use std::{
@@ -524,7 +574,7 @@ fn native_actor_take_input_give_revocation_and_inflight_handoff() {
         before.cursor, after.cursor
     );
     host.discover().unwrap();
-    let fresh = host
+    let mut fresh = host
         .candidates
         .values()
         .find(|c| c.window.handle == agent)
@@ -545,6 +595,60 @@ fn native_actor_take_input_give_revocation_and_inflight_handoff() {
         warmed_cursor,
         "reacquiring a window recreated the display"
     );
+    // Reconstruct a timed-out handoff after its input was revoked. Discovery
+    // must expose the pending reference, then reconcile the real physical
+    // placement without issuing another move or losing the window permanently.
+    let mut pending = host.taken.remove(&fresh).unwrap();
+    let pending_key = thread_key(&pending.window);
+    host.hooks.remove(&pending_key).unwrap().close().unwrap();
+    pending.handoff_placement = Some(Placement::Center);
+    pending.state = None;
+    pending.receiver = None;
+    pending.view = None;
+    host.candidates.remove(&fresh);
+    host.returning.insert(fresh.clone(), pending);
+    host.discover().unwrap();
+    assert!(
+        host.candidates.contains_key(&fresh),
+        "pending handoff was hidden from discovery"
+    );
+    assert!(
+        host.take(&fresh, &cancelled).is_err(),
+        "pending handoff reacquired input"
+    );
+    assert_eq!(
+        host.observe(&fresh).unwrap().payload["status"],
+        "handoff_pending"
+    );
+    let pending = &host.returning[&fresh];
+    let destination = placement_bounds(pending.original, Placement::Center).unwrap();
+    let returned = Window::inspect(agent)
+        .unwrap()
+        .relocate_for_handoff(destination)
+        .unwrap();
+    host.discover().unwrap();
+    assert!(host.returning.is_empty());
+    assert!(!reservations().lock().contains_key(&pending_key));
+    assert_eq!(
+        Window::inspect(agent).unwrap(),
+        returned,
+        "read-only discovery moved the handed-off window"
+    );
+    let recovered = host
+        .candidates
+        .values()
+        .find(|c| c.window.handle == agent)
+        .unwrap()
+        .id
+        .clone();
+    assert_ne!(
+        recovered, fresh,
+        "completed handoff revived a revoked reference"
+    );
+    assert!(host.observe(&fresh).is_err());
+    fresh = recovered;
+    host.take(&fresh, &cancelled).unwrap();
+    settle(&mut host, &fresh);
     // Native BUTTON blocks inside its real click handler; the command has started,
     // so give_window must revoke input but refuse to move it until that handler ends.
     send(agent, WM_APP + 45, 8000, 0);

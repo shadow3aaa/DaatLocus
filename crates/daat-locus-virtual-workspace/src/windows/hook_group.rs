@@ -145,6 +145,13 @@ impl WindowHook {
         let surface = InputSurface::inspect(&self.root, handle)?;
         match self.thread_for(surface) {
             Ok(index) => Ok(index),
+            Err(error)
+                if self.accessibility_guards && super::input::signature_restriction(&error) =>
+            {
+                // No input was dispatched. Only this surface needs UIA; retain
+                // the frame's activation guards and other native routes.
+                Err(error)
+            }
             Err(error) => {
                 self.revoke();
                 Err(error)

@@ -323,7 +323,7 @@ impl Window {
                 ));
             }
             if !current.minimized {
-                return current.relocate(bounds);
+                return current.relocate_in_region(bounds);
             }
             if std::time::Instant::now() >= deadline {
                 return Err(Error::Timeout("restore window placement"));
@@ -334,6 +334,24 @@ impl Window {
     /// Nonactivating placement outside or inside a workspace. Return a fresh observation;
     /// moving never authorizes input to the new location by itself.
     pub fn relocate(&self, bounds: Rect) -> Result<Self> {
+        self.relocate_checked(bounds, |observed| observed == bounds)
+    }
+
+    /// Accept DPI/application resizing inside the reserved region. The returned
+    /// observation, rather than the requested size, defines all subsequent input.
+    pub fn relocate_in_region(&self, bounds: Rect) -> Result<Self> {
+        self.relocate_checked(bounds, |observed| bounds.contains_rect(observed))
+    }
+
+    /// Handoff accepts the application's final size (minimum size/DPI constraints),
+    /// while still requiring its requested position and a stable observed frame.
+    pub fn relocate_for_handoff(&self, bounds: Rect) -> Result<Self> {
+        self.relocate_checked(bounds, |_| true)
+    }
+
+    fn relocate_checked(&self, bounds: Rect, size_fits: impl Fn(Rect) -> bool) -> Result<Self> {
+        bounds.width()?;
+        bounds.height()?;
         let _dpi = DpiContext::enter()?;
         // Display arrival can trigger a per-monitor DPI relayout after selection.
         // Placement targets identity and explicit bounds, not old image pixels;
@@ -381,7 +399,10 @@ impl Window {
                 settled = None;
             }
             previous = Some(observed.clone());
-            if observed.bounds == bounds {
+            if observed.bounds.left == bounds.left
+                && observed.bounds.top == bounds.top
+                && size_fits(observed.bounds)
+            {
                 let since = settled.get_or_insert_with(std::time::Instant::now);
                 // SetWindowPos can be followed by shell/DPI relayout. Bind the
                 // result only after a short stable observation, never reissue
@@ -393,7 +414,10 @@ impl Window {
                 settled = None;
             }
             if std::time::Instant::now() >= deadline {
-                return Err(Error::Timeout("window placement; observe before retrying"));
+                return Err(Error::PlacementUnsettled {
+                    requested: bounds,
+                    observed: observed.bounds,
+                });
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -448,9 +472,9 @@ impl Window {
     pub(super) fn raise_for_accessibility(&self) -> Result<()> {
         self.validate()?;
         let before = super::DesktopState::read()?;
-        if self.owns_control(before.foreground) || before.capture != 0 {
+        if self.owns_control(before.foreground) {
             return Err(Error::InvalidState(
-                "accessibility preparation requires a background window and no pointer capture",
+                "accessibility preparation requires a background window",
             ));
         }
         if unsafe {
@@ -482,12 +506,6 @@ impl Window {
         } == 0
         {
             return Err(last_error("accessibility stacking acknowledgement"));
-        }
-        let after = super::DesktopState::read()?;
-        if before != after {
-            return Err(Error::InvalidState(
-                "accessibility preparation changed the user's desktop input state",
-            ));
         }
         self.validate()
     }

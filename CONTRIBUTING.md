@@ -369,13 +369,22 @@ and partial-lease cleanup. Do not disable OS/application mitigations to pass eit
 test. Normal runs ignore these environment-dependent cases; explicitly opting in
 fails clearly when an installed app/driver or interactive prerequisite is missing.
 
-`WindowInput` chooses Hook normally and UIA on a setup-time signature restriction.
+`WindowInput` chooses Hook normally. A setup-time signature restriction enables
+UIA for restricted receivers while retaining Hook input on other surfaces.
+`backend_for` / `supported_actions_for` resolve the selected receiver before input.
 UIA explicitly disables `AutoSetFocus`, retains available CBT guards, and supports
 accessible click/vertical scroll/close patterns. It does not advertise arbitrary
 keys, caret insertion or dragging. A failed/uncertain action never triggers backend
 fallback or replay. Apps can still implement incompatible behavior; check actual
 results and desktop receipts. `native_hosted` also verifies UIA on a real Win32
 BUTTON as well as the cross-process Hook route.
+The driver-independent `native_hosted` case
+`restricted_child_keeps_native_routes_and_skips_disabled_uia_decoration` applies
+a real Microsoft-only signature policy to a disposable child. It checks Chinese
+text on a native sibling, UIA selection beneath a disabled decorative pane,
+correct routing between overlapping hosted siblings, and disabled-button refusal.
+The `native_window_capture` DPI-shrink case verifies actual capture dimensions
+after application resizing and rejection of a frame that exceeds its reserved region.
 
 Consumers hold `WindowHook::attach(&window, absolute_dll_path)` (or initially
 `workspace.hook(...)`) while operating the target; `text`, `key` and `mouse` take

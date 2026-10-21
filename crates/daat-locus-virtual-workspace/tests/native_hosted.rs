@@ -64,10 +64,23 @@ fn fixture(role: &str) -> Result<()> {
     };
     assert_ne!(unsafe { RegisterClassW(&definition) }, 0);
     let parent: usize = std::env::var("DAAT_LOCUS_HOSTED_WINDOW_TEST_PARENT")?.parse()?;
-    let content = role == "content";
+    let content = role.ends_with("content");
+    if role == "restricted-content" {
+        let policy = 1u32; // MicrosoftSignedOnly: our Hook DLL cannot enter this child.
+        assert_ne!(
+            unsafe {
+                windows_sys::Win32::System::Threading::SetProcessMitigationPolicy(
+                    windows_sys::Win32::System::Threading::ProcessSignaturePolicy,
+                    (&policy as *const u32).cast(),
+                    std::mem::size_of_val(&policy),
+                )
+            },
+            0
+        );
+    }
     let hwnd = unsafe {
         CreateWindowExW(
-            0,
+            if role == "frame" { WS_EX_NOACTIVATE } else { 0 },
             class.as_ptr(),
             wide(role).as_ptr(),
             if content {
@@ -130,6 +143,29 @@ fn fixture(role: &str) -> Result<()> {
     } else {
         ptr::null_mut()
     };
+    if role == "restricted-content" {
+        // Like Chromium's compositor pane: visible, disabled, overlapping live
+        // controls, and earlier in the raw UIA sibling order.
+        assert!(
+            !unsafe {
+                CreateWindowExW(
+                    WS_EX_TRANSPARENT,
+                    wide("STATIC").as_ptr(),
+                    wide("decoration").as_ptr(),
+                    WS_CHILD | WS_VISIBLE | WS_DISABLED,
+                    0,
+                    0,
+                    420,
+                    400,
+                    hwnd,
+                    ptr::null_mut(),
+                    module,
+                    ptr::null(),
+                )
+            }
+            .is_null()
+        );
+    }
     unsafe {
         ShowWindow(
             hwnd,
@@ -166,11 +202,14 @@ struct Fixture {
 }
 impl Fixture {
     fn start(role: &str, parent: usize) -> Result<Self> {
+        Self::start_for(role, parent, TEST)
+    }
+    fn start_for(role: &str, parent: usize, test: &str) -> Result<Self> {
         let mut child = Command::new(std::env::current_exe()?)
             .args([
                 "--ignored",
                 "--exact",
-                TEST,
+                test,
                 "--nocapture",
                 "--test-threads=1",
             ])
@@ -237,6 +276,94 @@ fn text(hwnd: usize) -> Result<String> {
     let mut text = [0u16; 256];
     let length = send(hwnd, WM_GETTEXT, text.len(), text.as_mut_ptr() as isize)?;
     Ok(String::from_utf16(&text[..length])?)
+}
+
+#[test]
+#[ignore = "requires matching built Hook DLL on an unlocked interactive desktop; no IDD required"]
+fn restricted_child_keeps_native_routes_and_skips_disabled_uia_decoration() -> Result<()> {
+    const CASE: &str = "restricted_child_keeps_native_routes_and_skips_disabled_uia_decoration";
+    if let Ok(role) = std::env::var(ROLE) {
+        return fixture(&role);
+    }
+    unsafe {
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+    let frame = Fixture::start_for("frame", 80, CASE)?;
+    let native = Fixture::start_for("content", frame.hwnd, CASE)?;
+    let restricted = Fixture::start_for("restricted-content", frame.hwnd, CASE)?;
+    let target = Window::inspect(frame.hwnd)?;
+    let dll = std::env::current_exe()?
+        .parent()
+        .ok_or("test directory missing")?
+        .parent()
+        .ok_or("profile missing")?
+        .join("daat_locus_workspace_hook.dll");
+    assert!(dll.is_file(), "build daat-locus-workspace-hook first");
+    let mut input = WindowInput::attach(&target, &dll)?;
+    assert_eq!(input.backend_for(native.edit)?, InputBackend::Hook);
+    assert_eq!(
+        input.backend_for(restricted.button)?,
+        InputBackend::Automation
+    );
+    assert!(
+        input
+            .supported_actions_for(native.edit)?
+            .contains(&"literal_unicode")
+    );
+    assert!(
+        !input
+            .supported_actions_for(restricted.button)?
+            .contains(&"literal_unicode")
+    );
+    input.text(native.edit, "仍然支持中文", Duration::from_secs(3))?;
+    assert_eq!(text(native.edit)?, "仍然支持中文");
+    input.mouse(
+        restricted.hwnd,
+        MouseAction::ClickLeft,
+        Point { x: 45, y: 115 },
+        Duration::from_secs(3),
+    )?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while send(restricted.hwnd, QUERY, 0, 0)? == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        send(restricted.hwnd, QUERY, 0, 0)?,
+        1,
+        "UIA must invoke the live button exactly once through the decorative sibling"
+    );
+    unsafe {
+        windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow(restricted.button as _, 0);
+    }
+    assert!(
+        input
+            .mouse(
+                restricted.button,
+                MouseAction::ClickLeft,
+                Point { x: 25, y: 15 },
+                Duration::from_secs(3)
+            )
+            .is_err()
+    );
+    assert_eq!(
+        send(restricted.hwnd, QUERY, 0, 0)?,
+        1,
+        "a disabled actionable button must remain blocked"
+    );
+    assert!(
+        input.input_enabled(),
+        "pre-dispatch refusal must preserve the lease"
+    );
+    input.text(native.edit, "，继续", Duration::from_secs(3))?;
+    assert_eq!(text(native.edit)?, "仍然支持中文，继续");
+    input.stop()?;
+    assert!(
+        input
+            .text(native.edit, "revoked", Duration::from_secs(3))
+            .is_err()
+    );
+    assert_eq!(text(native.edit)?, "仍然支持中文，继续");
+    Ok(())
 }
 
 #[test]

@@ -15,6 +15,27 @@ struct Fixture {
     root: usize,
     button: usize,
 }
+unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: usize, l: isize) -> isize {
+    if message == WM_WINDOWPOSCHANGING
+        && !unsafe { GetPropW(hwnd, windows_sys::w!("dl-test-constrain-size")) }.is_null()
+    {
+        let position = unsafe { &mut *(l as *mut WINDOWPOS) };
+        if position.flags & SWP_NOSIZE == 0 {
+            position.cx = position.cx.max(320);
+            position.cy = position.cy.max(220);
+        }
+    }
+    if message == WM_WINDOWPOSCHANGING
+        && !unsafe { GetPropW(hwnd, windows_sys::w!("dl-test-dpi-shrink")) }.is_null()
+    {
+        let position = unsafe { &mut *(l as *mut WINDOWPOS) };
+        if position.flags & SWP_NOSIZE == 0 {
+            position.cx = position.cx * 2 / 3;
+            position.cy = position.cy * 2 / 3;
+        }
+    }
+    unsafe { DefWindowProcW(hwnd, message, w, l) }
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         unsafe {
@@ -34,7 +55,7 @@ fn fixture() -> Fixture {
             .collect();
         let green = CreateSolidBrush(0x0033aa11);
         let wc = WNDCLASSW {
-            lpfnWndProc: Some(DefWindowProcW),
+            lpfnWndProc: Some(procedure),
             lpszClassName: class.as_ptr(),
             hbrBackground: green,
             ..Default::default()
@@ -126,6 +147,106 @@ fn fixture() -> Fixture {
         root,
         button,
     }
+}
+
+#[test]
+#[ignore = "requires unlocked interactive Windows desktop; no IDD or Hook DLL required"]
+fn handoff_accepts_application_size_constraints_but_workspace_placement_stays_exact() {
+    let fixture = fixture();
+    assert_ne!(
+        unsafe {
+            SetPropW(
+                fixture.root as HWND,
+                windows_sys::w!("dl-test-constrain-size"),
+                1usize as _,
+            )
+        },
+        0
+    );
+    let requested = daat_locus_virtual_workspace::Rect {
+        left: 100,
+        top: 110,
+        right: 300,
+        bottom: 260,
+    };
+    let window = Window::inspect(fixture.root).unwrap();
+    let returned = window.relocate_for_handoff(requested).unwrap();
+    assert_eq!(
+        returned.bounds,
+        daat_locus_virtual_workspace::Rect {
+            left: 100,
+            top: 110,
+            right: 420,
+            bottom: 330
+        }
+    );
+    let error = returned.relocate(requested).unwrap_err();
+    assert!(
+        matches!(error, daat_locus_virtual_workspace::Error::PlacementUnsettled { requested: actual, observed }
+        if actual == requested && observed == returned.bounds)
+    );
+    assert!(
+        daat_locus_virtual_workspace::windows()
+            .unwrap()
+            .iter()
+            .any(|w| w.handle == fixture.root)
+    );
+}
+
+#[test]
+#[ignore = "requires unlocked interactive Windows desktop; no IDD or Hook DLL required"]
+fn workspace_placement_accepts_dpi_shrink_but_rejects_overflow() {
+    use daat_locus_virtual_workspace::{Error, Rect};
+    let fixture = fixture();
+    assert_ne!(
+        unsafe {
+            SetPropW(
+                fixture.root as HWND,
+                windows_sys::w!("dl-test-dpi-shrink"),
+                1usize as _,
+            )
+        },
+        0
+    );
+    let region = Rect {
+        left: 100,
+        top: 110,
+        right: 700,
+        bottom: 560,
+    };
+    let window = Window::inspect(fixture.root).unwrap();
+    let moved = window.relocate_in_region(region).unwrap();
+    assert_eq!(
+        moved.bounds,
+        Rect {
+            left: 100,
+            top: 110,
+            right: 500,
+            bottom: 410
+        }
+    );
+    let frame = moved.capture().unwrap();
+    assert_eq!((frame.width, frame.height), (400, 300));
+    unsafe {
+        RemovePropW(fixture.root as HWND, windows_sys::w!("dl-test-dpi-shrink"));
+        assert_ne!(
+            SetPropW(
+                fixture.root as HWND,
+                windows_sys::w!("dl-test-constrain-size"),
+                1usize as _
+            ),
+            0
+        );
+    }
+    let small = Rect {
+        left: 100,
+        top: 110,
+        right: 300,
+        bottom: 260,
+    };
+    assert!(
+        matches!(moved.relocate_in_region(small), Err(Error::PlacementUnsettled { observed, .. }) if observed.right == 420 && observed.bottom == 330)
+    );
 }
 
 #[test]

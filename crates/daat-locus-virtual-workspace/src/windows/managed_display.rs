@@ -27,7 +27,7 @@ pub struct VirtualDisplay {
 impl VirtualDisplay {
     pub fn create(options: DisplayOptions) -> Result<Self> {
         options.validate()?;
-        require_physical()?;
+        require_user_output()?;
         let connection = Connection::create(options.timeout)?;
         let mut owned = Self {
             device: Some(connection.handle),
@@ -72,7 +72,7 @@ impl VirtualDisplay {
         options.validate()?;
         self.validate_lease()?;
         let _dpi = DpiContext::enter()?;
-        let existing = require_physical()?;
+        let existing = require_user_output()?;
         let others: Vec<_> = existing
             .iter()
             .filter(|display| {
@@ -81,7 +81,7 @@ impl VirtualDisplay {
             .collect();
         let physical: Vec<_> = others
             .iter()
-            .filter(|display| !display.indirect && !display.cloned)
+            .filter(|display| !display.workspace)
             .map(|display| display.bounds)
             .collect();
         let occupied: Vec<_> = others.iter().map(|display| display.bounds).collect();
@@ -89,7 +89,7 @@ impl VirtualDisplay {
             .origin
             .or_else(|| default_origin(&physical, &occupied, options.width, options.height))
             .ok_or(Error::InvalidState(
-                "no free position adjacent to a physical display",
+                "no free position adjacent to a user display",
             ))?;
         let right = origin
             .x
@@ -320,13 +320,10 @@ fn to_luid(value: u64) -> windows_sys::Win32::Foundation::LUID {
         HighPart: (value >> 32) as i32,
     }
 }
-fn require_physical() -> Result<Vec<Display>> {
+fn require_user_output() -> Result<Vec<Display>> {
     let active = displays()?;
-    if !active
-        .iter()
-        .any(|display| !display.indirect && !display.cloned)
-    {
-        return Err(Error::InvalidState("a physical display must remain active"));
+    if !active.iter().any(|display| !display.workspace) {
+        return Err(Error::InvalidState("a user display must remain active"));
     }
     Ok(active)
 }
