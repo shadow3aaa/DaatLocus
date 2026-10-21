@@ -79,6 +79,23 @@ export function seedOverflowActivityPreview(actor: ActorStore) {
   preview!.overflow = true;
 }
 
+export function seedProseActivityPreview(actor: ActorStore) {
+  seedActivityPreview(actor);
+  const state = preview!;
+  const chunks: ["assistant" | "reasoning", string][] = [
+    ["assistant", "QQ"],
+    ["reasoning", "Checking the device conversation."],
+    ["assistant", ' has a "我的手机" device-transfer conversation (with a previous APK transfer). **Now'],
+    ["reasoning", "Checking build progress."],
+    ["assistant", " let me wait** on the build.\n\n中文正文"],
+    ["reasoning", "Checking the paragraph boundary."],
+    ["assistant", "也应连续显示，保留原文的段落和 `代码`，不因思考增量被拆开。"],
+  ];
+  emitEvent(actor.summary.id,{type:"generation_started",message_id:state.input.id,generation:++state.generation});
+  for (const [channel, content] of chunks) emitEvent(actor.summary.id,{type:"generation_delta",message_id:state.input.id,generation:state.generation,channel,text:content});
+  start(state,command("bun run build"));
+}
+
 export function seedGuidanceActivityPreview(actor: ActorStore) {
   seedActivityPreview(actor);
   const state = preview!;

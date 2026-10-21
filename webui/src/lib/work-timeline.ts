@@ -87,10 +87,26 @@ export function workActivityTimeline(events: EventRecord[], message: MessageReco
     }
     if (segment.kind === "tools") group.callIds.push(...segment.callIds);
     else if (isLiveReasoning(segment, index, segments, live && message.status === "running")) {
-      group.thinking = segment.content.split(/\n\s*\n/).filter(part => part.trim()).at(-1)?.replace(/\s+/g, " ").trim() || null;
+      let thinking = segment.content;
+      for (let earlier = index - 1; earlier >= 0; earlier--) {
+        const previous = segments[earlier];
+        if (previous.kind !== "text" || previous.generation !== segment.generation) break;
+        if (previous.channel === "reasoning") thinking = previous.content + thinking;
+      }
+      group.thinking = thinking.split(/\n\s*\n/).filter(part => part.trim()).at(-1)?.replace(/\s+/g, " ").trim() || null;
     }
   }
-  return output.filter(segment => segment.kind !== "activity" || segment.callIds.length > 0 || segment.thinking);
+  const visible: WorkActivitySegment[] = [];
+  for (const segment of output) {
+    if (segment.kind === "activity" && !segment.callIds.length && !segment.thinking) continue;
+    const previous = visible.at(-1);
+    // Progress flushes can interleave assistant and reasoning chunks. Hidden
+    // reasoning is not a paragraph boundary; preserve the original Markdown.
+    // Tool groups, guidance and distinct generations still separate prose.
+    if (segment.kind === "text" && previous?.kind === "text" && previous.generation === segment.generation && previous.channel === segment.channel) previous.content += segment.content;
+    else visible.push(segment);
+  }
+  return visible;
 }
 export function elapsedLabel(start?: number | null, end?: number | null, now = Date.now()): string | null {
   if (start == null) return null;
