@@ -312,6 +312,81 @@ fn one_shot_capture_preserves_desktop_state() {
 }
 
 #[test]
+#[ignore = "requires unlocked interactive Windows desktop; no IDD or Hook DLL required"]
+fn capture_survives_caller_apartment_exit_and_com_library_cleanup() {
+    use windows::Win32::System::{Com::CoFreeUnusedLibrariesEx, WinRT::*};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+
+    const CHILD: &str = "DAAT_LOCUS_CAPTURE_LIFETIME_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // A native use-after-unload terminates the process, so exercise it in an
+        // isolated child and assert its exit status as well as its pixel checks.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "capture_survives_caller_apartment_exit_and_com_library_cleanup",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "capture lifetime child failed: {status}");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("capture lifetime child did not terminate");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    let fixture = fixture();
+    let window = Window::inspect(fixture.root).unwrap();
+    for round in 0..16 {
+        let target = window.clone();
+        let frame = std::thread::spawn(move || {
+            // Include callers already in an STA as well as short-lived MTAs.
+            unsafe {
+                RoInitialize(if round % 2 == 0 {
+                    RO_INIT_MULTITHREADED
+                } else {
+                    RO_INIT_SINGLETHREADED
+                })
+                .unwrap();
+            }
+            let frame = target.capture().unwrap();
+            unsafe { RoUninitialize() };
+            frame
+        })
+        .join()
+        .unwrap();
+        assert_eq!(frame.bounds, window.bounds);
+        let pixel = ((120 * frame.width + 180) * 4) as usize;
+        assert_eq!(&frame.bgra[pixel..pixel + 4], &[0x33, 0xaa, 0x11, 255]);
+        unsafe { CoFreeUnusedLibrariesEx(0, None) };
+        assert!(
+            !unsafe { GetModuleHandleW(windows_sys::w!("GraphicsCapture.dll")) }.is_null(),
+            "WGC callback code must remain mapped after caller teardown"
+        );
+    }
+    // A stale/destroyed window must still fail without invalidating later captures.
+    drop(fixture);
+    assert!(window.capture().is_err());
+    let replacement = self::fixture();
+    Window::inspect(replacement.root)
+        .unwrap()
+        .capture()
+        .unwrap();
+}
+
+#[test]
 #[ignore = "requires unlocked interactive Windows desktop and stationary cursor; no IDD or Hook DLL required"]
 fn minimized_window_is_discoverable_without_restoring_or_enabling_input() {
     use daat_locus_virtual_workspace::windows;

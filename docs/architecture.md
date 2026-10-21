@@ -157,6 +157,9 @@ attach 仅借用现有输出，
 放置窗口使用不请求激活的异步 SetWindowPos；调用方重新观察后才能输入，不隐式
 还原最小化/最大化窗口。库保留 GDI 整屏诊断捕获；生产 ComputerUse 通过
 `Window::capture` 使用 WGC 捕获指定 HWND 的合成表面，返回原始 BGRA 像素。
+首次捕获仅从 System32 加载并固定 `GraphicsCapture.dll` 到进程结束，避免 WGC
+内部回调在 COM 清理后进入已卸载代码；线程的 WinRT 初始化仍成对释放，每次观察
+仍关闭并释放 frame/session/pool 和 GPU 资源，不保留捕获会话或空闲帧循环。
 几何收敛只检查目标身份及目标窗口的几何，不比较用户桌面的光标、前台、焦点或
 capture 快照来撤销输入。Hook/UIA 回执中的桌面快照是观察信息；后台输入成功与否
 取决于目标协议、Hook 租约和 UIA 调用结果。用户在物理屏切换窗口、输入或拖曳

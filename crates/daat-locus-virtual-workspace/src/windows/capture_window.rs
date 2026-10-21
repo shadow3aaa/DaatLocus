@@ -1,7 +1,10 @@
 //! One-shot compositor capture of an HWND. No desktop crop, retained session or idle frame pump.
 use super::{DpiContext, Frame, Window};
 use crate::{Error, Rect, Result};
-use std::time::{Duration, Instant};
+use std::{
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 use windows::{
     Graphics::{
         Capture::{
@@ -34,6 +37,51 @@ impl Drop for Apartment {
         }
     }
 }
+
+fn retain_capture_module() -> windows::core::Result<()> {
+    use windows_sys::Win32::{
+        Foundation::FreeLibrary,
+        System::LibraryLoader::{
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN,
+            GetModuleHandleExW, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+        },
+    };
+
+    static RESIDENT: OnceLock<windows::core::Result<()>> = OnceLock::new();
+    RESIDENT
+        .get_or_init(|| unsafe {
+            // WGC can dispatch internal callbacks after Close and RoUninitialize.
+            // Keep their code mapped for the process lifetime, before activating
+            // any WGC object. A delay or a per-session library reference still
+            // races those callbacks. Capture/GPU objects remain per observation.
+            // https://github.com/robmikh/Win32CaptureSample/issues/99
+            let library = LoadLibraryExW(
+                windows_sys::w!("GraphicsCapture.dll"),
+                std::ptr::null_mut(),
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            );
+            if library.is_null() {
+                return Err(windows::core::Error::from_thread());
+            }
+            let mut pinned = std::ptr::null_mut();
+            let result = if GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                library.cast(),
+                &mut pinned,
+            ) == 0
+            {
+                Err(windows::core::Error::from_thread())
+            } else {
+                Ok(())
+            };
+            // Balance our temporary load. The loader's PIN survives this and
+            // every subsequent COM library sweep, including other callers'.
+            FreeLibrary(library);
+            result
+        })
+        .clone()
+}
+
 struct Pool(Direct3D11CaptureFramePool);
 impl Drop for Pool {
     fn drop(&mut self) {
@@ -61,6 +109,7 @@ impl Window {
     pub fn capture(&self) -> Result<Frame> {
         let _dpi = DpiContext::enter()?;
         self.validate()?;
+        retain_capture_module().map_err(Error::Capture)?;
         let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
         if let Err(error) = &initialized
             && error.code() != RPC_E_CHANGED_MODE

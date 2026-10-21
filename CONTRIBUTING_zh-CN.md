@@ -105,6 +105,8 @@ cargo test --locked -p daat-locus-virtual-workspace --test native_window_capture
 ```
 
 该用例验证覆盖窗口下的已知像素、子控件命中、禁用/模态拒绝、输入状态保持和重复捕获清理。
+生命周期回归在隔离子进程中交替使用短命 MTA/STA 调用线程，核对已知像素、COM DLL
+清理后的模块驻留及子进程退出状态，以捕获 DLL 卸载后的原生回调崩溃。
 还验证最小化窗口可以被发现、扫描不会还原窗口，且截图和输入仍被拒绝。
 下列 Actor 与计算器用例还验证覆盖窗口下的真实 Hook/UIA 输入，仍需签名 IDD。
 
