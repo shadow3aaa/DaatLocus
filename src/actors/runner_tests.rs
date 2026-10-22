@@ -5689,3 +5689,351 @@ fn assert_shared_actor_instructions(prompt: &str) {
     assert_eq!(prompt.matches(instructions).count(), 1);
     assert!(!prompt.contains("Use report for a material discovery"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn follower_http_import_forwards_original_evidence_without_local_execution() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+    use reqwest::{Method, StatusCode};
+    use serde_json::Value;
+
+    let executor_model = Arc::new(ReplayProvider::new(vec![]));
+    let submitting_model = Arc::new(ReplayProvider::new(vec![]));
+    let ((_a_dir, a, net_a), (b_dir, b, net_b), _relay) =
+        device_pair(executor_model.clone(), submitting_model.clone()).await;
+    // Finish the initial account-definition import before clearing this device's
+    // model configuration, so an in-flight first synchronization cannot restore it.
+    let config_revision = net_a
+        .host
+        .configurations
+        .revision(&net_a.host)
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while net_b
+            .host
+            .configurations
+            .revision(&net_b.host)
+            .unwrap()
+            .as_ref()
+            != Some(&config_revision)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("account definitions did not initially synchronize");
+    b.suspend_execution().await.unwrap();
+    let mut config = b.config();
+    config.models.clear();
+    config.providers.clear();
+    config.main_model.clear();
+    b.update_config(config).await.unwrap();
+    assert!(!b.workers_enabled());
+    assert!(!b.core_permitted());
+    assert!(b.config().validate().is_err());
+
+    // Install the same isolated account credential on both enrolled devices.
+    // No authentication shortcut: subsequent requests use the real HTTP OPAQUE login.
+    let password = b"isolated import fixture password";
+    let setup = daat_locus_auth::new_setup();
+    let account = net_a.host.account_id().unwrap();
+    let registration = daat_locus_auth::RegistrationClient::start(password.to_vec()).unwrap();
+    let response = daat_locus_auth::registration_response(
+        &setup,
+        format!("DaatLocus.Account.v1/{account}/fixture").as_bytes(),
+        &registration.request(),
+    )
+    .unwrap();
+    let record = daat_locus_auth::password_file(&registration.finish(&response).unwrap()).unwrap();
+    let bundle = crate::accounts::CredentialBundle::new(
+        account.clone(),
+        "fixture".into(),
+        &setup,
+        &record,
+        None,
+    )
+    .unwrap();
+    net_a.host.accounts.install(bundle.clone(), &account).unwrap();
+    net_b.host.accounts.install(bundle, &account).unwrap();
+
+    let original = "Preserve <layout> 🔵\n\nOriginal spacing and text.";
+    let answer = "The UI context remains historical evidence, not a new task.";
+    let session = "00000000-0000-4000-8000-000000000042";
+    let rollout = [
+        json!({"type":"session_meta","payload":{"id":session,"cwd":"FOREIGN_WORKSPACE","instructions":"FOREIGN_GRANTS"}}),
+        json!({"type":"event_msg","payload":{"type":"user_message","message":original}}),
+        json!({"type":"event_msg","payload":{"type":"agent_message","message":answer}}),
+        json!({"type":"response_item","payload":{"type":"function_call","arguments":"PRIVATE_TOOL_ARGUMENTS"}}),
+    ]
+    .iter()
+    .map(Value::to_string)
+    .collect::<Vec<_>>()
+    .join("\n");
+    let home = b_dir.path().join("codex");
+    std::fs::create_dir_all(home.join("sessions")).unwrap();
+    std::fs::write(
+        home.join("sessions").join(format!("rollout-{session}.jsonl")),
+        rollout,
+    )
+    .unwrap();
+
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let url = format!("http://{address}");
+    let mut state = crate::service::ServiceState::new(b.clone(), url.clone())
+        .unwrap()
+        .with_listen_address(address)
+        .with_codex_home(home);
+    // Reuse the paired, running transport and its Core controller.
+    state.stage = Some(net_b.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            crate::service::router(state)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = crate::http_client::builder().build().unwrap();
+    let login = daat_locus_auth::LoginClient::start(password.to_vec()).unwrap();
+    let response = client
+        .post(format!("{url}/v1/account/login/start"))
+        .header("origin", &url)
+        .header("x-daat-request", "1")
+        .json(&json!({"name":"fixture","request":B64.encode(login.request())}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: Value = response.json().await.unwrap();
+    let proof = login
+        .finish(
+            &B64.decode(response["response"].as_str().unwrap()).unwrap(),
+            &B64.decode(response["context"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+    let response = client
+        .post(format!("{url}/v1/account/login/finish"))
+        .header("origin", &url)
+        .header("x-daat-request", "1")
+        .json(&json!({"id":response["id"],"message":B64.encode(proof)}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let owner = |method: Method, path: &str| {
+        client
+            .request(method, format!("{url}{path}"))
+            .header("cookie", &cookie)
+            .header("origin", &url)
+            .header("x-daat-request", "1")
+    };
+    let list: Value = owner(Method::GET, "/v1/imports/codex")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["items"].as_array().unwrap().len(), 1);
+    let response = owner(Method::POST, "/v1/imports/codex/preview")
+        .json(&json!({"source_id":list["items"][0]["id"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: Value = response.json().await.unwrap();
+    let resource_id = preview["resource_id"].as_str().unwrap().to_owned();
+    let resource = crate::resources::export(&b, "core", &resource_id).unwrap();
+    let expected_bytes = crate::resources::bytes(&b, "core", &resource).unwrap();
+    let evidence: Value = serde_json::from_slice(&expected_bytes).unwrap();
+    assert_eq!(
+        evidence["messages"],
+        json!([
+            {"role":"user","text":original}, {"role":"assistant","text":answer}
+        ])
+    );
+    for forbidden in ["FOREIGN_WORKSPACE", "FOREIGN_GRANTS", "PRIVATE_TOOL_ARGUMENTS"] {
+        assert!(!evidence.to_string().contains(forbidden));
+    }
+    assert!(crate::resources::export(&a, "core", &resource_id).is_err());
+    assert!(a.store().messages("core", None, 10).unwrap().items.is_empty());
+    assert!(b.store().messages("core", None, 10).unwrap().items.is_empty());
+
+    executor_model.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall {
+            id: "read-forwarded-import".into(),
+            name: "actors__read_resource".into(),
+            arguments: json!({"resource_id":resource_id,"offset":null,"limit":4096}),
+        }]),
+        MockReply::Calls(vec![AgentToolCall {
+            id: "prepare-forwarded-import".into(),
+            name: "actors__import_conversation".into(),
+            arguments: json!({"stage_id":net_a.host.local,"resource_id":resource_id,
+                "name":"Forwarded Athena","instructions":"Preserve the UI context."}),
+        }]),
+        MockReply::Answer("Imported; waiting for the owner."),
+    ]);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !net_b.core.read().as_ref().unwrap().accepts_input() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("model-less follower must accept routed input");
+    assert!(
+        b.config().validate().is_err(),
+        "the follower must have no local model"
+    );
+    assert!(!b.core_permitted());
+    let epoch = net_a.core.read().as_ref().unwrap().epoch();
+    let response = owner(Method::POST, "/v1/imports/codex")
+        .json(&json!({"resource_id":resource_id}))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let submitted: Value = serde_json::from_str(&body).unwrap();
+    let input_id = submitted["id"].as_str().unwrap();
+    assert_eq!(submitted["attachments"][0]["id"], resource_id);
+
+    // HTTP admission precedes transport delivery; do not call wait_core_completed
+    // until the execution endpoint's durable inbox actually contains the input.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while a.store().message(input_id).is_err() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the executing device did not receive the import");
+    let done = wait_core_completed(&a, input_id).await;
+    assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
+    assert_eq!(done.content, submitted["content"].as_str().unwrap());
+    assert_eq!(done.attachments.len(), 1);
+    assert_eq!(done.attachments[0].id, resource_id);
+    assert!(done.remote_authority.is_none() && done.delegation_grant.is_none());
+    assert!(matches!(done.source, MessageSource::User));
+    let received = crate::resources::export(&a, "core", &resource_id).unwrap();
+    assert_eq!(
+        crate::resources::bytes(&a, "core", &received).unwrap(),
+        expected_bytes
+    );
+    let imported: Vec<_> = a
+        .store()
+        .actors()
+        .unwrap()
+        .into_iter()
+        .filter(|actor| actor.config.name == "Forwarded Athena")
+        .collect();
+    assert_eq!(imported.len(), 1);
+    let imported = &imported[0];
+    assert_eq!(imported.status, ActorStatus::Idle);
+    assert_eq!(imported.parent_id.as_deref(), Some("core"));
+    assert!(
+        a.store()
+            .messages(&imported.id, None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(a.store().messages("root", None, 10).unwrap().items.is_empty());
+    assert!(b.store().messages("root", None, 10).unwrap().items.is_empty());
+    let parent = a.core_device_actor().unwrap();
+    assert_eq!(imported.config.workspace, parent.config.workspace);
+    let mut expected_permissions = parent.config.permissions.clone();
+    expected_permissions.readable_roots = vec![parent.config.workspace.clone()];
+    expected_permissions.writable_roots = vec![parent.config.workspace.clone()];
+    assert_eq!(imported.config.permissions, expected_permissions);
+    assert_ne!(
+        imported.config.workspace,
+        b.core_device_actor().unwrap().config.workspace
+    );
+    let retained = crate::resources::export(&a, &imported.id, &resource_id).unwrap();
+    assert_eq!(
+        crate::resources::bytes(&a, &imported.id, &retained).unwrap(),
+        expected_bytes
+    );
+    assert!(crate::resources::export(&a, "root", &resource_id).is_err());
+    assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
+    assert!(!b.core_permitted());
+    assert!(b.config().validate().is_err());
+    assert!(submitting_model.requests.lock().is_empty());
+    assert_eq!(executor_model.requests.lock().len(), 3);
+    let tools = a
+        .store()
+        .tool_summaries("core", input_id, None, 10)
+        .unwrap()
+        .items;
+    assert!(
+        tools
+            .iter()
+            .all(|tool| tool.error.is_none() && tool.name != "actors__send")
+    );
+    let read = tools
+        .iter()
+        .find(|tool| tool.name == "actors__read_resource")
+        .unwrap();
+    let read = a.store().tool_result(&read.id).unwrap();
+    assert!(read.model_content.contains("Original spacing and text."));
+    let creation = tools
+        .iter()
+        .find(|tool| tool.name == "actors__import_conversation")
+        .unwrap();
+    assert_eq!(creation.outcome.as_ref().unwrap()["id"], imported.id);
+
+    // Wait for the completion checkpoint before retrying the same HTTP request.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if net_b.core.read().as_ref().unwrap().accepts_input()
+                && b.store()
+                    .message(input_id)
+                    .is_ok_and(|record| record.status == MessageStatus::Completed)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the follower did not observe the completed import");
+    let response = owner(Method::POST, "/v1/imports/codex")
+        .json(&json!({"resource_id":resource_id}))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let repeated: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(repeated["id"], input_id);
+    assert_eq!(repeated["status"], "completed");
+    assert_eq!(
+        a.store()
+            .actors()
+            .unwrap()
+            .into_iter()
+            .filter(|actor| actor.config.name == "Forwarded Athena")
+            .count(),
+        1
+    );
+    assert!(submitting_model.requests.lock().is_empty());
+    assert_eq!(executor_model.requests.lock().len(), 3);
+
+    server.abort();
+    net_b.stop().await;
+    net_a.stop().await;
+    b.shutdown().await;
+    a.shutdown().await;
+}

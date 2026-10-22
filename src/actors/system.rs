@@ -157,6 +157,18 @@ impl ActorSystem {
             self.shared_core().is_some_and(|core| core.permitted())
         }
     }
+    pub(crate) fn core_accepts_input(&self) -> bool {
+        if self.inner.stopping.load(Ordering::Acquire)
+            || self.inner.reconfiguring.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        if self.local_core() {
+            self.core_permitted()
+        } else {
+            self.shared_core().is_some_and(|core| core.accepts_input())
+        }
+    }
     pub(crate) fn core_execution_permitted(&self) -> bool {
         if self.local_core() {
             self.core_permitted()

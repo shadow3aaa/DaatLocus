@@ -15,7 +15,7 @@ import { ActorDialog } from "@/components/actor-dialog";
 import { ConversationPane } from "@/components/conversation-pane";
 import { SettingsPage, settingsPath, settingsTabFromPath, type SettingsPageHandle, type SettingsTab } from "@/components/settings-page";
 import { useCoreStatus } from "@/hooks/use-core-status";
-import { coreConnectionMessage, getStage } from "@/lib/stage-api";
+import { coreConnectionMessage, coreConversationReady, getStage } from "@/lib/stage-api";
 import { configurePrimaryActor } from "@/lib/work-timeline";
 import type { ComposerModel } from "@/components/composer";
 import { ActorApiError, accessKey, getAccess, getActor, getConfig, getConfigReadiness, logoutSession, type Access } from "@/lib/actor-api";
@@ -72,7 +72,7 @@ export default function App() {
     return () => { controller.abort(); clearTimeout(timer); };
   }, [access, revoked]);
   const core = useCoreStatus(access ? accessKey(access) : null, revoked);
-  const conversationReady = entry === "core" && core ? core.model_ready : ready;
+  const conversationReady = entry === "core" ? coreConversationReady(core, ready) : ready;
   const connectionMessage = entry === "core" ? coreConnectionMessage(core) : null;
   // Configuration may arrive after login; refresh model choices when sync catches up.
   useEffect(() => {

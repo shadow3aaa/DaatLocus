@@ -311,30 +311,8 @@ impl Controller {
                         .is_ok_and(|head| head == desired.head)
                 })
             });
-        let model_ready = self.runtime().is_ok_and(|runtime| {
-            let config = runtime.host.system.config();
-            config.validate().is_ok()
-                && runtime
-                    .host
-                    .system
-                    .actor(shared::ACTOR_ID)
-                    .is_ok_and(|actor| {
-                        config.models.contains_key(
-                            actor.config.model.as_deref().unwrap_or(&config.main_model),
-                        )
-                    })
-        });
-        let ready = synchronized
-            && self.runtime().is_ok_and(|runtime| {
-                model_ready
-                    && leader.is_some_and(|id| {
-                        if id == runtime.host.local {
-                            worker
-                        } else {
-                            runtime.connected(id)
-                        }
-                    })
-            });
+        let model_ready = self.model_ready();
+        let ready = self.accepts_input();
         let recovering = self.recovery.read().is_some();
         let frozen = self.frozen.lock().is_some();
         let failure = *self.failure.read();
@@ -353,7 +331,7 @@ impl Controller {
             "recovery_blocked"
         } else if frozen || failure == Some("reconciling") {
             "reconciling"
-        } else if !model_ready {
+        } else if !model_ready && !ready {
             "model_required"
         } else if worker && recovering {
             "local_recovery"
@@ -372,8 +350,44 @@ impl Controller {
         };
         serde_json::json!({"worker_stage_id":leader,"epoch":self.fence.lock().epoch(),"synchronized":synchronized,"ready":ready && !frozen,"model_ready":model_ready,"state":state,"error_code":failure,"config_revision":config_revision})
     }
+    fn model_ready(&self) -> bool {
+        self.runtime().is_ok_and(|runtime| {
+            let config = runtime.host.system.config();
+            config.validate().is_ok()
+                && runtime
+                    .host
+                    .system
+                    .actor(shared::ACTOR_ID)
+                    .is_ok_and(|actor| {
+                        config.models.contains_key(
+                            actor.config.model.as_deref().unwrap_or(&config.main_model),
+                        )
+                    })
+        })
+    }
     pub fn accepts_input(&self) -> bool {
-        self.status()["ready"].as_bool().unwrap_or(false)
+        if self.draining.load(Ordering::Acquire) || self.frozen.lock().is_some() {
+            return false;
+        }
+        let Ok(runtime) = self.runtime() else {
+            return false;
+        };
+        if self.permitted() {
+            return self.model_ready();
+        }
+        self.desired.read().as_ref().is_some_and(|desired| {
+            desired.lease.as_ref().is_some_and(|lease| {
+                let valid = self
+                    .fence
+                    .lock()
+                    .permits(lease.leader, lease.epoch, Instant::now());
+                lease.leader != runtime.host.local
+                    && runtime.connected(lease.leader)
+                    && valid
+                    && shared_store::head(runtime.host.system.store())
+                        .is_ok_and(|head| head == desired.head)
+            })
+        })
     }
     fn invalidate(&self) {
         self.ready.store(false, Ordering::Release);
