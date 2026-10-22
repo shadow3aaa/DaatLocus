@@ -434,8 +434,11 @@ schemas; do not silently repair them through provider-specific normalization.
 
 ## Source And Documentation
 
-- All built-in App instructions live in `src/app_instructions`; tool descriptions
-  and schemas stay with each App. Keep no partial root `prompts` directory.
+- Actor and approval-role instructions live in `src/app_instructions`; runner
+  injects Actor instructions independently of App installation. Put on-demand
+  cross-tool guidance in `src/builtin_skills`; keep tool descriptions and schemas
+  with each App. Apps have no ambient documentation interface. Keep no partial
+  root `prompts` directory.
 - WebUI text uses matching `webui/src/locales/en-US.json` and `zh-CN.json` catalogs.
   Default to the browser's first supported language, with English fallback;
   General settings offer browser default, Chinese and English with automatic save.
@@ -446,3 +449,4 @@ schemas; do not silently repair them through provider-specific normalization.
   validation and packaging instructions belong in CONTRIBUTING documents.
   Remove task journals, screenshot handoff records and progress checklists;
   preserve release changelogs. The repository needs no Git submodules.
+

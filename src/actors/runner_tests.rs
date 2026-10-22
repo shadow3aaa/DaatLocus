@@ -5601,10 +5601,9 @@ async fn wait_core_completed(system: &ActorSystem, id: &str) -> MessageRecord {
 }
 
 #[tokio::test]
-async fn core_prompt_injects_only_the_account_name_for_local_and_shared_apps() {
+async fn core_prompt_injects_role_and_account_name_once_for_local_and_shared_hosts() {
     use crate::{
         accounts::CredentialBundle,
-        actor_app::ActorApp,
         stage::{host::Host, runtime::Runtime, shared_runtime::Controller},
     };
     let (_directory, system) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
@@ -5628,18 +5627,36 @@ async fn core_prompt_injects_only_the_account_name_for_local_and_shared_apps() {
 
     let actor = system.actor("core").unwrap();
     let context = system.owner_app_context().unwrap();
-    let local =
-        AppManager::new(vec![Box::new(ActorApp::new("core".into(), system.clone()))]).unwrap();
+    std::fs::write(
+        actor.config.workspace.join("AGENTS.md"),
+        "Device project instructions must stay out of Core.",
+    )
+    .unwrap();
     let network = Runtime::new(host);
     let controller = Controller::new(&network).unwrap();
-    let shared =
-        crate::stage::shared_apps::manager(controller, actor.clone(), system.clone()).unwrap();
-    for apps in [local, shared] {
-        let prompt = system_prompt(&system, &actor, &apps, &context)
-            .await
-            .unwrap();
+    let mut previous_prompt = None;
+    for local in [true, false] {
+        if local {
+            system.install_local_core().unwrap();
+        } else {
+            system.disable_local_core();
+            system.install_shared_core(&controller);
+        }
+        assert_eq!(system.local_core(), local);
+        let prompt = system_prompt(&system, &actor, &context).await.unwrap();
         assert_shared_actor_instructions(&prompt);
-        assert!(prompt.contains("You are DaatLocus, alice's assistant."));
+        assert!(!prompt.contains("Device project instructions must stay out of Core."));
+        assert!(!prompt.contains("Workspace instructions (AGENTS.md):"));
+        let role = include_str!("../app_instructions/core.md").replace("{{account_name}}", "alice");
+        assert_eq!(prompt.matches(&role).count(), 1);
+        assert_eq!(
+            prompt.matches("You are DaatLocus, alice's assistant.").count(),
+            1
+        );
+        if let Some(previous) = &previous_prompt {
+            assert_eq!(&prompt, previous);
+        }
+        previous_prompt = Some(prompt.clone());
         assert!(!prompt.contains("{{account_name}}"));
         assert!(!prompt.contains(&account_id));
         for field in ["setup", "record"] {
@@ -5651,15 +5668,10 @@ async fn core_prompt_injects_only_the_account_name_for_local_and_shared_apps() {
 
 #[tokio::test]
 async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_invalid_records() {
-    use crate::actor_app::ActorApp;
     let (_directory, system) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
     let actor = system.actor("core").unwrap();
     let context = system.owner_app_context().unwrap();
-    let apps =
-        AppManager::new(vec![Box::new(ActorApp::new("core".into(), system.clone()))]).unwrap();
-    let prompt = system_prompt(&system, &actor, &apps, &context)
-        .await
-        .unwrap();
+    let prompt = system_prompt(&system, &actor, &context).await.unwrap();
     assert!(prompt.contains("You are DaatLocus, the user's assistant."));
     assert!(!prompt.contains("{{account_name}}"));
 
@@ -5669,17 +5681,13 @@ async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_inval
     )
     .unwrap();
     assert!(
-        system_prompt(&system, &actor, &apps, &context)
+        system_prompt(&system, &actor, &context)
             .await
             .is_err()
     );
 
     let worker = system.actor("root").unwrap();
-    let apps =
-        AppManager::new(vec![Box::new(ActorApp::new("root".into(), system.clone()))]).unwrap();
-    let prompt = system_prompt(&system, &worker, &apps, &context)
-        .await
-        .unwrap();
+    let prompt = system_prompt(&system, &worker, &context).await.unwrap();
     assert_shared_actor_instructions(&prompt);
     system.shutdown().await;
 }
@@ -5687,6 +5695,7 @@ async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_inval
 fn assert_shared_actor_instructions(prompt: &str) {
     let instructions = include_str!("../app_instructions/actors.md");
     assert_eq!(prompt.matches(instructions).count(), 1);
+    assert!(!prompt.contains(include_str!("../app_instructions/approval_review.md")));
     assert!(!prompt.contains("Use report for a material discovery"));
     assert!(!prompt.contains("Read this Actor's own durable history"));
 }
@@ -6077,13 +6086,15 @@ async fn runner_prompt_retains_identity_instructions_and_current_request_read_on
     let (_directory, system) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
     let mut actor = system.actor("root").unwrap();
     actor.config.instructions = "Keep the assigned project context.".into();
-    let apps = AppManager::new(vec![]).unwrap();
+    std::fs::write(
+        actor.config.workspace.join("AGENTS.md"),
+        "Worker project instructions fixture.",
+    )
+    .unwrap();
     let context = system.owner_app_context().unwrap();
     for read_only in [false, true] {
         actor.remote_read_only = read_only;
-        let prompt = system_prompt(&system, &actor, &apps, &context)
-            .await
-            .unwrap();
+        let prompt = system_prompt(&system, &actor, &context).await.unwrap();
         let expected = format!(
             "Actor name: {}\nActor ID: {}\nWorkspace: {}\nCurrent request read-only: {}\n",
             actor.config.name,
@@ -6092,7 +6103,14 @@ async fn runner_prompt_retains_identity_instructions_and_current_request_read_on
             read_only
         );
         assert!(prompt.starts_with(&expected));
-        assert!(prompt.contains(&actor.config.instructions));
+        assert_shared_actor_instructions(&prompt);
+        assert!(!prompt.contains("You are DaatLocus,"));
+        assert!(!prompt.contains("{{account_name}}"));
+        assert_eq!(prompt.matches(&actor.config.instructions).count(), 1);
+        assert_eq!(
+            prompt.matches("Worker project instructions fixture.").count(),
+            1
+        );
         assert!(prompt.contains("A final reply ends the current input"));
         assert!(prompt.contains("unless Core has already delivered a reply for that input"));
         for removed in [
@@ -6165,20 +6183,22 @@ async fn builtin_skill_metadata_is_discovered_by_workers_but_not_core() {
     context.sandbox_policy.filesystem.deny_read_paths = vec![directory.path().into()];
     context.sandbox_policy.builtin_resources =
         vec![crate::builtin_resources::BuiltinResource { path, content }];
-    let apps = AppManager::new(vec![]).unwrap();
     let mut worker = system.actor("root").unwrap();
     for read_only in [false, true] {
         worker.remote_read_only = read_only;
-        let prompt = system_prompt(&system, &worker, &apps, &context)
-            .await
-            .unwrap();
-        assert!(prompt.contains("builtin-prompt-fixture"));
+        let prompt = system_prompt(&system, &worker, &context).await.unwrap();
+        assert_eq!(prompt.matches("builtin-prompt-fixture").count(), 1);
+        assert_shared_actor_instructions(&prompt);
+        assert!(!prompt.contains("You are DaatLocus,"));
         assert!(!prompt.contains("Detailed body stays on disk."));
     }
     let core = system.actor("core").unwrap();
-    let prompt = system_prompt(&system, &core, &apps, &context)
-        .await
-        .unwrap();
+    let prompt = system_prompt(&system, &core, &context).await.unwrap();
     assert!(!prompt.contains("builtin-prompt-fixture"));
+    assert_shared_actor_instructions(&prompt);
+    assert_eq!(
+        prompt.matches("You are DaatLocus, the user's assistant.").count(),
+        1
+    );
     system.shutdown().await;
 }

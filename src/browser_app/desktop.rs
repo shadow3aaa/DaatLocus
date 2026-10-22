@@ -1152,10 +1152,6 @@ impl App for BrowserApp {
         AppId::browser()
     }
 
-    fn docs(&self) -> AppDocs {
-        AppDocs::from_markdown(include_str!("../app_instructions/browser.md"))
-    }
-
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         vec![
             AppToolSpec {

@@ -13,10 +13,20 @@ pub struct BuiltinResource {
 }
 
 const FILES: &[(&str, &[u8])] = &[
+    #[cfg(target_os = "windows")]
+    (
+        "skills/windows-gui-use/SKILL.md",
+        include_bytes!("builtin_skills/windows-gui-use/SKILL.md"),
+    ),
     #[cfg(target_os = "macos")]
     (
-        "skills/macos-window-dialogs/SKILL.md",
-        include_bytes!("builtin_skills/macos-window-dialogs/SKILL.md"),
+        "skills/macos-gui-use/SKILL.md",
+        include_bytes!("builtin_skills/macos-gui-use/SKILL.md"),
+    ),
+    #[cfg(target_os = "android")]
+    (
+        "skills/android-gui-use/SKILL.md",
+        include_bytes!("builtin_skills/android-gui-use/SKILL.md"),
     ),
 ];
 

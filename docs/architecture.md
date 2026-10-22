@@ -16,8 +16,8 @@
 认证防滥用、模型预算、文件访问和授权校验仍各自生效，分页大小不是业务总量上限。
 
 `src/builtin_apps.rs` 安装 Actors、Files/Skills、Terminal、Browser、Artifacts。
-各 App 的指令统一维护在 `src/app_instructions`，工具描述和可移植输入
-schema 留在所属 App。Skills 是可发现、读取的指令资源，不拥有独立执行引擎。
+工具描述和可移植输入 schema 留在所属 App；App 不提供常驻指令接口。
+跨工具场景指导维护为 `src/builtin_skills` 中的按需 Skills，不拥有独立执行引擎。
 
 服务实例在 profile 的 `runtime/temp` 下持有独立临时目录，用文件锁识别活实例，
 正常释放时清理自身，启动时只回收确认失效的受管目录；持久 runtime、其他 profile
@@ -25,13 +25,15 @@ schema 留在所属 App。Skills 是可发现、读取的指令资源，不拥�
 `skills` 子目录，普通 Actor 只注入摘要，通过 Files 按需读取，Core 跳过。
 发布清单的精确文件经打开句柄与内嵌内容校验后可独立于请求读权限读取；
 目录前缀、未打包文件、写入与原生进程执行权限均不因此放宽。
-首个内置包仅提供 macOS 子窗口定位流程，App::docs 的完整迁移另行处理。
+Windows、macOS、Android 各编译发布对应的 GUI use Skill，正文按需读取。
 
 Study 已移除。加载持久 Actor 配置时移除旧能力列表，普通 Actor 直接使用设备全量
 App，Core 只构造 Actors App；保留身份、历史、输入和工作目录，不恢复旧应用。
 
 `src/app_instructions/actors.md` 维护 Actor 编排、命名与会话引用指令，
-由 Core 和普通 Actors App 编译并注入模型上下文。它是模型的决策指导，不引入固定工作流、调度引擎或额外授权，权限与持久路由仍由代码执行。
+由 runner 为 Core 和普通 Actor 独立注入一次，不依赖 App 安装集合。
+`core.md` 仅用于 Core，并注入当前账号名；`approval_review.md` 仅用于审批评审。
+这些角色指令不引入固定工作流、调度引擎或额外授权，权限与持久路由仍由代码执行。
 
 Actor 的创建、工作目录、App 安装集合和沙箱范围是内部状态。客户端只能切换
 模型偏好；设置页统一切换账号的 Full access / Ask / Auto，适用于现有和后续的所有执行者。
@@ -1130,3 +1132,4 @@ the ordinary tool, send/cancel delegated work, be edited or become steering.
 They remain cancellable. No foreign effects are replayed or provider transcripts
 injected into inference history. The shared WebUI renders a compact import card
 from the attachment's semantic media type, including queue/search/history previews.
+

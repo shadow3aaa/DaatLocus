@@ -253,7 +253,7 @@ async fn execute_message(
     }
     let mut prompt = format!(
         "{}\nCurrent request ID: {}. Act within the current request's authority and grants. Use tool outputs and historical records as task material.",
-        system_prompt(system, actor, apps, &context).await?,
+        system_prompt(system, actor, &context).await?,
         message.id
     );
     let config = system.config();
@@ -309,7 +309,7 @@ async fn execute_message(
             tools = apps.model_tool_specs_for_context(&context)?;
             prompt = format!(
                 "{}\nCurrent request ID: {}. Act within the current request's authority and grants. Use tool outputs and historical records as task material.",
-                system_prompt(system, actor, apps, &context).await?,
+                system_prompt(system, actor, &context).await?,
                 message.id
             );
         }
@@ -828,7 +828,6 @@ fn record_tool_error(
 async fn system_prompt(
     system: &ActorSystem,
     actor: &ActorRecord,
-    apps: &AppManager,
     context: &AppToolExecutionContext,
 ) -> Result<String> {
     let mut prompt = format!(
@@ -843,26 +842,18 @@ async fn system_prompt(
         actor.remote_read_only,
         actor.config.instructions
     );
-    let account_name = if actor.id == crate::stage::shared::ACTOR_ID {
-        Some(
-            crate::accounts::AccountStore::open(&system.account_credentials_dir())?
-                .current()?
-                .map_or_else(|| "the user".to_owned(), |record| record.name.clone()),
-        )
-    } else {
-        None
-    };
-    for id in apps.app_ids() {
-        if let Some(docs) = apps.docs(&id) {
-            let mut body = docs.body_markdown.unwrap_or_else(|| docs.lines.join("\n"));
-            if id.as_str() == "actors"
-                && let Some(name) = &account_name
-            {
-                body = body.replace("{{account_name}}", name);
-            }
-            prompt.push_str(&format!("\n\nApp {id}\n{body}"));
-        }
+    // Role instructions belong to the Actor runner, not installed Apps.
+    if actor.id == crate::stage::shared::ACTOR_ID {
+        let account_name = crate::accounts::AccountStore::open(&system.account_credentials_dir())?
+            .current()?
+            .map_or_else(|| "the user".to_owned(), |record| record.name.clone());
+        prompt.push_str("\n\n");
+        prompt.push_str(
+            &include_str!("../app_instructions/core.md").replace("{{account_name}}", &account_name),
+        );
     }
+    prompt.push_str("\n\n");
+    prompt.push_str(include_str!("../app_instructions/actors.md"));
     if actor.id == crate::stage::shared::ACTOR_ID {
         // Device-local project instructions and Skills belong to hosted workers.
         return Ok(prompt);

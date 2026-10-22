@@ -1148,7 +1148,11 @@ mod tests {
             parent.display(),
             separator = std::path::MAIN_SEPARATOR,
         ));
-        assert!(traversal.components().any(|part| part == Component::ParentDir));
+        assert!(
+            traversal
+                .components()
+                .any(|part| part == Component::ParentDir)
+        );
         assert!(
             resolve_read_file_path(directory.path(), &policy, &traversal.to_string_lossy())
                 .is_err()
@@ -1324,8 +1328,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr),
         );
         assert_ne!(
-            fs::symlink_metadata(parent).unwrap().file_attributes()
-                & FILE_ATTRIBUTE_REPARSE_POINT,
+            fs::symlink_metadata(parent).unwrap().file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT,
             0,
         );
         assert_eq!(fs::read(&path).unwrap(), BUILTIN_BYTES);
@@ -1633,4 +1636,3 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), original);
     }
 }
-

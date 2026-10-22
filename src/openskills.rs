@@ -1104,4 +1104,41 @@ mod tests {
         assert!(replaced.skills.is_empty());
         assert_eq!(replaced.errors.len(), 1);
     }
+
+    #[test]
+    fn published_gui_skills_are_discoverable_only_for_the_host_platform() {
+        let directory = tempfile::tempdir().unwrap();
+        let temporary = crate::runtime_temp::RuntimeTemp::create(
+            &directory.path().canonicalize().unwrap().join("runtime"),
+        )
+        .unwrap();
+        let mut policy = RuntimeSandboxPolicy::disabled();
+        policy.filesystem.full_disk_read = false;
+        policy.filesystem.full_disk_write = false;
+        policy.filesystem.deny_read_paths = vec![directory.path().into()];
+        policy.builtin_resources = crate::builtin_resources::publish(&temporary).unwrap();
+
+        let catalog = load_openskills_from_roots_with_policy(Vec::new(), Vec::new(), Some(&policy));
+        assert!(catalog.errors().is_empty());
+        let names: Vec<_> = catalog
+            .skills()
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
+        let expected: &[&str] = if cfg!(target_os = "windows") {
+            &["windows-gui-use"]
+        } else if cfg!(target_os = "macos") {
+            &["macos-gui-use"]
+        } else if cfg!(target_os = "android") {
+            &["android-gui-use"]
+        } else {
+            &[]
+        };
+        assert_eq!(names, expected);
+        for skill in catalog.skills() {
+            assert_eq!(skill.scope, OpenSkillScope::Builtin);
+            assert!(!policy.is_path_readable(&skill.path));
+            assert!(!policy.is_path_writable(&skill.path));
+        }
+    }
 }

@@ -1897,10 +1897,6 @@ impl Controller {
                 device: runtime.host.settings().label.clone(),
                 app: id.to_string(),
                 revision: revision.clone(),
-                docs: manager
-                    .docs(&id)
-                    .and_then(|docs| docs.body_markdown)
-                    .unwrap_or_default(),
                 tools,
             })
             .collect())

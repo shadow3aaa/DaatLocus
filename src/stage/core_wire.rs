@@ -47,7 +47,6 @@ pub struct Installation {
     pub device: String,
     pub app: String,
     pub revision: String,
-    pub docs: String,
     pub tools: Vec<AppToolSpec>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -207,6 +206,25 @@ pub enum Response {
 #[cfg(test)]
 mod preference_tests {
     use super::*;
+    #[test]
+    fn installation_exposes_only_tools_and_rejects_obsolete_docs() {
+        let installation = Installation {
+            stage_id: StageId(uuid::Uuid::new_v4()),
+            device: "fixture device".into(),
+            app: "files".into(),
+            revision: "fixture revision".into(),
+            tools: vec![],
+        };
+        let current = serde_json::to_value(&installation).unwrap();
+        assert!(current.get("docs").is_none());
+        let decoded: Installation = serde_json::from_value(current.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), current);
+
+        let mut legacy = current.clone();
+        legacy["docs"] = serde_json::json!("Obsolete App instructions must not survive.");
+        assert!(serde_json::from_value::<Installation>(legacy).is_err());
+    }
+
     #[test]
     fn account_wire_exposes_only_narrow_preferences_not_arbitrary_configuration() {
         assert!(

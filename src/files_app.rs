@@ -8,8 +8,7 @@ use serde_json::json;
 use crate::{
     actors::ToolPermissionRequest,
     app::{
-        App, AppDocs, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec,
-        EmptyAppArgs,
+        App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec, EmptyAppArgs,
     },
     file_io::{
         self, CopyFileArgs, EditFileArgs, ListDirectoryArgs, ReadFileArgs, SearchTextArgs,
@@ -41,10 +40,6 @@ impl App for FilesApp {
     }
     fn id(&self) -> AppId {
         AppId::new("files").expect("built-in App id")
-    }
-
-    fn docs(&self) -> AppDocs {
-        AppDocs::from_markdown(include_str!("app_instructions/files.md"))
     }
 
     fn tool_specs(&self) -> Vec<AppToolSpec> {
@@ -512,8 +507,14 @@ mod tests {
             name: "read_file".into(),
             arguments: json!({"path": "child/../SKILL.md", "start_line": null, "line_count": null}),
         };
-        assert!(app.permission_request(&relative_call, &relative_context).is_err());
-        assert!(app.before_tool_call(&relative_call, &relative_context).is_err());
+        assert!(
+            app.permission_request(&relative_call, &relative_context)
+                .is_err()
+        );
+        assert!(
+            app.before_tool_call(&relative_call, &relative_context)
+                .is_err()
+        );
 
         let extra = skill.with_file_name("extra.md");
         std::fs::write(&extra, BUILTIN_SKILL).unwrap();
@@ -619,4 +620,3 @@ mod tests {
         );
     }
 }
-

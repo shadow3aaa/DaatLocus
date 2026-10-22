@@ -298,9 +298,6 @@ async fn refresh_preserves_other_app_instances_and_queries_are_exempt() {
         fn id(&self) -> crate::app::AppId {
             crate::app::AppId::new("counter").unwrap()
         }
-        fn docs(&self) -> crate::app::AppDocs {
-            crate::app::AppDocs::from_markdown("")
-        }
         fn tool_specs(&self) -> Vec<crate::app::AppToolSpec> {
             vec![crate::app::AppToolSpec {
                 name: "next".into(),

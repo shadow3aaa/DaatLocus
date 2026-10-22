@@ -450,8 +450,8 @@ Get-WinEvent -Path "$PWD/target/idd-diagnostics.etl" -Oldest |
 
 ## Actor 编排评测
 
-通用模型指令维护在 `src/app_instructions/actors.md`。Core 和安装管理型
-Actors App 的 hosted Actor 自动加载它；修改后重新构建后台。场景指导应保持
+通用模型指令维护在 `src/app_instructions/actors.md`。runner 为 Core 和普通
+Actor 独立注入它，不依赖 App 安装集合；修改后重新构建后台。场景指导应保持
 通用，区分编排失误与工具、环境、权限、运行时故障，在对应层修复问题，不能为
 每个失败都追加提示词规则。
 
@@ -544,7 +544,8 @@ Working Set；两种内存指标的峰值/P95 均来自采样，可能漏掉短�
 | 位置 | 职责 |
 | --- | --- |
 | `src/actors` | 执行、持久化、权限与审批 |
-| `src/*_app`、`src/app_instructions` | 领域工具及全部内置 App 指令 |
+| `src/*_app` | 领域工具与 schema |
+| `src/app_instructions`、`src/builtin_skills` | 角色指令与按需内置指导 |
 | `src/accounts`、`src/stage`、`src/resources` | 账号、设备协调与统一资源 |
 | `src/service` | 有界 HTTP 操作及可续传事件流 |
 | `webui/src/components` | 可组合界面、设置与两种固定对话呈现 |
@@ -742,3 +743,4 @@ macOS 的原生 Seatbelt 测试随正常测试执行，包含特殊路径字符�
 本机显式运行，macOS CI 必须执行；用例只删除自己创建的唯一 socket。
 Linux 同时验证受限进程不能凭相同 UID 获得 HTTP 初始化权限、普通独立 Owner 进程仍可使用。
 交叉编译不等于这些原生行为已通过验证。
+

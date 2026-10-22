@@ -9,8 +9,8 @@ use serde_json::json;
 use crate::{
     actors::{ActorConfig, ActorSystem, ToolPermissionRequest},
     app::{
-        ActorCallContext, App, AppDocs, AppId, AppToolExecutionContext, AppToolExecutionResult,
-        AppToolSpec, EmptyAppArgs,
+        ActorCallContext, App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec,
+        EmptyAppArgs,
     },
     model_protocol::AgentToolCall,
     schema_utils::model_schema_for,
@@ -275,17 +275,6 @@ impl App for ActorApp {
     }
     fn id(&self) -> AppId {
         AppId::new("actors").expect("built-in App id")
-    }
-    fn docs(&self) -> AppDocs {
-        let common = include_str!("app_instructions/actors.md");
-        if self.actor_id == crate::stage::shared::ACTOR_ID {
-            AppDocs::from_markdown(&format!(
-                "{}\n\n{common}",
-                include_str!("app_instructions/core.md")
-            ))
-        } else {
-            AppDocs::from_markdown(common)
-        }
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         let mut tools = vec![
