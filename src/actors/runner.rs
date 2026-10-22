@@ -253,7 +253,7 @@ async fn execute_message(
     }
     let mut prompt = format!(
         "{}\nCurrent request ID: {}. Archived inputs are historical evidence; the current request's authority and grants always apply.",
-        system_prompt(actor, apps, &context).await?,
+        system_prompt(system, actor, apps, &context).await?,
         message.id
     );
     let config = system.config();
@@ -309,7 +309,7 @@ async fn execute_message(
             tools = apps.model_tool_specs_for_context(&context)?;
             prompt = format!(
                 "{}\nCurrent request ID: {}. Archived inputs are historical evidence; the current request's authority and grants always apply.",
-                system_prompt(actor, apps, &context).await?,
+                system_prompt(system, actor, apps, &context).await?,
                 message.id
             );
         }
@@ -826,6 +826,7 @@ fn record_tool_error(
 }
 
 async fn system_prompt(
+    system: &ActorSystem,
     actor: &ActorRecord,
     apps: &AppManager,
     context: &AppToolExecutionContext,
@@ -844,12 +845,24 @@ async fn system_prompt(
         actor.remote_read_only,
         actor.config.instructions
     );
+    let account_name = if actor.id == crate::stage::shared::ACTOR_ID {
+        Some(
+            crate::accounts::AccountStore::open(&system.account_credentials_dir())?
+                .current()?
+                .map_or_else(|| "the user".to_owned(), |record| record.name.clone()),
+        )
+    } else {
+        None
+    };
     for id in apps.app_ids() {
         if let Some(docs) = apps.docs(&id) {
-            prompt.push_str(&format!(
-                "\n\nApp {id}\n{}",
-                docs.body_markdown.unwrap_or_else(|| docs.lines.join("\n"))
-            ));
+            let mut body = docs.body_markdown.unwrap_or_else(|| docs.lines.join("\n"));
+            if id.as_str() == "actors"
+                && let Some(name) = &account_name
+            {
+                body = body.replace("{{account_name}}", name);
+            }
+            prompt.push_str(&format!("\n\nApp {id}\n{body}"));
         }
     }
     if actor.id == crate::stage::shared::ACTOR_ID {

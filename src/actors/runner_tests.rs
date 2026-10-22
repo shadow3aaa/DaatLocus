@@ -5599,3 +5599,75 @@ async fn wait_core_completed(system: &ActorSystem, id: &str) -> MessageRecord {
         )
     })
 }
+
+#[tokio::test]
+async fn core_prompt_injects_only_the_account_name_for_local_and_shared_apps() {
+    use crate::{
+        accounts::CredentialBundle,
+        actor_app::ActorApp,
+        stage::{host::Host, runtime::Runtime, shared_runtime::Controller},
+    };
+    let (_directory, system) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
+    let host = Host::load(system.clone()).unwrap();
+    host.initialize(true).unwrap();
+    let account_id = host.account_id().unwrap();
+    let setup = daat_locus_auth::new_setup();
+    let client =
+        daat_locus_auth::RegistrationClient::start(b"prompt fixture password".to_vec()).unwrap();
+    let response = daat_locus_auth::registration_response(
+        &setup,
+        format!("DaatLocus.Account.v1/{account_id}/alice").as_bytes(),
+        &client.request(),
+    )
+    .unwrap();
+    let password = daat_locus_auth::password_file(&client.finish(&response).unwrap()).unwrap();
+    let record =
+        CredentialBundle::new(account_id.clone(), "Alice".into(), &setup, &password, None).unwrap();
+    let private = serde_json::to_value(&record).unwrap();
+    host.accounts.install(record, &account_id).unwrap();
+
+    let actor = system.actor("core").unwrap();
+    let context = system.owner_app_context().unwrap();
+    let local =
+        AppManager::new(vec![Box::new(ActorApp::new("core".into(), system.clone()))]).unwrap();
+    let network = Runtime::new(host);
+    let controller = Controller::new(&network).unwrap();
+    let shared =
+        crate::stage::shared_apps::manager(controller, actor.clone(), system.clone()).unwrap();
+    for apps in [local, shared] {
+        let prompt = system_prompt(&system, &actor, &apps, &context).await.unwrap();
+        assert!(prompt.contains("You are DaatLocus, alice's assistant."));
+        assert!(!prompt.contains("{{account_name}}"));
+        assert!(!prompt.contains(&account_id));
+        for field in ["setup", "record"] {
+            assert!(!prompt.contains(&private[field].to_string()));
+        }
+    }
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_invalid_records() {
+    use crate::actor_app::ActorApp;
+    let (_directory, system) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
+    let actor = system.actor("core").unwrap();
+    let context = system.owner_app_context().unwrap();
+    let apps =
+        AppManager::new(vec![Box::new(ActorApp::new("core".into(), system.clone()))]).unwrap();
+    let prompt = system_prompt(&system, &actor, &apps, &context).await.unwrap();
+    assert!(prompt.contains("You are DaatLocus, the user's assistant."));
+    assert!(!prompt.contains("{{account_name}}"));
+
+    std::fs::write(
+        system.account_credentials_dir().join("credentials.json"),
+        "invalid account fixture",
+    )
+    .unwrap();
+    assert!(system_prompt(&system, &actor, &apps, &context).await.is_err());
+
+    let worker = system.actor("root").unwrap();
+    let apps =
+        AppManager::new(vec![Box::new(ActorApp::new("root".into(), system.clone()))]).unwrap();
+    assert!(system_prompt(&system, &worker, &apps, &context).await.is_ok());
+    system.shutdown().await;
+}
