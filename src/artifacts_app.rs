@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::{
     actors::{ActorSystem, ToolPermissionRequest},
-    app::{App, AppDocs, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
+    app::{App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
     artifacts::{ArtifactKind, ArtifactRequest, store_artifact, store_resource_artifact},
     model_protocol::AgentToolCall,
     schema_utils::model_schema_for,
@@ -27,11 +27,13 @@ enum Kind {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct PresentArgs {
-    /// Existing resource ID or internal URI from any App. No filesystem access is needed.
+    /// Existing Actor-scoped resource ID or internal URI returned by any App. No filesystem access is needed.
     resource: Option<String>,
-    /// Local image/SVG/HTML path, subject to the Actor's file permissions.
+    /// Local image/SVG/HTML path, subject to the Actor's file permissions. Publishes a snapshot unaffected by later file changes.
     path: Option<String>,
+    /// Inline SVG or HTML.
     content: Option<String>,
+    /// External HTTP(S) address, or an existing internal resource URI.
     url: Option<String>,
     kind: Option<Kind>,
     title: Option<String>,
@@ -77,11 +79,8 @@ impl App for ArtifactsApp {
     fn id(&self) -> AppId {
         AppId::new("artifacts").expect("built-in App id")
     }
-    fn docs(&self) -> AppDocs {
-        AppDocs::from_markdown(include_str!("app_instructions/artifacts.md"))
-    }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
-        vec![AppToolSpec { name: "present".into(), description: "Present an existing resource from any App, an authorized local image/SVG/HTML path, inline SVG/HTML, or an external URL. Set exactly one source. Reuse artifact_id for a new version.".into(), input_schema: model_schema_for::<PresentArgs>() }]
+        vec![AppToolSpec { name: "present".into(), description: "Present an existing resource from any App, an authorized local image/SVG/HTML path, inline SVG/HTML, or an external URL. Set exactly one source. Reuse artifact_id for a new version. Returned internal resource URIs can be used directly in links or image embeds; they remain Actor-scoped references.".into(), input_schema: model_schema_for::<PresentArgs>() }]
     }
     fn permission_request(
         &self,

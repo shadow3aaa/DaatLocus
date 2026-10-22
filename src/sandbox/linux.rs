@@ -422,6 +422,7 @@ mod tests {
         filesystem.deny_read_paths = vec![private.clone()];
         filesystem.deny_write_paths = vec![private.clone()];
         let policy = RuntimeSandboxPolicy {
+            builtin_resources: Vec::new(),
             filesystem,
             protected_env_vars: vec![],
             strong_filesystem: StrongFilesystemSandboxMode::Required,

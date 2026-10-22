@@ -10,6 +10,7 @@ pub mod browser_app;
 #[cfg(not(target_os = "android"))]
 pub mod browser_install;
 pub mod builtin_apps;
+pub mod builtin_resources;
 pub mod computer_use_app;
 pub mod config;
 pub mod config_setup;
@@ -36,6 +37,7 @@ pub mod persistence;
 pub mod process_spawn;
 pub mod providers;
 pub mod resources;
+pub(crate) mod runtime_temp;
 pub mod sandbox;
 pub mod schema_utils;
 pub mod service;

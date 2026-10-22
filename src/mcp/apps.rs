@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     actors::ToolPermissionRequest,
-    app::{App, AppDocs, AppId, AppToolExecutionResult, AppToolSpec, EmptyAppArgs},
+    app::{App, AppId, AppToolExecutionResult, AppToolSpec, EmptyAppArgs},
     model_protocol::AgentToolCall,
     schema_utils::{model_schema_for, validate_model_facing_schema},
 };
@@ -105,9 +105,6 @@ fn args<T: serde::de::DeserializeOwned>(call: &AgentToolCall) -> Result<T> {
 impl App for AppsManager {
     fn id(&self) -> AppId {
         AppId::new("apps_manager").unwrap()
-    }
-    fn docs(&self) -> AppDocs {
-        AppDocs::from_markdown(include_str!("../app_instructions/apps_manager.md"))
     }
     fn can_passivate(&self) -> bool {
         true
@@ -340,13 +337,6 @@ impl App for McpApp {
     }
     fn can_passivate(&self) -> bool {
         self.session.is_none()
-    }
-    fn docs(&self) -> AppDocs {
-        AppDocs::from_markdown(&format!(
-            "# {}\n{}",
-            self.entry.name,
-            include_str!("../app_instructions/mcp.md")
-        ))
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         self.entry.tools.iter().map(|tool| {

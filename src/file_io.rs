@@ -1,10 +1,10 @@
 //! Plain file operations with execution-time scope checks and whole-file freshness.
-mod guarded_directory;
+pub(crate) mod guarded_directory;
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Mutex,
 };
 
@@ -14,7 +14,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{model_protocol::AgentContentPart, sandbox::RuntimeSandboxPolicy};
+use crate::{
+    builtin_resources::BuiltinResource, model_protocol::AgentContentPart,
+    sandbox::RuntimeSandboxPolicy,
+};
 
 pub const MAX_VIEW_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_READ_PAGE_BYTES: usize = 1024 * 1024;
@@ -221,20 +224,210 @@ fn authorized_path(
     value: &str,
     write: bool,
 ) -> Result<PathBuf> {
+    if !write {
+        let logical = unresolved_file_path(cwd, value)?;
+        ensure_authorized_read(&logical, policy, "file target")?;
+        let actual = resolve_read_file_path(cwd, policy, value)?;
+        if actual != logical {
+            ensure_authorized_read(&actual, policy, "file target")?;
+        }
+        return Ok(actual);
+    }
     let logical = RuntimeSandboxPolicy::resolve_path(Path::new(value), Some(cwd));
     guarded_directory::local_path(&logical)
         .map_err(|_| miette!("remote or device file paths are unsupported"))?;
-    let check = |path: &Path| {
-        if write {
-            policy.ensure_path_writable(path, "file target")
-        } else {
-            policy.ensure_path_readable(path, "file target")
-        }
-    };
-    check(&logical)?;
+    policy.ensure_path_writable(&logical, "file target")?;
     let actual = resolve_file_path(cwd, value)?;
-    check(&actual)?;
+    policy.ensure_path_writable(&actual, "file target")?;
     Ok(actual)
+}
+
+fn unresolved_file_path(cwd: &Path, value: &str) -> Result<PathBuf> {
+    if value.is_empty() || value.len() > 32768 {
+        return Err(miette!("file path is empty"));
+    }
+    let path = Path::new(value);
+    let logical = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    guarded_directory::local_path(&logical)
+        .map_err(|_| miette!("remote or device file paths are unsupported"))?;
+    Ok(logical)
+}
+
+/// Preserve the requested spelling until built-in resource validation has run.
+/// Canonicalizing first would erase a traversal or an untrusted symlink alias.
+pub(crate) fn resolve_read_file_path(
+    cwd: &Path,
+    policy: &RuntimeSandboxPolicy,
+    value: &str,
+) -> Result<PathBuf> {
+    let logical = unresolved_file_path(cwd, value)?;
+    if builtin_resource_for_path(&logical, policy)?.is_some() {
+        // Windows joins against a verbatim cwd normalize dot components.
+        // Check the original input as well, before granting the exemption.
+        if Path::new(value)
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+        {
+            return Err(miette!(
+                "built-in resources require their exact published path"
+            ));
+        }
+        return Ok(logical);
+    }
+    let actual = resolve_file_path(cwd, value)?;
+    if policy
+        .builtin_resources
+        .iter()
+        .any(|resource| resource.path == actual)
+    {
+        return Err(miette!(
+            "file target changed to a built-in resource during resolution"
+        ));
+    }
+    Ok(actual)
+}
+
+/// This is a file-read exemption, not a new filesystem root or process grant.
+/// A registered target must validate even if the ordinary policy permits it.
+pub(crate) fn ensure_authorized_read(
+    path: &Path,
+    policy: &RuntimeSandboxPolicy,
+    label: &str,
+) -> Result<()> {
+    if let Some(resource) = builtin_resource_for_path(path, policy)? {
+        read_builtin_bytes(resource, resource.content.len() as u64)?;
+        Ok(())
+    } else {
+        policy.ensure_path_readable(path, label)
+    }
+}
+
+pub(crate) fn read_requires_permission(path: &Path, policy: &RuntimeSandboxPolicy) -> Result<bool> {
+    if let Some(resource) = builtin_resource_for_path(path, policy)? {
+        read_builtin_bytes(resource, resource.content.len() as u64)?;
+        Ok(false)
+    } else {
+        Ok(!policy.is_path_readable(path))
+    }
+}
+
+fn builtin_resource_for_path<'a>(
+    path: &Path,
+    policy: &'a RuntimeSandboxPolicy,
+) -> Result<Option<&'a BuiltinResource>> {
+    guarded_directory::local_path(path)
+        .map_err(|_| miette!("remote or device file paths are unsupported"))?;
+    if policy.builtin_resources.is_empty() {
+        return Ok(None);
+    }
+    let normalized = RuntimeSandboxPolicy::resolve_path(path, None);
+    let resource = policy
+        .builtin_resources
+        .iter()
+        .find(|resource| resource.path == normalized);
+    // An alias of a built-in must not be canonicalized into the exemption,
+    // including when the caller would otherwise have unrestricted access.
+    let resource = match resource {
+        Some(resource) => Some(resource),
+        None => path.canonicalize().ok().and_then(|actual| {
+            policy
+                .builtin_resources
+                .iter()
+                .find(|resource| resource.path == actual)
+        }),
+    };
+    if let Some(resource) = resource {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+            || path != resource.path.as_path()
+        {
+            return Err(miette!(
+                "built-in resources require their exact published path"
+            ));
+        }
+        return Ok(Some(resource));
+    }
+    Ok(None)
+}
+
+fn validate_builtin_handle(
+    file: &fs::File,
+    directory: &guarded_directory::GuardedDirectory,
+    resource: &BuiltinResource,
+) -> Result<()> {
+    let parent = resource
+        .path
+        .parent()
+        .ok_or_else(|| miette!("built-in resource has no parent"))?;
+    let name = resource
+        .path
+        .file_name()
+        .ok_or_else(|| miette!("built-in resource has no filename"))?;
+    if opened_file_path(file, &resource.path)? != resource.path
+        || opened_file_path(directory.handle(), parent)? != parent
+    {
+        return Err(miette!("built-in resource path changed during access"));
+    }
+    // Rewalk every ancestor without following links, rather than comparing
+    // against the earlier pinned directory alone after it may have moved.
+    let current = guarded_directory::GuardedDirectory::open(parent, false)
+        .map_err(|_| miette!("built-in resource ancestors changed during access"))?;
+    if !guarded_directory::same_file(directory.handle(), current.handle())
+        .map_err(|_| miette!("unable to verify built-in resource directory"))?
+        || !current
+            .matches_file(name, file)
+            .map_err(|_| miette!("unable to verify built-in resource identity"))?
+    {
+        return Err(miette!("built-in resource identity changed during access"));
+    }
+    Ok(())
+}
+
+fn read_builtin_bytes(resource: &BuiltinResource, limit: u64) -> Result<Vec<u8>> {
+    let expected_len = resource.content.len() as u64;
+    if expected_len > limit {
+        return Err(miette!("file exceeds the size limit"));
+    }
+    let parent = resource
+        .path
+        .parent()
+        .ok_or_else(|| miette!("built-in resource has no parent"))?;
+    let name = resource
+        .path
+        .file_name()
+        .ok_or_else(|| miette!("built-in resource has no filename"))?;
+    let directory = guarded_directory::GuardedDirectory::open(parent, false)
+        .map_err(|_| miette!("unable to safely open built-in resource directory"))?;
+    let mut file = directory
+        .open_read(name)
+        .map_err(|_| miette!("unable to safely open built-in resource file"))?;
+    validate_builtin_handle(&file, &directory, resource)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| miette!("unable to inspect built-in resource file"))?;
+    if !metadata.is_file() || metadata.len() != expected_len {
+        return Err(miette!("built-in resource content changed"));
+    }
+    let mut bytes = vec![0; resource.content.len()];
+    file.read_exact(&mut bytes)
+        .map_err(|_| miette!("unable to read complete built-in resource file"))?;
+    validate_builtin_handle(&file, &directory, resource)?;
+    if file
+        .metadata()
+        .map_err(|_| miette!("unable to inspect built-in resource file"))?
+        .len()
+        != expected_len
+        || bytes.as_slice() != resource.content
+    {
+        return Err(miette!("built-in resource content changed"));
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn resolve_file_path(cwd: &Path, value: &str) -> Result<PathBuf> {
@@ -308,6 +501,9 @@ pub(crate) fn read_authorized_bytes(
 ) -> Result<Vec<u8>> {
     guarded_directory::local_path(path)
         .map_err(|_| miette!("remote or device file paths are unsupported"))?;
+    if let Some(resource) = builtin_resource_for_path(path, policy)? {
+        return read_builtin_bytes(resource, limit);
+    }
     policy.ensure_path_readable(path, "file target")?;
     let mut options = fs::OpenOptions::new();
     options.read(true);
@@ -327,7 +523,19 @@ pub(crate) fn read_authorized_bytes(
             return Err(miette!("file target is not on a local filesystem"));
         }
     }
-    check_opened_file(&file, path, policy, false)?;
+    let actual = opened_file_path(&file, path)?;
+    if policy
+        .builtin_resources
+        .iter()
+        .any(|resource| resource.path == actual)
+    {
+        // Classification preceded opening. A racing alias must not redirect
+        // the ordinary reader into a published target and skip verification.
+        return Err(miette!(
+            "file target changed to a built-in resource during access"
+        ));
+    }
+    policy.ensure_path_readable(&actual, "opened file")?;
     let metadata = file
         .metadata()
         .map_err(|_| miette!("unable to inspect file"))?;
@@ -353,6 +561,15 @@ fn check_opened_file(
     policy: &RuntimeSandboxPolicy,
     write: bool,
 ) -> Result<()> {
+    let actual = opened_file_path(file, path)?;
+    if write {
+        policy.ensure_path_writable(&actual, "opened file")
+    } else {
+        policy.ensure_path_readable(&actual, "opened file")
+    }
+}
+
+fn opened_file_path(file: &fs::File, path: &Path) -> Result<PathBuf> {
     #[cfg(windows)]
     let actual = {
         use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
@@ -395,17 +612,13 @@ fn check_opened_file(
     };
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (file, path, policy, write);
+        let _ = (file, path);
         return Err(miette!("opened-file verification is unavailable"));
     }
     #[cfg(any(unix, windows))]
     {
         let _ = path;
-        if write {
-            policy.ensure_path_writable(&actual, "opened file")
-        } else {
-            policy.ensure_path_readable(&actual, "opened file")
-        }
+        Ok(actual)
     }
 }
 
@@ -848,6 +1061,280 @@ pub fn view_image(
 
 #[cfg(test)]
 mod tests {
+    const BUILTIN_BYTES: &[u8] = b"trusted built-in instructions\n";
+
+    fn builtin_fixture() -> (tempfile::TempDir, RuntimeSandboxPolicy, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("skills/computer-use/SKILL.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, BUILTIN_BYTES).unwrap();
+        let mut policy = RuntimeSandboxPolicy::disabled();
+        policy.filesystem.full_disk_read = false;
+        policy.filesystem.full_disk_write = false;
+        policy.filesystem.readable_roots.clear();
+        policy.filesystem.writable_roots.clear();
+        policy.filesystem.deny_read_paths = vec![root.clone()];
+        policy.filesystem.deny_write_paths = vec![root];
+        policy.builtin_resources = vec![BuiltinResource {
+            path: path.clone(),
+            content: BUILTIN_BYTES,
+        }];
+        (directory, policy, path)
+    }
+
+    #[test]
+    fn builtins_are_exact_verified_reads_not_filesystem_roots() {
+        let (directory, policy, path) = builtin_fixture();
+        assert!(!policy.is_path_readable(&path));
+        assert!(!policy.is_path_writable(&path));
+        assert!(!read_requires_permission(&path, &policy).unwrap());
+        ensure_authorized_read(&path, &policy, "built-in skill").unwrap();
+        let result = read_file(
+            directory.path(),
+            &policy,
+            &ReadFileArgs {
+                path: path.display().to_string(),
+                ..read_args()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.content.as_bytes(), BUILTIN_BYTES);
+        assert_eq!(result.sha256, sha256(BUILTIN_BYTES));
+        assert!(read_authorized_bytes(&path, BUILTIN_BYTES.len() as u64 - 1, &policy).is_err());
+
+        let extra = path.with_file_name("extra.md");
+        fs::write(&extra, BUILTIN_BYTES).unwrap();
+        assert!(read_requires_permission(&extra, &policy).unwrap());
+        assert!(read_authorized_bytes(&extra, u64::MAX, &policy).is_err());
+        assert!(
+            list_directory(
+                directory.path(),
+                &policy,
+                &ListDirectoryArgs {
+                    path: path.parent().unwrap().display().to_string(),
+                    cursor: None,
+                    limit: None,
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn tampered_builtins_never_fall_back_to_full_access() {
+        let (_directory, mut policy, path) = builtin_fixture();
+        policy.filesystem.full_disk_read = true;
+        policy.filesystem.deny_read_paths.clear();
+        let mut same_length = BUILTIN_BYTES.to_vec();
+        same_length[0] = b'X';
+        for bytes in [Vec::new(), same_length, [BUILTIN_BYTES, b"extra"].concat()] {
+            fs::write(&path, bytes).unwrap();
+            assert!(policy.is_path_readable(&path));
+            assert!(read_authorized_bytes(&path, u64::MAX, &policy).is_err());
+            assert!(ensure_authorized_read(&path, &policy, "skill").is_err());
+            assert!(read_requires_permission(&path, &policy).is_err());
+        }
+    }
+
+    #[test]
+    fn builtin_traversal_is_rejected_before_normalization() {
+        let (directory, policy, path) = builtin_fixture();
+        let parent = path.parent().unwrap();
+        fs::create_dir(parent.join("child")).unwrap();
+        // Path::join would remove `..` from a Windows verbatim fixture path.
+        let traversal = PathBuf::from(format!(
+            "{}{separator}child{separator}..{separator}SKILL.md",
+            parent.display(),
+            separator = std::path::MAIN_SEPARATOR,
+        ));
+        assert!(
+            traversal
+                .components()
+                .any(|part| part == Component::ParentDir)
+        );
+        assert!(
+            resolve_read_file_path(directory.path(), &policy, &traversal.to_string_lossy())
+                .is_err()
+        );
+        assert!(read_authorized_bytes(&traversal, u64::MAX, &policy).is_err());
+        assert!(
+            read_file(
+                directory.path(),
+                &policy,
+                &ReadFileArgs {
+                    path: traversal.display().to_string(),
+                    ..read_args()
+                },
+            )
+            .is_err()
+        );
+        // The caller supplies this relative string directly. In particular,
+        // the production cwd join must not erase evidence before validation.
+        assert!(resolve_read_file_path(parent, &policy, "child/../SKILL.md").is_err());
+        assert!(
+            read_file(
+                parent,
+                &policy,
+                &ReadFileArgs {
+                    path: "child/../SKILL.md".into(),
+                    ..read_args()
+                },
+            )
+            .is_err()
+        );
+
+        // Dot components remain legal for ordinary authorized files.
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().canonicalize().unwrap();
+        fs::create_dir(root.join("child")).unwrap();
+        fs::write(root.join("ordinary.txt"), "ordinary content\n").unwrap();
+        let mut policy = policy;
+        policy.filesystem.readable_roots = vec![root.clone()];
+        let ordinary = read_file(
+            &root,
+            &policy,
+            &ReadFileArgs {
+                path: "child/../ordinary.txt".into(),
+                ..read_args()
+            },
+        )
+        .unwrap();
+        assert_eq!(ordinary.content, "ordinary content\n");
+    }
+
+    #[test]
+    fn builtin_copy_source_does_not_grant_write_edit_or_copy_target_access() {
+        let (_directory, policy, path) = builtin_fixture();
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().canonicalize().unwrap();
+        let mut policy = policy;
+        policy.filesystem.readable_roots = vec![root.clone()];
+        policy.filesystem.writable_roots = vec![crate::sandbox::WritableRoot {
+            root: root.clone(),
+            read_only_subpaths: vec![],
+        }];
+        let copied = root.join("copied.md");
+        copy_file(
+            &root,
+            &policy,
+            &CopyFileArgs {
+                source: path.display().to_string(),
+                destination: copied.display().to_string(),
+                expected_sha256: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(fs::read(&copied).unwrap(), BUILTIN_BYTES);
+        policy.filesystem.full_disk_write = true;
+        assert!(!policy.is_path_writable(&path));
+        assert!(
+            write_file(
+                &root,
+                &policy,
+                &WriteFileArgs {
+                    path: path.display().to_string(),
+                    content: "replacement".into(),
+                    expected_sha256: Some(sha256(BUILTIN_BYTES)),
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            edit_file(
+                &root,
+                &policy,
+                &EditFileArgs {
+                    path: path.display().to_string(),
+                    old_text: "trusted".into(),
+                    new_text: "modified".into(),
+                    expected_sha256: sha256(BUILTIN_BYTES),
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            copy_file(
+                &root,
+                &policy,
+                &CopyFileArgs {
+                    source: copied.display().to_string(),
+                    destination: path.display().to_string(),
+                    expected_sha256: Some(sha256(BUILTIN_BYTES)),
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), BUILTIN_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builtin_symlinks_aliases_and_replaced_ancestors_are_rejected() {
+        let (directory, mut policy, path) = builtin_fixture();
+        // Full access cannot turn an alias into a trusted published resource.
+        policy.filesystem.full_disk_read = true;
+        policy.filesystem.deny_read_paths.clear();
+        let alias = directory.path().join("alias.md");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(read_authorized_bytes(&alias, u64::MAX, &policy).is_err());
+        assert!(
+            resolve_read_file_path(directory.path(), &policy, &alias.to_string_lossy()).is_err()
+        );
+
+        let moved_file = directory.path().join("moved.md");
+        fs::rename(&path, &moved_file).unwrap();
+        std::os::unix::fs::symlink(&moved_file, &path).unwrap();
+        assert!(read_authorized_bytes(&path, u64::MAX, &policy).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::rename(&moved_file, &path).unwrap();
+
+        let parent = path.parent().unwrap();
+        let guard = guarded_directory::GuardedDirectory::open(parent, false).unwrap();
+        let opened = guard.open_read(path.file_name().unwrap()).unwrap();
+        let moved_parent = directory.path().join("moved-parent");
+        fs::rename(parent, &moved_parent).unwrap();
+        fs::create_dir(parent).unwrap();
+        fs::write(&path, BUILTIN_BYTES).unwrap();
+        assert!(validate_builtin_handle(&opened, &guard, &policy.builtin_resources[0]).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(parent).unwrap();
+        std::os::unix::fs::symlink(&moved_parent, parent).unwrap();
+        assert!(read_authorized_bytes(&path, u64::MAX, &policy).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn builtin_junction_ancestor_is_rejected() {
+        use std::os::windows::{fs::MetadataExt, process::CommandExt};
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        let (directory, policy, path) = builtin_fixture();
+        let parent = path.parent().unwrap();
+        let moved = directory.path().join("moved-parent");
+        fs::rename(parent, &moved).unwrap();
+        // cmd.exe does not use CRT argument quoting. Keep its command fixed
+        // and relative to the fixture, avoiding verbatim paths in mklink.
+        let output = std::process::Command::new("cmd.exe")
+            .current_dir(directory.path())
+            .args(["/D", "/V:OFF", "/C"])
+            .raw_arg(r#"mklink /J "skills\computer-use" "moved-parent""#)
+            .output()
+            .expect("Windows junction regression test requires cmd.exe");
+        assert!(
+            output.status.success(),
+            "unable to create junction: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert_ne!(
+            fs::symlink_metadata(parent).unwrap().file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT,
+            0,
+        );
+        assert_eq!(fs::read(&path).unwrap(), BUILTIN_BYTES);
+        assert!(read_authorized_bytes(&path, u64::MAX, &policy).is_err());
+    }
+
     #[test]
     fn actual_text_changes_preserve_line_numbers_hashes_and_bounds() {
         let before = b"first\nold\nlast\n";

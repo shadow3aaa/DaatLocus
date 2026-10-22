@@ -2,7 +2,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 use crate::{
     actors::{ActorSystem, AppReview, ToolPermissionRequest},
-    app::{App, AppDocs, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
+    app::{App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
     model_protocol::AgentToolCall,
     schema_utils::model_schema_for,
 };
@@ -304,12 +304,12 @@ impl ComputerUseApp {
             ),
             tool(
                 "get_window_state",
-                "Observe the complete taken window, including its title bar. Null region/scale returns the full window at native resolution. A region uses full-window pixel coordinates; scale 1..4 magnifies it. Input coordinates always refer to the returned image; the host handles crop/scale conversion.",
+                "Observe the complete taken window, including its title bar. Null region/scale returns the full window at native resolution. A region uses full-window pixel coordinates; scale 1..4 magnifies it. Input coordinates always refer to the returned image; the host handles crop/scale conversion. After outcome_unknown, timeout or capture failure, observe before deciding whether another input is needed.",
                 model_schema_for::<ObserveArgs>(),
             ),
             tool(
                 "adjust_window",
-                "Resize, move, fit or restore a taken window without activating it. Resize requires width/height; move requires x/y in virtual-screen pixels; fit uses the full screen work area; restore keeps its reserved size. Other parameters must be null. Null state_id allows recovery after capture failure. Returns a fresh full-window image and revokes earlier image coordinates.",
+                "Resize, move, fit or restore a taken window without activating it. Resize requires width/height; move requires x/y in virtual-screen pixels; fit uses the full screen work area; restore keeps its reserved size. Other parameters must be null. Null state_id allows recovery after capture failure. Returns a fresh full-window image and revokes earlier image coordinates and the selected input receiver.",
                 model_schema_for::<AdjustArgs>(),
             ),
             tool(
@@ -380,14 +380,6 @@ impl App for ComputerUseApp {
             "computer_use"
         })
         .expect("static App identifier")
-    }
-    fn docs(&self) -> AppDocs {
-        #[cfg(target_os = "android")]
-        return AppDocs::from_markdown(include_str!("../app_instructions/phone_use.md"));
-        #[cfg(target_os = "macos")]
-        return AppDocs::from_markdown(include_str!("../app_instructions/computer_use_macos.md"));
-        #[cfg(not(any(target_os = "android", target_os = "macos")))]
-        AppDocs::from_markdown(include_str!("../app_instructions/computer_use.md"))
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         Self::specifications()

@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::{
     actors::ToolPermissionRequest,
-    app::{App, AppDocs, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
+    app::{App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
     core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWaitMode, TerminalWriteStdinArgs},
     model_protocol::AgentToolCall,
     sandbox::RuntimeSandboxPolicy,
@@ -824,10 +824,6 @@ impl App for TerminalApp {
         AppId::terminal()
     }
 
-    fn docs(&self) -> AppDocs {
-        AppDocs::from_markdown(include_str!("../app_instructions/terminal.md"))
-    }
-
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         vec![
             AppToolSpec {
@@ -1391,6 +1387,7 @@ mod tests {
 
     fn test_sandbox_policy() -> RuntimeSandboxPolicy {
         RuntimeSandboxPolicy {
+            builtin_resources: Vec::new(),
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: true,
                 full_disk_write: true,

@@ -88,21 +88,6 @@ impl Display for AppId {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AppDocs {
-    pub lines: Vec<String>,
-    pub body_markdown: Option<String>,
-}
-
-impl AppDocs {
-    pub fn from_markdown(markdown: &str) -> Self {
-        Self {
-            lines: markdown.lines().map(str::to_string).collect(),
-            body_markdown: Some(markdown.to_string()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppToolSpec {
     pub name: String,
@@ -199,8 +184,6 @@ pub trait App: Send + Sync {
         false
     }
     fn id(&self) -> AppId;
-
-    fn docs(&self) -> AppDocs;
 
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         Vec::new()
@@ -347,10 +330,6 @@ impl AppManager {
         }
 
         Ok(Self { order, apps: table })
-    }
-
-    pub fn docs(&self, id: &AppId) -> Option<AppDocs> {
-        self.apps.get(id).map(|app| app.docs())
     }
 
     pub fn app_ids(&self) -> Vec<AppId> {
@@ -557,9 +536,6 @@ mod tests {
         fn id(&self) -> AppId {
             AppId::new("test").unwrap()
         }
-        fn docs(&self) -> AppDocs {
-            AppDocs::from_markdown("test")
-        }
         fn tool_specs(&self) -> Vec<AppToolSpec> {
             vec![AppToolSpec {
                 name: "read".into(),
@@ -627,9 +603,6 @@ mod tests {
     impl App for CleanupApp {
         fn id(&self) -> AppId {
             AppId::new(self.name).unwrap()
-        }
-        fn docs(&self) -> AppDocs {
-            AppDocs::from_markdown("cleanup")
         }
         async fn shutdown(&mut self) -> Result<()> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

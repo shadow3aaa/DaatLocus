@@ -10,8 +10,8 @@ use crate::{
     actor_app::ActorApp,
     actors::{ActorRecord, ActorSystem},
     app::{
-        App, AppDocs, AppId, AppManager, AppToolExecutionContext, AppToolExecutionResult,
-        AppToolSpec, EmptyAppArgs,
+        App, AppId, AppManager, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec,
+        EmptyAppArgs,
     },
     model_protocol::AgentToolCall,
     schema_utils::model_schema_for,
@@ -115,13 +115,6 @@ impl App for AccountActors {
     }
     fn id(&self) -> AppId {
         AppId::new("actors").expect("Actors App")
-    }
-    fn docs(&self) -> AppDocs {
-        AppDocs::from_markdown(concat!(
-            include_str!("../app_instructions/core.md"),
-            "\n\n",
-            include_str!("../app_instructions/orchestration.md")
-        ))
     }
     fn delegates_approval(&self, call: &AgentToolCall) -> bool {
         matches!(

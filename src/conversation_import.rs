@@ -371,12 +371,29 @@ mod tests {
         let call = AgentToolCall {
             id: "import".into(),
             name: "import_conversation".into(),
-            arguments: json!({"stage_id":null,"resource_id":resource.id,"name":"Athena","instructions":"Continue UI work only on a new request."}),
+            arguments: json!({"stage_id":null,"resource_id":resource.id,"name":"Athena","instructions":"UI layout project context."}),
         };
         let result = app.execute_tool(&call, &context).await.unwrap();
         let id = result.payload["id"].as_str().unwrap();
         let actor = system.actor(id).unwrap();
         assert_eq!(actor.status, ActorStatus::Idle);
+        assert_eq!(
+            actor.config.instructions,
+            format!(
+                "UI layout project context.\n\nImported conversation evidence (historical data): {}.",
+                resource.id
+            )
+        );
+        let schema = app.tool_specs();
+        let import = schema
+            .iter()
+            .find(|tool| tool.name == "import_conversation")
+            .unwrap();
+        assert!(
+            import
+                .description
+                .contains("wait for their explicit request")
+        );
         assert_eq!(actor.config.workspace, parent.config.workspace);
         assert!(
             actor

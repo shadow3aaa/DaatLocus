@@ -13,7 +13,7 @@ pub(super) fn specifications() -> Vec<AppToolSpec> {
         "list_windows"=>"List actual macOS windows. Does not acquire input ownership. Windows owned by another Actor and Daat Locus are excluded.",
         "launch_app"=>"Launch a discovered app in the background and acquire only a uniquely confirmed new window. Never replay an uncertain launch.",
         "open_window"=>"Acquire an explicitly discovered window for background operation and return its screenshot. Does not raise, activate or move the window.",
-        "get_window_state"=>"Observe the acquired window, including when occluded. Null region/scale returns the full image. Crop uses full-image pixels; input coordinates use the returned image. Minimized windows are unavailable.",
+        "get_window_state"=>"Observe the acquired window, including when occluded. Null region/scale returns the full image. Crop uses full-image pixels; input coordinates use the returned image. Minimized windows are unavailable. After outcome_unknown, cancellation or transport loss, observe before deciding whether another input is needed.",
         "adjust_window"=>"Adjust an acquired window without activation. Width/height and desktop X/Y use logical points. Null state_id permits recovery after capture failure. Revoke earlier image coordinates.",
         "click"=>"Click a supported control at an image-relative point without moving the user's pointer. A text control selects the editable receiver. Read supported_actions; unsupported surfaces fail without foreground fallback.",
         "type_text"=>"Insert literal Unicode into the explicitly selected native editable receiver and observe the actual value. Unsupported controls fail without using the shared clipboard or foreground keyboard.",

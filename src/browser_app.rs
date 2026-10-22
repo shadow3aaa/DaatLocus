@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, AppDocs, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
+    app::{App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
     model_protocol::AgentToolCall,
     schema_utils::model_schema_for,
 };
@@ -44,7 +44,9 @@ pub struct ReadOnlyBrowserApp {
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadUrlArgs {
+    /// Public Internet HTTP(S) URL; private and local network targets are unavailable.
     url: String,
+    /// True fetches current source; false may reuse this Actor's cached page.
     refresh: bool,
 }
 
@@ -300,11 +302,8 @@ impl App for ReadOnlyBrowserApp {
     fn id(&self) -> AppId {
         AppId::browser()
     }
-    fn docs(&self) -> AppDocs {
-        AppDocs::from_markdown(include_str!("app_instructions/browser_read_only.md"))
-    }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
-        vec![AppToolSpec { name: "read_url".into(), description: "Read URL source with HTTP GET, returning the final URL, status, media type, and original body.".into(), input_schema: model_schema_for::<ReadUrlArgs>() }]
+        vec![AppToolSpec { name: "read_url".into(), description: "Read public Internet UTF-8 source with bounded HTTP GET, returning the final URL, status, media type, and original body. Does not execute JavaScript or use browser cookies.".into(), input_schema: model_schema_for::<ReadUrlArgs>() }]
     }
     async fn execute_tool(
         &mut self,

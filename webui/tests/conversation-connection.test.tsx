@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ConversationConnection } from "../src/components/conversation-connection";
 import i18n from "../src/lib/i18n";
 import type { ConversationConnectionMessage } from "../src/lib/stage-api";
-import { coreConnectionMessage } from "../src/lib/stage-api";
+import { coreConnectionMessage, coreConversationReady } from "../src/lib/stage-api";
 import { Composer } from "../src/components/composer";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 
@@ -46,4 +46,16 @@ test("submissionDisabled leaves the textarea editable and disables the send cont
   expect(send).toBeDefined();
   expect(textarea).not.toContain('disabled=""');
   expect(send).toContain('disabled=""');
+});
+
+test("a ready remote Core permits conversation without a local model", () => {
+  const core = {worker_stage_id:"remote",epoch:1,synchronized:true,ready:true,model_ready:false,state:"replica"};
+  expect(coreConversationReady(core, false)).toBe(true);
+  expect(coreConnectionMessage(core)).toBeNull();
+  const offline = {...core,ready:false,model_ready:true,state:"offline"};
+  expect(coreConversationReady(offline, false)).toBe(true);
+  expect(coreConnectionMessage(offline)).toBe("conversation_pane.offline");
+  const unconfigured = {...core,ready:false,state:"model_required"};
+  expect(coreConversationReady(unconfigured, false)).toBe(false);
+  expect(coreConnectionMessage(unconfigured)).toBeNull();
 });

@@ -18,6 +18,9 @@ export const saveDeviceSettings = (preferences: DevicePreferences) => request<De
 export type CoreStatus = { worker_stage_id: string | null; epoch: number; synchronized: boolean; ready: boolean; model_ready: boolean; state: string; error_code?: string | null; config_revision?: string | null };
 export const getStageStatus = (options?: FetchOptions) => request<{core: CoreStatus | null; public_login: PublicLoginStatus; work_generation?: WorkGeneration | null}>("/v1/stage/status", options);
 export type ConversationConnectionMessage = "conversation_pane.synchronizing" | "conversation_pane.reconnecting" | "conversation_pane.recovering" | "conversation_pane.reconciling" | "conversation_pane.offline" | "conversation_pane.recovery_blocked" | "conversation_pane.preparing" | "conversation_pane.service_unavailable";
+export function coreConversationReady(core: CoreStatus | null | undefined, localReady: boolean): boolean {
+  return core ? core.ready || core.model_ready : localReady;
+}
 export function coreConnectionMessage(core: CoreStatus | null | undefined): ConversationConnectionMessage | null {
   if (core === undefined) return "conversation_pane.preparing";
   if (core === null) return "conversation_pane.service_unavailable";
