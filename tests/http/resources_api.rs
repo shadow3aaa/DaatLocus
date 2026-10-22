@@ -149,6 +149,9 @@ async fn historical_tool_queries_return_small_refs_then_scoped_details() {
         .system
         .send_user(&a, "historical tools".into(), vec![], None)
         .unwrap();
+    // This paused fixture must claim its input before recording an in-flight call.
+    let active = fixture.system.store().claim_next(&a).unwrap().unwrap();
+    assert_eq!(active.id, message.id);
     let mut ids = vec![];
     for index in 0..3 {
         let call = daat_locus::model_protocol::AgentToolCall {
