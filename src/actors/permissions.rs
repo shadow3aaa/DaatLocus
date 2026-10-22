@@ -105,31 +105,33 @@ pub fn policy(config: &ActorConfig, own_delivery: &Path) -> RuntimeSandboxPolicy
     readable_roots.push(own_delivery.to_path_buf());
     RuntimeSandboxPolicy {
         builtin_resources: Vec::new(),
-        filesystem: FileSystemSandboxPolicy {
-            full_disk_read: false,
-            full_disk_write: false,
-            readable_roots,
-            bound_roots: config
-                .permissions
-                .readable_roots
-                .iter()
-                .chain(config.permissions.writable_roots.iter())
-                .cloned()
-                .chain(std::iter::once(own_delivery.to_path_buf()))
-                .collect(),
-            writable_roots: config
-                .permissions
-                .writable_roots
-                .iter()
-                .map(|root| WritableRoot {
-                    root: root.clone(),
-                    read_only_subpaths: vec![],
-                })
-                .collect(),
-            deny_read_paths: Vec::new(),
-            deny_write_paths: Vec::new(),
+        native: crate::sandbox::SandboxPolicy {
+            filesystem: FileSystemSandboxPolicy {
+                full_disk_read: false,
+                full_disk_write: false,
+                readable_roots,
+                bound_roots: config
+                    .permissions
+                    .readable_roots
+                    .iter()
+                    .chain(config.permissions.writable_roots.iter())
+                    .cloned()
+                    .chain(std::iter::once(own_delivery.to_path_buf()))
+                    .collect(),
+                writable_roots: config
+                    .permissions
+                    .writable_roots
+                    .iter()
+                    .map(|root| WritableRoot {
+                        root: root.clone(),
+                        read_only_subpaths: vec![],
+                    })
+                    .collect(),
+                deny_read_paths: Vec::new(),
+                deny_write_paths: Vec::new(),
+            },
+            strong_filesystem: StrongFilesystemSandboxMode::Required,
         },
-        strong_filesystem: StrongFilesystemSandboxMode::Required,
     }
 }
 

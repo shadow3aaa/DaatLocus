@@ -419,11 +419,16 @@ schemas; do not silently repair them through provider-specific normalization.
   public network, or a developer's home data. External-environment checks must be
   explicitly opt-in and report unavailable prerequisites accurately.
 - Await asynchronous assertions and propagate failures. Missing prerequisites
-  must be reported as ignored/opt-in or fail with a clear reason, never return
-  early and report success. Use self-cleaning unique temporary directories;
-  normal tests must not write benchmark reports or fixed paths in the checkout.
-  Provision and explicitly run required native sandbox/privilege cases in their
-  platform CI jobs; marking them opt-in locally must not remove CI coverage.
+  must be reported as ignored/opt-in or fail with a clear reason, never silently
+  return early and report success. Native process sandbox tests are the narrow
+  exception: run them in the normal suite and return only when the shared
+  capability probe explicitly reports an unsupported platform prerequisite,
+  writing the reason directly to stderr. Such a return is unavailable coverage,
+  not a passing isolation check. Probe errors, malformed output, permission
+  failures and real sandbox launch failures must fail the test. Keep platform CI
+  sandbox prerequisites provisioned; explicitly run opt-in privilege cases there.
+  Use self-cleaning unique temporary directories; normal tests must not write
+  benchmark reports or fixed paths in the checkout.
 - Regression tests must exercise the mechanism that caused the bug and assert
   the corrected result; where practical, confirm they fail before the fix. Keep
   authentication, authorization, sandbox positive/negative cases, protocol/schema

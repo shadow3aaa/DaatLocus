@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use miette::{Result, miette};
 
-use super::{RuntimeSandboxPolicy, SandboxSpawnSpec, policy_paths_with_resolved};
+use super::{SandboxPolicy, SandboxSpawnSpec, policy_paths_with_resolved};
 
 const SANDBOX_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 const BASE: &str = include_str!("seatbelt_base_policy.sbpl");
@@ -11,7 +11,7 @@ const PLATFORM: &str = include_str!("seatbelt_read_only_platform_defaults.sbpl")
 
 #[cfg(test)]
 pub fn wrap_shell_command(
-    policy: &RuntimeSandboxPolicy,
+    policy: &SandboxPolicy,
     program: &str,
     args: Vec<String>,
 ) -> Result<SandboxSpawnSpec> {
@@ -46,7 +46,7 @@ impl Profile {
 }
 
 pub fn wrap_command(
-    policy: &RuntimeSandboxPolicy,
+    policy: &SandboxPolicy,
     program: PathBuf,
     args: Vec<String>,
 ) -> Result<SandboxSpawnSpec> {
@@ -232,7 +232,7 @@ impl Drop for MacosSandboxAsyncChild {
 }
 
 pub(super) fn spawn_restricted_async(
-    policy: &RuntimeSandboxPolicy,
+    policy: &SandboxPolicy,
     program: PathBuf,
     args: Vec<String>,
     options: super::SandboxProcessOptions,
@@ -269,14 +269,13 @@ pub(super) fn spawn_restricted_async(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::{
+    use crate::{
         FileSystemSandboxPolicy, SandboxAsyncChild, SandboxProcessOptions, SandboxStdio,
         StrongFilesystemSandboxMode, WritableRoot,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    fn policy(root: &Path) -> RuntimeSandboxPolicy {
-        RuntimeSandboxPolicy {
-            builtin_resources: Vec::new(),
+    fn policy(root: &Path) -> SandboxPolicy {
+        SandboxPolicy {
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: false,
                 full_disk_write: false,
@@ -330,6 +329,9 @@ mod tests {
     }
     #[tokio::test]
     async fn actor_scope_runs_shell_and_enforces_future_and_ancestor_denies() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         let temp = tempfile::Builder::new()
             .prefix("dl quoted \" (root)\n")
             .tempdir()
@@ -424,6 +426,9 @@ printf '%s' "$command" > {}
     }
     #[tokio::test]
     async fn root_exit_and_drop_close_background_process_pipes() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         use tokio::io::{AsyncBufReadExt, BufReader};
         for (cancel, background) in [(false, false), (false, true), (true, true)] {
             let temp = tempfile::tempdir().unwrap();

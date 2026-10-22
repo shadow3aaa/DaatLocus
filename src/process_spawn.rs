@@ -27,12 +27,6 @@ pub fn apply_no_window_with_flags(command: &mut std::process::Command, flags: u3
 #[cfg(not(windows))]
 pub(crate) fn apply_no_window_with_flags(_command: &mut std::process::Command, _flags: u32) {}
 
-/// Coordinate native HANDLE_LIST spawns with ordinary Rust process creation.
-/// Rust's private creation lock cannot protect handles prepared by our native broker.
+// Every native broker and ordinary host spawn shares this exact lock.
 #[cfg(windows)]
-pub(crate) fn creation_lock() -> std::io::Result<std::sync::MutexGuard<'static, ()>> {
-    static CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    CREATION
-        .lock()
-        .map_err(|_| std::io::Error::other("Process creation lock is unavailable"))
-}
+pub(crate) use daat_locus_sandbox::process_spawn::creation_lock;

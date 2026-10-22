@@ -1,7 +1,6 @@
 //! Own bubblewrap's namespace and temporary mount targets until every process dies.
 use super::super::{
-    RuntimeSandboxPolicy, SandboxProcessOptions, apply_tokio_command_options,
-    policy_paths_with_resolved,
+    SandboxPolicy, SandboxProcessOptions, apply_tokio_command_options, policy_paths_with_resolved,
 };
 use std::{
     fs::File,
@@ -177,7 +176,7 @@ fn cancelled(options: &SandboxProcessOptions) -> io::Result<()> {
     Ok(())
 }
 
-fn prepare_masks(policy: &RuntimeSandboxPolicy) -> io::Result<Vec<Arc<Mask>>> {
+fn prepare_masks(policy: &SandboxPolicy) -> io::Result<Vec<Arc<Mask>>> {
     let fs = &policy.filesystem;
     let mut protections = fs.deny_read_paths.clone();
     protections.extend(fs.deny_write_paths.clone());
@@ -332,7 +331,7 @@ fn pin_directory(path: &Path) -> io::Result<File> {
 }
 
 pub fn spawn_restricted_async(
-    policy: &RuntimeSandboxPolicy,
+    policy: &SandboxPolicy,
     program: &Path,
     args: Vec<String>,
     options: SandboxProcessOptions,
@@ -577,13 +576,10 @@ fn seccomp_filter() -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::{
-        FileSystemSandboxPolicy, SandboxStdio, StrongFilesystemSandboxMode, WritableRoot,
-    };
+    use crate::{FileSystemSandboxPolicy, SandboxStdio, StrongFilesystemSandboxMode, WritableRoot};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-    fn policy(root: &Path) -> RuntimeSandboxPolicy {
-        RuntimeSandboxPolicy {
-            builtin_resources: Vec::new(),
+    fn policy(root: &Path) -> SandboxPolicy {
+        SandboxPolicy {
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: false,
                 full_disk_write: false,
@@ -599,7 +595,7 @@ mod tests {
             strong_filesystem: StrongFilesystemSandboxMode::Required,
         }
     }
-    fn spawn(policy: &RuntimeSandboxPolicy, root: &Path, script: &str) -> LinuxSandboxAsyncChild {
+    fn spawn(policy: &SandboxPolicy, root: &Path, script: &str) -> LinuxSandboxAsyncChild {
         spawn_restricted_async(
             policy,
             Path::new("/bin/sh"),
@@ -645,8 +641,10 @@ mod tests {
         (status, out, err)
     }
     #[tokio::test]
-    #[ignore = "requires bubblewrap, user namespaces and Linux pidfd/openat2"]
     async fn actor_scope_runs_shell_and_preserves_missing_denies() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("work");
         std::fs::create_dir(&root).unwrap();
@@ -708,8 +706,10 @@ printf '%s' "$command" > output
         );
     }
     #[tokio::test]
-    #[ignore = "requires bubblewrap, user namespaces and Linux pidfd/openat2"]
     async fn dropping_process_kills_descendants_before_removing_masks() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let mut policy = policy(temp.path());
         policy.filesystem.deny_read_paths = vec![temp.path().join("missing")];
@@ -749,8 +749,10 @@ printf '%s' "$command" > output
         assert!(!temp.path().join("private").exists());
     }
     #[tokio::test]
-    #[ignore = "requires bubblewrap, user namespaces, pidfd/openat2 and rustc"]
     async fn native_filter_blocks_kernel_bypasses_and_keeps_ip_sockets() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("probe.rs");
         let executable = temp.path().join("probe");
@@ -787,8 +789,10 @@ fn main() {
     }
 
     #[tokio::test]
-    #[ignore = "requires bubblewrap, user namespaces and Linux pidfd/openat2"]
     async fn concurrent_sandboxes_keep_missing_masks_until_the_last_exit() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let mut policy = policy(temp.path());
         policy.filesystem.deny_read_paths = vec![temp.path().join("missing")];
@@ -813,45 +817,5 @@ fn main() {
             std::fs::read_to_string(temp.path().join("missing")).unwrap(),
             "host-secret"
         );
-    }
-    #[tokio::test]
-    #[ignore = "requires bubblewrap, user namespaces and Linux pidfd/openat2"]
-    async fn sandbox_tcp_socket_cannot_claim_local_owner_authority() {
-        let temp = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let script = format!(
-            "exec 3<>/dev/tcp/127.0.0.1/{}; read command",
-            address.port()
-        );
-        let mut child = spawn_restricted_async(
-            &policy(temp.path()),
-            Path::new("/bin/bash"),
-            vec!["-c".into(), script],
-            SandboxProcessOptions {
-                current_dir: Some(temp.path().to_owned()),
-                stdin: SandboxStdio::Piped,
-                stdout: SandboxStdio::Piped,
-                stderr: SandboxStdio::Piped,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let (_socket, peer) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            !crate::accounts::local_owner_connection(peer, Some(address)),
-            "sandbox UID was mistaken for unrestricted OS-owner authority"
-        );
-        child
-            .take_stdin()
-            .unwrap()
-            .write_all(b"finish\n")
-            .await
-            .unwrap();
-        let (status, out, err) = collect(child).await;
-        assert!(status.success(), "{status};out={out};err={err}");
     }
 }

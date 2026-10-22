@@ -1391,16 +1391,18 @@ mod tests {
     fn test_sandbox_policy() -> RuntimeSandboxPolicy {
         RuntimeSandboxPolicy {
             builtin_resources: Vec::new(),
-            filesystem: FileSystemSandboxPolicy {
-                full_disk_read: true,
-                full_disk_write: true,
-                readable_roots: Vec::new(),
-                writable_roots: Vec::new(),
-                deny_read_paths: Vec::new(),
-                bound_roots: Vec::new(),
-                deny_write_paths: Vec::new(),
+            native: crate::sandbox::SandboxPolicy {
+                filesystem: FileSystemSandboxPolicy {
+                    full_disk_read: true,
+                    full_disk_write: true,
+                    readable_roots: Vec::new(),
+                    writable_roots: Vec::new(),
+                    deny_read_paths: Vec::new(),
+                    bound_roots: Vec::new(),
+                    deny_write_paths: Vec::new(),
+                },
+                strong_filesystem: StrongFilesystemSandboxMode::Off,
             },
-            strong_filesystem: StrongFilesystemSandboxMode::Off,
         }
     }
 

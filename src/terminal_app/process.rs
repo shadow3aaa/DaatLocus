@@ -505,8 +505,10 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    #[ignore = "requires native Windows MXC/PSEC; run on a supported host"]
     async fn terminal_shell_runs_inside_required_native_isolation() {
+        if !crate::sandbox::test_support::native_sandbox_available() {
+            return;
+        }
         use std::os::windows::ffi::{OsStrExt, OsStringExt};
         use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
 
@@ -565,8 +567,10 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    #[ignore = "requires native Windows MXC/PSEC; run on a supported host"]
     async fn terminal_shell_renames_and_deletes_closed_logs_across_invocations() {
+        if !crate::sandbox::test_support::native_sandbox_available() {
+            return;
+        }
         let workspace = tempfile::Builder::new()
             .prefix("terminal mutation workspace ")
             .tempdir()

@@ -914,33 +914,46 @@ that runner. An unconfigured/skipped runner is unavailable native coverage.
 Use isolated local MCP servers for protocol, schema, credential, revision and
 uncertain-effect tests. Run `cargo test --lib mcp::tests` and
 `cargo test --test http_api apps::`, alongside Actor permission/runner checks.
-Windows native process tests require MXC/PSEC with native deny paths. They are
-explicitly ignored on generic Windows hosts, where the availability test still
-verifies that restrictive Auto mode fails closed. Configure the repository variable
-`MXC_RUNNER` with a provisioned Windows runner label to enable the dedicated native
-CI job. That job probes the capability and runs all native sandbox, Terminal and
-MCP cases; an unavailable capability fails the job. Do not count a skipped native
-job as positive isolation coverage. On a supported local Windows host run:
+
+Native sandbox, Terminal, MCP stdio and Actor approval integration tests run in
+the normal test suite on Windows, Linux and macOS, without a dedicated runner
+or `--ignored`. Each uses the shared native-capability probe before exercising
+isolation. An explicitly unsupported prerequisite prints its reason directly to
+stderr and returns from the test. This means unavailable native coverage, not
+proof that isolation passed. Malformed probe output, probe errors, permission
+failures and real sandbox launch failures fail the test; they are not skips.
+Runtime isolation still fails closed and never falls back to host execution.
+
+Windows uses the pinned MXC SDK's PSEC and deny-path capability probes. A host
+that explicitly lacks these capabilities skips the native cases; a probe error
+fails. This does not require an SDK upgrade or alter runtime permissions,
+environment handling or approval behavior. To run focused native checks:
 
 ```powershell
 $env:DAAT_LOCUS_BUILD_WEBUI = '0'
-cargo test --locked --no-default-features --lib sandbox:: -- --include-ignored --test-threads=4
-cargo test --locked --no-default-features --lib terminal_app::process::tests::terminal_shell_runs_inside_required_native_isolation -- --ignored --exact
-cargo test --locked --no-default-features --lib mcp::tests::stdio_uses_native_sandbox_explicit_environment_and_reaps_processes -- --ignored --exact
+cargo test --locked -p daat-locus-sandbox -- --test-threads=4
+cargo test --locked -p daat-locus --no-default-features --lib sandbox:: -- --test-threads=4
+cargo test --locked --no-default-features --lib terminal_app::process::tests
+cargo test --locked --no-default-features --lib mcp::tests::stdio_uses_native_sandbox_explicit_environment_and_reaps_processes -- --exact
+cargo test --locked --no-default-features --lib actors::approval::tests::approved_terminal_scope_runs_natively_only_after_explicit_retry -- --exact
 ```
 
-Linux CI installs bubblewrap and enables unprivileged user namespaces, then runs
-all ignored sandbox cases explicitly. The backend requires pidfd/openat2 (Linux
-5.6 or later), bubblewrap's `--disable-userns`/`--seccomp` support and a reviewed
-x86-64 or AArch64 syscall ABI. Native tests cover real Actor read/write scopes,
-missing protections, concurrent mounts, private devices/procfs, syscall filtering
-and descendant cleanup. The syscall fixture requires rustc. macOS runs its
-Seatbelt native cases in the normal suite, including unusual path characters,
-future private paths, symlink escapes, process cleanup and ancestor rename protection.
-CI explicitly runs the ignored private control-socket case on macOS; it initializes
-the OS-owner control directory and removes only its own unique socket. Linux also
-checks that a sandbox's TCP connection cannot claim OS-owner authority while a
-separate ordinary owner process can still bootstrap.
+Linux CI still installs bubblewrap and enables unprivileged user namespaces.
+The backend requires pidfd/openat2 (Linux 5.6 or later), bubblewrap's
+`--disable-userns`/`--seccomp` support and a reviewed x86-64 or AArch64 syscall ABI.
+An absent bubblewrap executable, a known missing required option, a missing
+required kernel syscall or an unsupported syscall ABI can skip native tests.
+Denied namespace creation is a failure, not an unsupported-platform skip.
+Tests cover real Actor read/write scopes, missing protections, concurrent mounts,
+private devices/procfs, syscall filtering and descendant cleanup. The syscall
+fixture requires rustc. Linux also checks that a sandbox's TCP connection cannot
+claim OS-owner authority while a separate ordinary owner process can bootstrap.
+
+macOS native tests may skip when `/usr/bin/sandbox-exec` is absent. Otherwise the
+normal suite exercises Seatbelt, including unusual path characters, future
+private paths, symlink escapes, process cleanup and ancestor rename protection.
+Cross-compilation does not establish these native behaviors. GUI, external-service and system-changing
+tests remain explicitly opt-in with their existing prerequisites.
 
 The Windows stdio integration verifies allowed workspace reads, denied private
 storage, explicit environment and child cleanup. No real account or

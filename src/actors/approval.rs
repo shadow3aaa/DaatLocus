@@ -2245,8 +2245,10 @@ mod tests {
 
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     #[tokio::test]
-    #[ignore = "requires the platform's native process sandbox; run in provisioned native CI"]
     async fn approved_terminal_scope_runs_natively_only_after_explicit_retry() {
+        if !crate::sandbox::test_support::native_sandbox_available() {
+            return;
+        }
         use crate::app::App;
         let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
             json!({"decision":"approve","reason":"Use the requested fixture caches"}),

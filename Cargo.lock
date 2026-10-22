@@ -1358,7 +1358,6 @@ dependencies = [
 name = "daat-locus"
 version = "0.5.0"
 dependencies = [
- "appcontainer_common",
  "async-trait",
  "axum",
  "base64 0.23.1",
@@ -1367,6 +1366,7 @@ dependencies = [
  "daat-locus-auth",
  "daat-locus-client-protocol",
  "daat-locus-macros",
+ "daat-locus-sandbox",
  "daat-locus-virtual-workspace",
  "diffy",
  "dunce",
@@ -1376,7 +1376,6 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "jsonschema",
- "learning_mode_windows",
  "libc",
  "md-5",
  "miette",
@@ -1404,7 +1403,6 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.30.0",
  "toml 1.1.8+spec-1.1.0",
- "tracelogging",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -1413,7 +1411,6 @@ dependencies = [
  "viewpoint-core",
  "windows",
  "windows-sys 0.61.2",
- "wxc_common",
  "zeroize",
  "zip 9.0.4",
  "zstd",
@@ -1501,6 +1498,29 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "daat-locus-sandbox"
+version = "0.1.0"
+dependencies = [
+ "appcontainer_common",
+ "dunce",
+ "learning_mode_windows",
+ "libc",
+ "miette",
+ "parking_lot",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracelogging",
+ "tracing",
+ "uuid",
+ "windows",
+ "windows-sys 0.61.2",
+ "wxc_common",
 ]
 
 [[package]]
