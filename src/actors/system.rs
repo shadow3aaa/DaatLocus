@@ -437,9 +437,8 @@ impl ActorSystem {
         protect_private_path(&delivery_dir)?;
         let store = ActorStore::open(&data_dir.join("actors.sqlite3"))?;
         store.recover()?;
-        let temporary = crate::runtime_temp::RuntimeTemp::create(
-            &data_dir.with_file_name("runtime"),
-        )?;
+        let temporary =
+            crate::runtime_temp::RuntimeTemp::create(&data_dir.with_file_name("runtime"))?;
         let builtin_resources = crate::builtin_resources::publish(&temporary)?;
         let temporary_root = temporary.root().to_path_buf();
         let system = Self {
@@ -3060,10 +3059,9 @@ mod tests {
             .unwrap()
             .path()
             .to_path_buf();
-        let survivor = crate::runtime_temp::RuntimeTemp::create(
-            system.inner.temporary_root.parent().unwrap(),
-        )
-        .unwrap();
+        let survivor =
+            crate::runtime_temp::RuntimeTemp::create(system.inner.temporary_root.parent().unwrap())
+                .unwrap();
         let survivor_path = survivor.path().to_path_buf();
         let context = system.owner_app_context().unwrap();
         assert!(!context.sandbox_policy.is_path_writable(&instance));
@@ -3077,5 +3075,4 @@ mod tests {
         system.shutdown().await;
         assert!(survivor_path.is_dir());
     }
-
 }

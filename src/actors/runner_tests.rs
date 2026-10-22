@@ -6141,11 +6141,14 @@ async fn runner_prompt_keeps_current_request_authority_and_task_material_guidanc
 #[tokio::test]
 async fn builtin_skill_metadata_is_discovered_by_workers_but_not_core() {
     let (directory, system) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
-    let temporary =
-        crate::runtime_temp::RuntimeTemp::create(
-            &directory.path().canonicalize().unwrap().join("fixture-runtime"),
-        )
-            .unwrap();
+    let temporary = crate::runtime_temp::RuntimeTemp::create(
+        &directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("fixture-runtime"),
+    )
+    .unwrap();
     let content = b"---\nname: builtin-prompt-fixture\ndescription: Discover a bundled procedure.\n---\n\nDetailed body stays on disk.\n";
     let path = temporary
         .publish(

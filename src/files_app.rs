@@ -115,11 +115,7 @@ impl App for FilesApp {
         let actual = if write {
             file_io::resolve_file_path(&context.execution_cwd, path)?
         } else {
-            file_io::resolve_read_file_path(
-                &context.execution_cwd,
-                &context.sandbox_policy,
-                path,
-            )?
+            file_io::resolve_read_file_path(&context.execution_cwd, &context.sandbox_policy, path)?
         };
         let writable_roots = if write {
             let parent = actual
@@ -197,11 +193,7 @@ impl App for FilesApp {
                     &context.sandbox_policy,
                     path,
                 )?;
-                file_io::ensure_authorized_read(
-                    &actual,
-                    &context.sandbox_policy,
-                    "file target",
-                )?;
+                file_io::ensure_authorized_read(&actual, &context.sandbox_policy, "file target")?;
             }
         }
         Ok(())
@@ -399,7 +391,9 @@ mod tests {
             name: "files__read_file".into(),
             arguments: json!({"path": skill, "start_line": null, "line_count": null}),
         };
-        manager.validate_tool_call_for_approval(&call, &context).unwrap();
+        manager
+            .validate_tool_call_for_approval(&call, &context)
+            .unwrap();
         let request = manager.permission_request(&call, &context).unwrap();
         assert!(request.readable_roots.is_empty());
         assert!(request.writable_roots.is_empty());
@@ -417,10 +411,16 @@ mod tests {
             arguments: json!({}),
         };
         let catalog = manager.execute_tool(&list, &context).await.unwrap();
-        assert!(catalog.payload["skills"].as_array().unwrap().iter().any(|item| {
-            item["name"] == "builtin-fixture"
-                && item["path"].as_str() == Some(skill.to_string_lossy().as_ref())
-        }));
+        assert!(
+            catalog.payload["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| {
+                    item["name"] == "builtin-fixture"
+                        && item["path"].as_str() == Some(skill.to_string_lossy().as_ref())
+                })
+        );
 
         // Approval/preflight success must not authenticate later replacement bytes.
         let mut modified = BUILTIN_SKILL.to_vec();
@@ -430,9 +430,13 @@ mod tests {
         assert!(manager.validate_tool_call(&call, &context).is_err());
         assert!(manager.execute_tool(&call, &context).await.is_err());
         let catalog = manager.execute_tool(&list, &context).await.unwrap();
-        assert!(!catalog.payload["skills"].as_array().unwrap().iter().any(|item| {
-            item["name"] == "builtin-fixture"
-        }));
+        assert!(
+            !catalog.payload["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| { item["name"] == "builtin-fixture" })
+        );
     }
 
     #[tokio::test]
@@ -455,9 +459,18 @@ mod tests {
         assert!(!context.sandbox_policy.is_path_writable(&skill));
 
         for (name, arguments) in [
-            ("write_file", json!({"path": skill, "content": "changed", "expected_sha256": "unused"})),
-            ("edit_file", json!({"path": skill, "old_text": "built-in", "new_text": "changed", "expected_sha256": "unused"})),
-            ("copy_file", json!({"source": destination, "destination": skill, "expected_sha256": "unused"})),
+            (
+                "write_file",
+                json!({"path": skill, "content": "changed", "expected_sha256": "unused"}),
+            ),
+            (
+                "edit_file",
+                json!({"path": skill, "old_text": "built-in", "new_text": "changed", "expected_sha256": "unused"}),
+            ),
+            (
+                "copy_file",
+                json!({"source": destination, "destination": skill, "expected_sha256": "unused"}),
+            ),
         ] {
             let call = AgentToolCall {
                 id: "deny-builtin-mutation".into(),
@@ -590,4 +603,3 @@ mod tests {
         );
     }
 }
-

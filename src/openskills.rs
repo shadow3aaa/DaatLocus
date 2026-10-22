@@ -341,7 +341,11 @@ fn load_openskills_from_roots_with_policy(
     // permission-exempt directory. The shared reader verifies the published bytes.
     if let Some(policy) = policy {
         for resource in &policy.builtin_resources {
-            if resource.path.file_name().is_none_or(|name| name != SKILL_FILE_NAME) {
+            if resource
+                .path
+                .file_name()
+                .is_none_or(|name| name != SKILL_FILE_NAME)
+            {
                 continue;
             }
             match parse_skill_file(&resource.path, OpenSkillScope::Builtin, Some(policy)) {
@@ -1055,9 +1059,10 @@ mod tests {
     #[test]
     fn builtin_catalog_uses_only_verified_manifest_files_under_denied_roots() {
         let directory = tempfile::tempdir().unwrap();
-        let temporary =
-            crate::runtime_temp::RuntimeTemp::create(&directory.path().canonicalize().unwrap().join("runtime"))
-                .unwrap();
+        let temporary = crate::runtime_temp::RuntimeTemp::create(
+            &directory.path().canonicalize().unwrap().join("runtime"),
+        )
+        .unwrap();
         let content = b"---\nname: builtin-fixture\ndescription: Test bundled discovery.\n---\n\nRead the fixture.\n";
         let path = temporary
             .publish(Path::new("skills/fixture/SKILL.md"), content)
@@ -1082,11 +1087,7 @@ mod tests {
             path: path.clone(),
             content,
         }];
-        let catalog = load_openskills_from_roots_with_policy(
-            Vec::new(),
-            Vec::new(),
-            Some(&policy),
-        );
+        let catalog = load_openskills_from_roots_with_policy(Vec::new(), Vec::new(), Some(&policy));
         assert_eq!(catalog.skills.len(), 1);
         assert_eq!(catalog.skills[0].scope, OpenSkillScope::Builtin);
         assert!(catalog.skills[0].auto_use_enabled());
@@ -1098,13 +1099,9 @@ mod tests {
         assert!(!policy.is_path_writable(&path));
 
         fs::write(&path, "replaced").unwrap();
-        let replaced = load_openskills_from_roots_with_policy(
-            Vec::new(),
-            Vec::new(),
-            Some(&policy),
-        );
+        let replaced =
+            load_openskills_from_roots_with_policy(Vec::new(), Vec::new(), Some(&policy));
         assert!(replaced.skills.is_empty());
         assert_eq!(replaced.errors.len(), 1);
     }
-
 }

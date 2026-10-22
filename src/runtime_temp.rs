@@ -54,10 +54,9 @@ impl RuntimeTemp {
         let root_path = runtime_dir.join("temp");
         let coordination = match root.create_private_file(OsStr::new(LIFECYCLE)) {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                root.open_regular(OsStr::new(LIFECYCLE), true)
-                    .into_diagnostic()?
-            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => root
+                .open_regular(OsStr::new(LIFECYCLE), true)
+                .into_diagnostic()?,
             Err(error) => return Err(error).into_diagnostic(),
         };
         root.protect_private_file(OsStr::new(LIFECYCLE), &coordination)
@@ -115,9 +114,9 @@ impl RuntimeTemp {
                 components[0],
                 Component::Normal(name) if name == "skills" || name == "resources"
             )
-            || components.iter().any(|component| {
-                !matches!(component, Component::Normal(name) if resource_name(name))
-            })
+            || components.iter().any(
+                |component| !matches!(component, Component::Normal(name) if resource_name(name)),
+            )
         {
             return Err(miette!(
                 "temporary resource needs a normal skills/ or resources/ path"
@@ -274,7 +273,9 @@ impl Cleanup {
         remaining: &mut usize,
     ) -> io::Result<Self> {
         if depth > MAX_CLEANUP_DEPTH {
-            return Err(io::Error::other("temporary tree is too deep to clean safely"));
+            return Err(io::Error::other(
+                "temporary tree is too deep to clean safely",
+            ));
         }
         let mut files = Vec::new();
         let mut children = Vec::new();
@@ -290,8 +291,7 @@ impl Cleanup {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::MetadataExt;
-                        if directory.handle().metadata()?.dev()
-                            != child.handle().metadata()?.dev()
+                        if directory.handle().metadata()?.dev() != child.handle().metadata()?.dev()
                         {
                             return Err(io::Error::other("temporary tree crosses a filesystem"));
                         }
@@ -302,9 +302,7 @@ impl Cleanup {
                     // A crash after atomic hardlink publication can leave both
                     // names. Unlink them without opening or changing the file.
                     if !directory.is_regular_file(&name)? {
-                        return Err(io::Error::other(
-                            "temporary tree contains an unknown entry",
-                        ));
+                        return Err(io::Error::other("temporary tree contains an unknown entry"));
                     }
                     files.push(name);
                 }
@@ -409,18 +407,21 @@ mod tests {
         let unknown = temporary.root().join("user-files");
         std::fs::create_dir(&unknown).unwrap();
         std::fs::write(unknown.join("keep"), b"keep").unwrap();
-        let empty = temporary
-            .root()
-            .join(format!("{INSTANCE_PREFIX}{}", uuid::Uuid::new_v4().simple()));
+        let empty = temporary.root().join(format!(
+            "{INSTANCE_PREFIX}{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::create_dir(&empty).unwrap();
-        let malformed = temporary
-            .root()
-            .join(format!("{INSTANCE_PREFIX}{}", uuid::Uuid::new_v4().simple()));
+        let malformed = temporary.root().join(format!(
+            "{INSTANCE_PREFIX}{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::create_dir(&malformed).unwrap();
         std::fs::write(malformed.join(LEASE), b"not a DL marker").unwrap();
-        let interrupted = temporary
-            .root()
-            .join(format!("{INSTANCE_PREFIX}{}", uuid::Uuid::new_v4().simple()));
+        let interrupted = temporary.root().join(format!(
+            "{INSTANCE_PREFIX}{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::create_dir(&interrupted).unwrap();
         std::fs::write(interrupted.join(LEASE), &MARKER[..8]).unwrap();
         let next = RuntimeTemp::create(&root).unwrap();
@@ -444,7 +445,10 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), content);
         assert!(temporary.publish(relative, b"replacement").is_err());
         assert_eq!(std::fs::read(&path).unwrap(), content);
-        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
         for invalid in [
             "../escape",
             "skills/../../escape",
@@ -507,7 +511,11 @@ mod tests {
         std::fs::write(outside.path().join("keep"), b"outside").unwrap();
         let temporary = RuntimeTemp::create(&root).unwrap();
         symlink(outside.path(), temporary.path().join("resources")).unwrap();
-        assert!(temporary.publish(Path::new("resources/new"), b"new").is_err());
+        assert!(
+            temporary
+                .publish(Path::new("resources/new"), b"new")
+                .is_err()
+        );
         let stale = abandon(temporary);
         let next = RuntimeTemp::create(&root).unwrap();
         assert!(
@@ -516,7 +524,10 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
-        assert_eq!(std::fs::read(outside.path().join("keep")).unwrap(), b"outside");
+        assert_eq!(
+            std::fs::read(outside.path().join("keep")).unwrap(),
+            b"outside"
+        );
         assert!(!outside.path().join("new").exists());
         drop(next);
         let (_another, symlinked_root) = profile();
@@ -576,7 +587,11 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "test requires a local NTFS junction");
-        assert!(temporary.publish(Path::new("resources/new"), b"new").is_err());
+        assert!(
+            temporary
+                .publish(Path::new("resources/new"), b"new")
+                .is_err()
+        );
         let stale = abandon(temporary);
         let next = RuntimeTemp::create(&root).unwrap();
         assert_ne!(
@@ -586,7 +601,10 @@ mod tests {
                 & FILE_ATTRIBUTE_REPARSE_POINT,
             0
         );
-        assert_eq!(std::fs::read(outside.path().join("keep")).unwrap(), b"outside");
+        assert_eq!(
+            std::fs::read(outside.path().join("keep")).unwrap(),
+            b"outside"
+        );
         assert!(!outside.path().join("new").exists());
         drop(next);
         // Remove only the fixture junction, not its target.

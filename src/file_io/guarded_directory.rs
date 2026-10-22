@@ -616,7 +616,11 @@ impl GuardedDirectory {
         let file = {
             use std::os::fd::{AsRawFd, FromRawFd};
             let name = c_name(name)?;
-            let access = if writable { libc::O_RDWR } else { libc::O_RDONLY };
+            let access = if writable {
+                libc::O_RDWR
+            } else {
+                libc::O_RDONLY
+            };
             let raw = unsafe {
                 libc::openat(
                     self.directory.as_raw_fd(),
@@ -660,7 +664,8 @@ impl GuardedDirectory {
                     GetFileInformationByHandle,
                 };
                 let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-                if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut info) } == 0
+                if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut info) }
+                    == 0
                 {
                     return Err(io::Error::last_os_error());
                 }
@@ -714,7 +719,10 @@ impl GuardedDirectory {
             use std::os::windows::fs::MetadataExt;
             use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
             let metadata = fs::symlink_metadata(self.path.join(name))?;
-            Ok(metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0)
+            Ok(
+                metadata.is_file()
+                    && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+            )
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -765,7 +773,11 @@ impl GuardedDirectory {
             use std::os::fd::AsRawFd;
             let name = c_name(name)?;
             syscall_result(unsafe {
-                libc::unlinkat(self.directory.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR)
+                libc::unlinkat(
+                    self.directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::AT_REMOVEDIR,
+                )
             })
         }
         #[cfg(windows)]

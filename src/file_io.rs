@@ -274,7 +274,9 @@ pub(crate) fn resolve_read_file_path(
         .iter()
         .any(|resource| resource.path == actual)
     {
-        return Err(miette!("file target changed to a built-in resource during resolution"));
+        return Err(miette!(
+            "file target changed to a built-in resource during resolution"
+        ));
     }
     Ok(actual)
 }
@@ -294,10 +296,7 @@ pub(crate) fn ensure_authorized_read(
     }
 }
 
-pub(crate) fn read_requires_permission(
-    path: &Path,
-    policy: &RuntimeSandboxPolicy,
-) -> Result<bool> {
+pub(crate) fn read_requires_permission(path: &Path, policy: &RuntimeSandboxPolicy) -> Result<bool> {
     if let Some(resource) = builtin_resource_for_path(path, policy)? {
         read_builtin_bytes(resource, resource.content.len() as u64)?;
         Ok(false)
@@ -333,12 +332,14 @@ fn builtin_resource_for_path<'a>(
     };
     if let Some(resource) = resource {
         if !path.is_absolute()
-            || path.components().any(|component| {
-                matches!(component, Component::ParentDir | Component::CurDir)
-            })
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
             || path != resource.path.as_path()
         {
-            return Err(miette!("built-in resources require their exact published path"));
+            return Err(miette!(
+                "built-in resources require their exact published path"
+            ));
         }
         return Ok(Some(resource));
     }
@@ -520,7 +521,9 @@ pub(crate) fn read_authorized_bytes(
     {
         // Classification preceded opening. A racing alias must not redirect
         // the ordinary reader into a published target and skip verification.
-        return Err(miette!("file target changed to a built-in resource during access"));
+        return Err(miette!(
+            "file target changed to a built-in resource during access"
+        ));
     }
     policy.ensure_path_readable(&actual, "opened file")?;
     let metadata = file
@@ -1256,8 +1259,15 @@ mod tests {
         let moved = directory.path().join("moved-parent");
         fs::rename(parent, &moved).unwrap();
         let output = std::process::Command::new("cmd.exe")
-            .args(["/D", "/C", r#"mklink /J "%DL_TEST_JUNCTION%" "%DL_TEST_TARGET%""#])
-            .env("DL_TEST_JUNCTION", directory.path().join("skills/computer-use"))
+            .args([
+                "/D",
+                "/C",
+                r#"mklink /J "%DL_TEST_JUNCTION%" "%DL_TEST_TARGET%""#,
+            ])
+            .env(
+                "DL_TEST_JUNCTION",
+                directory.path().join("skills/computer-use"),
+            )
             .env("DL_TEST_TARGET", &moved)
             .output()
             .expect("Windows junction regression test requires cmd.exe");
@@ -1571,4 +1581,3 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), original);
     }
 }
-
