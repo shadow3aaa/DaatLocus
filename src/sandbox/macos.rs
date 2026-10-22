@@ -247,7 +247,7 @@ pub(super) fn spawn_restricted_async(
     let cancelled = options.spawn_cancelled.clone();
     let mut command = tokio::process::Command::new(spawn.program);
     command.args(spawn.args).process_group(0).kill_on_drop(true);
-    super::apply_tokio_command_options(policy, &mut command, options);
+    super::apply_tokio_command_options(&mut command, options);
     if cancelled
         .as_ref()
         .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))

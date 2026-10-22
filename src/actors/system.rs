@@ -2017,11 +2017,8 @@ impl ActorSystem {
             .models
             .get(config.actor_model_name(actor.config.model.as_deref()))
             .map_or(4096, |model| model.tool_output_max_tokens);
-        let mut sandbox_policy = super::permissions::policy(
-            &actor.config,
-            &self.actor_data_dir(&actor.id),
-            denied,
-        );
+        let mut sandbox_policy =
+            super::permissions::policy(&actor.config, &self.actor_data_dir(&actor.id), denied);
         // Only the broker reads verified instruction bytes; native processes get no grant.
         sandbox_policy
             .filesystem

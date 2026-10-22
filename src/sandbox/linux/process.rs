@@ -425,7 +425,7 @@ pub fn spawn_restricted_async(
     if !policy.filesystem.full_disk_read && !policy.filesystem.full_disk_write {
         command.env("TMPDIR", "/tmp");
     }
-    apply_tokio_command_options(policy, &mut command, options);
+    apply_tokio_command_options(&mut command, options);
     command.kill_on_drop(true);
     // Do not change parent descriptor flags in this multithreaded service.
     // Bubblewrap consumes both descriptors and closes them before workload exec.
