@@ -450,7 +450,7 @@ Get-WinEvent -Path "$PWD/target/idd-diagnostics.etl" -Oldest |
 
 ## Actor 编排评测
 
-通用模型指令维护在 `src/app_instructions/orchestration.md`。Core 和安装管理型
+通用模型指令维护在 `src/app_instructions/actors.md`。Core 和安装管理型
 Actors App 的 hosted Actor 自动加载它；修改后重新构建后台。场景指导应保持
 通用，区分编排失误与工具、环境、权限、运行时故障，在对应层修复问题，不能为
 每个失败都追加提示词规则。

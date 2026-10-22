@@ -22,10 +22,8 @@ schema 留在所属 App。Skills 是可发现、读取的指令资源，不拥�
 Study 已移除。加载持久 Actor 配置时移除旧能力列表，普通 Actor 直接使用设备全量
 App，Core 只构造 Actors App；保留身份、历史、输入和工作目录，不恢复旧应用。
 
-`src/app_instructions/orchestration.md` 维护通用场景的 Actor 分工、复用、
-工作区协作与结果验收策略，与 Core 和普通 Actors App 的指令共同编译并
-注入模型上下文。它是模型的
-决策指导，不引入固定工作流、调度引擎或额外授权，权限与持久路由仍由代码执行。
+`src/app_instructions/actors.md` 维护 Actor 编排、命名与会话引用指令，
+由 Core 和普通 Actors App 编译并注入模型上下文。它是模型的决策指导，不引入固定工作流、调度引擎或额外授权，权限与持久路由仍由代码执行。
 
 Actor 的创建、工作目录、App 安装集合和沙箱范围是内部状态。客户端只能切换
 模型偏好；设置页统一切换账号的 Full access / Ask / Auto，适用于现有和后续的所有执行者。

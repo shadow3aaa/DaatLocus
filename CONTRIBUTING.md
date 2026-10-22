@@ -471,7 +471,7 @@ driver failure; inspect the decoded event's status and severity.
 
 ## Actor orchestration evaluations
 
-The shared model-facing policy is `src/app_instructions/orchestration.md`.
+The shared model-facing policy is `src/app_instructions/actors.md`.
 Core and hosted Actors with the management Actors App receive it automatically;
 rebuild the backend after edits. Keep scenario guidance general and distinguish
 orchestration mistakes from tool, environment, permission or runtime failures.

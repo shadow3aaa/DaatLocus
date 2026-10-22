@@ -280,8 +280,6 @@ impl App for ActorApp {
         let common = concat!(
             include_str!("app_instructions/actors.md"),
             "\n\n",
-            include_str!("app_instructions/orchestration.md"),
-            "\n\n",
             include_str!("app_instructions/history.md")
         );
         if self.actor_id == crate::stage::shared::ACTOR_ID {

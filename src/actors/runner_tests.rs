@@ -5638,6 +5638,7 @@ async fn core_prompt_injects_only_the_account_name_for_local_and_shared_apps() {
         let prompt = system_prompt(&system, &actor, &apps, &context)
             .await
             .unwrap();
+        assert_shared_actor_instructions(&prompt);
         assert!(prompt.contains("You are DaatLocus, alice's assistant."));
         assert!(!prompt.contains("{{account_name}}"));
         assert!(!prompt.contains(&account_id));
@@ -5676,10 +5677,15 @@ async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_inval
     let worker = system.actor("root").unwrap();
     let apps =
         AppManager::new(vec![Box::new(ActorApp::new("root".into(), system.clone()))]).unwrap();
-    assert!(
-        system_prompt(&system, &worker, &apps, &context)
-            .await
-            .is_ok()
-    );
+    let prompt = system_prompt(&system, &worker, &apps, &context)
+        .await
+        .unwrap();
+    assert_shared_actor_instructions(&prompt);
     system.shutdown().await;
+}
+
+fn assert_shared_actor_instructions(prompt: &str) {
+    let instructions = include_str!("../app_instructions/actors.md");
+    assert_eq!(prompt.matches(instructions).count(), 1);
+    assert!(!prompt.contains("Use report for a material discovery"));
 }
