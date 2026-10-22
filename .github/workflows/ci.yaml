@@ -216,4 +216,3 @@ jobs:
           --app-apk clients/app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
           --test-apk clients/app/src-tauri/gen/android/app/build/outputs/apk/androidTest/universal/release/app-universal-release-androidTest.apk
           --fixture-apk clients/app/src-tauri/gen/android/phone-use-fixture/build/outputs/apk/debug/phone-use-fixture-debug.apk
-

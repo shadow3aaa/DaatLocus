@@ -611,17 +611,26 @@ mod tests {
                 "{stage}: output did not drain"
             );
             let output = process.output_since(0).text;
-            assert!(status.success(), "{stage}: status={status}, output={output:?}");
+            assert!(
+                status.success(),
+                "{stage}: status={status}, output={output:?}"
+            );
             // End the entire previous native process before opening the next one.
             drop(process);
             if index == 0 {
                 for name in ["check.log", "baseline.log"] {
-                    assert!(workspace.path().join(name).is_file(), "{name} was not created");
+                    assert!(
+                        workspace.path().join(name).is_file(),
+                        "{name} was not created"
+                    );
                 }
             }
         }
         for name in ["check.log", "renamed-check.log", "baseline.log"] {
-            assert!(!workspace.path().join(name).exists(), "{name} was not removed");
+            assert!(
+                !workspace.path().join(name).exists(),
+                "{name} was not removed"
+            );
         }
     }
 
@@ -688,4 +697,3 @@ mod tests {
         assert!(pending.is_empty());
     }
 }
-

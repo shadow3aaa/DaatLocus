@@ -786,8 +786,7 @@ foreach ($name in @('readonly.txt', 'denied.txt', 'readonly-directory', 'denied-
 [Console]::WriteLine('protected-targets-complete')
 "#
         );
-        let (status, out, err) =
-            collect(launch(&policy, &root, script, SandboxStdio::Null)).await;
+        let (status, out, err) = collect(launch(&policy, &root, script, SandboxStdio::Null)).await;
         assert!(status.success(), "{status}; stdout={out}; stderr={err}");
         assert!(out.contains("protected-targets-complete"), "stdout={out}");
         for path in &files {
@@ -798,8 +797,16 @@ foreach ($name in @('readonly.txt', 'denied.txt', 'readonly-directory', 'denied-
                 "{}.renamed",
                 path.file_name().unwrap().to_str().unwrap()
             ));
-            assert!(path.exists(), "protected target removed: {}", path.display());
-            assert!(!renamed.exists(), "protected target renamed: {}", path.display());
+            assert!(
+                path.exists(),
+                "protected target removed: {}",
+                path.display()
+            );
+            assert!(
+                !renamed.exists(),
+                "protected target renamed: {}",
+                path.display()
+            );
         }
         assert_eq!(targets.map(|path| dacl(path)), before);
     }
