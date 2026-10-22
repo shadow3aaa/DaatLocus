@@ -92,12 +92,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Require native MXC/PSEC
+        id: native_psec
         run: cargo test --locked --no-default-features --lib sandbox::windows::tests::require_native_mxc -- --ignored --exact
       - name: Check native sandbox boundaries and lifecycle
         run: |
           cargo test --locked --no-default-features --lib sandbox:: -- --include-ignored --test-threads=4
       - name: Check native Terminal
         run: cargo test --locked --no-default-features --lib terminal_app::process::tests::terminal_shell_runs_inside_required_native_isolation -- --ignored --exact
+      - name: Check Terminal rename and delete across invocations
+        if: ${{ !cancelled() && steps.native_psec.outcome == 'success' }}
+        run: cargo test --locked --no-default-features --lib terminal_app::process::tests::terminal_shell_renames_and_deletes_closed_logs_across_invocations -- --ignored --exact
       - name: Check native MCP transport
         run: cargo test --locked --no-default-features --lib mcp::tests::stdio_uses_native_sandbox_explicit_environment_and_reaps_processes -- --ignored --exact
   desktop:
@@ -212,3 +216,4 @@ jobs:
           --app-apk clients/app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
           --test-apk clients/app/src-tauri/gen/android/app/build/outputs/apk/androidTest/universal/release/app-universal-release-androidTest.apk
           --fixture-apk clients/app/src-tauri/gen/android/phone-use-fixture/build/outputs/apk/debug/phone-use-fixture-debug.apk
+

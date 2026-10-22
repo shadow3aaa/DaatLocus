@@ -666,6 +666,146 @@ mod tests {
     }
     #[tokio::test]
     #[ignore = "requires native Windows MXC/PSEC with deny paths; run on a supported host"]
+    async fn mxc_writable_scope_allows_file_and_directory_rename_and_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("host.txt"), "initial").unwrap();
+        std::fs::create_dir(root.join("host-directory")).unwrap();
+        std::fs::write(root.join("host-directory/child.txt"), "child").unwrap();
+        let before = dacl(&root);
+        let script = format!(
+            "$root = {};\n{}",
+            quote(&root),
+            r#"
+$ErrorActionPreference = 'Stop'
+# WriteAllText/AppendAllText close their handles before rename/delete.
+[IO.File]::WriteAllText((Join-Path $root 'sandbox.txt'), 'initial')
+foreach ($name in @('host.txt', 'sandbox.txt')) {
+    $path = Join-Path $root $name
+    $renamed = "$path.renamed"
+    [Console]::WriteLine("append file: $name")
+    [IO.File]::AppendAllText($path, '+append')
+    if ([IO.File]::ReadAllText($path) -ne 'initial+append') { throw 'append mismatch' }
+    [Console]::WriteLine("rename file: $name")
+    Rename-Item -LiteralPath $path -NewName "$name.renamed"
+    if (Test-Path -LiteralPath $path) { throw 'original file survived rename' }
+    if ([IO.File]::ReadAllText($renamed) -ne 'initial+append') { throw 'rename lost content' }
+    [Console]::WriteLine("delete file: $name")
+    Remove-Item -LiteralPath $renamed -Force
+    if (Test-Path -LiteralPath $renamed) { throw 'file survived delete' }
+}
+$null = [IO.Directory]::CreateDirectory((Join-Path $root 'empty-directory'))
+$null = [IO.Directory]::CreateDirectory((Join-Path $root 'sandbox-directory'))
+[IO.File]::WriteAllText((Join-Path $root 'sandbox-directory/child.txt'), 'child')
+foreach ($name in @('host-directory', 'empty-directory', 'sandbox-directory')) {
+    $path = Join-Path $root $name
+    $renamed = "$path.renamed"
+    [Console]::WriteLine("rename directory: $name")
+    Rename-Item -LiteralPath $path -NewName "$name.renamed"
+    if (Test-Path -LiteralPath $path) { throw 'original directory survived rename' }
+    if (-not [IO.Directory]::Exists($renamed)) { throw 'renamed directory missing' }
+    if ($name -ne 'empty-directory') {
+        if ([IO.File]::ReadAllText((Join-Path $renamed 'child.txt')) -ne 'child') {
+            throw 'directory rename lost content'
+        }
+    }
+    [Console]::WriteLine("delete directory: $name")
+    Remove-Item -LiteralPath $renamed -Recurse -Force
+    if (Test-Path -LiteralPath $renamed) { throw 'directory survived delete' }
+}
+[Console]::WriteLine('rename-delete-complete')
+"#
+        );
+        let (status, out, err) =
+            collect(launch(&policy(&root), &root, script, SandboxStdio::Null)).await;
+        assert!(status.success(), "{status}; stdout={out}; stderr={err}");
+        assert!(out.contains("rename-delete-complete"), "stdout={out}");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        assert_eq!(dacl(&root), before, "sandbox changed the workspace DACL");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires native Windows MXC/PSEC with deny paths; run on a supported host"]
+    async fn mxc_rename_and_delete_preserve_readonly_and_denied_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        std::fs::create_dir(&root).unwrap();
+        let readonly = root.join("readonly.txt");
+        let denied = root.join("denied.txt");
+        let readonly_dir = root.join("readonly-directory");
+        let denied_dir = root.join("denied-directory");
+        for directory in [&readonly_dir, &denied_dir] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let files = [
+            readonly.clone(),
+            denied.clone(),
+            readonly_dir.join("child.txt"),
+            denied_dir.join("child.txt"),
+        ];
+        for path in &files {
+            std::fs::write(path, "protected").unwrap();
+        }
+        let targets = [&readonly, &denied, &readonly_dir, &denied_dir];
+        let before = targets.map(|path| dacl(path));
+        let mut policy = policy(&root);
+        policy.filesystem.writable_roots[0].read_only_subpaths =
+            vec![readonly.clone(), readonly_dir.clone()];
+        policy.filesystem.deny_read_paths = vec![denied.clone(), denied_dir.clone()];
+        policy.filesystem.deny_write_paths = vec![denied.clone(), denied_dir.clone()];
+        let script = format!(
+            "$root = {};\n{}",
+            quote(&root),
+            r#"
+$ErrorActionPreference = 'Stop'
+foreach ($name in @('readonly.txt', 'denied.txt', 'readonly-directory', 'denied-directory')) {
+    $path = Join-Path $root $name
+    foreach ($operation in @('rename', 'delete')) {
+        [Console]::WriteLine("deny ${operation}: $name")
+        $blocked = $false
+        try {
+            if ($operation -eq 'rename') {
+                Rename-Item -LiteralPath $path -NewName "$name.renamed"
+            } else {
+                Remove-Item -LiteralPath $path -Recurse -Force
+            }
+        } catch {
+            $failure = $_
+            $exception = $_.Exception
+            while ($null -ne $exception) {
+                if (($exception -is [UnauthorizedAccessException]) -or
+                    (($exception.HResult -band 0xffff) -eq 5)) { $blocked = $true }
+                $exception = $exception.InnerException
+            }
+            if (-not $blocked) { throw $failure }
+        }
+        if (-not $blocked) { throw "protected target allowed ${operation}: $name" }
+    }
+}
+[Console]::WriteLine('protected-targets-complete')
+"#
+        );
+        let (status, out, err) =
+            collect(launch(&policy, &root, script, SandboxStdio::Null)).await;
+        assert!(status.success(), "{status}; stdout={out}; stderr={err}");
+        assert!(out.contains("protected-targets-complete"), "stdout={out}");
+        for path in &files {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "protected");
+        }
+        for path in targets {
+            let renamed = path.with_file_name(format!(
+                "{}.renamed",
+                path.file_name().unwrap().to_str().unwrap()
+            ));
+            assert!(path.exists(), "protected target removed: {}", path.display());
+            assert!(!renamed.exists(), "protected target renamed: {}", path.display());
+        }
+        assert_eq!(targets.map(|path| dacl(path)), before);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires native Windows MXC/PSEC with deny paths; run on a supported host"]
     async fn dropping_mxc_kills_descendants_with_open_pipes() {
         use tokio::io::{AsyncBufReadExt, BufReader};
         use windows_sys::Win32::{
