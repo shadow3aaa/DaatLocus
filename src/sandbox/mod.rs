@@ -20,7 +20,7 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
-/// The OS-owner maintenance channel is private infrastructure, not an App scope.
+/// Address namespace for the authenticated OS-owner maintenance channel.
 #[cfg(unix)]
 pub(crate) fn unix_control_directory() -> PathBuf {
     PathBuf::from("/tmp").join(format!("dl-control-{}", unsafe { libc::geteuid() }))
@@ -45,12 +45,6 @@ impl WritableRoot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PrivateDeliveryScope {
-    pub root: PathBuf,
-    pub own_readable: PathBuf,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileSystemSandboxPolicy {
     pub full_disk_read: bool,
     pub full_disk_write: bool,
@@ -58,7 +52,6 @@ pub struct FileSystemSandboxPolicy {
     pub writable_roots: Vec<WritableRoot>,
     pub deny_read_paths: Vec<PathBuf>,
     pub deny_write_paths: Vec<PathBuf>,
-    pub private_delivery: Option<PrivateDeliveryScope>,
     /// Canonical roots captured when authority was granted. Replacing one with
     /// a symlink must not silently authorize the symlink's new destination.
     pub bound_roots: Vec<PathBuf>,
@@ -483,8 +476,7 @@ const fn filesystem_policy_requires_backend(policy: &FileSystemSandboxPolicy) ->
         && policy.readable_roots.is_empty()
         && policy.writable_roots.is_empty()
         && policy.deny_read_paths.is_empty()
-        && policy.deny_write_paths.is_empty()
-        && policy.private_delivery.is_none())
+        && policy.deny_write_paths.is_empty())
 }
 
 pub fn normalize_path(path: &Path) -> PathBuf {
@@ -584,7 +576,6 @@ fn validate_native_policy_paths(policy: &FileSystemSandboxPolicy) -> Result<()> 
         .chain(policy.writable_roots.iter().map(|root| &root.root))
         .chain(policy.deny_read_paths.iter())
         .chain(policy.deny_write_paths.iter())
-        .chain(policy.private_delivery.iter().map(|scope| &scope.root))
         .chain(
             policy
                 .writable_roots
@@ -603,7 +594,6 @@ fn validate_native_policy_paths(policy: &FileSystemSandboxPolicy) -> Result<()> 
         .deny_read_paths
         .iter()
         .chain(&policy.deny_write_paths)
-        .chain(policy.private_delivery.iter().map(|scope| &scope.root))
         .chain(
             policy
                 .writable_roots
@@ -676,7 +666,6 @@ impl FileSystemSandboxPolicy {
             writable_roots: Vec::new(),
             deny_read_paths: Vec::new(),
             deny_write_paths: Vec::new(),
-            private_delivery: None,
             bound_roots: Vec::new(),
         }
     }
@@ -688,7 +677,6 @@ impl FileSystemSandboxPolicy {
             && self.writable_roots.is_empty()
             && self.deny_read_paths.is_empty()
             && self.deny_write_paths.is_empty()
-            && self.private_delivery.is_none()
             && self.bound_roots.is_empty()
     }
 
@@ -710,12 +698,6 @@ impl FileSystemSandboxPolicy {
             if self.ensure_root_bindings().is_err() {
                 return false;
             }
-            if self.private_delivery.as_ref().is_some_and(|scope| {
-                path_is_or_descends_logical_or_resolved(path, &scope.root)
-                    && !path_is_or_descends_resolved(path, &scope.own_readable)
-            }) {
-                return false;
-            }
             if path_is_denied(path, &self.deny_read_paths) {
                 return false;
             }
@@ -735,13 +717,6 @@ impl FileSystemSandboxPolicy {
     pub fn is_path_writable(&self, path: &Path) -> bool {
         with_path_resolution_cache(|| {
             if self.ensure_root_bindings().is_err() {
-                return false;
-            }
-            if self
-                .private_delivery
-                .as_ref()
-                .is_some_and(|scope| path_is_or_descends_logical_or_resolved(path, &scope.root))
-            {
                 return false;
             }
             if path_is_denied(path, &self.deny_write_paths) {
@@ -893,40 +868,6 @@ mod tests {
         SandboxStdio, StrongFilesystemSandboxMode, WritableRoot,
     };
 
-    #[test]
-    fn account_namespace_protects_future_profiles_and_keeps_own_deliveries_readable() {
-        let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().join("accounts");
-        let own = base.join("profiles/alice/delivery/core");
-        std::fs::create_dir_all(&own).unwrap();
-        let mut policy = RuntimeSandboxPolicy::disabled();
-        policy.filesystem.private_delivery = Some(super::PrivateDeliveryScope {
-            root: base.clone(),
-            own_readable: own.clone(),
-        });
-        std::fs::write(own.join("answer.txt"), "answer").unwrap();
-        // A later account cannot become visible through broad filesystem grants.
-        let other = base.join("profiles/bob/state");
-        std::fs::create_dir_all(&other).unwrap();
-        std::fs::write(other.join("secret.txt"), "private account").unwrap();
-        let read = |path: &Path| {
-            crate::file_io::read_file(
-                directory.path(),
-                &policy,
-                &crate::file_io::ReadFileArgs {
-                    path: path.to_string_lossy().into_owned(),
-                    start_line: None,
-                    line_count: None,
-                },
-            )
-        };
-        assert!(read(&own.join("answer.txt")).is_ok());
-        assert!(read(&other.join("secret.txt")).is_err());
-        assert!(!policy.is_path_writable(&own.join("answer.txt")));
-        assert!(!policy.is_path_writable(&other.join("next.txt")));
-        assert!(!policy.is_path_readable(&base));
-    }
-
     #[cfg(unix)]
     #[test]
     fn replacing_an_authorized_root_cannot_rebind_its_permissions() {
@@ -1027,7 +968,6 @@ mod tests {
                     secret_file.clone(),
                 ],
                 deny_write_paths: vec![protected_config, protected_home, secret_file.clone()],
-                private_delivery: None,
                 bound_roots: Vec::new(),
             },
             strong_filesystem: StrongFilesystemSandboxMode::Required,
@@ -1276,7 +1216,6 @@ exit 42
             }],
             deny_read_paths: Vec::new(),
             deny_write_paths: Vec::new(),
-            private_delivery: None,
             bound_roots: Vec::new(),
         };
 

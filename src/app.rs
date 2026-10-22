@@ -133,8 +133,6 @@ pub struct ActorCallContext {
     pub remote_read_only: bool,
     pub actor_id: String,
     pub message_id: String,
-    /// Explicit credential/resource boundaries inherited by native processes.
-    pub private_roots: Vec<PathBuf>,
     /// Server-created policy for a device-backed shared-core App invocation.
     pub device_policy: Option<crate::actors::ActorConfig>,
 }

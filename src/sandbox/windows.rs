@@ -368,10 +368,6 @@ fn build_request(
         .map(|root| root.root.clone())
         .collect::<Vec<_>>();
     let mut deny = fs.deny_read_paths.clone();
-    if let Some(scope) = &fs.private_delivery {
-        // Native programs cannot safely inherit the Files App's delivery exception.
-        deny.push(scope.root.clone());
-    }
     if fs.full_disk_read || fs.full_disk_write {
         read.extend(volumes()?);
     }
@@ -558,7 +554,6 @@ mod tests {
                 }],
                 deny_read_paths: vec![],
                 deny_write_paths: vec![],
-                private_delivery: None,
                 bound_roots: vec![],
             },
             strong_filesystem: StrongFilesystemSandboxMode::Required,

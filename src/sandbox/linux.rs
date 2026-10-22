@@ -59,8 +59,7 @@ pub(super) fn requires_backend(policy: &FileSystemSandboxPolicy) -> bool {
         && policy.readable_roots.is_empty()
         && policy.writable_roots.is_empty()
         && policy.deny_read_paths.is_empty()
-        && policy.deny_write_paths.is_empty()
-        && policy.private_delivery.is_none())
+        && policy.deny_write_paths.is_empty())
 }
 
 fn find_bwrap_in_path() -> Option<PathBuf> {
@@ -263,7 +262,6 @@ mod tests {
             readable_roots: Vec::new(),
             writable_roots: Vec::new(),
             deny_read_paths: vec![protected_home.clone()],
-            private_delivery: None,
             bound_roots: Vec::new(),
             deny_write_paths: vec![source_root.clone()],
         };
@@ -320,7 +318,6 @@ mod tests {
                 read_only_subpaths: vec![git_dir.clone()],
             }],
             deny_read_paths: Vec::new(),
-            private_delivery: None,
             bound_roots: Vec::new(),
             deny_write_paths: Vec::new(),
         };
@@ -474,7 +471,6 @@ printf ok > "$ALLOWED"
             readable_roots: Vec::new(),
             writable_roots: Vec::new(),
             deny_read_paths: Vec::new(),
-            private_delivery: None,
             bound_roots: Vec::new(),
             deny_write_paths: Vec::new(),
         };

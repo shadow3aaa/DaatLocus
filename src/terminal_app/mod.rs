@@ -1196,16 +1196,8 @@ impl App for TerminalApp {
 
 fn terminal_process_policy(context: &AppToolExecutionContext) -> RuntimeSandboxPolicy {
     let mut policy = context.sandbox_policy.clone();
-    if let Some(caller) = &context.actor_call {
-        for root in &caller.private_roots {
-            policy.filesystem.deny_read_paths.push(root.clone());
-            policy.filesystem.deny_write_paths.push(root.clone());
-        }
+    if context.actor_call.is_some() {
         policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
-    }
-    if let Some(scope) = policy.filesystem.private_delivery.take() {
-        policy.filesystem.deny_read_paths.push(scope.root.clone());
-        policy.filesystem.deny_write_paths.push(scope.root);
     }
     policy.filesystem.deny_read_paths.sort();
     policy.filesystem.deny_read_paths.dedup();
@@ -1405,7 +1397,6 @@ mod tests {
                 readable_roots: Vec::new(),
                 writable_roots: Vec::new(),
                 deny_read_paths: Vec::new(),
-                private_delivery: None,
                 bound_roots: Vec::new(),
                 deny_write_paths: Vec::new(),
             },

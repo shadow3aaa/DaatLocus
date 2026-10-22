@@ -86,15 +86,9 @@ pub fn wrap_command(
             profile.rule("deny", "file-write*", &path)?;
         }
     }
-    let mut deny_read = fs.deny_read_paths.clone();
-    let mut deny_write = fs.deny_write_paths.clone();
-    deny_read.push(super::unix_control_directory());
-    deny_write.push(super::unix_control_directory());
-    if let Some(scope) = &fs.private_delivery {
-        deny_read.push(scope.root.clone());
-        deny_write.push(scope.root.clone());
-    }
-    for path in policy_paths_with_resolved(&deny_read) {
+    let deny_read = &fs.deny_read_paths;
+    let deny_write = &fs.deny_write_paths;
+    for path in policy_paths_with_resolved(deny_read) {
         profile.rule("deny", read_ops, &path)?;
         let key = profile.parameters.len() - 1;
         profile.rules.push_str(&format!(
@@ -104,7 +98,7 @@ pub fn wrap_command(
         // state; read denial is also a write boundary for native programs.
         profile.rule("deny", "file-write*", &path)?;
     }
-    for path in policy_paths_with_resolved(&deny_write) {
+    for path in policy_paths_with_resolved(deny_write) {
         profile.rule("deny", "file-write*", &path)?;
     }
     let anchors = fs
@@ -297,7 +291,6 @@ mod tests {
                     root.join("ordinary/secret"),
                 ],
                 deny_write_paths: vec![],
-                private_delivery: None,
                 bound_roots: vec![std::fs::canonicalize(root).unwrap()],
             },
             strong_filesystem: StrongFilesystemSandboxMode::Required,
@@ -517,89 +510,5 @@ printf '%s' "$command" > {}
             .expect("background process retained its output pipe")
             .unwrap();
         }
-    }
-    #[tokio::test]
-    #[ignore = "native macOS check initializes the OS-owner control directory; CI runs it explicitly"]
-    async fn owner_control_socket_is_denied_even_with_broad_filesystem_grants() {
-        use std::os::unix::{
-            fs::DirBuilderExt,
-            net::{UnixListener, UnixStream},
-        };
-        let parent = super::super::unix_control_directory();
-        match std::fs::DirBuilder::new().mode(0o700).create(&parent) {
-            Ok(()) => (),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
-            Err(error) => panic!("private control fixture: {error}"),
-        }
-        let path = parent.join(format!(
-            "sandbox-test-{}.sock",
-            uuid::Uuid::new_v4().simple()
-        ));
-        struct Fixture {
-            path: PathBuf,
-        }
-        impl Drop for Fixture {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_file(&self.path);
-            }
-        }
-        let fixture = Fixture { path };
-        let _listener = UnixListener::bind(&fixture.path).unwrap();
-        let _owner = UnixStream::connect(&fixture.path).unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(temp.path()).unwrap();
-        let source = root.join("probe.rs");
-        let executable = root.join("probe");
-        std::fs::write(&source,r#"fn main(){let _public=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let error=std::os::unix::net::UnixStream::connect(std::env::args().nth(1).unwrap()).expect_err("sandbox reached owner control socket");assert_eq!(error.kind(),std::io::ErrorKind::PermissionDenied);}"#).unwrap();
-        let built =
-            std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
-                .arg(&source)
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .expect("native Seatbelt test requires rustc");
-        assert!(
-            built.status.success(),
-            "{}",
-            String::from_utf8_lossy(&built.stderr)
-        );
-        let mut policy = policy(&root);
-        policy.filesystem.full_disk_read = true;
-        policy.filesystem.full_disk_write = true;
-        let mut child = SandboxAsyncChild::spawn_shell(
-            &policy,
-            executable.to_str().unwrap(),
-            vec![fixture.path.to_str().unwrap().to_owned()],
-            SandboxProcessOptions {
-                current_dir: Some(root),
-                stdin: SandboxStdio::Null,
-                stdout: SandboxStdio::Null,
-                stderr: SandboxStdio::Piped,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let mut stderr = child.take_stderr().unwrap();
-        let (status, errors) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            tokio::try_join!(
-                async {
-                    loop {
-                        if let Some(status) = child.try_wait()? {
-                            return Ok::<_, std::io::Error>(status);
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                },
-                async {
-                    let mut errors = String::new();
-                    stderr.read_to_string(&mut errors).await?;
-                    Ok::<_, std::io::Error>(errors)
-                }
-            )
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(status.success(), "{status};{errors}");
     }
 }

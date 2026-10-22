@@ -56,9 +56,6 @@ jobs:
       - name: Check macOS native host integration
         if: runner.os == 'macOS'
         run: cargo clippy --locked -p daat-locus-app --features native-contract --all-targets -- -D warnings
-      - name: Check required macOS private control isolation
-        if: runner.os == 'macOS'
-        run: cargo test --locked -p daat-locus --lib sandbox::macos::tests::owner_control_socket_is_denied_even_with_broad_filesystem_grants -- --ignored --exact
       - name: Check approved native Terminal scope
         if: runner.os != 'Windows'
         run: cargo test --locked -p daat-locus --lib actors::approval::tests::approved_terminal_scope_runs_natively_only_after_explicit_retry -- --ignored --exact

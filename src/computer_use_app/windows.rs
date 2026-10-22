@@ -288,7 +288,7 @@ struct Host {
     returning: BTreeMap<String, Taken>,
     hooks: HashMap<ThreadKey, WindowInput>,
     workspace: Option<VirtualWorkspace>,
-    private_roots: Vec<PathBuf>,
+    deny_read_paths: Vec<PathBuf>,
     effect_started: bool,
     hook_dll: PathBuf,
     launcher_exe: Option<PathBuf>,
@@ -307,7 +307,7 @@ impl Host {
             returning: BTreeMap::new(),
             hooks: HashMap::new(),
             workspace: None,
-            private_roots: Vec::new(),
+            deny_read_paths: Vec::new(),
             effect_started: false,
             hook_dll: std::env::current_exe()
                 .ok()
@@ -366,13 +366,7 @@ impl Host {
             return Err(miette!("ComputerUse host belongs to another Actor"));
         }
         self.epoch = context.turn_epoch;
-        self.private_roots = context
-            .actor_call
-            .as_ref()
-            .map(|call| call.private_roots.clone())
-            .unwrap_or_default();
-        self.private_roots
-            .extend(context.sandbox_policy.filesystem.deny_read_paths.clone());
+        self.deny_read_paths = context.sandbox_policy.filesystem.deny_read_paths.clone();
         if cancelled.load(Ordering::Acquire) {
             return Err(miette!("ComputerUse cancelled before dispatch"));
         }
@@ -710,7 +704,10 @@ impl Host {
             .to_string_lossy()
             .to_lowercase();
         if stem.starts_with("daat-locus")
-            || self.private_roots.iter().any(|root| path.starts_with(root))
+            || self
+                .deny_read_paths
+                .iter()
+                .any(|root| path.starts_with(root))
         {
             return false;
         }
@@ -724,8 +721,15 @@ impl Host {
             .clone();
         if !app.launch.starts_with("shell:AppsFolder\\") {
             let path = Path::new(&app.launch);
-            if !path.is_file() || self.private_roots.iter().any(|root| path.starts_with(root)) {
-                return Err(miette!("application launch path is unavailable or private"));
+            if !path.is_file()
+                || self
+                    .deny_read_paths
+                    .iter()
+                    .any(|root| path.starts_with(root))
+            {
+                return Err(miette!(
+                    "application launch path is unavailable or denied by the current sandbox policy"
+                ));
             }
         }
         // Prepare the destination before the application's first window exists.

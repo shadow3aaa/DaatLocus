@@ -247,38 +247,6 @@ fn prepare_masks(policy: &RuntimeSandboxPolicy) -> io::Result<Vec<Arc<Mask>>> {
                         use std::os::unix::ffi::OsStrExt;
                         let name = std::ffi::CString::new(prefix.file_name().unwrap().as_bytes())
                             .map_err(io::Error::other)?;
-                        if prefix == super::super::unix_control_directory() {
-                            // This persistent infrastructure directory must stay
-                            // a directory if the maintenance server binds later.
-                            let result =
-                                unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
-                            if result < 0
-                                && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
-                            {
-                                return Err(io::Error::last_os_error());
-                            }
-                            let descriptor = unsafe {
-                                libc::openat(
-                                    parent.as_raw_fd(),
-                                    name.as_ptr(),
-                                    libc::O_PATH
-                                        | libc::O_DIRECTORY
-                                        | libc::O_NOFOLLOW
-                                        | libc::O_CLOEXEC,
-                                )
-                            };
-                            if descriptor < 0 {
-                                return Err(io::Error::last_os_error());
-                            }
-                            let directory = unsafe { File::from_raw_fd(descriptor) };
-                            if directory.metadata()?.uid() != unsafe { libc::geteuid() } {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::PermissionDenied,
-                                    "Control directory has a different OS owner",
-                                ));
-                            }
-                            break;
-                        }
                         let descriptor = unsafe {
                             libc::openat(
                                 parent.as_raw_fd(),
@@ -380,12 +348,6 @@ pub fn spawn_restricted_async(
     })?;
     // Fail before creating any workload on kernels without stable process handles.
     drop(pidfd(std::process::id() as i32)?);
-    let mut policy = policy.clone();
-    if let Some(scope) = policy.filesystem.private_delivery.take() {
-        policy.filesystem.deny_read_paths.push(scope.root.clone());
-        policy.filesystem.deny_write_paths.push(scope.root);
-    }
-    let policy = &policy;
     let masks = prepare_masks(policy)?;
     let mut filesystem = policy.filesystem.clone();
     let boundary = |path: &mut PathBuf| {
@@ -630,9 +592,8 @@ mod tests {
                     root: root.to_owned(),
                     read_only_subpaths: vec![],
                 }],
-                deny_read_paths: vec![crate::sandbox::unix_control_directory()],
-                deny_write_paths: vec![crate::sandbox::unix_control_directory()],
-                private_delivery: None,
+                deny_read_paths: vec![],
+                deny_write_paths: vec![],
                 bound_roots: vec![root.to_owned()],
             },
             strong_filesystem: StrongFilesystemSandboxMode::Required,
@@ -821,10 +782,6 @@ fn main() {
             String::from_utf8_lossy(&output.stderr)
         );
         let child = spawn(&policy(temp.path()), temp.path(), "exec ./probe");
-        assert!(
-            crate::sandbox::unix_control_directory().is_dir(),
-            "maintenance startup must not inherit a file mountpoint"
-        );
         let (status, out, err) = collect(child).await;
         assert!(status.success(), "{status};out={out};err={err}");
     }

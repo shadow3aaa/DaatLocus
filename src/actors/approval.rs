@@ -659,6 +659,13 @@ mod tests {
         mode: ApprovalMode,
         reviewer: Arc<Reviewer>,
     ) -> (tempfile::TempDir, ActorSystem, ActorRecord, MessageRecord) {
+        fixture_with_config(mode, reviewer, |_, _| {}).await
+    }
+    async fn fixture_with_config(
+        mode: ApprovalMode,
+        reviewer: Arc<Reviewer>,
+        configure: impl FnOnce(&mut Config, &std::path::Path),
+    ) -> (tempfile::TempDir, ActorSystem, ActorRecord, MessageRecord) {
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -685,6 +692,7 @@ mod tests {
                 api_key: "unused-test-key".into(),
             },
         );
+        configure(&mut config, dir.path());
         let system = ActorSystem::open_paused_with_factory(
             dir.path().join("data"),
             workspace,
@@ -2171,16 +2179,6 @@ mod tests {
             // Validate Terminal's actual admission path without requiring a
             // platform-native process sandbox in this isolated approval test.
             app.before_tool_call(&call, &effective).unwrap();
-            assert!(
-                effective
-                    .actor_call
-                    .as_ref()
-                    .unwrap()
-                    .private_roots
-                    .iter()
-                    .all(|root| !properties.starts_with(root)),
-                "native processes must not receive an implicit runtime-directory deny root"
-            );
             let result = crate::file_io::read_file(
                 &effective.execution_cwd,
                 &effective.sandbox_policy,
@@ -2369,21 +2367,39 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     #[tokio::test]
-    async fn terminal_private_boundary_is_not_an_approval_candidate() {
+    async fn configured_oauth_fixture_accepts_normal_scoped_approval() {
         use crate::app::App;
-        let reviewer = Arc::new(Reviewer::new(ReviewReply::Fail));
-        let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
+            json!({"decision":"approve","reason":"Read the synthetic fixture explicitly requested"}),
+        )));
+        let (dir, system, actor, message) =
+            fixture_with_config(ApprovalMode::Auto, reviewer.clone(), |config, root| {
+                config.providers.insert(
+                    "fixture-oauth".into(),
+                    ProviderConfig::OpenaiCodexOauth {
+                        base_url: None,
+                        auth_file: root.join(".daat-locus/oauth.json").display().to_string(),
+                    },
+                );
+            })
+            .await;
+        // This is inert fixture content, never a credential or provider request.
+        let path = dir.path().join(".daat-locus/oauth.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "synthetic fixture, not credentials").unwrap();
+        let mut app = crate::files_app::FilesApp::new(dir.path().join("images"), false);
+        let call = AgentToolCall {
+            id: "read-configured-path-fixture".into(),
+            name: "read_file".into(),
+            arguments: json!({"path":path,"start_line":null,"line_count":null}),
+        };
         let base = system.execution_context(&actor, &message).unwrap();
-        let private = system.account_credentials_dir().to_path_buf();
-        std::fs::create_dir_all(&private).unwrap();
-        let call = scoped_terminal_call(&private, &private, &dir.path().join("unrequested"));
-        let mut app = crate::terminal_app::TerminalApp::new();
-        let requested = app.permission_request(&call, &base).unwrap();
-        let review = app.review_requirement(&call, &base).unwrap();
-        assert!(
-            super::authorize(
+        assert!(app.execute_tool(&call, &base).await.is_err());
+        for _ in 0..2 {
+            let base = system.execution_context(&actor, &message).unwrap();
+            let requested = app.permission_request(&call, &base).unwrap();
+            let effective = authorize_with_application(
                 &system,
                 &actor,
                 &message,
@@ -2391,21 +2407,74 @@ mod tests {
                 &ActorControl::default(),
                 &base,
                 &requested,
-                review.as_ref(),
+                None,
             )
             .await
+            .unwrap();
+            let result = app.execute_tool(&call, &effective).await.unwrap();
+            assert_eq!(
+                result.payload["content"],
+                "synthetic fixture, not credentials"
+            );
+            assert!(!effective.sandbox_policy.is_path_writable(&path));
+            assert!(
+                !effective
+                    .sandbox_policy
+                    .is_path_readable(&path.with_file_name("unrequested"))
+            );
+            assert!(!effective.sandbox_policy.filesystem.full_disk_read);
+            assert!(!effective.sandbox_policy.filesystem.full_disk_write);
+        }
+        assert_eq!(reviewer.requests.lock().len(), 1);
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn changed_builtin_can_request_and_receive_an_ordinary_read_grant() {
+        use crate::app::App;
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
+            json!({"decision":"approve","reason":"Read the changed fixture as an ordinary file"}),
+        )));
+        let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(&path, "modified fixture").unwrap();
+        let mut base = system.execution_context(&actor, &message).unwrap();
+        base.sandbox_policy.builtin_resources = vec![crate::builtin_resources::BuiltinResource {
+            path: path.clone(),
+            content: b"original compiled fixture",
+        }];
+        let mut app = crate::files_app::FilesApp::new(dir.path().join("images"), false);
+        let call = AgentToolCall {
+            id: "read-modified-builtin-fixture".into(),
+            name: "read_file".into(),
+            arguments: json!({"path":path,"start_line":null,"line_count":null}),
+        };
+        assert!(app.execute_tool(&call, &base).await.is_err());
+        let requested = app.permission_request(&call, &base).unwrap();
+        assert_eq!(requested.readable_roots, vec![path.clone()]);
+        let effective = authorize_with_application(
+            &system,
+            &actor,
+            &message,
+            &call,
+            &ActorControl::default(),
+            &base,
+            &requested,
+            None,
+        )
+        .await
+        .unwrap();
+        let result = app.execute_tool(&call, &effective).await.unwrap();
+        assert_eq!(result.payload["content"], "modified fixture");
+        assert!(
+            crate::file_io::read_builtin_bytes(
+                &effective.sandbox_policy.builtin_resources[0],
+                1024
+            )
             .is_err()
         );
-        assert!(app.execute_tool(&call, &base).await.is_err());
-        assert!(reviewer.requests.lock().is_empty());
-        assert!(
-            system
-                .store()
-                .approvals(Some(&actor.id), None, 10)
-                .unwrap()
-                .items
-                .is_empty()
-        );
+        assert!(!effective.sandbox_policy.is_path_writable(&path));
+        assert_eq!(reviewer.requests.lock().len(), 1);
         system.shutdown().await;
     }
 

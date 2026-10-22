@@ -543,15 +543,6 @@ impl ActorStore {
             self.commit(tx)
         })
     }
-    pub(crate) fn actor_ids(&self) -> Result<Vec<String>> {
-        database_io(|| {
-            let db = self.db.lock();
-            let mut stmt = sql(db.prepare("SELECT id FROM actors ORDER BY id"))?;
-            sql(stmt.query_map([], |r| r.get(0)))?
-                .collect::<rusqlite::Result<_>>()
-                .into_diagnostic()
-        })
-    }
     #[cfg(test)]
     pub(crate) fn actor_count(&self) -> Result<i64> {
         database_io(|| {

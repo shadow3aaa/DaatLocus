@@ -338,7 +338,8 @@ fn load_openskills_from_roots_with_policy(
     }
 
     // Built-ins are enumerated from the compiled manifest, not by traversing a
-    // permission-exempt directory. The shared reader verifies the published bytes.
+    // permission-exempt directory. Builtin parsing verifies the published bytes,
+    // even when an independent scope permits ordinary reads of modified files.
     if let Some(policy) = policy {
         for resource in &policy.builtin_resources {
             if resource
@@ -545,7 +546,29 @@ fn parse_skill_file(
     scope: OpenSkillScope,
     policy: Option<&RuntimeSandboxPolicy>,
 ) -> Result<OpenSkill, SkillParseError> {
-    let contents = read_skill_text(path, policy).map_err(SkillParseError::Read)?;
+    let contents = if scope == OpenSkillScope::Builtin {
+        let resource = policy
+            .and_then(|policy| {
+                policy
+                    .builtin_resources
+                    .iter()
+                    .find(|resource| resource.path == path)
+            })
+            .ok_or_else(|| {
+                SkillParseError::Read(io::Error::other("builtin manifest entry is unavailable"))
+            })?;
+        let bytes = crate::file_io::read_builtin_bytes(resource, 256 * 1024).map_err(|_| {
+            SkillParseError::Read(io::Error::other("builtin skill content is unverified"))
+        })?;
+        String::from_utf8(bytes).map_err(|_| {
+            SkillParseError::Read(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "skill resource is not UTF-8",
+            ))
+        })?
+    } else {
+        read_skill_text(path, policy).map_err(SkillParseError::Read)?
+    };
     let frontmatter = extract_frontmatter(&contents).ok_or(SkillParseError::MissingFrontmatter)?;
     let parsed: SkillFrontmatter =
         serde_yaml::from_str(&frontmatter).map_err(SkillParseError::InvalidYaml)?;
@@ -1099,6 +1122,12 @@ mod tests {
         assert!(!policy.is_path_writable(&path));
 
         fs::write(&path, "replaced").unwrap();
+        policy.filesystem.deny_read_paths.clear();
+        policy.filesystem.readable_roots.push(path.clone());
+        assert_eq!(
+            crate::file_io::read_authorized_bytes(&path, 1024, &policy).unwrap(),
+            b"replaced"
+        );
         let replaced =
             load_openskills_from_roots_with_policy(Vec::new(), Vec::new(), Some(&policy));
         assert!(replaced.skills.is_empty());

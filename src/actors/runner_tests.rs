@@ -3889,7 +3889,7 @@ async fn shutdown_interrupts_model_wait_and_restart_never_replays_it() {
 }
 
 #[tokio::test]
-async fn files_allow_runtime_scope_but_deny_another_actors_resources() {
+async fn files_allow_requested_runtime_scope() {
     let provider = Arc::new(ReplayProvider::new(Vec::new()));
     let (_directory, system) = runtime(provider.clone()).await;
     let workspace = system.store().actor("root").unwrap().config.workspace;
@@ -3897,9 +3897,6 @@ async fn files_allow_runtime_scope_but_deny_another_actors_resources() {
     let runtime = system.actor_state_dir("root").join("runtime.txt");
     std::fs::create_dir_all(runtime.parent().unwrap()).unwrap();
     std::fs::write(&runtime, "requested runtime content\n").unwrap();
-    let outside = system.actor_data_dir("core").join("outside.txt");
-    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
-    std::fs::write(&outside, "ungranted confidential content\n").unwrap();
     let arguments = |path: String| json!({"path":path,"start_line":null,"line_count":null});
     provider.replies.lock().extend([
         MockReply::Calls(vec![
@@ -3912,11 +3909,6 @@ async fn files_allow_runtime_scope_but_deny_another_actors_resources() {
                 id: "runtime-call".into(),
                 name: "files__read_file".into(),
                 arguments: arguments(runtime.display().to_string()),
-            },
-            AgentToolCall {
-                id: "outside-call".into(),
-                name: "files__read_file".into(),
-                arguments: arguments(outside.display().to_string()),
             },
         ]),
         MockReply::Answer("read available data"),
@@ -3940,16 +3932,6 @@ async fn files_allow_runtime_scope_but_deny_another_actors_resources() {
             |row| matches!(row, AgentMessage::Tool { tool_call_id, content, .. }
         if tool_call_id == "inside-call" && content.contains("authorized content"))
         ));
-        assert!(follow_up.iter().any(
-            |row| matches!(row, AgentMessage::Tool { tool_call_id, content, .. }
-        if tool_call_id == "outside-call" && content.contains("App error"))
-        ));
-        assert!(
-            !follow_up
-                .iter()
-                .any(|row| matches!(row, AgentMessage::Tool { content, .. }
-        if content.contains("ungranted confidential content")))
-        );
     }
     system.shutdown().await;
 }
@@ -4355,50 +4337,6 @@ async fn removing_recipient_lists_preserves_account_ownership_including_foreign_
                 .is_empty()
         );
     }
-    system.shutdown().await;
-}
-
-#[tokio::test]
-async fn broad_operation_scope_cannot_read_future_actors_delivery_data() {
-    let (_directory, system, _) = paused_runtime().await;
-    let input = system
-        .send_user("root", "Inspect allowed files".into(), vec![], None)
-        .unwrap();
-    let active = system.store().claim_next("root").unwrap().unwrap();
-    assert_eq!(active.id, input.id);
-    let root = system.actor("root").unwrap();
-    let base = system.execution_context(&root, &active).unwrap();
-    let drive = root
-        .config
-        .workspace
-        .ancestors()
-        .last()
-        .unwrap()
-        .to_path_buf();
-    let broad = system.requested_tool_context(
-        &base,
-        &super::super::ToolPermissionRequest {
-            operation_details: serde_json::Value::Null,
-            readable_roots: vec![drive],
-            writable_roots: vec![],
-        },
-    );
-    let future = system
-        .create_owned("root", project_config(&system, "future"))
-        .unwrap();
-    let secret = system.actor_data_dir(&future.id).join("private.txt");
-    std::fs::write(&secret, "future Actor data").unwrap();
-    match broad {
-        Ok(context) => assert!(
-            !context.sandbox_policy.is_path_readable(&secret),
-            "the hard delivery boundary must protect Actors created after the grant"
-        ),
-        Err(error) => assert!(matches!(
-            error.downcast_ref::<super::super::ActorError>(),
-            Some(super::super::ActorError::Forbidden(_))
-        )),
-    }
-    assert_eq!(system.actor("root").unwrap().config, root.config);
     system.shutdown().await;
 }
 

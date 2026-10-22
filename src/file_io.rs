@@ -250,7 +250,12 @@ fn unresolved_file_path(cwd: &Path, value: &str) -> Result<PathBuf> {
     let logical = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        cwd.join(path)
+        // Preserve dot components even with a verbatim Windows cwd. The
+        // manifest exemption must see the spelling the caller supplied.
+        let mut joined = cwd.as_os_str().to_os_string();
+        joined.push(std::path::MAIN_SEPARATOR_STR);
+        joined.push(path);
+        PathBuf::from(joined)
     };
     guarded_directory::local_path(&logical)
         .map_err(|_| miette!("remote or device file paths are unsupported"))?;
@@ -265,39 +270,27 @@ pub(crate) fn resolve_read_file_path(
     value: &str,
 ) -> Result<PathBuf> {
     let logical = unresolved_file_path(cwd, value)?;
-    if builtin_resource_for_path(&logical, policy)?.is_some() {
-        // Windows joins against a verbatim cwd normalize dot components.
-        // Check the original input as well, before granting the exemption.
-        if Path::new(value)
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-        {
-            return Err(miette!(
-                "built-in resources require their exact published path"
-            ));
-        }
-        return Ok(logical);
+    if policy.is_path_readable(&logical) {
+        resolve_file_path(cwd, value)
+    } else {
+        // Preserve the spelling for trusted-read validation. A missing or
+        // invalid exemption can still request an ordinary canonical scope.
+        Ok(logical)
     }
-    let actual = resolve_file_path(cwd, value)?;
-    if policy
-        .builtin_resources
-        .iter()
-        .any(|resource| resource.path == actual)
-    {
-        return Err(miette!(
-            "file target changed to a built-in resource during resolution"
-        ));
-    }
-    Ok(actual)
 }
 
 /// This is a file-read exemption, not a new filesystem root or process grant.
-/// A registered target must validate even if the ordinary policy permits it.
+/// Ordinary scoped reads are independent of this verified manifest exemption.
 pub(crate) fn ensure_authorized_read(
     path: &Path,
     policy: &RuntimeSandboxPolicy,
     label: &str,
 ) -> Result<()> {
+    guarded_directory::local_path(path)
+        .map_err(|_| miette!("remote or device file paths are unsupported"))?;
+    if policy.is_path_readable(path) {
+        return Ok(());
+    }
     if let Some(resource) = builtin_resource_for_path(path, policy)? {
         read_builtin_bytes(resource, resource.content.len() as u64)?;
         Ok(())
@@ -307,12 +300,15 @@ pub(crate) fn ensure_authorized_read(
 }
 
 pub(crate) fn read_requires_permission(path: &Path, policy: &RuntimeSandboxPolicy) -> Result<bool> {
-    if let Some(resource) = builtin_resource_for_path(path, policy)? {
-        read_builtin_bytes(resource, resource.content.len() as u64)?;
-        Ok(false)
-    } else {
-        Ok(!policy.is_path_readable(path))
+    guarded_directory::local_path(path)
+        .map_err(|_| miette!("remote or device file paths are unsupported"))?;
+    if policy.is_path_readable(path) {
+        return Ok(false);
     }
+    Ok(!matches!(
+        builtin_resource_for_path(path, policy),
+        Ok(Some(resource)) if read_builtin_bytes(resource, resource.content.len() as u64).is_ok()
+    ))
 }
 
 fn builtin_resource_for_path<'a>(
@@ -329,8 +325,8 @@ fn builtin_resource_for_path<'a>(
         .builtin_resources
         .iter()
         .find(|resource| resource.path == normalized);
-    // An alias of a built-in must not be canonicalized into the exemption,
-    // including when the caller would otherwise have unrestricted access.
+    // An alias of a built-in must not be canonicalized into the exemption.
+    // Independently authorized ordinary reads do not use this classification.
     let resource = match resource {
         Some(resource) => Some(resource),
         None => path.canonicalize().ok().and_then(|actual| {
@@ -389,7 +385,7 @@ fn validate_builtin_handle(
     Ok(())
 }
 
-fn read_builtin_bytes(resource: &BuiltinResource, limit: u64) -> Result<Vec<u8>> {
+pub(crate) fn read_builtin_bytes(resource: &BuiltinResource, limit: u64) -> Result<Vec<u8>> {
     let expected_len = resource.content.len() as u64;
     if expected_len > limit {
         return Err(miette!("file exceeds the size limit"));
@@ -501,7 +497,9 @@ pub(crate) fn read_authorized_bytes(
 ) -> Result<Vec<u8>> {
     guarded_directory::local_path(path)
         .map_err(|_| miette!("remote or device file paths are unsupported"))?;
-    if let Some(resource) = builtin_resource_for_path(path, policy)? {
+    if !policy.is_path_readable(path)
+        && let Some(resource) = builtin_resource_for_path(path, policy)?
+    {
         return read_builtin_bytes(resource, limit);
     }
     policy.ensure_path_readable(path, "file target")?;
@@ -524,17 +522,6 @@ pub(crate) fn read_authorized_bytes(
         }
     }
     let actual = opened_file_path(&file, path)?;
-    if policy
-        .builtin_resources
-        .iter()
-        .any(|resource| resource.path == actual)
-    {
-        // Classification preceded opening. A racing alias must not redirect
-        // the ordinary reader into a published target and skip verification.
-        return Err(miette!(
-            "file target changed to a built-in resource during access"
-        ));
-    }
     policy.ensure_path_readable(&actual, "opened file")?;
     let metadata = file
         .metadata()
@@ -1074,8 +1061,6 @@ mod tests {
         policy.filesystem.full_disk_write = false;
         policy.filesystem.readable_roots.clear();
         policy.filesystem.writable_roots.clear();
-        policy.filesystem.deny_read_paths = vec![root.clone()];
-        policy.filesystem.deny_write_paths = vec![root];
         policy.builtin_resources = vec![BuiltinResource {
             path: path.clone(),
             content: BUILTIN_BYTES,
@@ -1122,18 +1107,26 @@ mod tests {
     }
 
     #[test]
-    fn tampered_builtins_never_fall_back_to_full_access() {
-        let (_directory, mut policy, path) = builtin_fixture();
-        policy.filesystem.full_disk_read = true;
-        policy.filesystem.deny_read_paths.clear();
+    fn changed_builtins_require_ordinary_scope_and_never_gain_manifest_trust() {
+        let (directory, policy, path) = builtin_fixture();
+        let mut approved = policy.clone();
+        approved.filesystem.readable_roots = vec![path.clone()];
         let mut same_length = BUILTIN_BYTES.to_vec();
         same_length[0] = b'X';
         for bytes in [Vec::new(), same_length, [BUILTIN_BYTES, b"extra"].concat()] {
-            fs::write(&path, bytes).unwrap();
-            assert!(policy.is_path_readable(&path));
+            fs::write(&path, &bytes).unwrap();
             assert!(read_authorized_bytes(&path, u64::MAX, &policy).is_err());
             assert!(ensure_authorized_read(&path, &policy, "skill").is_err());
-            assert!(read_requires_permission(&path, &policy).is_err());
+            assert!(read_requires_permission(&path, &policy).unwrap());
+            assert_eq!(
+                read_authorized_bytes(&path, u64::MAX, &approved).unwrap(),
+                bytes
+            );
+            ensure_authorized_read(&path, &approved, "ordinary file").unwrap();
+            assert!(!read_requires_permission(&path, &approved).unwrap());
+            assert!(read_builtin_bytes(&approved.builtin_resources[0], u64::MAX).is_err());
+            assert!(!approved.is_path_readable(&directory.path().join("unrequested")));
+            assert!(!approved.is_path_writable(&path));
         }
     }
 
@@ -1153,10 +1146,10 @@ mod tests {
                 .components()
                 .any(|part| part == Component::ParentDir)
         );
-        assert!(
+        let requested =
             resolve_read_file_path(directory.path(), &policy, &traversal.to_string_lossy())
-                .is_err()
-        );
+                .unwrap();
+        assert!(read_requires_permission(&requested, &policy).unwrap());
         assert!(read_authorized_bytes(&traversal, u64::MAX, &policy).is_err());
         assert!(
             read_file(
@@ -1171,7 +1164,8 @@ mod tests {
         );
         // The caller supplies this relative string directly. In particular,
         // the production cwd join must not erase evidence before validation.
-        assert!(resolve_read_file_path(parent, &policy, "child/../SKILL.md").is_err());
+        let requested = resolve_read_file_path(parent, &policy, "child/../SKILL.md").unwrap();
+        assert!(read_requires_permission(&requested, &policy).unwrap());
         assert!(
             read_file(
                 parent,
@@ -1226,7 +1220,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fs::read(&copied).unwrap(), BUILTIN_BYTES);
-        policy.filesystem.full_disk_write = true;
         assert!(!policy.is_path_writable(&path));
         assert!(
             write_file(
@@ -1266,21 +1259,71 @@ mod tests {
             .is_err()
         );
         assert_eq!(fs::read(&path).unwrap(), BUILTIN_BYTES);
+
+        // A normal directory grant permits mutation, without widening the
+        // manifest exemption or granting unrelated paths.
+        let granted = path.parent().unwrap().to_path_buf();
+        policy.filesystem.readable_roots.push(granted.clone());
+        policy
+            .filesystem
+            .writable_roots
+            .push(crate::sandbox::WritableRoot {
+                root: granted,
+                read_only_subpaths: vec![],
+            });
+        write_file(
+            &root,
+            &policy,
+            &WriteFileArgs {
+                path: path.display().to_string(),
+                content: "replacement".into(),
+                expected_sha256: Some(sha256(BUILTIN_BYTES)),
+            },
+        )
+        .unwrap();
+        edit_file(
+            &root,
+            &policy,
+            &EditFileArgs {
+                path: path.display().to_string(),
+                old_text: "replacement".into(),
+                new_text: "modified".into(),
+                expected_sha256: sha256(b"replacement"),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_authorized_bytes(&path, u64::MAX, &policy).unwrap(),
+            b"modified"
+        );
+        assert!(read_builtin_bytes(&policy.builtin_resources[0], u64::MAX).is_err());
+        copy_file(
+            &root,
+            &policy,
+            &CopyFileArgs {
+                source: copied.display().to_string(),
+                destination: path.display().to_string(),
+                expected_sha256: Some(sha256(b"modified")),
+            },
+        )
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), BUILTIN_BYTES);
+        assert!(
+            !policy.is_path_writable(&path.parent().unwrap().parent().unwrap().join("unrequested"))
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn builtin_symlinks_aliases_and_replaced_ancestors_are_rejected() {
-        let (directory, mut policy, path) = builtin_fixture();
-        // Full access cannot turn an alias into a trusted published resource.
-        policy.filesystem.full_disk_read = true;
-        policy.filesystem.deny_read_paths.clear();
+        let (directory, policy, path) = builtin_fixture();
+        // An alias cannot acquire the manifest's no-scope read exemption.
         let alias = directory.path().join("alias.md");
         std::os::unix::fs::symlink(&path, &alias).unwrap();
         assert!(read_authorized_bytes(&alias, u64::MAX, &policy).is_err());
-        assert!(
-            resolve_read_file_path(directory.path(), &policy, &alias.to_string_lossy()).is_err()
-        );
+        let requested =
+            resolve_read_file_path(directory.path(), &policy, &alias.to_string_lossy()).unwrap();
+        assert!(read_requires_permission(&requested, &policy).unwrap());
 
         let moved_file = directory.path().join("moved.md");
         fs::rename(&path, &moved_file).unwrap();

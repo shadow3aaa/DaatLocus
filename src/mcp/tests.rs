@@ -164,7 +164,6 @@ fn context(directory: &std::path::Path) -> AppToolExecutionContext {
             remote_read_only: false,
             actor_id: "test-actor".into(),
             message_id: "test-request".into(),
-            private_roots: vec![],
             device_policy: None,
         }),
     }

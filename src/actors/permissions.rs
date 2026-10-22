@@ -1,4 +1,4 @@
-//! Filesystem scope, approval-mode inheritance and private storage protection.
+//! Filesystem scope, approval-mode inheritance and OS storage protection.
 use super::{ActorConfig, ActorError};
 use crate::sandbox::{
     FileSystemSandboxPolicy, RuntimeSandboxPolicy, StrongFilesystemSandboxMode, WritableRoot,
@@ -100,16 +100,7 @@ pub(crate) fn approval_strength(mode: super::ApprovalMode) -> u8 {
         super::ApprovalMode::Ask => 2,
     }
 }
-pub fn policy(
-    config: &ActorConfig,
-    own_delivery: &Path,
-    denied: Vec<PathBuf>,
-) -> RuntimeSandboxPolicy {
-    #[cfg(unix)]
-    let denied = denied
-        .into_iter()
-        .chain(std::iter::once(crate::sandbox::unix_control_directory()))
-        .collect::<Vec<_>>();
+pub fn policy(config: &ActorConfig, own_delivery: &Path) -> RuntimeSandboxPolicy {
     let mut readable_roots = config.permissions.readable_roots.clone();
     readable_roots.push(own_delivery.to_path_buf());
     RuntimeSandboxPolicy {
@@ -117,10 +108,6 @@ pub fn policy(
         filesystem: FileSystemSandboxPolicy {
             full_disk_read: false,
             full_disk_write: false,
-            private_delivery: Some(crate::sandbox::PrivateDeliveryScope {
-                root: own_delivery.parent().unwrap_or(own_delivery).to_path_buf(),
-                own_readable: own_delivery.to_path_buf(),
-            }),
             readable_roots,
             bound_roots: config
                 .permissions
@@ -139,11 +126,8 @@ pub fn policy(
                     read_only_subpaths: vec![],
                 })
                 .collect(),
-            deny_read_paths: denied.clone(),
-            deny_write_paths: denied
-                .into_iter()
-                .chain(std::iter::once(own_delivery.to_path_buf()))
-                .collect(),
+            deny_read_paths: Vec::new(),
+            deny_write_paths: Vec::new(),
         },
         strong_filesystem: StrongFilesystemSandboxMode::Required,
     }
@@ -267,30 +251,4 @@ fn windows_private_acl(path: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(all(test, unix))]
-mod sandbox_tests {
-    use super::*;
-    #[test]
-    fn broad_actor_grants_cannot_open_the_owner_control_namespace() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(temp.path()).unwrap();
-        let delivery = root.join("private/delivery");
-        std::fs::create_dir_all(&delivery).unwrap();
-        let config = ActorConfig {
-            name: "worker".into(),
-            workspace: root.join("workspace"),
-            apps: vec![],
-            model: None,
-            instructions: String::new(),
-            permissions: super::super::ActorPermissions::workspace(PathBuf::from("/")),
-        };
-        let policy = policy(&config, &delivery, vec![]);
-        let endpoint = crate::sandbox::unix_control_directory()
-            .join(format!("{}.sock", uuid::Uuid::new_v4().simple()));
-        assert!(!policy.is_path_readable(&endpoint));
-        assert!(!policy.is_path_writable(&endpoint));
-        assert!(policy.is_path_writable(&root.join("workspace/allowed")));
-    }
 }

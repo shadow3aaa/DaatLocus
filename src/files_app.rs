@@ -355,8 +355,6 @@ mod tests {
             root: cwd.clone(),
             read_only_subpaths: vec![],
         }];
-        policy.filesystem.deny_read_paths = vec![root.clone()];
-        policy.filesystem.deny_write_paths = vec![root];
         policy.builtin_resources = vec![crate::builtin_resources::BuiltinResource {
             path: skill.clone(),
             content: BUILTIN_SKILL,
@@ -419,7 +417,8 @@ mod tests {
         let mut modified = BUILTIN_SKILL.to_vec();
         modified[0] = b'X';
         std::fs::write(&skill, modified).unwrap();
-        assert!(manager.permission_request(&call, &context).is_err());
+        let request = manager.permission_request(&call, &context).unwrap();
+        assert_eq!(request.readable_roots, vec![skill.clone()]);
         assert!(manager.validate_tool_call(&call, &context).is_err());
         assert!(manager.execute_tool(&call, &context).await.is_err());
         let catalog = manager.execute_tool(&list, &context).await.unwrap();
@@ -433,8 +432,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_copy_preflight_exempts_only_source_and_denies_mutations() {
-        let (_workspace, _resources, mut context, skill) = builtin_context();
+    async fn builtin_copy_preflight_exempts_only_source_and_requests_mutation_scope() {
+        let (_workspace, _resources, context, skill) = builtin_context();
         let mut app = FilesApp::new(context.execution_cwd.join("images"), false);
         let destination = context.execution_cwd.join("copied.md");
         let copy = AgentToolCall {
@@ -448,7 +447,6 @@ mod tests {
         app.before_tool_call(&copy, &context).unwrap();
         app.execute_tool(&copy, &context).await.unwrap();
         assert_eq!(std::fs::read(&destination).unwrap(), BUILTIN_SKILL);
-        context.sandbox_policy.filesystem.full_disk_write = true;
         assert!(!context.sandbox_policy.is_path_writable(&skill));
 
         for (name, arguments) in [
@@ -495,7 +493,12 @@ mod tests {
             name: "read_file".into(),
             arguments: json!({"path": traversal, "start_line": null, "line_count": null}),
         };
-        assert!(app.permission_request(&call, &context).is_err());
+        assert!(
+            !app.permission_request(&call, &context)
+                .unwrap()
+                .readable_roots
+                .is_empty()
+        );
         assert!(app.before_tool_call(&call, &context).is_err());
 
         let mut relative_context = context.clone();
@@ -506,8 +509,10 @@ mod tests {
             arguments: json!({"path": "child/../SKILL.md", "start_line": null, "line_count": null}),
         };
         assert!(
-            app.permission_request(&relative_call, &relative_context)
-                .is_err()
+            !app.permission_request(&relative_call, &relative_context)
+                .unwrap()
+                .readable_roots
+                .is_empty()
         );
         assert!(
             app.before_tool_call(&relative_call, &relative_context)

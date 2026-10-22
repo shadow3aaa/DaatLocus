@@ -82,8 +82,8 @@ client are connected.
   Apps. Do not retain App access lists, tool allowlists, delegation App ceilings,
   local read-only Actor identities or recipient lists. Hosted Actors perform
   research and filesystem/process/browser work with their project sandbox and
-  Actor-local remembered approvals. Authenticated remote authority and private
-  data isolation remain execution boundaries, independent of App installation.
+  Actor-local remembered approvals. Authenticated remote authority and Actor-resource
+  reference ownership remain execution boundaries, independent of App installation.
 - Actor configuration is internal creation/persistence state, not a user management
   surface. Do not expose editors or client/native RPCs that rewrite Apps, workspace,
   instructions or filesystem roots.
@@ -216,8 +216,8 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   and write grants covering reads. Policy, target or meaningful argument changes
   require a new action fingerprint. Keep remembered grants separate from Actor
   configuration and reclaim them when Actor data is removed by account reset.
-  Never broaden authenticated remote authority, framework credential access or
-  other Actors' private data through review or remembered grants.
+  Never broaden authenticated remote authority or Actor-resource reference
+  ownership through review or remembered grants.
 - Models cannot change the account approval mode. Only Owner settings change it;
   execution resolves the current account mode rather than an Actor's creation snapshot.
   Cancellation/reconfiguration must invalidate waiting approvals.
@@ -228,8 +228,9 @@ Every effect still requires device-side epoch, authorization, approval and sandb
 - Runtime directory names and roots, including `.daat-locus`, have no built-in
   filesystem blacklist. Apply ordinary scoped filesystem review and remembered
   grants to these paths; Terminal must not infer path permissions from command text.
-  Explicit OAuth-file, Actor-resource and native maintenance authority boundaries
-  remain independent of filesystem scope.
+  OAuth files, Actor delivery directories, native maintenance paths and runtime
+  resources follow the same filesystem scope rules. Resource-reference ownership
+  and authenticated maintenance authority remain independent of filesystem scope.
 - Restrictive native process isolation needs platform-specific positive and
   negative tests. Never replace an unavailable sandbox with host execution.
 - Read-only Browser uses bounded HTTP GET without Chrome/page JavaScript,
