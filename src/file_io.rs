@@ -266,6 +266,16 @@ pub(crate) fn resolve_read_file_path(
 ) -> Result<PathBuf> {
     let logical = unresolved_file_path(cwd, value)?;
     if builtin_resource_for_path(&logical, policy)?.is_some() {
+        // Windows joins against a verbatim cwd normalize dot components.
+        // Check the original input as well, before granting the exemption.
+        if Path::new(value)
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+        {
+            return Err(miette!(
+                "built-in resources require their exact published path"
+            ));
+        }
         return Ok(logical);
     }
     let actual = resolve_file_path(cwd, value)?;
@@ -1132,7 +1142,13 @@ mod tests {
         let (directory, policy, path) = builtin_fixture();
         let parent = path.parent().unwrap();
         fs::create_dir(parent.join("child")).unwrap();
-        let traversal = parent.join("child/../SKILL.md");
+        // Path::join would remove `..` from a Windows verbatim fixture path.
+        let traversal = PathBuf::from(format!(
+            "{}{separator}child{separator}..{separator}SKILL.md",
+            parent.display(),
+            separator = std::path::MAIN_SEPARATOR,
+        ));
+        assert!(traversal.components().any(|part| part == Component::ParentDir));
         assert!(
             resolve_read_file_path(directory.path(), &policy, &traversal.to_string_lossy())
                 .is_err()
@@ -1149,6 +1165,38 @@ mod tests {
             )
             .is_err()
         );
+        // The caller supplies this relative string directly. In particular,
+        // the production cwd join must not erase evidence before validation.
+        assert!(resolve_read_file_path(parent, &policy, "child/../SKILL.md").is_err());
+        assert!(
+            read_file(
+                parent,
+                &policy,
+                &ReadFileArgs {
+                    path: "child/../SKILL.md".into(),
+                    ..read_args()
+                },
+            )
+            .is_err()
+        );
+
+        // Dot components remain legal for ordinary authorized files.
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().canonicalize().unwrap();
+        fs::create_dir(root.join("child")).unwrap();
+        fs::write(root.join("ordinary.txt"), "ordinary content\n").unwrap();
+        let mut policy = policy;
+        policy.filesystem.readable_roots = vec![root.clone()];
+        let ordinary = read_file(
+            &root,
+            &policy,
+            &ReadFileArgs {
+                path: "child/../ordinary.txt".into(),
+                ..read_args()
+            },
+        )
+        .unwrap();
+        assert_eq!(ordinary.content, "ordinary content\n");
     }
 
     #[test]
@@ -1254,21 +1302,19 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn builtin_junction_ancestor_is_rejected() {
+        use std::os::windows::{fs::MetadataExt, process::CommandExt};
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
         let (directory, policy, path) = builtin_fixture();
         let parent = path.parent().unwrap();
         let moved = directory.path().join("moved-parent");
         fs::rename(parent, &moved).unwrap();
+        // cmd.exe does not use CRT argument quoting. Keep its command fixed
+        // and relative to the fixture, avoiding verbatim paths in mklink.
         let output = std::process::Command::new("cmd.exe")
-            .args([
-                "/D",
-                "/C",
-                r#"mklink /J "%DL_TEST_JUNCTION%" "%DL_TEST_TARGET%""#,
-            ])
-            .env(
-                "DL_TEST_JUNCTION",
-                directory.path().join("skills/computer-use"),
-            )
-            .env("DL_TEST_TARGET", &moved)
+            .current_dir(directory.path())
+            .args(["/D", "/V:OFF", "/C"])
+            .raw_arg(r#"mklink /J "skills\computer-use" "moved-parent""#)
             .output()
             .expect("Windows junction regression test requires cmd.exe");
         assert!(
@@ -1277,6 +1323,12 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
+        assert_ne!(
+            fs::symlink_metadata(parent).unwrap().file_attributes()
+                & FILE_ATTRIBUTE_REPARSE_POINT,
+            0,
+        );
+        assert_eq!(fs::read(&path).unwrap(), BUILTIN_BYTES);
         assert!(read_authorized_bytes(&path, u64::MAX, &policy).is_err());
     }
 
@@ -1581,3 +1633,4 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), original);
     }
 }
+

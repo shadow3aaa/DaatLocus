@@ -489,7 +489,13 @@ mod tests {
     fn builtin_traversal_and_extra_files_do_not_pass_files_preflight() {
         let (_workspace, _resources, context, skill) = builtin_context();
         let app = FilesApp::new(context.execution_cwd.join("images"), false);
-        let traversal = skill.parent().unwrap().join("child/../SKILL.md");
+        // Preserve the actual traversal instead of normalizing a Windows
+        // verbatim path while constructing the fixture with Path::join.
+        let traversal = format!(
+            "{}{separator}child{separator}..{separator}SKILL.md",
+            skill.parent().unwrap().display(),
+            separator = std::path::MAIN_SEPARATOR,
+        );
         std::fs::create_dir(skill.parent().unwrap().join("child")).unwrap();
         let call = AgentToolCall {
             id: "traversal".into(),
@@ -498,6 +504,16 @@ mod tests {
         };
         assert!(app.permission_request(&call, &context).is_err());
         assert!(app.before_tool_call(&call, &context).is_err());
+
+        let mut relative_context = context.clone();
+        relative_context.execution_cwd = skill.parent().unwrap().to_path_buf();
+        let relative_call = AgentToolCall {
+            id: "relative-traversal".into(),
+            name: "read_file".into(),
+            arguments: json!({"path": "child/../SKILL.md", "start_line": null, "line_count": null}),
+        };
+        assert!(app.permission_request(&relative_call, &relative_context).is_err());
+        assert!(app.before_tool_call(&relative_call, &relative_context).is_err());
 
         let extra = skill.with_file_name("extra.md");
         std::fs::write(&extra, BUILTIN_SKILL).unwrap();
@@ -603,3 +619,4 @@ mod tests {
         );
     }
 }
+
