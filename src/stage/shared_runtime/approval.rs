@@ -14,7 +14,7 @@ impl Controller {
         &self,
         caller: &ActorCallContext,
         stage: StageId,
-        approval_id: String,
+        source: crate::actors::runtime_permissions::ApplicationSource,
         application: crate::actors::ReviewApplication,
     ) -> Result<ApprovalRecord> {
         let runtime = self.runtime()?;
@@ -32,7 +32,7 @@ impl Controller {
                 Request::SubmitApproval {
                     epoch: self.epoch(),
                     message: caller.message_id.clone(),
-                    approval_id,
+                    source,
                     application,
                 },
             )
@@ -48,7 +48,7 @@ impl Controller {
         peer: StageId,
         epoch: u64,
         message: &str,
-        approval_id: &str,
+        source: crate::actors::runtime_permissions::ApplicationSource,
         application: crate::actors::ReviewApplication,
     ) -> Result<Response> {
         self.require_worker(peer, epoch).await?;
@@ -65,13 +65,13 @@ impl Controller {
             .execution_context_with_policy(&actor, &input, Some(actor.config.clone()))
             .map_err(|_| StageError::Forbidden("Approval authority is unavailable"))?;
         let control = ActorControl::default();
-        let future = crate::actors::approval::submit_application(
+        let future = crate::actors::runtime_permissions::submit(
             system,
             &actor,
             &input,
             &control,
             &context,
-            approval_id,
+            source,
             application,
         );
         tokio::pin!(future);

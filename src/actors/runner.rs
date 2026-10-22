@@ -665,7 +665,14 @@ async fn execute_call(
     apps.validate_tool_call(call, &context)?;
     // Persist the intent before executing effects. Recovery exposes the
     // interrupted call, and does not replay it as an apparently fresh request.
-    system.store().tool_started(&actor.id, &message.id, call)?;
+    let native_execution = !apps.delegates_approval(call, &context)?;
+    let result_id = system.store().tool_started_with_authority(
+        &actor.id,
+        &message.id,
+        call,
+        fresh_actor.remote_read_only,
+        native_execution,
+    )?;
     if actor.id == crate::stage::shared::ACTOR_ID {
         system.checkpoint_core().await?;
     }
@@ -681,6 +688,9 @@ async fn execute_call(
     };
     match outcome {
         None => {
+            system
+                .store()
+                .discard_tool_result_reference(&actor.id, &message.id, &call.id)?;
             record_tool_error(
                 system,
                 actor,
@@ -704,59 +714,104 @@ async fn execute_call(
                 check_interruption(system, control, message)?;
                 return Ok(Vec::new());
             }
-            record_tool_error(
-                system,
-                actor,
-                message,
-                call,
-                &system.safe_error(&error.to_string()),
-                history,
-            )?;
+            let mut result = super::runtime_permissions::error_result(system, &error);
+            if native_execution {
+                super::runtime_permissions::attach_reference(
+                    system,
+                    actor,
+                    message,
+                    call,
+                    &context,
+                    &result_id,
+                    &mut result,
+                    Some(&error),
+                )?;
+            }
+            finish_tool_result(system, actor, message, call, &context, result, history)?;
             check_interruption(system, control, message)?;
             Ok(Vec::new())
         }
         Some(Ok(mut result)) => {
-            let images = crate::resources::capture_images(system, &actor.id, result.model_images)?;
-            let references =
-                crate::resources::bind_image_resources(system, &actor.id, &message.id, &images)?;
-            let custom_content = result.model_content.is_some();
-            let embedded_references = if !references.is_empty()
-                && let Some(payload) = result.payload.as_object_mut()
-            {
-                payload.insert("resource_references".into(), json!(&references));
-                true
-            } else {
-                false
-            };
-            let mut full_text = result
-                .model_content
-                .unwrap_or_else(|| result.payload.to_string());
-            if !references.is_empty() && (custom_content || !embedded_references) {
-                full_text.push_str(&format!("\n{}", json!({"resource_references":references})));
+            if native_execution {
+                super::runtime_permissions::attach_reference(
+                    system,
+                    actor,
+                    message,
+                    call,
+                    &context,
+                    &result_id,
+                    &mut result,
+                    None,
+                )?;
             }
-            let model_content = crate::resources::bound_output(
-                system,
-                &actor.id,
-                &call.id,
-                &full_text,
-                context.tool_output_max_tokens,
-                result.overflow_continuation,
-            )?;
-            system.store().tool_finished(
-                &actor.id,
-                &message.id,
-                call,
-                result.payload,
-                &model_content,
-                &result.summary,
-                result.failure.as_deref(),
-            )?;
-            let tool = AgentMessage::tool(&call.id, &call.name, model_content);
-            history.push(tool);
+            let images =
+                finish_tool_result(system, actor, message, call, &context, result, history)?;
             check_interruption(system, control, message)?;
             Ok(images)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_tool_result(
+    system: &ActorSystem,
+    actor: &ActorRecord,
+    message: &MessageRecord,
+    call: &AgentToolCall,
+    context: &AppToolExecutionContext,
+    mut result: crate::app::AppToolExecutionResult,
+    history: &mut Vec<AgentMessage>,
+) -> Result<Vec<crate::model_protocol::AgentContentPart>> {
+    let images = crate::resources::capture_images(system, &actor.id, result.model_images)?;
+    let references =
+        crate::resources::bind_image_resources(system, &actor.id, &message.id, &images)?;
+    let custom_content = result.model_content.is_some();
+    let embedded_references = if !references.is_empty()
+        && let Some(payload) = result.payload.as_object_mut()
+    {
+        payload.insert("resource_references".into(), json!(&references));
+        true
+    } else {
+        false
+    };
+    let mut full_text = result
+        .model_content
+        .unwrap_or_else(|| result.payload.to_string());
+    if !references.is_empty() && (custom_content || !embedded_references) {
+        full_text.push_str(&format!("\n{}", json!({"resource_references":references})));
+    }
+    let mut model_content = crate::resources::bound_output(
+        system,
+        &actor.id,
+        &call.id,
+        &full_text,
+        context.tool_output_max_tokens,
+        result.overflow_continuation,
+    )?;
+    if let Some(reference) = &result.permission_reference {
+        reference.append_to(&mut model_content);
+    }
+    system.store().tool_finished_with_reference(
+        &actor.id,
+        &message.id,
+        call,
+        result.payload,
+        &model_content,
+        &result.summary,
+        result.failure.as_deref(),
+        result
+            .permission_reference
+            .as_ref()
+            .map(|reference| reference.tool_result_id.as_str()),
+    )?;
+    let content = if result.failure.is_some() {
+        format!("App error: {model_content}")
+    } else {
+        model_content
+    };
+    let tool = AgentMessage::tool(&call.id, &call.name, content);
+    history.push(tool);
+    Ok(images)
 }
 
 fn record_tool_application_required(
@@ -768,6 +823,9 @@ fn record_tool_application_required(
     history: &mut Vec<AgentMessage>,
 ) -> Result<()> {
     let content = reference.required_content();
+    system
+        .store()
+        .discard_tool_result_reference(&actor.id, &message.id, &call.id)?;
     system.store().tool_finished(
         &actor.id,
         &message.id,
@@ -790,6 +848,9 @@ fn record_tool_rejection(
     history: &mut Vec<AgentMessage>,
 ) -> Result<()> {
     let content = rejection.model_content();
+    system
+        .store()
+        .discard_tool_result_reference(&actor.id, &message.id, &call.id)?;
     system.store().tool_finished(
         &actor.id,
         &message.id,

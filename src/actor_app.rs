@@ -190,9 +190,41 @@ struct AppealApprovalArgs {
 #[serde(deny_unknown_fields)]
 struct RequestApprovalArgs {
     stage_id: Option<String>,
-    approval_id: String,
+    approval_id: Option<String>,
+    tool_result_id: Option<String>,
+    readable_roots: Option<Vec<String>>,
+    writable_roots: Option<Vec<String>>,
     task: String,
     reason: String,
+}
+impl RequestApprovalArgs {
+    fn source(&self) -> Result<crate::actors::runtime_permissions::ApplicationSource> {
+        use crate::actors::runtime_permissions::ApplicationSource;
+        match (
+            &self.approval_id,
+            &self.tool_result_id,
+            &self.readable_roots,
+            &self.writable_roots,
+        ) {
+            (Some(id), None, None, None) if !id.trim().is_empty() => {
+                Ok(ApplicationSource::Approval {
+                    approval_id: id.clone(),
+                })
+            }
+            (None, Some(id), Some(read), Some(write))
+                if !id.trim().is_empty() && (!read.is_empty() || !write.is_empty()) =>
+            {
+                Ok(ApplicationSource::ToolResult {
+                    tool_result_id: id.clone(),
+                    readable_roots: read.iter().map(Into::into).collect(),
+                    writable_roots: write.iter().map(Into::into).collect(),
+                })
+            }
+            _ => Err(miette!(
+                "Use either approval_id with null result/roots, or tool_result_id with explicit readable_roots/writable_roots and null approval_id"
+            )),
+        }
+    }
 }
 
 #[model_schema]
@@ -288,7 +320,7 @@ impl App for ActorApp {
             AppToolSpec { name: "read_resource".into(), description: "Read this Actor's immutable resource by ID or internal resource URI. Text uses UTF-8 byte offsets; null starts at zero. Follow next_offset. Images are attached to model context. A reference never grants access to another Actor.".into(), input_schema: model_schema_for::<ReadResourceArgs>() },
             AppToolSpec { name: "yield".into(), description: "End only this input silently after the current tool group settles. Sends no message or final result and does not complete delegated work. Use while waiting for collaborators or when an update needs no outward response; later results wake you automatically.".into(), input_schema: model_schema_for::<EmptyAppArgs>() },
             AppToolSpec { name: "appeal_approval".into(), description: "Asynchronously forward your own denied automatic approval to Core to ask the Owner. Use the exact source stage_id and approval_id from the denial (null stage_id selects this device) and explain the request in natural language. Does not wait, execute the call or grant permission. Repeating the same appeal does not send another question. This control operation needs no review.".into(), input_schema: model_schema_for::<AppealApprovalArgs>() },
-            AppToolSpec { name: "request_approval".into(), description: "Submit an immutable approval reference returned by a tool, your current task and the reason that exact operation and scope are needed. Null stage_id selects this device. Reviews only that Actor's active request, cannot change the operation, and never executes it. After approval recheck the target and retry the original tool with its declared arguments. A denial may be appealed to Core. This control operation needs no review.".into(), input_schema: model_schema_for::<RequestApprovalArgs>() },
+            AppToolSpec { name: "request_approval".into(), description: "Submit either an immutable approval_id (null result and roots), or a tool_result_id with explicit absolute readable_roots/writable_roots (null approval_id), your current task and reason. A result reference does not establish a denial; propose only the exact missing scope supported by its output. Null stage_id selects this device. Reviews only that Actor's active request, cannot change the operation, and never executes it. After approval recheck the target and retry the original tool with its declared arguments. A denial may be appealed to Core. This control operation needs no review.".into(), input_schema: model_schema_for::<RequestApprovalArgs>() },
         ];
         if self.actor_id == crate::stage::shared::ACTOR_ID && self.system.local_core() {
             tools.push(AppToolSpec{name:"devices".into(),description:"Read the current device identity. This account runs purely locally; hosted Actor operations use this device.".into(),input_schema:model_schema_for::<EmptyAppArgs>()});
@@ -432,6 +464,7 @@ impl App for ActorApp {
             "request_approval" => {
                 let args: RequestApprovalArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                let source = args.source()?;
                 let source_stage = self.approval_stage(args.stage_id.as_deref())?.to_string();
                 let application = crate::actors::ReviewApplication {
                     task: args.task,
@@ -443,7 +476,7 @@ impl App for ActorApp {
                     core.submit_approval_application(
                         caller,
                         self.approval_stage(args.stage_id.as_deref())?,
-                        args.approval_id,
+                        source,
                         application,
                     )
                     .await
@@ -452,13 +485,13 @@ impl App for ActorApp {
                     self.require_local_stage(args.stage_id.as_deref())?;
                     let actor = self.system.record_for_tool(&self.actor_id, caller)?;
                     let message = self.system.store().message(&caller.message_id)?;
-                    crate::actors::approval::submit_application(
+                    crate::actors::runtime_permissions::submit(
                         &self.system,
                         &actor,
                         &message,
                         &crate::actors::ActorControl::default(),
                         context,
-                        &args.approval_id,
+                        source,
                         application,
                     )
                     .await?
@@ -1057,5 +1090,54 @@ mod tests {
             schema["properties"]["workspace"]["type"],
             json!(["string", "null"])
         );
+    }
+    #[test]
+    fn approval_application_requires_one_unambiguous_reference_and_portable_roots() {
+        crate::schema_utils::validate_model_facing_schema(
+            &model_schema_for::<RequestApprovalArgs>(),
+        )
+        .unwrap();
+        let base = json!({"stage_id":null,"approval_id":null,"tool_result_id":null,"readable_roots":null,"writable_roots":null,"task":"Fixture task","reason":"Fixture reason"});
+        for (approval, result, read, write, valid) in [
+            (
+                json!("approval"),
+                json!(null),
+                json!(null),
+                json!(null),
+                true,
+            ),
+            (
+                json!(null),
+                json!("result"),
+                json!(["/fixture"]),
+                json!([]),
+                true,
+            ),
+            (json!(null), json!(null), json!(null), json!(null), false),
+            (
+                json!("approval"),
+                json!("result"),
+                json!(["/fixture"]),
+                json!([]),
+                false,
+            ),
+            (json!("approval"), json!(null), json!([]), json!([]), false),
+            (json!(null), json!("result"), json!([]), json!([]), false),
+            (
+                json!(null),
+                json!(""),
+                json!(["/fixture"]),
+                json!([]),
+                false,
+            ),
+        ] {
+            let mut value = base.clone();
+            value["approval_id"] = approval;
+            value["tool_result_id"] = result;
+            value["readable_roots"] = read;
+            value["writable_roots"] = write;
+            let args: RequestApprovalArgs = serde_json::from_value(value).unwrap();
+            assert_eq!(args.source().is_ok(), valid);
+        }
     }
 }

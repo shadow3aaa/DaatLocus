@@ -103,6 +103,8 @@ pub struct EmptyAppArgs {}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppToolExecutionResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_reference: Option<crate::actors::runtime_permissions::PermissionReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
     pub summary: String,
     pub payload: Value,
@@ -118,6 +120,7 @@ pub struct AppToolExecutionResult {
 impl AppToolExecutionResult {
     pub fn new(summary: impl Into<String>, payload: Value, model_content: Option<String>) -> Self {
         Self {
+            permission_reference: None,
             failure: None,
             summary: summary.into(),
             payload,

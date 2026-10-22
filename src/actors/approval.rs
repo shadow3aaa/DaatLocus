@@ -234,6 +234,19 @@ pub async fn authorize(
     .into())
 }
 
+pub(crate) fn validate_application(application: &super::ReviewApplication) -> Result<()> {
+    if application.task.trim().is_empty()
+        || application.reason.trim().is_empty()
+        || application.task.len() + application.reason.len() > 8192
+    {
+        return Err(super::ActorError::Invalid(
+            "State the current task and a bounded reason for this permission".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Submit only a reference and explanation. Stored arguments/scopes are never replaced or executed.
 pub(crate) async fn submit_application(
     system: &ActorSystem,
@@ -244,15 +257,7 @@ pub(crate) async fn submit_application(
     id: &str,
     application: super::ReviewApplication,
 ) -> Result<ApprovalRecord> {
-    if application.task.trim().is_empty()
-        || application.reason.trim().is_empty()
-        || application.task.len() + application.reason.len() > 8192
-    {
-        return Err(super::ActorError::Invalid(
-            "State the current task and a bounded reason for this permission".into(),
-        )
-        .into());
-    }
+    validate_application(&application)?;
     ensure_current(system, actor, message, control)?;
     let record = system.store().approval(id)?;
     if record.actor_id != actor.id
@@ -302,6 +307,15 @@ async fn authorize_record(
     control: &ActorControl,
     record: &ApprovalRecord,
 ) -> Result<()> {
+    if record.mode == ApprovalMode::None {
+        ensure_current(system, actor, message, control)?;
+        let resolved = system.store().resolve_approval(
+            &record.id,
+            ApprovalDecision::Approved,
+            "Permission allowed by the account Full access policy",
+        )?;
+        return apply_decision(system, &resolved);
+    }
     if record.mode == ApprovalMode::Auto {
         let review = if call.arguments.to_string().len() > REVIEW_ARGUMENT_BYTES {
             Err(ReviewFailure::Arguments)
@@ -380,7 +394,7 @@ fn cancelled(control: &ActorControl, message: &MessageRecord) -> bool {
         || control.cancelled.lock().contains(&message.id)
 }
 
-fn ensure_current(
+pub(crate) fn ensure_current(
     system: &ActorSystem,
     actor: &ActorRecord,
     message: &MessageRecord,
@@ -2782,4 +2796,5 @@ mod tests {
         );
         system.shutdown().await;
     }
+    include!("runtime_permission_tests.rs");
 }

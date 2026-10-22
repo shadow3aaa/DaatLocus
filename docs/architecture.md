@@ -815,6 +815,27 @@ App 通过 `review_requirement` 声明哪些操作需要审查、审查标准以
 审批卡，也不能通过 Owner 审批接口直接批准。
 审核独立输入保留来源、实际参数、目标、App 标准与授权范围；执行者说明不能自行授权。
 
+已实际执行的任意 App 调用可附带设备本地 `tool_result_id` 和 `stage_id`，不依赖
+Terminal 参数或特殊包装。保留原 payload、输出、退出码和 running 状态，在输出预算
+裁剪后追加独立引用；引用本身不声称检测到权限拒绝。仅沙箱库的类型化 `AccessDenied`
+可明确指定拒绝的读写目标，并自动生成不可变的 `ApplicationRequired`；原诊断仍保留。
+不从 stderr、操作系统 `PermissionDenied`、errno 或命令文本猜测目标和范围。
+
+`actors__request_approval` 二选一接收现有 `approval_id`，或 `tool_result_id` 加明确的
+绝对路径 `readable_roots` / `writable_roots`，并要求当前任务和理由。后者保存原调用参数，
+只对新提议的未覆盖范围申请审批；已覆盖范围不能冒充新增权限或宣称修复了原生 ACL。
+Auto / Ask 沿用原审查流程，Full access 不等待 Owner、只记住本次允许的精确范围。
+无论哪种来源，批准不会执行或重放原调用。
+
+实际执行开始时在同一事务写入设备本地 provenance；未 started 的 fallback 结果不能补造。
+本地引用绑定结果 UUID、Actor、输入、call、工具名、参数、开始时间和原输入权限摘要。
+仅公共 App 结果适配层在结果落盘的同一事务确认完成资格；普通 done 观察、未确认效果的
+恢复记录及明确审批拒绝不获得可消费的结果引用。
+共享目标设备把本地 provenance 写入现有 `core_app_effects` 的 started 事务，独立于
+协调者同步来的 tools 观察；仅匹配的 completed 效果可被申请消费。检查点、导入与恢复
+只复制观察，不复制执行来源凭据。申请时重新校验源设备、当前活跃输入、原调用权限、
+规范路径绑定和认证远端权限上限；账号工作重置同时删除这些本地凭据。
+
 需要申请与 Ask/Auto 拒绝仅阻止当前操作，不将工具或输入标成执行失败。结果以结构化审批决定
 保留原因、审批 ID 与源设备，实时事件及历史活动呈现未获批准及原因；跨设备转发
 不把这些字段压成错误字符串。Actor 可说明决定或选择已获授权的替代方案，不能

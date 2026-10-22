@@ -203,6 +203,13 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   supplies operation, scope and authority facts. Check existing grants first;
   covered permissions need no new application or review. Task/reason metadata
   never changes semantic fingerprints. Appeal control operations do not require review.
+- A completed App invocation retains its original payload/output and may append a
+  device-local result reference. This does not itself diagnose a sandbox denial.
+  Typed sandbox denials can also supply an immutable approval reference; otherwise
+  the model proposes explicit missing read/write roots through request_approval.
+  Never infer scope from stderr, errno or command text. Result references bind to
+  the original call and current input authority on the device that executed it;
+  copied observations are not native execution proof. Review never replays a call.
 - Ask waits for Owner approval of immutable arguments and requested scope. None
   omits review and can use the operation's requested extra filesystem scope.
   Ask/Auto rejection is a structured permission decision, not a tool or input

@@ -23,8 +23,6 @@ use crate::{
     schema_utils::model_schema_for,
 };
 
-const TERMINAL_SCOPE_RECOVERY: &str = "Check the output and existing effects before issuing another command. If required paths are outside the current filesystem scope, request their exact directories with additional_read_roots/additional_write_roots in a new terminal_exec call for approval.";
-
 pub struct TerminalApp {
     sessions: BTreeMap<String, TerminalSession>,
     output_buffer_capacity: usize,
@@ -219,9 +217,7 @@ impl TerminalApp {
                 output_buffer_capacity,
             )
             .await
-            .map_err(|err| {
-                miette!("failed to spawn terminal process: {err}\n{TERMINAL_SCOPE_RECOVERY}")
-            })?,
+            .map_err(|err| miette!("failed to spawn terminal process: {err}"))?,
         );
         session.approved_roots = ToolPermissionRequest {
             operation_details: serde_json::Value::Null,
@@ -798,16 +794,6 @@ fn tokenize_powershell_words(input: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
-fn terminal_scope_guidance(session: &TerminalSessionState) -> Option<serde_json::Value> {
-    session.exit_code.filter(|code| *code != 0).map(|_| {
-        json!({
-            "kind": "conditional_scope_request",
-            "tool": "terminal_exec",
-            "message": TERMINAL_SCOPE_RECOVERY
-        })
-    })
-}
-
 fn compact_terminal_model_content(
     summary: &str,
     session: &TerminalSessionState,
@@ -820,9 +806,6 @@ fn compact_terminal_model_content(
         format!("session={}", terminal_session_meta(session)),
     ];
     lines.extend(extra_lines.iter().cloned());
-    if session.exit_code.is_some_and(|code| code != 0) {
-        lines.push(TERMINAL_SCOPE_RECOVERY.into());
-    }
     if !output.trim().is_empty() {
         lines.push("output=".to_string());
         lines.push(truncate_terminal_output_for_model(output, max_tokens));
@@ -1073,7 +1056,6 @@ impl App for TerminalApp {
                 Ok(AppToolExecutionResult::new(
                     summary,
                     json!({
-                        "guidance": terminal_scope_guidance(&result.session),
                         "session": result.session,
                         "output": result.output,
                         "output_missed_bytes": result.output_missed_bytes,
@@ -1164,7 +1146,6 @@ impl App for TerminalApp {
                 Ok(AppToolExecutionResult::new(
                     summary,
                     json!({
-                        "guidance": terminal_scope_guidance(&result.session),
                         "session": result.session,
                         "output": result.output,
                         "output_missed_bytes": result.output_missed_bytes,
@@ -1964,7 +1945,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_command_offers_scope_request_without_replaying_effects() {
+    async fn failed_command_retains_output_without_replaying_effects() {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("effect.txt");
         let command = if cfg!(windows) {
@@ -2018,17 +1999,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
         assert!(output.contains("synthetic command failure"));
         assert_eq!(result.payload["running"], false);
-        assert_eq!(
-            result.payload["guidance"]["kind"],
-            "conditional_scope_request"
-        );
-        assert!(
-            result
-                .model_content
-                .as_deref()
-                .unwrap()
-                .contains("additional_read_roots/additional_write_roots")
-        );
         assert!(
             result.payload.get("approval").is_none(),
             "a failed process is not itself an approval decision"

@@ -843,7 +843,7 @@ impl ModelProvider for ReplayProvider {
             MockReply::Calls(vec![AgentToolCall {
                 id: "submit-approval".into(),
                 name: "actors__request_approval".into(),
-                arguments: json!({"stage_id":reference["stage_id"],"approval_id":reference["approval_id"],"task":task,"reason":reason}),
+                arguments: json!({"stage_id":reference["stage_id"],"approval_id":reference["approval_id"],"tool_result_id":null,"readable_roots":null,"writable_roots":null,"task":task,"reason":reason}),
             }])
         } else {
             reply
@@ -6140,5 +6140,286 @@ async fn builtin_skill_metadata_is_discovered_by_workers_but_not_core() {
             .count(),
         1
     );
+    system.shutdown().await;
+}
+
+struct RuntimeScopeFixture {
+    executions: Arc<std::sync::atomic::AtomicUsize>,
+    denied_target: Option<std::path::PathBuf>,
+    permission_denied: bool,
+    output: String,
+}
+#[async_trait]
+impl crate::app::App for RuntimeScopeFixture {
+    fn id(&self) -> crate::app::AppId {
+        crate::app::AppId::new("fixture").unwrap()
+    }
+    fn tool_specs(&self) -> Vec<crate::app::AppToolSpec> {
+        vec![crate::app::AppToolSpec {
+            name: "inspect".into(),
+            description: "Synthetic scope fixture".into(),
+            input_schema: crate::schema_utils::model_schema_for::<crate::app::EmptyAppArgs>(),
+        }]
+    }
+    async fn execute_tool(
+        &mut self,
+        _: &AgentToolCall,
+        context: &AppToolExecutionContext,
+    ) -> Result<crate::app::AppToolExecutionResult> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        if self.permission_denied {
+            return Err(super::super::approval::ApprovalDenied(
+                super::super::approval::ApprovalRejection {
+                    approval_id: "denied-fixture-scope".into(),
+                    stage_id: "fixture-stage".into(),
+                    reason: "Owner declined the exact scope".into(),
+                    mode: super::super::ApprovalMode::Ask,
+                },
+            )
+            .into());
+        }
+        if let Some(target) = &self.denied_target {
+            context
+                .sandbox_policy
+                .ensure_path_readable(target, "fixture input")?;
+        }
+        Ok(crate::app::AppToolExecutionResult::new(
+            "Synthetic output",
+            json!({"output":self.output,"exit_code":0,"running":true}),
+            Some(self.output.clone()),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn runtime_scope_reference_preserves_generic_output_and_never_replays_app() {
+    let (directory, system, _) = paused_runtime().await;
+    let queued = system
+        .send_user("root", "Inspect fixture".into(), vec![], None)
+        .unwrap();
+    let message = system.store().claim_next("root").unwrap().unwrap();
+    assert_eq!(message.id, queued.id);
+    let actor = system.execution_actor(&message).unwrap();
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let output = "prefix result\nchild: Permission denied\nsuffix result";
+    let mut apps = AppManager::new(vec![Box::new(RuntimeScopeFixture {
+        executions: counter.clone(),
+        denied_target: None,
+        permission_denied: false,
+        output: output.into(),
+    })])
+    .unwrap();
+    let call = AgentToolCall {
+        id: "generic-scope-output".into(),
+        name: "fixture__inspect".into(),
+        arguments: json!({}),
+    };
+    let mut history = vec![];
+    execute_call(
+        &system,
+        &actor,
+        &message,
+        &ActorControl::default(),
+        &mut apps,
+        &call,
+        &mut history,
+    )
+    .await
+    .unwrap();
+    let summary = system
+        .store()
+        .tool_summaries(&actor.id, &message.id, None, 10)
+        .unwrap()
+        .items
+        .remove(0);
+    let record = system.store().tool_result(&summary.id).unwrap();
+    assert_eq!(
+        record.payload,
+        json!({"output":output,"exit_code":0,"running":true})
+    );
+    assert!(record.model_content.starts_with(output));
+    let metadata = record
+        .model_content
+        .lines()
+        .find_map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|v| v.get("permission_reference").cloned())
+        })
+        .unwrap();
+    assert_eq!(metadata["tool_result_id"], record.id);
+    assert!(metadata.get("approval_id").is_none());
+    let root = directory.path().join("additional");
+    std::fs::create_dir(&root).unwrap();
+    let context = system.execution_context(&actor, &message).unwrap();
+    let mut actors = crate::actor_app::ActorApp::new(actor.id.clone(), system.clone());
+    let request = AgentToolCall {
+        id: "scope-application".into(),
+        name: "request_approval".into(),
+        arguments: json!({"stage_id":metadata["stage_id"],"approval_id":null,"tool_result_id":metadata["tool_result_id"],"readable_roots":[root],"writable_roots":[],"task":"Inspect fixture","reason":"Read the exact requested additional fixture"}),
+    };
+    let approved = crate::app::App::execute_tool(&mut actors, &request, &context)
+        .await
+        .unwrap();
+    assert_eq!(approved.payload["approval"]["decision"], "approved");
+    assert_eq!(approved.payload["executed"], false);
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        system.store().tool_result(&record.id).unwrap().payload,
+        record.payload
+    );
+    let mut refused_app = AppManager::new(vec![Box::new(RuntimeScopeFixture {
+        executions: counter.clone(),
+        denied_target: None,
+        permission_denied: true,
+        output: String::new(),
+    })])
+    .unwrap();
+    let refused_call = AgentToolCall {
+        id: "explicit-refusal".into(),
+        ..call
+    };
+    execute_call(
+        &system,
+        &actor,
+        &message,
+        &ActorControl::default(),
+        &mut refused_app,
+        &refused_call,
+        &mut history,
+    )
+    .await
+    .unwrap();
+    let refused = system
+        .store()
+        .tool_summaries(&actor.id, &message.id, None, 10)
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|record| record.call_id == refused_call.id)
+        .unwrap();
+    let refused = system.store().tool_result(&refused.id).unwrap();
+    assert_eq!(refused.payload["approval"]["decision"], "denied");
+    assert!(
+        system
+            .store()
+            .native_tool_result(&refused.id, &actor.id, &message.id)
+            .is_err(),
+        "a known denied-result UUID must not become a new scope application"
+    );
+    let mut refused_request = request.clone();
+    refused_request.arguments["tool_result_id"] = json!(refused.id);
+    assert!(
+        crate::app::App::execute_tool(&mut actors, &refused_request, &context)
+            .await
+            .is_err()
+    );
+    assert_eq!(counter.load(Ordering::SeqCst), 2);
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn runtime_scope_typed_app_denial_and_bounded_output_keep_consumable_references() {
+    let (directory, system, _) = paused_runtime().await;
+    system
+        .send_user("root", "Inspect fixture".into(), vec![], None)
+        .unwrap();
+    let message = system.store().claim_next("root").unwrap().unwrap();
+    let actor = system.execution_actor(&message).unwrap();
+    let target = directory.path().join("outside");
+    std::fs::create_dir(&target).unwrap();
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut apps = AppManager::new(vec![Box::new(RuntimeScopeFixture {
+        executions: counter.clone(),
+        denied_target: Some(target.clone()),
+        permission_denied: false,
+        output: String::new(),
+    })])
+    .unwrap();
+    let call = AgentToolCall {
+        id: "typed-internal-denial".into(),
+        name: "fixture__inspect".into(),
+        arguments: json!({}),
+    };
+    execute_call(
+        &system,
+        &actor,
+        &message,
+        &ActorControl::default(),
+        &mut apps,
+        &call,
+        &mut vec![],
+    )
+    .await
+    .unwrap();
+    let summary = system
+        .store()
+        .tool_summaries(&actor.id, &message.id, None, 10)
+        .unwrap()
+        .items
+        .remove(0);
+    let result = system.store().tool_result(&summary.id).unwrap();
+    assert!(result.error.is_some());
+    assert!(
+        result
+            .model_content
+            .starts_with(result.error.as_ref().unwrap())
+    );
+    let reference = result
+        .model_content
+        .lines()
+        .find_map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|v| v.get("permission_reference").cloned())
+        })
+        .unwrap();
+    let approval = system
+        .store()
+        .approval(reference["approval_id"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(
+        approval.decision,
+        super::super::ApprovalDecision::ApplicationRequired
+    );
+    assert_eq!(
+        approval.requested.readable_roots,
+        vec![target.canonicalize().unwrap()]
+    );
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    let huge_call = AgentToolCall {
+        id: "large-output-reference".into(),
+        ..call
+    };
+    let result_id = system
+        .store()
+        .tool_started(&actor.id, &message.id, &huge_call)
+        .unwrap();
+    let mut context = system.execution_context(&actor, &message).unwrap();
+    context.tool_output_max_tokens = 64;
+    let raw = "unaltered fixture output ".repeat(3000);
+    let mut huge = crate::app::AppToolExecutionResult::new(
+        "Large result",
+        json!({"output":raw}),
+        Some(raw.clone()),
+    );
+    super::super::runtime_permissions::attach_reference(
+        &system, &actor, &message, &huge_call, &context, &result_id, &mut huge, None,
+    )
+    .unwrap();
+    finish_tool_result(
+        &system,
+        &actor,
+        &message,
+        &huge_call,
+        &context,
+        huge,
+        &mut vec![],
+    )
+    .unwrap();
+    let saved = system.store().tool_result(&result_id).unwrap();
+    assert_eq!(saved.payload["output"], raw);
+    assert!(saved.model_content.contains(&result_id));
+    assert!(saved.model_content.contains("permission_reference"));
     system.shutdown().await;
 }
