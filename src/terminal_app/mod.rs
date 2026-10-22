@@ -1188,14 +1188,6 @@ fn terminal_process_policy(context: &AppToolExecutionContext) -> RuntimeSandboxP
         policy.filesystem.deny_read_paths.push(scope.root.clone());
         policy.filesystem.deny_write_paths.push(scope.root);
     }
-    for key in [
-        "SSH_AUTH_SOCK",
-        "GPG_AGENT_INFO",
-        "AWS_SESSION_TOKEN",
-        "AZURE_ACCESS_TOKEN",
-    ] {
-        policy.protected_env_vars.push(key.into());
-    }
     policy.filesystem.deny_read_paths.sort();
     policy.filesystem.deny_read_paths.dedup();
     policy.filesystem.deny_write_paths.sort();
@@ -1398,7 +1390,6 @@ mod tests {
                 bound_roots: Vec::new(),
                 deny_write_paths: Vec::new(),
             },
-            protected_env_vars: Vec::new(),
             strong_filesystem: StrongFilesystemSandboxMode::Off,
         }
     }
@@ -1935,18 +1926,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_exec_strips_protected_env_vars() {
-        let _env = EnvOverride::set("DAAT_LOCUS_TEST_ENV", "super-secret-value");
+    async fn terminal_exec_inherits_host_environment_without_name_filtering() {
+        let _env = EnvOverride::set("DAAT_LOCUS_TEST_SECRET_TOKEN", "synthetic inherited value");
         let mut app = TerminalApp::new();
         let mut sandbox_policy = test_sandbox_policy();
-        sandbox_policy
-            .protected_env_vars
-            .push("DAAT_LOCUS_TEST_ENV".to_string());
+        // Exercise inheritance with a scoped policy rather than the disabled shortcut.
+        sandbox_policy.filesystem.full_disk_write = false;
 
         let result = app
             .exec_command_with_progress(
                 TerminalExecCommandRequest {
-                    command: env_value_command("DAAT_LOCUS_TEST_ENV"),
+                    command: env_value_command("DAAT_LOCUS_TEST_SECRET_TOKEN"),
                     session_id: None,
                     workdir: None,
                     sandbox_policy: &sandbox_policy,
@@ -1958,12 +1948,7 @@ mod tests {
             .await
             .expect("env check command should run");
 
-        assert!(
-            result.output.contains("missing"),
-            "protected env var should be removed from terminal child process: {:?}",
-            result.output
-        );
-        assert!(!result.output.contains("super-secret-value"));
+        assert_eq!(result.output.trim(), "synthetic inherited value");
     }
 
     #[tokio::test]

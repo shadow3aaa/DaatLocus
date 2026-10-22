@@ -69,7 +69,6 @@ pub struct RuntimeSandboxPolicy {
     /// Exact compiled instruction files; Files validates bytes without granting native access.
     pub builtin_resources: Vec<crate::builtin_resources::BuiltinResource>,
     pub filesystem: FileSystemSandboxPolicy,
-    pub protected_env_vars: Vec<String>,
     pub strong_filesystem: StrongFilesystemSandboxMode,
 }
 
@@ -89,7 +88,7 @@ pub enum SandboxStdio {
 
 #[derive(Clone, Debug, Default)]
 pub struct SandboxProcessOptions {
-    /// Explicit credentials supplied for this process, never ambient service secrets.
+    /// Process-specific overrides applied to the inherited environment.
     pub environment: Vec<(String, String)>,
     pub current_dir: Option<PathBuf>,
     pub stdin: SandboxStdio,
@@ -239,7 +238,7 @@ impl SandboxAsyncChild {
         let mut command = tokio::process::Command::new(spawn_spec.program);
         command.args(spawn_spec.args);
         let spawn_cancelled = options.spawn_cancelled.clone();
-        apply_tokio_command_options(policy, &mut command, options);
+        apply_tokio_command_options(&mut command, options);
         #[cfg(windows)]
         let _creation = crate::process_spawn::creation_lock()?;
         if spawn_cancelled
@@ -464,11 +463,9 @@ impl AsyncRead for SandboxChildStderr {
 }
 
 fn apply_tokio_command_options(
-    policy: &RuntimeSandboxPolicy,
     command: &mut tokio::process::Command,
     options: SandboxProcessOptions,
 ) {
-    strip_protected_env_from_tokio_command(policy, command);
     command.envs(options.environment);
     if let Some(current_dir) = options.current_dir {
         command.current_dir(current_dir);
@@ -488,20 +485,6 @@ const fn filesystem_policy_requires_backend(policy: &FileSystemSandboxPolicy) ->
         && policy.deny_read_paths.is_empty()
         && policy.deny_write_paths.is_empty()
         && policy.private_delivery.is_none())
-}
-
-fn strip_protected_env_from_tokio_command(
-    policy: &RuntimeSandboxPolicy,
-    command: &mut tokio::process::Command,
-) {
-    for (name, _) in std::env::vars_os() {
-        if name
-            .to_str()
-            .is_some_and(|name| policy.is_env_var_protected(name))
-        {
-            command.env_remove(&name);
-        }
-    }
 }
 
 pub fn normalize_path(path: &Path) -> PathBuf {
@@ -779,14 +762,12 @@ impl RuntimeSandboxPolicy {
         Self {
             filesystem: FileSystemSandboxPolicy::unrestricted(),
             builtin_resources: Vec::new(),
-            protected_env_vars: Vec::new(),
             strong_filesystem: StrongFilesystemSandboxMode::Off,
         }
     }
 
     pub fn is_disabled(&self) -> bool {
         self.filesystem.is_unrestricted()
-            && self.protected_env_vars.is_empty()
             && self.strong_filesystem == StrongFilesystemSandboxMode::Off
     }
 
@@ -797,27 +778,6 @@ impl RuntimeSandboxPolicy {
             base.unwrap_or_else(|| Path::new("/")).join(path)
         };
         normalize_path(&absolute)
-    }
-
-    pub fn is_env_var_protected(&self, name: &str) -> bool {
-        if self.is_disabled() {
-            return false;
-        }
-        Self::is_env_var_protected_by_list(name, &self.protected_env_vars)
-    }
-
-    pub fn is_env_var_protected_by_list(name: &str, protected_env_vars: &[String]) -> bool {
-        let normalized = name.trim();
-        if normalized.is_empty() {
-            return false;
-        }
-        if protected_env_vars
-            .iter()
-            .any(|protected| protected.eq_ignore_ascii_case(normalized))
-        {
-            return true;
-        }
-        is_sensitive_env_var_name(normalized)
     }
 
     pub fn is_path_readable(&self, path: &Path) -> bool {
@@ -920,36 +880,6 @@ impl RuntimeSandboxPolicy {
     }
 }
 
-fn is_sensitive_env_var_name(name: &str) -> bool {
-    const SENSITIVE_MARKERS: &[&str] = &[
-        "API_KEY",
-        "ACCESS_KEY",
-        "SECRET",
-        "TOKEN",
-        "PASSWORD",
-        "PASSWD",
-        "CREDENTIAL",
-        "PRIVATE_KEY",
-    ];
-    SENSITIVE_MARKERS
-        .iter()
-        .any(|marker| ascii_contains_ignore_case(name, marker))
-}
-
-fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
-    let needle_bytes = needle.as_bytes();
-    if needle_bytes.is_empty() {
-        return true;
-    }
-    let haystack_bytes = haystack.as_bytes();
-    haystack_bytes.windows(needle_bytes.len()).any(|window| {
-        window
-            .iter()
-            .zip(needle_bytes)
-            .all(|(left, right)| left.eq_ignore_ascii_case(right))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1025,20 +955,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_secret_env_names_are_case_insensitive() {
-        let policy = RuntimeSandboxPolicy {
-            builtin_resources: Vec::new(),
-            protected_env_vars: vec!["CUSTOM_PROVIDER_TOKEN".into()],
-            ..RuntimeSandboxPolicy::disabled()
-        };
-        assert!(policy.is_env_var_protected("custom_provider_token"));
-        assert!(policy.is_env_var_protected("OPENAI_API_KEY"));
-        assert!(policy.is_env_var_protected("aws_secret_access_key"));
-        assert!(!policy.is_env_var_protected("PATH"));
-        assert!(!policy.is_env_var_protected("SSH_AUTH_SOCK"));
-    }
-
-    #[test]
     fn strong_command_spawn_spec_is_passthrough_when_disabled() {
         let policy = RuntimeSandboxPolicy::disabled();
 
@@ -1056,10 +972,8 @@ mod tests {
 
         assert!(policy.is_disabled());
         assert_eq!(policy.strong_filesystem, StrongFilesystemSandboxMode::Off);
-        assert!(policy.protected_env_vars.is_empty());
         assert!(policy.is_path_readable(Path::new("/home/user/.daat-locus/config.toml")));
         assert!(policy.is_path_writable(Path::new("/repo/src/main.rs")));
-        assert!(!policy.is_env_var_protected("OPENAI_API_KEY"));
 
         let shell_spec =
             policy.shell_spawn_spec("/bin/sh", vec!["-lc".to_string(), "echo ok".to_string()]);
@@ -1116,7 +1030,6 @@ mod tests {
                 private_delivery: None,
                 bound_roots: Vec::new(),
             },
-            protected_env_vars: Vec::new(),
             strong_filesystem: StrongFilesystemSandboxMode::Required,
         };
         let mut write_probes = protected_write_files.to_vec();

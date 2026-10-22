@@ -108,13 +108,6 @@ pub struct Session {
 impl Session {
     pub async fn connect(source: &Source, context: &AppToolExecutionContext) -> Result<Self> {
         source.validate()?;
-        if let Source::Stdio { environment, .. } = source
-            && environment
-                .keys()
-                .any(|key| context.sandbox_policy.is_env_var_protected(key))
-        {
-            return Err(miette!("MCP environment contains a protected variable"));
-        }
         let dirty = Arc::new(AtomicBool::new(false));
         let handler = Handler(dirty.clone());
         let mut child_guard = None;

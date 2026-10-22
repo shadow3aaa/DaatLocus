@@ -35,6 +35,10 @@ fn main() {
             message if message == WM_APP + 75 => {
                 return std::env::var_os("SystemRoot").is_some() as isize;
             }
+            message if message == WM_APP + 76 => {
+                return (std::env::var("DL_GUI_TEST_TOKEN").as_deref()
+                    == Ok("synthetic inherited value")) as isize;
+            }
             WM_CLOSE => {
                 unsafe {
                     DestroyWindow(hwnd);

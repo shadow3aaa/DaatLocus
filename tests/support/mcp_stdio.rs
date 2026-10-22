@@ -33,8 +33,9 @@ fn main() {
                 1
             };
             let text = std::fs::read_to_string(&paths[index]).unwrap_or_else(|_| "denied".into());
-            let value = std::env::var("DL_MCP_FIXTURE").unwrap();
-            format!(r#"{{"content":[{{"type":"text","text":"{value}|{text}"}}],"isError":false}}"#)
+            let value = std::env::var("DL_MCP_FIXTURE_TOKEN").unwrap();
+            let ambient = std::env::var("DL_MCP_AMBIENT_SECRET").unwrap();
+            format!(r#"{{"content":[{{"type":"text","text":"{value}|{ambient}|{text}"}}],"isError":false}}"#)
         } else {
             panic!("unexpected request");
         };

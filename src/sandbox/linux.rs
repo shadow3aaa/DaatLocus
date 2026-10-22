@@ -424,7 +424,6 @@ mod tests {
         let policy = RuntimeSandboxPolicy {
             builtin_resources: Vec::new(),
             filesystem,
-            protected_env_vars: vec![],
             strong_filesystem: StrongFilesystemSandboxMode::Required,
         };
         let script = r#"set -eu

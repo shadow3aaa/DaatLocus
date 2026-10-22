@@ -635,7 +635,6 @@ mod tests {
                 private_delivery: None,
                 bound_roots: vec![root.to_owned()],
             },
-            protected_env_vars: vec![],
             strong_filesystem: StrongFilesystemSandboxMode::Required,
         }
     }

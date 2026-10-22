@@ -104,7 +104,6 @@ pub fn policy(
     config: &ActorConfig,
     own_delivery: &Path,
     denied: Vec<PathBuf>,
-    protected_env_vars: Vec<String>,
 ) -> RuntimeSandboxPolicy {
     #[cfg(unix)]
     let denied = denied
@@ -146,7 +145,6 @@ pub fn policy(
                 .chain(std::iter::once(own_delivery.to_path_buf()))
                 .collect(),
         },
-        protected_env_vars,
         strong_filesystem: StrongFilesystemSandboxMode::Required,
     }
 }
@@ -288,7 +286,7 @@ mod sandbox_tests {
             instructions: String::new(),
             permissions: super::super::ActorPermissions::workspace(PathBuf::from("/")),
         };
-        let policy = policy(&config, &delivery, vec![], vec![]);
+        let policy = policy(&config, &delivery, vec![]);
         let endpoint = crate::sandbox::unix_control_directory()
             .join(format!("{}.sock", uuid::Uuid::new_v4().simple()));
         assert!(!policy.is_path_readable(&endpoint));

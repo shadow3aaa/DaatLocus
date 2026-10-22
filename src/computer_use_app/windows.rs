@@ -289,7 +289,6 @@ struct Host {
     hooks: HashMap<ThreadKey, WindowInput>,
     workspace: Option<VirtualWorkspace>,
     private_roots: Vec<PathBuf>,
-    protected_env: Vec<String>,
     effect_started: bool,
     hook_dll: PathBuf,
     launcher_exe: Option<PathBuf>,
@@ -309,7 +308,6 @@ impl Host {
             hooks: HashMap::new(),
             workspace: None,
             private_roots: Vec::new(),
-            protected_env: Vec::new(),
             effect_started: false,
             hook_dll: std::env::current_exe()
                 .ok()
@@ -368,7 +366,6 @@ impl Host {
             return Err(miette!("ComputerUse host belongs to another Actor"));
         }
         self.epoch = context.turn_epoch;
-        self.protected_env = context.sandbox_policy.protected_env_vars.clone();
         self.private_roots = context
             .actor_call
             .as_ref()
@@ -758,36 +755,10 @@ impl Host {
             .arg(bounds.right.to_string())
             .arg("--bottom")
             .arg(bounds.bottom.to_string())
-            .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .creation_flags(0x0800_0000);
-        for name in [
-            "SystemRoot",
-            "WINDIR",
-            "PATH",
-            "PATHEXT",
-            "USERPROFILE",
-            "USERNAME",
-            "USERDOMAIN",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "TEMP",
-            "TMP",
-            "ProgramFiles",
-            "ProgramFiles(x86)",
-            "ProgramData",
-        ] {
-            if !self
-                .protected_env
-                .iter()
-                .any(|protected| protected.eq_ignore_ascii_case(name))
-                && let Some(value) = std::env::var_os(name)
-            {
-                launcher.env(name, value);
-            }
-        }
         if cancelled.load(Ordering::Acquire) {
             return Err(miette!("launch cancelled before dispatch"));
         }

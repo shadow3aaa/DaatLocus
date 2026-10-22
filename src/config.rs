@@ -251,32 +251,6 @@ impl Config {
             .unwrap_or_else(|| panic!("main_model '{}' not found in models", self.main_model))
     }
 
-    pub fn protected_secret_env_vars(&self) -> Vec<String> {
-        let mut vars = Vec::new();
-        for provider in self.providers.values() {
-            match provider {
-                ProviderConfig::Openai { api_key, .. }
-                | ProviderConfig::AnthropicCompatible { api_key, .. }
-                | ProviderConfig::OpenaiCompatible { api_key, .. } => {
-                    push_secret_env_ref(&mut vars, api_key);
-                }
-                ProviderConfig::GithubCopilot { github_token } => {
-                    push_secret_env_ref(&mut vars, github_token);
-                }
-                ProviderConfig::OpenaiCodexOauth { .. } => {}
-                ProviderConfig::OpenCodeConsoleOauth { .. } => {}
-                ProviderConfig::Ollama { api_key, .. } => {
-                    if let Some(key) = api_key {
-                        push_secret_env_ref(&mut vars, key);
-                    }
-                }
-            }
-        }
-        vars.sort_by_key(|name| name.to_ascii_uppercase());
-        vars.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-        vars
-    }
-
     /// Saved settings may intentionally contain no model; execution still
     /// requires the complete configuration checked by `validate`.
     pub fn validate_settings(&self) -> Result<(), String> {
@@ -317,12 +291,6 @@ impl Config {
             }
         }
         Ok(())
-    }
-}
-
-fn push_secret_env_ref(vars: &mut Vec<String>, value: &str) {
-    if let Some(name) = env_ref_name(value) {
-        vars.push(name);
     }
 }
 
@@ -539,36 +507,6 @@ mod tests {
         assert_eq!(
             normalize_provider_base_url("https://example.com/proxy/v1"),
             "https://example.com/proxy/v1"
-        );
-    }
-
-    #[test]
-    fn protected_secret_env_vars_are_collected_from_config_refs() {
-        let mut config = Config::default();
-        config.providers.insert(
-            "openai".to_string(),
-            ProviderConfig::Openai {
-                api_key: "${OPENAI_API_KEY}".to_string(),
-                base_url: None,
-            },
-        );
-        config.providers.insert(
-            "compatible".to_string(),
-            ProviderConfig::OpenaiCompatible {
-                base_url: "https://example.com/v1".to_string(),
-                api_key: "env:COMPATIBLE_TOKEN".to_string(),
-            },
-        );
-        config.providers.insert(
-            "copilot".to_string(),
-            ProviderConfig::GithubCopilot {
-                github_token: "$GITHUB_TOKEN".to_string(),
-            },
-        );
-
-        assert_eq!(
-            config.protected_secret_env_vars(),
-            vec!["COMPATIBLE_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY",]
         );
     }
 

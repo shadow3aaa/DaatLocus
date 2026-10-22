@@ -1999,7 +1999,6 @@ impl ActorSystem {
                 _ => {}
             }
         }
-        let mut protected_env = config.protected_secret_env_vars();
         #[cfg(target_os = "android")]
         if let Some(application_dir) = daat_locus_paths_sync().root().parent() {
             let paths = daat_locus_paths_sync();
@@ -2014,34 +2013,6 @@ impl ActorSystem {
                 }
             }
         }
-        let inherited_safe = [
-            "PATH",
-            "PATHEXT",
-            "SYSTEMROOT",
-            "WINDIR",
-            "COMSPEC",
-            "TEMP",
-            "TMP",
-            "HOME",
-            "USERPROFILE",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "LANG",
-            "LC_ALL",
-            "LC_CTYPE",
-            "TERM",
-            "NUMBER_OF_PROCESSORS",
-            "PROCESSOR_ARCHITECTURE",
-        ];
-        protected_env.extend(std::env::vars_os().filter_map(|(key, _)| {
-            let key = key.to_string_lossy();
-            let upper = key.to_ascii_uppercase();
-            if !inherited_safe.contains(&upper.as_str()) {
-                Some(key.into_owned())
-            } else {
-                None
-            }
-        }));
         let tool_output_max_tokens = config
             .models
             .get(config.actor_model_name(actor.config.model.as_deref()))
@@ -2050,7 +2021,6 @@ impl ActorSystem {
             &actor.config,
             &self.actor_data_dir(&actor.id),
             denied,
-            protected_env,
         );
         // Only the broker reads verified instruction bytes; native processes get no grant.
         sandbox_policy

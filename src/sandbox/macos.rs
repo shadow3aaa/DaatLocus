@@ -300,7 +300,6 @@ mod tests {
                 private_delivery: None,
                 bound_roots: vec![std::fs::canonicalize(root).unwrap()],
             },
-            protected_env_vars: vec![],
             strong_filesystem: StrongFilesystemSandboxMode::Required,
         }
     }

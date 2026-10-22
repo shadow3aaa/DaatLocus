@@ -438,25 +438,7 @@ fn build_request(
     {
         container = normalized;
     }
-    let mut env = BTreeMap::new();
-    for (key, value) in std::env::vars_os() {
-        let key = key
-            .into_string()
-            .map_err(|_| io::Error::other("MXC requires Unicode environment names"))?;
-        if policy.is_env_var_protected(&key) {
-            continue;
-        }
-        let value = value
-            .into_string()
-            .map_err(|_| io::Error::other("MXC requires Unicode environment values"))?;
-        env.insert(key.to_uppercase(), value);
-    }
-    for (key, value) in &options.environment {
-        if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
-            return Err(io::Error::other("Invalid process environment"));
-        }
-        env.insert(key.to_uppercase(), value.clone());
-    }
+    let mut env = process_environment(std::env::vars_os(), &options.environment)?;
     // SDK resolves native NT namespaces through these variables. Bind them to
     // OS-known directories rather than caller-controlled environment values.
     let windows = platform_roots()?.remove(0);
@@ -501,11 +483,67 @@ fn build_request(
     })
 }
 
+fn process_environment(
+    inherited: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    overrides: &[(String, String)],
+) -> io::Result<BTreeMap<String, String>> {
+    let mut env = BTreeMap::new();
+    for (key, value) in inherited {
+        let key = key
+            .into_string()
+            .map_err(|_| io::Error::other("MXC requires Unicode environment names"))?;
+        let value = value
+            .into_string()
+            .map_err(|_| io::Error::other("MXC requires Unicode environment values"))?;
+        env.insert(key.to_uppercase(), value);
+    }
+    for (key, value) in overrides {
+        if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
+            return Err(io::Error::other("Invalid process environment"));
+        }
+        env.insert(key.to_uppercase(), value.clone());
+    }
+    Ok(env)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sandbox::{FileSystemSandboxPolicy, StrongFilesystemSandboxMode, WritableRoot};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn process_environment_inherits_names_and_preserves_values() {
+        let inherited = [
+            ("Path", r"C:\Tool One\bin;C:\Tool Two\bin;C:\Tool One\bin"),
+            ("PATHEXT", ".CMD;.EXE;.BAT"),
+            ("CARGO_HOME", r"C:\Build Cache\cargo"),
+            ("RUSTUP_HOME", r"C:\Build Cache\rustup"),
+            ("custom_SETTING", "Keep Case and spaces"),
+            ("Override_OPTION", "inherited option"),
+            ("APP_TOKEN", "synthetic token fixture"),
+            ("APP_SECRET", "synthetic secret fixture"),
+        ];
+        let env = process_environment(
+            inherited
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into())),
+            &[("override_option".into(), "explicit override".into())],
+        )
+        .unwrap();
+        assert_eq!(
+            env["PATH"],
+            r"C:\Tool One\bin;C:\Tool Two\bin;C:\Tool One\bin"
+        );
+        assert_eq!(env["PATHEXT"], ".CMD;.EXE;.BAT");
+        assert_eq!(env["CARGO_HOME"], r"C:\Build Cache\cargo");
+        assert_eq!(env["RUSTUP_HOME"], r"C:\Build Cache\rustup");
+        assert_eq!(env["CUSTOM_SETTING"], "Keep Case and spaces");
+        assert_eq!(env["OVERRIDE_OPTION"], "explicit override");
+        assert_eq!(env["APP_TOKEN"], "synthetic token fixture");
+        assert_eq!(env["APP_SECRET"], "synthetic secret fixture");
+        assert!(!env.contains_key("custom_SETTING"));
+    }
 
     fn policy(root: &Path) -> RuntimeSandboxPolicy {
         RuntimeSandboxPolicy {
@@ -523,7 +561,6 @@ mod tests {
                 private_delivery: None,
                 bound_roots: vec![],
             },
-            protected_env_vars: vec![],
             strong_filesystem: StrongFilesystemSandboxMode::Required,
         }
     }
