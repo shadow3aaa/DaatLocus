@@ -798,6 +798,16 @@ fn tokenize_powershell_words(input: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
+fn terminal_scope_guidance(session: &TerminalSessionState) -> Option<serde_json::Value> {
+    session.exit_code.filter(|code| *code != 0).map(|_| {
+        json!({
+            "kind": "conditional_scope_request",
+            "tool": "terminal_exec",
+            "message": TERMINAL_SCOPE_RECOVERY
+        })
+    })
+}
+
 fn compact_terminal_model_content(
     summary: &str,
     session: &TerminalSessionState,
@@ -1063,6 +1073,7 @@ impl App for TerminalApp {
                 Ok(AppToolExecutionResult::new(
                     summary,
                     json!({
+                        "guidance": terminal_scope_guidance(&result.session),
                         "session": result.session,
                         "output": result.output,
                         "output_missed_bytes": result.output_missed_bytes,
@@ -1153,6 +1164,7 @@ impl App for TerminalApp {
                 Ok(AppToolExecutionResult::new(
                     summary,
                     json!({
+                        "guidance": terminal_scope_guidance(&result.session),
                         "session": result.session,
                         "output": result.output,
                         "output_missed_bytes": result.output_missed_bytes,
@@ -1990,8 +2002,9 @@ mod tests {
             }),
         };
         let mut app = TerminalApp::new();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (result, output) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let mut result = app.execute_tool(&call, &context).await.unwrap();
+            let mut output = result.payload["output"].as_str().unwrap().to_string();
             while result.payload["running"].as_bool() == Some(true) {
                 let poll = AgentToolCall {
                     id: "poll-partial-failure".into(),
@@ -2002,13 +2015,20 @@ mod tests {
                     }),
                 };
                 result = app.execute_tool(&poll, &context).await.unwrap();
+                output.push_str(result.payload["output"].as_str().unwrap());
             }
-            result
+            (result, output)
         })
         .await
         .expect("failed command did not finish");
         assert_eq!(result.payload["session"]["exit_code"], 7);
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
+        assert!(output.contains("synthetic command failure"));
+        assert_eq!(result.payload["running"], false);
+        assert_eq!(
+            result.payload["guidance"]["kind"],
+            "conditional_scope_request"
+        );
         assert!(
             result
                 .model_content

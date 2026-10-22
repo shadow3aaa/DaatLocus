@@ -2314,7 +2314,10 @@ mod tests {
             std::fs::read_to_string(writes.join("result.txt")).unwrap(),
             "approved cache data"
         );
-        assert!(!outside.exists(), "native process escaped the approved scope");
+        assert!(
+            !outside.exists(),
+            "native process escaped the approved scope"
+        );
         assert_eq!(reviewer.requests.lock().len(), 1);
         assert_eq!(
             system.store().actor("root").unwrap().config.permissions,
