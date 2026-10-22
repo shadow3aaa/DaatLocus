@@ -5635,7 +5635,9 @@ async fn core_prompt_injects_only_the_account_name_for_local_and_shared_apps() {
     let shared =
         crate::stage::shared_apps::manager(controller, actor.clone(), system.clone()).unwrap();
     for apps in [local, shared] {
-        let prompt = system_prompt(&system, &actor, &apps, &context).await.unwrap();
+        let prompt = system_prompt(&system, &actor, &apps, &context)
+            .await
+            .unwrap();
         assert!(prompt.contains("You are DaatLocus, alice's assistant."));
         assert!(!prompt.contains("{{account_name}}"));
         assert!(!prompt.contains(&account_id));
@@ -5654,7 +5656,9 @@ async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_inval
     let context = system.owner_app_context().unwrap();
     let apps =
         AppManager::new(vec![Box::new(ActorApp::new("core".into(), system.clone()))]).unwrap();
-    let prompt = system_prompt(&system, &actor, &apps, &context).await.unwrap();
+    let prompt = system_prompt(&system, &actor, &apps, &context)
+        .await
+        .unwrap();
     assert!(prompt.contains("You are DaatLocus, the user's assistant."));
     assert!(!prompt.contains("{{account_name}}"));
 
@@ -5663,11 +5667,19 @@ async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_inval
         "invalid account fixture",
     )
     .unwrap();
-    assert!(system_prompt(&system, &actor, &apps, &context).await.is_err());
+    assert!(
+        system_prompt(&system, &actor, &apps, &context)
+            .await
+            .is_err()
+    );
 
     let worker = system.actor("root").unwrap();
     let apps =
         AppManager::new(vec![Box::new(ActorApp::new("root".into(), system.clone()))]).unwrap();
-    assert!(system_prompt(&system, &worker, &apps, &context).await.is_ok());
+    assert!(
+        system_prompt(&system, &worker, &apps, &context)
+            .await
+            .is_ok()
+    );
     system.shutdown().await;
 }
