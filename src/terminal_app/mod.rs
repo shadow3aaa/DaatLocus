@@ -1391,6 +1391,7 @@ mod tests {
 
     fn test_sandbox_policy() -> RuntimeSandboxPolicy {
         RuntimeSandboxPolicy {
+            builtin_resources: Vec::new(),
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: true,
                 full_disk_write: true,

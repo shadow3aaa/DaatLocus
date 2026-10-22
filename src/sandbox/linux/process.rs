@@ -621,6 +621,7 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     fn policy(root: &Path) -> RuntimeSandboxPolicy {
         RuntimeSandboxPolicy {
+            builtin_resources: Vec::new(),
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: false,
                 full_disk_write: false,

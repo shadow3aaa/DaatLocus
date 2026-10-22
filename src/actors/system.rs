@@ -55,6 +55,9 @@ struct Worker {
     task: JoinHandle<()>,
 }
 struct Inner {
+    temporary: Mutex<Option<crate::runtime_temp::RuntimeTemp>>,
+    temporary_root: PathBuf,
+    builtin_resources: Vec<crate::builtin_resources::BuiltinResource>,
     app_registry: Arc<crate::mcp::Registry>,
     #[cfg(windows)]
     computer_workspace: Mutex<Option<Arc<crate::computer_use_app::Workspace>>>,
@@ -434,8 +437,16 @@ impl ActorSystem {
         protect_private_path(&delivery_dir)?;
         let store = ActorStore::open(&data_dir.join("actors.sqlite3"))?;
         store.recover()?;
+        let temporary = crate::runtime_temp::RuntimeTemp::create(
+            &data_dir.with_file_name("runtime"),
+        )?;
+        let builtin_resources = crate::builtin_resources::publish(&temporary)?;
+        let temporary_root = temporary.root().to_path_buf();
         let system = Self {
             inner: Arc::new(Inner {
+                temporary: Mutex::new(Some(temporary)),
+                temporary_root,
+                builtin_resources,
                 #[cfg(windows)]
                 computer_workspace: Mutex::new(None),
                 app_registry: crate::mcp::Registry::open(data_dir.join("apps.json"))?,
@@ -1922,6 +1933,8 @@ impl ActorSystem {
         for (id, worker) in workers {
             let _ = self.stop_actor_worker(&id, worker).await;
         }
+        let temporary = self.inner.temporary.lock().take();
+        drop(temporary);
     }
     pub fn execution_context(
         &self,
@@ -2034,12 +2047,20 @@ impl ActorSystem {
             .models
             .get(config.actor_model_name(actor.config.model.as_deref()))
             .map_or(4096, |model| model.tool_output_max_tokens);
-        let sandbox_policy = super::permissions::policy(
+        let mut sandbox_policy = super::permissions::policy(
             &actor.config,
             &self.actor_data_dir(&actor.id),
             denied,
             protected_env,
         );
+        // Only the broker reads verified instruction bytes; native processes get no grant.
+        sandbox_policy
+            .filesystem
+            .deny_write_paths
+            .push(self.inner.temporary_root.clone());
+        if actor.id != crate::stage::shared::ACTOR_ID {
+            sandbox_policy.builtin_resources = self.inner.builtin_resources.clone();
+        }
         let mut context = AppToolExecutionContext {
             execution_cwd: actor.config.workspace.clone(),
             sandbox_policy,
@@ -3028,4 +3049,33 @@ mod tests {
         assert_eq!(system.actor(FIXTURE_ACTOR_ID).unwrap().config, old);
         assert!(!system.inner.reconfiguring.load(Ordering::Acquire));
     }
+    #[tokio::test]
+    async fn shutdown_releases_only_its_owned_temporary_instance() {
+        let (directory, system) = fixture().await;
+        let instance = system
+            .inner
+            .temporary
+            .lock()
+            .as_ref()
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let survivor = crate::runtime_temp::RuntimeTemp::create(
+            system.inner.temporary_root.parent().unwrap(),
+        )
+        .unwrap();
+        let survivor_path = survivor.path().to_path_buf();
+        let context = system.owner_app_context().unwrap();
+        assert!(!context.sandbox_policy.is_path_writable(&instance));
+        assert!(context.sandbox_policy.builtin_resources.is_empty());
+        assert!(instance.is_dir());
+        system.shutdown().await;
+        assert!(!instance.exists());
+        assert!(survivor_path.is_dir());
+        assert!(system.infrastructure_dir().is_dir());
+        assert!(directory.path().exists());
+        system.shutdown().await;
+        assert!(survivor_path.is_dir());
+    }
+
 }

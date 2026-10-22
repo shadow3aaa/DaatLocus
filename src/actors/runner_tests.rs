@@ -6137,3 +6137,45 @@ async fn runner_prompt_keeps_current_request_authority_and_task_material_guidanc
     }
     system.shutdown().await;
 }
+
+#[tokio::test]
+async fn builtin_skill_metadata_is_discovered_by_workers_but_not_core() {
+    let (directory, system) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
+    let temporary =
+        crate::runtime_temp::RuntimeTemp::create(
+            &directory.path().canonicalize().unwrap().join("fixture-runtime"),
+        )
+            .unwrap();
+    let content = b"---\nname: builtin-prompt-fixture\ndescription: Discover a bundled procedure.\n---\n\nDetailed body stays on disk.\n";
+    let path = temporary
+        .publish(
+            std::path::Path::new("skills/prompt-fixture/SKILL.md"),
+            content,
+        )
+        .unwrap();
+    let mut context = system.owner_app_context().unwrap();
+    assert!(context.sandbox_policy.builtin_resources.is_empty());
+    context.sandbox_policy.filesystem.full_disk_read = false;
+    context.sandbox_policy.filesystem.full_disk_write = false;
+    context.sandbox_policy.filesystem.readable_roots.clear();
+    context.sandbox_policy.filesystem.writable_roots.clear();
+    context.sandbox_policy.filesystem.deny_read_paths = vec![directory.path().into()];
+    context.sandbox_policy.builtin_resources =
+        vec![crate::builtin_resources::BuiltinResource { path, content }];
+    let apps = AppManager::new(vec![]).unwrap();
+    let mut worker = system.actor("root").unwrap();
+    for read_only in [false, true] {
+        worker.remote_read_only = read_only;
+        let prompt = system_prompt(&system, &worker, &apps, &context)
+            .await
+            .unwrap();
+        assert!(prompt.contains("builtin-prompt-fixture"));
+        assert!(!prompt.contains("Detailed body stays on disk."));
+    }
+    let core = system.actor("core").unwrap();
+    let prompt = system_prompt(&system, &core, &apps, &context)
+        .await
+        .unwrap();
+    assert!(!prompt.contains("builtin-prompt-fixture"));
+    system.shutdown().await;
+}

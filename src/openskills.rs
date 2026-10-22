@@ -43,6 +43,7 @@ pub enum OpenSkillScope {
     Project,
     DaatLocusHome,
     User,
+    Builtin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +169,7 @@ impl OpenSkillScope {
             Self::Project => 0,
             Self::DaatLocusHome => 1,
             Self::User => 2,
+            Self::Builtin => 3,
         }
     }
 }
@@ -331,6 +333,33 @@ fn load_openskills_from_roots_with_policy(
                 root_by_skill_path
                     .entry(skill.path.clone())
                     .or_insert_with(|| root_path.clone());
+            }
+        }
+    }
+
+    // Built-ins are enumerated from the compiled manifest, not by traversing a
+    // permission-exempt directory. The shared reader verifies the published bytes.
+    if let Some(policy) = policy {
+        for resource in &policy.builtin_resources {
+            if resource.path.file_name().is_none_or(|name| name != SKILL_FILE_NAME) {
+                continue;
+            }
+            match parse_skill_file(&resource.path, OpenSkillScope::Builtin, Some(policy)) {
+                Ok(skill) => {
+                    let root = resource
+                        .path
+                        .parent()
+                        .and_then(Path::parent)
+                        .unwrap_or(&resource.path)
+                        .to_path_buf();
+                    used_roots.push(root.clone());
+                    root_by_skill_path.insert(skill.path.clone(), root);
+                    catalog.skills.push(skill);
+                }
+                Err(error) => catalog.errors.push(OpenSkillError {
+                    path: resource.path.clone(),
+                    message: error.to_string(),
+                }),
             }
         }
     }
@@ -535,9 +564,14 @@ fn parse_skill_file(
     Ok(OpenSkill {
         name,
         description,
-        path: canonicalize_lossy(path),
+        path: if scope == OpenSkillScope::Builtin {
+            path.to_path_buf()
+        } else {
+            canonicalize_lossy(path)
+        },
         scope,
-        allow_implicit_invocation: load_allow_implicit_invocation(path, policy),
+        allow_implicit_invocation: scope == OpenSkillScope::Builtin
+            || load_allow_implicit_invocation(path, policy),
         user_disabled: false,
     })
 }
@@ -804,7 +838,7 @@ fn display_path(path: &Path) -> String {
 const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r"- Discovery: The list above is the OpenSkills available in this context (name + description + file path). Skill bodies live on disk at the listed paths.
 - Trigger rules: If the user names a skill with `$SkillName` or plain text, or the task clearly matches a skill description above, use that skill for the current turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
 - How to use a skill:
-  1. Before task actions that rely on a skill, use Terminal or Coding tools as needed and read that skill's `SKILL.md` completely.
+  1. Before task actions that rely on a skill, use `files__read_file` to read that skill's `SKILL.md` completely.
   2. Resolve relative paths mentioned by `SKILL.md` relative to the directory containing that `SKILL.md`.
   3. Read only the referenced files needed for the task; avoid loading unrelated `references/`, `scripts/`, or `assets/`.
   4. Prefer running or adapting provided `scripts/` and reusing provided `assets/` or templates when applicable.
@@ -813,7 +847,7 @@ const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r"- Discovery: The list abov
 const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r"- Discovery: The list above is the OpenSkills available in this context (name + description + short path). Expand short paths with the matching alias from `### Skill roots`.
 - Trigger rules: If the user names a skill with `$SkillName` or plain text, or the task clearly matches a skill description above, use that skill for the current turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
 - How to use a skill:
-  1. Expand the listed short `file` path with `### Skill roots`, then use Terminal or Coding tools as needed and read that skill's `SKILL.md` completely before task actions that rely on it.
+  1. Expand the listed short `file` path with `### Skill roots`, then use `files__read_file` to read that skill's `SKILL.md` completely before task actions that rely on it.
   2. Resolve relative paths mentioned by `SKILL.md` relative to the directory containing that expanded `SKILL.md`.
   3. Read only the referenced files needed for the task; avoid loading unrelated `references/`, `scripts/`, or `assets/`.
   4. Prefer running or adapting provided `scripts/` and reusing provided `assets/` or templates when applicable.
@@ -1018,4 +1052,59 @@ mod tests {
         assert!(extract_frontmatter("name: charts\n").is_none());
         assert!(extract_frontmatter("---\n\n---\n").is_none());
     }
+    #[test]
+    fn builtin_catalog_uses_only_verified_manifest_files_under_denied_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let temporary =
+            crate::runtime_temp::RuntimeTemp::create(&directory.path().canonicalize().unwrap().join("runtime"))
+                .unwrap();
+        let content = b"---\nname: builtin-fixture\ndescription: Test bundled discovery.\n---\n\nRead the fixture.\n";
+        let path = temporary
+            .publish(Path::new("skills/fixture/SKILL.md"), content)
+            .unwrap();
+        temporary
+            .publish(
+                Path::new("skills/unlisted/SKILL.md"),
+                b"---\nname: unlisted\ndescription: Not in the manifest.\n---\n",
+            )
+            .unwrap();
+        temporary
+            .publish(
+                Path::new("skills/fixture/agents/openai.yaml"),
+                b"policy:\n  allow_implicit_invocation: false\n",
+            )
+            .unwrap();
+        let mut policy = RuntimeSandboxPolicy::disabled();
+        policy.filesystem.full_disk_read = false;
+        policy.filesystem.full_disk_write = false;
+        policy.filesystem.deny_read_paths = vec![directory.path().into()];
+        policy.builtin_resources = vec![crate::builtin_resources::BuiltinResource {
+            path: path.clone(),
+            content,
+        }];
+        let catalog = load_openskills_from_roots_with_policy(
+            Vec::new(),
+            Vec::new(),
+            Some(&policy),
+        );
+        assert_eq!(catalog.skills.len(), 1);
+        assert_eq!(catalog.skills[0].scope, OpenSkillScope::Builtin);
+        assert!(catalog.skills[0].auto_use_enabled());
+        let prompt = catalog.render_prompt_block().unwrap();
+        assert!(prompt.contains("builtin-fixture"));
+        assert!(!prompt.contains("Read the fixture."));
+        assert!(!prompt.contains("unlisted"));
+        assert!(!policy.is_path_readable(&path));
+        assert!(!policy.is_path_writable(&path));
+
+        fs::write(&path, "replaced").unwrap();
+        let replaced = load_openskills_from_roots_with_policy(
+            Vec::new(),
+            Vec::new(),
+            Some(&policy),
+        );
+        assert!(replaced.skills.is_empty());
+        assert_eq!(replaced.errors.len(), 1);
+    }
+
 }

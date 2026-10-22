@@ -66,6 +66,8 @@ pub struct FileSystemSandboxPolicy {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSandboxPolicy {
+    /// Exact compiled instruction files; Files validates bytes without granting native access.
+    pub builtin_resources: Vec<crate::builtin_resources::BuiltinResource>,
     pub filesystem: FileSystemSandboxPolicy,
     pub protected_env_vars: Vec<String>,
     pub strong_filesystem: StrongFilesystemSandboxMode,
@@ -776,6 +778,7 @@ impl RuntimeSandboxPolicy {
     pub const fn disabled() -> Self {
         Self {
             filesystem: FileSystemSandboxPolicy::unrestricted(),
+            builtin_resources: Vec::new(),
             protected_env_vars: Vec::new(),
             strong_filesystem: StrongFilesystemSandboxMode::Off,
         }
@@ -1024,6 +1027,7 @@ mod tests {
     #[test]
     fn explicit_secret_env_names_are_case_insensitive() {
         let policy = RuntimeSandboxPolicy {
+            builtin_resources: Vec::new(),
             protected_env_vars: vec!["CUSTOM_PROVIDER_TOKEN".into()],
             ..RuntimeSandboxPolicy::disabled()
         };
@@ -1092,6 +1096,7 @@ mod tests {
         std::fs::write(&public_file, "public").expect("write public file");
 
         let policy = RuntimeSandboxPolicy {
+            builtin_resources: Vec::new(),
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: true,
                 full_disk_write: false,
@@ -1370,6 +1375,7 @@ exit 42
     #[test]
     fn shell_spawn_spec_uses_sandbox_exec_on_macos() {
         let policy = RuntimeSandboxPolicy {
+            builtin_resources: Vec::new(),
             strong_filesystem: StrongFilesystemSandboxMode::Required,
             ..RuntimeSandboxPolicy::disabled()
         };

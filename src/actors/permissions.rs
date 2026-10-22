@@ -114,6 +114,7 @@ pub fn policy(
     let mut readable_roots = config.permissions.readable_roots.clone();
     readable_roots.push(own_delivery.to_path_buf());
     RuntimeSandboxPolicy {
+        builtin_resources: Vec::new(),
         filesystem: FileSystemSandboxPolicy {
             full_disk_read: false,
             full_disk_write: false,
