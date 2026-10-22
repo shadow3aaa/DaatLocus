@@ -139,8 +139,7 @@ async fn native_rename_and_delete_preserve_readonly_and_denied_targets() {
     policy.filesystem.deny_write_paths = vec![denied.clone(), denied_dir.clone()];
     let script = protected_script(&root);
     let (status, out, err) = collect(launch(&policy, &root, script)).await;
-    assert!(status.success(), "{status}; stdout={out}; stderr={err}");
-    assert!(out.contains("protected-targets-complete"), "stdout={out}");
+    // Observe host state even if a command's exit status is misleading.
     for path in &files {
         assert_eq!(std::fs::read_to_string(path).unwrap(), "protected");
     }
@@ -163,6 +162,8 @@ async fn native_rename_and_delete_preserve_readonly_and_denied_targets() {
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), targets.len());
     #[cfg(target_os = "windows")]
     assert_eq!(targets.map(|path| dacl(path)), before);
+    assert!(status.success(), "{status}; stdout={out}; stderr={err}");
+    assert!(out.contains("protected-targets-complete"), "stdout={out}");
 }
 
 #[cfg(target_os = "windows")]
@@ -352,11 +353,11 @@ export LC_ALL=C
 printf control > "$root/control.txt"
 mv "$root/control.txt" "$root/control.txt.renamed"
 [ "$(cat "$root/control.txt.renamed")" = control ]
-rm -f "$root/control.txt.renamed"
+rm "$root/control.txt.renamed"
 mkdir "$root/control-directory"
 mv "$root/control-directory" "$root/control-directory.renamed"
 [ -d "$root/control-directory.renamed" ]
-rm -rf "$root/control-directory.renamed"
+rm -r "$root/control-directory.renamed"
 for name in readonly.txt denied.txt readonly-directory denied-directory; do
     path="$root/$name"
     for operation in rename delete; do
@@ -367,7 +368,10 @@ for name in readonly.txt denied.txt readonly-directory denied-directory; do
                 exit 20
             fi
         else
-            if failure=$(rm -rf "$path" 2>&1); then
+            # BSD rm -rf silently skips FTS_NS entries when stat is denied.
+            # Without -f it attempts unlink or reports the traversal error;
+            # only an actual permission diagnostic is accepted below.
+            if failure=$(rm -r "$path" 2>&1); then
                 printf 'protected target allowed delete: %s\n' "$name" >&2
                 exit 21
             fi
