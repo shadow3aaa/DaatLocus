@@ -5650,7 +5650,9 @@ async fn core_prompt_injects_role_and_account_name_once_for_local_and_shared_hos
         let role = include_str!("../app_instructions/core.md").replace("{{account_name}}", "alice");
         assert_eq!(prompt.matches(&role).count(), 1);
         assert_eq!(
-            prompt.matches("You are DaatLocus, alice's assistant.").count(),
+            prompt
+                .matches("You are DaatLocus, alice's assistant.")
+                .count(),
             1
         );
         if let Some(previous) = &previous_prompt {
@@ -5680,11 +5682,7 @@ async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_inval
         "invalid account fixture",
     )
     .unwrap();
-    assert!(
-        system_prompt(&system, &actor, &context)
-            .await
-            .is_err()
-    );
+    assert!(system_prompt(&system, &actor, &context).await.is_err());
 
     let worker = system.actor("root").unwrap();
     let prompt = system_prompt(&system, &worker, &context).await.unwrap();
@@ -6108,7 +6106,9 @@ async fn runner_prompt_retains_identity_instructions_and_current_request_read_on
         assert!(!prompt.contains("{{account_name}}"));
         assert_eq!(prompt.matches(&actor.config.instructions).count(), 1);
         assert_eq!(
-            prompt.matches("Worker project instructions fixture.").count(),
+            prompt
+                .matches("Worker project instructions fixture.")
+                .count(),
             1
         );
         assert!(prompt.contains("A final reply ends the current input"));
@@ -6197,7 +6197,9 @@ async fn builtin_skill_metadata_is_discovered_by_workers_but_not_core() {
     assert!(!prompt.contains("builtin-prompt-fixture"));
     assert_shared_actor_instructions(&prompt);
     assert_eq!(
-        prompt.matches("You are DaatLocus, the user's assistant.").count(),
+        prompt
+            .matches("You are DaatLocus, the user's assistant.")
+            .count(),
         1
     );
     system.shutdown().await;

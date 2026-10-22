@@ -7,9 +7,7 @@ use serde_json::json;
 
 use crate::{
     actors::ToolPermissionRequest,
-    app::{
-        App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec, EmptyAppArgs,
-    },
+    app::{App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec, EmptyAppArgs},
     file_io::{
         self, CopyFileArgs, EditFileArgs, ListDirectoryArgs, ReadFileArgs, SearchTextArgs,
         ViewImageArgs, WriteFileArgs,
