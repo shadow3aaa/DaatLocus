@@ -59,6 +59,9 @@ jobs:
       - name: Check required macOS private control isolation
         if: runner.os == 'macOS'
         run: cargo test --locked -p daat-locus --lib sandbox::macos::tests::owner_control_socket_is_denied_even_with_broad_filesystem_grants -- --ignored --exact
+      - name: Check approved native Terminal scope
+        if: runner.os != 'Windows'
+        run: cargo test --locked -p daat-locus --lib actors::approval::tests::approved_terminal_scope_runs_natively_only_after_explicit_retry -- --ignored --exact
       - name: Check Windows symlink escape protection
         if: runner.os == 'Windows'
         run: cargo test --locked -p daat-locus --lib file_io::tests::symlink_escape_is_denied -- --ignored --exact
@@ -102,6 +105,9 @@ jobs:
       - name: Check Terminal rename and delete across invocations
         if: ${{ !cancelled() && steps.native_psec.outcome == 'success' }}
         run: cargo test --locked --no-default-features --lib terminal_app::process::tests::terminal_shell_renames_and_deletes_closed_logs_across_invocations -- --ignored --exact
+      - name: Check approved native Terminal scope
+        if: ${{ !cancelled() && steps.native_psec.outcome == 'success' }}
+        run: cargo test --locked --no-default-features --lib actors::approval::tests::approved_terminal_scope_runs_natively_only_after_explicit_retry -- --ignored --exact
       - name: Check native MCP transport
         run: cargo test --locked --no-default-features --lib mcp::tests::stdio_uses_native_sandbox_explicit_environment_and_reaps_processes -- --ignored --exact
   desktop:

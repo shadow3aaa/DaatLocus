@@ -2203,6 +2203,209 @@ mod tests {
         system.shutdown().await;
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    fn scoped_terminal_call(
+        read_root: &std::path::Path,
+        write_root: &std::path::Path,
+        unrequested: &std::path::Path,
+    ) -> AgentToolCall {
+        let input = read_root.join("source.txt");
+        let output = write_root.join("result.txt");
+        let quote = |path: &std::path::Path| {
+            let value = path.to_str().unwrap();
+            if cfg!(windows) {
+                format!("'{}'", value.replace('\'', "''"))
+            } else {
+                format!("'{}'", value.replace('\'', "'\"'\"'"))
+            }
+        };
+        let command = if cfg!(windows) {
+            format!(
+                "$ErrorActionPreference='Stop'; [IO.File]::WriteAllText({}, [IO.File]::ReadAllText({})); $allowed=$false; try {{ [IO.File]::WriteAllText({}, 'unexpected'); $allowed=$true }} catch {{}}; if ($allowed) {{ throw 'unrequested write succeeded' }}; Write-Output 'scope-ok'",
+                quote(&output),
+                quote(&input),
+                quote(unrequested)
+            )
+        } else {
+            format!(
+                "set -eu; cat {} > {}; if printf unexpected > {}; then exit 17; fi; printf 'scope-ok\\n'",
+                quote(&input),
+                quote(&output),
+                quote(unrequested)
+            )
+        };
+        AgentToolCall {
+            id: "scoped-terminal".into(),
+            name: "terminal_exec".into(),
+            arguments: json!({
+                "command":command,"session_id":null,"workdir":write_root,
+                "additional_read_roots":[read_root],"additional_write_roots":[write_root],
+                "yield_time_ms":1000,"max_chars":2000
+            }),
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    #[ignore = "requires the platform's native process sandbox; run in provisioned native CI"]
+    async fn approved_terminal_scope_runs_natively_only_after_explicit_retry() {
+        use crate::app::App;
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
+            json!({"decision":"approve","reason":"Use the requested fixture caches"}),
+        )));
+        let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let reads = dir.path().join("read-cache");
+        let writes = dir.path().join("write-cache");
+        let unrelated = dir.path().join("unrequested");
+        for path in [&reads, &writes, &unrelated] {
+            std::fs::create_dir(path).unwrap();
+        }
+        std::fs::write(reads.join("source.txt"), "approved cache data").unwrap();
+        let outside = unrelated.join("forbidden.txt");
+        let call = scoped_terminal_call(&reads, &writes, &outside);
+        let mut app = crate::terminal_app::TerminalApp::new();
+        let base = system.execution_context(&actor, &message).unwrap();
+        assert!(!base.sandbox_policy.is_path_readable(&reads));
+        assert!(!base.sandbox_policy.is_path_writable(&writes));
+        assert!(app.before_tool_call(&call, &base).is_err());
+        let requested = app.permission_request(&call, &base).unwrap();
+        let review = app.review_requirement(&call, &base).unwrap();
+        let effective = authorize_with_application(
+            &system,
+            &actor,
+            &message,
+            &call,
+            &ActorControl::default(),
+            &base,
+            &requested,
+            review.as_ref(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !writes.join("result.txt").exists(),
+            "approval must not execute the proposed command"
+        );
+        assert!(!effective.sandbox_policy.is_path_writable(&outside));
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut result = app.execute_tool(&call, &effective).await.unwrap();
+            while result.payload["running"].as_bool() == Some(true) {
+                let poll = AgentToolCall {
+                    id: "poll-scoped-terminal".into(),
+                    name: "terminal_write_stdin".into(),
+                    arguments: json!({
+                        "session_id":result.payload["session"]["session_id"],
+                        "text":"","wait_mode":"timeout","yield_time_ms":1000,"max_chars":2000
+                    }),
+                };
+                result = app.execute_tool(&poll, &effective).await.unwrap();
+            }
+            result
+        })
+        .await
+        .expect("approved native command did not finish");
+        assert_eq!(
+            result.payload["session"]["exit_code"],
+            json!(0),
+            "{}",
+            result.payload
+        );
+        assert_eq!(
+            std::fs::read_to_string(writes.join("result.txt")).unwrap(),
+            "approved cache data"
+        );
+        assert!(!outside.exists(), "native process escaped the approved scope");
+        assert_eq!(reviewer.requests.lock().len(), 1);
+        assert_eq!(
+            system.store().actor("root").unwrap().config.permissions,
+            actor.config.permissions
+        );
+        app.shutdown().await.unwrap();
+        system.shutdown().await;
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn rejected_or_unavailable_scope_review_keeps_terminal_admission_closed() {
+        use crate::app::App;
+        for reply in [
+            ReviewReply::Json(json!({"decision":"deny","reason":"Not authorized"})),
+            ReviewReply::Fail,
+        ] {
+            let reviewer = Arc::new(Reviewer::new(reply));
+            let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+            let outside = dir.path().join("cache");
+            std::fs::create_dir(&outside).unwrap();
+            std::fs::write(outside.join("source.txt"), "scope fixture").unwrap();
+            let call = scoped_terminal_call(&outside, &outside, &dir.path().join("unrequested"));
+            let mut app = crate::terminal_app::TerminalApp::new();
+            let base = system.execution_context(&actor, &message).unwrap();
+            let requested = app.permission_request(&call, &base).unwrap();
+            let review = app.review_requirement(&call, &base).unwrap();
+            let error = authorize_with_application(
+                &system,
+                &actor,
+                &message,
+                &call,
+                &ActorControl::default(),
+                &base,
+                &requested,
+                review.as_ref(),
+            )
+            .await
+            .err()
+            .expect("review must deny the requested scope");
+            assert!(rejection(&error).is_some());
+            let fresh = system.execution_context(&actor, &message).unwrap();
+            assert!(!fresh.sandbox_policy.is_path_readable(&outside));
+            assert!(!fresh.sandbox_policy.is_path_writable(&outside));
+            assert!(app.execute_tool(&call, &fresh).await.is_err());
+            assert!(!outside.join("result.txt").exists());
+            assert_eq!(reviewer.requests.lock().len(), 1);
+            system.shutdown().await;
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn terminal_private_boundary_is_not_an_approval_candidate() {
+        use crate::app::App;
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Fail));
+        let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let base = system.execution_context(&actor, &message).unwrap();
+        let private = system.account_credentials_dir().to_path_buf();
+        std::fs::create_dir_all(&private).unwrap();
+        let call = scoped_terminal_call(&private, &private, &dir.path().join("unrequested"));
+        let mut app = crate::terminal_app::TerminalApp::new();
+        let requested = app.permission_request(&call, &base).unwrap();
+        let review = app.review_requirement(&call, &base).unwrap();
+        assert!(
+            super::authorize(
+                &system,
+                &actor,
+                &message,
+                &call,
+                &ActorControl::default(),
+                &base,
+                &requested,
+                review.as_ref(),
+            )
+            .await
+            .is_err()
+        );
+        assert!(app.execute_tool(&call, &base).await.is_err());
+        assert!(reviewer.requests.lock().is_empty());
+        assert!(
+            system
+                .store()
+                .approvals(Some(&actor.id), None, 10)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        system.shutdown().await;
+    }
+
     #[tokio::test]
     async fn ordinary_project_reads_need_no_review_in_ask_or_auto_mode() {
         for mode in [ApprovalMode::Ask, ApprovalMode::Auto] {

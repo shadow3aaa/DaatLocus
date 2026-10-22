@@ -23,6 +23,8 @@ use crate::{
     schema_utils::model_schema_for,
 };
 
+const TERMINAL_SCOPE_RECOVERY: &str = "Check the output and existing effects before issuing another command. If required paths are outside the current filesystem scope, request their exact directories with additional_read_roots/additional_write_roots in a new terminal_exec call for approval.";
+
 pub struct TerminalApp {
     sessions: BTreeMap<String, TerminalSession>,
     output_buffer_capacity: usize,
@@ -217,7 +219,9 @@ impl TerminalApp {
                 output_buffer_capacity,
             )
             .await
-            .map_err(|err| miette!("failed to spawn terminal process: {err}"))?,
+            .map_err(|err| {
+                miette!("failed to spawn terminal process: {err}\n{TERMINAL_SCOPE_RECOVERY}")
+            })?,
         );
         session.approved_roots = ToolPermissionRequest {
             operation_details: serde_json::Value::Null,
@@ -806,6 +810,9 @@ fn compact_terminal_model_content(
         format!("session={}", terminal_session_meta(session)),
     ];
     lines.extend(extra_lines.iter().cloned());
+    if session.exit_code.is_some_and(|code| code != 0) {
+        lines.push(TERMINAL_SCOPE_RECOVERY.into());
+    }
     if !output.trim().is_empty() {
         lines.push("output=".to_string());
         lines.push(truncate_terminal_output_for_model(output, max_tokens));
@@ -1949,6 +1956,71 @@ mod tests {
             .expect("env check command should run");
 
         assert_eq!(result.output.trim(), "synthetic inherited value");
+    }
+
+    #[tokio::test]
+    async fn failed_command_offers_scope_request_without_replaying_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("effect.txt");
+        let command = if cfg!(windows) {
+            format!(
+                "[IO.File]::AppendAllText('{}', 'x'); [Console]::Error.WriteLine('synthetic command failure'); exit 7",
+                marker.to_string_lossy().replace('\'', "''")
+            )
+        } else {
+            format!(
+                "printf x >> '{}'; printf 'synthetic command failure\\n' >&2; exit 7",
+                marker.to_string_lossy().replace('\'', "'\"'\"'")
+            )
+        };
+        let context = AppToolExecutionContext {
+            execution_cwd: directory.path().to_path_buf(),
+            sandbox_policy: test_sandbox_policy(),
+            tool_output_max_tokens: 1000,
+            turn_epoch: 1,
+            actor_call: None,
+        };
+        let call = AgentToolCall {
+            id: "partial-failure".into(),
+            name: "terminal_exec".into(),
+            arguments: json!({
+                "command":command,"session_id":null,"workdir":null,
+                "additional_read_roots":null,"additional_write_roots":null,
+                "yield_time_ms":5000,"max_chars":2000
+            }),
+        };
+        let mut app = TerminalApp::new();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut result = app.execute_tool(&call, &context).await.unwrap();
+            while result.payload["running"].as_bool() == Some(true) {
+                let poll = AgentToolCall {
+                    id: "poll-partial-failure".into(),
+                    name: "terminal_write_stdin".into(),
+                    arguments: json!({
+                        "session_id":result.payload["session"]["session_id"],
+                        "text":"","wait_mode":"timeout","yield_time_ms":1000,"max_chars":2000
+                    }),
+                };
+                result = app.execute_tool(&poll, &context).await.unwrap();
+            }
+            result
+        })
+        .await
+        .expect("failed command did not finish");
+        assert_eq!(result.payload["session"]["exit_code"], 7);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
+        assert!(
+            result
+                .model_content
+                .as_deref()
+                .unwrap()
+                .contains("additional_read_roots/additional_write_roots")
+        );
+        assert!(
+            result.payload.get("approval").is_none(),
+            "a failed process is not itself an approval decision"
+        );
+        app.shutdown().await.unwrap();
     }
 
     #[tokio::test]
