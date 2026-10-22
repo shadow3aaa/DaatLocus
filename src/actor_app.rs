@@ -277,11 +277,7 @@ impl App for ActorApp {
         AppId::new("actors").expect("built-in App id")
     }
     fn docs(&self) -> AppDocs {
-        let common = concat!(
-            include_str!("app_instructions/actors.md"),
-            "\n\n",
-            include_str!("app_instructions/history.md")
-        );
+        let common = include_str!("app_instructions/actors.md");
         if self.actor_id == crate::stage::shared::ACTOR_ID {
             AppDocs::from_markdown(&format!(
                 "{}\n\n{common}",

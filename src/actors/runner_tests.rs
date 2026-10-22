@@ -5688,6 +5688,7 @@ fn assert_shared_actor_instructions(prompt: &str) {
     let instructions = include_str!("../app_instructions/actors.md");
     assert_eq!(prompt.matches(instructions).count(), 1);
     assert!(!prompt.contains("Use report for a material discovery"));
+    assert!(!prompt.contains("Read this Actor's own durable history"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
