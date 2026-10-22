@@ -103,6 +103,8 @@ pub struct EmptyAppArgs {}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppToolExecutionResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_reference: Option<crate::actors::runtime_permissions::PermissionReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
     pub summary: String,
     pub payload: Value,
@@ -118,6 +120,7 @@ pub struct AppToolExecutionResult {
 impl AppToolExecutionResult {
     pub fn new(summary: impl Into<String>, payload: Value, model_content: Option<String>) -> Self {
         Self {
+            permission_reference: None,
             failure: None,
             summary: summary.into(),
             payload,
@@ -133,8 +136,6 @@ pub struct ActorCallContext {
     pub remote_read_only: bool,
     pub actor_id: String,
     pub message_id: String,
-    /// Explicit credential/resource boundaries inherited by native processes.
-    pub private_roots: Vec<PathBuf>,
     /// Server-created policy for a device-backed shared-core App invocation.
     pub device_policy: Option<crate::actors::ActorConfig>,
 }

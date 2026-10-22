@@ -35,7 +35,7 @@ fn packaged_activation_cannot_claim_another_app_from_the_same_broker_pid() {
 
 #[test]
 #[ignore = "requires signed IDD, built daat-locus binary, launch_target example and Hook DLL; run on an unlocked desktop with stationary cursor, serially"]
-fn native_launch_prepares_screen_and_claims_only_the_new_window_with_a_clean_environment() {
+fn native_launch_prepares_screen_and_claims_only_the_new_window_with_inherited_environment() {
     use std::time::Instant;
     let profile = std::env::current_exe()
         .unwrap()
@@ -91,10 +91,26 @@ fn native_launch_prepares_screen_and_claims_only_the_new_window_with_a_clean_env
     let screen = warm.display().clone();
     drop(warm);
     let baseline = DesktopState::read().unwrap();
+    struct FixtureEnvironment(Option<std::ffi::OsString>);
+    impl Drop for FixtureEnvironment {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = &self.0 {
+                    std::env::set_var("DL_GUI_TEST_TOKEN", previous);
+                } else {
+                    std::env::remove_var("DL_GUI_TEST_TOKEN");
+                }
+            }
+        }
+    }
+    let _environment = FixtureEnvironment(std::env::var_os("DL_GUI_TEST_TOKEN"));
+    // This opt-in Windows test runs serially and changes only its synthetic key.
+    unsafe {
+        std::env::set_var("DL_GUI_TEST_TOKEN", "synthetic inherited value");
+    }
     let mut host = Host::new("launch-test".into(), display);
     host.launcher_exe = Some(launcher);
     host.hook_dll = dll;
-    host.protected_env = vec!["PATH".into()];
     let app = host.register_app("launch target".into(), fixture.to_str().unwrap().into());
     let cancelled = AtomicBool::new(false);
     let reply = host.launch(&app, &cancelled).unwrap();
@@ -182,13 +198,18 @@ fn native_launch_prepares_screen_and_claims_only_the_new_window_with_a_clean_env
     };
     assert_eq!(
         send(WM_APP + 74, 0),
-        0,
-        "protected PATH leaked into the application"
+        1,
+        "inherited PATH was removed from the application"
     );
     assert_eq!(
         send(WM_APP + 75, 0),
         1,
         "normal Windows environment was removed"
+    );
+    assert_eq!(
+        send(WM_APP + 76, 0),
+        1,
+        "custom synthetic environment did not reach the application"
     );
     assert_eq!(DesktopState::read().unwrap(), baseline);
     original.validate().unwrap();

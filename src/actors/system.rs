@@ -56,7 +56,6 @@ struct Worker {
 }
 struct Inner {
     temporary: Mutex<Option<crate::runtime_temp::RuntimeTemp>>,
-    temporary_root: PathBuf,
     builtin_resources: Vec<crate::builtin_resources::BuiltinResource>,
     app_registry: Arc<crate::mcp::Registry>,
     #[cfg(windows)]
@@ -440,11 +439,9 @@ impl ActorSystem {
         let temporary =
             crate::runtime_temp::RuntimeTemp::create(&data_dir.with_file_name("runtime"))?;
         let builtin_resources = crate::builtin_resources::publish(&temporary)?;
-        let temporary_root = temporary.root().to_path_buf();
         let system = Self {
             inner: Arc::new(Inner {
                 temporary: Mutex::new(Some(temporary)),
-                temporary_root,
                 builtin_resources,
                 #[cfg(windows)]
                 computer_workspace: Mutex::new(None),
@@ -903,7 +900,7 @@ impl ActorSystem {
                 .any(|denied| path.starts_with(denied))
             {
                 return Err(forbidden(
-                    "Private service or Actor data cannot be granted to this operation",
+                    "Requested filesystem scope conflicts with the current sandbox policy",
                 ));
             }
             if remote && !base.sandbox_policy.is_path_readable(&path) {
@@ -935,7 +932,7 @@ impl ActorSystem {
                 .any(|denied| path.starts_with(denied))
             {
                 return Err(forbidden(
-                    "Private service or Actor data cannot be granted to this operation",
+                    "Requested filesystem scope conflicts with the current sandbox policy",
                 ));
             }
             if remote && !base.sandbox_policy.is_path_writable(&path) {
@@ -963,11 +960,6 @@ impl ActorSystem {
         Ok(context)
     }
     fn validate_config(&self, config: &ActorConfig) -> Result<()> {
-        if config.workspace.starts_with(&self.inner.delivery_dir) {
-            return Err(invalid(
-                "Private service storage cannot be an Actor workspace",
-            ));
-        }
         if let Some(model) = &config.model
             && !self.inner.config.read().models.contains_key(model)
         {
@@ -1267,7 +1259,7 @@ impl ActorSystem {
                     .any(|path| denied.iter().any(|deny| path.starts_with(deny)))
                 {
                     return Err(forbidden(
-                        "Appeal cannot override protected credentials or Actor resources",
+                        "Appeal scope conflicts with the current sandbox policy",
                     ));
                 }
             }
@@ -1954,7 +1946,6 @@ impl ActorSystem {
                 remote_read_only: actor.remote_read_only,
                 actor_id: actor.id.clone(),
                 message_id: message.id.clone(),
-                private_roots: vec![],
                 device_policy: device_policy.clone(),
             },
         )?;
@@ -1971,92 +1962,12 @@ impl ActorSystem {
         device_policy: Option<ActorConfig>,
     ) -> Result<AppToolExecutionContext> {
         let config = self.config();
-        // Runtime paths have no ambient filesystem blacklist. Only explicit
-        // credential/resource boundaries below survive an approved scope.
-        let mut denied = Vec::new();
-        let mut private_roots = vec![self.inner.delivery_dir.clone()];
-        for id in self.store().actor_ids()? {
-            if id != actor.id {
-                denied.push(self.actor_data_dir(&id));
-            }
-        }
-        for provider in config.providers.values() {
-            match provider {
-                ProviderConfig::OpenaiCodexOauth { auth_file, .. }
-                | ProviderConfig::OpenCodeConsoleOauth { auth_file, .. } => {
-                    let value = resolve_env_reference(auth_file);
-                    if !value.trim().is_empty() {
-                        let cwd = std::env::current_dir().into_diagnostic()?;
-                        let path =
-                            canonical_path(&crate::sandbox::RuntimeSandboxPolicy::resolve_path(
-                                std::path::Path::new(&value),
-                                Some(&cwd),
-                            ))?;
-                        private_roots.push(path.clone());
-                        denied.push(path);
-                    }
-                }
-                _ => {}
-            }
-        }
-        let mut protected_env = config.protected_secret_env_vars();
-        #[cfg(target_os = "android")]
-        if let Some(application_dir) = daat_locus_paths_sync().root().parent() {
-            let paths = daat_locus_paths_sync();
-            // Native WebView cookies and platform stores share the app UID. Full
-            // access to an App operation never grants these framework credentials.
-            for entry in std::fs::read_dir(application_dir).into_diagnostic()? {
-                let entry = entry.into_diagnostic()?;
-                // Service storage already uses the Actor-bound delivery policy,
-                // which permits only this Actor's ledger-backed resource bytes.
-                if entry.file_name() != "workspace" && entry.path() != paths.root() {
-                    denied.push(entry.path());
-                }
-            }
-        }
-        let inherited_safe = [
-            "PATH",
-            "PATHEXT",
-            "SYSTEMROOT",
-            "WINDIR",
-            "COMSPEC",
-            "TEMP",
-            "TMP",
-            "HOME",
-            "USERPROFILE",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "LANG",
-            "LC_ALL",
-            "LC_CTYPE",
-            "TERM",
-            "NUMBER_OF_PROCESSORS",
-            "PROCESSOR_ARCHITECTURE",
-        ];
-        protected_env.extend(std::env::vars_os().filter_map(|(key, _)| {
-            let key = key.to_string_lossy();
-            let upper = key.to_ascii_uppercase();
-            if !inherited_safe.contains(&upper.as_str()) {
-                Some(key.into_owned())
-            } else {
-                None
-            }
-        }));
         let tool_output_max_tokens = config
             .models
             .get(config.actor_model_name(actor.config.model.as_deref()))
             .map_or(4096, |model| model.tool_output_max_tokens);
-        let mut sandbox_policy = super::permissions::policy(
-            &actor.config,
-            &self.actor_data_dir(&actor.id),
-            denied,
-            protected_env,
-        );
-        // Only the broker reads verified instruction bytes; native processes get no grant.
-        sandbox_policy
-            .filesystem
-            .deny_write_paths
-            .push(self.inner.temporary_root.clone());
+        let mut sandbox_policy =
+            super::permissions::policy(&actor.config, &self.actor_data_dir(&actor.id));
         if actor.id != crate::stage::shared::ACTOR_ID {
             sandbox_policy.builtin_resources = self.inner.builtin_resources.clone();
         }
@@ -2069,7 +1980,6 @@ impl ActorSystem {
                 remote_read_only: actor.remote_read_only,
                 actor_id: actor.id,
                 message_id: message_id.into(),
-                private_roots,
                 device_policy: device_policy.clone(),
             }),
         };
@@ -3060,7 +2970,7 @@ mod tests {
             .path()
             .to_path_buf();
         let survivor =
-            crate::runtime_temp::RuntimeTemp::create(system.inner.temporary_root.parent().unwrap())
+            crate::runtime_temp::RuntimeTemp::create(instance.parent().unwrap().parent().unwrap())
                 .unwrap();
         let survivor_path = survivor.path().to_path_buf();
         let context = system.owner_app_context().unwrap();

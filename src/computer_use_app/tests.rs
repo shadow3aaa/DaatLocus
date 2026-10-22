@@ -196,7 +196,6 @@ fn desktop_exception_preserves_other_app_policy_and_rejects_read_only_authority(
         remote_read_only: true,
         actor_id: "actor".into(),
         message_id: "input".into(),
-        private_roots: vec![],
         device_policy: None,
     });
     assert!(ComputerUseApp::check_context(&context).is_err());

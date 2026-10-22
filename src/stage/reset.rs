@@ -190,7 +190,7 @@ pub(crate) fn replace(store: &ActorStore, record: &Record, root: &ActorRecord) -
         // Explicitly retain credentials, device identity/enrollment, revocations,
         // transport generations and Raft votes/logs/membership.
         const TABLES: &[&str] = &[
-            "account_approval_refs", "stage_local_approvals", "approvals", "tools",
+            "account_approval_refs", "stage_local_approvals", "stage_local_tool_results", "approvals", "tools",
             "idempotency", "resources", "history", "messages", "actor_event_index",
             "events", "actor_event_heads", "actor_text_heads", "actor_journal_meta",
             "stage_snapshot_pages", "stage_account_actors", "actors",

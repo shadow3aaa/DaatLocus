@@ -13,6 +13,7 @@ use uuid::Uuid;
 mod approval_appeals;
 mod core_guidance;
 mod review_applications;
+mod tool_provenance;
 
 pub struct ActorStore {
     db: Mutex<Connection>,
@@ -436,6 +437,7 @@ impl ActorStore {
           CREATE INDEX IF NOT EXISTS events_actor ON events(actor_id,seq);
           CREATE INDEX IF NOT EXISTS events_message ON events(actor_id,json_extract(record,'$.message_id'),seq);
           CREATE TABLE IF NOT EXISTS tools(id TEXT PRIMARY KEY,actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,message_id TEXT NOT NULL,call_id TEXT NOT NULL,record TEXT NOT NULL,done INTEGER NOT NULL,UNIQUE(message_id,call_id));
+          CREATE TABLE IF NOT EXISTS stage_local_tool_results(id TEXT PRIMARY KEY,record TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS resources(actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,id TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(actor_id,id));
           CREATE TABLE IF NOT EXISTS idempotency(actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,principal TEXT NOT NULL,key TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(actor_id,principal,key));
           CREATE TABLE IF NOT EXISTS approvals(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,record TEXT NOT NULL);
@@ -541,15 +543,6 @@ impl ActorStore {
                 }
             }
             self.commit(tx)
-        })
-    }
-    pub(crate) fn actor_ids(&self) -> Result<Vec<String>> {
-        database_io(|| {
-            let db = self.db.lock();
-            let mut stmt = sql(db.prepare("SELECT id FROM actors ORDER BY id"))?;
-            sql(stmt.query_map([], |r| r.get(0)))?
-                .collect::<rusqlite::Result<_>>()
-                .into_diagnostic()
         })
     }
     #[cfg(test)]
@@ -1601,7 +1594,17 @@ impl ActorStore {
         actor_id: &str,
         message_id: &str,
         call: &AgentToolCall,
-    ) -> Result<()> {
+    ) -> Result<String> {
+        self.tool_started_with_authority(actor_id, message_id, call, false, true)
+    }
+    pub(crate) fn tool_started_with_authority(
+        &self,
+        actor_id: &str,
+        message_id: &str,
+        call: &AgentToolCall,
+        read_only: bool,
+        native: bool,
+    ) -> Result<String> {
         database_io(|| {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
@@ -1620,6 +1623,9 @@ impl ActorStore {
                 finished_at_ms: None,
             };
             sql(tx.execute("INSERT INTO tools(id,actor_id,message_id,call_id,record,done) VALUES(?1,?2,?3,?4,?5,0)",params![result.id,actor_id,message_id,call.id,encode(&result)?]))?;
+            if native {
+                tool_provenance::insert(&tx, &result, read_only, None)?;
+            }
             event(
                 &tx,
                 actor_id,
@@ -1629,7 +1635,8 @@ impl ActorStore {
                     name: call.name.clone(),
                 },
             )?;
-            self.commit(tx)
+            self.commit(tx)?;
+            Ok(result.id)
         })
     }
     // A tool observation is committed together with its complete model protocol.
@@ -1643,6 +1650,31 @@ impl ActorStore {
         model_content: &str,
         summary: &str,
         error: Option<&str>,
+    ) -> Result<String> {
+        self.tool_finished_with_reference(
+            actor_id,
+            message_id,
+            call,
+            payload,
+            model_content,
+            summary,
+            error,
+            None,
+        )
+    }
+    /// Only the common App-result adapter can certify a completed native result.
+    /// Recovery and copied observations use tool_finished and cannot certify one.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tool_finished_with_reference(
+        &self,
+        actor_id: &str,
+        message_id: &str,
+        call: &AgentToolCall,
+        payload: Value,
+        model_content: &str,
+        summary: &str,
+        error: Option<&str>,
+        native_result_id: Option<&str>,
     ) -> Result<String> {
         database_io(|| {
             let mut db = self.db.lock();
@@ -1683,6 +1715,9 @@ impl ActorStore {
             result.error = error.map(str::to_owned);
             result.finished_at_ms = Some(now());
             sql(tx.execute("INSERT INTO tools(id,actor_id,message_id,call_id,record,done) VALUES(?1,?2,?3,?4,?5,1) ON CONFLICT(message_id,call_id) DO UPDATE SET record=excluded.record,done=1",params![result.id,actor_id,message_id,call.id,encode(&result)?]))?;
+            if let Some(id) = native_result_id {
+                tool_provenance::complete(&tx, &result, id)?;
+            }
             let observation = AgentMessage::tool(
                 &call.id,
                 &call.name,

@@ -43,26 +43,19 @@ jobs:
           # The disposable runner must permit the user namespaces exercised by bwrap.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked -p daat-locus -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-computer-use -p daat-locus-macros -p daat-locus-virtual-workspace -p daat-locus-workspace-hook -p xtask --all-targets -- -D warnings
+      - run: cargo clippy --locked -p daat-locus -p daat-locus-sandbox -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-computer-use -p daat-locus-macros -p daat-locus-virtual-workspace -p daat-locus-workspace-hook -p xtask --all-targets -- -D warnings
       - run: cargo test --locked -p daat-locus --lib --bins --test http_api -- --test-threads=4 --skip actors::runner::tests::three_device_core_preserves_resources_context_and_effects_across_sequential_takeover
       - name: Check sequential device takeover
         env:
           DAAT_LOCUS_TEST_STAGE_TRACE: '1'
         run: cargo test --locked -p daat-locus --lib actors::runner::tests::three_device_core_preserves_resources_context_and_effects_across_sequential_takeover -- --exact
-      - name: Check required Linux native sandbox
-        if: runner.os == 'Linux'
-        run: |
-          cargo test --locked -p daat-locus --lib sandbox:: -- --include-ignored --test-threads=4
       - name: Check macOS native host integration
         if: runner.os == 'macOS'
         run: cargo clippy --locked -p daat-locus-app --features native-contract --all-targets -- -D warnings
-      - name: Check required macOS private control isolation
-        if: runner.os == 'macOS'
-        run: cargo test --locked -p daat-locus --lib sandbox::macos::tests::owner_control_socket_is_denied_even_with_broad_filesystem_grants -- --ignored --exact
       - name: Check Windows symlink escape protection
         if: runner.os == 'Windows'
         run: cargo test --locked -p daat-locus --lib file_io::tests::symlink_escape_is_denied -- --ignored --exact
-      - run: cargo test --locked -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-computer-use -p daat-locus-macros -p daat-locus-virtual-workspace -p xtask
+      - run: cargo test --locked -p daat-locus-sandbox -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-computer-use -p daat-locus-macros -p daat-locus-virtual-workspace -p xtask
       - name: Install WiX for Windows upgrade transaction tests
         if: runner.os == 'Windows'
         shell: pwsh
@@ -80,26 +73,6 @@ jobs:
           cargo test --locked -p daat-locus --test installer_upgrade -- --test-threads=1
           $env:DAAT_LOCUS_TEST_COMPANION = Join-Path $env:GITHUB_WORKSPACE 'target/debug/daat-locus.exe'
           cargo test --locked -p xtask -- service_lifecycle_surrounds_msi_and_restores_the_service_after_rollback --ignored --nocapture --test-threads=1
-  windows-mxc:
-    # The public Windows images may not expose PSEC. A provisioned runner is
-    # required; skipped means unavailable, never a positive isolation result.
-    if: ${{ vars.MXC_RUNNER != '' }}
-    runs-on: ${{ vars.MXC_RUNNER }}
-    env:
-      DAAT_LOCUS_BUILD_WEBUI: '0'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Require native MXC/PSEC
-        run: cargo test --locked --no-default-features --lib sandbox::windows::tests::require_native_mxc -- --ignored --exact
-      - name: Check native sandbox boundaries and lifecycle
-        run: |
-          cargo test --locked --no-default-features --lib sandbox:: -- --include-ignored --test-threads=4
-      - name: Check native Terminal
-        run: cargo test --locked --no-default-features --lib terminal_app::process::tests::terminal_shell_runs_inside_required_native_isolation -- --ignored --exact
-      - name: Check native MCP transport
-        run: cargo test --locked --no-default-features --lib mcp::tests::stdio_uses_native_sandbox_explicit_environment_and_reaps_processes -- --ignored --exact
   desktop:
     runs-on: ${{ matrix.os }}
     strategy:

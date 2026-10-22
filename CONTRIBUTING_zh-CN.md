@@ -728,19 +728,27 @@ WebUI mock 场景包含应用列表、空列表、加载中和加载失败；连
 
 ## 原生进程沙箱验证
 
-Windows 已改用 MXC/PSEC，不再修改宿主文件 ACL。通用 Windows runner 验证不可用时
-明确拒绝受限执行；原生正反例需要实际支持 PSEC deny paths 的主机。配置仓库变量
-`MXC_RUNNER` 为已准备好的 Windows runner 标签后，CI 的独立原生任务会先探测能力，
-再执行沙箱、Terminal 和 MCP 测试；缺少能力必须失败，跳过任务不算原生验证通过。
-具体本机命令见 CONTRIBUTING.md 的 MCP validation。
+原生沙箱、Terminal、MCP stdio 与 Actor 审批集成测试在 Windows、Linux 和 macOS
+的正常测试套件中运行，无需专用 runner 或 `--ignored`。各用例先调用共享的原生能力
+探针；只有明确确认平台前提不受支持时，才直接向 stderr 输出原因并从测试返回。
+这表示缺少原生覆盖，不能算作隔离验证通过。探针输出格式异常、探针错误、权限错误
+和真实沙箱启动失败都必须使测试失败，不能跳过。运行时仍在无法隔离时明确拒绝，
+不会回退为宿主执行。
 
-Linux CI 安装 bwrap 并允许 user namespace，显式运行全部 ignored 沙箱测试。后端需要
-支持 pidfd/openat2 的 Linux 5.6+、支持 `--disable-userns` 和 `--seccomp` 的 bwrap，
-以及已审核的 x86-64/AArch64 syscall ABI。测试覆盖有限读写根、缺失路径、并发挂载、
-私有设备/procfs、内核接口过滤和子进程清理；syscall 探针使用 rustc 编译。
-macOS 的原生 Seatbelt 测试随正常测试执行，包含特殊路径字符、未来私有路径、
-符号链接越界及祖先目录改名。维护 socket 用例会初始化 OS-owner 控制目录，
-本机显式运行，macOS CI 必须执行；用例只删除自己创建的唯一 socket。
-Linux 同时验证受限进程不能凭相同 UID 获得 HTTP 初始化权限、普通独立 Owner 进程仍可使用。
-交叉编译不等于这些原生行为已通过验证。
+Windows 使用当前固定版本 MXC SDK 的 PSEC 与 deny paths 能力探针。主机明确缺少
+这些能力时才跳过原生用例，探针错误仍失败；无需升级 SDK，也不改变运行时权限、
+环境变量处理或审批行为。本机定向测试命令见 CONTRIBUTING.md 的 MCP validation。
+
+Linux CI 仍安装 bwrap 并允许 user namespace。后端需要支持 pidfd/openat2 的
+Linux 5.6+、支持 `--disable-userns` 和 `--seccomp` 的 bwrap，以及已审核的
+x86-64/AArch64 syscall ABI。bwrap 不存在、已知缺少必需选项、内核缺少必需 syscall
+或 syscall ABI 不受支持时可以跳过；创建 namespace 被拒绝属于失败，不能算平台
+不支持。测试覆盖有限读写根、缺失路径、并发挂载、私有设备/procfs、内核接口过滤和
+子进程清理；syscall 探针使用 rustc 编译。Linux 同时验证受限进程不能凭相同 UID
+获得 HTTP 初始化权限，普通独立 Owner 进程仍可使用。
+
+macOS 仅在 `/usr/bin/sandbox-exec` 不存在时跳过原生用例，否则随正常测试验证
+Seatbelt，包含特殊路径字符、未来私有路径、符号链接越界、子进程清理及祖先目录
+改名。交叉编译不等于这些原生行为已通过验证。GUI、外部服务及会改变
+系统状态的测试仍保留原有显式启用方式与前提要求。
 

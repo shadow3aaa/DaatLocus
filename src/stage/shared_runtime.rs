@@ -660,10 +660,10 @@ impl Controller {
             Request::SubmitApproval {
                 epoch,
                 message,
-                approval_id,
+                source,
                 application,
             } => {
-                self.handle_approval_application(peer, epoch, &message, &approval_id, application)
+                self.handle_approval_application(peer, epoch, &message, source, application)
                     .await
             }
             Request::ReviewApproval { epoch, facts } => {
@@ -2030,25 +2030,69 @@ impl Controller {
             }
         };
         self.require_worker(peer, epoch).await?;
-        system.store().stage_transaction(|tx| {
-            tx.execute(
-                "INSERT INTO core_app_effects VALUES(?1,?2,?3,'started',NULL)",
-                params![message, call.id, digest],
-            )?;
-            Ok(())
-        })?;
+        let result_id = system
+            .store()
+            .shared_tool_started(&actor.id, message, &call, actor.remote_read_only, &digest)
+            .map_err(|_| StageError::Unavailable("Cannot persist device execution provenance"))?;
         let mut future = Box::pin(manager.execute_tool(&call, &approved));
         let result = loop {
             tokio::select! {
-                result=&mut future=>break result,
-                _=tokio::time::sleep(Duration::from_millis(25))=>{if Instant::now() >= deadline || !self.fence.lock().permits(peer,epoch,Instant::now()) || system.store().message(message).is_ok_and(|input| input.cancel_requested || input.status != MessageStatus::Running){break Err(miette::miette!("Worker changed or input stopped; effect result may be unknown"));}},
+                result=&mut future=>break Some(result),
+                _=tokio::time::sleep(Duration::from_millis(25))=>{if Instant::now() >= deadline || !self.fence.lock().permits(peer,epoch,Instant::now()) || system.store().message(message).is_ok_and(|input| input.cancel_requested || input.status != MessageStatus::Running){break None;}},
             }
         };
         drop(future);
-        let result = result.map_err(|error| {
-            tracing::warn!(app, reason=%system.safe_error(&format!("{error:#}")), "Device App operation failed");
-            StageError::Unavailable("Device App result is uncertain")
-        });
+        let result = match result {
+            Some(Ok(mut result)) => {
+                crate::actors::runtime_permissions::attach_reference(
+                    system,
+                    &actor,
+                    &input,
+                    &call,
+                    &approved,
+                    &result_id,
+                    &mut result,
+                    None,
+                )
+                .map_err(|_| {
+                    StageError::Unavailable("Cannot retain device permission reference")
+                })?;
+                Ok(result)
+            }
+            Some(Err(error)) => {
+                if let Some(reference) = crate::actors::approval::required(&error) {
+                    Ok(AppToolExecutionResult::new(
+                        "Approval application required",
+                        reference.required_payload(),
+                        Some(reference.required_content()),
+                    ))
+                } else if let Some(rejection) = crate::actors::approval::rejection(&error) {
+                    Ok(AppToolExecutionResult::new(
+                        "App operation was not approved",
+                        rejection.payload(),
+                        Some(rejection.model_content()),
+                    ))
+                } else {
+                    let mut result =
+                        crate::actors::runtime_permissions::error_result(system, &error);
+                    crate::actors::runtime_permissions::attach_reference(
+                        system,
+                        &actor,
+                        &input,
+                        &call,
+                        &approved,
+                        &result_id,
+                        &mut result,
+                        Some(&error),
+                    )
+                    .map_err(|_| {
+                        StageError::Unavailable("Cannot retain device permission reference")
+                    })?;
+                    Ok(result)
+                }
+            }
+            None => Err(StageError::Unavailable("Device App result is uncertain")),
+        };
         match result {
             Ok(mut result) => {
                 result.model_images = crate::resources::capture_images(
@@ -2431,7 +2475,7 @@ impl Controller {
                         .models
                         .get(actor.config.model.as_ref().unwrap_or(&config.main_model))
                         .map_or(4096, |model| model.tool_output_max_tokens);
-                    let content = crate::resources::bound_output(
+                    let mut content = crate::resources::bound_output(
                         system,
                         shared::ACTOR_ID,
                         &call.id,
@@ -2439,6 +2483,9 @@ impl Controller {
                         limit,
                         result.overflow_continuation,
                     )?;
+                    if let Some(reference) = &result.permission_reference {
+                        reference.append_to(&mut content);
+                    }
                     let images = crate::resources::capture_images(
                         system,
                         shared::ACTOR_ID,
@@ -2453,7 +2500,7 @@ impl Controller {
                             result.payload,
                             &content,
                             &result.summary,
-                            None,
+                            result.failure.as_deref(),
                         )
                         .map_err(|_| {
                             StageError::Unavailable("Cannot preserve confirmed App result")
@@ -2812,4 +2859,5 @@ mod tests {
         );
         system.shutdown().await;
     }
+    include!("shared_runtime/runtime_permission_tests.rs");
 }

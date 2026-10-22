@@ -82,8 +82,8 @@ client are connected.
   Apps. Do not retain App access lists, tool allowlists, delegation App ceilings,
   local read-only Actor identities or recipient lists. Hosted Actors perform
   research and filesystem/process/browser work with their project sandbox and
-  Actor-local remembered approvals. Authenticated remote authority and private
-  data isolation remain execution boundaries, independent of App installation.
+  Actor-local remembered approvals. Authenticated remote authority and Actor-resource
+  reference ownership remain execution boundaries, independent of App installation.
 - Actor configuration is internal creation/persistence state, not a user management
   surface. Do not expose editors or client/native RPCs that rewrite Apps, workspace,
   instructions or filesystem roots.
@@ -203,6 +203,13 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   supplies operation, scope and authority facts. Check existing grants first;
   covered permissions need no new application or review. Task/reason metadata
   never changes semantic fingerprints. Appeal control operations do not require review.
+- A completed App invocation retains its original payload/output and may append a
+  device-local result reference. This does not itself diagnose a sandbox denial.
+  Typed sandbox denials can also supply an immutable approval reference; otherwise
+  the model proposes explicit missing read/write roots through request_approval.
+  Never infer scope from stderr, errno or command text. Result references bind to
+  the original call and current input authority on the device that executed it;
+  copied observations are not native execution proof. Review never replays a call.
 - Ask waits for Owner approval of immutable arguments and requested scope. None
   omits review and can use the operation's requested extra filesystem scope.
   Ask/Auto rejection is a structured permission decision, not a tool or input
@@ -216,8 +223,8 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   and write grants covering reads. Policy, target or meaningful argument changes
   require a new action fingerprint. Keep remembered grants separate from Actor
   configuration and reclaim them when Actor data is removed by account reset.
-  Never broaden authenticated remote authority, framework credential access or
-  other Actors' private data through review or remembered grants.
+  Never broaden authenticated remote authority or Actor-resource reference
+  ownership through review or remembered grants.
 - Models cannot change the account approval mode. Only Owner settings change it;
   execution resolves the current account mode rather than an Actor's creation snapshot.
   Cancellation/reconfiguration must invalidate waiting approvals.
@@ -228,8 +235,9 @@ Every effect still requires device-side epoch, authorization, approval and sandb
 - Runtime directory names and roots, including `.daat-locus`, have no built-in
   filesystem blacklist. Apply ordinary scoped filesystem review and remembered
   grants to these paths; Terminal must not infer path permissions from command text.
-  Explicit OAuth-file, Actor-resource and native maintenance authority boundaries
-  remain independent of filesystem scope.
+  OAuth files, Actor delivery directories, native maintenance paths and runtime
+  resources follow the same filesystem scope rules. Resource-reference ownership
+  and authenticated maintenance authority remain independent of filesystem scope.
 - Restrictive native process isolation needs platform-specific positive and
   negative tests. Never replace an unavailable sandbox with host execution.
 - Read-only Browser uses bounded HTTP GET without Chrome/page JavaScript,
@@ -418,11 +426,16 @@ schemas; do not silently repair them through provider-specific normalization.
   public network, or a developer's home data. External-environment checks must be
   explicitly opt-in and report unavailable prerequisites accurately.
 - Await asynchronous assertions and propagate failures. Missing prerequisites
-  must be reported as ignored/opt-in or fail with a clear reason, never return
-  early and report success. Use self-cleaning unique temporary directories;
-  normal tests must not write benchmark reports or fixed paths in the checkout.
-  Provision and explicitly run required native sandbox/privilege cases in their
-  platform CI jobs; marking them opt-in locally must not remove CI coverage.
+  must be reported as ignored/opt-in or fail with a clear reason, never silently
+  return early and report success. Native process sandbox tests are the narrow
+  exception: run them in the normal suite and return only when the shared
+  capability probe explicitly reports an unsupported platform prerequisite,
+  writing the reason directly to stderr. Such a return is unavailable coverage,
+  not a passing isolation check. Probe errors, malformed output, permission
+  failures and real sandbox launch failures must fail the test. Keep platform CI
+  sandbox prerequisites provisioned; explicitly run opt-in privilege cases there.
+  Use self-cleaning unique temporary directories; normal tests must not write
+  benchmark reports or fixed paths in the checkout.
 - Regression tests must exercise the mechanism that caused the bug and assert
   the corrected result; where practical, confirm they fail before the fix. Keep
   authentication, authorization, sandbox positive/negative cases, protocol/schema

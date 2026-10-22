@@ -1,7 +1,7 @@
 //! Profile-local, application-owned temporary resources.
 //!
-//! Only this runtime writes here. Actor policies must deny writes to `root()`;
-//! narrowly authorized built-in resource reads are a separate Files concern.
+//! Runtime publication and cleanup own the lifecycle. Actor filesystem access
+//! uses ordinary sandbox scopes; verified built-in reads are a separate concern.
 //! Cleanup trusts an OS lock, never a PID or the age of a directory.
 use crate::file_io::guarded_directory::GuardedDirectory;
 use miette::{IntoDiagnostic, Result, miette};
@@ -22,7 +22,6 @@ const MAX_CLEANUP_DEPTH: usize = 64;
 /// One runtime instance, not a daemon or a process-wide resource registry.
 /// Keep this value alive until every consumer has stopped using its resources.
 pub(crate) struct RuntimeTemp {
-    root_path: PathBuf,
     path: PathBuf,
     root: GuardedDirectory,
     instance: Option<GuardedDirectory>,
@@ -85,7 +84,6 @@ impl RuntimeTemp {
             (root_path.join(name), instance, lease)
         };
         Ok(Self {
-            root_path,
             path,
             root,
             instance: Some(instance),
@@ -98,10 +96,9 @@ impl RuntimeTemp {
         &self.path
     }
 
-    /// Deny Actor writes to the whole managed namespace, including other live
-    /// instances and lock files. Do not turn this root into an ambient read grant.
-    pub(crate) fn root(&self) -> &Path {
-        &self.root_path
+    #[cfg(test)]
+    fn root(&self) -> &Path {
+        self.path.parent().expect("temporary instance has a root")
     }
 
     /// Publish one immutable file atomically beneath skills/ or resources/.

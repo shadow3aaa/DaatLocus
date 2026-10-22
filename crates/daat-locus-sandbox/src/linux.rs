@@ -10,7 +10,7 @@ use std::{
 use miette::{Result, miette};
 
 use super::{
-    FileSystemSandboxPolicy, RuntimeSandboxPolicy, SandboxSpawnSpec, StrongFilesystemSandboxMode,
+    FileSystemSandboxPolicy, SandboxPolicy, SandboxSpawnSpec, StrongFilesystemSandboxMode,
     policy_paths_with_resolved,
 };
 
@@ -18,7 +18,7 @@ const BWRAP_PROGRAM: &str = "bwrap";
 
 #[cfg(test)]
 pub fn wrap_shell_command(
-    policy: &RuntimeSandboxPolicy,
+    policy: &SandboxPolicy,
     program: &str,
     args: Vec<String>,
 ) -> Result<SandboxSpawnSpec> {
@@ -26,7 +26,7 @@ pub fn wrap_shell_command(
 }
 
 pub fn wrap_command(
-    policy: &RuntimeSandboxPolicy,
+    policy: &SandboxPolicy,
     program: PathBuf,
     args: Vec<String>,
 ) -> Result<SandboxSpawnSpec> {
@@ -59,11 +59,10 @@ pub(super) fn requires_backend(policy: &FileSystemSandboxPolicy) -> bool {
         && policy.readable_roots.is_empty()
         && policy.writable_roots.is_empty()
         && policy.deny_read_paths.is_empty()
-        && policy.deny_write_paths.is_empty()
-        && policy.private_delivery.is_none())
+        && policy.deny_write_paths.is_empty())
 }
 
-fn find_bwrap_in_path() -> Option<PathBuf> {
+pub(super) fn find_bwrap_in_path() -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     // Daemons commonly start in `/`; excluding everything beneath cwd would
     // reject every system executable. Prefer root-managed system locations and
@@ -248,7 +247,7 @@ fn path_to_arg(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::WritableRoot;
+    use crate::WritableRoot;
 
     #[test]
     fn bwrap_args_protect_full_disk_policy_with_denies() {
@@ -263,7 +262,6 @@ mod tests {
             readable_roots: Vec::new(),
             writable_roots: Vec::new(),
             deny_read_paths: vec![protected_home.clone()],
-            private_delivery: None,
             bound_roots: Vec::new(),
             deny_write_paths: vec![source_root.clone()],
         };
@@ -320,7 +318,6 @@ mod tests {
                 read_only_subpaths: vec![git_dir.clone()],
             }],
             deny_read_paths: Vec::new(),
-            private_delivery: None,
             bound_roots: Vec::new(),
             deny_write_paths: Vec::new(),
         };
@@ -397,8 +394,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires bwrap and user namespace support"]
     async fn writable_root_preserves_private_devices_and_pid_namespace() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         let tempdir = tempfile::tempdir().expect("tempdir");
         let read_only = tempdir.path().join("read-only");
         let private = tempdir.path().join("private");
@@ -421,10 +420,8 @@ mod tests {
         ];
         filesystem.deny_read_paths = vec![private.clone()];
         filesystem.deny_write_paths = vec![private.clone()];
-        let policy = RuntimeSandboxPolicy {
-            builtin_resources: Vec::new(),
+        let policy = SandboxPolicy {
             filesystem,
-            protected_env_vars: vec![],
             strong_filesystem: StrongFilesystemSandboxMode::Required,
         };
         let script = r#"set -eu
@@ -475,7 +472,6 @@ printf ok > "$ALLOWED"
             readable_roots: Vec::new(),
             writable_roots: Vec::new(),
             deny_read_paths: Vec::new(),
-            private_delivery: None,
             bound_roots: Vec::new(),
             deny_write_paths: Vec::new(),
         };

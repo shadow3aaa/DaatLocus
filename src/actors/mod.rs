@@ -8,6 +8,7 @@ pub use types::*;
 pub mod approval;
 pub mod permissions;
 pub mod runner;
+pub(crate) mod runtime_permissions;
 pub mod store;
 mod system;
 pub use system::{ActorControl, ActorSystem, ModelFactory};

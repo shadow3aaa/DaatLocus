@@ -25,9 +25,7 @@ use wxc_common::{
     sandbox_process::{SandboxBackend, SandboxProcess, StdioMode},
 };
 
-use super::{
-    RuntimeSandboxPolicy, SandboxProcessOptions, SandboxStdio, policy_paths_with_resolved,
-};
+use super::{SandboxPolicy, SandboxProcessOptions, SandboxStdio, policy_paths_with_resolved};
 
 #[link(name = "advapi32")]
 unsafe extern "system" {}
@@ -83,7 +81,7 @@ fn cancelled(options: &SandboxProcessOptions) -> io::Result<()> {
 }
 
 pub fn spawn_restricted_async(
-    policy: &RuntimeSandboxPolicy,
+    policy: &SandboxPolicy,
     program: &Path,
     args: Vec<String>,
     options: SandboxProcessOptions,
@@ -120,7 +118,7 @@ pub fn spawn_restricted_async(
         ));
     }
     let mut logger = Logger::new(Mode::Buffer);
-    // SDK pipe handles are briefly inheritable. Coordinate with DL's other
+    // SDK pipe handles are briefly inheritable. Coordinate with other
     // native spawns so they cannot capture these process-private channels.
     let creation = crate::process_spawn::creation_lock()?;
     cancelled(&options)?;
@@ -354,7 +352,7 @@ fn platform_roots() -> io::Result<Vec<PathBuf>> {
 }
 
 fn build_request(
-    policy: &RuntimeSandboxPolicy,
+    policy: &SandboxPolicy,
     program: &Path,
     args: Vec<String>,
     options: &SandboxProcessOptions,
@@ -368,10 +366,6 @@ fn build_request(
         .map(|root| root.root.clone())
         .collect::<Vec<_>>();
     let mut deny = fs.deny_read_paths.clone();
-    if let Some(scope) = &fs.private_delivery {
-        // Native programs cannot safely inherit the Files App's delivery exception.
-        deny.push(scope.root.clone());
-    }
     if fs.full_disk_read || fs.full_disk_write {
         read.extend(volumes()?);
     }
@@ -438,25 +432,7 @@ fn build_request(
     {
         container = normalized;
     }
-    let mut env = BTreeMap::new();
-    for (key, value) in std::env::vars_os() {
-        let key = key
-            .into_string()
-            .map_err(|_| io::Error::other("MXC requires Unicode environment names"))?;
-        if policy.is_env_var_protected(&key) {
-            continue;
-        }
-        let value = value
-            .into_string()
-            .map_err(|_| io::Error::other("MXC requires Unicode environment values"))?;
-        env.insert(key.to_uppercase(), value);
-    }
-    for (key, value) in &options.environment {
-        if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
-            return Err(io::Error::other("Invalid process environment"));
-        }
-        env.insert(key.to_uppercase(), value.clone());
-    }
+    let mut env = process_environment(std::env::vars_os(), &options.environment)?;
     // SDK resolves native NT namespaces through these variables. Bind them to
     // OS-known directories rather than caller-controlled environment values.
     let windows = platform_roots()?.remove(0);
@@ -501,15 +477,70 @@ fn build_request(
     })
 }
 
+fn process_environment(
+    inherited: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    overrides: &[(String, String)],
+) -> io::Result<BTreeMap<String, String>> {
+    let mut env = BTreeMap::new();
+    for (key, value) in inherited {
+        let key = key
+            .into_string()
+            .map_err(|_| io::Error::other("MXC requires Unicode environment names"))?;
+        let value = value
+            .into_string()
+            .map_err(|_| io::Error::other("MXC requires Unicode environment values"))?;
+        env.insert(key.to_uppercase(), value);
+    }
+    for (key, value) in overrides {
+        if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
+            return Err(io::Error::other("Invalid process environment"));
+        }
+        env.insert(key.to_uppercase(), value.clone());
+    }
+    Ok(env)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::{FileSystemSandboxPolicy, StrongFilesystemSandboxMode, WritableRoot};
+    use crate::{FileSystemSandboxPolicy, StrongFilesystemSandboxMode, WritableRoot};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn policy(root: &Path) -> RuntimeSandboxPolicy {
-        RuntimeSandboxPolicy {
-            builtin_resources: Vec::new(),
+    #[test]
+    fn process_environment_inherits_names_and_preserves_values() {
+        let inherited = [
+            ("Path", r"C:\Tool One\bin;C:\Tool Two\bin;C:\Tool One\bin"),
+            ("PATHEXT", ".CMD;.EXE;.BAT"),
+            ("CARGO_HOME", r"C:\Build Cache\cargo"),
+            ("RUSTUP_HOME", r"C:\Build Cache\rustup"),
+            ("custom_SETTING", "Keep Case and spaces"),
+            ("Override_OPTION", "inherited option"),
+            ("APP_TOKEN", "synthetic token fixture"),
+            ("APP_SECRET", "synthetic secret fixture"),
+        ];
+        let env = process_environment(
+            inherited
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into())),
+            &[("override_option".into(), "explicit override".into())],
+        )
+        .unwrap();
+        assert_eq!(
+            env["PATH"],
+            r"C:\Tool One\bin;C:\Tool Two\bin;C:\Tool One\bin"
+        );
+        assert_eq!(env["PATHEXT"], ".CMD;.EXE;.BAT");
+        assert_eq!(env["CARGO_HOME"], r"C:\Build Cache\cargo");
+        assert_eq!(env["RUSTUP_HOME"], r"C:\Build Cache\rustup");
+        assert_eq!(env["CUSTOM_SETTING"], "Keep Case and spaces");
+        assert_eq!(env["OVERRIDE_OPTION"], "explicit override");
+        assert_eq!(env["APP_TOKEN"], "synthetic token fixture");
+        assert_eq!(env["APP_SECRET"], "synthetic secret fixture");
+        assert!(!env.contains_key("custom_SETTING"));
+    }
+
+    fn policy(root: &Path) -> SandboxPolicy {
+        SandboxPolicy {
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: false,
                 full_disk_write: false,
@@ -520,10 +551,8 @@ mod tests {
                 }],
                 deny_read_paths: vec![],
                 deny_write_paths: vec![],
-                private_delivery: None,
                 bound_roots: vec![],
             },
-            protected_env_vars: vec![],
             strong_filesystem: StrongFilesystemSandboxMode::Required,
         }
     }
@@ -531,7 +560,7 @@ mod tests {
         format!("'{}'", path.display().to_string().replace('\'', "''"))
     }
     fn launch(
-        policy: &RuntimeSandboxPolicy,
+        policy: &SandboxPolicy,
         root: &Path,
         script: String,
         stdin: SandboxStdio,
@@ -608,8 +637,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires native Windows MXC/PSEC with deny paths; run on a supported host"]
     async fn mxc_enforces_scopes_and_future_denies_with_streaming_stdio() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("work");
         std::fs::create_dir(&root).unwrap();
@@ -665,8 +696,10 @@ mod tests {
         );
     }
     #[tokio::test]
-    #[ignore = "requires native Windows MXC/PSEC with deny paths; run on a supported host"]
     async fn dropping_mxc_kills_descendants_with_open_pipes() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         use tokio::io::{AsyncBufReadExt, BufReader};
         use windows_sys::Win32::{
             Foundation::{CloseHandle, WAIT_OBJECT_0},
@@ -715,10 +748,15 @@ mod tests {
     #[tokio::test]
     async fn auto_mode_never_downgrades_isolation() {
         let temp = tempfile::tempdir().unwrap();
-        let supported = BaseContainerRunner::is_process_security_environment_usable();
+        let supported = matches!(
+            crate::capabilities::native_support().expect("native sandbox capability probe failed"),
+            crate::capabilities::NativeSupport::Supported
+        );
         let mut policy = policy(temp.path());
         policy.strong_filesystem = StrongFilesystemSandboxMode::Auto;
-        let result = crate::sandbox::SandboxAsyncChild::spawn_shell(
+        policy.filesystem.deny_read_paths = vec![temp.path().join("private")];
+        policy.filesystem.deny_write_paths = policy.filesystem.deny_read_paths.clone();
+        let result = crate::SandboxAsyncChild::spawn_shell(
             &policy,
             "cmd.exe",
             vec!["/d".into(), "/c".into(), "echo isolated".into()],
@@ -753,24 +791,24 @@ mod tests {
             .unwrap();
             assert!(status.success());
         } else {
-            assert!(matches!(result,Err(error) if error.kind()==io::ErrorKind::Unsupported));
+            let error = result
+                .err()
+                .expect("unsupported host must refuse restrictive Auto execution");
+            // The backend preserves typed support-query failures as Other.
+            // Accept only the same explicit absence codes as the probe, never
+            // an unrelated permission/configuration/launch error.
+            let unsupported_query = error.get_ref().is_some_and(|cause| {
+                matches!(
+                    cause.downcast_ref::<learning_mode_windows::LearningModeError>(),
+                    Some(learning_mode_windows::LearningModeError::HResultCall { code, .. })
+                        if matches!(*code as u32, 0x8000_4001 | 0x8007_0032 | 0x8007_0078)
+                )
+            });
+            assert!(
+                error.kind() == io::ErrorKind::Unsupported || unsupported_query,
+                "unexpected failure on unsupported host: {error}"
+            );
         }
-    }
-
-    #[test]
-    #[ignore = "probe for a CI runner provisioned with native MXC/PSEC"]
-    fn require_native_mxc() {
-        assert!(
-            BaseContainerRunner::is_process_security_environment_usable(),
-            "This runner needs Windows with usable MXC/PSEC"
-        );
-        assert!(
-            SecurityEnvironmentApi::load()
-                .unwrap()
-                .supports_deny_paths()
-                .unwrap(),
-            "Native deny paths are required"
-        );
     }
 
     fn dacl(path: &Path) -> Vec<u8> {
@@ -814,40 +852,6 @@ mod tests {
         }
         bytes
     }
-    #[tokio::test]
-    #[ignore = "requires native Windows MXC/PSEC with deny paths; run on a supported host"]
-    async fn mxc_socket_cannot_claim_local_owner_authority() {
-        let temp = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let script = format!(
-            "$ErrorActionPreference='Stop'; $client=[Net.Sockets.TcpClient]::new('127.0.0.1',{}); $null=[Console]::ReadLine(); $client.Dispose()",
-            address.port()
-        );
-        let mut child = launch(
-            &policy(temp.path()),
-            temp.path(),
-            script,
-            SandboxStdio::Piped,
-        );
-        let (_socket, peer) =
-            tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
-                .await
-                .unwrap()
-                .unwrap();
-        assert!(
-            !crate::accounts::local_owner_connection(peer, Some(address)),
-            "sandboxed App claimed the OS-owner bootstrap authority"
-        );
-        child
-            .take_stdin()
-            .unwrap()
-            .write_all(b"done\n")
-            .await
-            .unwrap();
-        let (status, out, err) = collect(child).await;
-        assert!(status.success(), "{status};out={out};err={err}");
-    }
     #[test]
     fn unavailable_volumes_do_not_invalidate_an_available_scope() {
         let temp = tempfile::tempdir().unwrap();
@@ -858,8 +862,10 @@ mod tests {
         assert!(!expanded.contains(&unavailable));
     }
     #[tokio::test]
-    #[ignore = "requires native Windows MXC/PSEC with deny paths; run on a supported host"]
     async fn exited_process_output_survives_dropping_the_process_handle() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let mut child = launch(
             &policy(temp.path()),

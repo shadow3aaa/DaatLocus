@@ -234,6 +234,19 @@ pub async fn authorize(
     .into())
 }
 
+pub(crate) fn validate_application(application: &super::ReviewApplication) -> Result<()> {
+    if application.task.trim().is_empty()
+        || application.reason.trim().is_empty()
+        || application.task.len() + application.reason.len() > 8192
+    {
+        return Err(super::ActorError::Invalid(
+            "State the current task and a bounded reason for this permission".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Submit only a reference and explanation. Stored arguments/scopes are never replaced or executed.
 pub(crate) async fn submit_application(
     system: &ActorSystem,
@@ -244,15 +257,7 @@ pub(crate) async fn submit_application(
     id: &str,
     application: super::ReviewApplication,
 ) -> Result<ApprovalRecord> {
-    if application.task.trim().is_empty()
-        || application.reason.trim().is_empty()
-        || application.task.len() + application.reason.len() > 8192
-    {
-        return Err(super::ActorError::Invalid(
-            "State the current task and a bounded reason for this permission".into(),
-        )
-        .into());
-    }
+    validate_application(&application)?;
     ensure_current(system, actor, message, control)?;
     let record = system.store().approval(id)?;
     if record.actor_id != actor.id
@@ -302,6 +307,15 @@ async fn authorize_record(
     control: &ActorControl,
     record: &ApprovalRecord,
 ) -> Result<()> {
+    if record.mode == ApprovalMode::None {
+        ensure_current(system, actor, message, control)?;
+        let resolved = system.store().resolve_approval(
+            &record.id,
+            ApprovalDecision::Approved,
+            "Permission allowed by the account Full access policy",
+        )?;
+        return apply_decision(system, &resolved);
+    }
     if record.mode == ApprovalMode::Auto {
         let review = if call.arguments.to_string().len() > REVIEW_ARGUMENT_BYTES {
             Err(ReviewFailure::Arguments)
@@ -380,7 +394,7 @@ fn cancelled(control: &ActorControl, message: &MessageRecord) -> bool {
         || control.cancelled.lock().contains(&message.id)
 }
 
-fn ensure_current(
+pub(crate) fn ensure_current(
     system: &ActorSystem,
     actor: &ActorRecord,
     message: &MessageRecord,
@@ -659,6 +673,13 @@ mod tests {
         mode: ApprovalMode,
         reviewer: Arc<Reviewer>,
     ) -> (tempfile::TempDir, ActorSystem, ActorRecord, MessageRecord) {
+        fixture_with_config(mode, reviewer, |_, _| {}).await
+    }
+    async fn fixture_with_config(
+        mode: ApprovalMode,
+        reviewer: Arc<Reviewer>,
+        configure: impl FnOnce(&mut Config, &std::path::Path),
+    ) -> (tempfile::TempDir, ActorSystem, ActorRecord, MessageRecord) {
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -685,6 +706,7 @@ mod tests {
                 api_key: "unused-test-key".into(),
             },
         );
+        configure(&mut config, dir.path());
         let system = ActorSystem::open_paused_with_factory(
             dir.path().join("data"),
             workspace,
@@ -2171,16 +2193,6 @@ mod tests {
             // Validate Terminal's actual admission path without requiring a
             // platform-native process sandbox in this isolated approval test.
             app.before_tool_call(&call, &effective).unwrap();
-            assert!(
-                effective
-                    .actor_call
-                    .as_ref()
-                    .unwrap()
-                    .private_roots
-                    .iter()
-                    .all(|root| !properties.starts_with(root)),
-                "native processes must not receive an implicit runtime-directory deny root"
-            );
             let result = crate::file_io::read_file(
                 &effective.execution_cwd,
                 &effective.sandbox_policy,
@@ -2200,6 +2212,285 @@ mod tests {
             approval(&system, &message.id).await.decision,
             ApprovalDecision::Approved
         );
+        system.shutdown().await;
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    fn scoped_terminal_call(
+        read_root: &std::path::Path,
+        write_root: &std::path::Path,
+        unrequested: &std::path::Path,
+    ) -> AgentToolCall {
+        let input = read_root.join("source.txt");
+        let output = write_root.join("result.txt");
+        let quote = |path: &std::path::Path| {
+            let value = path.to_str().unwrap();
+            if cfg!(windows) {
+                format!("'{}'", value.replace('\'', "''"))
+            } else {
+                format!("'{}'", value.replace('\'', "'\"'\"'"))
+            }
+        };
+        let command = if cfg!(windows) {
+            format!(
+                "$ErrorActionPreference='Stop'; [IO.File]::WriteAllText({}, [IO.File]::ReadAllText({})); $allowed=$false; try {{ [IO.File]::WriteAllText({}, 'unexpected'); $allowed=$true }} catch {{}}; if ($allowed) {{ throw 'unrequested write succeeded' }}; Write-Output 'scope-ok'",
+                quote(&output),
+                quote(&input),
+                quote(unrequested)
+            )
+        } else {
+            format!(
+                "set -eu; cat {} > {}; if printf unexpected > {}; then exit 17; fi; printf 'scope-ok\\n'",
+                quote(&input),
+                quote(&output),
+                quote(unrequested)
+            )
+        };
+        AgentToolCall {
+            id: "scoped-terminal".into(),
+            name: "terminal_exec".into(),
+            arguments: json!({
+                "command":command,"session_id":null,"workdir":write_root,
+                "additional_read_roots":[read_root],"additional_write_roots":[write_root],
+                "yield_time_ms":1000,"max_chars":2000
+            }),
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn approved_terminal_scope_runs_natively_only_after_explicit_retry() {
+        if !crate::sandbox::test_support::native_sandbox_available() {
+            return;
+        }
+        use crate::app::App;
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
+            json!({"decision":"approve","reason":"Use the requested fixture caches"}),
+        )));
+        let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let reads = dir.path().join("read-cache");
+        let writes = dir.path().join("write-cache");
+        let unrelated = dir.path().join("unrequested");
+        for path in [&reads, &writes, &unrelated] {
+            std::fs::create_dir(path).unwrap();
+        }
+        std::fs::write(reads.join("source.txt"), "approved cache data").unwrap();
+        let outside = unrelated.join("forbidden.txt");
+        let call = scoped_terminal_call(&reads, &writes, &outside);
+        let mut app = crate::terminal_app::TerminalApp::new();
+        let base = system.execution_context(&actor, &message).unwrap();
+        assert!(!base.sandbox_policy.is_path_readable(&reads));
+        assert!(!base.sandbox_policy.is_path_writable(&writes));
+        assert!(app.before_tool_call(&call, &base).is_err());
+        let requested = app.permission_request(&call, &base).unwrap();
+        let review = app.review_requirement(&call, &base).unwrap();
+        let effective = authorize_with_application(
+            &system,
+            &actor,
+            &message,
+            &call,
+            &ActorControl::default(),
+            &base,
+            &requested,
+            review.as_ref(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !writes.join("result.txt").exists(),
+            "approval must not execute the proposed command"
+        );
+        assert!(!effective.sandbox_policy.is_path_writable(&outside));
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut result = app.execute_tool(&call, &effective).await.unwrap();
+            while result.payload["running"].as_bool() == Some(true) {
+                let poll = AgentToolCall {
+                    id: "poll-scoped-terminal".into(),
+                    name: "terminal_write_stdin".into(),
+                    arguments: json!({
+                        "session_id":result.payload["session"]["session_id"],
+                        "text":"","wait_mode":"timeout","yield_time_ms":1000,"max_chars":2000
+                    }),
+                };
+                result = app.execute_tool(&poll, &effective).await.unwrap();
+            }
+            result
+        })
+        .await
+        .expect("approved native command did not finish");
+        assert_eq!(
+            result.payload["session"]["exit_code"],
+            json!(0),
+            "{}",
+            result.payload
+        );
+        assert_eq!(
+            std::fs::read_to_string(writes.join("result.txt")).unwrap(),
+            "approved cache data"
+        );
+        assert!(
+            !outside.exists(),
+            "native process escaped the approved scope"
+        );
+        assert_eq!(reviewer.requests.lock().len(), 1);
+        assert_eq!(
+            system.store().actor("root").unwrap().config.permissions,
+            actor.config.permissions
+        );
+        app.shutdown().await.unwrap();
+        system.shutdown().await;
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn rejected_or_unavailable_scope_review_keeps_terminal_admission_closed() {
+        use crate::app::App;
+        for reply in [
+            ReviewReply::Json(json!({"decision":"deny","reason":"Not authorized"})),
+            ReviewReply::Fail,
+        ] {
+            let reviewer = Arc::new(Reviewer::new(reply));
+            let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+            let outside = dir.path().join("cache");
+            std::fs::create_dir(&outside).unwrap();
+            std::fs::write(outside.join("source.txt"), "scope fixture").unwrap();
+            let call = scoped_terminal_call(&outside, &outside, &dir.path().join("unrequested"));
+            let mut app = crate::terminal_app::TerminalApp::new();
+            let base = system.execution_context(&actor, &message).unwrap();
+            let requested = app.permission_request(&call, &base).unwrap();
+            let review = app.review_requirement(&call, &base).unwrap();
+            let error = authorize_with_application(
+                &system,
+                &actor,
+                &message,
+                &call,
+                &ActorControl::default(),
+                &base,
+                &requested,
+                review.as_ref(),
+            )
+            .await
+            .err()
+            .expect("review must deny the requested scope");
+            assert!(rejection(&error).is_some());
+            let fresh = system.execution_context(&actor, &message).unwrap();
+            assert!(!fresh.sandbox_policy.is_path_readable(&outside));
+            assert!(!fresh.sandbox_policy.is_path_writable(&outside));
+            assert!(app.execute_tool(&call, &fresh).await.is_err());
+            assert!(!outside.join("result.txt").exists());
+            assert_eq!(reviewer.requests.lock().len(), 1);
+            system.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_oauth_fixture_accepts_normal_scoped_approval() {
+        use crate::app::App;
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
+            json!({"decision":"approve","reason":"Read the synthetic fixture explicitly requested"}),
+        )));
+        let (dir, system, actor, message) =
+            fixture_with_config(ApprovalMode::Auto, reviewer.clone(), |config, root| {
+                config.providers.insert(
+                    "fixture-oauth".into(),
+                    ProviderConfig::OpenaiCodexOauth {
+                        base_url: None,
+                        auth_file: root.join(".daat-locus/oauth.json").display().to_string(),
+                    },
+                );
+            })
+            .await;
+        // This is inert fixture content, never a credential or provider request.
+        let path = dir.path().join(".daat-locus/oauth.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "synthetic fixture, not credentials").unwrap();
+        let mut app = crate::files_app::FilesApp::new(dir.path().join("images"), false);
+        let call = AgentToolCall {
+            id: "read-configured-path-fixture".into(),
+            name: "read_file".into(),
+            arguments: json!({"path":path,"start_line":null,"line_count":null}),
+        };
+        let base = system.execution_context(&actor, &message).unwrap();
+        assert!(app.execute_tool(&call, &base).await.is_err());
+        for _ in 0..2 {
+            let base = system.execution_context(&actor, &message).unwrap();
+            let requested = app.permission_request(&call, &base).unwrap();
+            let effective = authorize_with_application(
+                &system,
+                &actor,
+                &message,
+                &call,
+                &ActorControl::default(),
+                &base,
+                &requested,
+                None,
+            )
+            .await
+            .unwrap();
+            let result = app.execute_tool(&call, &effective).await.unwrap();
+            assert_eq!(
+                result.payload["content"],
+                "synthetic fixture, not credentials"
+            );
+            assert!(!effective.sandbox_policy.is_path_writable(&path));
+            assert!(
+                !effective
+                    .sandbox_policy
+                    .is_path_readable(&path.with_file_name("unrequested"))
+            );
+            assert!(!effective.sandbox_policy.filesystem.full_disk_read);
+            assert!(!effective.sandbox_policy.filesystem.full_disk_write);
+        }
+        assert_eq!(reviewer.requests.lock().len(), 1);
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn changed_builtin_can_request_and_receive_an_ordinary_read_grant() {
+        use crate::app::App;
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
+            json!({"decision":"approve","reason":"Read the changed fixture as an ordinary file"}),
+        )));
+        let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(&path, "modified fixture").unwrap();
+        let mut base = system.execution_context(&actor, &message).unwrap();
+        base.sandbox_policy.builtin_resources = vec![crate::builtin_resources::BuiltinResource {
+            path: path.clone(),
+            content: b"original compiled fixture",
+        }];
+        let mut app = crate::files_app::FilesApp::new(dir.path().join("images"), false);
+        let call = AgentToolCall {
+            id: "read-modified-builtin-fixture".into(),
+            name: "read_file".into(),
+            arguments: json!({"path":path,"start_line":null,"line_count":null}),
+        };
+        assert!(app.execute_tool(&call, &base).await.is_err());
+        let requested = app.permission_request(&call, &base).unwrap();
+        assert_eq!(requested.readable_roots, vec![path.clone()]);
+        let effective = authorize_with_application(
+            &system,
+            &actor,
+            &message,
+            &call,
+            &ActorControl::default(),
+            &base,
+            &requested,
+            None,
+        )
+        .await
+        .unwrap();
+        let result = app.execute_tool(&call, &effective).await.unwrap();
+        assert_eq!(result.payload["content"], "modified fixture");
+        assert!(
+            crate::file_io::read_builtin_bytes(
+                &effective.sandbox_policy.builtin_resources[0],
+                1024
+            )
+            .is_err()
+        );
+        assert!(!effective.sandbox_policy.is_path_writable(&path));
+        assert_eq!(reviewer.requests.lock().len(), 1);
         system.shutdown().await;
     }
 
@@ -2505,4 +2796,5 @@ mod tests {
         );
         system.shutdown().await;
     }
+    include!("runtime_permission_tests.rs");
 }

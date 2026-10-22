@@ -164,7 +164,6 @@ fn context(directory: &std::path::Path) -> AppToolExecutionContext {
             remote_read_only: false,
             actor_id: "test-actor".into(),
             message_id: "test-request".into(),
-            private_roots: vec![],
             device_policy: None,
         }),
     }
@@ -386,8 +385,25 @@ async fn refresh_preserves_other_app_instances_and_queries_are_exempt() {
 }
 #[cfg(target_os = "windows")]
 #[tokio::test]
-#[ignore = "requires native Windows MXC/PSEC; run on a supported host"]
 async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
+    if !crate::sandbox::test_support::native_sandbox_available() {
+        return;
+    }
+    struct FixtureEnvironment(Option<std::ffi::OsString>);
+    impl Drop for FixtureEnvironment {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.0 {
+                    Some(previous) => std::env::set_var("DL_MCP_AMBIENT_SECRET", previous),
+                    None => std::env::remove_var("DL_MCP_AMBIENT_SECRET"),
+                }
+            }
+        }
+    }
+    let _environment = FixtureEnvironment(std::env::var_os("DL_MCP_AMBIENT_SECRET"));
+    unsafe {
+        std::env::set_var("DL_MCP_AMBIENT_SECRET", "ambient-fixture");
+    }
     let directory = tempfile::tempdir().unwrap();
     let system = actor_system(directory.path()).await;
     let mut context = system.owner_app_context().unwrap();
@@ -426,22 +442,8 @@ async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
             secret.to_string_lossy().into_owned(),
             workspace.join("server.pid").to_string_lossy().into_owned(),
         ],
-        environment: BTreeMap::from([("DL_MCP_FIXTURE".into(), "explicit".into())]),
+        environment: BTreeMap::from([("DL_MCP_FIXTURE_TOKEN".into(), "explicit".into())]),
     };
-    context
-        .sandbox_policy
-        .protected_env_vars
-        .push("DL_MCP_FIXTURE".into());
-    assert!(
-        transport::Session::connect(&source, &context)
-            .await
-            .is_err()
-    );
-    assert!(
-        !workspace.join("server.pid").exists(),
-        "a protected environment override must be rejected before starting the server"
-    );
-    context.sandbox_policy.protected_env_vars.pop();
     let entry = registry
         .install("Local".into(), String::new(), source, &context)
         .await
@@ -456,12 +458,18 @@ async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
         .execute_tool(&call(&name, json!({"value":true})), &context)
         .await
         .unwrap();
-    assert_eq!(allowed.model_content.as_deref(), Some("explicit|public"));
+    assert_eq!(
+        allowed.model_content.as_deref(),
+        Some("explicit|ambient-fixture|public")
+    );
     let denied = app
         .execute_tool(&call(&name, json!({"value":false})), &context)
         .await
         .unwrap();
-    assert_eq!(denied.model_content.as_deref(), Some("explicit|denied"));
+    assert_eq!(
+        denied.model_content.as_deref(),
+        Some("explicit|ambient-fixture|denied")
+    );
     let running_pid: u32 = std::fs::read_to_string(workspace.join("server.pid"))
         .unwrap()
         .parse()

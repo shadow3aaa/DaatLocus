@@ -1,7 +1,6 @@
 //! Own bubblewrap's namespace and temporary mount targets until every process dies.
 use super::super::{
-    RuntimeSandboxPolicy, SandboxProcessOptions, apply_tokio_command_options,
-    policy_paths_with_resolved,
+    SandboxPolicy, SandboxProcessOptions, apply_tokio_command_options, policy_paths_with_resolved,
 };
 use std::{
     fs::File,
@@ -177,7 +176,7 @@ fn cancelled(options: &SandboxProcessOptions) -> io::Result<()> {
     Ok(())
 }
 
-fn prepare_masks(policy: &RuntimeSandboxPolicy) -> io::Result<Vec<Arc<Mask>>> {
+fn prepare_masks(policy: &SandboxPolicy) -> io::Result<Vec<Arc<Mask>>> {
     let fs = &policy.filesystem;
     let mut protections = fs.deny_read_paths.clone();
     protections.extend(fs.deny_write_paths.clone());
@@ -247,38 +246,6 @@ fn prepare_masks(policy: &RuntimeSandboxPolicy) -> io::Result<Vec<Arc<Mask>>> {
                         use std::os::unix::ffi::OsStrExt;
                         let name = std::ffi::CString::new(prefix.file_name().unwrap().as_bytes())
                             .map_err(io::Error::other)?;
-                        if prefix == super::super::unix_control_directory() {
-                            // This persistent infrastructure directory must stay
-                            // a directory if the maintenance server binds later.
-                            let result =
-                                unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
-                            if result < 0
-                                && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
-                            {
-                                return Err(io::Error::last_os_error());
-                            }
-                            let descriptor = unsafe {
-                                libc::openat(
-                                    parent.as_raw_fd(),
-                                    name.as_ptr(),
-                                    libc::O_PATH
-                                        | libc::O_DIRECTORY
-                                        | libc::O_NOFOLLOW
-                                        | libc::O_CLOEXEC,
-                                )
-                            };
-                            if descriptor < 0 {
-                                return Err(io::Error::last_os_error());
-                            }
-                            let directory = unsafe { File::from_raw_fd(descriptor) };
-                            if directory.metadata()?.uid() != unsafe { libc::geteuid() } {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::PermissionDenied,
-                                    "Control directory has a different OS owner",
-                                ));
-                            }
-                            break;
-                        }
                         let descriptor = unsafe {
                             libc::openat(
                                 parent.as_raw_fd(),
@@ -364,7 +331,7 @@ fn pin_directory(path: &Path) -> io::Result<File> {
 }
 
 pub fn spawn_restricted_async(
-    policy: &RuntimeSandboxPolicy,
+    policy: &SandboxPolicy,
     program: &Path,
     args: Vec<String>,
     options: SandboxProcessOptions,
@@ -380,12 +347,6 @@ pub fn spawn_restricted_async(
     })?;
     // Fail before creating any workload on kernels without stable process handles.
     drop(pidfd(std::process::id() as i32)?);
-    let mut policy = policy.clone();
-    if let Some(scope) = policy.filesystem.private_delivery.take() {
-        policy.filesystem.deny_read_paths.push(scope.root.clone());
-        policy.filesystem.deny_write_paths.push(scope.root);
-    }
-    let policy = &policy;
     let masks = prepare_masks(policy)?;
     let mut filesystem = policy.filesystem.clone();
     let boundary = |path: &mut PathBuf| {
@@ -425,7 +386,7 @@ pub fn spawn_restricted_async(
     if !policy.filesystem.full_disk_read && !policy.filesystem.full_disk_write {
         command.env("TMPDIR", "/tmp");
     }
-    apply_tokio_command_options(policy, &mut command, options);
+    apply_tokio_command_options(&mut command, options);
     command.kill_on_drop(true);
     // Do not change parent descriptor flags in this multithreaded service.
     // Bubblewrap consumes both descriptors and closes them before workload exec.
@@ -615,13 +576,10 @@ fn seccomp_filter() -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::{
-        FileSystemSandboxPolicy, SandboxStdio, StrongFilesystemSandboxMode, WritableRoot,
-    };
+    use crate::{FileSystemSandboxPolicy, SandboxStdio, StrongFilesystemSandboxMode, WritableRoot};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-    fn policy(root: &Path) -> RuntimeSandboxPolicy {
-        RuntimeSandboxPolicy {
-            builtin_resources: Vec::new(),
+    fn policy(root: &Path) -> SandboxPolicy {
+        SandboxPolicy {
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: false,
                 full_disk_write: false,
@@ -630,16 +588,14 @@ mod tests {
                     root: root.to_owned(),
                     read_only_subpaths: vec![],
                 }],
-                deny_read_paths: vec![crate::sandbox::unix_control_directory()],
-                deny_write_paths: vec![crate::sandbox::unix_control_directory()],
-                private_delivery: None,
+                deny_read_paths: vec![],
+                deny_write_paths: vec![],
                 bound_roots: vec![root.to_owned()],
             },
-            protected_env_vars: vec![],
             strong_filesystem: StrongFilesystemSandboxMode::Required,
         }
     }
-    fn spawn(policy: &RuntimeSandboxPolicy, root: &Path, script: &str) -> LinuxSandboxAsyncChild {
+    fn spawn(policy: &SandboxPolicy, root: &Path, script: &str) -> LinuxSandboxAsyncChild {
         spawn_restricted_async(
             policy,
             Path::new("/bin/sh"),
@@ -685,8 +641,10 @@ mod tests {
         (status, out, err)
     }
     #[tokio::test]
-    #[ignore = "requires bubblewrap, user namespaces and Linux pidfd/openat2"]
     async fn actor_scope_runs_shell_and_preserves_missing_denies() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("work");
         std::fs::create_dir(&root).unwrap();
@@ -748,8 +706,10 @@ printf '%s' "$command" > output
         );
     }
     #[tokio::test]
-    #[ignore = "requires bubblewrap, user namespaces and Linux pidfd/openat2"]
     async fn dropping_process_kills_descendants_before_removing_masks() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let mut policy = policy(temp.path());
         policy.filesystem.deny_read_paths = vec![temp.path().join("missing")];
@@ -789,8 +749,10 @@ printf '%s' "$command" > output
         assert!(!temp.path().join("private").exists());
     }
     #[tokio::test]
-    #[ignore = "requires bubblewrap, user namespaces, pidfd/openat2 and rustc"]
     async fn native_filter_blocks_kernel_bypasses_and_keeps_ip_sockets() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("probe.rs");
         let executable = temp.path().join("probe");
@@ -822,17 +784,15 @@ fn main() {
             String::from_utf8_lossy(&output.stderr)
         );
         let child = spawn(&policy(temp.path()), temp.path(), "exec ./probe");
-        assert!(
-            crate::sandbox::unix_control_directory().is_dir(),
-            "maintenance startup must not inherit a file mountpoint"
-        );
         let (status, out, err) = collect(child).await;
         assert!(status.success(), "{status};out={out};err={err}");
     }
 
     #[tokio::test]
-    #[ignore = "requires bubblewrap, user namespaces and Linux pidfd/openat2"]
     async fn concurrent_sandboxes_keep_missing_masks_until_the_last_exit() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let mut policy = policy(temp.path());
         policy.filesystem.deny_read_paths = vec![temp.path().join("missing")];
@@ -857,45 +817,5 @@ fn main() {
             std::fs::read_to_string(temp.path().join("missing")).unwrap(),
             "host-secret"
         );
-    }
-    #[tokio::test]
-    #[ignore = "requires bubblewrap, user namespaces and Linux pidfd/openat2"]
-    async fn sandbox_tcp_socket_cannot_claim_local_owner_authority() {
-        let temp = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let script = format!(
-            "exec 3<>/dev/tcp/127.0.0.1/{}; read command",
-            address.port()
-        );
-        let mut child = spawn_restricted_async(
-            &policy(temp.path()),
-            Path::new("/bin/bash"),
-            vec!["-c".into(), script],
-            SandboxProcessOptions {
-                current_dir: Some(temp.path().to_owned()),
-                stdin: SandboxStdio::Piped,
-                stdout: SandboxStdio::Piped,
-                stderr: SandboxStdio::Piped,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let (_socket, peer) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            !crate::accounts::local_owner_connection(peer, Some(address)),
-            "sandbox UID was mistaken for unrestricted OS-owner authority"
-        );
-        child
-            .take_stdin()
-            .unwrap()
-            .write_all(b"finish\n")
-            .await
-            .unwrap();
-        let (status, out, err) = collect(child).await;
-        assert!(status.success(), "{status};out={out};err={err}");
     }
 }

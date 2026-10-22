@@ -39,6 +39,7 @@ members = [
     ".",
     "crates/daat-locus-macros",
     "crates/daat-locus-auth",
+    "crates/daat-locus-sandbox",
     "crates/daat-locus-client-protocol",
     "crates/daat-locus-virtual-workspace",
     "crates/daat-locus-virtual-workspace/hook",
@@ -110,6 +111,7 @@ zstd = { version = "0.13", default-features = false }
 openraft = { version = "=0.9.25", features = ["serde", "storage-v2"] }
 daat-locus-macros = { version = "0.2.1", path = "crates/daat-locus-macros" }
 daat-locus-auth = { path = "crates/daat-locus-auth" }
+daat-locus-sandbox = { path = "crates/daat-locus-sandbox" }
 daat-locus-client-protocol = { path = "crates/daat-locus-client-protocol" }
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 getrandom = "0.4.2"
@@ -163,10 +165,6 @@ features = [
 ]
 
 [target.'cfg(windows)'.dependencies]
-appcontainer_common = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
-learning_mode_windows = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
-wxc_common = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
-tracelogging = "=1.2.3"
 daat-locus-virtual-workspace = { path = "crates/daat-locus-virtual-workspace" }
 png = "0.18"
 windows = { version = "0.62.2", features = ["Win32_UI_Shell", "Win32_System_Com", "Win32_Foundation"] }

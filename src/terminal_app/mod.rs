@@ -1177,24 +1177,8 @@ impl App for TerminalApp {
 
 fn terminal_process_policy(context: &AppToolExecutionContext) -> RuntimeSandboxPolicy {
     let mut policy = context.sandbox_policy.clone();
-    if let Some(caller) = &context.actor_call {
-        for root in &caller.private_roots {
-            policy.filesystem.deny_read_paths.push(root.clone());
-            policy.filesystem.deny_write_paths.push(root.clone());
-        }
+    if context.actor_call.is_some() {
         policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
-    }
-    if let Some(scope) = policy.filesystem.private_delivery.take() {
-        policy.filesystem.deny_read_paths.push(scope.root.clone());
-        policy.filesystem.deny_write_paths.push(scope.root);
-    }
-    for key in [
-        "SSH_AUTH_SOCK",
-        "GPG_AGENT_INFO",
-        "AWS_SESSION_TOKEN",
-        "AZURE_ACCESS_TOKEN",
-    ] {
-        policy.protected_env_vars.push(key.into());
     }
     policy.filesystem.deny_read_paths.sort();
     policy.filesystem.deny_read_paths.dedup();
@@ -1388,18 +1372,18 @@ mod tests {
     fn test_sandbox_policy() -> RuntimeSandboxPolicy {
         RuntimeSandboxPolicy {
             builtin_resources: Vec::new(),
-            filesystem: FileSystemSandboxPolicy {
-                full_disk_read: true,
-                full_disk_write: true,
-                readable_roots: Vec::new(),
-                writable_roots: Vec::new(),
-                deny_read_paths: Vec::new(),
-                private_delivery: None,
-                bound_roots: Vec::new(),
-                deny_write_paths: Vec::new(),
+            native: crate::sandbox::SandboxPolicy {
+                filesystem: FileSystemSandboxPolicy {
+                    full_disk_read: true,
+                    full_disk_write: true,
+                    readable_roots: Vec::new(),
+                    writable_roots: Vec::new(),
+                    deny_read_paths: Vec::new(),
+                    bound_roots: Vec::new(),
+                    deny_write_paths: Vec::new(),
+                },
+                strong_filesystem: StrongFilesystemSandboxMode::Off,
             },
-            protected_env_vars: Vec::new(),
-            strong_filesystem: StrongFilesystemSandboxMode::Off,
         }
     }
 
@@ -1935,18 +1919,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_exec_strips_protected_env_vars() {
-        let _env = EnvOverride::set("DAAT_LOCUS_TEST_ENV", "super-secret-value");
+    async fn terminal_exec_inherits_host_environment_without_name_filtering() {
+        let _env = EnvOverride::set("DAAT_LOCUS_TEST_SECRET_TOKEN", "synthetic inherited value");
         let mut app = TerminalApp::new();
         let mut sandbox_policy = test_sandbox_policy();
-        sandbox_policy
-            .protected_env_vars
-            .push("DAAT_LOCUS_TEST_ENV".to_string());
+        // Exercise inheritance with a scoped policy rather than the disabled shortcut.
+        sandbox_policy.filesystem.full_disk_write = false;
 
         let result = app
             .exec_command_with_progress(
                 TerminalExecCommandRequest {
-                    command: env_value_command("DAAT_LOCUS_TEST_ENV"),
+                    command: env_value_command("DAAT_LOCUS_TEST_SECRET_TOKEN"),
                     session_id: None,
                     workdir: None,
                     sandbox_policy: &sandbox_policy,
@@ -1958,12 +1941,69 @@ mod tests {
             .await
             .expect("env check command should run");
 
+        assert_eq!(result.output.trim(), "synthetic inherited value");
+    }
+
+    #[tokio::test]
+    async fn failed_command_retains_output_without_replaying_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("effect.txt");
+        let command = if cfg!(windows) {
+            format!(
+                "[IO.File]::AppendAllText('{}', 'x'); [Console]::Error.WriteLine('synthetic command failure'); exit 7",
+                marker.to_string_lossy().replace('\'', "''")
+            )
+        } else {
+            format!(
+                "printf x >> '{}'; printf 'synthetic command failure\\n' >&2; exit 7",
+                marker.to_string_lossy().replace('\'', "'\"'\"'")
+            )
+        };
+        let context = AppToolExecutionContext {
+            execution_cwd: directory.path().to_path_buf(),
+            sandbox_policy: test_sandbox_policy(),
+            tool_output_max_tokens: 1000,
+            turn_epoch: 1,
+            actor_call: None,
+        };
+        let call = AgentToolCall {
+            id: "partial-failure".into(),
+            name: "terminal_exec".into(),
+            arguments: json!({
+                "command":command,"session_id":null,"workdir":null,
+                "additional_read_roots":null,"additional_write_roots":null,
+                "yield_time_ms":5000,"max_chars":2000
+            }),
+        };
+        let mut app = TerminalApp::new();
+        let (result, output) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut result = app.execute_tool(&call, &context).await.unwrap();
+            let mut output = result.payload["output"].as_str().unwrap().to_string();
+            while result.payload["running"].as_bool() == Some(true) {
+                let poll = AgentToolCall {
+                    id: "poll-partial-failure".into(),
+                    name: "terminal_write_stdin".into(),
+                    arguments: json!({
+                        "session_id":result.payload["session"]["session_id"],
+                        "text":"","wait_mode":"timeout","yield_time_ms":1000,"max_chars":2000
+                    }),
+                };
+                result = app.execute_tool(&poll, &context).await.unwrap();
+                output.push_str(result.payload["output"].as_str().unwrap());
+            }
+            (result, output)
+        })
+        .await
+        .expect("failed command did not finish");
+        assert_eq!(result.payload["session"]["exit_code"], 7);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
+        assert!(output.contains("synthetic command failure"));
+        assert_eq!(result.payload["running"], false);
         assert!(
-            result.output.contains("missing"),
-            "protected env var should be removed from terminal child process: {:?}",
-            result.output
+            result.payload.get("approval").is_none(),
+            "a failed process is not itself an approval decision"
         );
-        assert!(!result.output.contains("super-secret-value"));
+        app.shutdown().await.unwrap();
     }
 
     #[tokio::test]
