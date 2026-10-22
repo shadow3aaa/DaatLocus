@@ -389,7 +389,11 @@ mod tests {
             .iter()
             .find(|tool| tool.name == "import_conversation")
             .unwrap();
-        assert!(import.description.contains("wait for their explicit request"));
+        assert!(
+            import
+                .description
+                .contains("wait for their explicit request")
+        );
         assert_eq!(actor.config.workspace, parent.config.workspace);
         assert!(
             actor

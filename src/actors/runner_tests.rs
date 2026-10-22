@@ -5753,7 +5753,11 @@ async fn follower_http_import_forwards_original_evidence_without_local_execution
         None,
     )
     .unwrap();
-    net_a.host.accounts.install(bundle.clone(), &account).unwrap();
+    net_a
+        .host
+        .accounts
+        .install(bundle.clone(), &account)
+        .unwrap();
     net_b.host.accounts.install(bundle, &account).unwrap();
 
     let original = "Preserve <layout> 🔵\n\nOriginal spacing and text.";
@@ -5772,7 +5776,8 @@ async fn follower_http_import_forwards_original_evidence_without_local_execution
     let home = b_dir.path().join("codex");
     std::fs::create_dir_all(home.join("sessions")).unwrap();
     std::fs::write(
-        home.join("sessions").join(format!("rollout-{session}.jsonl")),
+        home.join("sessions")
+            .join(format!("rollout-{session}.jsonl")),
         rollout,
     )
     .unwrap();
@@ -5863,12 +5868,28 @@ async fn follower_http_import_forwards_original_evidence_without_local_execution
             {"role":"user","text":original}, {"role":"assistant","text":answer}
         ])
     );
-    for forbidden in ["FOREIGN_WORKSPACE", "FOREIGN_GRANTS", "PRIVATE_TOOL_ARGUMENTS"] {
+    for forbidden in [
+        "FOREIGN_WORKSPACE",
+        "FOREIGN_GRANTS",
+        "PRIVATE_TOOL_ARGUMENTS",
+    ] {
         assert!(!evidence.to_string().contains(forbidden));
     }
     assert!(crate::resources::export(&a, "core", &resource_id).is_err());
-    assert!(a.store().messages("core", None, 10).unwrap().items.is_empty());
-    assert!(b.store().messages("core", None, 10).unwrap().items.is_empty());
+    assert!(
+        a.store()
+            .messages("core", None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        b.store()
+            .messages("core", None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
 
     executor_model.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {
@@ -5948,8 +5969,20 @@ async fn follower_http_import_forwards_original_evidence_without_local_execution
             .items
             .is_empty()
     );
-    assert!(a.store().messages("root", None, 10).unwrap().items.is_empty());
-    assert!(b.store().messages("root", None, 10).unwrap().items.is_empty());
+    assert!(
+        a.store()
+            .messages("root", None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        b.store()
+            .messages("root", None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
     let parent = a.core_device_actor().unwrap();
     assert_eq!(imported.config.workspace, parent.config.workspace);
     let mut expected_permissions = parent.config.permissions.clone();
