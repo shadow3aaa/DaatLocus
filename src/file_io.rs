@@ -1,7 +1,8 @@
 //! Plain file operations with execution-time scope checks and whole-file freshness.
 pub(crate) mod guarded_directory;
 use std::{
-    collections::{BTreeMap, HashSet},
+    borrow::Cow,
+    collections::BTreeMap,
     fs,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -21,6 +22,8 @@ use crate::{
 
 pub const MAX_VIEW_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_READ_PAGE_BYTES: usize = 1024 * 1024;
+/// A search never descends further than this many directory levels below its root.
+const MAX_SEARCH_DEPTH: usize = 32;
 static FILE_WRITES: Mutex<()> = Mutex::new(());
 
 #[model_schema]
@@ -85,6 +88,11 @@ pub struct SearchTextArgs {
     pub path: String,
     pub query: String,
     pub case_sensitive: bool,
+    /// Directory levels below `path` to descend into. Required; 1 searches only the entries
+    /// directly inside `path`, and the maximum is 32.
+    pub depth: usize,
+    /// Also walk paths excluded by repository/global Git rules and .git metadata. Defaults to false.
+    pub include_ignored: Option<bool>,
     pub limit: Option<usize>,
 }
 
@@ -242,11 +250,46 @@ fn authorized_path(
     Ok(actual)
 }
 
+/// Restore a Windows extended-length prefix that separator normalization
+/// flattened into `//?/...`. `std::path` reads that spelling as a UNC prefix,
+/// so the files layer would reject the target as remote instead of opening the
+/// local volume it names.
+#[cfg(windows)]
+fn normalize_verbatim_prefix(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let is_separator = |byte: u8| byte == b'\\' || byte == b'/';
+    // `\\?\` disables OS separator translation, so its remainder must use
+    // backslashes even when the caller sent forward slashes.
+    if bytes.len() >= 4
+        && is_separator(bytes[0])
+        && is_separator(bytes[1])
+        && bytes[2] == b'?'
+        && is_separator(bytes[3])
+    {
+        let mut restored = String::with_capacity(value.len());
+        restored.push_str(r"\\?\");
+        restored.push_str(&value[4..].replace('/', "\\"));
+        return Some(restored);
+    }
+    None
+}
+
+/// Paths arrive as model- or client-supplied text, so a previously mangled
+/// extended-length prefix is repaired before any policy check sees it.
+fn normalize_path_input(value: &str) -> Cow<'_, str> {
+    #[cfg(windows)]
+    if let Some(restored) = normalize_verbatim_prefix(value) {
+        return Cow::Owned(restored);
+    }
+    Cow::Borrowed(value)
+}
+
 fn unresolved_file_path(cwd: &Path, value: &str) -> Result<PathBuf> {
     if value.is_empty() || value.len() > 32768 {
         return Err(miette!("file path is empty"));
     }
-    let path = Path::new(value);
+    let value = normalize_path_input(value);
+    let path = Path::new(value.as_ref());
     let logical = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -430,7 +473,8 @@ pub(crate) fn resolve_file_path(cwd: &Path, value: &str) -> Result<PathBuf> {
     if value.is_empty() || value.len() > 32768 {
         return Err(miette!("file path is empty"));
     }
-    let logical = RuntimeSandboxPolicy::resolve_path(Path::new(value), Some(cwd));
+    let value = normalize_path_input(value);
+    let logical = RuntimeSandboxPolicy::resolve_path(Path::new(value.as_ref()), Some(cwd));
     guarded_directory::local_path(&logical)
         .map_err(|_| miette!("remote or device file paths are unsupported"))?;
     let mut ancestor = logical.clone();
@@ -679,6 +723,15 @@ pub fn search_text(
     policy: &RuntimeSandboxPolicy,
     args: &SearchTextArgs,
 ) -> Result<SearchResult> {
+    search_text_with_global_rules(cwd, policy, args, true)
+}
+
+fn search_text_with_global_rules(
+    cwd: &Path,
+    policy: &RuntimeSandboxPolicy,
+    args: &SearchTextArgs,
+    global_rules: bool,
+) -> Result<SearchResult> {
     if args.query.is_empty() {
         return Err(miette!("search query must not be empty"));
     }
@@ -689,40 +742,66 @@ pub fn search_text(
         args.query.to_lowercase()
     };
     let limit = args.limit.unwrap_or(50).clamp(1, 200);
-    let mut pending = vec![root];
-    let mut visited = HashSet::new();
+    if args.depth == 0 || args.depth > MAX_SEARCH_DEPTH {
+        return Err(miette!(
+            "search depth must be between 1 and {MAX_SEARCH_DEPTH}"
+        ));
+    }
     let mut output_bytes = 0usize;
     let mut result = SearchResult {
         matches: Vec::new(),
         limited: false,
     };
-    while let Some(path) = pending.pop() {
-        let Ok(actual) = authorized_path(cwd, policy, &path.to_string_lossy(), false) else {
+    let use_ignore_files = !args.include_ignored.unwrap_or(false);
+    let filter_cwd = cwd.to_path_buf();
+    let filter_policy = policy.clone();
+    let mut walker = ignore::WalkBuilder::new(&root);
+    walker
+        .standard_filters(false)
+        .parents(use_ignore_files)
+        .git_ignore(use_ignore_files)
+        .git_global(use_ignore_files && global_rules)
+        .require_git(true)
+        .follow_links(false)
+        .max_depth(Some(args.depth))
+        .sort_by_file_name(|left, right| left.cmp(right))
+        .filter_entry(move |entry| {
+            if use_ignore_files && entry.file_name() == ".git" {
+                return false;
+            }
+            // Rule discovery is internal metadata I/O. Admission to the search
+            // still checks Actor authority before descending into a directory.
+            let Ok(actual) = authorized_path(
+                &filter_cwd,
+                &filter_policy,
+                &entry.path().to_string_lossy(),
+                false,
+            ) else {
+                return false;
+            };
+            if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+                return guarded_directory::GuardedDirectory::open(&actual, false).is_ok_and(
+                    |directory| {
+                        check_opened_file(directory.handle(), &actual, &filter_policy, false)
+                            .is_ok()
+                    },
+                );
+            }
+            true
+        });
+    for entry in walker.build() {
+        let entry = entry.map_err(|_| miette!("unable to traverse search directory"))?;
+        // Library diagnostics can contain private rule text or ancestor paths.
+        if entry.error().is_some() {
+            return Err(miette!("unable to load search ignore rules"));
+        }
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let Ok(actual) = authorized_path(cwd, policy, &entry.path().to_string_lossy(), false)
+        else {
             continue;
         };
-        if !visited.insert(actual.clone()) {
-            continue;
-        }
-        let metadata =
-            fs::metadata(&actual).map_err(|_| miette!("unable to inspect search path"))?;
-        if metadata.is_dir() {
-            let directory = guarded_directory::GuardedDirectory::open(&actual, false)
-                .map_err(|_| miette!("unable to pin search directory"))?;
-            check_opened_file(directory.handle(), &actual, policy, false)?;
-            let names = directory
-                .names()
-                .map_err(|_| miette!("unable to enumerate authorized search directory"))?;
-            let mut children = Vec::new();
-            for name in names {
-                children.push(actual.join(name));
-            }
-            children.sort();
-            pending.extend(children.into_iter().rev());
-            continue;
-        }
-        if !metadata.is_file() {
-            continue;
-        }
         let bytes = read_bytes(&actual, u64::MAX, policy)?;
         let Ok(text) = std::str::from_utf8(&bytes) else {
             continue;
@@ -744,7 +823,7 @@ pub fn search_text(
             }
             output_bytes += line.len();
             result.matches.push(SearchMatch {
-                path: path.display().to_string(),
+                path: actual.display().to_string(),
                 line_number: index + 1,
                 text: line.into(),
             });
@@ -1414,6 +1493,82 @@ mod tests {
     }
     use super::*;
 
+    // Ordinary fixtures must not inherit a developer's global Git configuration.
+    fn search_text(
+        cwd: &Path,
+        policy: &RuntimeSandboxPolicy,
+        args: &SearchTextArgs,
+    ) -> Result<SearchResult> {
+        super::search_text_with_global_rules(cwd, policy, args, false)
+    }
+
+    #[test]
+    fn global_gitignore_is_internal_and_can_be_disabled() {
+        const CHILD_ROOT: &str = "DAAT_LOCUS_GLOBAL_IGNORE_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let mut policy = RuntimeSandboxPolicy::disabled();
+            policy.filesystem.full_disk_read = false;
+            policy.filesystem.readable_roots = vec![root.clone()];
+            let args = SearchTextArgs {
+                path: ".".into(),
+                query: "needle".into(),
+                case_sensitive: true,
+                depth: 1,
+                include_ignored: None,
+                limit: None,
+            };
+            let filtered = super::search_text(&root, &policy, &args).unwrap();
+            assert_eq!(filtered.matches.len(), 1);
+            assert!(filtered.matches[0].path.ends_with("visible.txt"));
+            let all = super::search_text(
+                &root,
+                &policy,
+                &SearchTextArgs {
+                    include_ignored: Some(true),
+                    ..args
+                },
+            )
+            .unwrap();
+            assert_eq!(all.matches.len(), 2);
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join("visible.txt"), "needle visible\n").unwrap();
+        fs::write(root.join("hidden.txt"), "needle hidden\n").unwrap();
+        let rules = temp.path().join("global-ignore");
+        fs::write(&rules, "hidden.txt\n").unwrap();
+        let config = temp.path().join("gitconfig");
+        fs::write(
+            &config,
+            format!(
+                "[core]\nexcludesFile = {}\n",
+                rules.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        // Only the child receives these environment settings; parallel tests and
+        // the developer's actual configuration remain untouched.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "file_io::tests::global_gitignore_is_internal_and_can_be_disabled",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, &root)
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn read_args() -> ReadFileArgs {
         ReadFileArgs {
             path: "a.txt".into(),
@@ -1598,6 +1753,8 @@ mod tests {
                 path: ".".into(),
                 query: "needle".into(),
                 case_sensitive: true,
+                depth: 1,
+                include_ignored: None,
                 limit: Some(1),
             },
         )
@@ -1631,26 +1788,30 @@ mod tests {
         let second = list_directory(dir.path(), &policy, &args).unwrap();
         assert_eq!(second.entries[0].name, "b.txt");
         assert!(second.next_cursor.is_none());
-        let found = search_text(
-            dir.path(),
-            &policy,
-            &SearchTextArgs {
-                path: ".".into(),
-                query: "needle".into(),
-                case_sensitive: false,
-                limit: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(found.matches.len(), 2);
-        assert_eq!(found.matches[0].text, "Needle\r\n");
-        assert!(
-            !found
-                .matches
-                .iter()
-                .any(|item| item.text.contains("secret"))
-        );
-        assert!(!found.limited);
+        for include_ignored in [None, Some(true)] {
+            let found = search_text(
+                dir.path(),
+                &policy,
+                &SearchTextArgs {
+                    path: ".".into(),
+                    query: "needle".into(),
+                    case_sensitive: false,
+                    depth: 3,
+                    include_ignored,
+                    limit: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(found.matches.len(), 2);
+            assert_eq!(found.matches[0].text, "Needle\r\n");
+            assert!(
+                !found
+                    .matches
+                    .iter()
+                    .any(|item| item.text.contains("secret"))
+            );
+            assert!(!found.limited);
+        }
     }
 
     #[test]
@@ -1677,5 +1838,355 @@ mod tests {
         assert_eq!(media_type, "image/gif");
         fs::write(dir.path().join("image.gif"), "changed").unwrap();
         assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn search_skips_gitignored_directories_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".gitignore"), "/target\nnode_modules/\n").unwrap();
+        fs::write(root.join(".git/metadata"), "needle in metadata\n").unwrap();
+        fs::write(root.join(".hidden"), "needle in hidden\n").unwrap();
+        fs::write(root.join(".ignore"), "source.txt\n").unwrap();
+        fs::create_dir_all(root.join("nested/build")).unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::write(root.join("nested/.gitignore"), "build/\n").unwrap();
+        fs::write(root.join("target/hidden.txt"), "needle in target\n").unwrap();
+        fs::write(root.join("node_modules/hidden.txt"), "needle in modules\n").unwrap();
+        fs::write(root.join("nested/build/hidden.txt"), "needle in build\n").unwrap();
+        fs::write(root.join("nested/keep.txt"), "needle in nested\n").unwrap();
+        fs::write(root.join("source.txt"), "needle in source\n").unwrap();
+        let args = SearchTextArgs {
+            path: ".".into(),
+            query: "needle".into(),
+            case_sensitive: true,
+            depth: 4,
+            include_ignored: None,
+            limit: None,
+        };
+
+        let found = search_text(&root, &RuntimeSandboxPolicy::disabled(), &args).unwrap();
+        let mut texts = found
+            .matches
+            .iter()
+            .map(|item| item.text.trim())
+            .collect::<Vec<_>>();
+        texts.sort();
+        assert_eq!(
+            texts,
+            ["needle in hidden", "needle in nested", "needle in source"]
+        );
+
+        let unfiltered = search_text(
+            &root,
+            &RuntimeSandboxPolicy::disabled(),
+            &SearchTextArgs {
+                include_ignored: Some(true),
+                ..args
+            },
+        )
+        .unwrap();
+        assert_eq!(unfiltered.matches.len(), 7);
+    }
+
+    #[test]
+    fn subdirectory_search_inherits_repository_rules_and_stops_at_git_boundary() {
+        for git_file in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let outer = dir.path().canonicalize().unwrap();
+            let root = outer.join("repo");
+            let subdir = root.join("src/deep");
+            fs::create_dir_all(&subdir).unwrap();
+            if git_file {
+                fs::write(root.join(".git"), "gitdir: elsewhere\n").unwrap();
+            } else {
+                fs::create_dir(root.join(".git")).unwrap();
+            }
+            fs::write(outer.join(".gitignore"), "*.txt\n").unwrap();
+            fs::write(root.join(".gitignore"), "*.log\n/root-only.txt\nignored/\n").unwrap();
+            fs::write(root.join("src/.gitignore"), "!keep.log\n").unwrap();
+            for name in ["drop.log", "keep.log", "source.txt", "root-only.txt"] {
+                fs::write(subdir.join(name), "needle\n").unwrap();
+            }
+            let mut policy = RuntimeSandboxPolicy::disabled();
+            policy.filesystem.full_disk_read = false;
+            policy.filesystem.readable_roots = vec![outer.clone()];
+            let args = SearchTextArgs {
+                path: subdir.to_string_lossy().into_owned(),
+                query: "needle".into(),
+                case_sensitive: true,
+                depth: 1,
+                include_ignored: None,
+                limit: None,
+            };
+            let found = search_text(&root, &policy, &args).unwrap();
+            let mut names = found
+                .matches
+                .iter()
+                .map(|item| {
+                    Path::new(&item.path)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>();
+            names.sort();
+            assert_eq!(names, ["keep.log", "root-only.txt", "source.txt"]);
+            let file_args = SearchTextArgs {
+                path: subdir.join("drop.log").to_string_lossy().into_owned(),
+                ..args.clone()
+            };
+            assert_eq!(
+                search_text(&root, &policy, &file_args)
+                    .unwrap()
+                    .matches
+                    .len(),
+                1
+            );
+            let all = search_text(
+                &root,
+                &policy,
+                &SearchTextArgs {
+                    include_ignored: Some(true),
+                    ..args.clone()
+                },
+            )
+            .unwrap();
+            assert_eq!(all.matches.len(), 4);
+
+            // Internal rules still apply when only the search subtree is in scope.
+            policy.filesystem.readable_roots = vec![subdir.clone()];
+            assert_eq!(
+                search_text(&subdir, &policy, &args).unwrap().matches.len(),
+                3
+            );
+            // Loading internal metadata does not expand the searched file scope.
+            assert!(
+                search_text(
+                    &subdir,
+                    &policy,
+                    &SearchTextArgs {
+                        path: root.to_string_lossy().into_owned(),
+                        ..args.clone()
+                    }
+                )
+                .is_err()
+            );
+            assert!(
+                read_file(
+                    &subdir,
+                    &policy,
+                    &ReadFileArgs {
+                        path: root.join(".gitignore").to_string_lossy().into_owned(),
+                        start_line: None,
+                        line_count: None,
+                    }
+                )
+                .is_err()
+            );
+
+            // WalkBuilder treats an explicitly supplied root as searchable.
+            let excluded = root.join("ignored/deep");
+            fs::create_dir_all(&excluded).unwrap();
+            fs::write(excluded.join("hidden.txt"), "needle\n").unwrap();
+            policy.filesystem.readable_roots = vec![root.clone()];
+            let excluded_args = SearchTextArgs {
+                path: excluded.to_string_lossy().into_owned(),
+                ..args
+            };
+            assert_eq!(
+                search_text(&root, &policy, &excluded_args)
+                    .unwrap()
+                    .matches
+                    .len(),
+                1
+            );
+            assert_eq!(
+                search_text(
+                    &root,
+                    &policy,
+                    &SearchTextArgs {
+                        include_ignored: Some(true),
+                        ..excluded_args
+                    }
+                )
+                .unwrap()
+                .matches
+                .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn search_uses_git_globs_and_nested_unignores() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("nested/deep")).unwrap();
+        fs::write(
+            root.join(".gitignore"),
+            "/root-only.txt\n*.log\nreport[0-9].txt\nnested/**/hidden.txt\n",
+        )
+        .unwrap();
+        fs::write(root.join("nested/.gitignore"), "!keep.log\n").unwrap();
+        for name in [
+            "root-only.txt",
+            "nested/root-only.txt",
+            "debug.log",
+            "nested/keep.log",
+            "report1.txt",
+            "reportx.txt",
+            "nested/hidden.txt",
+            "nested/deep/hidden.txt",
+            "nested/deep/nothidden.txt",
+        ] {
+            fs::write(root.join(name), "needle\n").unwrap();
+        }
+        let result = search_text(
+            &root,
+            &RuntimeSandboxPolicy::disabled(),
+            &SearchTextArgs {
+                path: ".".into(),
+                query: "needle".into(),
+                case_sensitive: true,
+                depth: 4,
+                include_ignored: None,
+                limit: None,
+            },
+        )
+        .unwrap();
+        let mut paths = result
+            .matches
+            .iter()
+            .map(|item| {
+                Path::new(&item.path)
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "nested/deep/nothidden.txt",
+                "nested/keep.log",
+                "nested/root-only.txt",
+                "reportx.txt"
+            ]
+        );
+    }
+
+    #[test]
+    fn search_honors_the_required_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("one/two")).unwrap();
+        fs::write(root.join("top.txt"), "needle top\n").unwrap();
+        fs::write(root.join("one/one.txt"), "needle one\n").unwrap();
+        fs::write(root.join("one/two/deep.txt"), "needle deep\n").unwrap();
+        let args = SearchTextArgs {
+            path: ".".into(),
+            query: "needle".into(),
+            case_sensitive: true,
+            depth: 1,
+            include_ignored: None,
+            limit: None,
+        };
+
+        let shallow = search_text(&root, &RuntimeSandboxPolicy::disabled(), &args).unwrap();
+        assert_eq!(shallow.matches.len(), 1);
+        assert!(shallow.matches[0].path.ends_with("top.txt"));
+
+        let deeper = search_text(
+            &root,
+            &RuntimeSandboxPolicy::disabled(),
+            &SearchTextArgs { depth: 3, ..args },
+        )
+        .unwrap();
+        assert_eq!(deeper.matches.len(), 3);
+    }
+
+    #[test]
+    fn search_rejects_a_missing_or_out_of_range_depth() {
+        // The model contract requires an explicit depth; a silent default would
+        // let one call walk an arbitrarily deep tree.
+        assert!(
+            serde_json::from_value::<SearchTextArgs>(serde_json::json!({
+                "path": ".",
+                "query": "needle",
+                "case_sensitive": true,
+                "limit": null,
+            }))
+            .is_err()
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let policy = RuntimeSandboxPolicy::disabled();
+        let mut args = SearchTextArgs {
+            path: ".".into(),
+            query: "needle".into(),
+            case_sensitive: true,
+            depth: 0,
+            include_ignored: None,
+            limit: None,
+        };
+        assert!(search_text(dir.path(), &policy, &args).is_err());
+        args.depth = MAX_SEARCH_DEPTH + 1;
+        assert!(search_text(dir.path(), &policy, &args).is_err());
+        args.depth = MAX_SEARCH_DEPTH;
+        assert!(search_text(dir.path(), &policy, &args).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mangled_extended_length_paths_still_name_the_same_local_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("a.txt"), "needle\n").unwrap();
+        // Earlier separator normalization produced `//?/C:/...`, which
+        // std::path parses as a UNC prefix instead of an extended-length one.
+        let mangled = root.join("a.txt").display().to_string().replace('\\', "/");
+        assert!(mangled.starts_with("//?/"));
+        let page = read_file(
+            &root,
+            &RuntimeSandboxPolicy::disabled(),
+            &ReadFileArgs {
+                path: mangled,
+                start_line: None,
+                line_count: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.content, "needle\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_prefixes_round_trip_and_unc_is_not_a_device_path() {
+        let restored = normalize_path_input("//?/UNC/server/share/skill.md");
+        assert_eq!(&*restored, r"\\?\UNC\server\share\skill.md");
+        let untouched = normalize_path_input(r"\\?\C:\Users\shadow\skill.md");
+        assert_eq!(&*untouched, r"\\?\C:\Users\shadow\skill.md");
+
+        // A network target keeps its remote namespace; it never becomes a
+        // device namespace or an accepted local volume.
+        let dir = tempfile::tempdir().unwrap();
+        let error = read_file(
+            dir.path(),
+            &RuntimeSandboxPolicy::disabled(),
+            &ReadFileArgs {
+                path: r"\\?\UNC\server\share\skill.md".into(),
+                start_line: None,
+                line_count: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("remote or device"));
     }
 }

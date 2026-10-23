@@ -44,7 +44,7 @@ impl App for FilesApp {
         let mut specs = vec![
             AppToolSpec { name: "copy_file".into(), description: "Copy authorized file bytes to a writable workspace. Use this to bring an Actor attachment into the workspace before native commands. Existing destinations require expected_sha256.".into(), input_schema: model_schema_for::<CopyFileArgs>() },
             AppToolSpec { name: "list_directory".into(), description: "List an authorized directory page, ordered by name. Continue using next_cursor.".into(), input_schema: model_schema_for::<ListDirectoryArgs>() },
-            AppToolSpec { name: "search_text".into(), description: "Find literal text in authorized files beneath a path. Returns original matching lines with file paths and line numbers.".into(), input_schema: model_schema_for::<SearchTextArgs>() },
+            AppToolSpec { name: "search_text".into(), description: "Find literal text in authorized files beneath a path. Requires an explicit depth (1-32). Respects repository and global Git ignore rules and skips .git metadata unless include_ignored is true. Explicit search roots remain searchable. Returns original matching lines with file paths and line numbers.".into(), input_schema: model_schema_for::<SearchTextArgs>() },
             AppToolSpec { name: "read_file".into(), description: "Read plaintext lines and the whole-file sha256. Relative paths use the Actor workspace.".into(), input_schema: model_schema_for::<ReadFileArgs>() },
             AppToolSpec { name: "write_file".into(), description: "Create a file or overwrite it using its current expected_sha256.".into(), input_schema: model_schema_for::<WriteFileArgs>() },
             AppToolSpec { name: "edit_file".into(), description: "Replace exact unique old_text using the current file expected_sha256.".into(), input_schema: model_schema_for::<EditFileArgs>() },
@@ -228,7 +228,7 @@ impl App for FilesApp {
             }
             "search_text" => {
                 let args: SearchTextArgs = serde_json::from_value(call.arguments.clone())
-                    .map_err(|_| miette!("invalid search_text arguments"))?;
+                    .map_err(|error| miette!("invalid search_text arguments: {error}"))?;
                 let result =
                     file_io::search_text(&context.execution_cwd, &context.sandbox_policy, &args)?;
                 Ok(AppToolExecutionResult::new(

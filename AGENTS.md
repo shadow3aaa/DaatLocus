@@ -193,6 +193,12 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   approval fingerprints. Undeclared ordinary operations do not require review.
   Sandbox access outside existing or remembered roots independently requires
   review, regardless of which App requested access.
+  Internal search discovery/loading of repository `.gitignore` and global Git
+  ignore configuration/rules is exempt from Actor filesystem scope and review.
+  Keep repository-boundary discovery, library-managed ignore loading and private
+  rule contents; this grants no Actor file access.
+  Search targets, returned file contents and explicit rule-file reads retain
+  ordinary Actor permissions.
 - Ordinary tool schemas and arguments contain no runtime review fields. An
   uncovered permission returns an immutable approval reference without executing.
   Actors submit that reference, task and reason through the separate Actors App

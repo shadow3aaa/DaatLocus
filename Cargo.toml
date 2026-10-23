@@ -66,6 +66,7 @@ disabled-strategies = ["quick-install", "compile"]
 
 [dependencies]
 hex = "0.4.3"
+ignore = "0.4.24"
 async-trait = "0.1.89"
 axum = "0.8.4"
 base64 = "0.23.1"

@@ -858,8 +858,17 @@ fn lines_char_cost(lines: &[String]) -> usize {
         .sum()
 }
 
+/// Forward slashes are a display convenience for relative path segments only.
+/// Absolute paths keep their original bytes: rewriting separators turns a
+/// `\\?\C:\...` extended-length prefix into `//?/C:/...`, which `std::path`
+/// reads as a UNC prefix, so the Files layer would reject the read as remote.
 fn display_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let text = path.to_string_lossy();
+    if path.is_absolute() {
+        text.into_owned()
+    } else {
+        text.replace('\\', "/")
+    }
 }
 
 const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r"- Discovery: The list above is the OpenSkills available in this context (name + description + file path). Skill bodies live on disk at the listed paths.
@@ -1169,5 +1178,43 @@ mod tests {
             assert!(!policy.is_path_readable(&skill.path));
             assert!(!policy.is_path_writable(&skill.path));
         }
+    }
+
+    #[test]
+    fn skill_summary_preserves_extended_length_paths_and_stays_readable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let skill_dir = root.join("demo");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let skill_path = skill_dir.join(SKILL_FILE_NAME);
+        fs::write(
+            &skill_path,
+            "---\nname: demo\ndescription: Path fixture\n---\n\nRead the fixture body.\n",
+        )
+        .unwrap();
+        let catalog = load_openskills_from_roots(vec![SkillRoot {
+            path: root.clone(),
+            scope: OpenSkillScope::Project,
+        }]);
+        let prompt = catalog.render_prompt_block().expect("prompt");
+
+        // The published root must survive byte-for-byte. A separator-rewritten
+        // root expands into a path the files layer reads as a remote namespace.
+        assert!(prompt.contains(&format!("`{}`", root.display())));
+        assert!(!prompt.contains("//?/"));
+        assert!(prompt.contains("demo/SKILL.md"));
+
+        let expanded = skill_path.to_string_lossy().into_owned();
+        let page = crate::file_io::read_file(
+            &root,
+            &RuntimeSandboxPolicy::disabled(),
+            &crate::file_io::ReadFileArgs {
+                path: expanded,
+                start_line: None,
+                line_count: None,
+            },
+        )
+        .unwrap();
+        assert!(page.content.contains("Read the fixture body."));
     }
 }
