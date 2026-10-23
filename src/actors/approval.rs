@@ -106,11 +106,7 @@ impl ApprovalRejection {
     }
 
     pub(crate) fn model_content(&self) -> String {
-        let guidance = if self.mode == ApprovalMode::Auto {
-            "If needed, explicitly use actors__appeal_approval with this approval_id and stage_id and an explanation to ask the Owner through Core without blocking."
-        } else {
-            "The Owner declined this operation. Respect the decision and choose an authorized alternative."
-        };
+        let guidance = "Do not submit this effect for automatic review again. If needed, use actors__appeal_approval with this approval_id and stage_id, null tool_result_id/readable_roots/writable_roots and an explanation to ask the Owner through Core without blocking.";
         format!(
             "{}\nThe operation was not executed. Do not retry the denied effect before authorization. {guidance}",
             self.payload()
@@ -135,33 +131,6 @@ pub struct ReviewVerdict {
 }
 
 const REVIEW_INSTRUCTIONS: &str = include_str!("../app_instructions/approval_review.md");
-
-#[derive(Debug, thiserror::Error, miette::Diagnostic)]
-#[error("New permission requires an approval application: {0}")]
-pub struct ApprovalRequired(pub ApprovalRejection);
-
-pub(crate) fn required(error: &miette::Report) -> Option<ApprovalRejection> {
-    if let Some(error) = error.downcast_ref::<ApprovalRequired>() {
-        return Some(error.0.clone());
-    }
-    match error.downcast_ref::<crate::stage::StageError>() {
-        Some(crate::stage::StageError::ApprovalRequired(reference)) => Some(reference.clone()),
-        _ => None,
-    }
-}
-
-impl ApprovalRejection {
-    pub(crate) fn required_payload(&self) -> serde_json::Value {
-        json!({"approval":{"decision":"application_required", "approval_id":self.approval_id,
-            "stage_id":self.stage_id,"mode":self.mode}})
-    }
-    pub(crate) fn required_content(&self) -> String {
-        format!(
-            "{}\nThe operation was not executed. Use actors__request_approval with this exact approval_id and stage_id, the current task and your reason. Do not add fields to the original App tool. Approval remembers permission only; after approval recheck the target and call the original tool with its declared arguments. Covered permissions do not require another application.",
-            self.required_payload()
-        )
-    }
-}
 
 /// The caller must first validate the App registry, arguments, and capabilities.
 /// A denial prevents this operation and permits authorized alternatives.
@@ -206,8 +175,21 @@ pub async fn authorize(
     if scopes.is_empty() {
         return Ok(effective);
     }
-    // Only a genuinely new permission needs an application. In particular this
-    // must stay after the remembered-grant lookup, not in schema/App validation.
+    // A changed call id or retry is not a new review of an already denied action.
+    if let Some(record) = system.store().denied_operation(
+        &actor.id,
+        &message.id,
+        call,
+        &requested,
+        review,
+        mode,
+        &scopes,
+    )? {
+        apply_decision(system, &record)?;
+    }
+    // Pre-execution review suspends this invocation; no model round trip or
+    // second execution is needed. Post-execution references remain separate.
+    let task: String = message.content.chars().take(1000).collect();
     let record = system.store().create_approval(ApprovalRecord {
         seq: 0,
         id: Uuid::new_v4().to_string(),
@@ -218,20 +200,35 @@ pub async fn authorize(
         review: review.cloned(),
         scopes,
         mode,
-        decision: ApprovalDecision::ApplicationRequired,
-        reason: "An approval application is required".into(),
+        decision: ApprovalDecision::Pending,
+        reason: "Permission review requested".into(),
         created_at_ms: chrono::Utc::now().timestamp_millis(),
         resolved_at_ms: None,
         appeal: None,
-        application: None,
+        application: Some(super::ReviewApplication {
+            task: if task.trim().is_empty() {
+                "Complete the active request".into()
+            } else {
+                task
+            },
+            reason: format!(
+                "Review the requested {} operation before execution",
+                call.name
+            ),
+        }),
     })?;
-    Err(ApprovalRequired(ApprovalRejection {
-        approval_id: record.id,
-        stage_id: system.store().public_stage_id()?.to_string(),
-        reason: "An approval application is required".into(),
-        mode,
-    })
-    .into())
+    let result = authorize_record(system, actor, message, call, control, &record).await;
+    if result.is_err() && ensure_current(system, actor, message, control).is_err() {
+        let _ = system.store().resolve_approval(
+            &record.id,
+            ApprovalDecision::Cancelled,
+            "Request interrupted or Actor configuration changed",
+        );
+    }
+    result?;
+    ensure_current(system, actor, message, control)?;
+    effective.sandbox_policy.filesystem.ensure_root_bindings()?;
+    Ok(effective)
 }
 
 pub(crate) fn validate_application(application: &super::ReviewApplication) -> Result<()> {
@@ -756,37 +753,6 @@ mod tests {
         assert_eq!(message.id, queued.id);
         (dir, system, actor, message)
     }
-    #[allow(clippy::too_many_arguments)]
-    async fn authorize_with_application(
-        system: &ActorSystem,
-        actor: &ActorRecord,
-        message: &MessageRecord,
-        call: &AgentToolCall,
-        control: &ActorControl,
-        base: &AppToolExecutionContext,
-        requested: &ToolPermissionRequest,
-        review: Option<&AppReview>,
-    ) -> Result<AppToolExecutionContext> {
-        match super::authorize(
-            system, actor, message, call, control, base, requested, review,
-        )
-        .await
-        {
-            Ok(context) => Ok(context),
-            Err(error) => {
-                let Some(reference) = required(&error) else {
-                    return Err(error);
-                };
-                super::submit_application(system,actor,message,control,base,&reference.approval_id,
-                    super::super::ReviewApplication {task:"Read the requested project evidence".into(),reason:"This operation obtains the source needed to complete the requested task".into()}).await?;
-                super::authorize(
-                    system, actor, message, call, control, base, requested, review,
-                )
-                .await
-            }
-        }
-    }
-
     async fn authorize_reviewed(
         system: &ActorSystem,
         actor: &ActorRecord,
@@ -802,7 +768,7 @@ mod tests {
             "Review this test operation against the explicit user request.",
             json!({"tool":call.name,"arguments":call.arguments}),
         );
-        authorize_with_application(
+        super::authorize(
             system,
             actor,
             message,
@@ -831,7 +797,7 @@ mod tests {
         let base = system.execution_context(actor, message)?;
         let requested = apps.permission_request(call, &base)?;
         let review = apps.review_requirement(call, &base)?;
-        let effective = authorize_with_application(
+        let effective = super::authorize(
             system,
             actor,
             message,
@@ -872,7 +838,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_uses_an_immutable_reference_without_changing_tool_arguments() {
+    async fn preflight_review_keeps_declared_schema_and_needs_no_application() {
         let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
             json!({"decision":"approve","reason":"requested command"}),
         )));
@@ -915,7 +881,7 @@ mod tests {
         );
         let requested = apps.permission_request(&call, &base).unwrap();
         let review = apps.review_requirement(&call, &base).unwrap();
-        let error = super::authorize(
+        super::authorize(
             &system,
             &actor,
             &message,
@@ -926,95 +892,10 @@ mod tests {
             review.as_ref(),
         )
         .await
-        .err()
         .unwrap();
-        let reference = required(&error).unwrap();
-        let draft = system.store().approval(&reference.approval_id).unwrap();
-        assert_eq!(draft.decision, ApprovalDecision::ApplicationRequired);
-        assert_eq!(draft.call.arguments, call.arguments);
-        assert!(reviewer.requests.lock().is_empty());
-        assert!(
-            system
-                .store()
-                .pending_approvals(Some(&actor.id), None, 10)
-                .unwrap()
-                .items
-                .is_empty()
-        );
-        assert!(
-            system
-                .store()
-                .resolve_approval(
-                    &draft.id,
-                    ApprovalDecision::Approved,
-                    "cannot bypass application"
-                )
-                .is_err()
-        );
-        let application = super::super::ReviewApplication {
-            task: "Verify the requested shell setup".into(),
-            reason: "Echo a fixed local fixture without changing files".into(),
-        };
-        system.seed_test_actor("other");
-        let other = system.store().actor("other").unwrap();
-        assert!(
-            super::submit_application(
-                &system,
-                &other,
-                &message,
-                &ActorControl::default(),
-                &base,
-                &draft.id,
-                application.clone()
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            reviewer.requests.lock().is_empty(),
-            "another Actor cannot submit this reference"
-        );
-        let record = super::submit_application(
-            &system,
-            &actor,
-            &message,
-            &ActorControl::default(),
-            &base,
-            &draft.id,
-            application.clone(),
-        )
-        .await
-        .unwrap();
+        let record = approval(&system, &message.id).await;
         assert_eq!(record.decision, ApprovalDecision::Approved);
         assert_eq!(record.call.arguments, call.arguments);
-        // Repeating the same submitted application is idempotent, but the explanation
-        // cannot be replaced after its decision has been bound to the original call.
-        super::submit_application(
-            &system,
-            &actor,
-            &message,
-            &ActorControl::default(),
-            &base,
-            &draft.id,
-            application.clone(),
-        )
-        .await
-        .unwrap();
-        let mut changed = application;
-        changed.reason = "A different justification".into();
-        assert!(
-            super::submit_application(
-                &system,
-                &actor,
-                &message,
-                &ActorControl::default(),
-                &base,
-                &draft.id,
-                changed
-            )
-            .await
-            .is_err()
-        );
         call.id = Uuid::new_v4().to_string();
         super::authorize(
             &system,
@@ -1036,20 +917,12 @@ mod tests {
                 .unwrap()
                 .items
                 .len(),
-            1,
-            "remembered grants must not create another application"
+            1
         );
-        let input: serde_json::Value =
+        let facts: serde_json::Value =
             serde_json::from_str(&reviewer.requests.lock()[0].current_user_message).unwrap();
-        assert_eq!(
-            input["application"]["task"],
-            "Verify the requested shell setup"
-        );
-        assert_eq!(
-            input["application"]["reason"],
-            "Echo a fixed local fixture without changing files"
-        );
-        assert_eq!(input["proposed_call"]["arguments"], call.arguments);
+        assert_eq!(facts["request"]["content"], message.content);
+        assert_eq!(facts["proposed_call"]["arguments"], call.arguments);
         system.shutdown().await;
     }
 
@@ -1058,25 +931,29 @@ mod tests {
         let reviewer = Arc::new(Reviewer::new(ReviewReply::Fail));
         let (_dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
         let base = system.execution_context(&actor, &message).unwrap();
-        let review = AppReview::new(
-            "test/input-bound/v1",
-            "Review the requested operation",
-            json!({"target":"fixture"}),
-        );
-        let error = super::authorize(
+        let target = base
+            .execution_cwd
+            .parent()
+            .unwrap()
+            .join("outside-input-fixture");
+        let error = base
+            .sandbox_policy
+            .ensure_path_readable(&target, "fixture input")
+            .unwrap_err();
+        let mut result = crate::app::AppToolExecutionResult::new("Fixture denial", json!({}), None);
+        super::super::runtime_permissions::attach_reference(
             &system,
             &actor,
             &message,
             &call(),
-            &ActorControl::default(),
             &base,
-            &ToolPermissionRequest::default(),
-            Some(&review),
+            "fixture-result",
+            &mut result,
+            Some(&error),
         )
-        .await
-        .err()
         .unwrap();
-        let reference = required(&error).unwrap();
+        let reference = result.permission_reference.unwrap();
+        let approval_id = reference.approval_id.unwrap();
         let application = super::super::ReviewApplication {
             task: "Read the requested evidence".into(),
             reason: "Inspect the requested source".into(),
@@ -1089,7 +966,7 @@ mod tests {
                 &message,
                 &ActorControl::default(),
                 &base,
-                &reference.approval_id,
+                &approval_id,
                 application.clone()
             )
             .await
@@ -1100,11 +977,7 @@ mod tests {
             .finish_message(&message.id, MessageStatus::Cancelled, None, None)
             .unwrap();
         assert_eq!(
-            system
-                .store()
-                .approval(&reference.approval_id)
-                .unwrap()
-                .decision,
+            system.store().approval(&approval_id).unwrap().decision,
             ApprovalDecision::Cancelled
         );
         let queued = system
@@ -1120,7 +993,7 @@ mod tests {
                 &next,
                 &ActorControl::default(),
                 &context,
-                &reference.approval_id,
+                &approval_id,
                 application
             )
             .await
@@ -1139,207 +1012,72 @@ mod tests {
 
     #[tokio::test]
     async fn owner_appeal_is_nonblocking_origin_bound_and_remembers_without_replaying_effects() {
-        for decision in ["approve", "deny"] {
-            let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
-                json!({"decision":"deny","reason":"Need the Owner's confirmation for the external output folder"}),
-            )));
-            let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
-            let outside = dir.path().join("requested-output");
-            let worker_caller = system
-                .execution_context(&actor, &message)
-                .unwrap()
-                .actor_call
-                .unwrap();
-            std::fs::create_dir(&outside).unwrap();
-            let target = outside.join("result.txt");
-            let write = AgentToolCall {
-                id: "write-output".into(),
-                name: "files__write_file".into(),
-                arguments: json!({"path":target,"content":"verified output","expected_sha256":null}),
-            };
-            let mut apps =
-                crate::builtin_apps::create_apps(&actor, system.clone(), &system.config()).unwrap();
-            let error = execute_control(&system, &actor, &message, &mut apps, &write)
-                .await
-                .unwrap_err();
-            let denied = system
-                .store()
-                .approvals(Some(&actor.id), None, 10)
-                .unwrap()
-                .items
-                .pop()
-                .unwrap();
-            assert_eq!(rejection(&error).unwrap().approval_id, denied.id);
-            assert!(!target.exists());
-            let appeal_call = AgentToolCall {
-                id: "appeal-once".into(),
-                name: "actors__appeal_approval".into(),
-                arguments: json!({"stage_id":null,"approval_id":denied.id,"explanation":"The requested deliverable belongs in this output folder; may I write it there?"}),
-            };
-            let result = execute_control(&system, &actor, &message, &mut apps, &appeal_call)
-                .await
-                .unwrap();
-            let repeated = execute_control(&system, &actor, &message, &mut apps, &appeal_call)
-                .await
-                .unwrap();
-            assert_eq!(
-                result.payload["core_message_id"],
-                repeated.payload["core_message_id"]
-            );
-            assert_eq!(
-                system.store().message(&message.id).unwrap().status,
-                MessageStatus::Running
-            );
-            assert!(
-                system
+        for mode in [ApprovalMode::Auto, ApprovalMode::Ask] {
+            for decision in ["approve", "deny"] {
+                let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
+                    json!({"decision":"deny","reason":"Need the Owner's confirmation for the external output folder"}),
+                )));
+                let (dir, system, actor, message) = fixture(mode, reviewer.clone()).await;
+                let outside = dir.path().join("requested-output");
+                let worker_caller = system
+                    .execution_context(&actor, &message)
+                    .unwrap()
+                    .actor_call
+                    .unwrap();
+                std::fs::create_dir(&outside).unwrap();
+                let target = outside.join("result.txt");
+                let write = AgentToolCall {
+                    id: "write-output".into(),
+                    name: "files__write_file".into(),
+                    arguments: json!({"path":target,"content":"verified output","expected_sha256":null}),
+                };
+                let mut apps =
+                    crate::builtin_apps::create_apps(&actor, system.clone(), &system.config())
+                        .unwrap();
+                let attempt = execute_control(&system, &actor, &message, &mut apps, &write);
+                let owner = async {
+                    if mode == ApprovalMode::Ask {
+                        let pending = approval(&system, &message.id).await;
+                        system
+                            .store()
+                            .resolve_approval(
+                                &pending.id,
+                                ApprovalDecision::Denied,
+                                "Need the Owner's confirmation",
+                            )
+                            .unwrap();
+                    }
+                };
+                let (attempt, ()) = tokio::join!(attempt, owner);
+                let error = attempt.unwrap_err();
+                let denied = system
                     .store()
-                    .approval_scopes(&actor.id)
+                    .approvals(Some(&actor.id), None, 10)
                     .unwrap()
-                    .is_empty()
-            );
-            // Another ordinary operation can finish while the appeal waits.
-            let local = actor.config.workspace.join("local.txt");
-            std::fs::write(&local, "independent work").unwrap();
-            let local_call = AgentToolCall {
-                id: "continue-work".into(),
-                name: "files__read_file".into(),
-                arguments: json!({"path":local,"start_line":null,"line_count":null}),
-            };
-            assert_eq!(
-                execute_control(&system, &actor, &message, &mut apps, &local_call)
-                    .await
-                    .unwrap()
-                    .payload["content"],
-                "independent work"
-            );
-            // Yield the original inbox input, rather than keeping a tool call
-            // pending. The later runtime notification must itself resume work.
-            system
-                .store()
-                .finish_message(&message.id, MessageStatus::Completed, None, None)
-                .unwrap();
-            let core = system.actor("core").unwrap();
-            let mut core_apps =
-                crate::builtin_apps::create_apps(&core, system.clone(), &system.config()).unwrap();
-            let appeal_input = system.store().claim_next("core").unwrap().unwrap();
-            assert_eq!(appeal_input.id, result.payload["core_message_id"]);
-            let resolve = AgentToolCall {
-                id: "owner-decision".into(),
-                name: "actors__resolve_approval_appeal".into(),
-                arguments: json!({"stage_id":null,"approval_id":denied.id,"decision":decision,"reason":"The Owner explicitly answered this request"}),
-            };
-            // A real appeal is still an Actor input; Core cannot approve it itself.
-            assert!(
-                execute_control(&system, &core, &appeal_input, &mut core_apps, &resolve)
-                    .await
-                    .is_err()
-            );
-            system
-                .send_user(
-                    "core",
-                    "An unrelated message sent before the question".into(),
-                    vec![],
-                    None,
-                )
-                .unwrap();
-            // This fixture keeps inference paused. Exercise the actual durable
-            // delivery/publication boundary used by Core's live deliver tool.
-            let question = system
-                .store()
-                .deliver(
-                    "core",
-                    &appeal_input.id,
-                    "ask-owner",
-                    "The worker requests write access to the output folder. Do you approve?",
-                )
-                .unwrap();
-            system.store().publish_delivery(&question.id).unwrap();
-            system
-                .store()
-                .finish_message(&appeal_input.id, MessageStatus::Completed, None, None)
-                .unwrap();
-            let earlier_owner = system.store().claim_next("core").unwrap().unwrap();
-            assert!(
-                execute_control(&system, &core, &earlier_owner, &mut core_apps, &resolve)
-                    .await
-                    .is_err(),
-                "an Owner input predating the question cannot answer it"
-            );
-            system
-                .store()
-                .finish_message(&earlier_owner.id, MessageStatus::Completed, None, None)
-                .unwrap();
-            system
-                .send_user(
-                    "core",
-                    format!("I {decision} this output-folder request"),
-                    vec![],
-                    None,
-                )
-                .unwrap();
-            let owner = system.store().claim_next("core").unwrap().unwrap();
-            // A normal worker cannot resolve a request even with the right ID.
-            assert!(
-                system
-                    .resolve_appeal_from_core(
-                        &worker_caller,
-                        &denied.id,
-                        ApprovalDecision::Approved,
-                        "forged worker permission"
-                    )
-                    .await
-                    .is_err()
-            );
-            let result = execute_control(&system, &core, &owner, &mut core_apps, &resolve)
-                .await
-                .unwrap();
-            assert_eq!(result.payload["effect_executed"], false);
-            assert!(
-                !target.exists(),
-                "Owner resolution must not execute the denied write"
-            );
-            let record = system.store().approval(&denied.id).unwrap();
-            assert_eq!(
-                record.decision,
-                ApprovalDecision::Denied,
-                "preserve the original automatic decision"
-            );
-            let appeal = record.appeal.unwrap();
-            assert_eq!(appeal.owner_message_id.as_deref(), Some(owner.id.as_str()));
-            let notice = system
-                .store()
-                .message(appeal.notification_id.as_deref().unwrap())
-                .unwrap();
-            assert_eq!(notice.actor_id, actor.id);
-            assert_eq!(notice.in_reply_to.as_deref(), Some(message.id.as_str()));
-            assert_eq!(notice.status, MessageStatus::Queued);
-            let resumed = system.store().claim_next(&actor.id).unwrap().unwrap();
-            assert_eq!(resumed.id, notice.id);
-            let repeated = execute_control(&system, &core, &owner, &mut core_apps, &resolve)
-                .await
-                .unwrap();
-            assert_eq!(
-                repeated.payload["appeal"]["notification_id"],
-                json!(notice.id)
-            );
-            if decision == "approve" {
-                let mut retry = write.clone();
-                retry.id = "retry-after-owner-approval".into();
-                execute_control(&system, &actor, &resumed, &mut apps, &retry)
+                    .items
+                    .pop()
+                    .unwrap();
+                assert_eq!(rejection(&error).unwrap().approval_id, denied.id);
+                assert!(!target.exists());
+                let appeal_call = AgentToolCall {
+                    id: "appeal-once".into(),
+                    name: "actors__appeal_approval".into(),
+                    arguments: json!({"stage_id":null,"approval_id":denied.id,"tool_result_id":null,"readable_roots":null,"writable_roots":null,"explanation":"The requested deliverable belongs in this output folder; may I write it there?"}),
+                };
+                let result = execute_control(&system, &actor, &message, &mut apps, &appeal_call)
                     .await
                     .unwrap();
-                assert_eq!(std::fs::read_to_string(&target).unwrap(), "verified output");
-                let base = system.execution_context(&actor, &resumed).unwrap();
-                assert!(
-                    base.sandbox_policy
-                        .is_path_writable(&outside.join("child.txt"))
+                let repeated = execute_control(&system, &actor, &message, &mut apps, &appeal_call)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result.payload["core_message_id"],
+                    repeated.payload["core_message_id"]
                 );
-                assert!(
-                    !base
-                        .sandbox_policy
-                        .is_path_writable(&dir.path().join("sibling/result.txt"))
+                assert_eq!(
+                    system.store().message(&message.id).unwrap().status,
+                    MessageStatus::Running
                 );
-            } else {
                 assert!(
                     system
                         .store()
@@ -1347,13 +1085,165 @@ mod tests {
                         .unwrap()
                         .is_empty()
                 );
+                // Another ordinary operation can finish while the appeal waits.
+                let local = actor.config.workspace.join("local.txt");
+                std::fs::write(&local, "independent work").unwrap();
+                let local_call = AgentToolCall {
+                    id: "continue-work".into(),
+                    name: "files__read_file".into(),
+                    arguments: json!({"path":local,"start_line":null,"line_count":null}),
+                };
+                assert_eq!(
+                    execute_control(&system, &actor, &message, &mut apps, &local_call)
+                        .await
+                        .unwrap()
+                        .payload["content"],
+                    "independent work"
+                );
+                // Yield the original inbox input, rather than keeping a tool call
+                // pending. The later runtime notification must itself resume work.
+                system
+                    .store()
+                    .finish_message(&message.id, MessageStatus::Completed, None, None)
+                    .unwrap();
+                let core = system.actor("core").unwrap();
+                let mut core_apps =
+                    crate::builtin_apps::create_apps(&core, system.clone(), &system.config())
+                        .unwrap();
+                let appeal_input = system.store().claim_next("core").unwrap().unwrap();
+                assert_eq!(appeal_input.id, result.payload["core_message_id"]);
+                let resolve = AgentToolCall {
+                    id: "owner-decision".into(),
+                    name: "actors__resolve_approval_appeal".into(),
+                    arguments: json!({"stage_id":null,"approval_id":denied.id,"decision":decision,"reason":"The Owner explicitly answered this request"}),
+                };
+                // A real appeal is still an Actor input; Core cannot approve it itself.
+                assert!(
+                    execute_control(&system, &core, &appeal_input, &mut core_apps, &resolve)
+                        .await
+                        .is_err()
+                );
+                system
+                    .send_user(
+                        "core",
+                        "An unrelated message sent before the question".into(),
+                        vec![],
+                        None,
+                    )
+                    .unwrap();
+                // This fixture keeps inference paused. Exercise the actual durable
+                // delivery/publication boundary used by Core's live deliver tool.
+                let question = system
+                    .store()
+                    .deliver(
+                        "core",
+                        &appeal_input.id,
+                        "ask-owner",
+                        "The worker requests write access to the output folder. Do you approve?",
+                    )
+                    .unwrap();
+                system.store().publish_delivery(&question.id).unwrap();
+                system
+                    .store()
+                    .finish_message(&appeal_input.id, MessageStatus::Completed, None, None)
+                    .unwrap();
+                let earlier_owner = system.store().claim_next("core").unwrap().unwrap();
+                assert!(
+                    execute_control(&system, &core, &earlier_owner, &mut core_apps, &resolve)
+                        .await
+                        .is_err(),
+                    "an Owner input predating the question cannot answer it"
+                );
+                system
+                    .store()
+                    .finish_message(&earlier_owner.id, MessageStatus::Completed, None, None)
+                    .unwrap();
+                system
+                    .send_user(
+                        "core",
+                        format!("I {decision} this output-folder request"),
+                        vec![],
+                        None,
+                    )
+                    .unwrap();
+                let owner = system.store().claim_next("core").unwrap().unwrap();
+                // A normal worker cannot resolve a request even with the right ID.
+                assert!(
+                    system
+                        .resolve_appeal_from_core(
+                            &worker_caller,
+                            &denied.id,
+                            ApprovalDecision::Approved,
+                            "forged worker permission"
+                        )
+                        .await
+                        .is_err()
+                );
+                let result = execute_control(&system, &core, &owner, &mut core_apps, &resolve)
+                    .await
+                    .unwrap();
+                assert_eq!(result.payload["effect_executed"], false);
+                assert!(
+                    !target.exists(),
+                    "Owner resolution must not execute the denied write"
+                );
+                let record = system.store().approval(&denied.id).unwrap();
+                assert_eq!(
+                    record.decision,
+                    ApprovalDecision::Denied,
+                    "preserve the original automatic decision"
+                );
+                let appeal = record.appeal.unwrap();
+                assert_eq!(appeal.owner_message_id.as_deref(), Some(owner.id.as_str()));
+                let notice = system
+                    .store()
+                    .message(appeal.notification_id.as_deref().unwrap())
+                    .unwrap();
+                assert_eq!(notice.actor_id, actor.id);
+                assert_eq!(notice.in_reply_to.as_deref(), Some(message.id.as_str()));
+                assert_eq!(notice.status, MessageStatus::Queued);
+                let resumed = system.store().claim_next(&actor.id).unwrap().unwrap();
+                assert_eq!(resumed.id, notice.id);
+                let repeated = execute_control(&system, &core, &owner, &mut core_apps, &resolve)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    repeated.payload["appeal"]["notification_id"],
+                    json!(notice.id)
+                );
+                if decision == "approve" {
+                    let mut retry = write.clone();
+                    retry.id = "retry-after-owner-approval".into();
+                    execute_control(&system, &actor, &resumed, &mut apps, &retry)
+                        .await
+                        .unwrap();
+                    assert_eq!(std::fs::read_to_string(&target).unwrap(), "verified output");
+                    let base = system.execution_context(&actor, &resumed).unwrap();
+                    assert!(
+                        base.sandbox_policy
+                            .is_path_writable(&outside.join("child.txt"))
+                    );
+                    assert!(
+                        !base
+                            .sandbox_policy
+                            .is_path_writable(&dir.path().join("sibling/result.txt"))
+                    );
+                } else {
+                    assert!(
+                        system
+                            .store()
+                            .approval_scopes(&actor.id)
+                            .unwrap()
+                            .is_empty()
+                    );
+                }
+                assert_eq!(
+                    reviewer.requests.lock().len(),
+                    usize::from(mode == ApprovalMode::Auto),
+                    "appeals, control tools and remembered calls must never re-enter automatic review"
+                );
+                system.shutdown().await;
             }
-            assert_eq!(
-                reviewer.requests.lock().len(),
-                1,
-                "appeals, control tools and remembered calls must never re-enter automatic review"
-            );
-            system.shutdown().await;
         }
     }
 
@@ -1397,7 +1287,7 @@ mod tests {
         std::fs::create_dir(&outside).unwrap();
         let base = source.execution_context(&actor, &message).unwrap();
         assert!(
-            authorize_with_application(
+            super::authorize(
                 &source,
                 &actor,
                 &message,
@@ -1558,7 +1448,7 @@ mod tests {
             };
             let requested = app.permission_request(&call, &base).unwrap();
             let review = app.review_requirement(&call, &base).unwrap();
-            let effective = authorize_with_application(
+            let effective = super::authorize(
                 &system,
                 &actor,
                 &message,
@@ -2179,7 +2069,7 @@ mod tests {
             let requested = app.permission_request(&call, &base).unwrap();
             assert!(requested.readable_roots.is_empty());
             let review = app.review_requirement(&call, &base).unwrap();
-            let effective = authorize_with_application(
+            let effective = super::authorize(
                 &system,
                 &actor,
                 &message,
@@ -2286,7 +2176,7 @@ mod tests {
         assert!(app.before_tool_call(&call, &base).is_err());
         let requested = app.permission_request(&call, &base).unwrap();
         let review = app.review_requirement(&call, &base).unwrap();
-        let effective = authorize_with_application(
+        let effective = super::authorize(
             &system,
             &actor,
             &message,
@@ -2361,7 +2251,7 @@ mod tests {
             let base = system.execution_context(&actor, &message).unwrap();
             let requested = app.permission_request(&call, &base).unwrap();
             let review = app.review_requirement(&call, &base).unwrap();
-            let error = authorize_with_application(
+            let error = super::authorize(
                 &system,
                 &actor,
                 &message,
@@ -2417,7 +2307,7 @@ mod tests {
         for _ in 0..2 {
             let base = system.execution_context(&actor, &message).unwrap();
             let requested = app.permission_request(&call, &base).unwrap();
-            let effective = authorize_with_application(
+            let effective = super::authorize(
                 &system,
                 &actor,
                 &message,
@@ -2470,7 +2360,7 @@ mod tests {
         assert!(app.execute_tool(&call, &base).await.is_err());
         let requested = app.permission_request(&call, &base).unwrap();
         assert_eq!(requested.readable_roots, vec![path.clone()]);
-        let effective = authorize_with_application(
+        let effective = super::authorize(
             &system,
             &actor,
             &message,
@@ -2511,7 +2401,7 @@ mod tests {
             let base = system.execution_context(&actor, &message).unwrap();
             let requested = apps.permission_request(&proposed, &base).unwrap();
             let review = apps.review_requirement(&proposed, &base).unwrap();
-            let context = authorize_with_application(
+            let context = super::authorize(
                 &system,
                 &actor,
                 &message,
@@ -2559,7 +2449,7 @@ mod tests {
         let pending = {
             let (system, actor, message) = (system.clone(), actor.clone(), message.clone());
             tokio::spawn(async move {
-                authorize_with_application(
+                super::authorize(
                     &system,
                     &actor,
                     &message,
@@ -2614,7 +2504,7 @@ mod tests {
         let pending = {
             let (system, actor, message) = (system.clone(), actor.clone(), message.clone());
             tokio::spawn(async move {
-                authorize_with_application(
+                super::authorize(
                     &system,
                     &actor,
                     &message,
@@ -2684,7 +2574,7 @@ mod tests {
         let mut proposed = call();
         proposed.arguments["path"] = json!(nested);
         let requested = apps.permission_request(&proposed, &base).unwrap();
-        let context = authorize_with_application(
+        let context = super::authorize(
             &reopened,
             &actor,
             &active,
@@ -2750,7 +2640,7 @@ mod tests {
         );
         let base = system.execution_context(&actor, &message).unwrap();
         assert!(
-            authorize_with_application(
+            super::authorize(
                 &system,
                 &actor,
                 &message,

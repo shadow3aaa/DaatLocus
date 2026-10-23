@@ -205,23 +205,25 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   rule contents; this grants no Actor file access.
   Search targets, returned file contents and explicit rule-file reads retain
   ordinary Actor permissions.
-- Ordinary tool schemas and arguments contain no runtime review fields. An
-  uncovered permission returns an immutable approval reference without executing.
-  Actors submit that reference, task and reason through the separate Actors App
-  approval operation. Runtime binds it to the original Actor, active input,
-  arguments and scope. Approval remembers permission without replaying the call;
-  retrying an operation covered by remembered grants needs no new application.
-  New review applications include the Actor's current task and reason; runtime
-  supplies operation, scope and authority facts. Check existing grants first;
-  covered permissions need no new application or review. Task/reason metadata
-  never changes semantic fingerprints. Appeal control operations do not require review.
+- Ordinary tool schemas and arguments contain no runtime review fields. Runtime
+  checks existing grants first, then suspends pre-execution calls requiring review.
+  It records immutable arguments/scopes and supplies the current input and operation
+  facts to Ask/Auto. Approval resumes the same not-yet-started invocation after
+  authority, cancellation and target checks; no model retry is needed.
+  Cancellation or reconfiguration aborts waiting calls without executing effects.
+  Equivalent reviewed denials within an input reuse their original decision rather
+  than starting another automatic review. Semantic action or scope changes require
+  a fresh fingerprint. Appeal control operations do not require review.
 - A completed App invocation retains its original payload/output and may append a
   device-local result reference. This does not itself diagnose a sandbox denial.
   Typed sandbox denials can also supply an immutable approval reference; otherwise
-  the model proposes explicit missing read/write roots through request_approval.
+  the model proposes explicit missing read/write roots through appeal_approval.
   Never infer scope from stderr, errno or command text. Result references bind to
   the original call and current input authority on the device that executed it;
-  copied observations are not native execution proof. Review never replays a call.
+  copied observations are not native execution proof. The unified appeal_approval
+  control reviews references not previously reviewed; reviewed Ask/Auto denials
+  instead go to Core for a later direct Owner decision, never another Auto review.
+  A post-execution reference approval remembers scope without replaying the call.
 - Ask waits for Owner approval of immutable arguments and requested scope. None
   omits review and can use the operation's requested extra filesystem scope.
   Ask/Auto rejection is a structured permission decision, not a tool or input
@@ -240,7 +242,7 @@ Every effect still requires device-side epoch, authorization, approval and sandb
 - Models cannot change the account approval mode. Only Owner settings change it;
   execution resolves the current account mode rather than an Actor's creation snapshot.
   Cancellation/reconfiguration must invalidate waiting approvals.
-  Owner HTTP resolution is only for Ask Pending; Auto appeals use the Core-mediated
+  Owner HTTP resolution is only for Ask Pending; reviewed-denial appeals use the Core-mediated
   conversation path and remain separate from the original denied decision.
 - Opened filesystem targets must stay within the effective policy; an earlier
   canonical-path check alone does not justify unsafe symlink-following I/O.
@@ -459,6 +461,14 @@ schemas; do not silently repair them through provider-specific normalization.
 
 ## Source And Documentation
 
+- Keep prompts short and imperative. Define desired actions with positive
+  instructions; keep each rule focused and state it once.
+  Ground instructions in context the reading model can observe and actions it
+  can perform through its outputs or tools. Keep explanations, examples and
+  implementation details only when necessary to make an instruction actionable.
+  Integrate user-facing language requirements into the reply style: concise
+  natural language, task names, and avoidance of raw tool names and internal
+  details. Provide technical detail when requested or needed for a user decision.
 - Actor and approval-role instructions live in `src/app_instructions`; runner
   injects Actor instructions independently of App installation. Put on-demand
   cross-tool guidance in `src/builtin_skills`; keep tool descriptions and schemas

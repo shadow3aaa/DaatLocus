@@ -10,10 +10,6 @@ use std::{collections::VecDeque, sync::atomic::AtomicBool};
 enum MockReply {
     Answer(&'static str),
     Calls(Vec<AgentToolCall>),
-    SubmitApproval {
-        task: &'static str,
-        reason: &'static str,
-    },
     Pending,
     // An explicitly unresponsive provider may resume inference any number of
     // times. Unlike Calls, this tail is never consumed or replayed as an effect.
@@ -36,10 +32,6 @@ async fn approval_rejection_is_not_a_tool_or_input_failure() {
                 name: "files__write_file".into(),
                 arguments: json!({"path":target,"content":"must not be written","expected_sha256":null}),
             }]),
-            MockReply::SubmitApproval {
-                task: "Produce the requested file",
-                reason: "Write to the proposed output folder",
-            },
             MockReply::Answer("I will use an authorized alternative."),
         ]));
         provider
@@ -99,22 +91,14 @@ async fn approval_rejection_is_not_a_tool_or_input_failure() {
             .tool_summaries("root", &input.id, None, 10)
             .unwrap()
             .items;
-        assert_eq!(
-            tools.len(),
-            2,
-            "only the original proposal and its approval application run"
-        );
+        assert_eq!(tools.len(), 1);
         assert!(tools.iter().all(|tool| tool.error.is_none()));
-        assert_eq!(
-            tools[0].outcome.as_ref().unwrap()["approval"]["decision"],
-            "application_required"
-        );
         let original = system.store().tool_result(&tools[0].id).unwrap();
         assert!(
             original.started_at_ms.is_none(),
             "the original operation must not start"
         );
-        let tool = &tools[1];
+        let tool = &tools[0];
         let expected = json!({"approval":{"decision":"denied","approval_id":record.id,
             "stage_id":system.store().public_stage_id().unwrap().to_string(),"mode":mode,"reason":reason}});
         assert!(tool.error.is_none());
@@ -125,11 +109,11 @@ async fn approval_rejection_is_not_a_tool_or_input_failure() {
         let events = system.store().events(0, Some("root"), false, 100).unwrap();
         assert!(events.iter().any(|event| matches!(&event.event,
             ActorEvent::ToolFinished {call_id, error:None, outcome:Some(outcome), ..}
-                if call_id == "submit-approval" && outcome == &expected)));
+                if call_id == "rejected-write" && outcome == &expected)));
         {
             let requests = provider.requests.lock();
-            assert_eq!(requests.len(), 3);
-            assert!(requests[2].messages.iter().any(|row| matches!(row,
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1].messages.iter().any(|row| matches!(row,
                 AgentMessage::Tool {content,..} if content.contains(&record.id)
                     && content.contains(reason) && !content.starts_with("App error:"))));
         }
@@ -138,31 +122,19 @@ async fn approval_rejection_is_not_a_tool_or_input_failure() {
 }
 
 #[tokio::test]
-async fn approval_remembers_permission_without_executing_until_the_original_tool_is_retried() {
-    use super::super::ApprovalMode;
-    for retry in [false, true] {
+async fn preflight_approval_executes_original_call_without_a_model_retry() {
+    use super::super::{ApprovalDecision, ApprovalMode};
+    for mode in [ApprovalMode::Auto, ApprovalMode::Ask] {
         let outside = tempfile::tempdir().unwrap();
         let target = outside.path().join("approved-output.txt");
-        let proposed = AgentToolCall {
-            id: "propose-write".into(),
-            name: "files__write_file".into(),
-            arguments: json!({"path":target,"content":"explicit retry output","expected_sha256":null}),
-        };
-        let mut replies = vec![
-            MockReply::Calls(vec![proposed.clone()]),
-            MockReply::SubmitApproval {
-                task: "Create the requested output",
-                reason: "The requested file is outside the workspace",
-            },
-        ];
-        if retry {
-            replies.push(MockReply::Calls(vec![AgentToolCall {
-                id: "retry-write".into(),
-                ..proposed
-            }]));
-        }
-        replies.push(MockReply::Answer("Permission flow completed"));
-        let provider = Arc::new(ReplayProvider::new(replies));
+        let provider = Arc::new(ReplayProvider::new(vec![
+            MockReply::Calls(vec![AgentToolCall {
+                id: "original-write".into(),
+                name: "files__write_file".into(),
+                arguments: json!({"path":target,"content":"original call output","expected_sha256":null}),
+            }]),
+            MockReply::Answer("Output created"),
+        ]));
         provider
             .review_replies
             .lock()
@@ -170,12 +142,43 @@ async fn approval_remembers_permission_without_executing_until_the_original_tool
         let (_dir, system) = runtime(provider.clone()).await;
         system.install_local_core().unwrap();
         system
-            .patch_owned_preferences("core", None, Some(ApprovalMode::Auto))
+            .patch_owned_preferences("core", None, Some(mode))
             .await
             .unwrap();
         let input = system
             .send_user("root", "Create the output".into(), vec![], None)
             .unwrap();
+        if mode == ApprovalMode::Ask {
+            let pending = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(record) = system
+                        .store()
+                        .pending_approvals(Some("root"), None, 10)
+                        .unwrap()
+                        .items
+                        .pop()
+                    {
+                        break record;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                !target.exists(),
+                "waiting for approval must not execute effects"
+            );
+            assert_eq!(
+                provider.requests.lock().len(),
+                1,
+                "inference waits on the original call"
+            );
+            system
+                .store()
+                .resolve_approval(&pending.id, ApprovalDecision::Approved, "Requested output")
+                .unwrap();
+        }
         let finished = wait_completed(&system, &input.id).await;
         assert_eq!(
             finished.status,
@@ -183,40 +186,19 @@ async fn approval_remembers_permission_without_executing_until_the_original_tool
             "{:?}",
             finished.error
         );
-        if retry {
-            assert_eq!(
-                std::fs::read_to_string(&target).unwrap(),
-                "explicit retry output"
-            );
-        } else {
-            assert!(
-                !target.exists(),
-                "approval must never execute the stored operation"
-            );
-        }
-        let tools = system
-            .store()
-            .tool_summaries("root", &input.id, None, 10)
-            .unwrap()
-            .items;
-        assert!(tools.iter().all(|tool| tool.error.is_none()));
-        assert!(
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "original call output"
+        );
+        assert_eq!(
             system
                 .store()
-                .tool_result(&tools[0].id)
+                .tool_summaries("root", &input.id, None, 10)
                 .unwrap()
-                .started_at_ms
-                .is_none()
+                .items
+                .len(),
+            1
         );
-        assert_eq!(
-            tools[1].outcome.as_ref().unwrap()["approval"]["decision"],
-            "approved"
-        );
-        assert_eq!(
-            system.store().tool_result(&tools[1].id).unwrap().payload["executed"],
-            false
-        );
-        assert_eq!(provider.review_requests.lock().len(), 1);
         assert_eq!(
             system
                 .store()
@@ -224,8 +206,7 @@ async fn approval_remembers_permission_without_executing_until_the_original_tool
                 .unwrap()
                 .items
                 .len(),
-            1,
-            "the retry must reuse the grant without another permission application"
+            1
         );
         assert!(!system.store().approval_scopes("root").unwrap().is_empty());
         system.shutdown().await;
@@ -822,34 +803,7 @@ impl ModelProvider for ReplayProvider {
                 progress.emit_assistant_delta("small delta ");
             }
         }
-        let reply = if let MockReply::SubmitApproval { task, reason } = reply {
-            let reference = request
-                .messages
-                .iter()
-                .rev()
-                .find_map(|row| {
-                    if let AgentMessage::Tool { content, .. } = row {
-                        let value = serde_json::Deserializer::from_str(content)
-                            .into_iter::<serde_json::Value>()
-                            .next()?
-                            .ok()?;
-                        let approval = value.get("approval")?;
-                        (approval["decision"] == "application_required").then(|| approval.clone())
-                    } else {
-                        None
-                    }
-                })
-                .expect("runtime must return an immutable approval reference");
-            MockReply::Calls(vec![AgentToolCall {
-                id: "submit-approval".into(),
-                name: "actors__request_approval".into(),
-                arguments: json!({"stage_id":reference["stage_id"],"approval_id":reference["approval_id"],"tool_result_id":null,"readable_roots":null,"writable_roots":null,"task":task,"reason":reason}),
-            }])
-        } else {
-            reply
-        };
         match reply {
-            MockReply::SubmitApproval { .. } => unreachable!("resolved to a model tool call above"),
             MockReply::Failure(error) => Err(miette!("{error}")),
             MockReply::ReasoningOnly => Ok(AgentTurnStreamResult {
                 items: vec![],
@@ -1423,7 +1377,7 @@ async fn core_guidance_routes_to_a_busy_worker_on_another_device() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn remote_approval_decisions_preserve_source_without_executing_or_failing_core() {
+async fn remote_preflight_review_continues_only_approved_operations_without_failing_core() {
     use super::super::ApprovalMode;
     for verdict in ["deny", "approve"] {
         let core_model = Arc::new(ReplayProvider::new(vec![]));
@@ -1454,11 +1408,7 @@ async fn remote_approval_decisions_preserve_source_without_executing_or_failing_
                 arguments: json!({"stage_id":net_b.host.local,"name":"Unapproved project",
                 "workspace":workspace,"instructions":null,"model":null}),
             }]),
-            MockReply::SubmitApproval {
-                task: "Create a project on the other device",
-                reason: "Use the proposed project directory",
-            },
-            MockReply::Answer("Permission decision received; no creation retry requested."),
+            MockReply::Answer("Permission decision received."),
         ]);
         let epoch = net_a.core.read().as_ref().unwrap().epoch();
         let input = a
@@ -1477,7 +1427,7 @@ async fn remote_approval_decisions_preserve_source_without_executing_or_failing_
             .tool_summaries("core", &input.id, None, 10)
             .unwrap()
             .items;
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 1);
         assert!(tools.iter().all(|tool| tool.error.is_none()));
         let decision = b
             .store()
@@ -1486,28 +1436,20 @@ async fn remote_approval_decisions_preserve_source_without_executing_or_failing_
             .items
             .pop()
             .unwrap();
-        assert_eq!(
-            tools[0].outcome.as_ref().unwrap()["approval"]["decision"],
-            "application_required"
-        );
-        assert_eq!(
-            tools[0].outcome.as_ref().unwrap()["approval"]["stage_id"],
-            net_b.host.local.to_string()
-        );
-        let expected = if verdict == "deny" {
-            json!({"approval":{"decision":"denied","approval_id":decision.id,
-            "stage_id":net_b.host.local.to_string(),"reason":reason,"mode":"auto"}})
+        if verdict == "deny" {
+            let expected = json!({"approval":{"decision":"denied","approval_id":decision.id,
+                "stage_id":net_b.host.local.to_string(),"reason":reason,"mode":"auto"}});
+            assert_eq!(tools[0].outcome.as_ref(), Some(&expected));
         } else {
-            json!({"approval":{"decision":"approved","approval_id":decision.id,
-            "stage_id":net_b.host.local.to_string()}})
-        };
-        assert_eq!(tools[1].outcome.as_ref(), Some(&expected));
-        assert!(
+            assert_eq!(decision.decision, super::super::ApprovalDecision::Approved);
+        }
+        assert_eq!(
             b.store()
                 .actors()
                 .unwrap()
                 .iter()
-                .all(|actor| actor.config.name != "Unapproved project")
+                .any(|actor| actor.config.name == "Unapproved project"),
+            verdict == "approve"
         );
         assert_eq!(
             b.store().approval_scopes("core").unwrap().is_empty(),
@@ -1567,15 +1509,6 @@ async fn remote_automatic_review_uses_busy_core_worker_without_moving_it_or_shar
             name: "files__write_file".into(),
             arguments: json!({"path":target,"content":"device B output","expected_sha256":null}),
         }]),
-        MockReply::SubmitApproval {
-            task: "Create the requested output",
-            reason: "The deliverable belongs in this folder",
-        },
-        MockReply::Calls(vec![AgentToolCall {
-            id: "write-approved-on-b".into(),
-            name: "files__write_file".into(),
-            arguments: json!({"path":target,"content":"device B output","expected_sha256":null}),
-        }]),
         MockReply::Answer("Output created"),
     ]);
     let request = b
@@ -1604,7 +1537,10 @@ async fn remote_automatic_review_uses_busy_core_worker_without_moving_it_or_shar
         assert!(reviews[0].history_messages.is_empty());
         let facts: serde_json::Value =
             serde_json::from_str(&reviews[0].current_user_message).unwrap();
-        assert_eq!(facts["application"]["task"], "Create the requested output");
+        assert_eq!(
+            facts["application"]["task"],
+            b.store().message(&request.id).unwrap().content
+        );
         assert_eq!(facts["proposed_call"]["arguments"]["path"], json!(target));
     }
     assert!(!b.store().approval_scopes("root").unwrap().is_empty());
@@ -6255,8 +6191,8 @@ async fn runtime_scope_reference_preserves_generic_output_and_never_replays_app(
     let mut actors = crate::actor_app::ActorApp::new(actor.id.clone(), system.clone());
     let request = AgentToolCall {
         id: "scope-application".into(),
-        name: "request_approval".into(),
-        arguments: json!({"stage_id":metadata["stage_id"],"approval_id":null,"tool_result_id":metadata["tool_result_id"],"readable_roots":[root],"writable_roots":[],"task":"Inspect fixture","reason":"Read the exact requested additional fixture"}),
+        name: "appeal_approval".into(),
+        arguments: json!({"stage_id":metadata["stage_id"],"approval_id":null,"tool_result_id":metadata["tool_result_id"],"readable_roots":[root],"writable_roots":[],"explanation":"Read the exact requested additional fixture"}),
     };
     let approved = crate::app::App::execute_tool(&mut actors, &request, &context)
         .await

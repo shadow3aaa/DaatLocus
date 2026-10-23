@@ -1143,7 +1143,7 @@ impl ActorSystem {
     ) -> Result<ApprovalRecord> {
         let actor = self.record_for_tool(&caller.actor_id, caller)?;
         if actor.remote_read_only
-            || actor.config.permissions.approval_mode != ApprovalMode::Auto
+            || actor.config.permissions.approval_mode != self.store().approval(approval_id)?.mode
             || !self
                 .account_actor_ids(&actor.id)?
                 .contains(crate::stage::shared::ACTOR_ID)
@@ -1231,7 +1231,7 @@ impl ActorSystem {
         let decision = authorization.decision;
         let original = self.store().message(&record.message_id)?;
         let actor = self.execution_actor(&original)?;
-        if actor.remote_read_only || actor.config.permissions.approval_mode != ApprovalMode::Auto {
+        if actor.remote_read_only || actor.config.permissions.approval_mode != record.mode {
             return Err(forbidden("Appeal permission mode or authority changed"));
         }
         if decision == ApprovalDecision::Approved {

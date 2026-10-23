@@ -623,11 +623,6 @@ async fn execute_call(
         )
         .await
     {
-        if let Some(reference) = super::approval::required(&error) {
-            record_tool_application_required(system, actor, message, call, &reference, history)?;
-            check_interruption(system, control, message)?;
-            return Ok(Vec::new());
-        }
         if let Some(rejection) = super::approval::rejection(&error) {
             record_tool_rejection(system, actor, message, call, &rejection, history)?;
             check_interruption(system, control, message)?;
@@ -702,13 +697,6 @@ async fn execute_call(
             Err(miette!("Execution interrupted"))
         }
         Some(Err(error)) => {
-            if let Some(reference) = super::approval::required(&error) {
-                record_tool_application_required(
-                    system, actor, message, call, &reference, history,
-                )?;
-                check_interruption(system, control, message)?;
-                return Ok(Vec::new());
-            }
             if let Some(rejection) = super::approval::rejection(&error) {
                 record_tool_rejection(system, actor, message, call, &rejection, history)?;
                 check_interruption(system, control, message)?;
@@ -812,31 +800,6 @@ fn finish_tool_result(
     let tool = AgentMessage::tool(&call.id, &call.name, content);
     history.push(tool);
     Ok(images)
-}
-
-fn record_tool_application_required(
-    system: &ActorSystem,
-    actor: &ActorRecord,
-    message: &MessageRecord,
-    call: &AgentToolCall,
-    reference: &super::approval::ApprovalRejection,
-    history: &mut Vec<AgentMessage>,
-) -> Result<()> {
-    let content = reference.required_content();
-    system
-        .store()
-        .discard_tool_result_reference(&actor.id, &message.id, &call.id)?;
-    system.store().tool_finished(
-        &actor.id,
-        &message.id,
-        call,
-        reference.required_payload(),
-        &content,
-        "Approval application required",
-        None,
-    )?;
-    history.push(AgentMessage::tool(&call.id, &call.name, content));
-    Ok(())
 }
 
 fn record_tool_rejection(

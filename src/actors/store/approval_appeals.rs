@@ -63,7 +63,7 @@ impl ActorStore {
                 || (!core_authorized && current.status != MessageStatus::Running)
                 || current.cancel_requested
                 || approval.actor_id != actor
-                || approval.mode != ApprovalMode::Auto
+                || approval.mode == ApprovalMode::None
                 || approval.decision != ApprovalDecision::Denied
                 || current.remote_authority.is_some()
                 || original.remote_authority.is_some()
@@ -231,7 +231,7 @@ impl ActorStore {
             }
             let original = message_tx(&tx, &approval.message_id)?;
             let request = message_tx(&tx, &appeal.request_message_id)?;
-            if approval.mode != ApprovalMode::Auto
+            if approval.mode == ApprovalMode::None
                 || approval.decision != ApprovalDecision::Denied
                 || original.cancel_requested
                 || original.remote_authority.is_some()

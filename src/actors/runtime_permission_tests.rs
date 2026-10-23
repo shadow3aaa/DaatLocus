@@ -148,8 +148,9 @@ async fn runtime_result_denied_or_unavailable_review_never_remembers_scope() {
         ReviewReply::Fail,
         ReviewReply::Timeout,
     ] {
+        let reviewer = Arc::new(Reviewer::new(reply));
         let (dir, system, actor, message) =
-            fixture(ApprovalMode::Auto, Arc::new(Reviewer::new(reply))).await;
+            fixture(ApprovalMode::Auto, reviewer.clone()).await;
         let root = dir.path().join("additional");
         std::fs::create_dir(&root).unwrap();
         let base = system.execution_context(&actor, &message).unwrap();
@@ -183,6 +184,61 @@ async fn runtime_result_denied_or_unavailable_review_never_remembers_scope() {
                 .decision,
             ApprovalDecision::Denied
         );
+        let requested = ToolPermissionRequest { readable_roots: vec![root.clone()], ..Default::default() };
+        let review = AppReview::new("fixture/new-effect/v1", "Review this operation", json!({"target":"fixture"}));
+        let retry = super::super::approval::authorize(&system, &actor, &message, &runtime_call(), &ActorControl::default(), &base, &requested, Some(&review)).await.err().expect("refused scope must remain denied");
+        assert!(rejection(&retry).is_some());
+        assert_eq!(reviewer.requests.lock().len(), 1, "an App review cannot bypass a refused filesystem scope");
+        let appeal = runtime_permission::submit(
+            &system, &actor, &message, &ActorControl::default(), &base,
+            result_source(&id, &root), runtime_application(),
+        ).await.unwrap();
+        assert!(appeal.appeal.is_some());
+        assert_eq!(reviewer.requests.lock().len(), 1, "a denied result routes to Core without another review");
+        system.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn reviewed_denial_is_reused_and_one_control_routes_it_to_core() {
+    use crate::app::App;
+    for mode in [ApprovalMode::Auto, ApprovalMode::Ask] {
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(json!({"decision":"deny","reason":"Fixture scope refused"}))));
+        let (_dir, system, actor, message) = fixture(mode, reviewer.clone()).await;
+        let base = system.execution_context(&actor, &message).unwrap();
+        let mut call = runtime_call();
+        let review = AppReview::new("fixture/once/v1", "Review the fixture effect", json!({"target":"once"}));
+        let control = ActorControl::default();
+        let requested = ToolPermissionRequest::default();
+        let authorize = super::super::approval::authorize(&system, &actor, &message, &call, &control, &base, &requested, Some(&review));
+        let owner = async {
+            if mode == ApprovalMode::Ask {
+                let record = approval(&system, &message.id).await;
+                system.store().resolve_approval(&record.id, ApprovalDecision::Denied, "Fixture scope refused").unwrap();
+            }
+        };
+        let (result, ()) = tokio::join!(authorize, owner);
+        let first = rejection(&result.err().expect("review must deny")).unwrap();
+        call.id = "different-call-id".into();
+        let second = tokio::time::timeout(Duration::from_secs(3), super::super::approval::authorize(&system, &actor, &message, &call, &control, &base, &requested, Some(&review)))
+            .await.expect("a denied retry must not start another review").err().expect("retry must preserve denial");
+        assert_eq!(rejection(&second).unwrap().approval_id, first.approval_id);
+        assert_eq!(system.store().approvals(Some(&actor.id), None, 10).unwrap().items.len(), 1);
+        let reviews = reviewer.requests.lock().len();
+        assert_eq!(reviews, usize::from(mode == ApprovalMode::Auto));
+        let mut actors = crate::actor_app::ActorApp::new(actor.id.clone(), system.clone());
+        let appeal_call = AgentToolCall {
+            id: "appeal-fixture".into(), name: "appeal_approval".into(),
+            arguments: json!({"stage_id":null,"approval_id":first.approval_id,"tool_result_id":null,"readable_roots":null,"writable_roots":null,"explanation":"Ask the Owner about the fixture permission"}),
+        };
+        let sent = actors.execute_tool(&appeal_call, &base).await.unwrap();
+        let duplicate = actors.execute_tool(&appeal_call, &base).await.unwrap();
+        assert_eq!(sent.payload["core_message_id"], duplicate.payload["core_message_id"]);
+        assert_eq!(sent.payload["blocking"], false);
+        assert_eq!(reviewer.requests.lock().len(), reviews);
+        let record = system.store().approval(&first.approval_id).unwrap();
+        assert_eq!(record.decision, ApprovalDecision::Denied);
+        assert!(record.appeal.is_some());
         system.shutdown().await;
     }
 }

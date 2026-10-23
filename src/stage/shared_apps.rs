@@ -98,7 +98,10 @@ struct ResolveAppealArgs {
 #[serde(deny_unknown_fields)]
 struct AppealArgs {
     stage_id: String,
-    approval_id: String,
+    approval_id: Option<String>,
+    tool_result_id: Option<String>,
+    readable_roots: Option<Vec<String>>,
+    writable_roots: Option<Vec<String>>,
     explanation: String,
 }
 
@@ -202,7 +205,6 @@ impl App for AccountActors {
                 | "deliver"
                 | "yield"
                 | "appeal_approval"
-                | "request_approval"
                 | "resolve_approval_appeal"
         ) {
             return self.local.execute_tool(call, context).await;

@@ -66,11 +66,6 @@ pub enum Request {
         epoch: u64,
         approval_id: String,
     },
-    BeginApprovalAppeal {
-        epoch: u64,
-        approval_id: String,
-        explanation: String,
-    },
     ApplyApprovalAppeal {
         epoch: u64,
         authorization: crate::actors::ApprovalAppealAuthorization,
@@ -151,9 +146,6 @@ pub enum Request {
 pub enum Response {
     ApprovalSubmitted {
         record: Box<crate::actors::ApprovalRecord>,
-    },
-    ApprovalRequired {
-        reference: crate::actors::approval::ApprovalRejection,
     },
     ApprovalReview {
         verdict: std::result::Result<

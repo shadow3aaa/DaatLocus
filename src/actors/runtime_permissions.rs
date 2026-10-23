@@ -25,9 +25,9 @@ impl PermissionReference {
             serde_json::json!({"permission_reference":self})
         ));
         if self.approval_id.is_some() {
-            content.push_str("If this scope is needed, use actors__request_approval with this approval_id and stage_id, null tool_result_id and roots, your current task and reason. Approval remembers permission only and never repeats the tool call.");
+            content.push_str("If this scope is needed, use actors__appeal_approval with this approval_id and stage_id, null tool_result_id and roots, an explanation. Approval remembers permission only and never repeats the tool call.");
         } else {
-            content.push_str("If the result shows a required filesystem scope is missing, use actors__request_approval with this tool_result_id and stage_id, null approval_id, the exact readable_roots/writable_roots you propose, your current task and reason. This result reference is not an approval or a detected denial. Approval remembers permission only and never repeats the tool call.");
+            content.push_str("If the result shows a required filesystem scope is missing, use actors__appeal_approval with this tool_result_id and stage_id, null approval_id, the exact readable_roots/writable_roots you propose, an explanation. This result reference is not an approval or a detected denial. Approval remembers permission only and never repeats the tool call.");
         }
     }
 }
@@ -91,6 +91,17 @@ fn create_scope_application(
                 scopes.push(scope);
             }
         }
+    }
+    if let Some(record) = system.store().denied_operation(
+        &actor.id,
+        &message.id,
+        call,
+        &requested,
+        None,
+        actor.config.permissions.approval_mode,
+        &scopes,
+    )? {
+        return Ok(record);
     }
     system.store().create_approval(ApprovalRecord {
         seq: 0,
@@ -215,6 +226,21 @@ pub(crate) async fn submit(
             .id
         }
     };
+    let record = system.store().approval(&id)?;
+    if record.actor_id != actor.id || !system.store().native_approval(&id)? {
+        return Err(miette!("Approval reference is outside the Actor authority"));
+    }
+    if record.decision == ApprovalDecision::Denied {
+        return if actor.id == crate::stage::shared::ACTOR_ID {
+            system.appeal_from_current_core(&id, &application.reason)
+        } else {
+            let caller = base
+                .actor_call
+                .as_ref()
+                .ok_or_else(|| miette!("Appeal requires an active Actor request"))?;
+            system.appeal_from_actor(caller, &id, &application.reason)
+        };
+    }
     super::approval::submit_application(system, actor, message, control, base, &id, application)
         .await
 }

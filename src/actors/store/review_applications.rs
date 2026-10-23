@@ -1,6 +1,50 @@
 use super::*;
 
 impl ActorStore {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn denied_operation(
+        &self,
+        actor: &str,
+        message: &str,
+        call: &crate::model_protocol::AgentToolCall,
+        requested: &ToolPermissionRequest,
+        review: Option<&super::super::AppReview>,
+        mode: ApprovalMode,
+        scopes: &[ApprovalScope],
+    ) -> Result<Option<ApprovalRecord>> {
+        database_io(|| {
+            let db = self.db.lock();
+            let filesystem: Vec<_> = scopes
+                .iter()
+                .filter(|scope| matches!(scope, ApprovalScope::Filesystem { .. }))
+                .collect();
+            let record = sql(db
+                .query_row(
+                    "SELECT record FROM approvals WHERE actor_id=?1 AND message_id=?2
+                 AND json_extract(record,'$.decision')='denied'
+                 AND json_extract(record,'$.mode')=?3
+                 AND ((json_extract(record,'$.call.name')=?4
+                       AND json_extract(record,'$.requested')=json(?5)
+                       AND COALESCE(json_extract(record,'$.review'),'null')=json(?6))
+                      OR (json_extract(record,'$.review') IS NULL
+                          AND json_extract(record,'$.scopes')=json(?7)))
+                 ORDER BY seq DESC LIMIT 1",
+                    params![
+                        actor,
+                        message,
+                        serde_json::to_value(mode).unwrap().as_str(),
+                        call.name,
+                        encode(requested)?,
+                        encode(&review)?,
+                        encode(&filesystem)?
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional())?;
+            record.map(decode).transpose()
+        })
+    }
+
     /// Bind explanatory metadata once, without accepting replacement App arguments or scopes.
     pub(crate) fn submit_review_application(
         &self,

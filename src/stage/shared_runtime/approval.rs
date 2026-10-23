@@ -132,41 +132,6 @@ impl Controller {
         }
     }
 
-    pub(crate) async fn begin_approval_appeal(
-        &self,
-        caller: &ActorCallContext,
-        stage: StageId,
-        approval_id: String,
-        explanation: String,
-    ) -> Result<ApprovalRecord> {
-        let runtime = self.runtime()?;
-        let actor = runtime
-            .host
-            .system
-            .record_for_tool(shared::ACTOR_ID, caller)
-            .map_err(|_| StageError::Forbidden("Core input is no longer active"))?;
-        if actor.remote_read_only {
-            return Err(StageError::Forbidden("Read-only authority cannot appeal"));
-        }
-        if !self.execution_permitted() {
-            return Err(StageError::Forbidden("Core worker is unavailable"));
-        }
-        match self
-            .request(
-                stage,
-                Request::BeginApprovalAppeal {
-                    epoch: self.epoch(),
-                    approval_id,
-                    explanation,
-                },
-            )
-            .await?
-        {
-            Response::ApprovalAppeal { record } => Ok(*record),
-            _ => Err(StageError::Invalid("Invalid appeal response")),
-        }
-    }
-
     pub(crate) async fn resolve_approval_appeal(
         &self,
         caller: &ActorCallContext,

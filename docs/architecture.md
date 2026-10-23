@@ -819,26 +819,26 @@ runtime 事实；不在 App 设备另选模型，不为审批改变 Core worker 
 App 通过 `review_requirement` 声明哪些操作需要审查、审查标准以及语义动作。
 默认普通操作不审查；超出沙箱的读写范围独立触发审查，不依赖工具名。
 普通工具严格使用 App 声明的 schema，不追加审批字段。runtime 先检查已有与记忆
-授权；仅未覆盖范围返回结构化 `application_required`、不可变审批 ID 与源设备，
-同时保存原调用与范围，不执行操作。Actor 使用独立 `actors__request_approval`
-提交该引用、当前任务和理由，其余事实由 runtime 填入；不能替换参数、范围或来源。
-引用只属于原 Actor 的当前活跃输入，申请说明一经提交不可修改。通过只记住权限，
-不执行或重放原操作；Actor 重新检查目标后按原工具 schema 调用，已覆盖权限直接通过。
-任务、理由不进入语义指纹，不因说明文字变化产生重复审核。未提交的引用不显示 Ask
-审批卡，也不能通过 Owner 审批接口直接批准。
-审核独立输入保留来源、实际参数、目标、App 标准与授权范围；执行者说明不能自行授权。
+授权；可在执行前确定的未覆盖范围直接保存为不可变 `Pending`，挂起当前调用进入
+Ask/Auto。runtime 提供当前输入、原参数、范围与权限事实，不再要求模型先收到失败、
+申请审批再重试。批准后重新检查当前权限、取消、配置和路径绑定，继续原来的尚未执行
+调用；等待期间不记为已开始的效果。取消或代际变化使等待失效，不执行或重放操作。
+同一活跃输入内，相同语义操作与范围的已审查拒绝复用原审批 ID，不因调用 ID 或重试
+而再次自动审查；有意义的动作、范围或策略变化才产生新的审查。
 
-已实际执行的任意 App 调用可附带设备本地 `tool_result_id` 和 `stage_id`，不依赖
+通用 App 适配层为实际执行后的结果附加设备本地 `tool_result_id` 和 `stage_id`，不依赖
 Terminal 参数或特殊包装。保留原 payload、输出、退出码和 running 状态，在输出预算
 裁剪后追加独立引用；引用本身不声称检测到权限拒绝。仅沙箱库的类型化 `AccessDenied`
-可明确指定拒绝的读写目标，并自动生成不可变的 `ApplicationRequired`；原诊断仍保留。
+可明确指定拒绝的读写目标，并生成尚未审查的不可变 `ApplicationRequired`；原诊断仍保留。
 不从 stderr、操作系统 `PermissionDenied`、errno 或命令文本猜测目标和范围。
 
-`actors__request_approval` 二选一接收现有 `approval_id`，或 `tool_result_id` 加明确的
-绝对路径 `readable_roots` / `writable_roots`，并要求当前任务和理由。后者保存原调用参数，
-只对新提议的未覆盖范围申请审批；已覆盖范围不能冒充新增权限或宣称修复了原生 ACL。
-Auto / Ask 沿用原审查流程，Full access 不等待 Owner、只记住本次允许的精确范围。
-无论哪种来源，批准不会执行或重放原调用。
+唯一的模型权限控制工具 `actors__appeal_approval` 接收现有 `approval_id`（结果与范围为 null），
+或 `tool_result_id` 加明确的绝对 `readable_roots` / `writable_roots`（approval_id 为 null），
+以及自然语言 explanation；任务来自当前输入。runtime 在源设备判断记录状态：未审查的
+引用进入正常 Ask/Auto 审查，已审查拒绝则异步发给 Core 询问 Owner，不再次自动审查。
+结果引用只为未覆盖范围生成申请；等价的已拒绝申请复用原决定，不能用新的结果引用
+绕过拒绝。Full access 不等待 Owner，只记住本次允许的精确范围。此控制工具及审查均不
+执行或重放引用的原调用；获批后由 Actor 明确决定后续操作。重复申诉不重复发送 Core 消息。
 
 实际执行开始时在同一事务写入设备本地 provenance；未 started 的 fallback 结果不能补造。
 本地引用绑定结果 UUID、Actor、输入、call、工具名、参数、开始时间和原输入权限摘要。
@@ -853,7 +853,7 @@ Auto / Ask 沿用原审查流程，Full access 不等待 Owner、只记住本次
 保留原因、审批 ID 与源设备，实时事件及历史活动呈现未获批准及原因；跨设备转发
 不把这些字段压成错误字符串。Actor 可说明决定或选择已获授权的替代方案，不能
 自动重试被拒操作。真正的工具执行错误仍走失败路径。
-Auto 拒绝返回不可变审批 ID。Actor 可通过 `actors__appeal_approval` 将自己的拒绝
+Ask/Auto 拒绝返回不可变审批 ID。Actor 可通过 `actors__appeal_approval` 将自己的拒绝
 记录及自然语言说明异步转交 Core，继续独立工作或 yield；每个拒绝只建立一次申请。
 runtime 将源设备、原任务、操作与范围加入 Core 输入，Core 用普通自然语言 deliver
 询问 Owner 并释放 inbox。只有这次可见询问之后的直接 Owner 输入才能触发
@@ -862,7 +862,7 @@ runtime 将源设备、原任务、操作与范围加入 Core 输入，Core 用�
 本地原范围、权限与路径绑定，记录授权并通知 Actor。它不执行 Core App 工具，也不需要
 复制 Core 的当前输入或执行上下文；申请与授权不能反过来触发 Core worker 切换。
 协作者消息和历史导入不能裁决。
-用户裁决保存在原记录的独立 appeal 字段，原 Auto 拒绝不改写；授权记忆与发给
+用户裁决保存在原记录的独立 appeal 字段，原审查拒绝不改写；授权记忆与发给
 原 Actor 的结果输入在同一事务提交。申请、裁决控制工具自身不审查，不产生审批套娃。
 仅记录原范围，不自动执行或重放旧工具；收到通过结果的 Actor 重新检查目标后再调用，
 命中记忆授权直接通过。原请求取消/中断、目标改变或账号重置不能借申请恢复旧权限。

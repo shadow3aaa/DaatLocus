@@ -600,9 +600,6 @@ impl Controller {
         let response: Response = serde_json::from_slice(&bytes)
             .map_err(|_| StageError::Invalid("Invalid core response"))?;
         tracing::debug!(peer=%peer,operation=label,elapsed_ms=began.elapsed().as_millis(),"Account device operation replied");
-        if let Response::ApprovalRequired { reference } = &response {
-            return Err(StageError::ApprovalRequired(reference.clone()));
-        }
         if let Response::ApprovalDenied { rejection } = &response {
             let mut rejection = rejection.clone();
             rejection.reason = runtime.host.system.safe_error(&rejection.reason);
@@ -677,19 +674,6 @@ impl Controller {
                 let record = system
                     .core_approval_appeal(&approval_id)
                     .map_err(|_| StageError::Forbidden("Appeal is outside account authority"))?;
-                Ok(Response::ApprovalAppeal {
-                    record: Box::new(record),
-                })
-            }
-            Request::BeginApprovalAppeal {
-                epoch,
-                approval_id,
-                explanation,
-            } => {
-                self.require_worker(peer, epoch).await?;
-                let record = system
-                    .appeal_from_current_core(&approval_id, &explanation)
-                    .map_err(|_| StageError::Forbidden("Core appeal could not be recorded"))?;
                 Ok(Response::ApprovalAppeal {
                     record: Box::new(record),
                 })
@@ -2016,14 +2000,16 @@ impl Controller {
         let approved = loop {
             tokio::select! {
                 result=&mut review=>break result.map_err(|error| {
-                    crate::actors::approval::required(&error).map(StageError::ApprovalRequired).or_else(|| crate::actors::approval::rejection(&error).map(StageError::ApprovalDenied))
+                    crate::actors::approval::rejection(&error).map(StageError::ApprovalDenied)
                         .unwrap_or(StageError::Forbidden("App authorization could not be completed"))
                 })?,
                 _=tokio::time::sleep(Duration::from_millis(25))=>{
                     if Instant::now() >= deadline || !self.fence.lock().permits(peer,epoch,Instant::now())
                         || system.store().message(message).is_ok_and(|input| input.cancel_requested || input.status != MessageStatus::Running) {
                         control.stop.store(true,Ordering::Release);
-                        if let Ok(approvals)=system.store().pending_approvals(Some(shared::ACTOR_ID),None,100) {for approval in approvals.items.into_iter().filter(|approval|approval.message_id==message && approval.call.id==call.id){let _=system.store().resolve_approval(&approval.id,crate::actors::ApprovalDecision::Cancelled,"Execution epoch changed");}}
+                        // Let authorize observe cancellation and resolve its own
+                        // pending Ask or Auto record before dropping the wait.
+                        let _ = (&mut review).await;
                         return Err(StageError::Forbidden("Worker changed during App approval"));
                     }
                 },
@@ -2060,13 +2046,7 @@ impl Controller {
                 Ok(result)
             }
             Some(Err(error)) => {
-                if let Some(reference) = crate::actors::approval::required(&error) {
-                    Ok(AppToolExecutionResult::new(
-                        "Approval application required",
-                        reference.required_payload(),
-                        Some(reference.required_content()),
-                    ))
-                } else if let Some(rejection) = crate::actors::approval::rejection(&error) {
+                if let Some(rejection) = crate::actors::approval::rejection(&error) {
                     Ok(AppToolExecutionResult::new(
                         "App operation was not approved",
                         rejection.payload(),
