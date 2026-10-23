@@ -32,7 +32,14 @@ fn main() {
             } else {
                 1
             };
-            let text = std::fs::read_to_string(&paths[index]).unwrap_or_else(|_| "denied".into());
+            let mut text = std::fs::read_to_string(&paths[index]).unwrap_or_else(|_| "denied".into());
+            if index == 1 {
+                text.push_str(if std::fs::write(&paths[index], "bad").is_err() {
+                    "|write-denied"
+                } else {
+                    "|write-allowed"
+                });
+            }
             let value = std::env::var("DL_MCP_FIXTURE_TOKEN").unwrap();
             let ambient = std::env::var("DL_MCP_AMBIENT_SECRET").unwrap();
             format!(r#"{{"content":[{{"type":"text","text":"{value}|{ambient}|{text}"}}],"isError":false}}"#)

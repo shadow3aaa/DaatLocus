@@ -25,6 +25,14 @@ impl RuntimeSandboxPolicy {
     pub fn resolve_path(path: &Path, base: Option<&Path>) -> PathBuf {
         SandboxPolicy::resolve_path(path, base)
     }
+
+    /// Native programs may read/execute host files; only their writes are scoped.
+    /// The original App policy is unchanged. Explicit authority denials survive.
+    pub fn for_process(&self) -> Self {
+        let mut policy = self.clone();
+        policy.filesystem.full_disk_read = true;
+        policy
+    }
 }
 
 impl Deref for RuntimeSandboxPolicy {
@@ -53,3 +61,9 @@ mod integration_tests;
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub(crate) mod test_support;
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+mod process_tests;

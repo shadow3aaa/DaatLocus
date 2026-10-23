@@ -828,7 +828,7 @@ impl App for TerminalApp {
         vec![
             AppToolSpec {
                 name: "terminal_exec".to_string(),
-                description: "Start a terminal command and return output after the current yield window ends. Set `session_id` to null to create a new session, or pass an existing session id returned by a prior terminal call to reuse that session. Never invent a session id. If the command is still running, the result keeps the session so later calls can continue with terminal_write_stdin.".to_string(),
+                description: "Start a terminal command and return output after the current yield window ends. Host reads and executable locations need no additional filesystem grant; writes remain scoped. Set `session_id` to null to create a new session, or pass an existing session id returned by a prior terminal call to reuse that session. Never invent a session id. If the command is still running, the result keeps the session so later calls can continue with terminal_write_stdin.".to_string(),
                 input_schema: model_schema_for::<TerminalExecArgs>(),
             },
             AppToolSpec {
@@ -939,7 +939,7 @@ impl App for TerminalApp {
         request.writable_roots.dedup();
         request
             .readable_roots
-            .retain(|path| !context.sandbox_policy.is_path_readable(path));
+            .retain(|path| !terminal_process_policy(context).is_path_readable(path));
         request
             .writable_roots
             .retain(|path| !context.sandbox_policy.is_path_writable(path));
@@ -968,6 +968,10 @@ impl App for TerminalApp {
                 |path| context.resolve_tool_path(Path::new(path), None),
             );
             process_policy.ensure_path_readable(&workdir, "terminal workdir")?;
+            for root in args.additional_write_roots.unwrap_or_default() {
+                let root = context.resolve_tool_path(Path::new(&root), None);
+                process_policy.ensure_path_writable(&root, "terminal requested write root")?;
+            }
         }
         if call.name == "terminal_write_stdin" {
             let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
@@ -998,8 +1002,7 @@ impl App for TerminalApp {
                     || context.execution_cwd.clone(),
                     |workdir| resolve_terminal_path(context, workdir, Some(&context.execution_cwd)),
                 );
-                context
-                    .sandbox_policy
+                terminal_process_policy(context)
                     .ensure_path_readable(&effective_workdir, "terminal workdir")?;
                 let effective_workdir = args
                     .workdir
@@ -1075,8 +1078,7 @@ impl App for TerminalApp {
                 let session = self.session_state(&args.session_id)?;
                 if let Some(cwd) = session.cwd.as_deref() {
                     let resolved_cwd = resolve_terminal_path(context, cwd, None);
-                    context
-                        .sandbox_policy
+                    terminal_process_policy(context)
                         .ensure_path_readable(&resolved_cwd, "terminal session cwd")?;
                 }
                 let result = self
@@ -1176,7 +1178,7 @@ impl App for TerminalApp {
 }
 
 fn terminal_process_policy(context: &AppToolExecutionContext) -> RuntimeSandboxPolicy {
-    let mut policy = context.sandbox_policy.clone();
+    let mut policy = context.sandbox_policy.for_process();
     if context.actor_call.is_some() {
         policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
     }
@@ -2254,10 +2256,7 @@ fn session_extra_roots_are_requested_again_before_stdin() {
         arguments: json!({"session_id": session_id, "text":"", "wait_mode":null, "yield_time_ms":null, "max_chars":null}),
     };
     let request = app.permission_request(&call, &base).unwrap();
-    assert_eq!(
-        request.readable_roots.as_slice(),
-        std::slice::from_ref(&root)
-    );
+    assert!(request.readable_roots.is_empty());
     assert_eq!(
         request.writable_roots.as_slice(),
         std::slice::from_ref(&root)

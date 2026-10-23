@@ -107,6 +107,10 @@ client are connected.
 - Project, investigation and general Actors use the same core and device Apps.
   Project workspaces grant recursive filesystem access from their top directory.
   Enforce sandbox and authenticated remote restrictions in tools, not only prompts.
+  Native processes (Terminal and MCP stdio) may read and execute host files at any
+  location; only writes are restricted to configured/remembered writable scopes.
+  Files App reads remain scoped. Keep explicit authority denials, native isolation,
+  process cleanup and authenticated remote restrictions when deriving process policy.
 - Guest conversation sharing, PIN sessions and quick-tunnel publication are removed.
   Accounts run either purely locally or interconnect through one public relay.
   Remove device-direct LAN, SSH, WebRTC, ICE/STUN and hole-punching paths.
@@ -193,6 +197,8 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   approval fingerprints. Undeclared ordinary operations do not require review.
   Sandbox access outside existing or remembered roots independently requires
   review, regardless of which App requested access.
+  For native process filesystem access this applies to writes; host reads and
+  executable locations do not require additional filesystem approval.
   Internal search discovery/loading of repository `.gitignore` and global Git
   ignore configuration/rules is exempt from Actor filesystem scope and review.
   Keep repository-boundary discovery, library-managed ignore loading and private

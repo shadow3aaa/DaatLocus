@@ -416,7 +416,9 @@ async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
         include_str!("../../tests/support/mcp_stdio.rs"),
     )
     .unwrap();
-    let executable = workspace.join("mcp-fixture.exe");
+    let tools = directory.path().join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    let executable = tools.join("mcp-fixture.exe");
     let compiled =
         std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
             .args(["--edition=2024", "--crate-name=mcp_stdio_fixture"])
@@ -462,14 +464,15 @@ async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
         allowed.model_content.as_deref(),
         Some("explicit|ambient-fixture|public")
     );
-    let denied = app
+    let outside = app
         .execute_tool(&call(&name, json!({"value":false})), &context)
         .await
         .unwrap();
     assert_eq!(
-        denied.model_content.as_deref(),
-        Some("explicit|ambient-fixture|denied")
+        outside.model_content.as_deref(),
+        Some("explicit|ambient-fixture|private|write-denied")
     );
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "private");
     let running_pid: u32 = std::fs::read_to_string(workspace.join("server.pid"))
         .unwrap()
         .parse()

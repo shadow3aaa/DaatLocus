@@ -720,8 +720,10 @@ x86 模拟器使用 `x86_64`，先运行 `cargo xtask package android --target x
 
 使用隔离的本地 MCP 服务器验证协议、schema、凭据、修订和不确定效果。
 运行 `cargo test --lib mcp::tests`、`cargo test --test http_api apps::`，并运行
-Actor 权限与执行循环的相关测试。Windows 原生 stdio 测试同时验证工作区读取、
-私有存储拒绝、显式环境变量和子进程回收，无需真实账号或公网 MCP 服务器。
+Actor 权限与执行循环的相关测试。原生 Terminal 契约验证工作区外读取和程序执行、
+工作区内可写及工作区外拒写，同时 Files 读取仍受作用域限制。Windows 原生 stdio
+测试验证工作区外 MCP 程序启动、宿主读取、范围外拒写、显式环境变量和子进程回收，
+无需真实账号或公网 MCP 服务器。
 WebUI mock 场景包含应用列表、空列表、加载中和加载失败；连接表单使用
 `https://unavailable.example/mcp` 模拟连接失败，mock 不会访问这个地址。
 

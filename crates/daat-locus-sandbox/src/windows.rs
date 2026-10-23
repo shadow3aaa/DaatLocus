@@ -637,6 +637,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn path_is_preserved_but_command_discovery_requires_tool_directory_access() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        let tools = temp.path().join("tools");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::write(
+            tools.join("dl-path-fixture.cmd"),
+            "@echo off\r\necho fixture-ran\r\n",
+        )
+        .unwrap();
+        let shell = platform_roots()
+            .unwrap()
+            .remove(0)
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let path = format!("{};{}", tools.display(), shell.parent().unwrap().display());
+        for allow_tools in [false, true] {
+            let mut policy = policy(&root);
+            if allow_tools {
+                policy.filesystem.readable_roots.push(tools.clone());
+            }
+            let script = format!(
+                "$ErrorActionPreference='Stop'; if ($env:PATH -cne {}) {{ exit 10 }}; if (Get-Command dl-path-fixture.cmd -ErrorAction SilentlyContinue) {{ [Console]::WriteLine('resolved') }} else {{ [Console]::WriteLine('unresolved') }}",
+                quote(Path::new(&path)),
+            );
+            let child = spawn_restricted_async(
+                &policy,
+                &shell,
+                vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    script,
+                ],
+                SandboxProcessOptions {
+                    current_dir: Some(root.clone()),
+                    environment: vec![("PATH".into(), path.clone())],
+                    stdin: SandboxStdio::Null,
+                    stdout: SandboxStdio::Piped,
+                    stderr: SandboxStdio::Piped,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let (status, out, err) = collect(child).await;
+            assert!(status.success(), "{status}; stdout={out}; stderr={err}");
+            assert_eq!(
+                out.trim(),
+                if allow_tools {
+                    "resolved"
+                } else {
+                    "unresolved"
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn mxc_enforces_scopes_and_future_denies_with_streaming_stdio() {
         if !crate::test_support::native_sandbox_available() {
             return;

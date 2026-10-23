@@ -97,8 +97,9 @@ impl TerminalProcess {
         spawn_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> std::io::Result<Self> {
         let (shell_program, shell_args) = shell_invocation(command);
+        let process_policy = sandbox_policy.for_process();
         let mut child = SandboxAsyncChild::spawn_shell(
-            sandbox_policy,
+            &process_policy,
             &shell_program,
             shell_args,
             SandboxProcessOptions {

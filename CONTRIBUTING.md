@@ -955,8 +955,11 @@ private paths, symlink escapes, process cleanup and ancestor rename protection.
 Cross-compilation does not establish these native behaviors. GUI, external-service and system-changing
 tests remain explicitly opt-in with their existing prerequisites.
 
-The Windows stdio integration verifies allowed workspace reads, denied private
-storage, explicit environment and child cleanup. No real account or
+The native Terminal contract verifies host reads and tool execution outside the
+workspace, allowed workspace writes and denied outside writes while Files reads
+remain scoped. The Windows stdio integration also verifies an MCP executable
+outside the workspace, host reads, denied outside writes, explicit environment
+and child cleanup. No real account or
 public MCP server is required. The WebUI mock gallery includes Apps list, empty,
 loading and failure scenes; its installation form can simulate connection failure
 with `https://unavailable.example/mcp`. Mock installation never contacts that URL.

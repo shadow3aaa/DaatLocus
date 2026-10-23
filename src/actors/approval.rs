@@ -2141,7 +2141,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_approved_runtime_scope_passes_terminal_preflight_and_is_remembered() {
+    async fn terminal_read_admission_remembers_effect_approval_without_granting_files_access() {
         use crate::app::App;
         let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
             json!({"decision":"approve","reason":"Read the requested signing metadata"}),
@@ -2177,6 +2177,7 @@ mod tests {
         for _ in 0..2 {
             let base = system.execution_context(&actor, &message).unwrap();
             let requested = app.permission_request(&call, &base).unwrap();
+            assert!(requested.readable_roots.is_empty());
             let review = app.review_requirement(&call, &base).unwrap();
             let effective = authorize_with_application(
                 &system,
@@ -2193,13 +2194,14 @@ mod tests {
             // Validate Terminal's actual admission path without requiring a
             // platform-native process sandbox in this isolated approval test.
             app.before_tool_call(&call, &effective).unwrap();
-            let result = crate::file_io::read_file(
-                &effective.execution_cwd,
-                &effective.sandbox_policy,
-                &read,
-            )
-            .unwrap();
-            assert_eq!(result.content, "keyAlias=fixture\n");
+            assert!(
+                crate::file_io::read_file(
+                    &effective.execution_cwd,
+                    &effective.sandbox_policy,
+                    &read,
+                )
+                .is_err()
+            );
             assert!(!effective.sandbox_policy.is_path_writable(&properties));
             assert!(
                 !effective

@@ -141,7 +141,7 @@ impl Session {
                 #[cfg(windows)]
                 let (command, arguments) =
                     windows_command(command, arguments, &context.execution_cwd, environment)?;
-                let policy = context.sandbox_policy.clone();
+                let policy = context.sandbox_policy.for_process();
                 let cwd = dunce::simplified(&context.execution_cwd).to_path_buf();
                 let command = command.clone();
                 let arguments = arguments.clone();

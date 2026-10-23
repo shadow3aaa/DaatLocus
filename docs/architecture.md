@@ -889,6 +889,10 @@ Actor 授权记忆控制，包括 OAuth 文件、Actor 交付目录、维护目�
 通用文件策略、路径绑定检查、原生后端和进程/stdio 生命周期属于独立的
 `crates/daat-locus-sandbox`；它不依赖 Actor、App、账户存储或内置资源清单。
 主库 `src/sandbox` 仅组合通用 `SandboxPolicy` 与 DL 的内置资源清单；
+Terminal 与 MCP stdio 在创建原生进程前派生全盘可读策略，允许从任意宿主位置
+读取文件和加载程序；写入仍受配置和记忆的可写范围、只读例外及明确拒绝规则约束。
+派生不修改 Files App 的原始读取策略，不扩大文件工具的读取权限；进程工作目录
+无需额外读取授权。原生库仍支持有限读取策略供其他调用方使用。
 原生进程只接收通用策略。Windows 普通宿主创建和沙箱创建共享库中的同一个
 进程创建锁，不能各自复制静态锁。
 库的 `ensure_path_readable` / `ensure_path_writable` 以类型化 `AccessDenied`
@@ -901,14 +905,15 @@ Actor 授权记忆控制，包括 OAuth 文件、Actor 交付目录、维护目�
 写入用 SHA256 版本校验。受限原生进程隔离不可用时必须拒绝，不能退回宿主执行。
 Windows 原生进程使用微软 MXC SDK 的 PSEC 后端，启动前探测实际可用性及 deny-path
 能力；无宿主 ACL 修改、递归文件扫描、AppContainer ACL 兼容后端或宿主执行回退。
-授权目录直接映射为内核读写根，只读例外和当前策略的拒绝路径独立保留；卷根仅枚举第一层
+宿主卷映射为内核只读根，可写授权目录另行映射，只读例外和当前策略的拒绝路径独立保留；卷根仅枚举第一层
 以适配 PSEC 的卷根语义，不遍历目录树。已批准根的绑定检查仍然生效。系统运行目录
 来自 Windows API，工作目录规范化以兼容 8.3 别名；继承宿主环境并应用进程覆盖项，将 SDK 依赖的系统目录变量绑定到 OS 查询结果。
 PSEC 保留 AppContainer token 身份，现有本机 Owner/维护通道继续拒绝沙箱进程。
 SDK 持有 Job 与隔离策略直到进程树结束；有界异步管道支持 Terminal/MCP 的流式收发，
 进程句柄释放后，已产生且尚未读取的输出仍可排空。
 Linux 使用 bwrap 的用户、PID、IPC、UTS namespace、能力清理和禁止嵌套 user namespace。
-有限读取策略包含 Shell、动态库及最小系统配置，并在私有 namespace 提供 `/tmp`。所有授权绑定挂载之后创建私有
+产品进程先将宿主根目录只读挂载，再覆盖已授权的可写根；通用库的有限读取模式
+仍只挂载 Shell、动态库及最小系统配置，并在私有 namespace 提供 `/tmp`。所有授权绑定挂载之后创建私有
 `/dev` 和对应 PID namespace 的 `/proc`，再应用只读例外与拒绝规则；祖先拒读遮罩
 直接覆盖后代，不再重开嵌套路径。bwrap 在完成隔离后加载 seccomp；禁止 io_uring、
 AF_VSOCK、按句柄打开文件及其他绕过隔离的内核接口，保留普通 IP 网络。
