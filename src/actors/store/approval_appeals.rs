@@ -20,18 +20,6 @@ fn admission(tx: &Transaction<'_>, actor: &str) -> Result<()> {
     Ok(())
 }
 
-fn position(tx: &Transaction<'_>, message: &MessageRecord) -> Result<i64> {
-    if core_requires_commit(tx)? {
-        sql(tx.query_row(
-            "SELECT ordinal FROM core_order WHERE entity='messages' AND remote_key=?1",
-            [&message.id],
-            |row| row.get(0),
-        ))
-    } else {
-        Ok(message.seq)
-    }
-}
-
 impl ActorStore {
     pub(crate) fn appeal_approval(
         &self,
@@ -134,6 +122,7 @@ impl ActorStore {
                 explanation: explanation.into(),
                 decision: ApprovalDecision::Pending,
                 owner_message_id: None,
+                decision_message_id: None,
                 notification_id: None,
             });
             sql(tx.execute(
@@ -142,41 +131,6 @@ impl ActorStore {
             ))?;
             self.commit(tx)?;
             Ok(approval)
-        })
-    }
-
-    pub(crate) fn owner_appeal_reply(
-        &self,
-        owner_input: &str,
-        core_message_id: &str,
-    ) -> Result<String> {
-        database_io(|| {
-            let mut db = self.db.lock();
-            let tx = sql(db.transaction())?;
-            let owner = message_tx(&tx, owner_input)?;
-            let core = crate::stage::shared::ACTOR_ID;
-            if owner.actor_id != core
-                || owner.source != MessageSource::User
-                || owner.status != MessageStatus::Running
-                || owner.cancel_requested
-                || owner.remote_authority.is_some()
-                || crate::conversation_import::is_import(&owner)
-            {
-                return Err(ActorError::Forbidden(
-                    "Appeal resolution requires a direct current Owner reply to Core".into(),
-                )
-                .into());
-            }
-            let order = if core_requires_commit(&tx)? {
-                "EXISTS(SELECT 1 FROM core_order o WHERE o.entity='messages' AND o.remote_key=m.id AND o.ordinal<?2)"
-            } else {
-                "m.seq<?2"
-            };
-            let query = format!(
-                "SELECT m.id FROM messages m WHERE m.actor_id='core' AND json_extract(m.record,'$.kind')='delivery' AND json_extract(m.record,'$.in_reply_to')=?1 AND json_extract(m.record,'$.reply_to.kind')='user' AND length(trim(json_extract(m.record,'$.reply')))>0 AND {order} AND EXISTS(SELECT 1 FROM events e WHERE e.actor_id='core' AND json_extract(e.record,'$.type')='message_added' AND json_extract(e.record,'$.message_id')=m.id) LIMIT 1"
-            );
-            sql(tx.query_row(&query,params![core_message_id,position(&tx,&owner)?],|row|row.get(0)).optional())?
-                .ok_or_else(|| ActorError::Forbidden("Core must ask the Owner about this appeal before resolving it from a later Owner reply".into()).into())
         })
     }
 
@@ -189,7 +143,7 @@ impl ActorStore {
                 approval_id: id,
                 decision,
                 reason,
-                owner_message_id: owner_input,
+                decision_message_id: decision_input,
                 ..
             } = authorization;
             let decision = *decision;
@@ -198,10 +152,12 @@ impl ActorStore {
                 ApprovalDecision::Approved | ApprovalDecision::Denied
             ) || reason.trim().is_empty()
                 || reason.len() > 8192
-                || owner_input.is_empty()
-                || owner_input.len() > 128
-                || authorization.question_message_id.is_empty()
-                || authorization.question_message_id.len() > 128
+                || decision_input.is_empty()
+                || decision_input.len() > 128
+                || authorization
+                    .owner_message_id
+                    .as_ref()
+                    .is_some_and(|id| id != decision_input)
             {
                 return Err(ActorError::Invalid("Invalid appeal decision".into()).into());
             }
@@ -222,9 +178,7 @@ impl ActorStore {
                 .into());
             }
             if appeal.decision != ApprovalDecision::Pending {
-                if appeal.owner_message_id.as_deref() == Some(owner_input.as_str())
-                    && appeal.decision == decision
-                {
+                if appeal.decision == decision {
                     return Ok(approval);
                 }
                 return Err(ActorError::Conflict("Appeal has already been resolved".into()).into());
@@ -269,7 +223,8 @@ impl ActorStore {
                 created_at_ms:now, updated_at_ms:now,
             })?;
             appeal.decision = decision;
-            appeal.owner_message_id = Some(owner_input.into());
+            appeal.owner_message_id = authorization.owner_message_id.clone();
+            appeal.decision_message_id = Some(decision_input.into());
             appeal.notification_id = Some(notification_id);
             approval.appeal = Some(appeal);
             sql(tx.execute(

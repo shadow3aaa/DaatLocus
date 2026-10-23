@@ -1117,20 +1117,26 @@ mod tests {
                     name: "actors__resolve_approval_appeal".into(),
                     arguments: json!({"stage_id":null,"approval_id":denied.id,"decision":decision,"reason":"The Owner explicitly answered this request"}),
                 };
-                // A real appeal is still an Actor input; Core cannot approve it itself.
+                // Core may decide on any active account input, while restricted
+                // caller authority must remain unable to grant permissions.
+                let core_caller = system
+                    .execution_context(&core, &appeal_input)
+                    .unwrap()
+                    .actor_call
+                    .unwrap();
+                let mut read_only = core_caller.clone();
+                read_only.remote_read_only = true;
                 assert!(
-                    execute_control(&system, &core, &appeal_input, &mut core_apps, &resolve)
+                    system
+                        .resolve_appeal_from_core(
+                            &read_only,
+                            &denied.id,
+                            ApprovalDecision::Approved,
+                            "restricted Core decision"
+                        )
                         .await
                         .is_err()
                 );
-                system
-                    .send_user(
-                        "core",
-                        "An unrelated message sent before the question".into(),
-                        vec![],
-                        None,
-                    )
-                    .unwrap();
                 // This fixture keeps inference paused. Exercise the actual durable
                 // delivery/publication boundary used by Core's live deliver tool.
                 let question = system
@@ -1147,17 +1153,18 @@ mod tests {
                     .store()
                     .finish_message(&appeal_input.id, MessageStatus::Completed, None, None)
                     .unwrap();
-                let earlier_owner = system.store().claim_next("core").unwrap().unwrap();
                 assert!(
-                    execute_control(&system, &core, &earlier_owner, &mut core_apps, &resolve)
+                    system
+                        .resolve_appeal_from_core(
+                            &core_caller,
+                            &denied.id,
+                            ApprovalDecision::Approved,
+                            "stale Core decision"
+                        )
                         .await
                         .is_err(),
-                    "an Owner input predating the question cannot answer it"
+                    "a finished Core input must not retain tool authority"
                 );
-                system
-                    .store()
-                    .finish_message(&earlier_owner.id, MessageStatus::Completed, None, None)
-                    .unwrap();
                 system
                     .send_user(
                         "core",
@@ -1195,6 +1202,10 @@ mod tests {
                 );
                 let appeal = record.appeal.unwrap();
                 assert_eq!(appeal.owner_message_id.as_deref(), Some(owner.id.as_str()));
+                assert_eq!(
+                    appeal.decision_message_id.as_deref(),
+                    Some(owner.id.as_str())
+                );
                 let notice = system
                     .store()
                     .message(appeal.notification_id.as_deref().unwrap())
@@ -1245,6 +1256,362 @@ mod tests {
                 system.shutdown().await;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn owner_reply_after_core_final_question_can_resolve_appeal() {
+        assert_owner_appeal_resolution(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn owner_reply_can_resolve_appeal_during_a_later_worker_input() {
+        assert_owner_appeal_resolution(false, true).await;
+    }
+
+    async fn assert_owner_appeal_resolution(final_question: bool, deferred_decision: bool) {
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
+            json!({"decision":"deny","reason":"Confirm the requested output directory"}),
+        )));
+        let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let output = dir.path().join("project-output");
+        std::fs::create_dir(&output).unwrap();
+        let target = output.join("result.txt");
+        let mut apps =
+            crate::builtin_apps::create_apps(&actor, system.clone(), &system.config()).unwrap();
+        let write = AgentToolCall {
+            id: "write-project-output".into(),
+            name: "files__write_file".into(),
+            arguments: json!({"path":target,"content":"Owner-approved output","expected_sha256":null}),
+        };
+        let denied = execute_control(&system, &actor, &message, &mut apps, &write)
+            .await
+            .unwrap_err();
+        let approval_id = rejection(&denied).unwrap().approval_id;
+        let appeal = system
+            .appeal_from_actor(
+                &system
+                    .execution_context(&actor, &message)
+                    .unwrap()
+                    .actor_call
+                    .unwrap(),
+                &approval_id,
+                "The requested build output needs write access to this directory",
+            )
+            .unwrap();
+        system
+            .store()
+            .finish_message(&message.id, MessageStatus::Completed, None, None)
+            .unwrap();
+        let core_input = system.store().claim_next("core").unwrap().unwrap();
+        assert_eq!(core_input.id, appeal.appeal.unwrap().core_message_id);
+        let question = "May the worker read and write the requested project output directory?";
+        // Isolate final-answer publication from deferred resolution: the latter
+        // uses the delivery path already covered by the existing happy-path test.
+        let published = if final_question {
+            system
+                .store()
+                .finish_message(
+                    &core_input.id,
+                    MessageStatus::Completed,
+                    Some(question),
+                    None,
+                )
+                .unwrap();
+            system.store().message(&core_input.id).unwrap()
+        } else {
+            let delivery = system
+                .store()
+                .deliver("core", &core_input.id, "ask-owner", question)
+                .unwrap();
+            system.store().publish_delivery(&delivery.id).unwrap();
+            system
+                .store()
+                .finish_message(&core_input.id, MessageStatus::Completed, None, None)
+                .unwrap();
+            system.store().message(&delivery.id).unwrap()
+        };
+        assert_eq!(published.reply.as_deref(), Some(question));
+        assert_eq!(published.status, MessageStatus::Completed);
+        system
+            .send_user(
+                "core",
+                "Allow it to read and write that directory".into(),
+                vec![],
+                None,
+            )
+            .unwrap();
+        let owner = system.store().claim_next("core").unwrap().unwrap();
+        assert!(owner.seq > published.seq);
+        let decision_input = if deferred_decision {
+            system
+                .store()
+                .finish_message(
+                    &owner.id,
+                    MessageStatus::Completed,
+                    Some("I will record the permission while checking the worker's update."),
+                    None,
+                )
+                .unwrap();
+            system
+                .send_user(
+                    &actor.id,
+                    "Report the independent work completed while awaiting permission".into(),
+                    vec![],
+                    None,
+                )
+                .unwrap();
+            let worker_input = system.store().claim_next(&actor.id).unwrap().unwrap();
+            let update = system.send_from_actor(&actor.id, &worker_input.id, "core", "Independent verification finished; the output directory still needs the Owner-approved grant.".into()).unwrap();
+            // Leave the worker idle so the eventual approval notification can
+            // become its next input; no cancelled or replayed effect is involved.
+            system
+                .store()
+                .finish_message(&worker_input.id, MessageStatus::Completed, None, None)
+                .unwrap();
+            let current = system.store().claim_next("core").unwrap().unwrap();
+            assert_eq!(current.id, update.id);
+            assert!(
+                matches!(&current.source, super::super::MessageSource::Actor { actor_id } if actor_id == &actor.id)
+            );
+            current
+        } else {
+            owner.clone()
+        };
+        let core = system.actor("core").unwrap();
+        let mut core_apps =
+            crate::builtin_apps::create_apps(&core, system.clone(), &system.config()).unwrap();
+        let result = execute_control(&system, &core, &decision_input, &mut core_apps, &AgentToolCall {
+            id:"record-owner-approval".into(), name:"actors__resolve_approval_appeal".into(),
+            arguments:json!({"stage_id":null,"approval_id":approval_id,"decision":"approve","reason":"The Owner explicitly approved after Core's question"}),
+        }).await;
+        if let Err(error) = &result {
+            system.shutdown().await;
+            panic!(
+                "The Owner approved after Core's visible question; resolution must also work with final_question={final_question}, deferred_decision={deferred_decision}: {error}"
+            );
+        }
+        assert_eq!(result.unwrap().payload["effect_executed"], false);
+        assert!(
+            !target.exists(),
+            "recording approval must not replay the denied write"
+        );
+        let record = system.store().approval(&approval_id).unwrap();
+        let appeal = record.appeal.unwrap();
+        assert_eq!(appeal.decision, ApprovalDecision::Approved);
+        assert_eq!(
+            appeal.decision_message_id.as_deref(),
+            Some(decision_input.id.as_str())
+        );
+        assert_eq!(
+            appeal.owner_message_id.as_deref(),
+            (!deferred_decision).then_some(owner.id.as_str()),
+            "a worker-input decision must not be mislabeled as a direct Owner input"
+        );
+        system
+            .store()
+            .finish_message(&decision_input.id, MessageStatus::Completed, None, None)
+            .unwrap();
+        system
+            .send_user(
+                "core",
+                "Continue coordinating the work".into(),
+                vec![],
+                None,
+            )
+            .unwrap();
+        let later = system.store().claim_next("core").unwrap().unwrap();
+        let repeated = execute_control(&system, &core, &later, &mut core_apps, &AgentToolCall {
+            id:"confirm-recorded-approval".into(), name:"actors__resolve_approval_appeal".into(),
+            arguments:json!({"stage_id":null,"approval_id":approval_id,"decision":"approve","reason":"Confirm the previously recorded permission"}),
+        }).await.unwrap();
+        assert_eq!(repeated.payload["effect_executed"], false);
+        let unchanged = system
+            .store()
+            .approval(&approval_id)
+            .unwrap()
+            .appeal
+            .unwrap();
+        assert_eq!(unchanged.decision, appeal.decision);
+        assert_eq!(unchanged.decision_message_id, appeal.decision_message_id);
+        assert_eq!(unchanged.owner_message_id, appeal.owner_message_id);
+        assert_eq!(unchanged.notification_id, appeal.notification_id);
+        assert_eq!(
+            system
+                .store()
+                .queued_messages(&actor.id, None, 10)
+                .unwrap()
+                .items
+                .iter()
+                .filter(|notice| notice.in_reply_to.as_deref() == Some(message.id.as_str()))
+                .count(),
+            1,
+            "repeating a decision must not notify the worker twice"
+        );
+        let notice = system.store().claim_next(&actor.id).unwrap().unwrap();
+        assert_eq!(Some(notice.id.as_str()), appeal.notification_id.as_deref());
+        let retry = AgentToolCall {
+            id: "retry-approved-write".into(),
+            ..write
+        };
+        execute_control(&system, &actor, &notice, &mut apps, &retry)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "Owner-approved output"
+        );
+        assert_eq!(
+            reviewer.requests.lock().len(),
+            1,
+            "Owner resolution and a granted retry must not run Auto again"
+        );
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reviewer_request_failure_can_be_appealed_without_another_automatic_review() {
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Fail));
+        let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let outside = dir.path().join("project");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let mut apps =
+            crate::builtin_apps::create_apps(&actor, system.clone(), &system.config()).unwrap();
+        let list = AgentToolCall {
+            id: "list-outside-project".into(),
+            name: "files__list_directory".into(),
+            arguments: json!({"path":outside,"cursor":null,"limit":null}),
+        };
+        let error = execute_control(&system, &actor, &message, &mut apps, &list)
+            .await
+            .unwrap_err();
+        let rejection = rejection(&error).unwrap();
+        assert!(
+            system
+                .store()
+                .approval_scopes(&actor.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            system
+                .store()
+                .pending_approvals(Some(&actor.id), None, 10)
+                .unwrap()
+                .items
+                .is_empty(),
+            "a failed Auto request must not silently start Ask"
+        );
+        let appeal = AgentToolCall {
+            id: "appeal-reviewer-outage".into(),
+            name: "actors__appeal_approval".into(),
+            arguments: json!({"stage_id":null,"approval_id":rejection.approval_id,"tool_result_id":null,"readable_roots":null,"writable_roots":null,"explanation":"The review service could not be reached. Ask the Owner to authorize the project directory."}),
+        };
+        let submitted = execute_control(&system, &actor, &message, &mut apps, &appeal)
+            .await
+            .unwrap();
+        let core_input = system.store().claim_next("core").unwrap().unwrap();
+        assert_eq!(submitted.payload["core_message_id"], core_input.id);
+        let facts: serde_json::Value = serde_json::from_str(&core_input.content).unwrap();
+        assert_eq!(
+            facts["denial_reason"], rejection.reason,
+            "Core must receive the original failure reason"
+        );
+        assert_eq!(facts["proposed_call"]["arguments"], list.arguments);
+        assert_eq!(
+            reviewer.requests.lock().len(),
+            1,
+            "a previously reviewed denial goes to Owner, not Auto again"
+        );
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn file_read_grant_requires_separate_directory_review_and_then_covers_children() {
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
+            json!({"decision":"approve","reason":"Read the requested manifest"}),
+        )));
+        let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let project = dir.path().join("outside-project");
+        std::fs::create_dir(&project).unwrap();
+        let manifest = project.join("Cargo.toml");
+        std::fs::write(&manifest, "[workspace]\n").unwrap();
+        std::fs::write(project.join("Cargo.lock"), "version = 4\n").unwrap();
+        let mut apps =
+            crate::builtin_apps::create_apps(&actor, system.clone(), &system.config()).unwrap();
+        let read = AgentToolCall {
+            id: "read-only-manifest".into(),
+            name: "files__read_file".into(),
+            arguments: json!({"path":manifest,"start_line":null,"line_count":null}),
+        };
+        let result = execute_control(&system, &actor, &message, &mut apps, &read)
+            .await
+            .unwrap();
+        assert_eq!(result.payload["content"], "[workspace]\n");
+        let context = system.execution_context(&actor, &message).unwrap();
+        assert!(context.sandbox_policy.is_path_readable(&manifest));
+        assert!(
+            !context.sandbox_policy.is_path_readable(&project),
+            "a file grant must not broaden to its parent"
+        );
+        *reviewer.reply.lock() = Some(ReviewReply::Json(
+            json!({"decision":"approve","reason":"List and inspect the requested project"}),
+        ));
+        let listing = execute_control(
+            &system,
+            &actor,
+            &message,
+            &mut apps,
+            &AgentToolCall {
+                id: "review-project-directory".into(),
+                name: "files__list_directory".into(),
+                arguments: json!({"path":project,"cursor":null,"limit":null}),
+            },
+        )
+        .await
+        .unwrap();
+        let names: Vec<_> = listing.payload["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["Cargo.lock", "Cargo.toml"]);
+        assert_eq!(
+            reviewer.requests.lock().len(),
+            2,
+            "listing the unapproved parent needs its own review"
+        );
+        let nested = project.join("new/child.txt");
+        std::fs::create_dir(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "new child evidence").unwrap();
+        let result = execute_control(
+            &system,
+            &actor,
+            &message,
+            &mut apps,
+            &AgentToolCall {
+                id: "read-new-child-with-remembered-grant".into(),
+                name: "files__read_file".into(),
+                arguments: json!({"path":nested,"start_line":null,"line_count":null}),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.payload["content"], "new child evidence");
+        assert_eq!(
+            reviewer.requests.lock().len(),
+            2,
+            "the directory grant recursively covers subsequent reads"
+        );
+        assert!(
+            !system
+                .execution_context(&actor, &message)
+                .unwrap()
+                .sandbox_policy
+                .is_path_writable(&nested)
+        );
+        system.shutdown().await;
     }
 
     #[tokio::test]
@@ -1377,10 +1744,35 @@ mod tests {
                 "Owner approved the output folder",
             )
             .unwrap();
+        for changed_scope in [true, false] {
+            let mut changed = authorization.clone();
+            if changed_scope {
+                changed.scopes_digest = "different-scope".into();
+            } else {
+                changed.core_message_id = "different-appeal".into();
+            }
+            assert!(source.apply_appeal_authorization(&changed).await.is_err());
+        }
+        assert!(
+            source
+                .store()
+                .approval_scopes(&actor.id)
+                .unwrap()
+                .is_empty()
+        );
         let record = source
             .apply_appeal_authorization(&authorization)
             .await
             .unwrap();
+        let mut reversed = authorization.clone();
+        reversed.decision = ApprovalDecision::Denied;
+        assert!(source.apply_appeal_authorization(&reversed).await.is_err());
+        let mut changed = authorization.clone();
+        changed.scopes_digest = "different-scope".into();
+        assert!(
+            source.apply_appeal_authorization(&changed).await.is_err(),
+            "idempotent decisions must still validate their original scope"
+        );
         assert_eq!(
             source.actor("core").unwrap().status,
             super::super::ActorStatus::Idle

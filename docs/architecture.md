@@ -855,13 +855,16 @@ Terminal 参数或特殊包装。保留原 payload、输出、退出码和 runni
 自动重试被拒操作。真正的工具执行错误仍走失败路径。
 Ask/Auto 拒绝返回不可变审批 ID。Actor 可通过 `actors__appeal_approval` 将自己的拒绝
 记录及自然语言说明异步转交 Core，继续独立工作或 yield；每个拒绝只建立一次申请。
-runtime 将源设备、原任务、操作与范围加入 Core 输入，Core 用普通自然语言 deliver
-询问 Owner 并释放 inbox。只有这次可见询问之后的直接 Owner 输入才能触发
-`actors__resolve_approval_appeal`。当前 Core runtime 校验 Owner 来源与提问后的逻辑
-顺序，绑定不可变申请与范围生成 native 裁决；源设备仅验证发送者是当前 Core worker、
+runtime 将源设备、原任务、操作与范围加入 Core 输入。Core 根据账号会话判断用户
+授权，缺失或不明确时用自然语言询问 Owner 并释放 inbox；普通最终回复与 deliver
+均可提问。Core 可在后续任意活跃输入中调用 `actors__resolve_approval_appeal`，
+不要求当前输入来自 Owner、回复紧邻询问或使用特定提问工具。runtime 信任当前 Core
+的语义裁决，记录作出决定的 Core 输入，绑定不可变申请与范围生成 native 裁决；
+仅当当前输入确为 Owner 消息时附记该来源，不推断历史中哪条消息表达了同意。
+同一引用的相同裁决可幂等重试，保留第一次裁决及通知。源设备仅验证发送者是当前 Core worker、
 本地原范围、权限与路径绑定，记录授权并通知 Actor。它不执行 Core App 工具，也不需要
 复制 Core 的当前输入或执行上下文；申请与授权不能反过来触发 Core worker 切换。
-协作者消息和历史导入不能裁决。
+执行者和历史导入不能直接裁决；Core 当前输入仍受执行权、只读与外部授权边界约束。
 用户裁决保存在原记录的独立 appeal 字段，原审查拒绝不改写；授权记忆与发给
 原 Actor 的结果输入在同一事务提交。申请、裁决控制工具自身不审查，不产生审批套娃。
 仅记录原范围，不自动执行或重放旧工具；收到通过结果的 Actor 重新检查目标后再调用，

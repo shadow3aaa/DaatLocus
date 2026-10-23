@@ -186,10 +186,13 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   Its only decisions are approve/deny. Errors, timeouts and invalid
   responses deny the operation without blocking for human approval. After a denial,
   the originating Actor may explicitly appeal its immutable approval ID to Core.
-  Core asks the Owner in natural language; only a later direct Owner reply may
-  resolve that appeal, remember the exact scopes and asynchronously notify the
-  Actor. Never automatically replay the denied call or treat worker prose as approval.
-  Core validates Owner replies on its current host and sends a bounded native
+  Core judges authorization from the account conversation and asks the Owner
+  when it is missing or unclear. It may resolve the appeal on any later active
+  input, without a required reply format, delivery tool or message adjacency.
+  Runtime trusts the current Core's decision, records its originating input and
+  binds it to the immutable appeal and scopes. Never automatically replay the
+  denied call or treat worker prose as Owner authorization.
+  Core sends a bounded native
   decision to the operation device. That device checks the original scope and
   hard authority, records its local grant and notifies the Actor; it must not
   run a Core App tool or require Core execution-context replication for approval.
@@ -222,7 +225,7 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   the original call and current input authority on the device that executed it;
   copied observations are not native execution proof. The unified appeal_approval
   control reviews references not previously reviewed; reviewed Ask/Auto denials
-  instead go to Core for a later direct Owner decision, never another Auto review.
+  instead go to Core for a decision based on Owner authorization, never another Auto review.
   A post-execution reference approval remembers scope without replaying the call.
 - Ask waits for Owner approval of immutable arguments and requested scope. None
   omits review and can use the operation's requested extra filesystem scope.

@@ -157,9 +157,7 @@ impl Controller {
             .host
             .system
             .prepare_appeal_authorization(caller, &record, decision, &reason)
-            .map_err(|_| {
-                StageError::Forbidden("Appeal requires a current Owner reply after Core's question")
-            })?;
+            .map_err(|_| StageError::Forbidden("Appeal requires current account Core authority"))?;
         if !self.execution_permitted() {
             return Err(StageError::Forbidden(
                 "Core worker changed before appeal resolution",

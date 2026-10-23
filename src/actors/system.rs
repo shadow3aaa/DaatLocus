@@ -1199,21 +1199,23 @@ impl ActorSystem {
         reason: &str,
     ) -> Result<ApprovalAppealAuthorization> {
         let core = self.record_for_tool(crate::stage::shared::ACTOR_ID, caller)?;
-        if core.remote_read_only {
-            return Err(forbidden("Read-only Core authority cannot resolve appeals"));
+        let input = self.store().message(&caller.message_id)?;
+        if core.remote_read_only
+            || (!self.local_core() && !self.core_execution_permitted())
+            || input.remote_authority.is_some()
+            || crate::conversation_import::is_import(&input)
+        {
+            return Err(forbidden("Current Core authority cannot resolve appeals"));
         }
         let appeal = record
             .appeal
             .as_ref()
             .ok_or_else(|| invalid("Approval has no appeal"))?;
-        let question = self
-            .store()
-            .owner_appeal_reply(&caller.message_id, &appeal.core_message_id)?;
         Ok(ApprovalAppealAuthorization {
             approval_id: record.id.clone(),
             core_message_id: appeal.core_message_id.clone(),
-            question_message_id: question,
-            owner_message_id: caller.message_id.clone(),
+            decision_message_id: caller.message_id.clone(),
+            owner_message_id: (input.source == MessageSource::User).then_some(input.id),
             scopes_digest: super::approval::scopes_digest(record)?,
             decision,
             reason: self.safe_error(reason),
