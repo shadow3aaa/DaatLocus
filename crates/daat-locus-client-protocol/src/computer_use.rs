@@ -12,15 +12,49 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayConfig {
+    pub width: u32,
+    pub height: u32,
+    pub scale: u32,
+}
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            width: 1920,
+            height: 1080,
+            scale: 1,
+        }
+    }
+}
+impl DisplayConfig {
+    pub fn validate(self) -> Result<()> {
+        if !(256..=4096).contains(&self.width)
+            || !(256..=4096).contains(&self.height)
+            || u64::from(self.width) * u64::from(self.height) > 8_000_000
+            || !matches!(self.scale, 1 | 2)
+            || !self.width.is_multiple_of(self.scale)
+            || !self.height.is_multiple_of(self.scale)
+        {
+            return Err(Error("Invalid virtual display resolution or scale".into()));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Permissions {
     pub enabled: bool,
     pub accessibility: bool,
     pub screen_recording: bool,
+    pub display_supported: bool,
+    pub display_ready: bool,
+    pub display: DisplayConfig,
 }
 impl Permissions {
     pub fn ready(&self) -> bool {
-        self.enabled && self.accessibility && self.screen_recording
+        self.enabled && self.accessibility && self.screen_recording && self.display_ready
     }
 }
 
@@ -191,3 +225,36 @@ mod transport {
 }
 #[cfg(target_os = "macos")]
 pub use transport::{Client, read_frame, verify, write_frame};
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    #[test]
+    fn display_modes_reject_unbounded_pixels_and_fractional_hidpi_points() {
+        for (width, height, scale, accepted) in [
+            (1920, 1080, 1, true),
+            (2560, 1600, 2, true),
+            (4096, 1080, 1, true),
+            (255, 720, 1, false),
+            (1920, 0, 1, false),
+            (4096, 4096, 1, false),
+            (1920, 1080, 0, false),
+            (1920, 1080, 3, false),
+            (1919, 1080, 2, false),
+            (1920, 1079, 2, false),
+            (u32::MAX, u32::MAX, 2, false),
+        ] {
+            assert_eq!(
+                DisplayConfig {
+                    width,
+                    height,
+                    scale
+                }
+                .validate()
+                .is_ok(),
+                accepted,
+                "mode {width}x{height}@{scale}"
+            );
+        }
+    }
+}

@@ -150,6 +150,8 @@ pub fn run(options: Options) -> Result<()> {
             #[cfg(target_os = "macos")]
             crate::computer_use::computer_use_configure,
             #[cfg(target_os = "macos")]
+            crate::computer_use::computer_use_display_configure,
+            #[cfg(target_os = "macos")]
             crate::computer_use::computer_use_permission,
             crate::transport::native_http_start,
             crate::transport::native_http_write,
@@ -182,8 +184,12 @@ pub fn run(options: Options) -> Result<()> {
             #[cfg(all(target_os = "macos", feature = "native-contract"))]
             if let Some(output) = native_contract.clone() {
                 let root = backend.root.clone();
+                let server = app
+                    .state::<std::sync::Arc<daat_locus_computer_use::Server>>()
+                    .inner()
+                    .clone();
                 std::thread::spawn(move || {
-                    let result = daat_locus_computer_use::run_native_contract(&root);
+                    let result = daat_locus_computer_use::run_native_contract(&root, &server);
                     let value = match result {
                         Ok(value) => serde_json::json!({"passed":true,"checks":value}),
                         Err(error) => serde_json::json!({"passed":false,"error":error.to_string()}),
@@ -383,6 +389,12 @@ pub fn run(options: Options) -> Result<()> {
         RunEvent::ExitRequested {
             code: None, api, ..
         } => api.prevent_exit(),
+        #[cfg(target_os = "macos")]
+        RunEvent::Exit => {
+            let _ = _app
+                .state::<std::sync::Arc<daat_locus_computer_use::Server>>()
+                .shutdown();
+        }
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => show(_app),
         _ => {}

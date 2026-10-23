@@ -25,7 +25,7 @@ async fn virtual_display_observation_is_owner_only_and_does_not_initialize_outpu
         .unwrap();
     assert_eq!(
         capabilities["supported"],
-        cfg!(any(windows, target_os = "android"))
+        cfg!(any(windows, target_os = "android", target_os = "macos"))
     );
     for _ in 0..2 {
         let response = fixture.owner(Method::GET, PATH).send().await.unwrap();

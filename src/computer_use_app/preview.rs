@@ -30,6 +30,8 @@ pub struct Catalog {
 pub(crate) fn catalog(system: &crate::actors::ActorSystem) -> miette::Result<Catalog> {
     #[cfg(windows)]
     return system.computer_workspace()?.preview_catalog();
+    #[cfg(target_os = "macos")]
+    return super::macos::preview_catalog(system);
     #[cfg(target_os = "android")]
     {
         let mut catalog = super::android::preview_catalog()?;
@@ -42,7 +44,7 @@ pub(crate) fn catalog(system: &crate::actors::ActorSystem) -> miette::Result<Cat
         }
         Ok(catalog)
     }
-    #[cfg(not(any(windows, target_os = "android")))]
+    #[cfg(not(any(windows, target_os = "android", target_os = "macos")))]
     {
         let _ = system;
         Ok(Catalog {
@@ -59,12 +61,14 @@ pub(crate) fn frame(
 ) -> miette::Result<Option<Vec<u8>>> {
     #[cfg(windows)]
     return system.computer_workspace()?.preview_frame(id);
+    #[cfg(target_os = "macos")]
+    return super::macos::preview_frame(system, id);
     #[cfg(target_os = "android")]
     {
         let _ = system;
         super::android::preview_frame(id)
     }
-    #[cfg(not(any(windows, target_os = "android")))]
+    #[cfg(not(any(windows, target_os = "android", target_os = "macos")))]
     {
         let _ = (system, id);
         Ok(None)

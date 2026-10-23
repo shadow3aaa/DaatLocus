@@ -796,6 +796,9 @@
     }
   },
   "macos_computer_use": {
+    "display_unsupported": "Virtual display unavailable on this macOS version",
+    "scale": "Display scale",
+    "display_invalid": "Width and height must be integers from 256 to 4096, with at most 8 million pixels, and divisible by the display scale.",
     "scope": "Allow GUI apps to be operated in the background",
     "permission_required": "Permission required",
     "finish_authorization": "Finish authorization",

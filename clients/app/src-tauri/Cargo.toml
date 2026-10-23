@@ -33,6 +33,7 @@ tauri-plugin-fs = "2"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 mimalloc = { workspace = true }
+rustls = { version = "0.23.44", default-features = false, features = ["ring", "std"] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 open = "5"

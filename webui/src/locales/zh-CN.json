@@ -796,6 +796,9 @@
     }
   },
   "macos_computer_use": {
+    "display_unsupported": "此 macOS 版本无法使用虚拟屏幕",
+    "scale": "显示缩放",
+    "display_invalid": "宽高须为 256 至 4096 的整数、总像素不超过 800 万，且能被显示缩放倍数整除。",
     "scope": "允许在后台操作 GUI 应用",
     "permission_required": "需要授权",
     "finish_authorization": "完成授权",

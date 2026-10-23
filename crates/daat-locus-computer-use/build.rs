@@ -1,6 +1,7 @@
 use std::{env, path::PathBuf, process::Command};
 fn main() {
     println!("cargo:rerun-if-changed=native/macos.swift");
+    println!("cargo:rerun-if-changed=native/virtual_display.m");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
@@ -42,11 +43,34 @@ fn main() {
             .success(),
         "macOS native compilation failed"
     );
+    let display_object = out.join("virtual_display.o");
+    assert!(
+        Command::new("xcrun")
+            .args([
+                "clang",
+                "-fobjc-arc",
+                "-fmodules",
+                "-O2",
+                "-target",
+                &target,
+                "-isysroot",
+                sdk.trim(),
+                "-c",
+                "native/virtual_display.m",
+                "-o"
+            ])
+            .arg(&display_object)
+            .status()
+            .unwrap()
+            .success(),
+        "macOS virtual display compilation failed"
+    );
     assert!(
         Command::new("ar")
             .arg("crs")
             .arg(out.join("libdl_computer_use_mac.a"))
             .arg(&object)
+            .arg(&display_object)
             .status()
             .unwrap()
             .success()

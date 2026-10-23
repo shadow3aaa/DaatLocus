@@ -46,3 +46,27 @@ pub async fn computer_use_permission(
     .await
     .map_err(|_| "GUI permission request interrupted")?
 }
+
+#[tauri::command]
+pub async fn computer_use_display_configure(
+    window: tauri::WebviewWindow,
+    display: daat_locus_computer_use::DisplayConfig,
+) -> Result<daat_locus_computer_use::Permissions, String> {
+    crate::transport::authorize_owner(&window).await?;
+    let root = window
+        .state::<crate::desktop::Client>()
+        .backend
+        .root
+        .clone();
+    let server = window
+        .state::<std::sync::Arc<daat_locus_computer_use::Server>>()
+        .inner()
+        .clone();
+    tokio::task::spawn_blocking(move || {
+        server
+            .configure_display(&root, display)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "GUI display configuration interrupted")?
+}

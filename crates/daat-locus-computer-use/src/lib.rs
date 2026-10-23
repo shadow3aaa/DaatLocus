@@ -1,5 +1,7 @@
 //! Native background GUI host. Independent of Actors, account storage, WebUI and Tauri.
-pub use daat_locus_client_protocol::computer_use::{Error, Permissions, Reply, Request, Result};
+pub use daat_locus_client_protocol::computer_use::{
+    DisplayConfig, Error, Permissions, Reply, Request, Result,
+};
 #[cfg(target_os = "macos")]
 use serde_json::Value;
 #[cfg(target_os = "macos")]

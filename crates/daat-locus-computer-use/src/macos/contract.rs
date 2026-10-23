@@ -45,16 +45,36 @@ fn point(view: &Value, id: &str, portion: f64) -> Result<Value> {
         json!({"x":(bounds["x"].as_f64().unwrap()+bounds["width"].as_f64().unwrap()*portion).round() as i64,"y":(bounds["y"].as_f64().unwrap()+bounds["height"].as_f64().unwrap()/2.0).round() as i64}),
     )
 }
-pub fn run_native_contract(root: &Path) -> Result<Value> {
+pub fn run_native_contract(root: &Path, server: &Server) -> Result<Value> {
     expect(
         root.file_name()
             .is_some_and(|name| name.to_string_lossy().starts_with("mac-test-")),
         "Native GUI tests require an isolated mac-test-* profile",
     )?;
     let until = std::time::Instant::now() + Duration::from_secs(300);
+    let mut initialized = false;
     loop {
-        if permissions(root).is_ok_and(|p| p.ready()) {
+        let status = permissions(root);
+        if !initialized
+            && status.as_ref().is_ok_and(|p| {
+                p.enabled && p.accessibility && p.screen_recording && !p.display_ready
+            })
+        {
+            initialized = true;
+            server.configure(root, true)?;
+            continue;
+        }
+        if status.as_ref().is_ok_and(|p| p.ready()) {
             break;
+        }
+        if let Some(output) = std::env::var_os("DAAT_LOCUS_NATIVE_CONTRACT") {
+            let progress = match status {
+                Ok(status) => json!({"phase":"waiting_for_gui_prerequisites","permissions":status}),
+                Err(error) => {
+                    json!({"phase":"waiting_for_gui_prerequisites","error":error.to_string()})
+                }
+            };
+            let _ = fs::write(output, progress.to_string());
         }
         if std::time::Instant::now() >= until {
             return Err(Error("GUI test prerequisite unavailable: enable GUI operation and grant Accessibility and Screen Recording".into()));
@@ -62,11 +82,94 @@ pub fn run_native_contract(root: &Path) -> Result<Value> {
         std::thread::sleep(Duration::from_millis(500));
     }
     std::thread::sleep(Duration::from_secs(2));
+    let original_config = display_config(root)?;
+    let display = result(native(json!({"op":"display_state"}))?)?;
+    let display_id = display["virtual"]["id"].clone();
+    expect(
+        display_id.as_u64().is_some_and(|id| id > 0)
+            && display["online"]
+                .as_array()
+                .is_some_and(|ids| ids.contains(&display_id)),
+        "Virtual output is not actually online",
+    )?;
+    let resized = DisplayConfig {
+        width: 1920,
+        height: 1200,
+        scale: 2,
+    };
+    server.configure_display(root, resized)?;
+    let changed = result(native(json!({"op":"display_state"}))?)?;
+    expect(
+        changed["virtual"]["id"] == display_id
+            && changed["virtual"]["width"] == 1920
+            && changed["virtual"]["height"] == 1200
+            && changed["virtual"]["bounds"]["width"] == 960.0,
+        "Applying HiDPI settings did not resize the same real output",
+    )?;
+    expect(
+        display_config(root)? == resized,
+        "Display preference was not persisted",
+    )?;
+    server.configure_display(
+        root,
+        DisplayConfig {
+            width: 1920,
+            height: 1200,
+            scale: 1,
+        },
+    )?;
     let mut host = Host::default();
+    let preview_request = |operation: &str, arguments: Value| Request {
+        id: Uuid::new_v4().to_string(),
+        scope: "owner-preview".into(),
+        session: String::new(),
+        epoch: 0,
+        operation: operation.into(),
+        arguments,
+    };
+    let preview = host.preview(root, &preview_request("preview_catalog", json!({})));
+    expect(
+        preview.failure.is_none()
+            && preview.payload["displays"]
+                .as_array()
+                .is_some_and(|items| items.len() == 1),
+        "Owner preview did not enumerate exactly one existing output",
+    )?;
+    let preview_id = preview.payload["displays"][0]["id"].clone();
+    let frame = host.preview(
+        root,
+        &preview_request("preview_frame", json!({"id":preview_id})),
+    );
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(
+            frame
+                .image
+                .ok_or_else(|| Error(format!("Missing virtual preview: {:?}", frame.failure)))?,
+        )
+        .map_err(|_| Error("Invalid preview bytes".into()))?;
+    expect(
+        bytes.len() > 24
+            && &bytes[..8] == b"\x89PNG\r\n\x1a\n"
+            && u32::from_be_bytes(bytes[16..20].try_into().unwrap()) == 1280,
+        "Owner preview did not capture the actual output as a bounded PNG",
+    )?;
+    expect(
+        host.scopes.is_empty(),
+        "Read-only preview created an Actor lease",
+    )?;
+    expect(
+        host.preview(
+            root,
+            &preview_request("preview_frame", json!({"id":"physical-screen"})),
+        )
+        .failure
+        .is_some(),
+        "Preview accepted an unowned display",
+    )?;
     let cancelled = Arc::new(Mutex::new(HashMap::new()));
     let session = Uuid::new_v4().to_string();
     let invoke = |host: &mut Host, scope: &str, operation: &str, arguments: Value| {
-        host.call(
+        let mut reply = host.call(
             root,
             &Request {
                 id: Uuid::new_v4().to_string(),
@@ -77,7 +180,11 @@ pub fn run_native_contract(root: &Path) -> Result<Value> {
                 arguments,
             },
             &cancelled,
-        )
+        );
+        if let Some(error) = &mut reply.failure {
+            *error = format!("{operation}: {error}");
+        }
+        reply
     };
     let query =
         json!({"app_id":null,"query":"Daat Locus Native Fixture","cursor":null,"limit":100});
@@ -94,7 +201,8 @@ pub fn run_native_contract(root: &Path) -> Result<Value> {
         "Start exactly one disposable Native Fixture window",
     )?;
     let id = windows[0]["window_id"].as_str().unwrap().to_owned();
-    let fixture_pid = host.scopes["test-a"].windows[&id].receipt["pid"].clone();
+    let original_receipt = host.scopes["test-a"].windows[&id].receipt.clone();
+    let fixture_pid = original_receipt["pid"].clone();
     let fixture_path = host.scopes["test-a"].windows[&id].receipt["path"].clone();
     let desktop = result(native(json!({"op":"desktop_state"}))?)?;
     expect(
@@ -107,6 +215,15 @@ pub fn run_native_contract(root: &Path) -> Result<Value> {
         "open_window",
         json!({"window_id":id}),
     ))?;
+    let acquired_bounds = &host.scopes["test-a"].windows[&id].receipt["bounds"];
+    let screen = result(native(json!({"op":"preview_catalog"}))?)?;
+    expect(
+        acquired_bounds["x"].as_f64().unwrap() >= screen["bounds"]["x"].as_f64().unwrap()
+            && acquired_bounds["x"].as_f64().unwrap() + acquired_bounds["width"].as_f64().unwrap()
+                <= screen["bounds"]["x"].as_f64().unwrap()
+                    + screen["bounds"]["width"].as_f64().unwrap(),
+        "Acquired window stayed on a user display",
+    )?;
     expect(
         control(&observed, "native-editor")?["value"] == "initial",
         "Fixture was not in its initial state",
@@ -267,6 +384,17 @@ pub fn run_native_contract(root: &Path) -> Result<Value> {
         released.failure.is_none() && !released.has_resources,
         "Release failed",
     )?;
+    let returned = result(native(json!({"op":"bind","id":original_receipt["id"]}))?)?;
+    expect(
+        returned["receipt"]["bounds"] == original_receipt["bounds"],
+        "Release did not restore the original window geometry",
+    )?;
+    result(native(json!({"op":"release","lease":returned["lease"]}))?)?;
+    let after_input = result(native(json!({"op":"desktop_state"}))?)?;
+    expect(
+        after_input == desktop,
+        "Virtual-display input changed focus or the physical cursor",
+    )?;
     let revoked = invoke(
         &mut host,
         "test-a",
@@ -277,14 +405,43 @@ pub fn run_native_contract(root: &Path) -> Result<Value> {
         revoked.failure.is_some(),
         "Released reference remained actionable",
     )?;
-    configure(root, false)?;
+    server.configure(root, false)?;
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = result(native(json!({"op":"display_state"}))?)?;
+        if !state["online"].as_array().unwrap().contains(&display_id) {
+            break;
+        }
+        expect(
+            std::time::Instant::now() < until,
+            "Disabling left the virtual output online",
+        )?;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let changed_while_disabled = DisplayConfig {
+        width: 1600,
+        height: 1000,
+        scale: 1,
+    };
+    server.configure_display(root, changed_while_disabled)?;
+    let disabled_state = result(native(json!({"op":"display_state"}))?)?;
+    expect(
+        disabled_state["virtual"]["id"] == 0 && display_config(root)? == changed_while_disabled,
+        "Editing disabled display settings created an output or lost the preference",
+    )?;
+    let disabled_preview = host.preview(root, &preview_request("preview_catalog", json!({})));
+    expect(
+        disabled_preview.payload["displays"] == json!([]),
+        "Preview recreated a disabled output",
+    )?;
     let disabled = invoke(
         &mut host,
         "test-a",
         "list_windows",
         json!({"query":null,"app_id":null,"cursor":null,"limit":100}),
     );
-    configure(root, true)?;
+    server.configure(root, true)?;
+    let desktop = result(native(json!({"op":"desktop_state"}))?)?;
     expect(
         disabled.failure.is_some(),
         "Disabled GUI capability admitted work",
@@ -367,7 +524,8 @@ pub fn run_native_contract(root: &Path) -> Result<Value> {
         after == desktop,
         "Background operations changed the foreground application or physical pointer",
     )?;
+    server.configure_display(root, original_config)?;
     Ok(
-        json!({"window_capture":true,"background_editing":true,"unicode_editing":true,"actual_button_action":true,"background_launch":true,"actual_window_close":true,"native_scroll":true,"slider_drag":true,"native_resize":true,"stale_state_rejected":true,"stale_epoch_rejected":true,"cancellation":true,"scope_isolation":true,"png_crop_scale":true,"released_reference_rejected":true,"disabled_admission_rejected":true,"foreground_and_physical_cursor_unchanged":true,"foreground_pid":desktop["pid"]}),
+        json!({"real_virtual_display":true,"same_output_resize_and_hidpi":true,"display_preference_persistence":true,"owner_preview_png":true,"readonly_preview_no_leases":true,"window_relocated_and_returned":true,"disabled_output_removed":true,"window_capture":true,"background_editing":true,"unicode_editing":true,"actual_button_action":true,"background_launch":true,"actual_window_close":true,"native_scroll":true,"slider_drag":true,"native_resize":true,"stale_state_rejected":true,"stale_epoch_rejected":true,"cancellation":true,"scope_isolation":true,"png_crop_scale":true,"released_reference_rejected":true,"disabled_admission_rejected":true,"foreground_and_physical_cursor_unchanged":true,"foreground_pid":desktop["pid"]}),
     )
 }

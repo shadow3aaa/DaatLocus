@@ -81,6 +81,7 @@ fn main() {
                 "phone_use_display_configure",
                 "computer_use_status",
                 "computer_use_configure",
+                "computer_use_display_configure",
                 "computer_use_permission",
                 "native_http_start",
                 "native_http_write",

@@ -59,6 +59,13 @@ macOS 与 Windows 使用同一个 `computer_use` App。独立原生库
 Tools 的 macOS SDK 和 Swift 编译器；先按正常流程构建共享 WebUI/认证 WASM。
 客户端仍支持 macOS 11，实时窗口截图需要 macOS 14+。
 
+客户端通过运行时绑定的私有 `CGVirtualDisplay` 类创建一块真实虚拟屏。
+开关需要两项 TCC 授权；“高级”中的像素分辨率和 1×/2× 缩放确认后在原显示器上生效。
+实测需验证实际在线枚举、模式尺寸、窗口迁入及归还、预览 PNG 和屏幕移除，不能仅以
+返回显示器编号作为成功。Owner 查看不创建屏幕、不请求授权。私有 API 缺失或模式
+未确认时拒绝输入。ABI 参考
+[Chromium 虚拟屏实现](https://chromium.googlesource.com/chromium/src/+/1b72286560637710932b4ef43908d0d6a121a432/ui/display/mac/test/virtual_display_util_mac.mm)。
+
 ```bash
 cargo test --locked -p daat-locus-client-protocol -p daat-locus-computer-use
 DAAT_LOCUS_BUILD_WEBUI=0 cargo test --locked -p daat-locus-app
@@ -70,7 +77,10 @@ xcrun swift-format lint --strict crates/daat-locus-computer-use/native/macos.swi
 `mac-test-*` 临时 profile，通过原生界面创建临时账号，在“GUI 操作”中启用并
 授予辅助功能、屏幕录制；授权对象应为安装后的客户端，而非服务或终端。
 系统认证由操作者完成；系统提示重启时退出并重新打开客户端。ad-hoc 签名构建
-替换后可能需要重新授权，必须检查实际状态，不修改 TCC 数据库或降低系统防护。
+替换后可能需要重新授权，必须检查实际状态。先完成安装再授权，实测期间固定测试产物。
+若开关已开启但 TCC 仍报告旧代码签名不匹配，需要从两处隐私列表移除旧测试条目，
+再添加安装后的 `.app`；仅关闭再开启可能保留旧签名要求。
+不修改 TCC 数据库或降低系统防护。
 
 将 `crates/daat-locus-computer-use/tests/fixtures/NativeFixture.swift` 编译为
 独立 AppKit `.app`，可执行文件为 `native-fixture`，使用例如

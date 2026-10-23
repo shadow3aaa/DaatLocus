@@ -79,9 +79,12 @@ pub fn permissions(root: &Path) -> Result<Permissions> {
         enabled: fs::read(preference(root)).is_ok_and(|v| v == b"enabled\n"),
         accessibility: value["accessibility"] == true,
         screen_recording: value["screen_recording"] == true,
+        display_supported: value["display"]["supported"] == true,
+        display_ready: value["display"]["ready"] == true,
+        display: display_config(root)?,
     })
 }
-pub fn configure(root: &Path, enabled: bool) -> Result<Permissions> {
+fn save_enabled(root: &Path, enabled: bool) -> Result<()> {
     let path = preference(root);
     let temporary = root.join(format!(".gui-{}", Uuid::new_v4()));
     let mut options = OpenOptions::new();
@@ -102,6 +105,36 @@ pub fn configure(root: &Path, enabled: bool) -> Result<Permissions> {
         let _ = fs::remove_file(temporary);
         return Err(Error("Cannot save GUI preference".into()));
     }
+    Ok(())
+}
+fn display_config(root: &Path) -> Result<DisplayConfig> {
+    let path = root.join("computer-use-display.json");
+    let value = match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|_| Error("Invalid display preference".into()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DisplayConfig::default(),
+        Err(_) => return Err(Error("Cannot read display preference".into())),
+    };
+    value.validate()?;
+    Ok(value)
+}
+fn apply_display(root: &Path, display: DisplayConfig) -> Result<()> {
+    use std::hash::{Hash, Hasher};
+    let mut serial = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut serial);
+    result(native(json!({"op":"virtual_configure","width":display.width,"height":display.height,"scale":display.scale,"serial":(serial.finish() as u32).max(1)}))?).map(|_| ())
+}
+pub fn configure(root: &Path, enabled: bool) -> Result<Permissions> {
+    // Disable admission before waiting on native work or returning windows.
+    save_enabled(root, enabled)?;
+    if !enabled {
+        result(native(json!({"op":"virtual_stop"}))?)?;
+    } else {
+        let status = permissions(root)?;
+        if status.accessibility && status.screen_recording && !status.display_ready {
+            apply_display(root, status.display)?;
+        }
+    }
     permissions(root)
 }
 pub fn request_permission(kind: &str) -> Result<()> {
@@ -112,6 +145,16 @@ pub fn request_permission(kind: &str) -> Result<()> {
     };
     result(native(json!({"op":op}))?).map(|_| ())
 }
+fn configure_connection(stream: &UnixStream) -> Result<()> {
+    // BSD accept inherits O_NONBLOCK. A large image must wait for its peer to
+    // drain the socket rather than dropping a partially written frame.
+    stream
+        .set_nonblocking(false)
+        .and_then(|()| stream.set_read_timeout(Some(Duration::from_secs(5))))
+        .and_then(|()| stream.set_write_timeout(Some(Duration::from_secs(5))))
+        .map_err(|_| Error("Cannot configure GUI connection".into()))
+}
+
 pub struct Server {
     stop: Arc<AtomicBool>,
     socket: PathBuf,
@@ -150,6 +193,8 @@ impl Server {
         let server_host = host.clone();
         let cancelled = Arc::new(Mutex::new(HashMap::<String, std::time::Instant>::new()));
         let active = Arc::new(AtomicUsize::new(0));
+        let startup_root = root.clone();
+        let startup_host = server_host.clone();
         std::thread::Builder::new()
             .name("dl-gui-listener".into())
             .spawn(move || {
@@ -169,14 +214,7 @@ impl Server {
                             );
                             std::thread::spawn(move || {
                                 let _ = (|| -> Result<()> {
-                                    stream
-                                        .set_read_timeout(Some(Duration::from_secs(5)))
-                                        .and_then(|()| {
-                                            stream.set_write_timeout(Some(Duration::from_secs(5)))
-                                        })
-                                        .map_err(|_| {
-                                            Error("Cannot configure GUI connection".into())
-                                        })?;
+                                    configure_connection(&stream)?;
                                     verify(&stream, &peer)?;
                                     let request: Request =
                                         serde_json::from_slice(&read_frame(&mut stream, 65536)?)
@@ -200,6 +238,13 @@ impl Server {
                                             image: None,
                                             has_resources: false,
                                         }
+                                    } else if matches!(
+                                        request.operation.as_str(),
+                                        "preview_catalog" | "preview_frame"
+                                    ) {
+                                        host.lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .preview(&root, &request)
                                     } else {
                                         host.lock()
                                             .unwrap_or_else(|e| e.into_inner())
@@ -222,6 +267,18 @@ impl Server {
                 }
             })
             .map_err(|_| Error("Cannot start GUI host".into()))?;
+        // CoreGraphics publishes display changes on the client's main run loop.
+        // Never wait for that run loop from the Tauri setup callback itself.
+        std::thread::spawn(move || {
+            let _host = startup_host.lock().unwrap_or_else(|e| e.into_inner());
+            if let Ok(status) = permissions(&startup_root)
+                && status.enabled
+                && status.accessibility
+                && status.screen_recording
+            {
+                let _ = apply_display(&startup_root, status.display);
+            }
+        });
         Ok(Self {
             stop,
             socket,
@@ -229,19 +286,67 @@ impl Server {
         })
     }
     pub fn configure(&self, root: &Path, enabled: bool) -> Result<Permissions> {
+        if !enabled {
+            save_enabled(root, false)?;
+        }
+        let mut host = self.host.lock().unwrap_or_else(|e| e.into_inner());
         let status = configure(root, enabled)?;
         if !enabled {
-            let mut host = self.host.lock().unwrap_or_else(|e| e.into_inner());
-            for scope in host.scopes.values_mut() {
-                Host::release(scope)
-            }
+            host.scopes.clear();
         }
         Ok(status)
+    }
+    pub fn configure_display(&self, root: &Path, display: DisplayConfig) -> Result<Permissions> {
+        display.validate()?;
+        let mut host = self.host.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = display_config(root)?;
+        let active = permissions(root)?.display_ready;
+        if previous == display {
+            return permissions(root);
+        }
+        let temporary = root.join(format!(".gui-display-{}", Uuid::new_v4()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temporary)
+            .map_err(|_| Error("Cannot save display preference".into()))?;
+        let bytes =
+            serde_json::to_vec(&display).map_err(|_| Error("Invalid display preference".into()))?;
+        let saved = (|| -> Result<()> {
+            file.write_all(&bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|_| Error("Cannot save display preference".into()))?;
+            if active {
+                apply_display(root, display)?;
+                host.scopes.clear();
+            }
+            if fs::rename(&temporary, root.join("computer-use-display.json")).is_err() {
+                if active {
+                    let _ = apply_display(root, previous);
+                }
+                return Err(Error("Cannot save display preference".into()));
+            }
+            Ok(())
+        })();
+        if saved.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        saved?;
+        permissions(root)
+    }
+    pub fn shutdown(&self) -> Result<()> {
+        let mut host = self.host.lock().unwrap_or_else(|e| e.into_inner());
+        result(native(json!({"op":"virtual_stop"}))?)?;
+        host.scopes.clear();
+        Ok(())
     }
 }
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        let _ = self.shutdown();
         let _ = fs::remove_file(&self.socket);
     }
 }
@@ -267,7 +372,7 @@ impl Scope {
                 self.retired
                     .insert(self.session.clone(), std::time::Instant::now());
             }
-            Host::release(self);
+            Host::release(self)?;
             self.apps.clear();
             self.session = session.into();
             self.epoch = 0;
@@ -312,11 +417,55 @@ impl Admission {
 impl Drop for Host {
     fn drop(&mut self) {
         for scope in self.scopes.values_mut() {
-            Self::release(scope)
+            let _ = Self::release(scope);
         }
     }
 }
 impl Host {
+    fn preview(&self, root: &Path, request: &Request) -> Reply {
+        let result = (|| -> Result<(Value, Option<String>)> {
+            let status = permissions(root)?;
+            let state = if !status.enabled {
+                "disabled"
+            } else if status.ready() {
+                "ready"
+            } else {
+                "unavailable"
+            };
+            let display = result(native(json!({"op":"preview_catalog"}))?)?;
+            let id = display["id"]
+                .as_u64()
+                .filter(|value| *value != 0)
+                .map(|value| format!("macos-{value}"));
+            if request.operation == "preview_catalog" {
+                return Ok((
+                    json!({"supported":status.display_supported,"state":state,"displays":if state=="ready"{id.map(|id|vec![json!({"id":id,"actor_id":null,"name":null,"width":display["width"],"height":display["height"]})]).unwrap_or_default()}else{vec![]}}),
+                    None,
+                ));
+            }
+            if state != "ready" || id.as_deref() != request.arguments["id"].as_str() {
+                return Err(Error("Virtual display preview unavailable".into()));
+            }
+            let frame = result(native(json!({"op":"preview_frame"}))?)?;
+            Ok((json!({}), frame["image"].as_str().map(str::to_owned)))
+        })();
+        match result {
+            Ok((payload, image)) => Reply {
+                summary: "Virtual display".into(),
+                payload,
+                image,
+                failure: None,
+                has_resources: false,
+            },
+            Err(error) => Reply {
+                summary: "Virtual display unavailable".into(),
+                payload: json!({}),
+                image: None,
+                failure: Some(error.0),
+                has_resources: false,
+            },
+        }
+    }
     fn invoke(&mut self, value: Value) -> Result<Value> {
         let admission = if value["op"] == "release" {
             None
@@ -332,13 +481,19 @@ impl Host {
         self.effect |= reply["effect"] == true;
         result(reply)
     }
-    fn release(scope: &mut Scope) {
-        for window in scope.windows.values() {
-            if let Some(lease) = &window.lease {
-                let _ = native(json!({"op":"release","lease":lease}));
+    fn release(scope: &mut Scope) -> Result<()> {
+        let mut failure = None;
+        scope.windows.retain(|_, window| {
+            if let Some(lease) = &window.lease
+                && let Err(error) = native(json!({"op":"release","lease":lease})).and_then(result)
+            {
+                window.state = None;
+                failure = Some(error);
+                return true;
             }
-        }
-        scope.windows.clear();
+            false
+        });
+        failure.map_or(Ok(()), Err)
     }
     #[cfg(feature = "native-contract")]
     fn call(
@@ -374,7 +529,7 @@ impl Host {
             }
             if !permissions(root)?.ready() {
                 for scope in self.scopes.values_mut() {
-                    Self::release(scope);
+                    let _ = Self::release(scope);
                 }
                 return Err(Error(
                     "Enable GUI operation, Accessibility and Screen Recording in Settings".into(),
@@ -398,9 +553,13 @@ impl Host {
             let mut scope = self.scopes.remove(&request.scope).unwrap_or_default();
             if request.operation == "detach" {
                 if scope.session == request.session {
-                    Self::release(&mut scope);
-                    scope.apps.clear();
                     scope.closed = true;
+                    let released = Self::release(&mut scope);
+                    scope.apps.clear();
+                    if let Err(error) = released {
+                        self.scopes.insert(request.scope.clone(), scope);
+                        return Err(error);
+                    }
                 }
                 self.scopes.insert(request.scope.clone(), scope);
                 return Ok((json!({"status":"detached"}), None));
@@ -541,16 +700,24 @@ impl Host {
                 }
                 rows.push(json!({"window_id":id,"app_id":app,"title":title,"taken":window.lease.is_some()}));
             }
+            let mut cleanup_failure = None;
             scope.windows.retain(|id, window| {
                 if live.contains(id) {
-                    true
-                } else {
-                    if let Some(lease) = &window.lease {
-                        let _ = native(json!({"op":"release","lease":lease}));
-                    }
-                    false
+                    return true;
                 }
+                if let Some(lease) = &window.lease
+                    && let Err(error) =
+                        native(json!({"op":"release","lease":lease})).and_then(result)
+                {
+                    window.state = None;
+                    cleanup_failure = Some(error);
+                    return true;
+                }
+                false
             });
+            if let Some(error) = cleanup_failure {
+                return Err(error);
+            }
             return Ok((Self::page("windows", rows, args)?, None));
         }
         let mut acquired = None;
@@ -581,19 +748,14 @@ impl Host {
             .windows
             .get_mut(id)
             .ok_or_else(|| Error("Unknown or revoked window; discover again".into()))?;
-        if op == "give_window" && args["placement"] != "original" {
-            return Err(Error(
-                "macOS windows remain on their existing desktop; use original placement".into(),
-            ));
-        }
         if op == "give_window"
             && (window.state.is_none() || window.state.as_deref() != args["state_id"].as_str())
         {
             return Err(Error("Stale observation; observe again".into()));
         }
         if op == "release_window" || op == "give_window" {
-            if let Some(lease) = window.lease.take() {
-                self.invoke(json!({"op":"release","lease":lease}))?;
+            if let Some(lease) = window.lease.as_ref() {
+                self.invoke(json!({"op":"release","lease":lease,"placement":args["placement"].as_str().unwrap_or("original")}))?;
             }
             scope.windows.remove(id);
             return Ok((json!({"status":"released","input_revoked":true}), None));
@@ -618,6 +780,7 @@ impl Host {
                         .into(),
                 );
                 window.receipt = bound["receipt"].clone();
+                self.invoke(json!({"op":"take","lease":window.lease}))?;
             }
         }
         let lease = window
@@ -813,6 +976,44 @@ mod tests {
 mod host_transport_tests {
     use super::*;
     use daat_locus_client_protocol::computer_use::Client;
+    #[test]
+    fn accepted_connection_sends_a_complete_large_reply_under_backpressure() {
+        use std::os::fd::AsRawFd;
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        // BSD accept inherits O_NONBLOCK from the nonblocking listener.
+        sender.set_nonblocking(true).unwrap();
+        configure_connection(&sender).unwrap();
+        let flags = unsafe { libc::fcntl(sender.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(
+            flags & libc::O_NONBLOCK,
+            0,
+            "accepted framed connections must block with bounded timeouts"
+        );
+        let size: libc::c_int = 4096;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    sender.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    std::ptr::from_ref(&size).cast(),
+                    std::mem::size_of_val(&size) as _,
+                )
+            },
+            0
+        );
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let expected: Vec<u8> = (0..=255).cycle().take(2 * 1024 * 1024).collect();
+        let bytes = expected.clone();
+        let writer = std::thread::spawn(move || write_frame(&mut sender, &bytes));
+        let received = read_frame(&mut receiver, 3 * 1024 * 1024).unwrap();
+        writer.join().unwrap().unwrap();
+        assert_eq!(received, expected);
+    }
+
     #[test]
     fn private_host_rejects_an_unexpected_service_before_native_dispatch() {
         let root = tempfile::tempdir().unwrap();

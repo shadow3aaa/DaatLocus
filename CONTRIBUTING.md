@@ -586,6 +586,16 @@ Swift compiler supplied by Xcode or Command Line Tools. The client still targets
 macOS 11; live window screenshots require macOS 14 or newer. Build the shared
 WebUI/authentication WASM before the client, following the normal build steps.
 
+
+The client creates one real virtual display using runtime-bound private
+`CGVirtualDisplay` classes. The switch requires both TCC grants; **Advanced**
+applies pixel resolution and 1×/2× scaling to the same display. Verify actual
+online enumeration, mode dimensions, window relocation/return, preview PNGs,
+and removal, rather than treating a returned display ID as success. Owner preview
+never creates a display or asks for permission. Private API absence or an
+unconfirmed mode must fail closed. Bindings follow the ABI described in
+[Chromium's virtual display implementation](https://chromium.googlesource.com/chromium/src/+/1b72286560637710932b4ef43908d0d6a121a432/ui/display/mac/test/virtual_display_util_mac.mm).
+
 ```bash
 cargo test --locked -p daat-locus-client-protocol -p daat-locus-computer-use
 DAAT_LOCUS_BUILD_WEBUI=0 cargo test --locked -p daat-locus-app
@@ -600,8 +610,13 @@ follow both system permission prompts. Grant Accessibility and Screen Recording
 to the installed client bundle, rather than the service or a terminal. Complete
 any system authentication yourself. If macOS requests it, quit and reopen the
 client. Rebuilding an ad-hoc signed bundle can invalidate its previous TCC grant;
-verify the actual permission state after each replacement. Do not edit TCC's
-database, weaken OS protections or reuse a personal account for this check.
+verify the actual permission state after each replacement. Finish installing the
+test build before granting permissions, and keep that artifact fixed during the
+check. If TCC reports an old code requirement mismatch despite an enabled switch,
+remove the test app's old entries from both privacy lists and add the installed
+bundle again; toggling a stale entry can retain the previous signing requirement.
+Do not edit TCC's database, weaken OS protections or reuse a personal account for
+this check.
 
 Build a separate AppKit fixture from
 `crates/daat-locus-computer-use/tests/fixtures/NativeFixture.swift`, with executable

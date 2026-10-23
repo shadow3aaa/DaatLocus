@@ -1467,6 +1467,7 @@ dependencies = [
  "png 0.18.1",
  "reqwest 0.13.5",
  "resvg",
+ "rustls",
  "rustls-platform-verifier",
  "serde",
  "serde_json",

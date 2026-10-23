@@ -23,7 +23,7 @@ async fn capabilities(
 ) -> ApiResult<Json<serde_json::Value>> {
     owner(&state, &headers).await?;
     Ok(Json(
-        serde_json::json!({"supported":cfg!(any(windows, target_os="android"))}),
+        serde_json::json!({"supported":cfg!(any(windows, target_os="android", target_os="macos"))}),
     ))
 }
 async fn catalog(
@@ -62,7 +62,10 @@ async fn frame(
         if !catalog.displays.iter().any(|display| display.id == id) {
             return Err(ApiError::not_found());
         }
-        preview::frame(&system, &id).map_err(ApiError::from_report)
+        preview::frame(&system, &id).map_err(|error| {
+            tracing::debug!(%error, "Virtual display frame capture failed");
+            ApiError::from_report(error)
+        })
     })
     .await
     .map_err(|_| ApiError::internal())??;

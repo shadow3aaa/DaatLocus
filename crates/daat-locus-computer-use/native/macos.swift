@@ -2,6 +2,31 @@ import AppKit
 import ApplicationServices
 import ScreenCaptureKit
 
+@_silgen_name("dl_virtual_supported") private func virtualSupported() -> Bool
+@_silgen_name("dl_virtual_id") private func virtualID() -> UInt32
+@_silgen_name("dl_virtual_configure") private func virtualConfigure(
+  _ width: UInt32, _ height: UInt32, _ scale: UInt32, _ serial: UInt32
+) -> UInt32
+@_silgen_name("dl_virtual_error") private func virtualError() -> UnsafePointer<CChar>
+@_silgen_name("dl_virtual_stop") private func virtualStop()
+private var virtualMode: [String: Any] = [:]
+private var placementIndex = 0
+private func virtualBounds() throws -> CGRect {
+  let id = virtualID()
+  try require(id != 0, "Enable the virtual display in GUI settings")
+  return CGDisplayBounds(id)
+}
+private func virtualStatus() -> [String: Any] {
+  let id = virtualID()
+  return [
+    "supported": virtualSupported(), "ready": id != 0, "id": id,
+    "bounds": rectJSON(id == 0 ? .zero : CGDisplayBounds(id)),
+    "width": id == 0 ? 0 : CGDisplayCopyDisplayMode(id).map { $0.pixelWidth } ?? 0,
+    "height": id == 0
+      ? 0 : CGDisplayCopyDisplayMode(id).map { $0.pixelHeight } ?? 0,
+  ]
+}
+
 private struct Failure: Error { let message: String }
 private func require(_ condition: Bool, _ message: String) throws {
   if !condition { throw Failure(message: message) }
@@ -125,6 +150,9 @@ private final class Lease {
   let pid: pid_t
   let started: Double
   let element: AXUIElement
+  let originalBounds: CGRect
+  var managed = false
+  var revoked = false
   var receiver: AXUIElement?
   var snapshot: Data?
   func controls() -> [[String: Any]] {
@@ -184,6 +212,8 @@ private final class Lease {
       let found = items.first(where: { windowID($0) == id })
     else { throw Failure(message: "Cannot bind an exact accessible window") }
     element = found
+    guard let original = frame(found) else { throw Failure(message: "Window geometry unavailable") }
+    originalBounds = original
     AXUIElementSetMessagingTimeout(found, 0.5)
   }
   func validate(_ allowMinimized: Bool = false) throws -> [String: Any] {
@@ -191,6 +221,14 @@ private final class Lease {
     try require(
       value["pid"] as? Int32 == pid && value["started"] as? Double == started
         && windowID(element) == id, "Window identity changed; discover again")
+    if !allowMinimized {
+      try require(managed && !revoked, "Window input was revoked; release and discover again")
+      let area = try virtualBounds()
+      let bounds = try readRect(value["bounds"])
+      try require(
+        area.contains(bounds), "Window left its virtual display; release or restore it before input"
+      )
+    }
     try require(
       allowMinimized || attribute(element, kAXMinimizedAttribute) as? Bool != true,
       "Minimized window is not live; restore it before observing")
@@ -260,43 +298,168 @@ private func setSize(_ element: AXUIElement, _ size: CGSize) throws {
 }
 private func adjust(_ lease: Lease, _ request: [String: Any]) throws {
   let bounds = try readRect(lease.validate(true)["bounds"])
+  let area = try virtualBounds()
   let action = try string(request, "action")
   if action == "restore" {
-    try require(writable(lease.element, kAXMinimizedAttribute), "Window cannot be restored")
-    try set(lease.element, kAXMinimizedAttribute, kCFBooleanFalse)
+    if attribute(lease.element, kAXMinimizedAttribute) as? Bool == true {
+      try set(lease.element, kAXMinimizedAttribute, kCFBooleanFalse)
+    }
+    if !area.contains(bounds) { try take(lease) }
     return
   }
   if action == "move" {
-    try require(writable(lease.element, kAXPositionAttribute), "Window position is not writable")
     let point = try CGPoint(x: number(request, "x"), y: number(request, "y"))
-    try require(abs(point.x) <= 100000 && abs(point.y) <= 100000, "Position outside desktop budget")
-    try setPoint(lease.element, point)
+    let target = CGRect(
+      x: area.minX + point.x, y: area.minY + point.y, width: bounds.width, height: bounds.height)
+    try require(
+      point.x >= 0 && point.y >= 0 && area.contains(target), "Position outside virtual display")
+    try setPoint(lease.element, target.origin)
     return
   }
   if action == "resize" {
     let size = try CGSize(width: number(request, "width"), height: number(request, "height"))
     try require(
-      size.width >= 100 && size.height >= 100 && size.width <= 3840 && size.height <= 2160
-        && size.width * size.height * 4 <= 8_000_000, "Size outside image budget")
-    try require(writable(lease.element, kAXSizeAttribute), "Window size is not writable")
+      size.width >= 100 && size.height >= 100 && size.width * size.height * 4 <= 8_000_000
+        && area.contains(CGRect(origin: bounds.origin, size: size)),
+      "Size outside virtual display or image budget")
     try setSize(lease.element, size)
     return
   }
   try require(action == "fit", "Unknown adjustment")
+  let inset = area.insetBy(dx: 16, dy: 16)
+  let ratio = min(1.0, sqrt(8_000_000 / (inset.width * inset.height * 4)))
+  try setSize(
+    lease.element, CGSize(width: floor(inset.width * ratio), height: floor(inset.height * ratio)))
+  try setPoint(lease.element, inset.origin)
+}
+private func take(_ lease: Lease) throws {
+  let area = try virtualBounds().insetBy(dx: 16, dy: 16)
+  let bounds = try lease.validate(true)
+  let current = try readRect(bounds["bounds"])
   try require(
     writable(lease.element, kAXPositionAttribute) && writable(lease.element, kAXSizeAttribute),
-    "Window does not accept fit")
-  let screens = NSScreen.screens
+    "Window cannot move to the virtual display")
+  lease.managed = true
+  if attribute(lease.element, kAXMinimizedAttribute) as? Bool == true {
+    try set(lease.element, kAXMinimizedAttribute, kCFBooleanFalse)
+  }
+  let offset = CGFloat(placementIndex % 4) * 8
+  placementIndex += 1
+  let width = min(current.width, area.width - offset)
+  let height = min(current.height, area.height - offset)
+  let ratio = min(1.0, sqrt(8_000_000 / (width * height * 4)))
+  try setSize(lease.element, CGSize(width: floor(width * ratio), height: floor(height * ratio)))
+  try setPoint(lease.element, CGPoint(x: area.minX + offset, y: area.minY + offset))
+  let deadline = Date().addingTimeInterval(2)
+  while Date() < deadline {
+    if let actual = frame(lease.element), area.contains(actual),
+      let receipt = try? info(lease.id), let published = try? readRect(receipt["bounds"]),
+      area.contains(published), actual == published
+    {
+      return
+    }
+    Thread.sleep(forTimeInterval: 0.025)
+  }
+  throw Failure(message: "Window relocation is unconfirmed; release or observe before continuing")
+}
+private func returnWindow(_ lease: Lease, _ placement: String = "original") throws {
+  guard lease.managed else { return }
+  // A window already closed by its application needs no relocation.
+  guard let process = NSRunningApplication(processIdentifier: lease.pid), !process.isTerminated,
+    process.launchDate?.timeIntervalSince1970 == lease.started
+  else {
+    lease.managed = false
+    return
+  }
+  var role: CFTypeRef?
+  let check = AXUIElementCopyAttributeValue(lease.element, kAXRoleAttribute as CFString, &role)
+  if check == .invalidUIElement {
+    lease.managed = false
+    return
+  }
+  try require(check == .success, "Cannot confirm window return while Accessibility is unavailable")
+  _ = try lease.validate(true)
+  var ids = [CGDirectDisplayID](repeating: 0, count: 64)
+  var count: UInt32 = 0
+  try require(CGGetOnlineDisplayList(64, &ids, &count) == .success, "Cannot inspect user displays")
+  let physical = ids.prefix(Int(count)).filter { $0 != virtualID() }.map { CGDisplayBounds($0) }
   guard
-    let screen = screens.first(where: {
-      $0.frame.contains(CGPoint(x: bounds.midX, y: (screens.first?.frame.maxY ?? 0) - bounds.midY))
-    }) ?? screens.first
-  else { throw Failure(message: "Display unavailable") }
-  let area = screen.visibleFrame
-  let top = (screens.first?.frame.maxY ?? 0) - area.maxY
-  let ratio = min(1.0, sqrt(8_000_000 / (area.width * area.height * 4)))
-  try setSize(lease.element, CGSize(width: area.width * ratio, height: area.height * ratio))
-  try setPoint(lease.element, CGPoint(x: area.minX, y: top))
+    let screen = physical.first(where: { $0.intersects(lease.originalBounds) }) ?? physical.first
+  else {
+    throw Failure(message: "No user display is available to return the window")
+  }
+  var target = lease.originalBounds
+  if placement != "original" {
+    target.size = CGSize(
+      width: placement == "center" ? min(target.width, screen.width) : screen.width / 2,
+      height: min(target.height, screen.height - 40))
+    target.origin = CGPoint(
+      x: placement == "right_half"
+        ? screen.midX : placement == "center" ? screen.midX - target.width / 2 : screen.minX,
+      y: screen.minY + 32)
+  }
+  target.size.width = min(target.width, screen.width)
+  target.size.height = min(target.height, screen.height - 32)
+  target.origin.x = max(screen.minX, min(target.minX, screen.maxX - target.width))
+  target.origin.y = max(screen.minY + 24, min(target.minY, screen.maxY - target.height))
+  try setSize(lease.element, target.size)
+  try setPoint(lease.element, target.origin)
+  // AX writes are asynchronous. Only revoke after the window actually returns.
+  let deadline = Date().addingTimeInterval(2)
+  while Date() < deadline {
+    if let actual = frame(lease.element), screen.intersects(actual),
+      virtualID() == 0 || !CGDisplayBounds(virtualID()).intersects(actual)
+    {
+      lease.managed = false
+      return
+    }
+    Thread.sleep(forTimeInterval: 0.025)
+  }
+  throw Failure(message: "Window return is unconfirmed; input remains revoked")
+}
+private func returnAllWindows() throws {
+  for token in Array(leases.keys) {
+    if let lease = leases[token] {
+      lease.revoked = true
+      try returnWindow(lease)
+      leases.removeValue(forKey: token)
+    }
+  }
+}
+@available(macOS 14.0, *)
+private func previewDisplay() throws -> [String: Any] {
+  let id = virtualID()
+  try require(id != 0 && CGPreflightScreenCaptureAccess(), "Virtual display preview unavailable")
+  let done = DispatchSemaphore(value: 0)
+  var image: CGImage?
+  var failure: Error?
+  SCShareableContent.getExcludingDesktopWindows(true, onScreenWindowsOnly: false) {
+    content, error in
+    guard let display = content?.displays.first(where: { $0.displayID == id }) else {
+      failure = error ?? Failure(message: "Virtual display is not capturable")
+      done.signal()
+      return
+    }
+    let config = SCStreamConfiguration()
+    let ratio = min(1, 1280.0 / Double(display.width))
+    config.width = max(1, Int(Double(display.width) * ratio))
+    config.height = max(1, Int(Double(display.height) * ratio))
+    config.showsCursor = false
+    SCScreenshotManager.captureImage(
+      contentFilter: SCContentFilter(display: display, excludingWindows: []), configuration: config
+    ) { value, error in
+      image = value
+      failure = error
+      done.signal()
+    }
+  }
+  try require(done.wait(timeout: .now() + 5) == .success, "Virtual display preview timed out")
+  if let failure { throw failure }
+  try require(virtualID() == id, "Virtual display changed during capture")
+  guard let image,
+    let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+  else { throw Failure(message: "Virtual display image unavailable") }
+  return ["image": png.base64EncodedString()]
 }
 private func launch(_ path: String) throws -> [String: Any] {
   let url = URL(fileURLWithPath: path).standardizedFileURL
@@ -453,6 +616,7 @@ private func perform(_ request: [String: Any]) throws -> [String: Any] {
   if op == "permissions" {
     return [
       "accessibility": AXIsProcessTrusted(), "screen_recording": CGPreflightScreenCaptureAccess(),
+      "display": virtualStatus(),
     ]
   }
   if op == "request_accessibility" {
@@ -466,13 +630,53 @@ private func perform(_ request: [String: Any]) throws -> [String: Any] {
     try openPrivacyPane("Privacy_ScreenCapture")
     return [:]
   }
+  if op == "virtual_configure" {
+    try require(
+      AXIsProcessTrusted() && CGPreflightScreenCaptureAccess(),
+      "Grant Accessibility and Screen Recording first")
+    let width = try number(request, "width")
+    let height = try number(request, "height")
+    let scale = try number(request, "scale")
+    try require(
+      width >= 256 && width <= 4096 && height >= 256 && height <= 4096
+        && width * height <= 8_000_000 && [1.0, 2.0].contains(scale) && width.rounded() == width
+        && height.rounded() == height, "Invalid virtual display mode")
+    if virtualID() != 0 && virtualMode["width"] as? Double == width
+      && virtualMode["height"] as? Double == height && virtualMode["scale"] as? Double == scale
+    {
+      return virtualStatus()
+    }
+    try returnAllWindows()
+    let id = virtualConfigure(
+      UInt32(width), UInt32(height), UInt32(scale), UInt32(try number(request, "serial")))
+    try require(id != 0, String(cString: virtualError()))
+    virtualMode = ["width": width, "height": height, "scale": scale]
+    return virtualStatus()
+  }
+  if op == "virtual_stop" {
+    try returnAllWindows()
+    virtualStop()
+    return [:]
+  }
+  if op == "preview_catalog" { return virtualStatus() }
+  if op == "preview_frame" { return try previewDisplay() }
   if op == "release", let token = request["lease"] as? String {
+    if let lease = leases[token] {
+      lease.revoked = true
+      try returnWindow(lease, request["placement"] as? String ?? "original")
+    }
     leases.removeValue(forKey: token)
     return [:]
   }
   try require(
     AXIsProcessTrusted() && CGPreflightScreenCaptureAccess(),
     "Enable Accessibility and Screen Recording in GUI settings")
+  if op == "display_state" {
+    var ids = [CGDirectDisplayID](repeating: 0, count: 64)
+    var count: UInt32 = 0
+    try require(CGGetOnlineDisplayList(64, &ids, &count) == .success, "Cannot enumerate displays")
+    return ["online": Array(ids.prefix(Int(count))), "virtual": virtualStatus()]
+  }
   if op == "desktop_state" {
     return [
       "pid": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0,
@@ -526,16 +730,19 @@ private func perform(_ request: [String: Any]) throws -> [String: Any] {
     let lease = try Lease(UInt32(id))
     let token = UUID().uuidString
     leases[token] = lease
-    return ["lease": token, "receipt": try lease.validate()]
+    return ["lease": token, "receipt": try lease.validate(true)]
   }
   guard let token = request["lease"] as? String, let lease = leases[token] else {
     throw Failure(message: "Unknown window lease")
   }
-  if op == "release" {
-    leases.removeValue(forKey: token)
+  try require(
+    op == "take" || (lease.managed && !lease.revoked),
+    "Window input was revoked; release and discover again")
+  let receipt = try lease.validate(op == "adjust_window" || op == "take")
+  if op == "take" {
+    try take(lease)
     return [:]
   }
-  let receipt = try lease.validate(op == "adjust_window")
   if op == "describe" { return ["receipt": receipt] }
   if let expected = request["bounds"] {
     try require(
@@ -703,6 +910,10 @@ public func dlMacRequest(
       let result = try perform(request)
       if request["op"] as? String != "request_accessibility"
         && request["op"] as? String != "request_screen_recording"
+        && request["op"] as? String != "virtual_configure"
+        && request["op"] as? String != "virtual_stop"
+        && request["op"] as? String != "preview_catalog"
+        && request["op"] as? String != "preview_frame"
       {
         try require(
           NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground

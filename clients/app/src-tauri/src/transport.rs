@@ -136,6 +136,10 @@ fn response_headers(headers: &HeaderMap) -> Vec<(String, String)> {
 }
 impl Transport {
     pub fn new(origin: Arc<RwLock<Url>>) -> Result<Self> {
+        // Workspace feature unification can enable reqwest's rustls-no-provider
+        // in the desktop binary too, which does not link the service initializer.
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        let _ = rustls::crypto::ring::default_provider().install_default();
         #[cfg(target_os = "android")]
         let builder = daat_locus::http_client::builder();
         #[cfg(not(target_os = "android"))]
@@ -486,7 +490,7 @@ pub async fn native_resource_download(
 pub fn capability(app: &tauri::AppHandle) -> tauri::Result<()> {
     app.add_capability(serde_json::json!({
         "identifier":"native-client", "windows":["main"], "local":true,
-        "permissions":["allow-desktop-account", "allow-desktop-window", "allow-phone-use-status", "allow-phone-use-configure", "allow-phone-use-display-configure", "allow-computer-use-status", "allow-computer-use-configure", "allow-computer-use-permission", "allow-native-http-start", "allow-native-http-write", "allow-native-http-send", "allow-native-http-read", "allow-native-http-cancel", "allow-native-resource-download"]
+        "permissions":["allow-desktop-account", "allow-desktop-window", "allow-phone-use-status", "allow-phone-use-configure", "allow-phone-use-display-configure", "allow-computer-use-status", "allow-computer-use-configure", "allow-computer-use-display-configure", "allow-computer-use-permission", "allow-native-http-start", "allow-native-http-write", "allow-native-http-send", "allow-native-http-read", "allow-native-http-cancel", "allow-native-resource-download"]
     }).to_string())
 }
 
