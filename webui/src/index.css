@@ -849,7 +849,9 @@ html[data-reduced-motion=true] *, html[data-reduced-motion=true] *::before, html
 .dl-model-menu { max-height: min(420px,60dvh,var(--radix-dropdown-menu-content-available-height,100dvh)); overflow: auto; }
 .dl-model-menu .dl-menu-choice { min-width: 0; overflow-wrap: anywhere; }
 .dl-primary-composer .dl-composer:has(.dl-stop-button):not(:has(.dl-stop-button + button)) { grid-template-columns: 44px minmax(0,1fr) 44px; }
-@media (hover: none) { .dl-copy-message { opacity: 1; } }
+[data-touch-actions=true] .dl-copy-message, [data-touch-actions=true] .dl-work-user-actions { display: none; }
+[data-touch-actions=true] { -webkit-user-select: none; user-select: none; }
+[data-touch-actions=true] :is(a,button,input,textarea,select,pre,[role=region]) { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
 @media (max-width: 640px) {
   .dl-setting-row:has(input), .dl-setting-row:has(textarea) { flex-direction: column; align-items: stretch; gap: 10px; }
   .dl-setting-row:has(input) [data-slot=field-content] { align-self: stretch; }

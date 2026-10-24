@@ -75,7 +75,7 @@ class MainActivity : TauriActivity() {
       override fun handleOnBackPressed() {
         webView.evaluateJavascript("""
           (() => {
-            if (document.querySelector('[data-slot="dialog-content"][data-state="open"]')) {
+            if (document.querySelector('[data-slot="context-menu-content"][data-state="open"], [data-slot="dialog-content"][data-state="open"]')) {
               document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true}));
               return true;
             }
