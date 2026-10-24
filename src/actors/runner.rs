@@ -530,7 +530,7 @@ async fn execute_message(
                             actor,
                             message,
                             &skipped,
-                            "Call was not executed because this request was interrupted",
+                            "Call was not executed because this request ended before the call could start",
                             &mut history,
                         )?;
                     }
@@ -609,7 +609,21 @@ async fn execute_call(
             return Ok(Vec::new());
         }
     };
-    let review = apps.review_requirement(call, &context)?;
+    let review = match apps.review_requirement(call, &context) {
+        Ok(review) => review,
+        Err(error) => {
+            record_tool_error(
+                system,
+                actor,
+                message,
+                call,
+                &system.safe_error(&error.to_string()),
+                history,
+            )?;
+            check_interruption(system, control, message)?;
+            return Ok(Vec::new());
+        }
+    };
     if !apps.delegates_approval(call, &context)?
         && let Err(error) = super::approval::authorize(
             system,
@@ -657,7 +671,18 @@ async fn execute_call(
     }
     let base = system.execution_context(&fresh_actor, message)?;
     let context = system.requested_tool_context(&base, &requested)?;
-    apps.validate_tool_call(call, &context)?;
+    if let Err(error) = apps.validate_tool_call(call, &context) {
+        record_tool_error(
+            system,
+            actor,
+            message,
+            call,
+            &system.safe_error(&error.to_string()),
+            history,
+        )?;
+        check_interruption(system, control, message)?;
+        return Ok(Vec::new());
+    }
     // Persist the intent before executing effects. Recovery exposes the
     // interrupted call, and does not replay it as an apparently fresh request.
     let native_execution = !apps.delegates_approval(call, &context)?;

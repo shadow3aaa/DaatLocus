@@ -100,7 +100,9 @@ struct AppealArgs {
     stage_id: String,
     approval_id: Option<String>,
     tool_result_id: Option<String>,
+    /// Exact read paths; null or [] requests no read scope.
     readable_roots: Option<Vec<String>>,
+    /// Exact write paths; null or [] requests no write scope.
     writable_roots: Option<Vec<String>>,
     explanation: String,
 }

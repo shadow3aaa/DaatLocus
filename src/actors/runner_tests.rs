@@ -371,6 +371,108 @@ async fn apps_manager_queries_and_refresh_complete_in_ask_mode_without_approval(
     system.shutdown().await;
 }
 
+#[cfg(any(windows, target_os = "macos", target_os = "android"))]
+#[tokio::test]
+async fn invalid_browser_review_arguments_do_not_abort_the_tool_group_or_input() {
+    let tab = format!("\"{}\"", "a".repeat(32));
+    let provider = Arc::new(ReplayProvider::new(vec![
+        MockReply::Calls(vec![
+            AgentToolCall {
+                id: "invalid-browser-id".into(),
+                name: "browser_use__click".into(),
+                arguments: json!({"tab_id":tab,"state_id":"b".repeat(32),"x":20,"y":30,"button":null,"click_count":null}),
+            },
+            AgentToolCall {
+                id: "invalid-observation-id".into(),
+                name: "browser_use__click".into(),
+                arguments: json!({"tab_id":"a".repeat(32),"state_id":format!("\"{}\"", "b".repeat(32)),"x":20,"y":30,"button":null,"click_count":null}),
+            },
+            AgentToolCall {
+                id: "independent-file".into(),
+                name: "files__write_file".into(),
+                arguments: json!({"path":"continued.txt","content":"continued after invalid input","expected_sha256":null}),
+            },
+        ]),
+        MockReply::Answer("The invalid browser input was rejected; I can correct it."),
+    ]));
+    let (_dir, system) = runtime(provider.clone()).await;
+    let input = system
+        .send_user(
+            "root",
+            "Test the browser and record progress".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    let completed = wait_completed(&system, &input.id).await;
+    assert_eq!(
+        completed.status,
+        MessageStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            system
+                .actor("root")
+                .unwrap()
+                .config
+                .workspace
+                .join("continued.txt")
+        )
+        .unwrap(),
+        "continued after invalid input"
+    );
+    let tools = system
+        .store()
+        .tool_summaries("root", &input.id, None, 10)
+        .unwrap()
+        .items;
+    let invalid = system
+        .store()
+        .tool_result(
+            &tools
+                .iter()
+                .find(|tool| tool.call_id == "invalid-browser-id")
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+    assert!(invalid.error.is_some());
+    let observation_error = tools
+        .iter()
+        .find(|tool| tool.call_id == "invalid-observation-id")
+        .unwrap();
+    assert!(observation_error.error.is_some());
+    assert!(observation_error.started_at_ms.is_none());
+    assert!(
+        invalid.started_at_ms.is_none(),
+        "Invalid calls must not start native effects"
+    );
+    assert!(
+        tools
+            .iter()
+            .find(|tool| tool.call_id == "independent-file")
+            .unwrap()
+            .error
+            .is_none()
+    );
+    assert!(
+        system
+            .store()
+            .approvals(Some("root"), None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    {
+        let requests = provider.requests.lock();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].messages.iter().any(|message| matches!(message, AgentMessage::Tool {tool_call_id, content, ..} if tool_call_id == "invalid-browser-id" && content.contains("tab_id"))));
+    }
+    system.shutdown().await;
+}
+
 #[tokio::test]
 async fn yield_skips_review_but_malformed_calls_do_not_silence_a_reply() {
     for (arguments, silent) in [(json!({}), true), (json!({"content":"invalid"}), false)] {

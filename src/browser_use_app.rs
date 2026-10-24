@@ -291,6 +291,21 @@ impl BrowserUseApp {
             }
             _ => return Err(miette!("Unknown BrowserUse operation")),
         };
+        if command
+            .tab()
+            .is_some_and(|tab| tab.len() != 32 || !tab.bytes().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(miette!(
+                "Invalid tab_id: copy the 32-character page ID exactly, without extra quotation marks; list pages if needed"
+            ));
+        }
+        if let Command::Input { state_id, .. } = &command
+            && (state_id.len() != 32 || !state_id.bytes().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(miette!(
+                "Invalid state_id: copy the 32-character observation ID exactly, without extra quotation marks; observe the page if needed"
+            ));
+        }
         if !command.validate() {
             return Err(miette!(
                 "Invalid BrowserUse input, key or image coordinates"
@@ -483,8 +498,7 @@ fn unknown(error: &str) -> AppToolExecutionResult {
         json!({"status":"outcome_unknown","message":error,"recovery":"List pages and observe before deciding whether another input is needed; do not replay automatically"}),
         None,
     );
-    result.failure =
-        Some("Browser observation unavailable after requested operation; do not replay".into());
+    result.failure = Some(format!("{error}; observe before continuing, do not replay"));
     result
 }
 
@@ -530,6 +544,7 @@ mod tests {
         assert!(app.review_requirement(&open, &context).unwrap().is_some());
         let native = tokio::spawn(async move {
             let pending = connection.requests.recv().await.unwrap();
+            assert!(pending.request.validate());
             assert_eq!(
                 pending.request.profile,
                 daat_locus_client_protocol::web::SHARED_BROWSER_PROFILE
@@ -603,6 +618,7 @@ mod tests {
         let shared_tab = observation["tab_id"].as_str().unwrap().to_owned();
         let native = tokio::spawn(async move {
             let pending = connection.requests.recv().await.unwrap();
+            assert!(pending.request.validate());
             assert_eq!(
                 pending.request.profile,
                 daat_locus_client_protocol::web::SHARED_BROWSER_PROFILE
