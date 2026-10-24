@@ -30,15 +30,54 @@ pub(crate) struct RuntimeTemp {
 }
 
 struct LifecycleLock<'a>(&'a File);
+// std::fs::File locking is unsupported on Android. Use the same OS-owned
+// flock lease on Unix, including Android, rather than skipping cleanup locks.
+fn lock_file(file: &File, nonblocking: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let operation = libc::LOCK_EX | if nonblocking { libc::LOCK_NB } else { 0 };
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    if nonblocking {
+        file.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => io::ErrorKind::WouldBlock.into(),
+            std::fs::TryLockError::Error(error) => error,
+        })
+    } else {
+        file.lock()
+    }
+}
+fn unlock_file(file: &File) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    file.unlock()
+}
 impl<'a> LifecycleLock<'a> {
     fn acquire(file: &'a File) -> io::Result<Self> {
-        file.lock()?;
+        lock_file(file, false)?;
         Ok(Self(file))
     }
 }
 impl Drop for LifecycleLock<'_> {
     fn drop(&mut self) {
-        let _ = self.0.unlock();
+        let _ = unlock_file(self.0);
     }
 }
 
@@ -74,8 +113,7 @@ impl RuntimeTemp {
             instance
                 .protect_private_file(OsStr::new(LEASE), &lease)
                 .into_diagnostic()?;
-            lease
-                .try_lock()
+            lock_file(&lease, true)
                 .map_err(|error| miette!("unable to lock temporary instance: {error}"))?;
             lease.write_all(MARKER).into_diagnostic()?;
             lease.sync_all().into_diagnostic()?;
@@ -234,7 +272,7 @@ fn sweep(root: &GuardedDirectory) {
                 return root.remove_empty_child(&name);
             }
             let mut lease = directory.open_regular(OsStr::new(LEASE), true)?;
-            if lease.try_lock().is_err() {
+            if lock_file(&lease, true).is_err() {
                 return Ok(()); // Live instance, unsupported lock, or unknown I/O: preserve it.
             }
             let mut marker = Vec::new();
