@@ -11,8 +11,7 @@ import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/in
 import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { BrowserSettings } from "@/components/settings/browser-settings";
+import { BrowserSettings, ClearBrowserDataDialog } from "@/components/settings/browser-settings";
 import { useBrowserPreferences, searchEngines } from "@/lib/browser-settings";
 import { BrowserSiteIcon } from "@/components/browser-site-icon";
 import { BrowserDownloads } from "@/components/browser-downloads";
@@ -267,9 +266,9 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
           {panel && library.next_offset!=null && <Button variant="ghost" onClick={()=>void refreshLibrary(library.next_offset!)}>{t("browser_use.load_more")}</Button>}
         </section>}
         {panel==="downloads" && <BrowserDownloads library={library} onAction={(action,value)=>void libraryAction(action,value)} onMore={()=>void refreshLibrary(library.next_offset!)}/>}
-        {panel==="settings" && <><BrowserSettings/><Button variant="outline" onClick={()=>setClear(true)}>{t("browser_use.clear_data")}</Button></>}
+        {panel==="settings" && <BrowserSettings/>}
       </main></div>}
     </div>
-    <Dialog open={clear} onOpenChange={setClear}><DialogContent><DialogTitle>{t("browser_use.clear_data")}</DialogTitle><DialogDescription>{t("browser_use.clear_data_description")}</DialogDescription><DialogFooter><Button variant="outline" onClick={()=>setClear(false)}>{t("common.cancel")}</Button><Button variant="destructive" onClick={()=>{setClear(false);void libraryAction("clear_data");}}>{t("browser_use.clear_data")}</Button></DialogFooter></DialogContent></Dialog>
+    <ClearBrowserDataDialog open={clear} onOpenChange={setClear}/>
   </section>;
 }

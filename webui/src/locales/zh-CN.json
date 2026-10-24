@@ -1,5 +1,7 @@
 {
   "browser_settings": {
+  "clear_action": "清除…",
+  "clear_summary": "保留历史记录和已下载的文件。",
   "title": "浏览器",
   "language": "网页语言",
   "zoom": "默认网页缩放",

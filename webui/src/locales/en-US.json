@@ -1,5 +1,7 @@
 {
   "browser_settings": {
+  "clear_action": "Clear…",
+  "clear_summary": "Keep browsing history and downloaded files.",
   "title": "Browser",
   "language": "Website language",
   "zoom": "Default page zoom",
