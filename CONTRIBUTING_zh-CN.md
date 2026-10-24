@@ -628,10 +628,17 @@ cargo xtask package android --target aarch64
 `--out-dir` 可自定义产物目录。
 
 Windows 安装包需要 WiX，macOS 安装包需要原生系统工具。
-macOS 打包会签名配套服务和完整应用包，并校验应用包完整性。使用
-`--macos-signing-identity <钥匙串签名身份>` 在各次构建中复用同一证书，才能保持
-macOS 隐私授权；指定身份不可用时打包失败。不指定时使用 ad-hoc 签名，授权绑定
-当前构建：更新后即使系统开关仍开启，也可能需要移除后重新添加应用。公证仍需另行完成。
+macOS 打包会签名配套服务和完整应用包，并校验应用包完整性。默认自动生成并复用
+`~/.daat-locus-private/macos-signing/` 中的本地签名身份，不随 checkout 改变。
+首次使用可能需要系统认证，仅建立用户级代码签名信任。独立钥匙串会追加到既有
+搜索列表，签名时解锁、完成后锁定；密码和加密 PKCS#12 备份只保存在私有目录中。
+在其他 Mac 上继续使用同一身份时，应备份并迁移整个目录。身份缺失、损坏或过期
+时打包失败，不会悄悄换证书。可用 `--macos-signing-identity <钥匙串签名身份>`
+指定已有身份。后续使用同一证书更新时保留代码身份与 macOS 隐私授权；从旧的
+ad-hoc 版本迁移时需要重新授权一次，可能需在系统设置中移除再添加应用。
+本地签名不能替代 Developer ID 分发和公证。
+发布工作流在临时 runner 上显式保留 ad-hoc 签名（`--macos-signing-identity -`），
+这些产物不保证跨构建保留隐私授权。
 `--skip-build --release-dir <directory>` 打包既有、已核实的产物：binary 归档需要
 内置 WebUI 的独立服务；Windows/macOS 安装包需要带原生资源的客户端和不重复
 嵌入页面的配套后台。缺失客户端或重复资源都会被拒绝。

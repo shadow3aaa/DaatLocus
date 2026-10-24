@@ -785,12 +785,21 @@ All package commands print Cargo-style progress and clickable artifact URLs (pla
 
 Windows installers require WiX; macOS installers require macOS tools.
 macOS packaging signs the companion service and completed app bundle, then
-verifies the bundle seal. Use `--macos-signing-identity <Keychain-identity>` with
-the same certificate across builds to retain macOS privacy authorization. An
-unavailable explicit identity fails packaging. Without this option signing is
-ad-hoc: privacy grants bind to that exact build and may require removing and
-adding the updated app in System Settings even when its old switch remains on.
-Notarization remains separate.
+verifies the bundle seal. By default it creates and reuses an owner-private
+code-signing identity in `~/.daat-locus-private/macos-signing/`, independent of
+the checkout. First use may request macOS authentication to establish user-level
+trust for code signing only. The dedicated keychain is registered alongside
+existing keychains, unlocked during signing and locked afterward. Its password
+and encrypted PKCS#12 backup stay in that private directory; back up the whole
+directory to retain the identity when moving builds to another Mac. Missing,
+incomplete or expired identities fail packaging instead of silently changing keys.
+Use `--macos-signing-identity <Keychain-identity>` to select an existing identity.
+Updates signed by the same certificate retain their designated requirement and
+macOS privacy grants. Migrating from an earlier ad-hoc build requires reauthorizing
+once, potentially by removing and adding the app in System Settings. Local signing
+does not replace Developer ID distribution or notarization.
+The release workflow explicitly keeps ad-hoc signing (`--macos-signing-identity -`)
+on ephemeral runners; those artifacts do not retain privacy grants across builds.
 `--skip-build --release-dir <directory>` packages existing verified artifacts.
 Binary archives require the standalone embedded WebUI service. Windows/macOS
 installers require a native WebUI client and an API-only companion service;

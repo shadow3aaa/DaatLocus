@@ -5,6 +5,8 @@ mod computer_use;
 #[path = "../../crates/daat-locus-virtual-workspace/build_support/development_certificate.rs"]
 mod development_certificate;
 mod idd_driver;
+#[cfg(target_os = "macos")]
+mod macos_signing;
 mod reporting;
 
 use clap::{Args, Parser, Subcommand};
@@ -51,7 +53,7 @@ struct Package {
     out_dir: Option<PathBuf>,
     #[arg(long)]
     skip_build: bool,
-    /// Reuse a Keychain code-signing identity to retain macOS privacy grants across updates.
+    /// Override the persistent local macOS signing identity with a Keychain identity.
     #[arg(long)]
     macos_signing_identity: Option<String>,
     /// Existing signed IDD package; otherwise build it through idd-driver.
@@ -611,34 +613,16 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 fn sign_macos_app(app: &Path, identity: Option<&str>) -> Result<()> {
-    let signer = identity.unwrap_or("-");
-    if signer.trim().is_empty() {
-        return Err("macOS signing identity cannot be empty".into());
+    #[cfg(target_os = "macos")]
+    {
+        let signing = macos_signing::SigningIdentity::resolve(identity)?;
+        signing.sign_app(app)
     }
-    // Linker signatures cover individual binaries, not the assembled app's
-    // Info.plist and resources. Sign nested code before sealing the bundle.
-    command(
-        Command::new("codesign")
-            .args([
-                "--force",
-                "--sign",
-                signer,
-                "--timestamp=none",
-                "--identifier",
-                "io.shadow3aaa.daatlocus.service",
-            ])
-            .arg(app.join("Contents/MacOS/daat-locus")),
-    )?;
-    command(
-        Command::new("codesign")
-            .args(["--force", "--sign", signer, "--timestamp=none"])
-            .arg(app),
-    )?;
-    command(
-        Command::new("codesign")
-            .args(["--verify", "--deep", "--strict"])
-            .arg(app),
-    )
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, identity);
+        Err("macOS signing requires macOS".into())
+    }
 }
 fn macos(context: &Context) -> Result<()> {
     let work = context.work()?;
@@ -687,12 +671,6 @@ fn macos(context: &Context) -> Result<()> {
         ),
     )?;
     sign_macos_app(&app, context.macos_signing_identity.as_deref())?;
-    if context.macos_signing_identity.is_none() {
-        status(
-            "Note",
-            "Ad-hoc signing binds privacy grants to this build. Reuse --macos-signing-identity for permissions across updates.",
-        );
-    }
     let stage = work.join("installer-root");
     copy_tree(&app, &stage.join("Applications/Daat Locus.app"))?;
     let cli = stage.join("usr/local/bin");
@@ -756,7 +734,7 @@ mod tests {
         .unwrap();
         let resource = resources.join("fixture.txt");
         fs::write(&resource, "original resource").unwrap();
-        sign_macos_app(&app, None).unwrap();
+        sign_macos_app(&app, Some("-")).unwrap();
         // Copying into the installer must retain a valid, complete bundle seal.
         let staged = directory.path().join("installed/Fixture.app");
         copy_tree(&app, &staged).unwrap();

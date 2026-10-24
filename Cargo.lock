@@ -8887,6 +8887,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "ico",
+ "libc",
  "png 0.18.1",
  "reqwest 0.13.5",
  "resvg",
