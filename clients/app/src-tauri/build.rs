@@ -1,6 +1,8 @@
 fn main() {
     use std::{env, fs, path::PathBuf};
-    let android = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+    let android = target_os == "android";
+    let macos = target_os == "macos";
     if android {
         // NDK 27 needs this opt-in for Android devices with 16 KiB pages.
         println!("cargo:rustc-link-arg=-Wl,-z,max-page-size=16384");
@@ -16,7 +18,7 @@ fn main() {
             "Build the shared WebUI before the native client: bun scripts/build-webui.ts"
         );
     }
-    let logo = root.join(if android {
+    let logo = root.join(if android || macos {
         "assets/logo-mark.svg"
     } else {
         "assets/logo.svg"
@@ -24,33 +26,18 @@ fn main() {
     println!("cargo:rerun-if-changed={}", logo.display());
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let tree = resvg::usvg::Tree::from_data(&fs::read(logo).unwrap(), &Default::default()).unwrap();
-    let mut pixels = resvg::tiny_skia::Pixmap::new(256, 256).unwrap();
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::from_scale(
-            256.0 / tree.size().width(),
-            256.0 / tree.size().height(),
-        ),
-        &mut pixels.as_mut(),
-    );
-    let mut rgba = pixels.data().to_vec();
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        let alpha = pixel[3] as u32;
-        if alpha > 0 && alpha < 255 {
-            for color in &mut pixel[..3] {
-                *color = ((*color as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
-            }
-        }
-    }
+    let rgba = render_icon(&tree, 256, 1.0, macos);
     let png_path = out.join("app.png");
-    let mut encoder = png::Encoder::new(fs::File::create(&png_path).unwrap(), 256, 256);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder
-        .write_header()
-        .unwrap()
-        .write_image_data(&rgba)
-        .unwrap();
+    write_png(&png_path, 256, &rgba);
+    if macos {
+        // 18pt at Retina resolution. A template uses alpha, so the white
+        // launcher background must be removed rather than drawn as a disk.
+        write_png(
+            &out.join("tray.png"),
+            36,
+            &render_icon(&tree, 36, 1.3, true),
+        );
+    }
     let icon_path = out.join("app.ico");
     let mut icons = ico::IconDir::new(ico::ResourceType::Icon);
     icons.add_entry(
@@ -93,4 +80,43 @@ fn main() {
             .windows_attributes(tauri_build::WindowsAttributes::new().window_icon_path(icon_path)),
     )
     .unwrap();
+}
+
+fn render_icon(tree: &resvg::usvg::Tree, size: u32, zoom: f32, transparent_mark: bool) -> Vec<u8> {
+    let mut pixels = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+    let scale = size as f32 / tree.size().width() * zoom;
+    let offset = (size as f32 - tree.size().width() * scale) / 2.0;
+    resvg::render(
+        tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale).post_translate(offset, offset),
+        &mut pixels.as_mut(),
+    );
+    let mut rgba = pixels.data().to_vec();
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        if transparent_mark {
+            // The source is black on white; premultiplied alpha minus red
+            // retains only the black mark, including its antialiased edges.
+            pixel[3] = pixel[3].saturating_sub(pixel[0]);
+            pixel[..3].fill(0);
+            continue;
+        }
+        let alpha = pixel[3] as u32;
+        if alpha > 0 && alpha < 255 {
+            for color in &mut pixel[..3] {
+                *color = ((*color as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+    rgba
+}
+
+fn write_png(path: &std::path::Path, size: u32, rgba: &[u8]) {
+    let mut encoder = png::Encoder::new(std::fs::File::create(path).unwrap(), size, size);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(rgba)
+        .unwrap();
 }

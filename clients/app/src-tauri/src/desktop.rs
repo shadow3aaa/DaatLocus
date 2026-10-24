@@ -11,6 +11,10 @@ use tauri::{
 use url::Url;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/app.png"));
+#[cfg(target_os = "macos")]
+const TRAY_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tray.png"));
+#[cfg(not(target_os = "macos"))]
+const TRAY_ICON: &[u8] = ICON;
 const OPEN: &str = "open-client";
 const QUIT: &str = "quit-client";
 const HIDE: &str = "hide-client";
@@ -279,7 +283,7 @@ pub fn run(options: Options) -> Result<()> {
                 app.set_menu(Menu::with_items(app, &[&application, &edit])?)?;
             }
             let tray = TrayIconBuilder::with_id("client")
-                .icon(Image::from_bytes(ICON)?)
+                .icon(Image::from_bytes(TRAY_ICON)?)
                 .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("Daat Locus")
                 .show_menu_on_left_click(!cfg!(windows))

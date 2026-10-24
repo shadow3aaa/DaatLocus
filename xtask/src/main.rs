@@ -375,11 +375,8 @@ fn xml(value: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
-fn raster(root: &Path, size: u32) -> Result<Vec<u8>> {
-    let tree = resvg::usvg::Tree::from_data(
-        &fs::read(root.join("assets/logo.svg"))?,
-        &resvg::usvg::Options::default(),
-    )?;
+fn raster(source: &Path, size: u32, transparent_mark: bool) -> Result<Vec<u8>> {
+    let tree = resvg::usvg::Tree::from_data(&fs::read(source)?, &resvg::usvg::Options::default())?;
     let mut pixels = resvg::tiny_skia::Pixmap::new(size, size).ok_or("Invalid icon dimensions")?;
     let scale = size as f32 / tree.size().width();
     resvg::render(
@@ -389,6 +386,12 @@ fn raster(root: &Path, size: u32) -> Result<Vec<u8>> {
     );
     let mut rgba = pixels.data().to_vec();
     for pixel in rgba.as_chunks_mut::<4>().0 {
+        if transparent_mark {
+            // Reuse Android's black mark without its white launcher backdrop.
+            pixel[3] = pixel[3].saturating_sub(pixel[0]);
+            pixel[..3].fill(0);
+            continue;
+        }
         let alpha = pixel[3] as u32;
         if alpha > 0 && alpha < 255 {
             for color in &mut pixel[..3] {
@@ -398,13 +401,13 @@ fn raster(root: &Path, size: u32) -> Result<Vec<u8>> {
     }
     Ok(rgba)
 }
-fn png_file(root: &Path, path: &Path, size: u32) -> Result<()> {
+fn png_file(source: &Path, path: &Path, size: u32, transparent_mark: bool) -> Result<()> {
     let mut encoder = png::Encoder::new(fs::File::create(path)?, size, size);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     encoder
         .write_header()?
-        .write_image_data(&raster(root, size)?)?;
+        .write_image_data(&raster(source, size, transparent_mark)?)?;
     Ok(())
 }
 fn windows(context: &Context, computer: Option<&computer_use::Assets>) -> Result<()> {
@@ -415,7 +418,7 @@ fn windows(context: &Context, computer: Option<&computer_use::Assets>) -> Result
         directory.add_entry(ico::IconDirEntry::encode(&ico::IconImage::from_rgba_data(
             size,
             size,
-            raster(&context.root, size)?,
+            raster(&context.root.join("assets/logo.svg"), size, false)?,
         ))?);
     }
     directory.write(fs::File::create(&icon)?)?;
@@ -493,7 +496,7 @@ fn windows(context: &Context, computer: Option<&computer_use::Assets>) -> Result
     };
     fs::write(&license, format!("{{\\rtf1\\ansi {trust_notice}{body}}}"))?;
     let logo = work.join("logo.png");
-    png_file(&context.root, &logo, 128)?;
+    png_file(&context.root.join("assets/logo.svg"), &logo, 128, false)?;
     let webview = work.join("MicrosoftEdgeWebview2Setup.exe");
     let response = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -599,6 +602,32 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
     }
     Ok(())
 }
+fn sign_macos_app(app: &Path) -> Result<()> {
+    // Linker signatures cover individual binaries, not the assembled app's
+    // Info.plist and resources. Sign nested code before sealing the bundle.
+    command(
+        Command::new("codesign")
+            .args([
+                "--force",
+                "--sign",
+                "-",
+                "--timestamp=none",
+                "--identifier",
+                "io.shadow3aaa.daatlocus.service",
+            ])
+            .arg(app.join("Contents/MacOS/daat-locus")),
+    )?;
+    command(
+        Command::new("codesign")
+            .args(["--force", "--sign", "-", "--timestamp=none"])
+            .arg(app),
+    )?;
+    command(
+        Command::new("codesign")
+            .args(["--verify", "--deep", "--strict"])
+            .arg(app),
+    )
+}
 fn macos(context: &Context) -> Result<()> {
     let work = context.work()?;
     let app = work.join("Daat Locus.app");
@@ -623,7 +652,12 @@ fn macos(context: &Context) -> Result<()> {
         (512, "icon_512x512.png"),
         (1024, "icon_512x512@2x.png"),
     ] {
-        png_file(&context.root, &iconset.join(name), size)?;
+        png_file(
+            &context.root.join("assets/logo-mark.svg"),
+            &iconset.join(name),
+            size,
+            true,
+        )?;
     }
     command(
         Command::new("iconutil")
@@ -640,6 +674,7 @@ fn macos(context: &Context) -> Result<()> {
             xml(context.meta.installer_version())
         ),
     )?;
+    sign_macos_app(&app)?;
     let stage = work.join("installer-root");
     copy_tree(&app, &stage.join("Applications/Daat Locus.app"))?;
     let cli = stage.join("usr/local/bin");
@@ -676,6 +711,57 @@ fn macos(context: &Context) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_app_signature_covers_bundle_resources_and_nested_code() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = directory.path().join("Fixture.app");
+        let bin = app.join("Contents/MacOS");
+        let resources = app.join("Contents/Resources");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&resources).unwrap();
+        let source = directory.path().join("main.c");
+        fs::write(&source, "int main(void) { return 0; }").unwrap();
+        command(
+            Command::new("xcrun")
+                .arg("clang")
+                .arg(&source)
+                .arg("-o")
+                .arg(bin.join("daat-locus-app")),
+        )
+        .unwrap();
+        fs::copy(bin.join("daat-locus-app"), bin.join("daat-locus")).unwrap();
+        fs::write(
+            app.join("Contents/Info.plist"),
+            r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>io.daat-locus.packaging-fixture</string><key>CFBundleExecutable</key><string>daat-locus-app</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>"#,
+        )
+        .unwrap();
+        let resource = resources.join("fixture.txt");
+        fs::write(&resource, "original resource").unwrap();
+        sign_macos_app(&app).unwrap();
+        // Copying into the installer must retain a valid, complete bundle seal.
+        let staged = directory.path().join("installed/Fixture.app");
+        copy_tree(&app, &staged).unwrap();
+        let verify = || {
+            Command::new("codesign")
+                .args(["--verify", "--deep", "--strict"])
+                .arg(&staged)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(verify());
+        let staged_resource = staged.join("Contents/Resources/fixture.txt");
+        fs::write(&staged_resource, "changed resource").unwrap();
+        assert!(
+            !verify(),
+            "changed bundle resources must invalidate the seal"
+        );
+        fs::write(&staged_resource, "original resource").unwrap();
+        fs::write(staged.join("Contents/MacOS/daat-locus"), "invalid code").unwrap();
+        assert!(!verify(), "changed companion code must invalidate the seal");
+    }
     #[test]
     fn embedded_marker_can_span_short_reads() {
         struct Chunks(std::io::Cursor<Vec<u8>>);

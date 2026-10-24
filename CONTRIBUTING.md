@@ -784,6 +784,8 @@ cargo xtask package android --target aarch64
 All package commands print Cargo-style progress and clickable artifact URLs (plain URLs in redirected logs). Use `--out-dir` to choose the destination.
 
 Windows installers require WiX; macOS installers require macOS tools.
+macOS packaging ad-hoc signs the companion service and completed app bundle, then
+verifies the bundle seal. Developer ID signing and notarization remain separate.
 `--skip-build --release-dir <directory>` packages existing verified artifacts.
 Binary archives require the standalone embedded WebUI service. Windows/macOS
 installers require a native WebUI client and an API-only companion service;
