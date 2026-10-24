@@ -51,6 +51,9 @@ struct Package {
     out_dir: Option<PathBuf>,
     #[arg(long)]
     skip_build: bool,
+    /// Reuse a Keychain code-signing identity to retain macOS privacy grants across updates.
+    #[arg(long)]
+    macos_signing_identity: Option<String>,
     /// Existing signed IDD package; otherwise build it through idd-driver.
     #[arg(long)]
     idd_package: Option<PathBuf>,
@@ -83,6 +86,7 @@ struct Context {
     target: String,
     release: PathBuf,
     output: PathBuf,
+    macos_signing_identity: Option<String>,
 }
 fn main() {
     if let Err(error) = run() {
@@ -142,6 +146,9 @@ fn run() -> Result<()> {
     }
     if kind == "macos" && (!cfg!(target_os = "macos") || !target.contains("apple-darwin")) {
         return Err("macOS installers require a macOS host/target".into());
+    }
+    if kind != "macos" && args.macos_signing_identity.is_some() {
+        return Err("--macos-signing-identity requires package macos".into());
     }
     status(
         "Packaging",
@@ -203,6 +210,7 @@ fn run() -> Result<()> {
         target,
         release,
         output,
+        macos_signing_identity: args.macos_signing_identity,
     };
     let binary = context.binary("daat-locus");
     if native {
@@ -602,7 +610,11 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn sign_macos_app(app: &Path) -> Result<()> {
+fn sign_macos_app(app: &Path, identity: Option<&str>) -> Result<()> {
+    let signer = identity.unwrap_or("-");
+    if signer.trim().is_empty() {
+        return Err("macOS signing identity cannot be empty".into());
+    }
     // Linker signatures cover individual binaries, not the assembled app's
     // Info.plist and resources. Sign nested code before sealing the bundle.
     command(
@@ -610,7 +622,7 @@ fn sign_macos_app(app: &Path) -> Result<()> {
             .args([
                 "--force",
                 "--sign",
-                "-",
+                signer,
                 "--timestamp=none",
                 "--identifier",
                 "io.shadow3aaa.daatlocus.service",
@@ -619,7 +631,7 @@ fn sign_macos_app(app: &Path) -> Result<()> {
     )?;
     command(
         Command::new("codesign")
-            .args(["--force", "--sign", "-", "--timestamp=none"])
+            .args(["--force", "--sign", signer, "--timestamp=none"])
             .arg(app),
     )?;
     command(
@@ -674,7 +686,13 @@ fn macos(context: &Context) -> Result<()> {
             xml(context.meta.installer_version())
         ),
     )?;
-    sign_macos_app(&app)?;
+    sign_macos_app(&app, context.macos_signing_identity.as_deref())?;
+    if context.macos_signing_identity.is_none() {
+        status(
+            "Note",
+            "Ad-hoc signing binds privacy grants to this build. Reuse --macos-signing-identity for permissions across updates.",
+        );
+    }
     let stage = work.join("installer-root");
     copy_tree(&app, &stage.join("Applications/Daat Locus.app"))?;
     let cli = stage.join("usr/local/bin");
@@ -738,7 +756,7 @@ mod tests {
         .unwrap();
         let resource = resources.join("fixture.txt");
         fs::write(&resource, "original resource").unwrap();
-        sign_macos_app(&app).unwrap();
+        sign_macos_app(&app, None).unwrap();
         // Copying into the installer must retain a valid, complete bundle seal.
         let staged = directory.path().join("installed/Fixture.app");
         copy_tree(&app, &staged).unwrap();
@@ -761,6 +779,10 @@ mod tests {
         fs::write(&staged_resource, "original resource").unwrap();
         fs::write(staged.join("Contents/MacOS/daat-locus"), "invalid code").unwrap();
         assert!(!verify(), "changed companion code must invalidate the seal");
+        assert!(
+            sign_macos_app(&app, Some("Daat Locus Missing Fixture Identity")).is_err(),
+            "an explicit signing identity must never silently fall back to ad-hoc"
+        );
     }
     #[test]
     fn embedded_marker_can_span_short_reads() {
@@ -798,6 +820,7 @@ mod tests {
             target: "x86_64-pc-windows-msvc".into(),
             release: root.clone(),
             output: root,
+            macos_signing_identity: None,
         };
         fs::write(c.binary("daat-locus"), UI_MARKER).unwrap();
         fs::write(c.binary("daat-locus-app"), b"desktop-client").unwrap();

@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Field, FieldContent, FieldDescription, FieldGroup, FieldTitle } from "@/components/ui/field";
 import { SettingsGroup, SettingsRow } from "./structure";
 import { errorText, Picker, StatusNote } from "./controls";
+import { refreshMacAuthorization } from "@/lib/macos-computer-use-authorization";
 
 export function MacComputerUseSettings() {
   const [status, setStatus] = useState<ComputerUsePermissions | null>(null);
@@ -19,6 +20,7 @@ export function MacComputerUseSettings() {
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
   const busy = useRef(false);
+  const refreshing = useRef(false);
   const revision = useRef(0);
   const authorized = !!status?.accessibility && !!status?.screen_recording;
   const ready = authorized && !!status?.display_ready;
@@ -29,6 +31,7 @@ export function MacComputerUseSettings() {
   const [displayError, setDisplayError] = useState<string | null>(null);
   function accept(actual: ComputerUsePermissions) {
     setStatus(actual);
+    if (actual.accessibility && actual.screen_recording) setDialog(false);
     if (!dirty.current) setDraft({width:String(actual.display.width),height:String(actual.display.height),scale:String(actual.display.scale)});
   }
   async function applyDisplay() {
@@ -44,12 +47,26 @@ export function MacComputerUseSettings() {
     finally {busy.current=false;if(mounted.current)setPending(false);}
   }
   async function refresh() {
-    if (busy.current) return;
+    if (busy.current || refreshing.current || document.visibilityState === "hidden") return;
+    refreshing.current = true;
     const current = revision.current;
-    try {const actual = await getComputerUseStatus();if (mounted.current && !busy.current && current === revision.current) {accept(actual);setError(null);}}
-    catch (cause) {if (mounted.current) setError(errorText(cause));}
+    let configuring = false;
+    try {
+      const actual = await refreshMacAuthorization({
+        status: getComputerUseStatus,
+        canConfigure: () => mounted.current && !busy.current && current === revision.current,
+        configure: enabled => {configuring=true;busy.current=true;setPending(true);return configureComputerUse(enabled);},
+      });
+      if (mounted.current && current === revision.current) {accept(actual);setError(null);}
+    }
+    catch (cause) {
+      if (mounted.current && current === revision.current) setError(errorText(cause));
+      try {const actual = await getComputerUseStatus();if (mounted.current && current === revision.current) accept(actual);} catch {}
+    }
+    finally {refreshing.current=false;if (configuring) {busy.current=false;if (mounted.current) setPending(false);}}
   }
-  useEffect(() => {mounted.current = true;void refresh();window.addEventListener("focus", refresh);return () => {mounted.current = false;window.removeEventListener("focus", refresh);};}, []);
+  useEffect(() => {mounted.current = true;void refresh();window.addEventListener("focus", refresh);document.addEventListener("visibilitychange", refresh);return () => {mounted.current = false;window.removeEventListener("focus", refresh);document.removeEventListener("visibilitychange", refresh);};}, []);
+  useEffect(() => {if (!dialog) return;const timer = window.setInterval(() => {void refresh();}, 1500);return () => window.clearInterval(timer);}, [dialog]);
   async function configure(enabled: boolean) {
     if (busy.current) return;
     busy.current = true;revision.current++;setPending(true);setError(null);

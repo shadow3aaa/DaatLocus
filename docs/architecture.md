@@ -419,6 +419,9 @@ Android 枚举已有 Actor 工作屏，以独立租约 ID 选择屏幕并读取�
 屏幕消失、关闭或授权失效时清空画面；图像按比例完整显示，不裁切，不写入 Actor 资源账本。
 设置页的 GUI 操作分类按服务能力显示 Windows ComputerUse 或 Android PhoneUse 内容；
 macOS 原生客户端显示开关、辅助功能与屏幕录制授权引导及屏幕宽高、缩放高级选项。
+授权弹窗在可见时及应用回到前台时重新检测；权限齐全后仅为已经启用的 GUI 操作
+续接虚拟屏初始化。Owner 关闭 GUI 操作或离开页面后，迟到的检测结果不能触发初始化。权限以
+当前客户端进程的系统检查为准；系统列表中残留旧签名的开关不代表当前构建已获授权。
 Windows 通过 Owner HTTP `GET/PATCH /v1/device/computer-use` 读取及串行修改本机开关和
 驱动支持的分辨率；沿用账号授权、可信 Origin 与请求头，不新增 WebView 业务命令。
 偏好保存在服务 profile 的 `computer-use.json`，不复制到账号或写入 Actor 配置。

@@ -628,8 +628,10 @@ cargo xtask package android --target aarch64
 `--out-dir` 可自定义产物目录。
 
 Windows 安装包需要 WiX，macOS 安装包需要原生系统工具。
-macOS 打包会对配套服务和完整应用包进行 ad-hoc 签名并校验应用包完整性；
-Developer ID 签名和公证仍需另行完成。
+macOS 打包会签名配套服务和完整应用包，并校验应用包完整性。使用
+`--macos-signing-identity <钥匙串签名身份>` 在各次构建中复用同一证书，才能保持
+macOS 隐私授权；指定身份不可用时打包失败。不指定时使用 ad-hoc 签名，授权绑定
+当前构建：更新后即使系统开关仍开启，也可能需要移除后重新添加应用。公证仍需另行完成。
 `--skip-build --release-dir <directory>` 打包既有、已核实的产物：binary 归档需要
 内置 WebUI 的独立服务；Windows/macOS 安装包需要带原生资源的客户端和不重复
 嵌入页面的配套后台。缺失客户端或重复资源都会被拒绝。

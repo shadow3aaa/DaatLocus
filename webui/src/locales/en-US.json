@@ -809,7 +809,7 @@
     "screen_recording_description": "View the selected window.",
     "granted": "Allowed",
     "authorize": "Authorize",
-    "restart_hint": "Enable Daat Locus in System Settings. Quit and reopen the app if macOS requests it."
+    "restart_hint": "Enable Daat Locus in System Settings. If it is already enabled but still unavailable, remove and add the app again, then quit and reopen it."
   },
   "virtual_displays": {
     "title": "Virtual displays",

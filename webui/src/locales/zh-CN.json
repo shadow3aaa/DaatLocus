@@ -809,7 +809,7 @@
     "screen_recording_description": "查看所选窗口的内容。",
     "granted": "已授权",
     "authorize": "前往授权",
-    "restart_hint": "在系统设置中启用 Daat Locus；如果系统提示，请退出并重新打开应用。"
+    "restart_hint": "在系统设置中启用 Daat Locus。若已开启但仍未生效，请移除后重新添加应用，再退出并重新打开。"
   },
   "virtual_displays": {
     "title": "虚拟屏幕",
