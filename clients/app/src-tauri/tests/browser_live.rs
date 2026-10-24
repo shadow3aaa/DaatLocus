@@ -38,6 +38,16 @@ impl Fixture {
                 let mut request = [0u8; 4096];
                 let _ = stream.read(&mut request);
                 let request = String::from_utf8_lossy(&request);
+                if request.starts_with("GET /shell.css ") {
+                    let body = include_str!("../../../../webui/src/index.css");
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(body.as_bytes());
+                    continue;
+                }
                 if request.starts_with("GET /collector.js ") {
                     let body = collector.as_ref().expect("Collector fixture unavailable");
                     let header = format!(
@@ -49,7 +59,7 @@ impl Fixture {
                     continue;
                 }
                 let body = if request.starts_with("GET /shell ") {
-                    r#"<!doctype html><meta charset="utf-8"><style>html,body{margin:0;background:transparent}header{height:100px;background:#333}button{position:fixed;left:100px;top:200px;width:200px;height:200px;border:0;background:rgba(255,0,0,.5);box-shadow:0 0 20px #0008}</style><header>Shell</header><div id="viewport" style="position:fixed;left:80px;top:140px;right:0;bottom:0"><div style="position:absolute;left:350px;top:60px;width:100px;height:100px;background:rgba(0,0,255,.5)" onclick="window.tips=(window.tips||0)+1"></div></div><script type="module">import {browserForeground} from "/collector.js";window.DLComposition={browserForeground};</script><button onclick="window.clicks=(window.clicks||0)+1">Overlay</button>"#
+                    r#"<!doctype html><html data-native-browser><meta charset="utf-8"><link rel="stylesheet" href="/shell.css"><style>html,body{margin:0;background:transparent}header{height:100px;box-sizing:border-box}button{position:fixed;left:100px;top:200px;width:200px;height:200px;border:0;background:rgba(255,0,0,.5);box-shadow:0 0 20px #0008}.dl-browser-progress{position:fixed;left:0;right:0;top:138px}</style><header class="dl-browser-tabs">Shell</header><div class="dl-browser-progress"></div><div id="viewport" style="position:fixed;left:80px;top:140px;right:0;bottom:0"><div style="position:absolute;left:350px;top:60px;width:100px;height:100px;background:rgba(0,0,255,.5)" onclick="window.tips=(window.tips||0)+1"></div></div><script type="module">import {browserForeground} from "/collector.js";window.DLComposition={browserForeground};</script><button onclick="window.clicks=(window.clicks||0)+1">Overlay</button>"#
                 } else if request.starts_with("GET /composition-page ") {
                     r#"<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;background:rgb(0,200,0)}</style><input aria-label="Native field" style="position:fixed;left:600px;top:100px;width:200px;height:40px"><script>document.onclick=()=>window.nativeControlResult=String(Number(window.nativeControlResult||0)+1)</script>"#
                 } else {
@@ -223,6 +233,16 @@ fn transparent_shell_composes_above_the_page_and_routes_native_clicks() {
             "nested foreground native input"
         );
         let pixels = step["layer"]["pixels"].as_array().unwrap();
+        for pixel in &pixels[4..6] {
+            assert!(
+                pixel
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|channel| channel.as_u64().unwrap() > 200),
+                "light browser chrome must stay opaque above the native surface: {pixel}"
+            );
+        }
         assert!(
             pixels[2][1].as_u64().unwrap() < 195,
             "shadow must composite outside the popup bounds: {pixels:?}"

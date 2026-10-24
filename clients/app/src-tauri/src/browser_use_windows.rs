@@ -313,7 +313,7 @@ pub async fn composition_probe(view: &Webview) -> Result<Value, String> {
         let bitmap=CreateCompatibleBitmap(source,size.right,size.bottom);let previous=SelectObject(dc,bitmap.into());
         let captured=PrintWindow(parent.0,dc.0,3)!=0;
         let pixel=|x:f64,y:f64|{let c=GetPixel(dc,(x*scale) as i32,(y*scale) as i32).0;[c&255,(c>>8)&255,(c>>16)&255]};
-        let pixels=[pixel(150.0,250.0),pixel(500.0,300.0),pixel(310.0,250.0),pixel(450.0,250.0)];
+        let pixels=[pixel(150.0,250.0),pixel(500.0,300.0),pixel(310.0,250.0),pixel(450.0,250.0),pixel(600.0,50.0),pixel(600.0,139.0)];
         SelectObject(dc,previous);let _=DeleteObject(bitmap.into());let _=DeleteDC(dc);ReleaseDC(None,source);
         Ok(json!({"composed":wry::native_composition::is_composed(hwnd.0 as isize),"captured":captured,"pixels":pixels}))
     }})();let _=tx.send(result.map_err(|e|e.to_string()));}).map_err(|e|e.to_string())?;

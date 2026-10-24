@@ -1017,7 +1017,7 @@ html[data-desktop-platform="windows"] .dl-virtual-displays-header { padding-righ
 
 /* Shared browser: quiet chrome, native page viewport, local start/library pages. */
 .dl-browser-page { position: relative; display: flex; flex-direction: column; height: 100%; min-width: 0; min-height: 0; overflow: hidden; border-radius: 16px 0 0 16px; background: var(--background); }
-.dl-browser-tabs { display: flex; align-items: center; min-width: 0; gap: 4px; min-height: 38px; padding: 3px 12px 0; flex: none; background: var(--sidebar); }
+.dl-browser-tabs { display: flex; align-items: center; min-width: 0; gap: 4px; min-height: 38px; padding: 3px 12px 0; flex: none; background: color-mix(in srgb,var(--foreground) 1.5%,var(--background)); }
 .dl-browser-tab-strip { display: flex; min-width: 0; overflow: auto; scrollbar-width: none; }
 .dl-browser-tab { display: flex; align-items: center; width: 200px; min-width: 100px; max-width: 220px; border-radius: 9px 9px 0 0; color: var(--muted-foreground); }
 .dl-browser-tab[data-active=true] { color: var(--foreground); background: var(--background); }
@@ -1133,7 +1133,7 @@ html[data-desktop-platform=windows] .dl-browser-tabs { padding-right: var(--dl-c
 
 .dl-browser-menu { animation: none; }
 
-.dl-browser-progress { height: 2px; flex: none; overflow: hidden; background: transparent; }
+.dl-browser-progress { height: 2px; flex: none; overflow: hidden; background: var(--background); }
 .dl-browser-progress span { display: block; height: 100%; background: var(--primary); opacity: 0; transition: width .2s ease, opacity .2s ease; }
 .dl-browser-progress[data-loading=true] span { opacity: 1; }
 .dl-browser-progress[data-loading=true] span:not([style]) { width: 35%; animation: dl-browser-loading 1.4s ease-in-out infinite; }
