@@ -50,9 +50,7 @@ thread_local! {static HOSTS:RefCell<HashMap<String,Retained<ShellHost>>>=RefCell
 pub(crate) fn remove(label: &str) {
     HOSTS.with(|hosts| {
         if let Some(host) = hosts.borrow_mut().remove(label) {
-            unsafe {
-                host.removeFromSuperview();
-            }
+            host.removeFromSuperview();
         }
     });
 }
@@ -79,7 +77,7 @@ pub(crate) async fn compose(
             if let Some(parent)=wrapper.superview(){
                 // AppKit and Core Animation share this order. Never mask the page.
                 if parent.subviews().lastObject().is_none_or(|top|Retained::as_ptr(&top).cast::<c_void>()!=Retained::as_ptr(&wrapper).cast::<c_void>()) {
-                    let _:()=msg_send![&*parent,addSubview:&*wrapper positioned:1_isize relativeTo:None::<&NSView>];
+                    let _:()=msg_send![&*parent,addSubview:&*wrapper, positioned:1_isize, relativeTo:None::<&NSView>];
                 }
                 wrapper.setFrame(parent.bounds());
             }
