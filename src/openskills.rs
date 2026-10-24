@@ -718,8 +718,11 @@ struct SkillPathAliasPlan {
 
 impl SkillPathAliasPlan {
     fn new(catalog: &OpenSkillsCatalog, skills: &[&OpenSkill]) -> Self {
+        // Bundled resources require their exact published path for verified
+        // reads. Show that callable path directly rather than a prompt alias.
         let skill_paths = skills
             .iter()
+            .filter(|skill| skill.scope != OpenSkillScope::Builtin)
             .map(|skill| skill.path.clone())
             .collect::<HashSet<_>>();
         let mut roots_for_skills: HashMap<&PathBuf, Vec<&PathBuf>> = HashMap::new();
@@ -762,6 +765,9 @@ impl SkillPathAliasPlan {
     }
 
     fn render_path(&self, skill: &OpenSkill) -> String {
+        if skill.scope == OpenSkillScope::Builtin {
+            return display_path(&skill.path);
+        }
         let Some(root) = self.root_by_skill_path.get(&skill.path) else {
             return display_path(&skill.path);
         };
@@ -1125,6 +1131,22 @@ mod tests {
         assert!(catalog.skills[0].auto_use_enabled());
         let prompt = catalog.render_prompt_block().unwrap();
         assert!(prompt.contains("builtin-fixture"));
+        assert!(prompt.contains(path.to_string_lossy().as_ref()));
+        assert_eq!(
+            crate::file_io::read_file(
+                directory.path(),
+                &policy,
+                &crate::file_io::ReadFileArgs {
+                    path: path.to_string_lossy().into_owned(),
+                    start_line: None,
+                    line_count: None,
+                }
+            )
+            .unwrap()
+            .content
+            .as_bytes(),
+            content
+        );
         assert!(!prompt.contains("Read the fixture."));
         assert!(!prompt.contains("unlisted"));
         assert!(!policy.is_path_readable(&path));

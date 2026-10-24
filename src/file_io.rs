@@ -31,7 +31,9 @@ static FILE_WRITES: Mutex<()> = Mutex::new(());
 #[serde(deny_unknown_fields)]
 pub struct ReadFileArgs {
     pub path: String,
+    /// One-based first line; null starts at line 1. Zero is invalid.
     pub start_line: Option<usize>,
+    /// Number of lines to read; null uses the default page size.
     pub line_count: Option<usize>,
 }
 
