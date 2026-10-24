@@ -1,7 +1,7 @@
 //! Owner-only full-page browser surface within the main client WebView.
 use crate::web_host::NativeHost;
 use daat_locus_client_protocol::web::{
-    BrowserBounds, BrowserInput, BrowserOcclusion, SHARED_BROWSER_PROFILE,
+    BrowserBounds, BrowserHitRegion, BrowserInput, SHARED_BROWSER_PROFILE,
 };
 use tauri::{Manager, Webview, Window, WindowBuilder};
 
@@ -85,13 +85,9 @@ pub(crate) fn resize(app: &tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
         applied.insert(key, geometry);
     }
-    host.browser_states
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
     let updating = host.inner().clone();
     tauri::async_runtime::spawn(async move {
-        let _ = apply_occlusions(&updating).await;
+        let _ = apply_input_regions(&updating).await;
     });
     Ok(())
 }
@@ -128,10 +124,6 @@ pub(crate) async fn set_panel(
                 .map_err(|_| "Browser unavailable")?
                 .clone();
             if order.is_empty() {
-                host.browser_states
-                    .lock()
-                    .map_err(|_| "Browser unavailable")?
-                    .clear();
                 return Ok(());
             }
             let window = page_window(&host)?;
@@ -174,7 +166,7 @@ pub async fn browser_control(
     tab: Option<String>,
     url: Option<String>,
     bounds: Option<BrowserBounds>,
-    occlusions: Option<Vec<BrowserOcclusion>>,
+    foreground: Option<Vec<BrowserHitRegion>>,
 ) -> Result<serde_json::Value, String> {
     let app = webview.app_handle();
     let current = webview.url().map_err(|_| "Browser unavailable")?;
@@ -184,7 +176,7 @@ pub async fn browser_control(
     let host = app.state::<NativeHost>().inner().clone();
     // Visual detachment must also work after logout, without revealing page facts.
     if action == "detach" {
-        host.occlusions
+        host.foreground
             .lock()
             .map_err(|_| "Browser unavailable")?
             .clear();
@@ -192,8 +184,8 @@ pub async fn browser_control(
         return Ok(serde_json::json!({}));
     }
     crate::transport::authorize_owner(&webview).await?;
-    let occlusions = occlusions.unwrap_or_default();
-    if occlusions.len() > 16 || occlusions.iter().any(|cut| !cut.validate()) {
+    let foreground = foreground.unwrap_or_default();
+    if foreground.len() > 512 || foreground.iter().any(|cut| !cut.validate()) {
         return Err("Invalid browser overlays".into());
     }
     let key = match tab {
@@ -230,9 +222,9 @@ pub async fn browser_control(
             let bounds = bounds
                 .filter(BrowserBounds::validate)
                 .ok_or("Invalid browser bounds")?;
-            *host.occlusions.lock().map_err(|_| "Browser unavailable")? = occlusions;
+            *host.foreground.lock().map_err(|_| "Browser unavailable")? = foreground;
             set_panel(&host, Some(bounds)).await?;
-            apply_occlusions(&host).await?;
+            apply_input_regions(&host).await?;
             return Ok(serde_json::json!({}));
         }
         "list" => {}
@@ -370,10 +362,6 @@ pub async fn browser_control(
                 .lock()
                 .map_err(|_| "Browser unavailable")?
                 .insert(key.into(), zoom);
-            host.browser_states
-                .lock()
-                .map_err(|_| "Browser unavailable")?
-                .remove(key);
         }
         "print" => {
             host.app
@@ -392,10 +380,6 @@ pub async fn browser_control(
             return Ok(serde_json::json!({"destination":"clipboard"}));
         }
         "find" | "find_next" | "find_previous" | "find_close" => {
-            host.browser_states
-                .lock()
-                .map_err(|_| "Browser unavailable")?
-                .remove(key.as_deref().ok_or("Select a browser page")?);
             let view = host
                 .app
                 .get_webview(key.as_deref().ok_or("Select a browser page")?)
@@ -438,10 +422,6 @@ pub async fn browser_control(
             if let Some(key) = temporary {
                 host.close_page(&key)?;
             }
-            host.browser_states
-                .lock()
-                .map_err(|_| "Browser unavailable")?
-                .clear();
         }
         "stop" => {
             if let Some(view) = key.as_deref().and_then(|key| host.app.get_webview(key)) {
@@ -572,43 +552,16 @@ pub(crate) fn move_tab(host: &NativeHost, key: &str, before: Option<&str>) -> Re
     }
     Ok(())
 }
-pub(crate) async fn apply_occlusions(host: &NativeHost) -> Result<(), String> {
+pub(crate) async fn apply_input_regions(host: &NativeHost) -> Result<(), String> {
     let bounds = *host.panel.lock().map_err(|_| "Browser unavailable")?;
-    let cuts = host
-        .occlusions
+    let foreground = host
+        .foreground
         .lock()
         .map_err(|_| "Browser unavailable")?
         .clone();
-    let selected = host
-        .selected
-        .lock()
-        .map_err(|_| "Browser unavailable")?
-        .clone();
-    if let Some(key) = selected
-        && let Some(view) = host.app.get_webview(&key)
-    {
-        let signature =
-            serde_json::to_string(&(if cuts.is_empty() { None } else { bounds }, &cuts))
-                .map_err(|_| "Browser unavailable")?;
-        if host
-            .applied_occlusions
-            .lock()
-            .map_err(|_| "Browser unavailable")?
-            .get(&key)
-            == Some(&signature)
-        {
-            return Ok(());
-        }
-        crate::browser_use::occlude(&view, bounds, cuts).await?;
-        host.applied_occlusions
-            .lock()
-            .map_err(|_| "Browser unavailable")?
-            .insert(key, signature);
+    if let Some(shell) = host.app.get_webview("main") {
+        crate::browser_use::compose(&shell, bounds, foreground).await?;
     }
-    host.browser_states
-        .lock()
-        .map_err(|_| "Browser unavailable")?
-        .clear();
     Ok(())
 }
 

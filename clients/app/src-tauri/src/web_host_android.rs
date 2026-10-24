@@ -19,7 +19,7 @@ pub async fn browser_control(
     tab: Option<String>,
     url: Option<String>,
     bounds: Option<daat_locus_client_protocol::web::BrowserBounds>,
-    occlusions: Option<Vec<daat_locus_client_protocol::web::BrowserOcclusion>>,
+    foreground: Option<Vec<daat_locus_client_protocol::web::BrowserHitRegion>>,
 ) -> Result<serde_json::Value, String> {
     crate::transport::authorize(&window)?;
     if action != "detach" {
@@ -56,13 +56,13 @@ pub async fn browser_control(
             | "clear_data"
             | "stop"
     ) || bounds.as_ref().is_some_and(|bounds| !bounds.validate())
-        || occlusions
+        || foreground
             .as_ref()
-            .is_some_and(|cuts| cuts.len() > 16 || cuts.iter().any(|cut| !cut.validate()))
+            .is_some_and(|cuts| cuts.len() > 512 || cuts.iter().any(|cut| !cut.validate()))
     {
         return Err("Invalid browser control".into());
     }
-    let input=serde_json::json!({"profile":daat_locus_client_protocol::web::SHARED_BROWSER_PROFILE,"action":action,"tab":tab,"url":url,"bounds":bounds,"occlusions":occlusions}).to_string();
+    let input=serde_json::json!({"profile":daat_locus_client_protocol::web::SHARED_BROWSER_PROFILE,"action":action,"tab":tab,"url":url,"bounds":bounds,"foreground":foreground}).to_string();
     tokio::task::spawn_blocking(move || {
         let context = ndk_context::android_context();
         let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };

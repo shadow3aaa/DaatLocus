@@ -14,40 +14,39 @@ mod platform;
 pub(crate) use platform::configuration;
 #[cfg(target_os = "macos")]
 pub(crate) use platform::prepare;
-#[cfg(all(target_os = "macos", feature = "web-contract"))]
-pub(crate) use platform::ui_probe_visibility;
 #[cfg(target_os = "macos")]
 pub(crate) use platform::remove_shortcuts;
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) use platform::shortcuts;
+#[cfg(all(target_os = "macos", feature = "web-contract"))]
+pub(crate) use platform::ui_probe_visibility;
 #[cfg(target_os = "macos")]
 #[path = "browser_use_macos.rs"]
 mod platform;
 
-pub(crate) struct Receipt {
+#[derive(Clone)]
+pub(crate) struct ImageFrame {
     pub state: String,
-    pub signature: String,
     pub width: u32,
     pub height: u32,
-    pub viewport_width: f64,
-    pub viewport_height: f64,
 }
-// DOM changes invalidate coordinates too. This fixed host script exposes no
-// native capability and accepts no model-provided JavaScript.
+// Fixed viewport measurements only. Page mutations never gate native input.
 const METRICS: &str = daat_locus_client_protocol::web::BROWSER_METRICS_SCRIPT;
 pub(crate) async fn navigation(view: &Webview) -> Result<(bool, bool), String> {
     platform::navigation(view).await
 }
-pub(crate) async fn occlude(
+pub(crate) async fn compose(
     view: &Webview,
     bounds: Option<daat_locus_client_protocol::web::BrowserBounds>,
-    cuts: Vec<daat_locus_client_protocol::web::BrowserOcclusion>,
+    cuts: Vec<daat_locus_client_protocol::web::BrowserHitRegion>,
 ) -> Result<(), String> {
-    platform::occlude(view, bounds, cuts).await
+    platform::compose(view, bounds, cuts).await
 }
-#[cfg(all(any(windows, target_os = "macos"), feature = "web-contract"))]
-pub(crate) async fn occlusion_probe(view: &Webview) -> Result<Value, String> {
-    platform::occlusion_probe(view).await
+#[cfg(all(windows, feature = "web-contract"))]
+pub(crate) use platform::{owner_click, owner_text};
+#[cfg(all(windows, feature = "web-contract"))]
+pub(crate) async fn composition_probe(view: &Webview) -> Result<Value, String> {
+    platform::composition_probe(view).await
 }
 pub(crate) async fn page_screenshot(view: &Webview) -> Result<String, String> {
     cursor_visibility(view, "suspend").await;
@@ -192,10 +191,6 @@ impl NativeHost {
             }
             BrowserCommand::Close { tab } => {
                 let key = label(profile, &tab);
-                self.browser_states
-                    .lock()
-                    .map_err(|_| "Browser unavailable")?
-                    .remove(&key);
                 self.close_page(&key)?;
             }
             BrowserCommand::Observe { tab } => {
@@ -211,30 +206,58 @@ impl NativeHost {
             } => {
                 let key = label(profile, &tab);
                 let window = self.app.get_webview(&key).ok_or("Browser page is closed")?;
-                let receipt = self
-                    .browser_states
+                // A reference supplies coordinate dimensions, not permission or freshness.
+                // Keep old frames usable while the page and the Owner remain live.
+                let frame = self
+                    .browser_frames
                     .lock()
                     .map_err(|_| "Browser unavailable")?
-                    .remove(&key)
-                    .ok_or("Observe this page before input")?;
-                if receipt.state != state_id {
-                    return Err("Stale browser observation; observe again".into());
-                }
-                let metrics = evaluate(&window, METRICS).await?;
-                if signature(&window, &metrics)? != receipt.signature {
-                    return Err("Browser page changed; observe again before input".into());
-                }
+                    .get(&key)
+                    .and_then(|frames| {
+                        frames
+                            .iter()
+                            .find(|frame| frame.state == state_id)
+                            .or_else(|| frames.back())
+                    })
+                    .cloned();
+                let needs_point = matches!(
+                    &input,
+                    BrowserInput::Move { .. }
+                        | BrowserInput::Drag { .. }
+                        | BrowserInput::Click { .. }
+                        | BrowserInput::Scroll { .. }
+                );
+                let viewport = if needs_point {
+                    Some(evaluate(&window, METRICS).await?)
+                } else {
+                    None
+                };
+                let size = window.size().map_err(|_| "Browser viewport unavailable")?;
+                let (image_width, image_height) = frame
+                    .map(|frame| (frame.width, frame.height))
+                    .unwrap_or((size.width.max(1), size.height.max(1)));
                 let map = |x: f64, y: f64| -> Result<(f64, f64), String> {
-                    if x < 0.0
+                    if !x.is_finite()
+                        || !y.is_finite()
+                        || x < 0.0
                         || y < 0.0
-                        || x >= f64::from(receipt.width)
-                        || y >= f64::from(receipt.height)
+                        || x >= f64::from(image_width)
+                        || y >= f64::from(image_height)
                     {
-                        return Err("Input point is outside the observed image".into());
+                        return Err("Input point is outside the coordinate image".into());
                     }
+                    let viewport = viewport.as_ref().ok_or("Browser viewport unavailable")?;
+                    let width = viewport["width"]
+                        .as_f64()
+                        .filter(|width| *width > 0.0)
+                        .ok_or("Browser viewport unavailable")?;
+                    let height = viewport["height"]
+                        .as_f64()
+                        .filter(|height| *height > 0.0)
+                        .ok_or("Browser viewport unavailable")?;
                     Ok((
-                        x / f64::from(receipt.width) * receipt.viewport_width,
-                        y / f64::from(receipt.height) * receipt.viewport_height,
+                        x / f64::from(image_width) * width,
+                        y / f64::from(image_height) * height,
                     ))
                 };
                 let input = match input {
@@ -277,14 +300,10 @@ impl NativeHost {
                     }
                     other => other,
                 };
-                // Decoration follows accepted, mapped input; rejected/stale calls
-                // cannot move it. It never dispatches input or moves the OS pointer.
+                // The cursor is decoration; Owner interaction can continue during it.
                 show_cursor(&window, &input).await;
-                // Owner input remains live during inspection/decoration awaits.
-                // The prepared closed shadow keeps our animation out of this signature.
-                if signature(&window, &evaluate(&window, METRICS).await?)? != receipt.signature {
-                    hide_cursor(&window);
-                    return Err("Browser page changed before input; observe again".into());
+                if self.app.get_webview(&key).is_none() {
+                    return Err("Browser page is closed".into());
                 }
                 if matches!(
                     &input,
@@ -314,17 +333,6 @@ impl NativeHost {
                 }
                 // Give native input/layout and normal navigation a chance to settle.
                 tokio::time::sleep(Duration::from_millis(180)).await;
-                for _ in 0..40 {
-                    if evaluate(&window, METRICS)
-                        .await?
-                        .get("ready")
-                        .and_then(Value::as_str)
-                        == Some("complete")
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(150)).await;
-                }
                 observation = Some(self.browser_observe(&key, &tab, id).await?);
             }
         }
@@ -339,10 +347,6 @@ impl NativeHost {
         tab: &str,
         id: &str,
     ) -> Result<BrowserObservation, String> {
-        self.browser_states
-            .lock()
-            .map_err(|_| "Browser unavailable")?
-            .remove(key);
         let window = self.app.get_webview(key).ok_or("Browser page is closed")?;
         cursor_visibility(&window, "prepare").await;
         self.select_page(key, false)?;
@@ -352,26 +356,11 @@ impl NativeHost {
         {
             return Err("Browser page is still loading or its URL is not allowed".into());
         }
-        // Retake only the observation when a transient layout/pointer event
-        // races capture. Native input is never repeated here.
-        let (before_signature, after, png) = tokio::time::timeout(Duration::from_secs(8), async {
-            for _ in 0..3 {
-                let before = evaluate(&window, METRICS).await?;
-                let prior = signature(&window, &before)?;
-                cursor_visibility(&window, "suspend").await;
-                let captured = platform::screenshot(&window).await;
-                cursor_visibility(&window, "resume").await;
-                let png = captured?;
-                let after = evaluate(&window, METRICS).await?;
-                if prior == signature(&window, &after)? {
-                    return Ok((prior, after, png));
-                }
-                tokio::time::sleep(Duration::from_millis(60)).await;
-            }
-            Err::<_, String>("Browser changed during capture; observe again".into())
-        })
-        .await
-        .map_err(|_| "Browser capture timed out; observe again, do not replay input")??;
+        // Capture the live page once; animations, scrolling and DOM updates are normal.
+        cursor_visibility(&window, "suspend").await;
+        let captured = platform::screenshot(&window).await;
+        cursor_visibility(&window, "resume").await;
+        let png = captured?;
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&png)
@@ -382,14 +371,6 @@ impl NativeHost {
         }
         let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
         let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
-        let viewport_width = after["width"]
-            .as_f64()
-            .filter(|v| *v > 0.0)
-            .ok_or("Browser viewport unavailable")?;
-        let viewport_height = after["height"]
-            .as_f64()
-            .filter(|v| *v > 0.0)
-            .ok_or("Browser viewport unavailable")?;
         if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 8_000_000 {
             return Err("Browser image geometry exceeds its budget".into());
         }
@@ -401,20 +382,23 @@ impl NativeHost {
             .get(key)
             .cloned()
             .unwrap_or_default();
-        self.browser_states
-            .lock()
-            .map_err(|_| "Browser unavailable")?
-            .insert(
-                key.into(),
-                Receipt {
-                    state: id.into(),
-                    signature: before_signature,
-                    width,
-                    height,
-                    viewport_width,
-                    viewport_height,
-                },
-            );
+        {
+            let mut pages = self
+                .browser_frames
+                .lock()
+                .map_err(|_| "Browser unavailable")?;
+            let frames = pages.entry(key.into()).or_default();
+            frames.push_back(ImageFrame {
+                state: id.into(),
+                width,
+                height,
+            });
+            // Bounded geometry cache only. Evicted references fall back to the latest
+            // dimensions and never turn a live page into a stale-state error.
+            while frames.len() > 128 {
+                frames.pop_front();
+            }
+        }
         Ok(BrowserObservation {
             page,
             state_id: id.into(),
@@ -424,24 +408,8 @@ impl NativeHost {
         })
     }
 }
-fn signature(window: &Webview, metrics: &Value) -> Result<String, String> {
-    Ok(format!(
-        "{}:{}:{}",
-        window.url().map_err(|_| "Browser URL unavailable")?,
-        serde_json::to_string(metrics).map_err(|_| "Browser geometry unavailable")?,
-        window
-            .size()
-            .map_err(|_| "Browser geometry unavailable")?
-            .width
-    ))
-}
-
 impl NativeHost {
     pub(crate) async fn owner_input(&self, key: &str, input: BrowserInput) -> Result<(), String> {
-        self.browser_states
-            .lock()
-            .map_err(|_| "Browser unavailable")?
-            .remove(key);
         let view = self.app.get_webview(key).ok_or("Browser page closed")?;
         hide_cursor(&view);
         if let BrowserInput::Navigate { url } = input {

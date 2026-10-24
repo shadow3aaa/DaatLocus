@@ -267,10 +267,16 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   Owner opens `/browser` through the same navigation as Virtual Displays. It
   replaces the content page, never a concurrent conversation pane or separate
   visible window. Shared WebUI controls an embedded native viewport; detaching
-  it preserves tabs. Native command grants match the main WebView, not every
+  it preserves tabs. Webpages sit below a transparent shell in the platform's native
+  compositor (Windows DirectComposition, macOS view/layer tree, Android hardware
+  ViewGroup). Never cut holes in webpages, pause them for overlays, or copy frames
+  for composition. Generic DOM foreground geometry routes input only; do not
+  enumerate widget types. Native resize updates geometry without hiding/reparenting.
+  Native command grants match the main WebView, not every
   WebView parented to the main window. Hide preserves tabs;
   Actor/App shutdown never closes the shared browser. Owner and models can operate at any
-  time; Owner input invalidates old screenshot states. Input uses one-use observations;
+  time; page changes and Owner input never invalidate or block browser operations.
+  Observation references only identify screenshot coordinates and remain reusable;
   keep screenshots authorized through the calling Actor's resource ledger.
   The account UI and third-party pages never share native command grants or cookies.
 

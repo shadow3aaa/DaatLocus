@@ -1141,3 +1141,8 @@ html[data-desktop-platform=windows] .dl-browser-tabs { padding-right: var(--dl-c
 .dl-browser-favicon { width: 16px; height: 16px; object-fit: contain; flex: none; }
 .dl-browser-site-icon .dl-browser-favicon { width: 28px; height: 28px; }
 @media (prefers-reduced-motion: reduce) { .dl-browser-progress[data-loading=true] span:not([style]) { width: 100%; animation: none; } }
+
+/* The transparent shell is the foreground native surface. Only this viewport
+   reveals the independent webpage below it; all chrome keeps its own paint. */
+html[data-native-browser], html[data-native-browser] body,
+html[data-native-browser] :is(#root,.dl-app,.dl-shell-body,.dl-main-view,.dl-browser-page,.dl-browser-viewport) { background: transparent; }

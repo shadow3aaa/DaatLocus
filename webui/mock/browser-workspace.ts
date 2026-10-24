@@ -1,5 +1,5 @@
 /** Development-only browser fixtures; no native bridge or external page requests. */
-import type { BrowserAction, BrowserBounds, BrowserWorkspace, BrowserLibraryAction, BrowserLibrary, BrowserFindAction, BrowserFindResult, BrowserOcclusion, BrowserPreferences } from "../src/lib/browser-workspace";
+import type { BrowserAction, BrowserBounds, BrowserWorkspace, BrowserLibraryAction, BrowserLibrary, BrowserFindAction, BrowserFindResult, BrowserPreferences } from "../src/lib/browser-workspace";
 import cursorScript from "../../crates/daat-locus-client-protocol/src/browser-cursor.js?raw";
 import html2canvas from "html2canvas";
 import { browserShortcut } from "../src/lib/browser-shortcuts";
@@ -37,8 +37,6 @@ for(const item of library.history)item.favicon=icon;
 for(const page of state.pages)if(page.url!=="about:blank")page.favicon=icon;
 if(scene==="loading"){state.selected="demo";state.pages[1].loading=true;setTimeout(()=>{state.pages[1].loading=false;changed();},12000);}
 let active=false;
-let surface:BrowserBounds|null=null;
-let occlusions:BrowserOcclusion[]=[];
 const frames=new Map<string,HTMLIFrameElement>();
 let frame:HTMLIFrameElement|null=null;
 function render(){
@@ -49,13 +47,6 @@ function render(){
   frame=frames.get(selected.tab)??null;
   if(!frame || !frame.isConnected){frame=document.createElement("iframe");frame.title="Browser preview";frame.setAttribute("sandbox","allow-scripts allow-downloads allow-modals");Object.assign(frame.style,{position:"absolute",inset:"0",width:"100%",height:"100%",border:"0"});viewport.append(frame);frames.set(selected.tab,frame);}
   if(frame.style.display!=="block")frame.style.display="block";
-  let mask="none";
-  if(surface&&occlusions.length&&new URLSearchParams(location.search).get("native_clip")==="1"){
-    const holes=occlusions.map(cut=>`<rect x="${cut.x-surface!.x}" y="${cut.y-surface!.y}" width="${cut.width}" height="${cut.height}" rx="${cut.radius}" fill="black"/>`).join("");
-    const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${surface.width}" height="${surface.height}"><defs><mask id="cut"><rect width="100%" height="100%" fill="white"/>${holes}</mask></defs><rect width="100%" height="100%" fill="white" mask="url(#cut)"/></svg>`;
-    mask=`url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
-  }
-  if(frame.style.maskImage!==mask){frame.style.maskImage=mask;frame.style.maskSize="100% 100%";}
   const escaped=selected.title.replaceAll("&","&amp;").replaceAll("<","&lt;");
   const source=`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{color-scheme:light dark;font:16px system-ui}body{margin:0;padding:clamp(20px,5vw,64px);line-height:1.6;background:light-dark(#fff,#212121);color:light-dark(#171717,#eee)}main{max-width:760px;margin:auto}h1{font-size:28px;font-weight:600;margin:0 0 16px}p{color:light-dark(#666,#aaa)}nav{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0}button,input{font:inherit;padding:9px 14px;border:1px solid #8886;border-radius:9px;background:transparent;color:inherit}button{cursor:pointer}button:hover{background:#8882}.target{min-height:190px;border:1px dashed #8888;border-radius:16px;display:grid;place-content:center;gap:12px;margin:24px 0}.target button{background:#5267df;color:white;border:0}input{width:min(320px,70vw)}output{min-height:24px;color:#5267df;display:block}section{margin:60px 0}</style><main><h1>${escaped || "Example Domain"}</h1><p>在下方选择一种操作，查看虚拟光标与动效。也可以直接点击、输入和滚动。</p><nav aria-label="光标演示">${["移动","点击","双击","拖动","滚动","键盘","连续播放","停止","边缘"].map((label,index)=>`<button data-demo="${index}">${label}</button>`).join("")}</nav><label><input id="reduced" type="checkbox" style="width:auto"> 减少动态效果</label><div class="target"><button id="target">点击按钮</button><input id="field" placeholder="试着输入文字" aria-label="演示输入"><output id="status" aria-live="polite"></output></div><button id="download">下载示例文件</button><section><h2>滚动区域</h2><p>光标不拦截鼠标事件，不改变输入焦点，也不会显示输入内容。</p></section><div style="height:650px;background:linear-gradient(transparent,#8881);border-radius:16px"></div></main><script>
 const nativeMatch=window.matchMedia.bind(window);let reduced=${new URLSearchParams(location.search).get('motion')==='full'?'false':new URLSearchParams(location.search).get('motion')==='reduce'?'true':"nativeMatch('(prefers-reduced-motion: reduce)').matches"};
@@ -99,8 +90,8 @@ document.querySelector('#download').onclick=()=>parent.postMessage({type:'dl-bro
 window.addEventListener("message",event=>{if(event.source===frame?.contentWindow && event.data?.type==="dl-browser-download"){library.downloads.unshift({id:crypto.randomUUID(),url:demo,name:"example.txt",time:Date.now(),status:"downloading",bytes:0});setTimeout(()=>{const item=library.downloads.find(item=>item.status==="downloading");if(item){item.status="complete";item.bytes=128;}},4000);}});
 window.addEventListener("message",event=>{if(event.source===frame?.contentWindow&&event.data?.type==="dl-browser-shortcut"&&typeof event.data.code==="string")window.dispatchEvent(new CustomEvent("dl-browser-shortcut",{detail:event.data.code}));});
 let layoutOperations:Promise<unknown>=Promise.resolve();
-export function browserLayout(bounds:BrowserBounds|null,cuts:BrowserOcclusion[]=[]){
-  const result=layoutOperations.catch(()=>{}).then(()=>{surface=bounds;occlusions=cuts;active=Boolean(bounds);render();});layoutOperations=result;return result;
+export function browserLayout(bounds:BrowserBounds|null,_foreground:unknown[]=[]){
+  const result=layoutOperations.catch(()=>{}).then(()=>{active=Boolean(bounds);render();});layoutOperations=result;return result;
 }
 export async function browserControl(action:BrowserAction,tab:string|null=null,url:string|null=null){
   const page=state.pages.find(page=>page.tab===state.selected);

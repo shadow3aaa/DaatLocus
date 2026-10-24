@@ -190,111 +190,134 @@ pub async fn screenshot(window: &Webview) -> Result<String, String> {
         .map(str::to_owned)
         .ok_or("Native browser screenshot missing".into())
 }
-pub async fn occlude(
-    view: &Webview,
+pub async fn compose(
+    shell: &Webview,
     bounds: Option<daat_locus_client_protocol::web::BrowserBounds>,
-    cuts: Vec<daat_locus_client_protocol::web::BrowserOcclusion>,
+    foreground: Vec<daat_locus_client_protocol::web::BrowserHitRegion>,
 ) -> Result<(), String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    view.with_webview(move |platform| {
-        let result = (|| unsafe {
-            use windows_sys::Win32::{
-                Foundation::{POINT, RECT},
-                Graphics::Gdi::*,
-                UI::WindowsAndMessaging::{GetParent, GetWindowRect},
-            };
-            let mut handle = windows::Win32::Foundation::HWND::default();
-            platform
-                .controller()
-                .ParentWindow(&mut handle)
-                .map_err(|_| "Browser layer unavailable")?;
-            let handle = handle.0;
-            let Some(bounds) = bounds.filter(|_| !cuts.is_empty()) else {
-                if SetWindowRgn(handle, std::ptr::null_mut(), 1) == 0 {
-                    return Err("Browser layer could not reset");
+    shell
+        .with_webview(move |platform| {
+            let result = (|| -> windows::core::Result<()> {
+                unsafe {
+                    use wry::native_composition::{InputRect, set_input_regions};
+                    let mut hwnd = windows::Win32::Foundation::HWND::default();
+                    platform.controller().ParentWindow(&mut hwnd)?;
+                    let scale = bounds.map(|area| area.scale).unwrap_or(1.0);
+                    let rect = |x: f64, y: f64, w: f64, h: f64| InputRect {
+                        left: (x * scale).floor() as i32,
+                        top: (y * scale).floor() as i32,
+                        right: ((x + w) * scale).ceil() as i32,
+                        bottom: ((y + h) * scale).ceil() as i32,
+                    };
+                    let viewport = bounds.map(|area| rect(area.x, area.y, area.width, area.height));
+                    let regions = foreground
+                        .into_iter()
+                        .map(|area| rect(area.x, area.y, area.width, area.height))
+                        .collect();
+                    set_input_regions(hwnd.0 as isize, viewport, regions)
                 }
-                return Ok(());
-            };
-            let mut window = RECT::default();
-            let mut origin = POINT { x: 0, y: 0 };
-            if GetWindowRect(handle, &mut window) == 0
-                || ClientToScreen(GetParent(handle), &mut origin) == 0
-            {
-                return Err("Browser layer bounds unavailable");
-            }
-            let region =
-                CreateRectRgn(0, 0, window.right - window.left, window.bottom - window.top);
-            if region.is_null() {
-                return Err("Browser layer unavailable");
-            }
-            for cut in cuts {
-                let x = (cut.x * bounds.scale).round() as i32 + origin.x - window.left;
-                let y = (cut.y * bounds.scale).round() as i32 + origin.y - window.top;
-                let width = (cut.width * bounds.scale).ceil() as i32;
-                let height = (cut.height * bounds.scale).ceil() as i32;
-                let radius = (cut.radius * bounds.scale)
-                    .min(f64::from(width.min(height)) / 2.0)
-                    .round() as i32;
-                let hole =
-                    CreateRoundRectRgn(x, y, x + width + 1, y + height + 1, radius * 2, radius * 2);
-                if hole.is_null() || CombineRgn(region, region, hole, RGN_DIFF) == 0 {
-                    if !hole.is_null() {
-                        DeleteObject(hole);
-                    }
-                    DeleteObject(region);
-                    return Err("Browser overlay could not be composed");
-                }
-                DeleteObject(hole);
-            }
-            if SetWindowRgn(handle, region, 1) == 0 {
-                DeleteObject(region);
-                return Err("Browser overlay could not be composed");
-            }
-            Ok(())
-        })()
-        .map_err(str::to_owned);
-        let _ = tx.send(result);
-    })
-    .map_err(|_| "Browser layer unavailable")?;
-    tokio::time::timeout(Duration::from_secs(5), rx)
-        .await
-        .map_err(|_| "Browser layer timed out")?
-        .map_err(|_| "Browser layer unavailable")?
+            })()
+            .map_err(|_| "Browser input routing unavailable".to_owned());
+            let _ = tx.send(result);
+        })
+        .map_err(|_| "Browser input routing unavailable")?;
+    rx.await.map_err(|_| "Browser input routing unavailable")?
 }
 #[cfg(feature = "web-contract")]
-pub async fn occlusion_probe(view: &Webview) -> Result<Value, String> {
-    let scale = view
-        .window()
-        .scale_factor()
-        .map_err(|_| "Browser unavailable")?;
+pub async fn owner_click(app: &tauri::AppHandle, x: f64, y: f64) -> Result<(), String> {
+    use tauri::Manager;
+    let window = app.get_window("main").ok_or("Probe window unavailable")?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    view.with_webview(move |platform| unsafe {
-        use windows_sys::Win32::{
-            Foundation::{POINT, RECT},
-            Graphics::Gdi::*,
-            UI::WindowsAndMessaging::{GetParent, GetWindowRect},
+    let app = app.clone();
+    app.run_on_main_thread(move || unsafe {
+        use windows::Win32::{Foundation::*, Graphics::Gdi::*, UI::WindowsAndMessaging::*};
+        let hwnd = HWND(window.hwnd().unwrap().0);
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetActiveWindow(hwnd);
+        let mut point = POINT {
+            x: (x * scale) as i32,
+            y: (y * scale) as i32,
         };
-        let mut handle = windows::Win32::Foundation::HWND::default();
-        let result = platform.controller().ParentWindow(&mut handle)
-            .map_err(|_| "Browser unavailable".to_owned()).map(|_| {
-                let region = CreateRectRgn(0, 0, 0, 0);
-                let kind = GetWindowRgn(handle.0, region);
-                let mut rect = RECT::default();
-                let mut origin = POINT { x: 0, y: 0 };
-                GetWindowRect(handle.0, &mut rect);
-                ClientToScreen(GetParent(handle.0), &mut origin);
-                let value = json!({
-                    "has_region": kind != 0,
-                    "cut_visible": PtInRegion(region, (50.0 * scale) as i32, (50.0 * scale) as i32) != 0,
-                    "page_visible": PtInRegion(region, (800.0 * scale) as i32, (100.0 * scale) as i32) != 0,
-                    "position": [f64::from(rect.left - origin.x) / scale, f64::from(rect.top - origin.y) / scale],
-                });
-                DeleteObject(region);
-                value
-            });
-        let _ = tx.send(result);
-    }).map_err(|_| "Browser unavailable")?;
-    rx.await.map_err(|_| "Browser unavailable")?
+        let _ = ClientToScreen(hwnd, &mut point);
+        // Exercise our actual native sibling hit tests without ever sending
+        // mouse input to another app or depending on global desktop occlusion.
+        let screen = LPARAM(((point.y as u32) << 16 | point.x as u32 & 0xffff) as isize);
+        let mut candidate = GetTopWindow(Some(hwnd)).ok();
+        let mut target = HWND::default();
+        while let Some(child) = candidate {
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(child, &mut rect);
+            if IsWindowVisible(child).as_bool()
+                && point.x >= rect.left
+                && point.x < rect.right
+                && point.y >= rect.top
+                && point.y < rect.bottom
+            {
+                let hit = SendMessageW(child, WM_NCHITTEST, Some(WPARAM(0)), Some(screen));
+                if hit.0 != HTTRANSPARENT as isize && hit.0 != HTNOWHERE as isize {
+                    target = child;
+                    break;
+                }
+            }
+            candidate = GetWindow(child, GW_HWNDNEXT).ok();
+        }
+        if target.0.is_null() {
+            let _ = tx.send(Err("No native child accepted input".to_owned()));
+            return;
+        }
+        let _ = ScreenToClient(target, &mut point);
+        let position = LPARAM(((point.y as u32) << 16 | point.x as u32 & 0xffff) as isize);
+        SendMessageW(target, WM_MOUSEMOVE, Some(WPARAM(0)), Some(position));
+        SendMessageW(target, WM_LBUTTONDOWN, Some(WPARAM(1)), Some(position));
+        SendMessageW(target, WM_LBUTTONUP, Some(WPARAM(0)), Some(position));
+        let _ = tx.send(Ok(()));
+    })
+    .map_err(|e| e.to_string())?;
+    rx.await.map_err(|e| e.to_string())?
+}
+#[cfg(feature = "web-contract")]
+pub async fn owner_text(app: &tauri::AppHandle, text: String) -> Result<(), String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || unsafe {
+        use windows::Win32::{
+            Foundation::*,
+            UI::{Input::KeyboardAndMouse::GetFocus, WindowsAndMessaging::*},
+        };
+        let focus = GetFocus();
+        for unit in text.encode_utf16() {
+            SendMessageW(
+                focus,
+                WM_CHAR,
+                Some(WPARAM(usize::from(unit))),
+                Some(LPARAM(0)),
+            );
+        }
+        let _ = tx.send(());
+    })
+    .map_err(|e| e.to_string())?;
+    rx.await.map_err(|e| e.to_string())
+}
+#[cfg(feature = "web-contract")]
+pub async fn composition_probe(view: &Webview) -> Result<Value, String> {
+    let scale = view.window().scale_factor().map_err(|e| e.to_string())?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    view.with_webview(move|platform|{let result=(||->windows::core::Result<Value>{unsafe{
+        use windows::Win32::{Foundation::*,Graphics::Gdi::*,UI::WindowsAndMessaging::*};
+        let mut hwnd=HWND::default();platform.controller().ParentWindow(&mut hwnd)?;
+        let parent=GetParent(hwnd)?;
+        let mut size=RECT::default();GetClientRect(parent,&mut size)?;
+        #[link(name="user32")]
+        unsafe extern "system" {fn PrintWindow(hwnd:*mut std::ffi::c_void,dc:*mut std::ffi::c_void,flags:u32)->i32;}
+        let source=GetDC(None);let dc=CreateCompatibleDC(Some(source));
+        let bitmap=CreateCompatibleBitmap(source,size.right,size.bottom);let previous=SelectObject(dc,bitmap.into());
+        let captured=PrintWindow(parent.0,dc.0,3)!=0;
+        let pixel=|x:f64,y:f64|{let c=GetPixel(dc,(x*scale) as i32,(y*scale) as i32).0;[c&255,(c>>8)&255,(c>>16)&255]};
+        let pixels=[pixel(150.0,250.0),pixel(500.0,300.0),pixel(310.0,250.0),pixel(450.0,250.0)];
+        SelectObject(dc,previous);let _=DeleteObject(bitmap.into());let _=DeleteDC(dc);ReleaseDC(None,source);
+        Ok(json!({"composed":wry::native_composition::is_composed(hwnd.0 as isize),"captured":captured,"pixels":pixels}))
+    }})();let _=tx.send(result.map_err(|e|e.to_string()));}).map_err(|e|e.to_string())?;
+    rx.await.map_err(|e| e.to_string())?
 }
 pub async fn find(window: &Webview, action: &str, text: &str) -> Result<Value, String> {
     let action = action.to_owned();

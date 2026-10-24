@@ -21,14 +21,14 @@ pub struct BrowserBounds {
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserOcclusion {
+pub struct BrowserHitRegion {
     pub x: f64,
     pub y: f64,
     pub width: f64,
     pub height: f64,
     pub radius: f64,
 }
-impl BrowserOcclusion {
+impl BrowserHitRegion {
     pub fn validate(&self) -> bool {
         [self.x, self.y, self.width, self.height, self.radius]
             .iter()

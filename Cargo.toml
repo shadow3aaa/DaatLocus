@@ -48,7 +48,7 @@ members = [
     "xtask",
 ]
 default-members = ["."]
-exclude = ["crates/daat-locus-virtual-workspace/driver"]
+exclude = ["crates/daat-locus-virtual-workspace/driver", "vendor/wry"]
 resolver = "3"
 
 [features]
@@ -177,3 +177,6 @@ codegen-units = 1
 lto = "fat"
 opt-level = 3
 strip = "symbols"
+
+[patch.crates-io]
+wry = { path = "vendor/wry" }

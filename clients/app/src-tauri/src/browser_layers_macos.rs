@@ -1,9 +1,9 @@
-//! Native composition and hit testing only; no script is installed in the page.
-use daat_locus_client_protocol::web::{BrowserBounds, BrowserOcclusion};
-use objc2::{DefinedClass, MainThreadOnly, class, define_class, msg_send};
-use objc2::{rc::Retained, runtime::AnyObject};
+//! A transparent shell above independent WKWebViews in the native view tree.
+//! Hit regions affect input only; Core Animation composes every CSS pixel.
+use daat_locus_client_protocol::web::{BrowserBounds, BrowserHitRegion};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained};
 use objc2_app_kit::{NSAutoresizingMaskOptions, NSView};
-use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSString};
+use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize};
 use objc2_web_kit::WKWebView;
 use std::{
     cell::{Cell, RefCell},
@@ -12,223 +12,85 @@ use std::{
 };
 use tauri::Webview;
 
-#[derive(Clone)]
-struct Cut {
-    rect: NSRect,
-    radius: f64,
-}
-impl Cut {
-    fn contains(&self, point: NSPoint) -> bool {
-        let r = self.radius;
-        let x = self.rect.origin.x;
-        let y = self.rect.origin.y;
-        let right = x + self.rect.size.width;
-        let bottom = y + self.rect.size.height;
-        if point.x < x || point.y < y || point.x >= right || point.y >= bottom {
-            return false;
-        }
-        let cx = point.x.clamp(x + r, right - r);
-        let cy = point.y.clamp(y + r, bottom - r);
-        (point.x - cx).powi(2) + (point.y - cy).powi(2) <= r * r
-    }
-}
 #[derive(Default)]
 struct Ivars {
-    cuts: RefCell<Vec<Cut>>,
+    viewport: Cell<Option<NSRect>>,
+    foreground: RefCell<Vec<NSRect>>,
     flipped: Cell<bool>,
+}
+fn contains(rect: NSRect, p: NSPoint) -> bool {
+    p.x >= rect.origin.x
+        && p.y >= rect.origin.y
+        && p.x < rect.origin.x + rect.size.width
+        && p.y < rect.origin.y + rect.size.height
 }
 define_class!(
     #[unsafe(super=NSView)]
     #[thread_kind=MainThreadOnly]
     #[ivars=Ivars]
-    struct ClipHost;
-    unsafe impl NSObjectProtocol for ClipHost {}
-    impl ClipHost{
+    struct ShellHost;
+    unsafe impl NSObjectProtocol for ShellHost {}
+    impl ShellHost {
         #[unsafe(method(isFlipped))]
-        fn flipped(&self)->bool{self.ivars().flipped.get()}
+        fn flipped(&self)->bool {self.ivars().flipped.get()}
         #[unsafe(method_id(hitTest:))]
-        fn hit(&self,point:NSPoint)->Option<Retained<NSView>>{
+        fn hit(&self,point:NSPoint)->Option<Retained<NSView>> {
             let local=self.convertPoint_fromView(point,unsafe{self.superview()}.as_deref());
-            if self.ivars().cuts.borrow().iter().any(|cut|cut.contains(local)) {
+            if self.ivars().viewport.get().is_some_and(|area|contains(area,local))
+                && !self.ivars().foreground.borrow().iter().any(|area|contains(*area,local)) {
                 None
-            } else {
+            }else{
                 let hit:Option<Retained<NSView>>=unsafe{msg_send![super(self),hitTest:point]};
                 hit.filter(|view|Retained::as_ptr(view).cast::<c_void>()!=(self as *const Self).cast::<c_void>())
             }
         }
     }
 );
-thread_local! {static HOSTS:RefCell<HashMap<String,Retained<ClipHost>>>=RefCell::new(HashMap::new());}
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGPathCreateMutable() -> *mut c_void;
-    fn CGPathAddRect(path: *mut c_void, transform: *const c_void, rect: NSRect);
-    fn CGPathAddRoundedRect(
-        path: *mut c_void,
-        transform: *const c_void,
-        rect: NSRect,
-        rx: f64,
-        ry: f64,
-    );
-    fn CGPathRelease(path: *mut c_void);
-    #[cfg(feature = "web-contract")]
-    fn CGPathContainsPoint(
-        path: *const c_void,
-        transform: *const c_void,
-        point: NSPoint,
-        even_odd: bool,
-    ) -> bool;
-}
-
-#[cfg(feature = "web-contract")]
-pub(crate) async fn occlusion_probe(view: &Webview) -> Result<serde_json::Value, String> {
-    let label = view.label().to_owned();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    view.with_webview(move |platform| {
-        let result = (|| unsafe {
-            let web = &*platform.inner().cast::<WKWebView>();
-            let host = HOSTS.with(|hosts| hosts.borrow().get(&label).cloned()).ok_or("Browser clipping host unavailable")?;
-            let layer:*mut AnyObject=msg_send![&*host,layer];
-            let mask:Option<Retained<AnyObject>>=msg_send![layer,mask];
-            let point = |x,y| NSPoint::new(x,if host.isFlipped(){y}else{host.bounds().size.height-y});
-            let painted = |point:NSPoint| {
-                let mut mask=mask.clone();
-                while let Some(shape)=mask {
-                    let path:*const c_void=msg_send![&*shape,path];
-                    if path.is_null() || !CGPathContainsPoint(path,std::ptr::null(),point,true){return false;}
-                    mask=msg_send![&*shape,mask];
-                }
-                true
-            };
-            let receives = |point:NSPoint| host.hitTest(host.convertPoint_toView(point,host.superview().as_deref())).is_some();
-            let cut=point(50.0,50.0);let page=point(800.0,100.0);
-            let frame=web.frame();
-            Ok(serde_json::json!({"has_region":mask.is_some(),"cut_visible":painted(cut)||receives(cut),"page_visible":painted(page)&&receives(page),"position":[frame.origin.x,if host.isFlipped(){frame.origin.y}else{host.bounds().size.height-frame.origin.y-frame.size.height}]}))
-        })().map_err(str::to_owned);
-        let _=tx.send(result);
-    }).map_err(|_|"Browser clipping probe unavailable")?;
-    rx.await.map_err(|_| "Browser clipping probe interrupted")?
-}
-#[link(name = "QuartzCore", kind = "framework")]
-unsafe extern "C" {}
+thread_local! {static HOSTS:RefCell<HashMap<String,Retained<ShellHost>>>=RefCell::new(HashMap::new());}
 pub(crate) fn remove(label: &str) {
     HOSTS.with(|hosts| {
         if let Some(host) = hosts.borrow_mut().remove(label) {
-            host.removeFromSuperview();
+            unsafe {
+                host.removeFromSuperview();
+            }
         }
     });
 }
-pub(crate) async fn occlude(
-    view: &Webview,
+pub(crate) async fn compose(
+    shell: &Webview,
     bounds: Option<BrowserBounds>,
-    cuts: Vec<BrowserOcclusion>,
+    foreground: Vec<BrowserHitRegion>,
 ) -> Result<(), String> {
-    let label = view.label().to_owned();
-    let main = view.window().label() == "main";
+    let label = shell.label().to_owned();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    view.with_webview(move |platform| {
-        let result = (|| unsafe {
-            let web = &*platform.inner().cast::<WKWebView>();
-            if !main {
-                remove(&label);
-                return Ok(());
-            }
-            let mtm =
-                MainThreadMarker::new().ok_or("Browser composition requires the main thread")?;
-            let parent = web.superview().ok_or("Browser parent unavailable")?;
-            let existing = HOSTS.with(|hosts| hosts.borrow().get(&label).cloned());
-            let wrapper = if let Some(host) = existing.filter(|host| {
-                Retained::as_ptr(host).cast::<c_void>()
-                    == Retained::as_ptr(&parent).cast::<c_void>()
-            }) {
-                host
-            } else {
-                remove(&label);
-                let frame = web.frame();
-                let allocated = ClipHost::alloc(mtm).set_ivars(Ivars {
-                    cuts: Default::default(),
-                    flipped: Cell::new(parent.isFlipped()),
-                });
-                let host: Retained<ClipHost> =
-                    msg_send![super(allocated),initWithFrame:parent.bounds()];
-                host.setAutoresizingMask(
-                    NSAutoresizingMaskOptions::ViewWidthSizable
-                        | NSAutoresizingMaskOptions::ViewHeightSizable,
-                );
-                parent.addSubview(&host);
-                host.addSubview(web);
-                web.setFrame(frame);
-                HOSTS.with(|hosts| {
-                    hosts.borrow_mut().insert(label, host.clone());
-                });
-                host
+    shell.with_webview(move|platform|{
+        let result=(||unsafe {
+            let web=&*platform.inner().cast::<WKWebView>();
+            let mtm=MainThreadMarker::new().ok_or("Browser composition requires the main thread")?;
+            let wrapper=if let Some(host)=HOSTS.with(|hosts|hosts.borrow().get(&label).cloned()){host}else{
+                let parent=web.superview().ok_or("Shell parent unavailable")?;
+                let allocated=ShellHost::alloc(mtm).set_ivars(Ivars{flipped:Cell::new(parent.isFlipped()),..Default::default()});
+                let host:Retained<ShellHost>=msg_send![super(allocated),initWithFrame:parent.bounds()];
+                host.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable|NSAutoresizingMaskOptions::ViewHeightSizable);
+                let frame=web.frame();
+                parent.addSubview(&host);host.addSubview(web);web.setFrame(frame);
+                HOSTS.with(|hosts|{hosts.borrow_mut().insert(label,host.clone());});host
             };
-            if let Some(parent) = wrapper.superview() {
+            if let Some(parent)=wrapper.superview(){
+                // AppKit and Core Animation share this order. Never mask the page.
+                if parent.subviews().lastObject().is_none_or(|top|Retained::as_ptr(&top).cast::<c_void>()!=Retained::as_ptr(&wrapper).cast::<c_void>()) {
+                    let _:()=msg_send![&*parent,addSubview:&*wrapper positioned:1_isize relativeTo:None::<&NSView>];
+                }
                 wrapper.setFrame(parent.bounds());
             }
-            let area = wrapper.bounds();
-            let factor = bounds
-                .map(|b| b.scale / web.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0))
-                .unwrap_or(1.0);
-            let native: Vec<_> = if bounds.is_none() {
-                Vec::new()
-            } else {
-                cuts.into_iter()
-                    .map(|cut| {
-                        let width = cut.width * factor;
-                        let height = cut.height * factor;
-                        let x = cut.x * factor;
-                        let y = if wrapper.isFlipped() {
-                            cut.y * factor
-                        } else {
-                            area.size.height - (cut.y + cut.height) * factor
-                        };
-                        Cut {
-                            rect: NSRect::new(
-                                NSPoint::new(x, y),
-                                objc2_foundation::NSSize::new(width, height),
-                            ),
-                            radius: (cut.radius * factor).min(width.min(height) / 2.0),
-                        }
-                    })
-                    .collect()
-            };
-            *wrapper.ivars().cuts.borrow_mut() = native.clone();
-            wrapper.setWantsLayer(true);
-            let layer: *mut AnyObject = msg_send![&*wrapper, layer];
-            if layer.is_null() {
-                return Err("Browser composition unavailable");
-            }
-            let mut mask: Option<Retained<AnyObject>> = None;
-            for cut in native {
-                let path = CGPathCreateMutable();
-                if path.is_null() {
-                    return Err("Browser composition unavailable");
-                }
-                CGPathAddRect(path, std::ptr::null(), area);
-                CGPathAddRoundedRect(path, std::ptr::null(), cut.rect, cut.radius, cut.radius);
-                let shape: Retained<AnyObject> = msg_send![class!(CAShapeLayer), new];
-                let _: () = msg_send![&*shape,setFrame:area];
-                let _: () = msg_send![&*shape,setPath:path];
-                let _: () = msg_send![&*shape,setFillRule:&*NSString::from_str("even-odd")];
-                if let Some(previous) = mask {
-                    let _: () = msg_send![&*shape,setMask:&*previous];
-                }
-                CGPathRelease(path);
-                mask = Some(shape);
-            }
-            let _: () = msg_send![class!(CATransaction), begin];
-            let _: () = msg_send![class!(CATransaction), setDisableActions: true];
-            let _: () = msg_send![layer,setMask:mask.as_deref()];
-            let _: () = msg_send![class!(CATransaction), commit];
-            Ok(())
-        })()
-        .map_err(str::to_owned);
-        let _ = tx.send(result);
-    })
-    .map_err(|_| "Browser composition unavailable")?;
-    tokio::time::timeout(std::time::Duration::from_secs(5), rx)
-        .await
-        .map_err(|_| "Browser composition timed out")?
-        .map_err(|_| "Browser composition unavailable")?
+            let area=wrapper.bounds();
+            let factor=bounds.map(|b|b.scale/web.window().map(|w|w.backingScaleFactor()).unwrap_or(1.0)).unwrap_or(1.0);
+            let rect=|x:f64,y:f64,w:f64,h:f64|NSRect::new(NSPoint::new(x*factor,if wrapper.isFlipped(){y*factor}else{area.size.height-(y+h)*factor}),NSSize::new(w*factor,h*factor));
+            wrapper.ivars().viewport.set(bounds.map(|b|rect(b.x,b.y,b.width,b.height)));
+            *wrapper.ivars().foreground.borrow_mut()=foreground.into_iter().map(|r|rect(r.x,r.y,r.width,r.height)).collect();
+            Ok::<_,&str>(())
+        })().map_err(str::to_owned);
+        let _=tx.send(result);
+    }).map_err(|e|e.to_string())?;
+    rx.await.map_err(|e| e.to_string())?
 }

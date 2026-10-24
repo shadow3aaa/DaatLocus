@@ -45,7 +45,6 @@ object WebHost {
     pending.remove(profile)?.let { it.result.complete(reply(it.id, error = error)) }
   }
   internal fun close(profile: String) {
-    BrowserUse.invalidate(profile)
     fail(profile, "Web page closed")
     pages.remove(profile)?.let {
       it.view.stopLoading()

@@ -334,12 +334,12 @@ impl App for BrowserUseApp {
         vec![
             tool(
                 "move_pointer",
-                "Move the pointer to screenshot coordinates within this page, without moving the OS pointer. Use for hover menus. Uses latest state_id and returns a fresh screenshot.",
+                "Move the pointer to screenshot coordinates within this page, without moving the OS pointer. Use for hover menus. Uses coordinate state_id and returns a fresh screenshot.",
                 model_schema_for::<Point>(),
             ),
             tool(
                 "drag",
-                "Drag the left button from x/y to to_x/to_y in observed image pixels, wholly inside this page. Uses latest state_id and returns a fresh screenshot.",
+                "Drag the left button from x/y to to_x/to_y in observed image pixels, wholly inside this page. Uses coordinate state_id and returns a fresh screenshot.",
                 model_schema_for::<Drag>(),
             ),
             tool(
@@ -359,42 +359,42 @@ impl App for BrowserUseApp {
             ),
             tool(
                 "click",
-                "Click at screenshot pixels using its latest state_id. Null button/count means left/single. State is consumed once and navigation, scrolling or DOM changes invalidate old coordinates. Returns a fresh screenshot.",
+                "Click at screenshot pixels using its coordinate state_id. Null button/count means left/single. References are reusable; page changes and user activity do not block input. Returns a fresh screenshot.",
                 model_schema_for::<Click>(),
             ),
             tool(
                 "scroll",
-                "Scroll at screenshot coordinates. Positive delta_y scrolls down, negative up; deltas are viewport CSS pixels. Uses the latest state_id and returns a fresh screenshot.",
+                "Scroll at screenshot coordinates. Positive delta_y scrolls down, negative up; deltas are viewport CSS pixels. Uses its coordinate state_id and returns a fresh screenshot.",
                 model_schema_for::<Scroll>(),
             ),
             tool(
                 "type_text",
-                "Insert Unicode text into the currently focused editable receiver through native browser input. Click the field first; this does not select a DOM element or execute JavaScript. Uses latest state_id and returns a fresh screenshot.",
+                "Insert Unicode text into the currently focused editable receiver through native browser input. Click the field first; this does not select a DOM element or execute JavaScript. Uses coordinate state_id and returns a fresh screenshot.",
                 model_schema_for::<Text>(),
             ),
             tool(
                 "press_key",
-                "Press Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp/Down, Space or one ASCII letter/digit, with optional control/alt/shift/meta modifiers. Uses latest state_id and returns a fresh screenshot.",
+                "Press Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp/Down, Space or one ASCII letter/digit, with optional control/alt/shift/meta modifiers. Uses coordinate state_id and returns a fresh screenshot.",
                 model_schema_for::<Key>(),
             ),
             tool(
                 "navigate",
-                "Navigate this page to an HTTP(S) URL without URL credentials, using latest state_id. Returns a fresh screenshot. Cannot navigate the account UI or file URLs.",
+                "Navigate this page to an HTTP(S) URL without URL credentials, using coordinate state_id. Returns a fresh screenshot. Cannot navigate the account UI or file URLs.",
                 model_schema_for::<Navigate>(),
             ),
             tool(
                 "back",
-                "Go back in this page's browser history, using latest state_id. Returns a fresh screenshot.",
+                "Go back in this page's browser history, using coordinate state_id. Returns a fresh screenshot.",
                 model_schema_for::<State>(),
             ),
             tool(
                 "forward",
-                "Go forward in this page's browser history, using latest state_id. Returns a fresh screenshot.",
+                "Go forward in this page's browser history, using coordinate state_id. Returns a fresh screenshot.",
                 model_schema_for::<State>(),
             ),
             tool(
                 "reload",
-                "Reload the page using latest state_id. Reload can repeat site requests; obtain appropriate authorization. Returns a fresh screenshot.",
+                "Reload the page using coordinate state_id. Reload can repeat site requests; obtain appropriate authorization. Returns a fresh screenshot.",
                 model_schema_for::<State>(),
             ),
             tool(

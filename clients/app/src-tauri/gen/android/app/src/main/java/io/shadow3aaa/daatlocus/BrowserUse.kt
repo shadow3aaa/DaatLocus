@@ -7,7 +7,6 @@ import android.widget.*
 import android.view.inputmethod.EditorInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.Rect
 import android.net.http.SslError
 import android.os.Build
 import android.os.Handler
@@ -17,7 +16,6 @@ import android.util.Base64
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.view.PixelCopy
 import android.webkit.*
 import androidx.lifecycle.Lifecycle
 import org.json.JSONArray
@@ -29,23 +27,55 @@ import java.util.concurrent.TimeUnit
 
 /** Native input only; this class is not a JavascriptInterface. All maps are UI-thread confined. */
 internal object BrowserUse {
-  private data class Cut(val rect:android.graphics.RectF,val radius:Float){
-    fun contains(x:Float,y:Float):Boolean{if(!rect.contains(x,y))return false;val r=radius.coerceAtMost(minOf(rect.width(),rect.height())/2);val cx=x.coerceIn(rect.left+r,rect.right-r);val cy=y.coerceIn(rect.top+r,rect.bottom-r);return (x-cx)*(x-cx)+(y-cy)*(y-cy)<=r*r}
-  }
-  private class PageFrame(owner:MainActivity):FrameLayout(owner){
-    var cuts:List<Cut> = emptyList()
-    private var pageGesture=false
-    override fun dispatchDraw(canvas:Canvas){
-      val saved=canvas.save()
-      for(cut in cuts){val path=android.graphics.Path();path.addRoundRect(cut.rect,cut.radius,cut.radius,android.graphics.Path.Direction.CW);if(Build.VERSION.SDK_INT>=26)canvas.clipOutPath(path)else{@Suppress("DEPRECATION") canvas.clipPath(path,android.graphics.Region.Op.DIFFERENCE)}}
-      super.dispatchDraw(canvas);canvas.restoreToCount(saved)
+  /** Shell and page are hardware accelerated siblings; no Canvas clipping. */
+  private class BrowserComposition(owner:MainActivity,val shell:WebView):FrameLayout(owner){
+    var page:FrameLayout?=null
+    var viewport=android.graphics.RectF()
+    var inputRegions:List<android.graphics.RectF> = emptyList()
+    private var gesture:View?=null
+    private var rightInset=0f
+    private var bottomInset=0f
+    fun update(x:Int,y:Int,w:Int,h:Int,regions:List<android.graphics.RectF>){
+      viewport.set(x.toFloat(),y.toFloat(),(x+w).toFloat(),(y+h).toFloat())
+      rightInset=(shell.width-x-w).toFloat();bottomInset=(shell.height-y-h).toFloat()
+      inputRegions=regions
+      layoutPage()
+    }
+    private fun layoutPage(){page?.let{frame->
+      val w=(width-viewport.left-rightInset).toInt().coerceAtLeast(1)
+      val h=(height-viewport.top-bottomInset).toInt().coerceAtLeast(1)
+      viewport.right=viewport.left+w;viewport.bottom=viewport.top+h
+      val previous=frame.layoutParams
+      if(previous==null||previous.width!=w||previous.height!=h)frame.layoutParams=LayoutParams(w,h)
+      frame.x=viewport.left;frame.y=viewport.top
+    }}
+    override fun onSizeChanged(w:Int,h:Int,oldw:Int,oldh:Int){super.onSizeChanged(w,h,oldw,oldh);layoutPage()}
+    private fun target(x:Float,y:Float):View=if(page?.visibility==View.VISIBLE&&viewport.contains(x,y)&&inputRegions.none{it.contains(x,y)})page!! else shell
+    private fun dispatch(target:View,event:MotionEvent,generic:Boolean):Boolean{
+      val local=MotionEvent.obtain(event)
+      local.offsetLocation(-target.x,-target.y)
+      return try{if(generic)target.dispatchGenericMotionEvent(local)else target.dispatchTouchEvent(local)}finally{local.recycle()}
     }
     override fun dispatchTouchEvent(event:MotionEvent):Boolean{
-      if(event.actionMasked==MotionEvent.ACTION_DOWN)pageGesture=cuts.none{it.contains(event.x,event.y)}
-      if(!pageGesture)return false
-      return super.dispatchTouchEvent(event)
+      if(event.actionMasked==MotionEvent.ACTION_DOWN)gesture=target(event.x,event.y)
+      val target=gesture ?: shell
+      val handled=dispatch(target,event,false)
+      if(event.actionMasked==MotionEvent.ACTION_UP||event.actionMasked==MotionEvent.ACTION_CANCEL)gesture=null
+      return handled
     }
-    override fun dispatchGenericMotionEvent(event:MotionEvent):Boolean=if(cuts.any{it.contains(event.x,event.y)})false else super.dispatchGenericMotionEvent(event)
+    override fun dispatchGenericMotionEvent(event:MotionEvent):Boolean=dispatch(target(event.x,event.y),event,true)
+  }
+  private var composition:BrowserComposition?=null
+  private fun composition(owner:MainActivity,client:WebView):BrowserComposition{
+    composition?.let{return it}
+    val parent=client.parent as? ViewGroup ?: throw IllegalStateException("Shell parent unavailable")
+    val index=parent.indexOfChild(client);val params=client.layoutParams
+    val root=BrowserComposition(owner,client)
+    parent.removeView(client);parent.addView(root,index,params)
+    client.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+    root.addView(client,FrameLayout.LayoutParams(-1,-1))
+    composition=root
+    return root
   }
   private val requestedUrls=mutableMapOf<String,String>()
   private val icons=mutableMapOf<String,String>()
@@ -100,11 +130,11 @@ internal object BrowserUse {
   private var profile=""
   private var embedded=false
   private var cursorScript=""
-  fun shutdown(){workspace?.dismiss();content?.let{(it.parent as? ViewGroup)?.removeView(it)};workspace=null;content=null;selected=null;embedded=false;receipts.clear();jobs.clear();loaded.clear();tabOrder.clear()}
+  fun shutdown(){workspace?.dismiss();content?.let{(it.parent as? ViewGroup)?.removeView(it)};workspace=null;content=null;selected=null;embedded=false;composition?.page=null;composition=null;jobs.clear();loaded.clear();frames.clear();tabOrder.clear()}
   private fun ensure(owner:MainActivity):Dialog {
     workspace?.let{return it}
     val dialog=Dialog(owner)
-    content=PageFrame(owner)
+    content=FrameLayout(owner)
     dialog.setContentView(content!!)
     workspace=dialog
     return dialog
@@ -114,11 +144,10 @@ internal object BrowserUse {
     val dialog=ensure(owner)
     configure(owner,view)
     content?.addView(view,FrameLayout.LayoutParams(-1,-1))
-    view.setOnTouchListener{_,event->if(event.action==MotionEvent.ACTION_DOWN)receipts.remove(key);false}
     view.setOnKeyListener{_,code,event->
       if(event.action!=KeyEvent.ACTION_DOWN)return@setOnKeyListener false
       val letter=shortcut(code,event) ?: return@setOnKeyListener false
-      receipts.remove(key);WebHost.clientView.get()?.let{client->client.requestFocus();client.evaluateJavascript("window.dispatchEvent(new CustomEvent('dl-browser-shortcut',{detail:'$letter'}))",null)};true
+      WebHost.clientView.get()?.let{client->client.requestFocus();client.evaluateJavascript("window.dispatchEvent(new CustomEvent('dl-browser-shortcut',{detail:'$letter'}))",null)};true
     }
     selected=key
     if(key !in tabOrder)tabOrder.add(key)
@@ -136,7 +165,7 @@ internal object BrowserUse {
     content?.layout(0,0,width,height)
   }
   fun forget(view:WebView){languageScripts.remove(view)?.remove()}
-  fun remove(key:String){requestedUrls.remove(key);icons.remove(key);zooms.remove(key);val index=tabOrder.indexOf(key);tabOrder.remove(key);if(selected==key)selected=tabOrder.filter{it.startsWith("$profile-")}.let{it.getOrNull(index.coerceAtMost(it.lastIndex))};selected?.let{select(it)}}
+  fun remove(key:String){frames.remove(key);requestedUrls.remove(key);icons.remove(key);zooms.remove(key);val index=tabOrder.indexOf(key);tabOrder.remove(key);if(selected==key)selected=tabOrder.filter{it.startsWith("$profile-")}.let{it.getOrNull(index.coerceAtMost(it.lastIndex))};selected?.let{select(it)}}
   private fun select(key:String){if(!WebHost.pages.containsKey(key))return;selected=key;WebHost.pages.filterKeys{it.startsWith("$profile-")}.forEach{(id,page)->page.view.visibility=if(id==key)View.VISIBLE else View.GONE}}
   fun controlAsync(owner:MainActivity,command:JSONObject,done:(JSONObject)->Unit){
     fun fail(message:String){done(JSONObject().put("error",message))}
@@ -149,7 +178,7 @@ internal object BrowserUse {
       if(!tab.matches(Regex("[0-9a-f]{32}")))throw IllegalArgumentException("Invalid browser page")
       val key="$account-$tab"
       val view=WebHost.pages[key]?.view ?: throw IllegalArgumentException("Browser page closed")
-      receipts.remove(key)
+
       if(action=="screenshot"){
         captureOwner(owner,view){bytes,error->
           if(error!=null)fail(error)
@@ -192,8 +221,9 @@ internal object BrowserUse {
           Thread{try{val bytes=ByteArrayOutputStream().also{bitmap.compress(Bitmap.CompressFormat.PNG,100,it)}.toByteArray();owner.runOnUiThread{done(bytes,null)}}catch(_:Exception){owner.runOnUiThread{done(null,"Screenshot unavailable")}}finally{bitmap.recycle()}}.start()
         }
         try{
-          if(Build.VERSION.SDK_INT>=26){val location=IntArray(2);view.getLocationInWindow(location);PixelCopy.request(owner.window,Rect(location[0],location[1],location[0]+width,location[1]+height),bitmap,{status->copied(status==PixelCopy.SUCCESS)},handler)}
-          else{view.draw(Canvas(bitmap));copied(true)}
+          // Snapshot this WebView only. Window PixelCopy would include shell
+          // tooltips/dialogs composited above it, potentially exposing account UI.
+          view.draw(Canvas(bitmap));copied(true)
         }catch(_:Exception){copied(false)}
       }})
     }
@@ -202,9 +232,9 @@ internal object BrowserUse {
     profile=command.getString("profile")
     val action=command.getString("action")
     if(action=="detach"){
-      (content as? PageFrame)?.cuts=emptyList()
+      composition?.let{it.page=null;it.inputRegions=emptyList()}
       content?.let{(it.parent as? ViewGroup)?.removeView(it)};embedded=false
-      content?.let{workspace?.setContentView(it)};receipts.clear();layoutOffscreen(owner)
+      content?.let{workspace?.setContentView(it)};layoutOffscreen(owner)
       return JSONObject()
     }
     if(!owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))throw IllegalStateException("Open the native client")
@@ -220,17 +250,14 @@ internal object BrowserUse {
         val y=(bounds.getDouble("y")*scale).toInt().coerceIn(0,client.height)
         val width=(bounds.getDouble("width")*scale).toInt().coerceIn(1,(client.width-x).coerceAtLeast(1))
         val height=(bounds.getDouble("height")*scale).toInt().coerceIn(1,(client.height-y).coerceAtLeast(1))
-        val origin=IntArray(2);client.getLocationInWindow(origin)
-        val container=owner.window.decorView as ViewGroup
-        val location=IntArray(2);container.getLocationInWindow(location)
+        val container=composition(owner,client)
         val frame=content!!
-        if(frame.parent!==container){(frame.parent as? ViewGroup)?.removeView(frame);container.addView(frame)}
-        frame.layoutParams=ViewGroup.LayoutParams(width,height)
-        frame.x=(origin[0]-location[0]+x).toFloat();frame.y=(origin[1]-location[1]+y).toFloat()
-        val cuts=command.optJSONArray("occlusions") ?: JSONArray()
-        (frame as PageFrame).cuts=(0 until cuts.length()).map{index->val cut=cuts.getJSONObject(index);val left=((cut.getDouble("x")-bounds.getDouble("x"))*scale).toFloat();val top=((cut.getDouble("y")-bounds.getDouble("y"))*scale).toFloat();val w=(cut.getDouble("width")*scale).toFloat();val h=(cut.getDouble("height")*scale).toFloat();Cut(android.graphics.RectF(left,top,left+w,top+h),(cut.getDouble("radius")*scale).toFloat().coerceAtMost(minOf(w,h)/2))}
-        frame.invalidate()
-        embedded=true;frame.visibility=View.VISIBLE;receipts.clear()
+        if(frame.parent!==container){(frame.parent as? ViewGroup)?.removeView(frame);container.addView(frame,0,FrameLayout.LayoutParams(width,height))}
+        container.page=frame
+        val regions=command.optJSONArray("foreground") ?: JSONArray()
+        val foreground=(0 until regions.length()).map{index->val region=regions.getJSONObject(index);val left=(region.getDouble("x")*scale).toFloat();val top=(region.getDouble("y")*scale).toFloat();android.graphics.RectF(left,top,left+(region.getDouble("width")*scale).toFloat(),top+(region.getDouble("height")*scale).toFloat())}
+        container.update(x,y,width,height,foreground)
+        embedded=true;frame.visibility=View.VISIBLE;
       }
       "preferences"->return preferences(owner)
       "set_preferences"->return patchPreferences(owner,JSONObject(command.getString("url")))
@@ -254,9 +281,9 @@ internal object BrowserUse {
       "clear_data"->{
         val temporary=if(WebHost.pages.keys.none{it.startsWith("$profile-")}) "$profile-${java.util.UUID.randomUUID().toString().replace("-", "")}" else null
         if(temporary!=null)WebHost.page(profile,temporary)
-        WebHost.pages.filterKeys{it.startsWith("$profile-")}.values.forEach{page->androidx.webkit.WebViewCompat.getProfile(page.view).cookieManager.removeAllCookies(null);androidx.webkit.WebViewCompat.getProfile(page.view).webStorage.deleteAllData();page.view.clearCache(true)};if(temporary!=null)WebHost.close(temporary);receipts.clear()
+        WebHost.pages.filterKeys{it.startsWith("$profile-")}.values.forEach{page->androidx.webkit.WebViewCompat.getProfile(page.view).cookieManager.removeAllCookies(null);androidx.webkit.WebViewCompat.getProfile(page.view).webStorage.deleteAllData();page.view.clearCache(true)};if(temporary!=null)WebHost.close(temporary);
       }
-      "zoom"->{val view=WebHost.pages[key]?.view ?: throw IllegalArgumentException("Select a browser page");val zoom=command.getString("url").toDouble();if(!zoom.isFinite()||zoom !in .25..5.0)throw IllegalArgumentException("Invalid zoom");view.zoomBy((zoom/(zooms[key] ?: 1.0)).toFloat());zooms[key!!]=zoom;receipts.clear()}
+      "zoom"->{val view=WebHost.pages[key]?.view ?: throw IllegalArgumentException("Select a browser page");val zoom=command.getString("url").toDouble();if(!zoom.isFinite()||zoom !in .25..5.0)throw IllegalArgumentException("Invalid zoom");view.zoomBy((zoom/(zooms[key] ?: 1.0)).toFloat());zooms[key!!]=zoom;}
       "print"->{val view=WebHost.pages[key]?.view ?: throw IllegalArgumentException("Select a browser page");val manager=owner.getSystemService(android.content.Context.PRINT_SERVICE) as android.print.PrintManager;manager.print(view.title ?: "Web page",view.createPrintDocumentAdapter(view.title ?: "Web page"),null)}
       "stop"->{WebHost.pages[key]?.view?.stopLoading()}
 
@@ -266,7 +293,7 @@ internal object BrowserUse {
       "close"->{if(key!=null)WebHost.close(key)}
       "navigate","back","forward","reload"->{
         val view=WebHost.pages[key]?.view ?: throw IllegalArgumentException("Select a browser page")
-        receipts.clear()
+
         configure(owner,view)
         when(action){"navigate"->{val url=command.getString("url");if(!WebHost.allowed(url))throw IllegalArgumentException("Browser URL not allowed");navigate(owner,key!!,view,url)};"back"->view.goBack();"forward"->view.goForward();else->view.reload()}
       }
@@ -310,12 +337,11 @@ internal object BrowserUse {
     val next=offset+100
     return JSONObject().put("history",window(history)).put("downloads",window(downloads)).put("next_offset",if(maxOf(history.length(),downloads.length())>next)next else JSONObject.NULL)
   }
-  private data class Receipt(val id:String,val signature:String,val width:Int,val height:Int)
-  private val receipts=mutableMapOf<String,Receipt>()
+  private data class ImageFrame(val id:String,val width:Int,val height:Int)
+  private val frames=mutableMapOf<String,java.util.ArrayDeque<ImageFrame>>()
   private val jobs=mutableMapOf<String,String>()
   private val loaded=mutableMapOf<String,()->Unit>()
   private val handler=Handler(Looper.getMainLooper())
-  fun invalidate(key:String) { receipts.remove(key) }
   private fun pageInfo(key:String,profile:String,page:WebHost.Page)=JSONObject().put("tab",key.removePrefix("$profile-")).put("url",requestedUrls[key] ?: page.view.url ?: "about:blank").put("title",if(page.view.url=="about:blank")"" else page.view.title ?: "").put("can_back",page.view.canGoBack()).put("can_forward",page.view.canGoForward()).put("zoom",zooms[key] ?: 1.0).put("loading",requestedUrls.containsKey(key)||page.view.progress<100).put("progress",page.view.progress).put("favicon",icons[key] ?: JSONObject.NULL)
   private fun pages(profile:String)=JSONArray().also { result -> WebHost.pages.filter { (key,page)->key.startsWith("$profile-")&&(requestedUrls.containsKey(key)||page.view.url==null||page.view.url=="about:blank"||WebHost.allowed(page.view.url ?: "")) }.entries.sortedBy{tabOrder.indexOf(it.key)}.forEach { (key,page)->result.put(pageInfo(key,profile,page)) } }
   private fun shortcut(code:Int,event:KeyEvent):String?{
@@ -340,45 +366,36 @@ internal object BrowserUse {
   private fun metrics(view:WebView,script:String,done:(JSONObject)->Unit,fail:(String)->Unit) {
     view.evaluateJavascript(script) { value -> try { val decoded=JSONTokener(value).nextValue();done(if(decoded is String)JSONObject(decoded)else decoded as JSONObject) }catch(_:Exception){fail("Browser inspection failed")} }
   }
-  private fun signature(view:WebView,value:JSONObject)="${view.url}:${view.width}:${view.height}:$value"
   fun request(owner:MainActivity,profile:String,id:String,command:JSONObject,script:String,cursor:String):String {
     cursorScript=cursor
     val result=CompletableFuture<String>()
     val tab=command.optString("tab")
     val key="$profile-$tab"
-    fun fail(message:String) { if(jobs[key]==id){jobs.remove(key);loaded.remove(key);invalidate(key)};result.complete(response(id,error=message)) }
+    fun fail(message:String) { if(jobs[key]==id){jobs.remove(key);loaded.remove(key);};result.complete(response(id,error=message)) }
     fun finish(observation:JSONObject?=null){if(jobs[key]==id){jobs.remove(key);loaded.remove(key)};result.complete(response(id,JSONObject().put("pages",pages(profile)).put("observation",observation ?: JSONObject.NULL)))}
     fun captureFrame() {
       if(result.isDone||jobs[key]!=id)return
       val page=WebHost.pages[key] ?: run {fail("Browser page closed");return}
       val view=page.view
-        select(key)
-      invalidate(key)
-      metrics(view,script,{before ->
-        if(result.isDone||jobs[key]!=id)return@metrics
-        val width=view.width;val height=view.height;val prior=signature(view,before)
-        if(width<=0||height<=0||width.toLong()*height>8_000_000){fail("Browser viewport exceeds image budget");return@metrics}
-        val bitmap=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888)
-        fun copied(success:Boolean) {
-          cursor(view,JSONObject().put("kind","resume"))
-          if(!success){bitmap.recycle();fail("Browser screenshot unavailable");return}
-          metrics(view,script,{after ->
-            try {
-              if(result.isDone||jobs[key]!=id)return@metrics
-              if(prior!=signature(view,after))throw IllegalStateException("Browser changed during capture; observe again")
-              val bytes=ByteArrayOutputStream().also {bitmap.compress(Bitmap.CompressFormat.PNG,100,it)}.toByteArray()
-              if(bytes.size>7*1024*1024)throw IllegalStateException("Browser screenshot exceeds its budget")
-              receipts[key]=Receipt(id,prior,width,height)
-              finish(JSONObject().put("page",pageInfo(key,profile,page)).put("state_id",id).put("width",width).put("height",height).put("png_base64",Base64.encodeToString(bytes,Base64.NO_WRAP)))
-            }catch(error:Exception){fail(error.message ?: "Browser capture failed")}finally{bitmap.recycle()}
-          },{message->bitmap.recycle();fail(message)})
-        }
-        if(Build.VERSION.SDK_INT>=26&&embedded&&(content as? PageFrame)?.cuts.isNullOrEmpty()){
-          val location=IntArray(2);view.getLocationInWindow(location)
-          val window=owner.window
-          if(window==null){copied(false)}else{PixelCopy.request(window,Rect(location[0],location[1],location[0]+width,location[1]+height),bitmap,{status->copied(status==PixelCopy.SUCCESS)},handler)}
-        }else{view.draw(Canvas(bitmap));copied(true)}
-      },::fail)
+      select(key)
+      val width=view.width;val height=view.height
+      if(width<=0||height<=0||width.toLong()*height>8_000_000){fail("Browser viewport exceeds image budget");return}
+      val bitmap=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888)
+      fun copied(success:Boolean) {
+        cursor(view,JSONObject().put("kind","resume"))
+        try {
+          if(result.isDone||jobs[key]!=id)return
+          if(!WebHost.pages.containsKey(key)){fail("Browser page closed");return}
+          if(!success){fail("Browser screenshot unavailable");return}
+          val bytes=ByteArrayOutputStream().also {bitmap.compress(Bitmap.CompressFormat.PNG,100,it)}.toByteArray()
+          if(bytes.size>7*1024*1024)throw IllegalStateException("Browser screenshot exceeds its budget")
+          val images=frames.getOrPut(key){java.util.ArrayDeque()};images.addLast(ImageFrame(id,width,height));while(images.size>128)images.removeFirst()
+          finish(JSONObject().put("page",pageInfo(key,profile,page)).put("state_id",id).put("width",width).put("height",height).put("png_base64",Base64.encodeToString(bytes,Base64.NO_WRAP)))
+        }catch(error:Exception){fail(error.message ?: "Browser capture failed")}finally{bitmap.recycle()}
+      }
+      // This is an explicit page snapshot, never a frame used for composition.
+      // Capture the page itself even when a noninteractive shell overlay is up.
+      view.draw(Canvas(bitmap));copied(true)
     }
     fun capture(){
       val view=WebHost.pages[key]?.view ?: run{fail("Browser page closed");return}
@@ -387,10 +404,10 @@ internal object BrowserUse {
     fun client(page:WebHost.Page) {
       page.view.webViewClient=object:WebViewClient(){
         override fun shouldOverrideUrlLoading(view:WebView,request:WebResourceRequest)=!WebHost.allowed(request.url.toString())
-        override fun onPageStarted(view:WebView,url:String,favicon:Bitmap?){invalidate(key);changed()}
+        override fun onPageStarted(view:WebView,url:String,favicon:Bitmap?){changed()}
         override fun onPageFinished(view:WebView,url:String){finished(owner,key,view,url);if(!WebHost.allowed(url)){fail("Browser URL is not allowed");return};loaded.remove(key)?.invoke()}
-        override fun onReceivedSslError(view:WebView,handler:SslErrorHandler,error:SslError){handler.cancel();invalidate(key);if(jobs[key]==id)fail("Browser certificate validation failed")}
-        override fun onReceivedError(view:WebView,request:WebResourceRequest,error:WebResourceError){if(request.isForMainFrame){invalidate(key);if(jobs[key]==id)fail("Browser navigation failed")}}
+        override fun onReceivedSslError(view:WebView,handler:SslErrorHandler,error:SslError){handler.cancel();if(jobs[key]==id)fail("Browser certificate validation failed")}
+        override fun onReceivedError(view:WebView,request:WebResourceRequest,error:WebResourceError){if(request.isForMainFrame){if(jobs[key]==id)fail("Browser navigation failed")}}
       }
     }
     owner.runOnUiThread {
@@ -412,31 +429,29 @@ internal object BrowserUse {
           "observe"->{if(!WebHost.pages.containsKey(key))throw IllegalStateException("Browser page closed");capture()}
           "input"->{
             val page=WebHost.pages[key] ?: throw IllegalStateException("Browser page closed")
-            val receipt=receipts.remove(key) ?: throw IllegalStateException("Observe before browser input")
-            if(receipt.id!=command.getString("state_id"))throw IllegalArgumentException("Stale browser state; observe again")
+            val images=frames[key]
+            val frame=images?.firstOrNull{it.id==command.getString("state_id")} ?: images?.lastOrNull() ?: ImageFrame("",page.view.width.coerceAtLeast(1),page.view.height.coerceAtLeast(1))
             metrics(page.view,script,{value ->
               try {
                 if(result.isDone||jobs[key]!=id)return@metrics
-                if(receipt.signature!=signature(page.view,value))throw IllegalStateException("Browser changed; observe again")
                 val input=command.getJSONObject("input");val kind=input.getString("kind");if(kind in listOf("navigate","back","forward","reload"))configure(owner,page.view)
-                fun point():Pair<Float,Float>{val x=input.getDouble("x");val y=input.getDouble("y");if(!x.isFinite()||!y.isFinite()||x<0||y<0||x>=receipt.width||y>=receipt.height)throw IllegalArgumentException("Point outside observed browser image");return Pair((x/receipt.width*page.view.width).toFloat(),(y/receipt.height*page.view.height).toFloat())}
+                fun point():Pair<Float,Float>{val x=input.getDouble("x");val y=input.getDouble("y");if(!x.isFinite()||!y.isFinite()||x<0||y<0||x>=frame.width||y>=frame.height)throw IllegalArgumentException("Point outside observed browser image");return Pair((x/frame.width*page.view.width).toFloat(),(y/frame.height*page.view.height).toFloat())}
                 client(page)
                 val hint=JSONObject().put("kind",kind)
                 when(kind){
-                  "move","click","scroll","drag"->{point();hint.put("x",input.getDouble("x")/receipt.width*value.getDouble("width")).put("y",input.getDouble("y")/receipt.height*value.getDouble("height"))}
+                  "move","click","scroll","drag"->{point();hint.put("x",input.getDouble("x")/frame.width*value.getDouble("width")).put("y",input.getDouble("y")/frame.height*value.getDouble("height"))}
                 }
                 if(kind=="click")hint.put("count",input.getInt("count"))
                 if(kind=="scroll")hint.put("delta_x",input.getDouble("delta_x")).put("delta_y",input.getDouble("delta_y"))
                 if(kind in listOf("navigate","back","forward","reload"))hint.put("kind","hide")
-                if(kind=="drag"){hint.put("to_x",input.getDouble("to_x")/receipt.width*value.getDouble("width")).put("to_y",input.getDouble("to_y")/receipt.height*value.getDouble("height"))}
+                if(kind=="drag"){hint.put("to_x",input.getDouble("to_x")/frame.width*value.getDouble("width")).put("to_y",input.getDouble("to_y")/frame.height*value.getDouble("height"))}
                 cursor(page.view,hint){
-                metrics(page.view,script,latestMetrics@{latest ->
                 try{
-                  if(result.isDone||jobs[key]!=id)return@latestMetrics
-                  if(receipt.signature!=signature(page.view,latest)){cursor(page.view,JSONObject().put("kind","hide"));throw IllegalStateException("Browser changed before input; observe again")}
+                  if(result.isDone||jobs[key]!=id)return@cursor
+                  if(!WebHost.pages.containsKey(key)){fail("Browser page closed");return@cursor}
                   when(kind){
                   "move"->{val(x,y)=point();mouse(page.view,MotionEvent.ACTION_HOVER_MOVE,x,y,0)}
-                  "drag"->{val(x,y)=point();val toX=input.getDouble("to_x");val toY=input.getDouble("to_y");if(!toX.isFinite()||!toY.isFinite()||toX<0||toY<0||toX>=receipt.width||toY>=receipt.height)throw IllegalArgumentException("Drag endpoint outside image");val endX=(toX/receipt.width*page.view.width).toFloat();val endY=(toY/receipt.height*page.view.height).toFloat();mouse(page.view,MotionEvent.ACTION_DOWN,x,y,MotionEvent.BUTTON_PRIMARY);for(step in 1..12){val t=step/12f;mouse(page.view,MotionEvent.ACTION_MOVE,x+(endX-x)*t,y+(endY-y)*t,MotionEvent.BUTTON_PRIMARY)};mouse(page.view,MotionEvent.ACTION_UP,endX,endY,0)}
+                  "drag"->{val(x,y)=point();val toX=input.getDouble("to_x");val toY=input.getDouble("to_y");if(!toX.isFinite()||!toY.isFinite()||toX<0||toY<0||toX>=frame.width||toY>=frame.height)throw IllegalArgumentException("Drag endpoint outside image");val endX=(toX/frame.width*page.view.width).toFloat();val endY=(toY/frame.height*page.view.height).toFloat();mouse(page.view,MotionEvent.ACTION_DOWN,x,y,MotionEvent.BUTTON_PRIMARY);for(step in 1..12){val t=step/12f;mouse(page.view,MotionEvent.ACTION_MOVE,x+(endX-x)*t,y+(endY-y)*t,MotionEvent.BUTTON_PRIMARY)};mouse(page.view,MotionEvent.ACTION_UP,endX,endY,0)}
                   "click"->{val(x,y)=point();repeat(input.getInt("count")){mouse(page.view,MotionEvent.ACTION_DOWN,x,y,when(input.getString("button")){"right"->MotionEvent.BUTTON_SECONDARY;"middle"->MotionEvent.BUTTON_TERTIARY;else->MotionEvent.BUTTON_PRIMARY});mouse(page.view,MotionEvent.ACTION_UP,x,y,0)}}
                   "scroll"->{val(x,y)=point();mouse(page.view,MotionEvent.ACTION_SCROLL,x,y,0,(-input.getDouble("delta_x")/48).toFloat(),(-input.getDouble("delta_y")/48).toFloat())}
                   "type"->{val connection=page.view.onCreateInputConnection(EditorInfo());if(connection==null||!connection.commitText(input.getString("text"),1))throw IllegalStateException("Focus an editable field before typing")}
@@ -449,7 +464,6 @@ internal object BrowserUse {
                 }
                 if(!loaded.containsKey(key))handler.postDelayed({capture()},250)
                 }catch(error:Exception){fail(error.message ?: "Browser input outcome unknown; observe again")}
-                },::fail)
                 }
               }catch(error:Exception){fail(error.message ?: "Browser input outcome unknown; observe again")}
             },::fail)
@@ -458,7 +472,7 @@ internal object BrowserUse {
         }
       }catch(error:Exception){fail(error.message ?: "Browser operation failed")}
     }
-    return try{result.get(27,TimeUnit.SECONDS)}catch(_:Exception){result.complete(response(id,error="Browser outcome unknown; observe before continuing"));owner.runOnUiThread{if(jobs[key]==id){jobs.remove(key);loaded.remove(key);invalidate(key)}};response(id,error="Browser outcome unknown; do not replay input")}
+    return try{result.get(27,TimeUnit.SECONDS)}catch(_:Exception){result.complete(response(id,error="Browser outcome unknown; observe before continuing"));owner.runOnUiThread{if(jobs[key]==id){jobs.remove(key);loaded.remove(key);}};response(id,error="Browser outcome unknown; do not replay input")}
   }
   private fun cursor(view:WebView,event:JSONObject,done:(()->Unit)?=null){
     if(cursorScript.isEmpty()){done?.invoke();return}

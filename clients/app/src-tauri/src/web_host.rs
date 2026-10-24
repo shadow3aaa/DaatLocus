@@ -3,7 +3,7 @@ use daat_locus_client_protocol::web::{
     CAPTURE_SCRIPT, Capture, MAX_CAPTURE_BYTES, Operation, Reply, Request,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -34,14 +34,14 @@ pub struct NativeHost {
     visible: bool,
     pub(crate) panel: Arc<Mutex<Option<daat_locus_client_protocol::web::BrowserBounds>>>,
     pub(crate) panel_insets: Arc<Mutex<(f64, f64)>>,
-    pub(crate) applied_occlusions: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) applied_bounds: Arc<Mutex<HashMap<String, AppliedBounds>>>,
-    pub(crate) occlusions: Arc<Mutex<Vec<daat_locus_client_protocol::web::BrowserOcclusion>>>,
+    pub(crate) foreground: Arc<Mutex<Vec<daat_locus_client_protocol::web::BrowserHitRegion>>>,
     pub(crate) probe_visible: bool,
     pub(crate) tab_order: Arc<Mutex<Vec<String>>>,
     pub(crate) titles: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) selected: Arc<Mutex<Option<String>>>,
-    pub(crate) browser_states: Arc<Mutex<HashMap<String, crate::browser_use::Receipt>>>,
+    pub(crate) browser_frames:
+        Arc<Mutex<HashMap<String, VecDeque<crate::browser_use::ImageFrame>>>>,
 }
 pub(crate) fn allowed_url(value: &url::Url, forbidden: &str) -> bool {
     matches!(value.scheme(), "http" | "https")
@@ -74,12 +74,11 @@ impl NativeHost {
             forbidden_origin,
             pending: Arc::new(Mutex::new(HashMap::new())),
             visible: false,
-            browser_states: Default::default(),
+            browser_frames: Default::default(),
             panel: Default::default(),
             panel_insets: Default::default(),
             applied_bounds: Default::default(),
-            applied_occlusions: Default::default(),
-            occlusions: Default::default(),
+            foreground: Default::default(),
             probe_visible: false,
             tab_order: Default::default(),
             titles: Default::default(),
@@ -321,11 +320,6 @@ impl NativeHost {
                     {
                         loading.started = true;
                     }
-                    loading_host
-                        .browser_states
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&loading_key);
                     return;
                 }
                 if shared && loading_host.navigation_allowed(payload.url()) {
@@ -446,10 +440,6 @@ impl NativeHost {
             window.on_window_event(move |event| {
                 if matches!(event, tauri::WindowEvent::Destroyed) {
                     host.fail(&key, "Web page closed");
-                    host.browser_states
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&key);
                     host.titles
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -462,6 +452,10 @@ impl NativeHost {
         Ok(())
     }
     pub(crate) fn close_page(&self, label: &str) -> Result<(), String> {
+        self.browser_frames
+            .lock()
+            .map_err(|_| "Browser unavailable")?
+            .remove(label);
         self.targets
             .lock()
             .map_err(|_| "Browser unavailable")?
@@ -482,10 +476,6 @@ impl NativeHost {
             .lock()
             .map_err(|_| "Browser unavailable")?
             .remove(label);
-        self.applied_occlusions
-            .lock()
-            .map_err(|_| "Browser unavailable")?
-            .remove(label);
         #[cfg(target_os = "macos")]
         {
             let label = label.to_owned();
@@ -501,10 +491,6 @@ impl NativeHost {
                 .and_then(|index| order.get(index.min(order.len().saturating_sub(1))))
                 .cloned()
         };
-        self.browser_states
-            .lock()
-            .map_err(|_| "Browser unavailable")?
-            .remove(label);
         self.titles
             .lock()
             .map_err(|_| "Browser unavailable")?
@@ -640,10 +626,6 @@ pub fn start(app: tauri::AppHandle, backend: crate::backend::Backend, origin: St
     tauri::async_runtime::spawn(async move {
         loop {
             let _ = bridge(&host, &backend).await;
-            host.browser_states
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clear();
             for (key, _view) in host.app.webviews() {
                 if key.starts_with("web-") && !host.is_browser_page(&key) {
                     let _ = host.close_page(&key);
@@ -702,6 +684,12 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
     struct Manifest {
         #[serde(default)]
         urls: Vec<String>,
+        #[serde(default)]
+        shell_url: Option<url::Url>,
+        #[serde(default)]
+        owner_clicks: HashMap<usize, Vec<(f64, f64)>>,
+        #[serde(default)]
+        owner_text: HashMap<usize, String>,
         output: PathBuf,
         #[serde(default)]
         browser_steps: Vec<daat_locus_client_protocol::web::BrowserCommand>,
@@ -727,7 +715,7 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
         #[serde(default)]
         owner_moves: HashMap<usize, Vec<(String, Option<String>)>>,
         #[serde(default)]
-        owner_occlusions: HashMap<usize, Vec<daat_locus_client_protocol::web::BrowserOcclusion>>,
+        owner_foreground: HashMap<usize, Vec<daat_locus_client_protocol::web::BrowserHitRegion>>,
         #[serde(default)]
         delays: HashMap<usize, u64>,
         #[serde(default)]
@@ -759,7 +747,13 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
             host.probe_visible = !manifest.hidden_browser;
             app.manage(host.clone());
             crate::transport::capability(&app)?;
-            if !manifest.panel_steps.is_empty(){WindowBuilder::new(&app,"main").inner_size(1280.0,1000.0).visible(!manifest.hidden_browser).focused(false).build()?;}
+            if !manifest.panel_steps.is_empty(){
+                let window=WindowBuilder::new(&app,"main").inner_size(1280.0,1000.0).visible(!manifest.hidden_browser).focused(false).build()?;
+                if let Some(url)=&manifest.shell_url {
+                    if url.scheme()!="http"||url.host_str()!=Some("127.0.0.1"){return Err("Probe shell must use a local fixture".into());}
+                    window.add_child(WebviewBuilder::new("main",WebviewUrl::External(url.clone())).background_color(tauri::webview::Color(0,0,0,0)).auto_resize().disable_drag_drop_handler(),tauri::LogicalPosition::new(0.0,0.0),tauri::LogicalSize::new(1280.0,1000.0))?;
+                }
+            }
             tauri::async_runtime::spawn(async move {
                 use sha2::{Digest, Sha256};
                 let mut results = Vec::new();
@@ -787,10 +781,6 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                         let key=host.selected.lock().unwrap().clone().unwrap();
                         host.owner_input(&key,input.clone()).await.unwrap();
                     }
-                    let source_command=command.clone();
-                    let mut pre_input_retries=0;
-                    let reply=loop {
-                    command=source_command.clone();
                     // UI fixtures include background app state. Inspect immediately
                     // before each input; never replay an input after an uncertain result.
                     if manifest.ui_review
@@ -863,17 +853,6 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                         },
                     };
                     let reply = host.execute(request).await;
-                    // Only these rejections prove that dispatch never started.
-                    // Resample the UI and locate its target again; never retry
-                    // capture failures or any other possibly completed effect.
-                    if manifest.ui_review && pre_input_retries<3 && reply.error.as_deref().is_some_and(|error|matches!(error,
-                        "Observe this page before input"|"Stale browser observation; observe again"|
-                        "Browser page changed; observe again before input"|"Browser page changed before input; observe again")) {
-                        pre_input_retries+=1;
-                        continue;
-                    }
-                    break reply;
-                    };
                     if let Some(observation) = reply
                         .browser
                         .as_ref()
@@ -891,11 +870,32 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                             if crate::browser_ui::move_tab(&host,&key,before.as_deref()).is_err(){app.exit(1);return;}
                         }
                     }
-                    if let Some(cuts)=manifest.owner_occlusions.get(&index){
-                        *host.occlusions.lock().unwrap()=cuts.clone();
-                        if crate::browser_ui::apply_occlusions(&host).await.is_err(){app.exit(1);return;}
+                    if let Some(cuts)=manifest.owner_foreground.get(&index){
+                        *host.foreground.lock().unwrap()=cuts.clone();
+                        if crate::browser_ui::apply_input_regions(&host).await.is_err(){app.exit(1);return;}
                     }
-                    let layer=if let Some(key)=&selected&&let Some(view)=host.app.get_webview(key){crate::browser_use::occlusion_probe(&view).await.ok()}else{None};
+                    if manifest.shell_url.is_some()&&let Some(shell)=host.app.get_webview("main") {
+                        let mut value=serde_json::Value::Null;
+                        for _ in 0..50 {
+                            value=crate::browser_use::evaluate(&shell,"window.DLComposition?.browserForeground(document.querySelector('#viewport'))").await.unwrap();
+                            if value.is_array(){break;}tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        if !value.is_array(){let _=std::fs::write(&manifest.output,"Production DOM collector did not load");app.exit(1);return;}
+                        *host.foreground.lock().unwrap()=serde_json::from_value(value).unwrap();
+                        crate::browser_ui::apply_input_regions(&host).await.unwrap();
+                    }
+                    #[cfg(windows)]
+                    if let Some(points)=manifest.owner_clicks.get(&index) {
+                        for &(x,y) in points{crate::browser_use::owner_click(&host.app,x,y).await.unwrap();}
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    #[cfg(windows)]
+                    if let Some(text)=manifest.owner_text.get(&index){crate::browser_use::owner_text(&host.app,text.clone()).await.unwrap();tokio::time::sleep(Duration::from_millis(100)).await;}
+                    #[cfg(windows)]
+                    let layer=if let Some(key)=&selected&&let Some(view)=host.app.get_webview(key){crate::browser_use::composition_probe(&view).await.ok()}else{None};
+                    #[cfg(not(windows))]
+                    let layer:Option<serde_json::Value>=None;
+                    let shell=if manifest.shell_url.is_some()&&let Some(shell)=host.app.get_webview("main") {crate::browser_use::evaluate(&shell,"({clicks:window.clicks||0,tips:window.tips||0,regions:window.DLComposition?.browserForeground(document.querySelector('#viewport')),width:innerWidth,height:innerHeight})").await.ok()}else{None};
                     let owner_workspace=serde_json::json!({"pages":host.pages(&profile),"selected":selected.as_deref().and_then(|key|key.strip_prefix(&format!("web-{profile}-")))});
                     let view=selected.as_deref().and_then(|key|host.app.get_webview(key));
                     #[cfg(target_os = "macos")]
@@ -940,7 +940,7 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                     let metadata=if let Some(view)=&view {crate::browser_use::evaluate(view,"({language:navigator.language,languages:navigator.languages,locale:Intl.DateTimeFormat().resolvedOptions().locale,header:document.querySelector('#language')?.textContent})").await.ok()}else{None};
                     let icons=host.icons.lock().unwrap().clone();
                     let library=if manifest.ui_review {serde_json::to_value(host.library.lock().unwrap().clone()).ok()}else{None};
-                    results.push(serde_json::json!({"command":command,"reply":reply,"pre_input_retries":pre_input_retries,"parent":parent,"native_control":native_control,"cursor":cursor,"cursor_frames":cursor_frames,"ui":ui,"library":library,"owner_find":owner_find,"screenshot":screenshot,"layer":layer,"owner_workspace":owner_workspace,"metadata":metadata,"icons":icons,"resize_checks":resize_checks}));
+                    results.push(serde_json::json!({"command":command,"reply":reply,"parent":parent,"native_control":native_control,"cursor":cursor,"cursor_frames":cursor_frames,"ui":ui,"library":library,"owner_find":owner_find,"screenshot":screenshot,"layer":layer,"owner_workspace":owner_workspace,"shell":shell,"metadata":metadata,"icons":icons,"resize_checks":resize_checks}));
                 }
                 let result = serde_json::to_vec(&results)
                     .map_err(|error| error.to_string())

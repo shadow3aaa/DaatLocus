@@ -10,7 +10,7 @@ export function browserPreferences(patch?:Partial<BrowserPreferences>){return in
 export type BrowserDownload = { id: string; url: string; name: string; time: number; status: "downloading" | "complete" | "failed" | "interrupted"; bytes: number };
 export type BrowserLibrary = { history: BrowserVisit[]; downloads: BrowserDownload[]; next_offset?: number | null };
 export type BrowserBounds = { x: number; y: number; width: number; height: number; scale: number };
-export type BrowserOcclusion = { x:number; y:number; width:number; height:number; radius:number };
+export type BrowserHitRegion = { x:number; y:number; width:number; height:number; radius:number };
 export type BrowserFindResult = { found: boolean; count: number | null; index: number | null };
 export type BrowserFindAction = "find" | "find_next" | "find_previous" | "find_close";
 export type BrowserAction = "list" | "select" | "move_tab" | "open" | "new_tab" | "navigate" | "back" | "forward" | "reload" | "stop" | "close";
@@ -37,8 +37,8 @@ export function browserScreenshot(tab: string) {
 }
 // Route changes cannot wait behind a slow navigation. Layout updates retain
 // their own order, including cleanup from the previous mounted page.
-const applyLayout=latestOperation<{bounds:BrowserBounds|null;occlusions:BrowserOcclusion[]}>(value=>invoke("browser_control", {action:value.bounds?"mount":"detach",...value,tab:null,url:null}));
-export function browserLayout(bounds:BrowserBounds|null,occlusions:BrowserOcclusion[]=[]){return applyLayout({bounds,occlusions});}
+const applyLayout=latestOperation<{bounds:BrowserBounds|null;foreground:BrowserHitRegion[]}>(value=>invoke("browser_control", {action:value.bounds?"mount":"detach",...value,tab:null,url:null}));
+export function browserLayout(bounds:BrowserBounds|null,foreground:BrowserHitRegion[]=[]){return applyLayout({bounds,foreground});}
 export async function subscribeBrowserWorkspace(callback:()=>void){
  window.addEventListener("dl-browser-changed",callback);
  try{const stop=await listen("dl-browser-changed",callback);return()=>{stop();window.removeEventListener("dl-browser-changed",callback);};}

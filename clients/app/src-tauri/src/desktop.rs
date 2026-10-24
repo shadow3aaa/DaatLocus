@@ -217,6 +217,7 @@ pub fn run(options: Options) -> Result<()> {
             let mut builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("Daat Locus")
+                    .background_color(tauri::webview::Color(0, 0, 0, 0))
                     .visible(!background)
                     .inner_size(1100.0, 820.0)
                     .min_inner_size(640.0, 480.0)

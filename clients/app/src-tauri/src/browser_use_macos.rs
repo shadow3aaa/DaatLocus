@@ -21,9 +21,7 @@ mod layers;
 mod mouse;
 #[path = "browser_wk_macos.rs"]
 mod wk;
-pub(crate) use layers::occlude;
-#[cfg(feature = "web-contract")]
-pub(crate) use layers::occlusion_probe;
+pub(crate) use layers::compose;
 pub(crate) use wk::{find, prepare};
 #[cfg(feature = "web-contract")]
 pub(crate) fn ui_probe_visibility(view: &Webview) {
