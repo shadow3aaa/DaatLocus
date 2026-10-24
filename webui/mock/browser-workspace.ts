@@ -147,9 +147,10 @@ async function captureMockPage(tab:string){
   const doc=new DOMParser().parseFromString(snapshot.html,"text/html");
   doc.querySelectorAll("script,iframe,object,embed,link,base,dl-agent-pointer").forEach(node=>node.remove());
   for(const element of doc.querySelectorAll("*"))for(const attribute of [...element.attributes])if(attribute.name.startsWith("on"))element.removeAttribute(attribute.name);
-  // An inert, script-disabled copy lets the fixture renderer inspect the DOM
-  // without granting same-origin access to the interactive browser page.
-  const renderer=document.createElement("iframe");renderer.setAttribute("sandbox","allow-same-origin");renderer.inert=true;renderer.setAttribute("aria-hidden","true");
+  // This inert, sanitized fixture copy permits html2canvas load callbacks.
+  // WebKit also applies sandbox script restrictions to those callbacks; the
+  // interactive page remains in its separate opaque-origin iframe.
+  const renderer=document.createElement("iframe");renderer.setAttribute("sandbox","allow-same-origin allow-scripts");renderer.inert=true;renderer.setAttribute("aria-hidden","true");
   Object.assign(renderer.style,{position:"fixed",left:"-20000px",top:"0",width:`${snapshot.width}px`,height:`${snapshot.height}px`,border:"0",pointerEvents:"none"});
   try{
     const loaded=new Promise<void>(resolve=>{renderer.onload=()=>resolve();});renderer.srcdoc="<!doctype html>"+doc.documentElement.outerHTML;document.body.append(renderer);await loaded;

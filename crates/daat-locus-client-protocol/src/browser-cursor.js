@@ -52,7 +52,9 @@
     window[key]=state;
   }
   if(event.kind==='prepare') return {visible:false};
-  const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Hidden WebViews pause animation timelines. Paint the final position rather
+  // than freezing the arrow at the beginning of its movement animation.
+  const reduced=document.hidden || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   state.reduced=reduced;
   const animate=(node,frames,options) => {
     node.getAnimations?.().forEach(animation=>animation.cancel());

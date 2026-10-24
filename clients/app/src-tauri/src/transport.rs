@@ -697,7 +697,7 @@ mod tests {
                 .unwrap(),
             )
             .invoke_handler(tauri::generate_handler![native_http_cancel])
-            .build(tauri::generate_context!())
+            .build(crate::desktop::context())
             .unwrap();
         // Deliberately let both views reach the handler to exercise its origin
         // and caller checks independently of the production main-only ACL.

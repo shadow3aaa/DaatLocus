@@ -1,23 +1,50 @@
 //! WKWebView snapshots and responder-local AppKit input; never post global events.
 use daat_locus_client_protocol::web::BrowserInput;
 use objc2::{ClassType, msg_send, sel};
-use objc2::{MainThreadMarker, rc::Retained};
+use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSEvent, NSEventModifierFlags, NSEventType, NSImage,
     NSResponder, NSView,
 };
-use objc2_foundation::{NSDictionary, NSError, NSPoint, NSRange, NSRect, NSString};
+use objc2_foundation::{
+    NSDictionary, NSError, NSObjectProtocol, NSPoint, NSRange, NSRect, NSString,
+};
 use objc2_web_kit::WKWebView;
 use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};
 use std::{ffi::c_void, sync::Mutex, time::Duration};
 use tauri::Webview;
+#[path = "browser_keys_macos.rs"]
+mod keys;
 #[path = "browser_layers_macos.rs"]
 mod layers;
+#[path = "browser_mouse_macos.rs"]
+mod mouse;
+#[path = "browser_wk_macos.rs"]
+mod wk;
 pub(crate) use layers::occlude;
+#[cfg(feature = "web-contract")]
+pub(crate) use layers::occlusion_probe;
+pub(crate) use wk::{find, prepare};
+#[cfg(feature = "web-contract")]
+pub(crate) fn ui_probe_visibility(view: &Webview) {
+    let _ = view.with_webview(|platform| unsafe {
+        let web = &*platform.inner().cast::<WKWebView>();
+        // Exercise foreground UI while leaving the user's actual key window
+        // alone. Occlusion would otherwise suspend requestAnimationFrame.
+        if web.respondsToSelector(sel!(_setWindowOcclusionDetectionEnabled:)) {
+            let _: () = msg_send![web, _setWindowOcclusionDetectionEnabled:false];
+        }
+        if let Some(window) = web.window() {
+            window.setIgnoresMouseEvents(true);
+            window.orderFrontRegardless();
+        }
+    });
+}
 thread_local! {static STORES:std::cell::RefCell<std::collections::HashMap<String,Retained<WKWebsiteDataStore>>>=std::cell::RefCell::new(Default::default());}
 thread_local! {static SHORTCUTS:std::cell::RefCell<std::collections::HashMap<String,Retained<objc2::runtime::AnyObject>>>=std::cell::RefCell::new(Default::default());}
 pub(crate) fn remove_shortcuts(label: &str) {
     layers::remove(label);
+    wk::remove(label);
     SHORTCUTS.with(|monitors| {
         if let Some(monitor) = monitors.borrow_mut().remove(label) {
             unsafe {
@@ -33,6 +60,7 @@ pub(crate) fn shortcuts(view: &Webview, app: tauri::AppHandle) {
         let Some(web)=Retained::retain(platform.inner().cast::<WKWebView>())else{return};
         let callback=block2::RcBlock::new(move |event:std::ptr::NonNull<NSEvent>|->*mut NSEvent{
             let event_ref=event.as_ref();
+            if keys::synthetic(event_ref){return event.as_ptr();}
             let Some(window)=web.window()else{return event.as_ptr()};
             if event_ref.windowNumber()!=window.windowNumber(){return event.as_ptr();}
             if web.isHiddenOrHasHiddenAncestor()||page_responder(&web).is_err(){return event.as_ptr();}
@@ -88,6 +116,7 @@ unsafe extern "C" {
         ...
     ) -> *mut c_void;
     fn CGEventSetLocation(event: *mut c_void, point: NSPoint);
+    fn CGEventSetIntegerValueField(event: *mut c_void, field: u32, value: i64);
 }
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -146,57 +175,113 @@ pub async fn navigation(window: &Webview) -> Result<(bool, bool), String> {
         .map_err(|_| "Browser history unavailable".into())
 }
 pub async fn input(window: &Webview, input: BrowserInput) -> Result<(), String> {
+    let editing = keys::editing(&input);
+    if let Some(editing) = &editing {
+        keys::begin(window, editing).await?;
+    }
     let (sender, receiver) = tokio::sync::oneshot::channel();
     window
         .with_webview(move |platform| unsafe {
             let web = &*platform.inner().cast::<WKWebView>();
-            let _ = sender.send(dispatch_input(web, input));
+            #[cfg(feature = "web-contract")]
+            let before = physical_input_state();
+            let result = dispatch_input(web, input);
+            #[cfg(feature = "web-contract")]
+            let result = if before != physical_input_state() {
+                Err("Native browser input changed OS focus, pointer or button state".into())
+            } else {
+                result
+            };
+            let _ = sender.send(result);
         })
         .map_err(|_| "WKWebView event loop unavailable")?;
     tokio::time::timeout(Duration::from_secs(8), receiver)
         .await
         .map_err(|_| "Browser input timed out; observe before continuing")?
-        .map_err(|_| "Browser input interrupted; do not replay")?
+        .map_err(|_| "Browser input interrupted; do not replay")??;
+    if let Some(editing) = editing {
+        keys::finish(window, editing).await?;
+    }
+    Ok(())
+}
+#[cfg(feature = "web-contract")]
+unsafe fn physical_input_state() -> (NSPoint, isize, i32, usize) {
+    use objc2::{class, runtime::AnyObject};
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let key: *mut AnyObject = msg_send![app, keyWindow];
+        let key = if key.is_null() {
+            0
+        } else {
+            msg_send![key, windowNumber]
+        };
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let front: *mut AnyObject = msg_send![workspace, frontmostApplication];
+        let pid = if front.is_null() {
+            0
+        } else {
+            msg_send![front, processIdentifier]
+        };
+        (
+            NSEvent::mouseLocation(),
+            key,
+            pid,
+            NSEvent::pressedMouseButtons(),
+        )
+    }
 }
 fn dispatch_input(web: &WKWebView, input: BrowserInput) -> Result<(), String> {
     unsafe {
         let view: &NSView = web;
         let native_window = view.window().ok_or("Browser window closed")?;
+        let buttons = mouse::Buttons::new()?;
 
         let point = |x: f64, y: f64| -> NSPoint {
             let bounds: NSRect = msg_send![view, bounds];
             let flipped: bool = msg_send![view, isFlipped];
             let local = NSPoint::new(x, if flipped { y } else { bounds.size.height - y });
             let result: NSPoint =
-                msg_send![view,convertPoint:local toView:std::ptr::null::<NSView>()];
+                msg_send![view,convertPoint:local, toView:std::ptr::null::<NSView>()];
             result
         };
         match input {
             BrowserInput::Move { x, y } => {
-                let event=NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(NSEventType::MouseMoved,point(x,y),NSEventModifierFlags::empty(),0.0,native_window.windowNumber(),None,0,0,0.0).ok_or("Pointer event unavailable")?;
-                view.mouseMoved(&event);
+                // WebKit routes an inactive page's MouseMoved only to scrollbars.
+                // A local drag-movement event also reaches content. Without a
+                // preceding down event this remains hover (buttons == 0), and
+                // never starts a drag or changes the physical button state.
+                let event=NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(NSEventType::LeftMouseDragged,point(x,y),NSEventModifierFlags::empty(),0.0,native_window.windowNumber(),None,0,0,0.0).ok_or("Pointer event unavailable")?;
+                // WebKit tracks movement through its tracking observer rather than
+                // NSResponder::mouseMoved. Its view-local test entry point keeps
+                // hover trusted without posting an event or moving the OS cursor.
+                if !web.respondsToSelector(sel!(_simulateMouseMove:)) {
+                    return Err("Native browser hover requires macOS 13 or newer".into());
+                }
+                let _: () = msg_send![web, _simulateMouseMove: &*event];
             }
             BrowserInput::Drag { x, y, to_x, to_y } => {
                 let p = point(x, y);
                 let local: NSPoint =
-                    msg_send![view,convertPoint:p fromView:std::ptr::null::<NSView>()];
+                    msg_send![view,convertPoint:p, fromView:std::ptr::null::<NSView>()];
                 let parent = view.superview();
-                let hit: NSPoint = msg_send![view,convertPoint:local toView:parent.as_deref()];
+                let hit: NSPoint = msg_send![view,convertPoint:local, toView:parent.as_deref()];
                 let target: *mut NSView = msg_send![view,hitTest:hit];
                 let target = target.as_ref().ok_or("No browser drag receiver")?;
                 let event = |kind, point, pressure| {
                     NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(kind,point,NSEventModifierFlags::empty(),0.0,native_window.windowNumber(),None,0,1,pressure).ok_or_else(||"Drag event unavailable".to_owned())
                 };
-                target.mouseDown(&event(NSEventType::LeftMouseDown, p, 1.0)?);
+                buttons.set(1);
+                target.mouseDown(&*event(NSEventType::LeftMouseDown, p, 1.0)?);
                 for step in 1..=12 {
                     let t = f64::from(step) / 12.0;
-                    target.mouseDragged(&event(
+                    target.mouseDragged(&*event(
                         NSEventType::LeftMouseDragged,
                         point(x + (to_x - x) * t, y + (to_y - y) * t),
                         1.0,
                     )?);
                 }
-                target.mouseUp(&event(NSEventType::LeftMouseUp, point(to_x, to_y), 0.0)?);
+                buttons.set(0);
+                target.mouseUp(&*event(NSEventType::LeftMouseUp, point(to_x, to_y), 0.0)?);
             }
             BrowserInput::Click {
                 x,
@@ -206,10 +291,10 @@ fn dispatch_input(web: &WKWebView, input: BrowserInput) -> Result<(), String> {
             } => {
                 let p = point(x, y);
                 let local: NSPoint =
-                    msg_send![view,convertPoint:p fromView:std::ptr::null::<NSView>()];
+                    msg_send![view,convertPoint:p, fromView:std::ptr::null::<NSView>()];
                 let parent = view.superview();
                 let hit_point: NSPoint =
-                    msg_send![view,convertPoint:local toView:parent.as_deref()];
+                    msg_send![view,convertPoint:local, toView:parent.as_deref()];
                 let target: *mut NSView = msg_send![view,hitTest:hit_point];
                 let target = target.as_ref().ok_or("No browser receiver at this point")?;
                 let _: bool = msg_send![&*native_window,makeFirstResponder:target];
@@ -218,14 +303,29 @@ fn dispatch_input(web: &WKWebView, input: BrowserInput) -> Result<(), String> {
                     let middle = button == "middle";
                     let down=NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(if middle{NSEventType::OtherMouseDown}else if right{NSEventType::RightMouseDown}else{NSEventType::LeftMouseDown},p,NSEventModifierFlags::empty(),0.0,native_window.windowNumber(),None,0,click.into(),1.0).ok_or("Mouse event unavailable")?;
                     let up=NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(if middle{NSEventType::OtherMouseUp}else if right{NSEventType::RightMouseUp}else{NSEventType::LeftMouseUp},p,NSEventModifierFlags::empty(),0.0,native_window.windowNumber(),None,0,click.into(),0.0).ok_or("Mouse event unavailable")?;
+                    let (down, up) = if middle {
+                        (middle_button(&down)?, middle_button(&up)?)
+                    } else {
+                        (down, up)
+                    };
+                    buttons.set(if middle {
+                        4
+                    } else if right {
+                        2
+                    } else {
+                        1
+                    });
                     if middle {
                         let _: () = msg_send![target,otherMouseDown:&*down];
+                        buttons.set(0);
                         let _: () = msg_send![target,otherMouseUp:&*up];
                     } else if right {
                         let _: () = msg_send![target,rightMouseDown:&*down];
+                        buttons.set(0);
                         let _: () = msg_send![target,rightMouseUp:&*up];
                     } else {
                         target.mouseDown(&down);
+                        buttons.set(0);
                         target.mouseUp(&up);
                     }
                 }
@@ -246,15 +346,27 @@ fn dispatch_input(web: &WKWebView, input: BrowserInput) -> Result<(), String> {
                 if event.is_null() {
                     return Err("Scroll event unavailable".into());
                 }
-                CGEventSetLocation(event, point(x, y));
-                let native: *mut NSEvent = msg_send![NSEvent::class(),eventWithCGEvent:event];
-                if let Some(native) = native.as_ref() {
-                    view.scrollWheel(native);
-                }
+                // CGEvent uses global, top-down screen coordinates. Rebind the
+                // NSEvent to this window before WebKit hit-tests nested scrollers.
+                let screens: *mut objc2::runtime::AnyObject =
+                    msg_send![objc2::class!(NSScreen), screens];
+                let screen: *mut objc2::runtime::AnyObject = msg_send![screens, firstObject];
+                let frame: NSRect = msg_send![screen, frame];
+                let location = native_window.convertPointToScreen(point(x, y));
+                CGEventSetLocation(
+                    event,
+                    NSPoint::new(location.x, frame.size.height - location.y),
+                );
+                let native: Option<Retained<NSEvent>> =
+                    msg_send![NSEvent::class(),eventWithCGEvent:event];
                 CFRelease(event);
-                if native.is_null() {
-                    return Err("Scroll event unavailable".into());
+                let native = native.ok_or("Scroll event unavailable")?;
+                if !native.respondsToSelector(sel!(_eventRelativeToWindow:)) {
+                    return Err("Window-local scroll events unavailable".into());
                 }
+                let local: Option<Retained<NSEvent>> =
+                    msg_send![&*native, _eventRelativeToWindow:&*native_window];
+                view.scrollWheel(&*local.ok_or("Window-local scroll event unavailable")?);
             }
             BrowserInput::Type { text } => {
                 let responder = page_responder(view)?;
@@ -264,10 +376,20 @@ fn dispatch_input(web: &WKWebView, input: BrowserInput) -> Result<(), String> {
                     return Err("Focus an editable browser field before typing".into());
                 }
                 let text = NSString::from_str(&text);
-                let _: () = msg_send![&*responder,insertText:&*text replacementRange:NSRange::new(isize::MAX as _,0)];
+                let _: () = msg_send![&*responder,insertText:&*text, replacementRange:NSRange::new(isize::MAX as _,0)];
             }
             BrowserInput::Key { key, modifiers } => {
-                let responder = page_responder(view)?;
+                let responder = match page_responder(view) {
+                    Ok(responder) => responder,
+                    Err(_) => {
+                        // Select only this window's page responder, without
+                        // activating the window or changing the OS key window.
+                        if !native_window.makeFirstResponder(Some(view)) {
+                            return Err("Browser page cannot receive keys".into());
+                        }
+                        page_responder(view)?
+                    }
+                };
                 let flags = modifiers
                     .iter()
                     .fold(NSEventModifierFlags::empty(), |flags, m| {
@@ -280,10 +402,19 @@ fn dispatch_input(web: &WKWebView, input: BrowserInput) -> Result<(), String> {
                                 _ => NSEventModifierFlags::empty(),
                             }
                     });
-                let (code, chars) = key_info(&key)?;
+                let (code, mut chars) = key_info(&key)?;
+                // AppKit key equivalents are case-sensitive. "Command+A"
+                // names the A key; uppercase characters without Shift would
+                // instead miss the standard select-all binding.
+                if flags.intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Control)
+                    && !flags.contains(NSEventModifierFlags::Shift)
+                {
+                    chars.make_ascii_lowercase();
+                }
                 let chars = NSString::from_str(&chars);
                 for event_type in [NSEventType::KeyDown, NSEventType::KeyUp] {
                     let event=NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(event_type,NSPoint::new(0.0,0.0),flags,0.0,native_window.windowNumber(),None,&chars,&chars,false,code).ok_or("Key event unavailable")?;
+                    keys::tag(&event, web)?;
                     if event_type == NSEventType::KeyDown {
                         responder.keyDown(&event)
                     } else {
@@ -311,6 +442,19 @@ fn dispatch_input(web: &WKWebView, input: BrowserInput) -> Result<(), String> {
             }
         }
         Ok(())
+    }
+}
+unsafe fn middle_button(event: &NSEvent) -> Result<Retained<NSEvent>, String> {
+    unsafe {
+        // AppKit's OtherMouse factory does not select the middle button.
+        let cg: *mut c_void = msg_send![event, CGEvent];
+        if cg.is_null() {
+            return Err("Native middle-button event unavailable".into());
+        }
+        const MOUSE_BUTTON_NUMBER: u32 = 3;
+        CGEventSetIntegerValueField(cg, MOUSE_BUTTON_NUMBER, 2);
+        let event: Option<Retained<NSEvent>> = msg_send![NSEvent::class(), eventWithCGEvent:cg];
+        event.ok_or_else(|| "Native middle-button event unavailable".into())
     }
 }
 fn page_responder(view: &NSView) -> Result<Retained<NSResponder>, String> {
@@ -396,7 +540,7 @@ fn key_info(key: &str) -> Result<(u16, String), String> {
         ('m', 46),
     ];
     keys.iter()
-        .find(|(ch, _)| Some(*ch) == key.to_ascii_lowercase().chars().next())
+        .find(|(ch, _)| key.to_ascii_lowercase().starts_with(*ch))
         .filter(|_| key.len() == 1)
         .map(|(_, code)| (*code, key.into()))
         .ok_or("Unsupported browser key".into())

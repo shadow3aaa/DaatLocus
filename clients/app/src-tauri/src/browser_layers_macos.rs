@@ -48,10 +48,13 @@ define_class!(
         fn flipped(&self)->bool{self.ivars().flipped.get()}
         #[unsafe(method_id(hitTest:))]
         fn hit(&self,point:NSPoint)->Option<Retained<NSView>>{
-            let local=self.convertPoint_fromView(point,self.superview().as_deref());
-            if self.ivars().cuts.borrow().iter().any(|cut|cut.contains(local)){return None;}
-            let hit:Option<Retained<NSView>>=unsafe{msg_send![super(self),hitTest:point]};
-            hit.filter(|view|Retained::as_ptr(view).cast::<c_void>()!=(self as *const Self).cast::<c_void>())
+            let local=self.convertPoint_fromView(point,unsafe{self.superview()}.as_deref());
+            if self.ivars().cuts.borrow().iter().any(|cut|cut.contains(local)) {
+                None
+            } else {
+                let hit:Option<Retained<NSView>>=unsafe{msg_send![super(self),hitTest:point]};
+                hit.filter(|view|Retained::as_ptr(view).cast::<c_void>()!=(self as *const Self).cast::<c_void>())
+            }
         }
     }
 );
@@ -68,6 +71,43 @@ unsafe extern "C" {
         ry: f64,
     );
     fn CGPathRelease(path: *mut c_void);
+    #[cfg(feature = "web-contract")]
+    fn CGPathContainsPoint(
+        path: *const c_void,
+        transform: *const c_void,
+        point: NSPoint,
+        even_odd: bool,
+    ) -> bool;
+}
+
+#[cfg(feature = "web-contract")]
+pub(crate) async fn occlusion_probe(view: &Webview) -> Result<serde_json::Value, String> {
+    let label = view.label().to_owned();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    view.with_webview(move |platform| {
+        let result = (|| unsafe {
+            let web = &*platform.inner().cast::<WKWebView>();
+            let host = HOSTS.with(|hosts| hosts.borrow().get(&label).cloned()).ok_or("Browser clipping host unavailable")?;
+            let layer:*mut AnyObject=msg_send![&*host,layer];
+            let mask:Option<Retained<AnyObject>>=msg_send![layer,mask];
+            let point = |x,y| NSPoint::new(x,if host.isFlipped(){y}else{host.bounds().size.height-y});
+            let painted = |point:NSPoint| {
+                let mut mask=mask.clone();
+                while let Some(shape)=mask {
+                    let path:*const c_void=msg_send![&*shape,path];
+                    if path.is_null() || !CGPathContainsPoint(path,std::ptr::null(),point,true){return false;}
+                    mask=msg_send![&*shape,mask];
+                }
+                true
+            };
+            let receives = |point:NSPoint| host.hitTest(host.convertPoint_toView(point,host.superview().as_deref())).is_some();
+            let cut=point(50.0,50.0);let page=point(800.0,100.0);
+            let frame=web.frame();
+            Ok(serde_json::json!({"has_region":mask.is_some(),"cut_visible":painted(cut)||receives(cut),"page_visible":painted(page)&&receives(page),"position":[frame.origin.x,if host.isFlipped(){frame.origin.y}else{host.bounds().size.height-frame.origin.y-frame.size.height}]}))
+        })().map_err(str::to_owned);
+        let _=tx.send(result);
+    }).map_err(|_|"Browser clipping probe unavailable")?;
+    rx.await.map_err(|_| "Browser clipping probe interrupted")?
 }
 #[link(name = "QuartzCore", kind = "framework")]
 unsafe extern "C" {}

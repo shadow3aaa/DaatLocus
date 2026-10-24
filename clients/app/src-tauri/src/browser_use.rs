@@ -13,6 +13,10 @@ mod platform;
 #[cfg(target_os = "macos")]
 pub(crate) use platform::configuration;
 #[cfg(target_os = "macos")]
+pub(crate) use platform::prepare;
+#[cfg(all(target_os = "macos", feature = "web-contract"))]
+pub(crate) use platform::ui_probe_visibility;
+#[cfg(target_os = "macos")]
 pub(crate) use platform::remove_shortcuts;
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) use platform::shortcuts;
@@ -41,7 +45,7 @@ pub(crate) async fn occlude(
 ) -> Result<(), String> {
     platform::occlude(view, bounds, cuts).await
 }
-#[cfg(all(windows, feature = "web-contract"))]
+#[cfg(all(any(windows, target_os = "macos"), feature = "web-contract"))]
 pub(crate) async fn occlusion_probe(view: &Webview) -> Result<Value, String> {
     platform::occlusion_probe(view).await
 }
@@ -81,19 +85,7 @@ pub(crate) async fn find(view: &Webview, action: &str, text: &str) -> Result<Val
     }
     #[cfg(target_os = "macos")]
     {
-        let clear = action == "find_close" || text.is_empty();
-        let text = serde_json::to_string(text).map_err(|_| "Invalid search")?;
-        let script = if clear {
-            "(()=>{getSelection()?.removeAllRanges();return {found:false,count:0,index:0}})()"
-                .into()
-        } else {
-            format!(
-                "(()=>{{if({}){{const range=document.createRange();range.selectNodeContents(document.body);range.collapse(true);getSelection()?.removeAllRanges();getSelection()?.addRange(range)}}return {{found:window.find({text},false,{},true,false,true,false),count:null,index:null}}}})()",
-                action == "find",
-                action == "find_previous"
-            )
-        };
-        evaluate(view, &script).await
+        platform::find(view, action, text).await
     }
 }
 pub(crate) async fn evaluate(window: &Webview, script: &str) -> Result<Value, String> {

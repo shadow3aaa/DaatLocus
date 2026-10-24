@@ -126,6 +126,10 @@ fn action(app: &tauri::AppHandle, id: &str) {
         _ => {}
     }
 }
+pub(crate) fn context<R: tauri::Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
+}
+
 pub fn run(options: Options) -> Result<()> {
     #[cfg(feature = "web-contract")]
     if let Some(manifest) = &options.web_probe {
@@ -140,7 +144,7 @@ pub fn run(options: Options) -> Result<()> {
     let backend = Backend::new(options)?;
     let status = tauri::async_runtime::block_on(backend.start())?;
     let origin = Arc::new(RwLock::new(backend::local_origin(&status.url)?));
-    let mut context = tauri::generate_context!();
+    let mut context = context();
     // Single-instance identity is profile-local, including separately installed OS users.
     let profile = backend::profile_id(&backend.root);
     let identifier = format!("{}.p{profile}", context.config().identifier);

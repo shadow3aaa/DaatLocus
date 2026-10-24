@@ -457,6 +457,8 @@ impl NativeHost {
                 }
             });
         }
+        #[cfg(target_os = "macos")]
+        crate::browser_use::prepare(&view, shared);
         Ok(())
     }
     pub(crate) fn close_page(&self, label: &str) -> Result<(), String> {
@@ -785,6 +787,10 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                         let key=host.selected.lock().unwrap().clone().unwrap();
                         host.owner_input(&key,input.clone()).await.unwrap();
                     }
+                    let source_command=command.clone();
+                    let mut pre_input_retries=0;
+                    let reply=loop {
+                    command=source_command.clone();
                     // UI fixtures include background app state. Inspect immediately
                     // before each input; never replay an input after an uncertain result.
                     if manifest.ui_review
@@ -857,6 +863,17 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                         },
                     };
                     let reply = host.execute(request).await;
+                    // Only these rejections prove that dispatch never started.
+                    // Resample the UI and locate its target again; never retry
+                    // capture failures or any other possibly completed effect.
+                    if manifest.ui_review && pre_input_retries<3 && reply.error.as_deref().is_some_and(|error|matches!(error,
+                        "Observe this page before input"|"Stale browser observation; observe again"|
+                        "Browser page changed; observe again before input"|"Browser page changed before input; observe again")) {
+                        pre_input_retries+=1;
+                        continue;
+                    }
+                    break reply;
+                    };
                     if let Some(observation) = reply
                         .browser
                         .as_ref()
@@ -878,12 +895,11 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                         *host.occlusions.lock().unwrap()=cuts.clone();
                         if crate::browser_ui::apply_occlusions(&host).await.is_err(){app.exit(1);return;}
                     }
-                    #[cfg(windows)]
                     let layer=if let Some(key)=&selected&&let Some(view)=host.app.get_webview(key){crate::browser_use::occlusion_probe(&view).await.ok()}else{None};
-                    #[cfg(not(windows))]
-                    let layer:Option<serde_json::Value>=None;
                     let owner_workspace=serde_json::json!({"pages":host.pages(&profile),"selected":selected.as_deref().and_then(|key|key.strip_prefix(&format!("web-{profile}-")))});
                     let view=selected.as_deref().and_then(|key|host.app.get_webview(key));
+                    #[cfg(target_os = "macos")]
+                    if manifest.ui_review && matches!(&command,daat_locus_client_protocol::web::BrowserCommand::Open{..}) && let Some(view)=&view {crate::browser_use::ui_probe_visibility(view);}
                     let parent=view.as_ref().map(|view|view.window().label().to_owned());
                     let mut owner_find=Vec::new();
                     if let Some(queries)=manifest.owner_find.get(&index) && let Some(view)=&view {
@@ -903,7 +919,7 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                             Err(error)=>Some(serde_json::json!({"error":error})),
                         }
                     }else{None};
-                    let native_control=if let Some(view)=&view{crate::browser_use::evaluate(&view,"({status:window.nativeControlResult || null})").await.ok()}else{None};
+                    let native_control=if let Some(view)=&view{crate::browser_use::evaluate(view,"({status:window.nativeControlResult || null})").await.ok()}else{None};
                     let cursor=if let Some(key)=&selected {host.cursor_probe(key).await}else{None};
                     let ui=if manifest.ui_review {if let Some(view)=selected.as_deref().and_then(|key|host.app.get_webview(key)) {
                         crate::browser_use::evaluate(&view,"({text:[...document.querySelectorAll('.dl-browser-page,[data-slot=popover-content]')].map(node=>node.innerText).join('\\n'),downloadPopup:(()=>{const node=document.querySelector('.dl-browser-downloads');if(!node)return null;const rect=node.getBoundingClientRect();const list=node.querySelector('.dl-browser-download-scroll');return {x:rect.x,y:rect.y,width:rect.width,height:rect.height,scrollTop:list.scrollTop,scrollHeight:list.scrollHeight,clientHeight:list.clientHeight}})(),tabs:Array.from(document.querySelectorAll('[role=tab]')).map(node=>({text:node.textContent,selected:node.getAttribute('aria-selected')==='true',draggable:node.parentElement.draggable})),surface:{live:[...document.querySelectorAll('.dl-browser-viewport>iframe')].some(node=>getComputedStyle(node).display!=='none'),clipped:[...document.querySelectorAll('.dl-browser-viewport>iframe')].some(node=>getComputedStyle(node).maskImage!=='none')},language:document.documentElement.lang,width:innerWidth,height:innerHeight,scrollWidth:document.documentElement.scrollWidth,inputs:Array.from(document.querySelectorAll('input')).map(input=>({label:input.getAttribute('aria-label'),value:input.value})),buttons:Array.from(document.querySelectorAll('button')).map(button=>({label:button.getAttribute('aria-label')||button.innerText,disabled:button.disabled,rect:{x:button.getBoundingClientRect().x,y:button.getBoundingClientRect().y,width:button.getBoundingClientRect().width,height:button.getBoundingClientRect().height}}))})").await.ok()
@@ -924,7 +940,7 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                     let metadata=if let Some(view)=&view {crate::browser_use::evaluate(view,"({language:navigator.language,languages:navigator.languages,locale:Intl.DateTimeFormat().resolvedOptions().locale,header:document.querySelector('#language')?.textContent})").await.ok()}else{None};
                     let icons=host.icons.lock().unwrap().clone();
                     let library=if manifest.ui_review {serde_json::to_value(host.library.lock().unwrap().clone()).ok()}else{None};
-                    results.push(serde_json::json!({"command":command,"reply":reply,"parent":parent,"native_control":native_control,"cursor":cursor,"cursor_frames":cursor_frames,"ui":ui,"library":library,"owner_find":owner_find,"screenshot":screenshot,"layer":layer,"owner_workspace":owner_workspace,"metadata":metadata,"icons":icons,"resize_checks":resize_checks}));
+                    results.push(serde_json::json!({"command":command,"reply":reply,"pre_input_retries":pre_input_retries,"parent":parent,"native_control":native_control,"cursor":cursor,"cursor_frames":cursor_frames,"ui":ui,"library":library,"owner_find":owner_find,"screenshot":screenshot,"layer":layer,"owner_workspace":owner_workspace,"metadata":metadata,"icons":icons,"resize_checks":resize_checks}));
                 }
                 let result = serde_json::to_vec(&results)
                     .map_err(|error| error.to_string())
@@ -936,7 +952,7 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
             });
             Ok(())
         })
-        .build(tauri::generate_context!())?;
+        .build(crate::desktop::context())?;
     app.run(|_, event| {
         if let tauri::RunEvent::ExitRequested {
             code: None, api, ..

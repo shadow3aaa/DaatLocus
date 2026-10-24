@@ -131,6 +131,17 @@ and Android WebView native input and PixelCopy. No debug port, arbitrary evaluat
 or system-wide input is exposed. PNGs are published in the calling Actor's resource
 ledger. Interrupted effects are never replayed automatically.
 
+macOS uses availability-checked WebKit SPI for view-local hover, native find
+highlights/counts and content insets. Hover requires macOS 13+; native Command
+editing defaults require macOS 14.4+ for focused-frame inspection. Synthesized button
+state is confined to the dispatching thread in this client and restored after
+each input; it never presses physical buttons. Sandboxed `srcdoc` subframes keep
+working while top-level navigation retains the host URL policy. Renderable HTTP
+attachments use the same managed download path as binary attachments.
+Synthetic keys cannot fall through to the account view or client menus. Standard
+Command editing defaults run only after trusted page handlers finish, preserving
+`preventDefault`, in an isolated WebKit client world scoped to the focused frame.
+
 Accepted inputs display a custom cursor without a text label, with subtle click,
 drag, scroll and keyboard indicators. This transient decoration neither dispatches
 input nor displays typed text. It is excluded from model screenshots and hidden
@@ -145,7 +156,11 @@ cargo test --no-default-features --lib browser_use_app
 
 Verify native page capture, trusted input, isolation, downloads and popup behavior
 on each supported platform. Compilation alone does not establish native runtime
-coverage.
+coverage. On macOS, opt-in native input probes also check that foreground
+application, key window, physical pointer and button state remain unchanged.
+UI fixtures use visible, unoccluded windows without activating them so WebKit
+runs foreground UI timers.
+
 
 Mock entry points: `/browser`, `/browser?view=history`, `/browser?view=downloads`,
 `/browser?view=settings`, `/browser?browser_scene=empty` and
