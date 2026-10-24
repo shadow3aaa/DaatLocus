@@ -892,7 +892,7 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                     #[cfg(windows)]
                     if let Some(text)=manifest.owner_text.get(&index){crate::browser_use::owner_text(&host.app,text.clone()).await.unwrap();tokio::time::sleep(Duration::from_millis(100)).await;}
                     #[cfg(windows)]
-                    let layer=if let Some(key)=&selected&&let Some(view)=host.app.get_webview(key){crate::browser_use::composition_probe(&view).await.ok()}else{None};
+                    let layer=if let Some(key)=&selected&&let Some(view)=host.app.get_webview(key){Some(crate::browser_use::composition_probe(&view).await.unwrap_or_else(|error|serde_json::json!({"error":error})))}else{None};
                     #[cfg(not(windows))]
                     let layer:Option<serde_json::Value>=None;
                     let shell=if manifest.shell_url.is_some()&&let Some(shell)=host.app.get_webview("main") {crate::browser_use::evaluate(&shell,"({clicks:window.clicks||0,tips:window.tips||0,regions:window.DLComposition?.browserForeground(document.querySelector('#viewport')),width:innerWidth,height:innerHeight})").await.ok()}else{None};

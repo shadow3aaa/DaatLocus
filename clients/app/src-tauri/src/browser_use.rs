@@ -46,7 +46,9 @@ pub(crate) async fn compose(
 pub(crate) use platform::{owner_click, owner_text};
 #[cfg(all(windows, feature = "web-contract"))]
 pub(crate) async fn composition_probe(view: &Webview) -> Result<Value, String> {
-    platform::composition_probe(view).await
+    let mut value = platform::composition_probe(view).await?;
+    value["background"] = evaluate(view, include_str!("browser-background.js")).await?;
+    Ok(value)
 }
 pub(crate) async fn page_screenshot(view: &Webview) -> Result<String, String> {
     cursor_visibility(view, "suspend").await;
@@ -101,11 +103,7 @@ pub(crate) async fn evaluate(window: &Webview, script: &str) -> Result<Value, St
         .await
         .map_err(|_| "Browser inspection timed out")?
         .map_err(|_| "Browser inspection interrupted")?;
-    let mut value: Value =
-        serde_json::from_str(&value).map_err(|_| "Invalid browser inspection")?;
-    if let Some(encoded) = value.as_str() {
-        value = serde_json::from_str(encoded).map_err(|_| "Invalid encoded browser inspection")?;
-    }
+    let value: Value = serde_json::from_str(&value).map_err(|_| "Invalid browser inspection")?;
     Ok(value)
 }
 fn label(profile: &str, tab: &str) -> String {

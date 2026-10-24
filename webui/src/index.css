@@ -1017,9 +1017,9 @@ html[data-desktop-platform="windows"] .dl-virtual-displays-header { padding-righ
 
 /* Shared browser: quiet chrome, native page viewport, local start/library pages. */
 .dl-browser-page { position: relative; display: flex; flex-direction: column; height: 100%; min-width: 0; min-height: 0; overflow: hidden; border-radius: 16px 0 0 16px; background: var(--background); }
-.dl-browser-tabs { display: flex; align-items: center; min-width: 0; gap: 4px; min-height: 38px; padding: 3px 12px 0; flex: none; background: color-mix(in srgb,var(--foreground) 1.5%,var(--background)); }
+.dl-browser-tabs { display: flex; align-items: center; min-width: 0; gap: 4px; min-height: 38px; padding: 3px 12px 0; flex: none; color: var(--dl-browser-tab-foreground,var(--foreground)); background: var(--dl-browser-tab-background,color-mix(in srgb,var(--foreground) 1.5%,var(--background))); transition: background-color .18s ease,color .18s ease; }
 .dl-browser-tab-strip { display: flex; min-width: 0; overflow: auto; scrollbar-width: none; }
-.dl-browser-tab { display: flex; align-items: center; width: 200px; min-width: 100px; max-width: 220px; border-radius: 9px 9px 0 0; color: var(--muted-foreground); }
+.dl-browser-tab { display: flex; align-items: center; width: 200px; min-width: 100px; max-width: 220px; border-radius: 9px 9px 0 0; color: inherit; }
 .dl-browser-tab[data-active=true] { color: var(--foreground); background: var(--background); }
 .dl-browser-tab { position: relative; flex-shrink: 0; user-select: none; }
 .dl-browser-tab[data-dragging=true] { opacity: .45; }
@@ -1030,6 +1030,9 @@ html[data-desktop-platform="windows"] .dl-virtual-displays-header { padding-righ
 .dl-browser-tab>button[role=tab] span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dl-browser-tab>button[role=tab] svg { width: 14px; height: 14px; flex: none; }
 .dl-browser-tab>[data-slot=button] { width: 24px; height: 24px; margin-right: 6px; }
+html[data-browser-tint] .dl-window-controls { color: var(--dl-browser-tab-foreground); }
+html[data-browser-tint] :is(.dl-browser-tabs>[data-slot=button],.dl-browser-tab:not([data-active=true])>[data-slot=button],.dl-window-controls>[data-slot=button]:not(:last-child)):hover { color: var(--dl-browser-tab-foreground); background: color-mix(in srgb,var(--dl-browser-tab-background) 88%,var(--dl-browser-tab-foreground)); }
+@media (prefers-reduced-motion: reduce) { .dl-browser-tabs { transition: none; } }
 .dl-browser-toolbar { display: flex; align-items: center; gap: 12px; padding: 10px 10px 11px; min-width: 0; flex: none; border-bottom: 1px solid var(--border); background: var(--background); }
 .dl-browser-navigation,.dl-browser-actions { display: flex; align-items: center; gap: 0; flex: none; border: 1px solid var(--border); border-radius: 28px; padding: 3px; box-shadow: 0 2px 12px color-mix(in srgb,var(--foreground) 3%,transparent); }
 .dl-browser-toolbar [data-slot=button] { border-radius: 50%; width: 38px; height: 38px; }

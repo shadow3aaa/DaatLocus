@@ -62,7 +62,7 @@ pub async fn browser_control(
     {
         return Err("Invalid browser control".into());
     }
-    let input=serde_json::json!({"profile":daat_locus_client_protocol::web::SHARED_BROWSER_PROFILE,"action":action,"tab":tab,"url":url,"bounds":bounds,"foreground":foreground}).to_string();
+    let input=serde_json::json!({"profile":daat_locus_client_protocol::web::SHARED_BROWSER_PROFILE,"action":action,"tab":tab,"url":url,"bounds":bounds,"foreground":foreground,"background_script":include_str!("browser-background.js")}).to_string();
     tokio::task::spawn_blocking(move || {
         let context = ndk_context::android_context();
         let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };

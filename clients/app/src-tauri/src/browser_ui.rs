@@ -494,6 +494,14 @@ pub async fn browser_control(
                 {
                     page["can_back"] = serde_json::json!(back);
                     page["can_forward"] = serde_json::json!(forward);
+                    page["background"] = tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        crate::browser_use::evaluate(&view, include_str!("browser-background.js")),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(serde_json::Value::Null);
                 }
                 page["loading"] = serde_json::json!(
                     host.loading

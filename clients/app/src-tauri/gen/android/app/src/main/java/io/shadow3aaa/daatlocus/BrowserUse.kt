@@ -171,6 +171,27 @@ internal object BrowserUse {
     fun fail(message:String){done(JSONObject().put("error",message))}
     try{
       val action=command.getString("action")
+      if(action=="list"){
+        val reply=control(owner,command)
+        val key=selected
+        val view=WebHost.pages[key]?.view
+        if(view==null){done(reply);return}
+        var completed=false
+        val timeout=Runnable{if(!completed){completed=true;done(reply)}}
+        handler.postDelayed(timeout,500)
+        view.evaluateJavascript(command.getString("background_script")){value->
+          if(!completed){
+            completed=true;handler.removeCallbacks(timeout)
+            val color=runCatching{JSONTokener(value).nextValue()}.getOrNull()
+            if(color is String&&color.matches(Regex("#[0-9a-fA-F]{6}"))){
+              val pages=reply.getJSONArray("pages")
+              for(index in 0 until pages.length()){val page=pages.getJSONObject(index);if(page.optString("tab")==key?.removePrefix("${command.getString("profile")}-"))page.put("background",color)}
+            }
+            done(reply)
+          }
+        }
+        return
+      }
       if(action !in listOf("find","find_next","find_previous","find_close","screenshot")){done(control(owner,command));return}
       if(!owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))throw IllegalStateException("Open the native client")
       val account=command.getString("profile")

@@ -4,6 +4,7 @@ import { ArrowLeftIcon, ArrowRightIcon, CameraIcon, ChevronDownIcon, ChevronUpIc
 import { t } from "@/lib/i18n";
 import { browserControl, browserFind, browserLayout, browserLibrary, browserScreenshot, subscribeBrowserWorkspace, type BrowserAction, type BrowserFindAction, type BrowserFindResult, type BrowserLibrary, type BrowserLibraryAction, type BrowserWorkspace } from "@/lib/browser-workspace";
 import { browserForeground } from "@/lib/browser-composition";
+import { browserChrome } from "@/lib/browser-chrome";
 import { isTauri } from "@tauri-apps/api/core";
 import { browserDestination } from "@/lib/browser-address";
 import { browserShortcut } from "@/lib/browser-shortcuts";
@@ -63,6 +64,16 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
   const blocked=useRef(false);
   const current=workspace.pages.find(page=>page.tab===workspace.selected);
   const home=!current || current.url==="about:blank";
+  useEffect(()=>{
+    const root=document.documentElement;
+    const palette=browserChrome(home?null:current?.background);
+    if(palette){
+      root.setAttribute("data-browser-tint","");
+      root.style.setProperty("--dl-browser-tab-background",palette.background);
+      root.style.setProperty("--dl-browser-tab-foreground",palette.foreground);
+    }
+    return()=>{root.removeAttribute("data-browser-tint");root.style.removeProperty("--dl-browser-tab-background");root.style.removeProperty("--dl-browser-tab-foreground");};
+  },[home,current?.background]);
   const nativeVisible=!home && !panel;
   blocked.current=!nativeVisible;
   const zoom=current?.zoom??1;

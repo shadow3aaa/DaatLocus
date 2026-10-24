@@ -2,7 +2,7 @@ import { latestOperation } from "./latest-operation";
 import { listen } from "@tauri-apps/api/event";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
-export type BrowserPageInfo = { tab: string; url: string; title: string; favicon?: string | null; progress?: number; loading?: boolean; can_back?: boolean; can_forward?: boolean; zoom?: number };
+export type BrowserPageInfo = { tab: string; url: string; title: string; favicon?: string | null; background?: string | null; progress?: number; loading?: boolean; can_back?: boolean; can_forward?: boolean; zoom?: number };
 export type BrowserWorkspace = { pages: BrowserPageInfo[]; selected: string | null };
 export type BrowserVisit = { id: string; url: string; title: string; time: number; favicon?: string | null };
 export type BrowserPreferences = {search_engine:"google"|"bing"|"duckduckgo"|"baidu";language:"system"|"zh-CN"|"en-US";default_zoom:number};

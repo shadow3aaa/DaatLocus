@@ -3,6 +3,7 @@ import type { BrowserAction, BrowserBounds, BrowserWorkspace, BrowserLibraryActi
 import cursorScript from "../../crates/daat-locus-client-protocol/src/browser-cursor.js?raw";
 import html2canvas from "html2canvas";
 import { browserShortcut } from "../src/lib/browser-shortcuts";
+import backgroundScript from "../../clients/app/src-tauri/src/browser-background.js?raw";
 const listeners=new Set<()=>void>();
 export async function subscribeBrowserWorkspace(callback:()=>void){listeners.add(callback);return()=>{listeners.delete(callback);};}
 const changed=()=>listeners.forEach(callback=>callback());
@@ -23,6 +24,7 @@ const histories=new Map<string,{urls:string[],index:number}>();
 const scene=new URLSearchParams(location.search).get("browser_scene");
 if(scene==="empty"){state={pages:[],selected:null};library.history=[];library.downloads=[];}
 if(scene==="cursor")state.selected="demo";
+if(scene==="tint"){state.selected="demo";state.pages[1].background="#1c3557";}
 if(scene==="downloads"){
   state.selected="demo";
   library.downloads=[
@@ -47,8 +49,16 @@ function render(){
   frame=frames.get(selected.tab)??null;
   if(!frame || !frame.isConnected){frame=document.createElement("iframe");frame.title="Browser preview";frame.setAttribute("sandbox","allow-scripts allow-downloads allow-modals");Object.assign(frame.style,{position:"absolute",inset:"0",width:"100%",height:"100%",border:"0"});viewport.append(frame);frames.set(selected.tab,frame);}
   if(frame.style.display!=="block")frame.style.display="block";
+  const initialBackground=frame.dataset.background??selected.background??"";
+  frame.dataset.background=initialBackground;
   const escaped=selected.title.replaceAll("&","&amp;").replaceAll("<","&lt;");
   const source=`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{color-scheme:light dark;font:16px system-ui}body{margin:0;padding:clamp(20px,5vw,64px);line-height:1.6;background:light-dark(#fff,#212121);color:light-dark(#171717,#eee)}main{max-width:760px;margin:auto}h1{font-size:28px;font-weight:600;margin:0 0 16px}p{color:light-dark(#666,#aaa)}nav{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0}button,input{font:inherit;padding:9px 14px;border:1px solid #8886;border-radius:9px;background:transparent;color:inherit}button{cursor:pointer}button:hover{background:#8882}.target{min-height:190px;border:1px dashed #8888;border-radius:16px;display:grid;place-content:center;gap:12px;margin:24px 0}.target button{background:#5267df;color:white;border:0}input{width:min(320px,70vw)}output{min-height:24px;color:#5267df;display:block}section{margin:60px 0}</style><main><h1>${escaped || "Example Domain"}</h1><p>在下方选择一种操作，查看虚拟光标与动效。也可以直接点击、输入和滚动。</p><nav aria-label="光标演示">${["移动","点击","双击","拖动","滚动","键盘","连续播放","停止","边缘"].map((label,index)=>`<button data-demo="${index}">${label}</button>`).join("")}</nav><label><input id="reduced" type="checkbox" style="width:auto"> 减少动态效果</label><div class="target"><button id="target">点击按钮</button><input id="field" placeholder="试着输入文字" aria-label="演示输入"><output id="status" aria-live="polite"></output></div><button id="download">下载示例文件</button><section><h2>滚动区域</h2><p>光标不拦截鼠标事件，不改变输入焦点，也不会显示输入内容。</p></section><div style="height:650px;background:linear-gradient(transparent,#8881);border-radius:16px"></div></main><script>
+const readBackground=()=>${backgroundScript};
+const reportBackground=()=>parent.postMessage({type:'dl-browser-background',background:readBackground()},'*');
+if(${JSON.stringify(initialBackground)})document.body.style.background=${JSON.stringify(initialBackground)};
+const palette=document.createElement('nav');palette.setAttribute('aria-label','页面背景');
+for(const [color,label] of [['#ffffff','浅色'],['#171717','深色'],['#1c3557','蓝色'],['#c88756','暖色']]){const button=document.createElement('button');button.textContent=label;button.onclick=()=>{document.body.style.background=color;document.body.style.color=['#171717','#1c3557'].includes(color)?'#fff':'#171717';reportBackground()};palette.append(button)}
+document.querySelector('main').prepend(palette);reportBackground();
 const nativeMatch=window.matchMedia.bind(window);let reduced=${new URLSearchParams(location.search).get('motion')==='full'?'false':new URLSearchParams(location.search).get('motion')==='reduce'?'true':"nativeMatch('(prefers-reduced-motion: reduce)').matches"};
 window.matchMedia=query=>query==='(prefers-reduced-motion: reduce)'?{matches:reduced}:nativeMatch(query);
 const cursor=(${cursorScript});let timer=0,step=0,ranges=[],match=-1;
@@ -89,6 +99,12 @@ document.querySelector('#download').onclick=()=>parent.postMessage({type:'dl-bro
 }
 window.addEventListener("message",event=>{if(event.source===frame?.contentWindow && event.data?.type==="dl-browser-download"){library.downloads.unshift({id:crypto.randomUUID(),url:demo,name:"example.txt",time:Date.now(),status:"downloading",bytes:0});setTimeout(()=>{const item=library.downloads.find(item=>item.status==="downloading");if(item){item.status="complete";item.bytes=128;}},4000);}});
 window.addEventListener("message",event=>{if(event.source===frame?.contentWindow&&event.data?.type==="dl-browser-shortcut"&&typeof event.data.code==="string")window.dispatchEvent(new CustomEvent("dl-browser-shortcut",{detail:event.data.code}));});
+window.addEventListener("message",event=>{
+  if(event.data?.type!=="dl-browser-background"||typeof event.data.background!=="string"||!/^#[0-9a-f]{6}$/i.test(event.data.background))return;
+  const tab=[...frames].find(([,view])=>view.contentWindow===event.source)?.[0];
+  const page=state.pages.find(page=>page.tab===tab);
+  if(page&&page.background!==event.data.background){page.background=event.data.background;changed();}
+});
 let layoutOperations:Promise<unknown>=Promise.resolve();
 export function browserLayout(bounds:BrowserBounds|null,_foreground:unknown[]=[]){
   const result=layoutOperations.catch(()=>{}).then(()=>{active=Boolean(bounds);render();});layoutOperations=result;return result;

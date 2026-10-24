@@ -227,7 +227,11 @@ fn transparent_shell_composes_above_the_page_and_routes_native_clicks() {
             "page native input: {}",
             step["native_control"]
         );
-        assert_eq!(step["layer"]["composed"], true);
+        assert_eq!(step["layer"]["composed"], true, "{}", step["layer"]);
+        assert_eq!(
+            step["layer"]["background"], "#00c800",
+            "read actual page paint"
+        );
         assert_eq!(
             step["shell"]["tips"], expected,
             "nested foreground native input"
