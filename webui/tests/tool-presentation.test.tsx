@@ -41,7 +41,7 @@ describe("tool observations are product content, never protocol dumps", () => {
   });
   test("GUI screenshots retain previews through either screenshot URLs or resource references", () => {
     const uri = "/v1/actors/root/resources/screenshot";
-    for (const name of ["computer_use__get_window_state", "phone_use__get_window_state"]) {
+    for (const name of ["computer_use__get_window_state", "phone_use__get_window_state", "browser_use__observe"]) {
       for (const references of [[], [{uri,name:"image",media_type:"image/png"}]]) {
         const html = renderToStaticMarkup(<ToolDetail result={result({name,payload:{status:"observed",observation:{title:"Observed application",screenshot_url:uri},resource_references:references}})} />);
         expect(html.match(/<img\b/g)).toHaveLength(1);
@@ -86,6 +86,11 @@ describe("tool observations are product content, never protocol dumps", () => {
     const html = renderToStaticMarkup(<ToolDetail result={result({name:"computer_use__give_window",arguments:{text:"PRIVATE_TYPED_TEXT"},payload:{status:"given_to_user",windows:[{title:"Returned document",controlled:false}],private_metadata:"PRIVATE_DRIVER_METADATA",state_id:"PRIVATE_STATE_TOKEN"}})}/>);
     expect(html).toContain("Returned document");
     for(const hidden of ["PRIVATE_TYPED_TEXT","PRIVATE_DRIVER_METADATA","PRIVATE_STATE_TOKEN","HIDDEN_MODEL_PROTOCOL"]) expect(html).not.toContain(hidden);
+  });
+  test("BrowserUse renders page facts while keeping coordinates and native receipts private", () => {
+    const html=renderToStaticMarkup(<ToolDetail result={result({name:"browser_use__click",arguments:{text:"PRIVATE_TYPED_TEXT",state_id:"PRIVATE_RECEIPT"},payload:{status:"observed",observation:{title:"Shared browser document",url:"https://example.com/report",tab_id:"PRIVATE_TAB",state_id:"PRIVATE_RECEIPT",png_base64:"PRIVATE_IMAGE"},private_metadata:"PRIVATE_NATIVE"}})}/>);
+    expect(html).toContain("Shared browser document");expect(html).toContain("https://example.com/report");
+    for(const hidden of ["PRIVATE_TYPED_TEXT","PRIVATE_RECEIPT","PRIVATE_TAB","PRIVATE_IMAGE","PRIVATE_NATIVE","HIDDEN_MODEL_PROTOCOL"])expect(html).not.toContain(hidden);
   });
   test("PhoneUse renders window observations without private native identifiers or typed input", () => {
     const html = renderToStaticMarkup(<ToolDetail result={result({name:"phone_use__set_text",arguments:{text:"PRIVATE_TYPED_TEXT"},payload:{status:"dispatched",observation:{title:"Android document",width:1280,height:720,state_id:"PRIVATE_STATE_TOKEN",window_id:"PRIVATE_WINDOW_TOKEN",input_target:{kind:"editable_control",text:"PRIVATE_RECEIVER_TEXT"}},private_metadata:"PRIVATE_NATIVE_METADATA"}})}/>);
@@ -144,14 +149,16 @@ describe("tool observations are product content, never protocol dumps", () => {
     for (const value of ["cargo check", "C:/project", "Finished build"]) expect(html).toContain(value);
     expect(html).not.toContain("HIDDEN_MODEL_PROTOCOL");
   });
-  test("browser navigation does not leak its model-specific JSON transcript", () => {
-    const html = renderToStaticMarkup(<ToolDetail result={result({ name: "browser__browser_open_page", payload: { page: { url: "https://example.com", title: "文档" } } })} />);
+  test("Web documents render their page content without model-specific transcripts", () => {
+    const html = renderToStaticMarkup(<ToolDetail result={result({ name: "web__run", payload: { results:[{operation:"open",result:{ref_id:"web:example",url:"https://example.com",title:"文档",content:"CAPTURED_PAGE_TEXT",offset:0,next_offset:100}}] } })} />);
     expect(html).toContain("https://example.com");
     expect(html).toContain("文档");
+    expect(html).toContain("CAPTURED_PAGE_TEXT");
+    expect(html).not.toContain("web:example");
     expect(html).not.toContain("HIDDEN_MODEL_PROTOCOL");
   });
   test("JSON web documents render as inspectable values rather than a raw dump", () => {
-    const html = renderToStaticMarkup(<ToolDetail result={result({ name: "browser__read_url", payload: { url: "https://example.com/data", status: 200, media_type: "application/json", body: '{"title":"报告","refresh":false}' } })} />);
+    const html = renderToStaticMarkup(<ToolDetail result={result({ name: "web__run", payload: { results:[{operation:"open",result:{url:"https://example.com/data",offset:0,next_offset:null,media_type:"application/json",content:'{"title":"报告","refresh":false}'}}] } })} />);
     expect(html).toContain("报告");
     expect(html).toContain(i18n.t("tool_parameters.no"));
     expect(html).not.toContain("&quot;refresh&quot;");

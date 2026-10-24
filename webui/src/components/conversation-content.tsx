@@ -75,7 +75,7 @@ export function Activities({ actorId, tools, onActor, thinking }: { actorId: str
   const actorRef = (tool: ToolSummary & { status?: string }) => !tool.id.startsWith("live:") && tool.status !== "running" && !tool.error && !approvalNotice(tool.outcome) && ["actors__create", "actors__send", "actors__steer"].includes(domainToolName(tool.name));
   const names = tools.filter(tool => !approvalNotice(tool.outcome)).map(tool => tool.name);
   const domains = names.map(domainToolName);
-  const GroupIcon = domains.some(name => name.startsWith("browser__")) && domains.some(name => !name.startsWith("browser__")) ? ToolGroupIcon : activityIcon(names);
+  const GroupIcon = domains.some(name => name.startsWith("web__")) && domains.some(name => !name.startsWith("web__")) ? ToolGroupIcon : activityIcon(names);
   if (!tools.length) return thinking ? <div className="dl-activities"><div className="dl-activity-heading dl-activity-thinking" role="status"><span className="dl-activity-title">{thinking}</span></div></div> : null;
   async function expand(tool: ToolSummary, retry = false) {
     pendingDetail.current?.abort();

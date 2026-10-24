@@ -17,7 +17,11 @@ export function mockPreviewPlugin(): Plugin {
       for (const response of responses) response.destroy();
       responses.clear();
     },
-    resolveId(id) {
+    resolveId(id,importer) {
+      const normalized=id.replaceAll("\\", "/").replace(/\.ts$/, "");
+      if (id === "@/lib/transport" || id === "./transport" && importer?.replaceAll("\\", "/").includes("/src/lib/")) return path.resolve(import.meta.dirname,"transport.ts");
+      if (id === "@/lib/desktop-account" || id === "./desktop-account" && importer?.replaceAll("\\", "/").includes("/src/lib/")) return path.resolve(import.meta.dirname,"desktop-account.ts");
+      if (id === "@/lib/browser-workspace" || normalized.endsWith("/src/lib/browser-workspace")) return path.resolve(import.meta.dirname, "browser-workspace.ts");
       if (process.env.DAAT_LOCUS_MOCK_MACOS === "1" && (id === "@/lib/desktop-window" || id.replaceAll("\\", "/").endsWith("/src/lib/desktop-window"))) return path.resolve(import.meta.dirname, "desktop-window.ts");
       if (process.env.DAAT_LOCUS_MOCK_MACOS === "1" && (id === "@/lib/macos-computer-use" || id.replaceAll("\\", "/").endsWith("/src/lib/macos-computer-use"))) return path.resolve(import.meta.dirname, "macos-computer-use.ts");
       if (process.env.DAAT_LOCUS_MOCK_PHONE === "1") {

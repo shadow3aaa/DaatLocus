@@ -59,7 +59,7 @@ export function seedActivityPreview(actor: ActorStore, thinkingOnly = false) {
   text(state,"assistant","我先检查消息流、活动记录和输入框的边界，再核对窄屏下的阅读位置。");
   text(state,"reasoning","先核对页面中可见的阅读区域，再查看对应的布局文件。");
   const actions: Action[] = [
-    {name:"browser__browser_open_page",summary:"检查消息区和活动记录的预览状态",arguments:{url:"http://127.0.0.1:5177/"},outcome:{url:"http://127.0.0.1:5177/"},payload:{url:"http://127.0.0.1:5177/",snapshot:"Browser tab: 19, Title: 工作活动 · 分步演示 · 1000px\nURL: http://127.0.0.1:5177/__mock/frame?scene=activity-replay&width=1000\n\nConversation: Iris\nMessage history\nGrouped activity\nComposer\n\nThe conversation remains readable when the composer grows."}},
+    {name:"web__run",summary:"检查消息区和活动记录的预览状态",arguments:{open:[{ref_id:"http://127.0.0.1:5177/",offset:null,source:"rendered",view:null,refresh:false}],click:null,find:null,response_length:"medium"},outcome:{url:"http://127.0.0.1:5177/"},payload:{results:[{operation:"open",result:{ref_id:"web:preview",title:"工作活动 · 分步演示",url:"http://127.0.0.1:5177/",offset:0,next_offset:null,content:"Conversation: Iris\nMessage history\nGrouped activity\nComposer\n\nThe conversation remains readable when the composer grows."}}]}},
     read("webui/src/components/conversation-pane.tsx"),
     read("webui/src/components/work-round.tsx"),
     command("rg -n 'padding|gap|overflow' webui/src/index.css"),

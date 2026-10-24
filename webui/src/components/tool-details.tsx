@@ -45,7 +45,7 @@ function imageReferences(result: ToolResult): { uri: string; name: string }[] {
   const origin = typeof location === "undefined" ? "http://localhost" : location.href;
   const fallback = asText(observation.title) || asText(payload.path).split(/[\\/]/).at(-1) || t("markdown.image");
   const references = asRows(payload.resource_references).filter(reference => asText(reference.media_type).startsWith("image/"));
-  if (["computer_use__", "phone_use__"].some(prefix => domainToolName(result.name).startsWith(prefix))) {
+  if (["computer_use__", "phone_use__", "browser_use__"].some(prefix => domainToolName(result.name).startsWith(prefix))) {
     references.push({ uri: asText(observation.screenshot_url), name: fallback });
   }
   const seen = new Set<string>();
@@ -126,14 +126,25 @@ function ToolContent({ result, onActor, hasImages }: ToolDetailProps & { hasImag
   if (result.name === "files__search_text") return <div className="dl-file-details"><p className="dl-tool-note">{t("tool_details.search")}{asText(args.query)}</p><ul className="dl-file-matches">{asRows(payload.matches).map((match, index) => <li key={index}><small>{asText(match.path)}:{String(match.line_number)}</small><pre>{asText(match.text)}</pre></li>)}</ul>{payload.limited === true && <small>{t("tool_details.result_limit_reached")}</small>}</div>;
   if (result.name === "files__list_skills") return <ul className="dl-tool-result-list">{asRows(payload.skills).map((skill, index) => <li key={index}><strong>{asText(skill.name)}</strong><p>{readableSummary(asText(skill.description))}</p></li>)}</ul>;
   if (result.name === "actors__list") return <ul className="dl-tool-result-list">{asRows(payload.actors).map((actor, index) => <li key={index}>{onActor && asText(actor.id) ? <button className="dl-result-actor" type="button" onClick={() => onActor(asText(actor.id))}>{asText(actor.name) || "Actor"}</button> : <strong>{asText(actor.name) || "Actor"}</strong>}<small>{actor.read_only === true ? t("tool_details.read_only") : actor.status === "archived" ? t("conversation_pane.actor_archived") : actor.status === "running" ? t("conversation_pane.working") : t("conversation_pane.ready")}</small></li>)}</ul>;
-  if (result.name.startsWith("browser__")) {
-    const page = asObject(payload.page);
-    const url = asText(payload.url) || asText(page.url) || asText(args.url);
-    const href = safeLink(url);
-    const source = asText(payload.snapshot) || asText(payload.body);
-    let document: JsonValue | undefined;
-    if (asText(payload.media_type).includes("json")) { try { document = JSON.parse(source) as JsonValue; } catch { /* Invalid source remains literal text. */ } }
-    return document !== undefined ? <div className="dl-tool-details dl-browser-details"><ToolParameters value={document} /></div> : <TextOutput label={t("tool_details.plain_text")} context={asText(payload.title) || asText(page.title)} content={source || readableSummary(result.summary) || t("tool_details.page_action_completed")} href={href} />;
+  if (result.name.startsWith("browser_use__")) {
+    const observation=asObject(payload.observation);
+    const pages=asRows(payload.pages);
+    const url=safeLink(asText(observation.url));
+    return <section className="dl-tool-details">{url&&<p><a href={url} target="_blank" rel="noreferrer">{asText(observation.title)||url}<ExternalLinkIcon aria-hidden="true"/></a></p>}{!hasImages&&pages.length>0&&<ul className="dl-tool-result-list">{pages.map((page,index)=><li key={index}><strong>{asText(page.title)||asText(page.url)}</strong></li>)}</ul>}{payload.status==="outcome_unknown"&&<p className="dl-operation-note">{t("browser_use.unknown")}</p>}</section>;
+  }
+  if (domainToolName(result.name).startsWith("web__")) {
+    return <div className="dl-tool-details">{asRows(payload.results).map((entry,index) => {
+      if (asText(entry.error)) return <p className="dl-operation-error" key={index}>{asText(entry.error)}</p>;
+      const document=asObject(entry.result);
+      const content=asText(document.content);
+      let structured: JsonValue | undefined;
+      if (asText(document.media_type).includes("json") && document.next_offset == null && document.offset === 0) {try {structured=JSON.parse(content) as JsonValue;} catch { /* Keep the original source text. */ }}
+      const matches=asRows(document.matches);
+      return <section key={index}>{structured !== undefined ? <ToolParameters value={structured} /> : <>
+        {content && <TextOutput label={t("tool_details.plain_text")} context={asText(document.title) || asText(document.url)} content={content} href={safeLink(asText(document.url))} />}
+        {matches.map((match,matchIndex)=><TextOutput key={matchIndex} label={t("tool_presentation.read_page")} content={asText(match.content)} />)}
+      </>}{document.next_offset != null && <p className="dl-operation-note">{t("tool_details.partial_document")}</p>}{Array.isArray(document.notices) && document.notices.filter((notice):notice is string=>typeof notice === "string").map((notice,noticeIndex)=><p className="dl-operation-note" key={noticeIndex}>{notice}</p>)}</section>;
+    })}{payload.closed === true && <p>{t("tool_details.page_action_completed")}</p>}</div>;
   }
   const text = [payload.message, payload.description, payload.text, payload.content].map(value => readableSummary(asText(value))).find(Boolean);
   const fields = text ? Object.fromEntries(Object.entries(payload).filter(([key]) => !["message","description","text","content"].includes(key))) : payload;

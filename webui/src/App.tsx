@@ -1,3 +1,4 @@
+import { browserSupported } from "@/lib/browser-workspace";
 import { useTranslation } from "react-i18next";
 import { t } from "@/lib/i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -10,6 +11,7 @@ import { AccountError } from "@/components/account-error";
 import { accountErrorCode } from "@/lib/account-errors";
 import { DesktopTitlebar } from "@/components/desktop-titlebar";
 import { NativeResourcePreview } from "@/components/native-resource-preview";
+import { BrowserPage } from "@/components/browser-page";
 import { VirtualDisplaysPage } from "@/components/virtual-displays-page";
 import { virtualDisplayCapabilities } from "@/lib/virtual-displays";
 import { AppsPage } from "@/components/apps-page";
@@ -48,6 +50,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const settingsPage = useRef<SettingsPageHandle>(null);
   const settingsReturnPath = useRef("/");
+  const [browserOpen, setBrowserOpen] = useState(() => location.pathname === "/browser");
   const [searching, setSearching] = useState(false);
 
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -57,7 +60,7 @@ export default function App() {
   useEffect(() => { const media = matchMedia("(max-width: 767px)"); const update = () => { setMobile(media.matches); setSidebarOpen(false); }; media.addEventListener("change", update); return () => media.removeEventListener("change", update); }, []);
 
   useEffect(() => { applyPreferences(preferences); savePreferences(preferences); void setWebUiLanguage(preferences.language); const media = matchMedia("(prefers-color-scheme: dark)"); const change = () => applyPreferences(preferences); media.addEventListener("change", change); const motion = matchMedia("(prefers-reduced-motion: reduce)"); motion.addEventListener("change", change); const languageChange = () => { void setWebUiLanguage(preferences.language); }; window.addEventListener("languagechange", languageChange); return () => { media.removeEventListener("change", change); motion.removeEventListener("change", change); window.removeEventListener("languagechange", languageChange); }; }, [preferences]);
-  const revoked = useCallback(() => { authEpoch.current++; configureConversationDevice(null); clearConversationDrafts(); setAccess(null); setActorStack([]); setSettings(false); setAppsOpen(false); setVirtualDisplaysOpen(false); setVirtualDisplaysSupported(false); setSearching(false); setSidebarOpen(false); }, []);
+  const revoked = useCallback(() => { authEpoch.current++; configureConversationDevice(null); clearConversationDrafts(); setAccess(null); setActorStack([]); setSettings(false); setAppsOpen(false); setVirtualDisplaysOpen(false); setVirtualDisplaysSupported(false); setSearching(false); setSidebarOpen(false); setBrowserOpen(false); }, []);
   useEffect(() => {
     if (!access) return;
     const controller = new AbortController();
@@ -108,7 +111,7 @@ export default function App() {
       if (epoch !== authEpoch.current) return;
       if (configuration.status === "fulfilled") setModels(configuration.value.models.map(model => ({ name: model.name, label: model.model_id || model.name, effort: model.thinking_budget || "", isDefault: configuration.value.main_model === model.name })));
       setReady(readiness.status === "fulfilled" && readiness.value.ready);
-      setAppsOpen(location.pathname === "/apps"); setVirtualDisplaysOpen(location.pathname === "/virtual-displays");
+      setAppsOpen(location.pathname === "/apps"); setVirtualDisplaysOpen(location.pathname === "/virtual-displays"); setBrowserOpen(location.pathname === "/browser");
       setAccess(result);
   }, [revoked]);
   useEffect(() => {
@@ -143,11 +146,11 @@ export default function App() {
     window.addEventListener("online", resume);
     return () => { controller.abort(); clearInterval(timer); document.removeEventListener("visibilitychange", resume); window.removeEventListener("online", resume); };
   }, [access, revoked]);
-  useEffect(() => { function pop() { const tab = settingsTabFromPath(location.pathname); if (tab) {setSettingsTab(tab);setSettings(true);return;} if (settings) {history.pushState(null, "", settingsPath(settingsTab));settingsPage.current?.close();return;} setAppsOpen(location.pathname === "/apps"); setVirtualDisplaysOpen(location.pathname === "/virtual-displays"); const linked = actorIdFromUrl(location.href, location.href); const id = linked ? localActorId(linked) : null; setActorStack(id && id !== entry ? [id] : []); } window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, [entry, settings, settingsTab]);
+  useEffect(() => { function pop() { const tab = settingsTabFromPath(location.pathname); if (tab) {setSettingsTab(tab);setSettings(true);return;} if (settings) {history.pushState(null, "", settingsPath(settingsTab));settingsPage.current?.close();return;} setAppsOpen(location.pathname === "/apps"); setVirtualDisplaysOpen(location.pathname === "/virtual-displays"); setBrowserOpen(location.pathname === "/browser"); const linked = actorIdFromUrl(location.href, location.href); const id = linked ? localActorId(linked) : null; setActorStack(id && id !== entry ? [id] : []); } window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, [entry, settings, settingsTab]);
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
       const key = event.key.toLowerCase();
-      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.isComposing || event.defaultPrevented || !["f", "k"].includes(key) || !access || peek || settings || appsOpen || virtualDisplaysOpen) return;
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.isComposing || event.defaultPrevented || !["f", "k"].includes(key) || !access || peek || settings || appsOpen || virtualDisplaysOpen || browserOpen) return;
       event.preventDefault();
       if (event.repeat) return;
       if (key === "k") setSearching(value => !value);
@@ -159,15 +162,16 @@ export default function App() {
     }
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
-  }, [access, peek, settings, appsOpen, virtualDisplaysOpen]);
+  }, [access, peek, settings, appsOpen, virtualDisplaysOpen, browserOpen]);
   function openActor(address: string) { if (mobile) setSidebarOpen(false); const id = localActorId(address); if (id === entry && !peek) return; setActorStack(old => old.at(-1) === id ? old : [...old, id]); history.pushState(null, "", conversationUrl(address)); }
   function closeActor() { setActorStack([]); history.replaceState(null, "", "/"); }
   function backActor() { const next = actorStack.slice(0, -1); setActorStack(next); history.replaceState(null, "", next.length ? conversationUrl(next.at(-1)!) : "/"); }
   function openSettings(tab: SettingsTab) { if (!settings) settingsReturnPath.current = location.pathname; setSettingsTab(tab); setSettings(true); setSidebarOpen(false); history.pushState(null, "", settingsPath(tab)); }
-  function closeSettings(open: boolean) { if (open) return; setSettings(false); setAppsOpen(settingsReturnPath.current === "/apps"); setVirtualDisplaysOpen(settingsReturnPath.current === "/virtual-displays"); history.replaceState(null, "", settingsReturnPath.current); }
-  function home() { if (settings) { settingsReturnPath.current = "/"; setActorStack([]); settingsPage.current?.close(); return; } setAppsOpen(false); setVirtualDisplaysOpen(false); closeActor(); if (mobile) setSidebarOpen(false); }
-  function openApps() { if (settings) { settingsReturnPath.current = "/apps"; settingsPage.current?.close(); return; } setAppsOpen(true); setVirtualDisplaysOpen(false); setSearching(false); setActorStack([]); setSidebarOpen(false); history.pushState(null, "", "/apps"); }
-  function openVirtualDisplays() { if (settings) { settingsReturnPath.current = "/virtual-displays"; settingsPage.current?.close(); return; } setVirtualDisplaysOpen(true); setAppsOpen(false); setSearching(false); setActorStack([]); setSidebarOpen(false); history.pushState(null, "", "/virtual-displays"); }
+  function closeSettings(open: boolean) { if (open) return; setSettings(false); setAppsOpen(settingsReturnPath.current === "/apps"); setVirtualDisplaysOpen(settingsReturnPath.current === "/virtual-displays"); setBrowserOpen(settingsReturnPath.current === "/browser"); history.replaceState(null, "", settingsReturnPath.current); }
+  function home() { if (settings) { settingsReturnPath.current = "/"; setActorStack([]); settingsPage.current?.close(); return; } setAppsOpen(false); setVirtualDisplaysOpen(false); setBrowserOpen(false); closeActor(); if (mobile) setSidebarOpen(false); }
+  function openApps() { if (settings) { settingsReturnPath.current = "/apps"; settingsPage.current?.close(); return; } setAppsOpen(true); setVirtualDisplaysOpen(false); setBrowserOpen(false); setSearching(false); setActorStack([]); setSidebarOpen(false); history.pushState(null, "", "/apps"); }
+  function openVirtualDisplays() { if (settings) { settingsReturnPath.current = "/virtual-displays"; settingsPage.current?.close(); return; } setVirtualDisplaysOpen(true); setAppsOpen(false); setBrowserOpen(false); setSearching(false); setActorStack([]); setSidebarOpen(false); history.pushState(null, "", "/virtual-displays"); }
+  function openBrowser() { if (settings) { settingsReturnPath.current = "/browser"; settingsPage.current?.close(); return; } setBrowserOpen(true); setAppsOpen(false); setVirtualDisplaysOpen(false); setSearching(false); setActorStack([]); setSidebarOpen(false); history.pushState(null, "", "/browser"); }
   function search() { if (mobile) setSidebarOpen(false); setSearching(true); }
   async function changed(actorId?: string) {
     const epoch = authEpoch.current;
@@ -193,18 +197,19 @@ export default function App() {
     <NativeResourcePreview />
     {access && logoutError && <div className="dl-action-error" role="alert"><span>{t("app.could_not_sign_out_try_again")}</span><Button variant="ghost" size="sm" onClick={() => { void logout(); }}>{t("app.retry")}</Button></div>}
     {checking ? <div className="dl-app-loading" role="status"><span className="dl-loading-orbit" />{t("app.connecting")}</div> : !access && startupError ? <div className="dl-app-loading" role="status"><AccountError code={startupError} /><Button variant="outline" onClick={() => setStartupAttempt(value => value + 1)}>{t("app.retry")}</Button></div> : !access ? <AccessGate onAuthenticated={() => setStartupAttempt(value => value + 1)} /> : <>
-      <div className="dl-app-shell"><NavigationRail access={access} settings={settings} apps={appsOpen} virtualDisplays={virtualDisplaysOpen} virtualDisplaysSupported={virtualDisplaysSupported} onVirtualDisplays={openVirtualDisplays} onApps={openApps} onHome={home} onSettings={() => openSettings("general")} onLogout={() => void logout()} /><div className="dl-shell-body">
+      <div className="dl-app-shell"><NavigationRail access={access} settings={settings} apps={appsOpen} virtualDisplays={virtualDisplaysOpen} browser={browserOpen} browserSupported={browserSupported()} onBrowser={openBrowser} virtualDisplaysSupported={virtualDisplaysSupported} onVirtualDisplays={openVirtualDisplays} onApps={openApps} onHome={home} onSettings={() => openSettings("general")} onLogout={() => void logout()} /><div className="dl-shell-body">
       {/* Keep the Core pane laid out so settings do not reset its reading position. */}
-      <div className="dl-home-layout" data-inactive={settings || appsOpen || virtualDisplaysOpen} aria-hidden={settings || appsOpen || virtualDisplaysOpen || undefined} inert={settings || appsOpen || virtualDisplaysOpen || undefined}>
+      <div className="dl-home-layout" data-inactive={settings || appsOpen || virtualDisplaysOpen || browserOpen} aria-hidden={settings || appsOpen || virtualDisplaysOpen || browserOpen || undefined} inert={settings || appsOpen || virtualDisplaysOpen || browserOpen || undefined}>
       <div className="dl-main-view"><header className="dl-main-heading" data-window-drag-region>{mobile && <Button variant="ghost" size="icon-sm" className="dl-open-sidebar" aria-label={t("navigation.open_sidebar")} onClick={() => setSidebarOpen(true)}><PanelLeftIcon /></Button>}<Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" className="dl-main-search" aria-label={t("app.search_conversation")} aria-keyshortcuts="Control+f Meta+f Control+k Meta+k" onClick={search}><SearchIcon /></Button></TooltipTrigger><TooltipContent>{t("app.search_conversation_shortcut")}</TooltipContent></Tooltip></header>
       <ConversationPane key={entry} actorId={entry} connectionMessage={connectionMessage} access={access} onActor={openActor} onAccessRevoked={revoked} models={models} ready={conversationReady} refreshVersion={refreshVersion} searchOpen={searching} onSearchOpenChange={setSearching} onConfigureModels={() => openSettings("models")} />
       </div></div>
       {appsOpen && !settings && <AppsPage onNavigation={() => setSidebarOpen(true)} onAccessRevoked={revoked} />}
       {virtualDisplaysOpen && !settings && <VirtualDisplaysPage onNavigation={() => setSidebarOpen(true)} onAccessRevoked={revoked} />}
-      {mobile && <NavigationDrawer access={access} open={sidebarOpen && !settings} onOpenChange={setSidebarOpen} virtualDisplaysSupported={virtualDisplaysSupported} onVirtualDisplays={openVirtualDisplays} onApps={openApps} onHome={home} onSettings={() => openSettings("general")} onLogout={() => void logout()} />}
+      {browserOpen && !settings && <BrowserPage onNavigation={() => setSidebarOpen(true)} />}
+      {mobile && <NavigationDrawer access={access} open={sidebarOpen && !settings} onOpenChange={setSidebarOpen} browserSupported={browserSupported()} onBrowser={openBrowser} virtualDisplaysSupported={virtualDisplaysSupported} onVirtualDisplays={openVirtualDisplays} onApps={openApps} onHome={home} onSettings={() => openSettings("general")} onLogout={() => void logout()} />}
       <SettingsPage onViewCore={() => {settingsReturnPath.current="/";setActorStack([]);closeSettings(false);void changed(entry);}} ref={settingsPage} open={settings} onOpenChange={closeSettings} initialTab={settingsTab} onTabChange={tab => {setSettingsTab(tab);history.replaceState(null, "", settingsPath(tab));}} preferences={preferences} onPreferencesChanged={setPreferences} onActorChanged={id => { void changed(id); }} canManage={access.kind === "owner"} />
       </div></div>
-      <ActorDialog key={peek} connectionMessage={peek === entry ? connectionMessage : null} actorId={peek} open={Boolean(peek) && !settings && !appsOpen && !virtualDisplaysOpen} onClose={closeActor} onActor={openActor} onBack={actorStack.length > 1 ? backActor : undefined} access={access} models={models} ready={peek === entry ? conversationReady : ready} onAccessRevoked={revoked} refreshVersion={refreshVersion} />
+      <ActorDialog key={peek} connectionMessage={peek === entry ? connectionMessage : null} actorId={peek} open={Boolean(peek) && !settings && !appsOpen && !virtualDisplaysOpen && !browserOpen} onClose={closeActor} onActor={openActor} onBack={actorStack.length > 1 ? backActor : undefined} access={access} models={models} ready={peek === entry ? conversationReady : ready} onAccessRevoked={revoked} refreshVersion={refreshVersion} />
     </>}
   </main></TooltipProvider>;
 }

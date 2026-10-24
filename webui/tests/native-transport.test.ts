@@ -128,3 +128,22 @@ test("native paths cannot become arbitrary network requests or resource reads", 
   expect(resourceActorId("/v1/actors/core/resources/image", "tauri://localhost/index.html")).toBe("core");
   expect(actorIdFromUrl("other://localhost/actors/work", "tauri://localhost")).toBeNull();
 });
+
+
+test("browser page detaches while navigation is pending and keeps layout changes ordered", async () => {
+  const {browserControl,browserLayout}=await import("../src/lib/browser-workspace");
+  const actions:string[]=[];
+  let started!:()=>void;const opening=new Promise<void>(resolve=>{started=resolve;});
+  let finish!:()=>void;const navigating=new Promise<void>(resolve=>{finish=resolve;});
+  handler=async(command,args)=>{
+    expect(command).toBe("browser_control");
+    const action=(args as {action:string}).action;actions.push(action);
+    if(action==="open"){started();await navigating;}
+    return {pages:[],selected:null};
+  };
+  const open=browserControl("open",null,"https://example.com");
+  await opening;
+  await Promise.all([browserLayout({x:80,y:120,width:800,height:600,scale:1}),browserLayout(null)]);
+  expect(actions).toEqual(["open","mount","detach"]);
+  finish();await open;
+});

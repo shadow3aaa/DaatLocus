@@ -93,7 +93,7 @@ function seed(): void {
     id: "research",
     name: "检查消息滚动与输入框布局",
     parent_id: ROOT_ACTOR_ID,
-    apps: ["files", "browser"],
+    apps: ["files", "web", "browser_use"],
     model: "mock-mini",
     approval_mode: "none",
     readable_roots: ["~/research"],

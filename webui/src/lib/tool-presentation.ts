@@ -23,7 +23,8 @@ const labels: Record<string, string> = {
   actors__create: "tool_presentation.create_actor", actors__import_conversation: "imports.bubble_title", actors__send: "conversation_turns.delegate_task", actors__list: "tool_presentation.view_actor", actors__read_history: "tool_presentation.read_history",
   files__read_file: "tool_presentation.read_file", files__write_file: "tool_presentation.write_file", files__edit_file: "tool_presentation.edit_file", files__copy_file: "tool_presentation.copy_file", files__list_directory: "tool_presentation.browse_folder", files__search_text: "tool_presentation.search_files", files__read_skill: "tool_presentation.read_skill", files__list_skills: "tool_presentation.view_skills", files__view_image: "tool_presentation.view_image",
   terminal__terminal_exec: "tool_presentation.run_command", terminal__terminal_write_stdin: "tool_presentation.terminal_input", terminal__terminal_terminate: "tool_presentation.stop_process",
-  browser__browser_snapshot: "tool_presentation.view_page", browser__browser_open_page: "tool_presentation.open_page", browser__browser_wait: "tool_presentation.wait_for_page", browser__browser_click: "tool_presentation.click_page", browser__browser_fill: "tool_presentation.fill_page", browser__browser_back: "tool_presentation.go_back", browser__browser_forward: "tool_presentation.go_forward", browser__browser_reload: "tool_presentation.reload_page", browser__browser_close_page: "tool_presentation.close_page", browser__read_url: "tool_presentation.read_page",
+  web__run: "tool_presentation.read_page", web__close: "tool_presentation.close_page",
+  browser_use__move_pointer:"browser_use.move",browser_use__drag:"browser_use.drag",browser_use__open_page:"browser_use.open",browser_use__observe:"browser_use.observe",browser_use__list_pages:"browser_use.list",browser_use__click:"browser_use.click",browser_use__scroll:"browser_use.scroll",browser_use__type_text:"browser_use.type",browser_use__press_key:"browser_use.key",browser_use__navigate:"browser_use.navigate",browser_use__back:"browser_use.back",browser_use__forward:"browser_use.forward",browser_use__reload:"browser_use.reload",browser_use__close_page:"tool_presentation.close_page",
   apps_manager__list: "apps.list_action", apps_manager__inspect: "apps.inspect_action", apps_manager__refresh: "apps.refresh_action", apps_manager__install: "apps.install_action", apps_manager__enable: "apps.enable", apps_manager__close: "apps.close",
   artifacts__present: "tool_details.deliver_result",
   actors__read_resource: "tool_presentation.read_attachment_or_output",
@@ -33,7 +34,7 @@ const labels: Record<string, string> = {
 const fieldLabels: Record<string, string> = {
   path: "tool_presentation.file", source: "tool_presentation.source", destination: "tool_presentation.destination", command: "tool_presentation.command", workdir: "tool_presentation.working_directory", cwd: "tool_presentation.working_directory", text: "tool_presentation.content", content: "tool_presentation.content", old_text: "tool_presentation.before", new_text: "tool_presentation.after", expected_sha256: "tool_presentation.expected_file_version", sha256: "tool_presentation.file_version",
   start_line: "tool_presentation.start_line", end_line: "tool_presentation.end_line", line_count: "tool_presentation.lines_to_read", total_lines: "tool_presentation.total_lines", query: "tool_presentation.search_query", case_sensitive: "tool_presentation.case_sensitive", limit: "tool_presentation.result_limit", cursor: "tool_presentation.cursor",
-  actor_id: "tool_presentation.target_actor", stage_id: "account_editor.device", name: "account_editor.name", workspace: "tool_presentation.working_directory", apps: "tool_presentation.installed_apps", model: "composer.models", instructions: "tool_presentation.instructions", read_only: "tool_details.read_only", url: "tool_presentation.url", refresh: "tool_presentation.refresh", page_id: "tool_presentation.page", element_ref: "tool_presentation.page_element", target: "tool_presentation.destination", value: "tool_presentation.value", wait_state: "tool_presentation.wait_state",
+  actor_id: "tool_presentation.target_actor", stage_id: "account_editor.device", name: "account_editor.name", workspace: "tool_presentation.working_directory", apps: "tool_presentation.installed_apps", model: "composer.models", instructions: "tool_presentation.instructions", read_only: "tool_details.read_only", url: "tool_presentation.url", refresh: "tool_presentation.refresh", target: "tool_presentation.destination", value: "tool_presentation.value",
   session_id: "tool_presentation.terminal", yield_time_ms: "tool_presentation.wait_time_ms", max_chars: "tool_presentation.output_character_limit", wait_mode: "tool_presentation.wait_mode", shell: "Shell", environment: "provider_editor.environment_variable", env: "provider_editor.environment_variable", timeout: "tool_presentation.timeout", timeout_ms: "tool_presentation.timeout_ms",
   readable_roots: "tool_presentation.readable_paths", writable_roots: "tool_presentation.writable_paths", operation: "tool_presentation.action", operation_details: "tool_presentation.action_details", title: "tool_presentation.title", description: "tool_presentation.description", kind: "tool_presentation.type", uri: "tool_presentation.link", media_type: "tool_presentation.content_type",
 };
@@ -49,7 +50,8 @@ export function toolIcon(name: string, outcome?: JsonValue | null) {
   if (name.startsWith("terminal__")) return TerminalSquareIcon;
   if (name.startsWith("actors__")) return MessageCircleIcon;
   if (name.includes("search")) return SearchIcon;
-  if (name.startsWith("browser__")) return Globe2Icon;
+  if (name.startsWith("web__")) return Globe2Icon;
+  if (name.startsWith("browser_use__")) return Globe2Icon;
   if (name.includes("delete")) return FileMinus2Icon;
   if (name.includes("edit_file")) return PencilIcon;
   if (name.includes("write_file")) return asObject(outcome).created === true ? FilePlus2Icon : PencilIcon;
@@ -61,7 +63,7 @@ export function toolIcon(name: string, outcome?: JsonValue | null) {
 export function activitySummary(names: string[]) {
   names = names.map(domainToolName);
   const parts: string[] = [];
-  if (names.some(name => name.startsWith("browser__"))) parts.push(t("tool_presentation.browsed_pages"));
+  if (names.some(name => name.startsWith("web__") || name.startsWith("browser_use__"))) parts.push(t("tool_presentation.browsed_pages"));
   if (names.some(name => /files__(write|edit|copy|delete)_/.test(name))) parts.push(t("tool_presentation.edited_files"));
   else if (names.some(name => name.startsWith("files__"))) parts.push(t("tool_presentation.read_files"));
   if (names.some(name => name.startsWith("terminal__"))) parts.push(t("tool_presentation.ran_commands"));
@@ -72,7 +74,7 @@ export function activitySummary(names: string[]) {
 
 export function activityIcon(names: string[]) {
   const domains = names.map(domainToolName);
-  return toolIcon(domains.find(name => name.startsWith("browser__")) || domains.find(name => /files__(write|edit|copy)_/.test(name)) || domains.find(name => name.startsWith("terminal__")) || domains[0] || "");
+  return toolIcon(domains.find(name => name.startsWith("web__")) || domains.find(name => /files__(write|edit|copy)_/.test(name)) || domains.find(name => name.startsWith("terminal__")) || domains[0] || "");
 }
 
 export function activityLabel(tool: ToolSummary & { status?: "running" | "completed" | "unknown" }) {
@@ -83,7 +85,8 @@ export function activityLabel(tool: ToolSummary & { status?: "running" | "comple
   const active = tool.status === "running";
   const outcome = asObject(tool.outcome ?? undefined);
   const summary = readableSummary(tool.summary);
-  if (name.startsWith("browser__")) return {label:summary || toolLabel(name),detail:active?t("tool_presentation.running_2"):""};
+  if (name.startsWith("web__")) return {label:summary || toolLabel(name),detail:active?t("tool_presentation.running_2"):""};
+  if (name.startsWith("browser_use__")) return {label:toolLabel(name),detail:asText(asObject(outcome.observation).title) || (active?t("tool_presentation.running_2"):"")};
   if (name.startsWith("apps_manager__")) return {label:toolLabel(name),detail:active?t("tool_presentation.running_2"):""};
   if (/^mcp_[a-f0-9]{32}__/.test(name)) { const app=asObject(outcome.app); return {label:asText(app.name) || t("apps.tool_action"),detail:asText(app.tool) || (active?t("tool_presentation.running_2"):"")}; }
   if (name === "terminal__terminal_exec") return {
