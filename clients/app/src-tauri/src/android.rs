@@ -55,7 +55,7 @@ pub extern "system" fn Java_io_shadow3aaa_daatlocus_MainActivity_nativeNetworkCh
 struct Client(Arc<MobileService>);
 #[tauri::command]
 async fn desktop_account(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     state: tauri::State<'_, Client>,
     input: daat_locus_client_protocol::BootstrapRequest,
 ) -> Result<daat_locus_client_protocol::BootstrapReply, String> {

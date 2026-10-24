@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{
-    Manager, WebviewWindow,
+    Manager, Webview,
     ipc::{InvokeBody, Request},
 };
 use tokio::sync::{Mutex as AsyncMutex, watch};
@@ -66,14 +66,14 @@ pub fn app_url(url: &Url) -> bool {
             || matches!(url.scheme(), "http" | "https")
                 && url.host_str() == Some("tauri.localhost"))
 }
-pub fn authorize(window: &WebviewWindow) -> Result<()> {
+pub fn authorize<R: tauri::Runtime>(window: &Webview<R>) -> Result<()> {
     let url = window.url().map_err(|_| UNAVAILABLE)?;
     if window.label() != "main" || !navigation(window.app_handle(), &url) {
         return Err(UNAVAILABLE.into());
     }
     Ok(())
 }
-pub fn navigation(app: &tauri::AppHandle, url: &Url) -> bool {
+pub fn navigation<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: &Url) -> bool {
     app_url(url)
         || cfg!(debug_assertions)
             && app.config().build.dev_url.as_ref().is_some_and(|dev| {
@@ -176,7 +176,7 @@ impl Transport {
     }
     fn prepare(
         &self,
-        window: &WebviewWindow,
+        window: &Webview,
         metadata: Metadata,
         body: Vec<u8>,
     ) -> Result<reqwest::RequestBuilder> {
@@ -227,7 +227,7 @@ impl Transport {
     }
     async fn resource(
         &self,
-        window: &WebviewWindow,
+        window: &Webview,
         path: &str,
         method: &Method,
     ) -> Result<tauri::http::Response<Vec<u8>>> {
@@ -280,7 +280,7 @@ impl Transport {
 
 #[tauri::command]
 pub async fn native_http_start(
-    window: WebviewWindow,
+    window: Webview,
     state: tauri::State<'_, Transport>,
     request: Request<'_>,
 ) -> Result<u64> {
@@ -323,7 +323,7 @@ pub async fn native_http_start(
 
 #[tauri::command]
 pub async fn native_http_write(
-    window: WebviewWindow,
+    window: Webview,
     state: tauri::State<'_, Transport>,
     request: Request<'_>,
 ) -> Result<()> {
@@ -356,7 +356,7 @@ pub async fn native_http_write(
 
 #[tauri::command]
 pub async fn native_http_send(
-    window: WebviewWindow,
+    window: Webview,
     state: tauri::State<'_, Transport>,
     id: u64,
 ) -> Result<Reply> {
@@ -398,7 +398,7 @@ pub async fn native_http_send(
 
 #[tauri::command]
 pub async fn native_http_read(
-    window: WebviewWindow,
+    window: Webview,
     state: tauri::State<'_, Transport>,
     id: u64,
 ) -> Result<tauri::ipc::Response> {
@@ -432,8 +432,8 @@ pub async fn native_http_read(
 }
 
 #[tauri::command]
-pub async fn native_http_cancel(
-    window: WebviewWindow,
+pub async fn native_http_cancel<R: tauri::Runtime>(
+    window: Webview<R>,
     state: tauri::State<'_, Transport>,
     id: u64,
 ) -> Result<()> {
@@ -444,7 +444,7 @@ pub async fn native_http_cancel(
 
 #[tauri::command]
 pub async fn native_resource_download(
-    window: WebviewWindow,
+    window: Webview,
     state: tauri::State<'_, Transport>,
     path: String,
     name: String,
@@ -499,7 +499,7 @@ pub fn capability(app: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 /// Local device capability settings still require the profile's current Owner session.
-pub async fn authorize_owner(window: &WebviewWindow) -> Result<()> {
+pub async fn authorize_owner(window: &Webview) -> Result<()> {
     authorize(window)?;
     let state = window.state::<Transport>();
     let response = state
@@ -542,7 +542,16 @@ pub fn resources(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::W
                     if !resource_path(path) || request.uri().query().is_some() {
                         return Err(UNAVAILABLE.into());
                     }
-                    let window = app.get_webview_window("main").ok_or(UNAVAILABLE)?;
+                    #[cfg(not(target_os = "android"))]
+                    let window = app.get_webview("main").ok_or(UNAVAILABLE)?;
+                    // Android's website views are owned by the Activity rather
+                    // than Tauri, which retains its single shell WebView.
+                    #[cfg(target_os = "android")]
+                    let window = app
+                        .get_webview_window("main")
+                        .ok_or(UNAVAILABLE)?
+                        .as_ref()
+                        .clone();
                     authorize(&window)?;
                     app.state::<Transport>()
                         .resource(&window, path, request.method())
@@ -565,7 +574,7 @@ fn resource_path(path: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn read_cookies(window: &WebviewWindow, url: &Url) -> Result<String> {
+fn read_cookies(window: &Webview, url: &Url) -> Result<String> {
     Ok(window
         .cookies_for_url(url.clone())
         .map_err(|_| UNAVAILABLE)?
@@ -575,7 +584,7 @@ fn read_cookies(window: &WebviewWindow, url: &Url) -> Result<String> {
         .join("; "))
 }
 #[cfg(target_os = "macos")]
-fn read_cookies(window: &WebviewWindow, url: &Url) -> Result<String> {
+fn read_cookies(window: &Webview, url: &Url) -> Result<String> {
     // Wry's WKWebView cookies_for_url compares Cookie.domain with Url::domain;
     // the latter is None for IP hosts. Keep loopback cookies in WebKit's private
     // store and filter with the exact, already verified service host instead.
@@ -606,7 +615,7 @@ fn cookie_matches_service(cookie: &cookie::Cookie<'_>, url: &Url) -> bool {
             || matches!(url.host(),Some(url::Host::Ipv6(ip)) if ip.is_loopback()))
 }
 #[cfg(not(target_os = "android"))]
-fn write_cookies(window: &WebviewWindow, url: &Url, headers: &HeaderMap) -> Result<()> {
+fn write_cookies(window: &Webview, url: &Url, headers: &HeaderMap) -> Result<()> {
     for value in headers.get_all("set-cookie") {
         let mut cookie = cookie::Cookie::parse(value.to_str().map_err(|_| UNAVAILABLE)?.to_owned())
             .map_err(|_| UNAVAILABLE)?;
@@ -619,11 +628,11 @@ fn write_cookies(window: &WebviewWindow, url: &Url, headers: &HeaderMap) -> Resu
     Ok(())
 }
 #[cfg(target_os = "android")]
-fn read_cookies(_window: &WebviewWindow, url: &Url) -> Result<String> {
+fn read_cookies(_window: &Webview, url: &Url) -> Result<String> {
     android_cookies(url, None)
 }
 #[cfg(target_os = "android")]
-fn write_cookies(_window: &WebviewWindow, url: &Url, headers: &HeaderMap) -> Result<()> {
+fn write_cookies(_window: &Webview, url: &Url, headers: &HeaderMap) -> Result<()> {
     for value in headers.get_all("set-cookie") {
         android_cookies(url, Some(value.to_str().map_err(|_| UNAVAILABLE)?))?;
     }
@@ -675,6 +684,86 @@ fn android_cookies(url: &Url, value: Option<&str>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn shell_transport_survives_mounting_browser_webviews_without_granting_them_access() {
+        use tauri::test::{assert_ipc_response, mock_builder};
+        let app = mock_builder()
+            .manage(
+                Transport::new(Arc::new(RwLock::new(
+                    Url::parse("http://127.0.0.1:45123").unwrap(),
+                )))
+                .unwrap(),
+            )
+            .invoke_handler(tauri::generate_handler![native_http_cancel])
+            .build(tauri::generate_context!())
+            .unwrap();
+        // Deliberately let both views reach the handler to exercise its origin
+        // and caller checks independently of the production main-only ACL.
+        app.add_capability(
+            serde_json::json!({
+                "identifier":"transport-test", "webviews":["*"], "local":true,
+                "permissions":["allow-native-http-cancel"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .build()
+        .unwrap();
+        let shell = main.as_ref().clone();
+        let request = || tauri::webview::InvokeRequest {
+            cmd: "native_http_cancel".into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: shell.url().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(serde_json::json!({"id":42})),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.to_string(),
+        };
+        let cancel = || {
+            let state = app.state::<Transport>();
+            state.requests.lock().unwrap().insert(
+                42,
+                Arc::new(Pending {
+                    generation: 0,
+                    cancel: watch::channel(false).0,
+                    state: AsyncMutex::new(RequestState::Closed),
+                    touched: Mutex::new(Instant::now()),
+                }),
+            );
+            assert_ipc_response(&main, request(), Ok::<(), ()>(()));
+            assert!(!state.requests.lock().unwrap().contains_key(&42));
+        };
+        cancel();
+        let detached = tauri::WindowBuilder::new(&app, "browser").build().unwrap();
+        let page = detached
+            .add_child(
+                tauri::WebviewBuilder::new("site", tauri::WebviewUrl::App("index.html".into())),
+                tauri::LogicalPosition::new(0., 0.),
+                tauri::LogicalSize::new(800., 600.),
+            )
+            .unwrap();
+        page.reparent(&shell.window()).unwrap();
+        assert!(app.get_webview_window("main").is_none());
+        cancel();
+        assert_ipc_response(
+            &Arc::new(page.clone()),
+            request(),
+            Err::<String, String>(UNAVAILABLE.into()),
+        );
+        page.reparent(&detached).unwrap();
+        cancel();
+        shell
+            .navigate(Url::parse("https://example.com/").unwrap())
+            .unwrap();
+        assert!(authorize(&shell).is_err());
+    }
 
     #[test]
     fn service_requests_and_resources_cannot_escape_the_verified_endpoint() {

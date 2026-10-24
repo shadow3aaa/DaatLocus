@@ -54,7 +54,7 @@ objc2 = "0.6.5"
 block2 = "0.6.2"
 objc2-foundation = "0.3.2"
 objc2-app-kit = {version="0.3.2",default-features=false,features=["std","NSEvent","NSView","NSWindow","NSResponder","NSImage","NSImageRep","NSBitmapImageRep","NSGraphicsContext","objc2-core-graphics","block2"]}
-objc2-web-kit = {version="0.3.2",default-features=false,features=["std","WKWebView","WKWebViewConfiguration","WKWebsiteDataStore","WKSnapshotConfiguration","WKNavigation","block2"]}
+objc2-web-kit = {version="0.3.2",default-features=false,features=["std","WKWebView","WKWebViewConfiguration","WKWebsiteDataStore","WKSnapshotConfiguration","WKNavigation","WKUserScript","WKUserContentController","block2"]}
 daat-locus-computer-use = { path = "../../../crates/daat-locus-computer-use" }
 
 [build-dependencies]
@@ -76,3 +76,6 @@ ndk-context = "0.1"
 miette = "7.6.0"
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dev-dependencies]
+tauri = { version = "2", features = ["test"] }

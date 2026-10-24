@@ -14,7 +14,7 @@ struct Bridge {
 }
 #[tauri::command]
 pub async fn browser_control(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     action: String,
     tab: Option<String>,
     url: Option<String>,
@@ -27,7 +27,9 @@ pub async fn browser_control(
     }
     if !matches!(
         action.as_str(),
-        "mount"
+        "preferences"
+            | "set_preferences"
+            | "mount"
             | "detach"
             | "list"
             | "select"

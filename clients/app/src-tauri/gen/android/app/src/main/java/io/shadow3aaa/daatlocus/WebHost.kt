@@ -50,6 +50,7 @@ object WebHost {
     pages.remove(profile)?.let {
       it.view.stopLoading()
       if(profile.length==64){it.dialog.setOnDismissListener(null);it.dialog.dismiss()} else { (it.view.parent as? ViewGroup)?.removeView(it.view);BrowserUse.remove(profile) }
+      BrowserUse.forget(it.view)
       it.view.destroy()
     }
   }
@@ -72,11 +73,14 @@ object WebHost {
           view.setDownloadListener { url,agent,disposition,mime,_ -> if(key!=profile)BrowserUse.download(owner,view,url,agent,disposition,mime) }
           view.webViewClient=object:WebViewClient(){
             override fun shouldOverrideUrlLoading(view:WebView,request:WebResourceRequest)=request.url.toString()!="about:blank" && !allowed(request.url.toString())
-            override fun onPageFinished(view:WebView,url:String){if(key!=profile)BrowserUse.visit(owner,url,view.title ?: "")}
+            override fun onPageStarted(view:WebView,url:String,favicon:android.graphics.Bitmap?){if(key!=profile)BrowserUse.changed()}
+            override fun onPageFinished(view:WebView,url:String){if(key!=profile)BrowserUse.finished(owner,key,view,url)}
             override fun onReceivedSslError(view:WebView,handler:SslErrorHandler,error:SslError){handler.cancel()}
           }
           view.webChromeClient = object : WebChromeClient() {
-            override fun onReceivedTitle(view:WebView,title:String){if(key!=profile)Unit}
+            override fun onReceivedTitle(view:WebView,title:String){if(key!=profile)BrowserUse.changed()}
+            override fun onProgressChanged(view:WebView,progress:Int){if(key!=profile)BrowserUse.changed()}
+            override fun onReceivedIcon(view:WebView,icon:android.graphics.Bitmap){if(key!=profile)BrowserUse.receivedIcon(owner,key,view,icon)}
             override fun onCreateWindow(view:WebView,isDialog:Boolean,isUserGesture:Boolean,resultMsg:android.os.Message):Boolean{
               if(key==profile || !isUserGesture)return false
               val next="$profile-${java.util.UUID.randomUUID().toString().replace("-", "")}";val target=page(profile,next)
@@ -89,8 +93,11 @@ object WebHost {
           dialog.setTitle("Web")
           dialog.setContentView(view)
           dialog.setOnDismissListener { close(key) }
-          dialog.show()
-          dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+          // Document capture runs independently of the visible shared browser.
+          // Give the unattached WebView a viewport without presenting a dialog.
+          val size = owner.resources.displayMetrics
+          view.measure(android.view.View.MeasureSpec.makeMeasureSpec(size.widthPixels, android.view.View.MeasureSpec.EXACTLY), android.view.View.MeasureSpec.makeMeasureSpec(size.heightPixels, android.view.View.MeasureSpec.EXACTLY))
+          view.layout(0, 0, size.widthPixels, size.heightPixels)
           Page(view, dialog).also { pages[key] = it }
 
   }

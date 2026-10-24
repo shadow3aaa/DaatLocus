@@ -3,6 +3,8 @@ mod backend;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod browser_data;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
+mod browser_preferences;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 mod browser_ui;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod browser_use;

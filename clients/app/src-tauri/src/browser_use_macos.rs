@@ -401,3 +401,61 @@ fn key_info(key: &str) -> Result<(u16, String), String> {
         .map(|(_, code)| (*code, key.into()))
         .ok_or("Unsupported browser key".into())
 }
+
+pub async fn configure(view: &Webview, script: &str) -> Result<(), String> {
+    let script = script.to_owned();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    view.with_webview(move |platform| {
+        unsafe {
+            use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime};
+            let web = &*platform.inner().cast::<WKWebView>();
+            let content = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                WKUserScript::alloc(MainThreadMarker::new().expect("WebView main thread")),
+                &NSString::from_str(&script),
+                WKUserScriptInjectionTime::AtDocumentStart,
+                false,
+            );
+            let controller = web.configuration().userContentController();
+            let scripts = controller.userScripts();
+            controller.removeAllUserScripts();
+            for existing in scripts.iter() {
+                if !existing
+                    .source()
+                    .to_string()
+                    .starts_with("/*dl-browser-language*/")
+                {
+                    controller.addUserScript(&existing);
+                }
+            }
+            controller.addUserScript(&content);
+        }
+        let _ = tx.send(());
+    })
+    .map_err(|_| "Browser language unavailable")?;
+    rx.await.map_err(|_| "Browser language unavailable".into())
+}
+
+pub async fn navigate(view: &Webview, url: &url::Url, locale: &str) -> Result<(), String> {
+    let url = url.to_string();
+    let locale = locale.to_owned();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    view.with_webview(move |platform| {
+        use objc2_foundation::{NSMutableURLRequest, NSURL};
+        let result = (|| unsafe {
+            let url =
+                NSURL::URLWithString(&NSString::from_str(&url)).ok_or("Invalid browser URL")?;
+            let request = NSMutableURLRequest::requestWithURL(&url);
+            request.setValue_forHTTPHeaderField(
+                Some(&NSString::from_str(&locale)),
+                &NSString::from_str("Accept-Language"),
+            );
+            let web = &*platform.inner().cast::<WKWebView>();
+            web.loadRequest(&request)
+                .ok_or("Browser navigation failed")?;
+            Ok::<_, String>(())
+        })();
+        let _ = tx.send(result);
+    })
+    .map_err(|_| "Browser navigation failed")?;
+    rx.await.map_err(|_| "Browser navigation failed")?
+}

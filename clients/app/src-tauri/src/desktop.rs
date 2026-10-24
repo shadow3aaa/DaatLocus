@@ -38,10 +38,11 @@ struct WindowState {
 }
 #[tauri::command]
 fn desktop_window(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     action: WindowAction,
 ) -> std::result::Result<WindowState, String> {
     crate::transport::authorize(&window)?;
+    let window = window.window();
     let result = match action {
         WindowAction::State => Ok(()),
         WindowAction::Drag => window.start_dragging(),
@@ -65,7 +66,7 @@ fn desktop_window(
 }
 #[tauri::command]
 async fn desktop_account(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     state: tauri::State<'_, Client>,
     input: daat_locus_client_protocol::BootstrapRequest,
 ) -> std::result::Result<daat_locus_client_protocol::BootstrapReply, String> {
@@ -99,7 +100,7 @@ fn labels() -> Labels {
     }
 }
 fn show(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -118,7 +119,7 @@ fn action(app: &tauri::AppHandle, id: &str) {
         OPEN => show(app),
         QUIT => app.exit(0),
         HIDE => {
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_window("main") {
                 let _ = window.hide();
             }
         }
@@ -312,7 +313,7 @@ pub fn run(options: Options) -> Result<()> {
                         let app = tray.app_handle().clone();
                         let handle = app.clone();
                         let _ = app.run_on_main_thread(move || {
-                            if let Some(window) = handle.get_webview_window("main") {
+                            if let Some(window) = handle.get_window("main") {
                                 let visible = window.is_visible().unwrap_or(false)
                                     && !window.is_minimized().unwrap_or(false);
                                 let text = labels();
@@ -394,6 +395,14 @@ pub fn run(options: Options) -> Result<()> {
         })
         .on_menu_event(|app, event| action(app, event.id.as_ref()))
         .on_window_event(|window, event| {
+            if matches!(window.label(), "main" | "browser")
+                && matches!(
+                    event,
+                    WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
+                )
+            {
+                let _ = crate::browser_ui::resize(window.app_handle());
+            }
             if window.label() == "main"
                 && let WindowEvent::CloseRequested { api, .. } = event
             {

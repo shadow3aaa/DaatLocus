@@ -1,7 +1,7 @@
 use tauri::Manager;
 #[tauri::command]
 pub async fn computer_use_status(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
 ) -> Result<daat_locus_computer_use::Permissions, String> {
     crate::transport::authorize_owner(&window).await?;
     let root = window
@@ -17,7 +17,7 @@ pub async fn computer_use_status(
 }
 #[tauri::command]
 pub async fn computer_use_configure(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     enabled: bool,
 ) -> Result<daat_locus_computer_use::Permissions, String> {
     crate::transport::authorize_owner(&window).await?;
@@ -35,10 +35,7 @@ pub async fn computer_use_configure(
         .map_err(|_| "GUI configuration interrupted")?
 }
 #[tauri::command]
-pub async fn computer_use_permission(
-    window: tauri::WebviewWindow,
-    kind: String,
-) -> Result<(), String> {
+pub async fn computer_use_permission(window: tauri::Webview, kind: String) -> Result<(), String> {
     crate::transport::authorize_owner(&window).await?;
     tokio::task::spawn_blocking(move || {
         daat_locus_computer_use::request_permission(&kind).map_err(|e| e.to_string())
@@ -49,7 +46,7 @@ pub async fn computer_use_permission(
 
 #[tauri::command]
 pub async fn computer_use_display_configure(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     display: daat_locus_computer_use::DisplayConfig,
 ) -> Result<daat_locus_computer_use::Permissions, String> {
     crate::transport::authorize_owner(&window).await?;

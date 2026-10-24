@@ -1,8 +1,12 @@
+import { latestOperation } from "./latest-operation";
+import { listen } from "@tauri-apps/api/event";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
-export type BrowserPageInfo = { tab: string; url: string; title: string; loading?: boolean; can_back?: boolean; can_forward?: boolean; zoom?: number };
+export type BrowserPageInfo = { tab: string; url: string; title: string; favicon?: string | null; progress?: number; loading?: boolean; can_back?: boolean; can_forward?: boolean; zoom?: number };
 export type BrowserWorkspace = { pages: BrowserPageInfo[]; selected: string | null };
-export type BrowserVisit = { id: string; url: string; title: string; time: number };
+export type BrowserVisit = { id: string; url: string; title: string; time: number; favicon?: string | null };
+export type BrowserPreferences = {search_engine:"google"|"bing"|"duckduckgo"|"baidu";language:"system"|"zh-CN"|"en-US";default_zoom:number};
+export function browserPreferences(patch?:Partial<BrowserPreferences>){return invoke<BrowserPreferences>("browser_control",{action:patch?"set_preferences":"preferences",url:patch?JSON.stringify(patch):null,tab:null,bounds:null});}
 export type BrowserDownload = { id: string; url: string; name: string; time: number; status: "downloading" | "complete" | "failed" | "interrupted"; bytes: number };
 export type BrowserLibrary = { history: BrowserVisit[]; downloads: BrowserDownload[]; next_offset?: number | null };
 export type BrowserBounds = { x: number; y: number; width: number; height: number; scale: number };
@@ -13,7 +17,7 @@ export type BrowserAction = "list" | "select" | "move_tab" | "open" | "new_tab" 
 export type BrowserLibraryAction = "library" | "clear_history" | "remove_history" | "save_download" | "remove_download" | "reveal_download" | "open_downloads" | "zoom" | "print" | "clear_data";
 export const browserSupported = isTauri;
 let commands: Promise<unknown> = Promise.resolve();
-let layouts: Promise<unknown> = Promise.resolve();
+
 export function browserControl(action: BrowserAction, tab: string | null = null, url: string | null = null) {
   const result = commands.catch(() => {}).then(() => invoke<BrowserWorkspace>("browser_control", { action, tab, url, bounds: null }));
   commands = result;
@@ -33,8 +37,10 @@ export function browserScreenshot(tab: string) {
 }
 // Route changes cannot wait behind a slow navigation. Layout updates retain
 // their own order, including cleanup from the previous mounted page.
-export function browserLayout(bounds: BrowserBounds | null, occlusions:BrowserOcclusion[] = []) {
-  const result = layouts.catch(() => {}).then(() => invoke("browser_control", { action: bounds ? "mount" : "detach", bounds, occlusions, tab: null, url: null }));
-  layouts = result;
-  return result;
+const applyLayout=latestOperation<{bounds:BrowserBounds|null;occlusions:BrowserOcclusion[]}>(value=>invoke("browser_control", {action:value.bounds?"mount":"detach",...value,tab:null,url:null}));
+export function browserLayout(bounds:BrowserBounds|null,occlusions:BrowserOcclusion[]=[]){return applyLayout({bounds,occlusions});}
+export async function subscribeBrowserWorkspace(callback:()=>void){
+ window.addEventListener("dl-browser-changed",callback);
+ try{const stop=await listen("dl-browser-changed",callback);return()=>{stop();window.removeEventListener("dl-browser-changed",callback);};}
+ catch(error){window.removeEventListener("dl-browser-changed",callback);throw error;}
 }

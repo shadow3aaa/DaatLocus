@@ -391,7 +391,7 @@ html[data-desktop-platform="windows"] [data-window-drag-region] { user-select: n
 .dl-step-summary { color: inherit; }
 .dl-step-mark, .dl-step-error-mark { width: 4px; height: 4px; border-radius: 50%; background: var(--muted-foreground); flex: 0 0 auto; }
 .dl-step-error-mark { background: var(--destructive); }
-.dl-tool-details { margin: 9px 0 12px 12px; padding: 12px 14px; background: var(--muted); border-radius: 12px; max-width: calc(100% - 12px); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
+.dl-tool-details { min-width: 0; overflow-wrap: anywhere; margin: 9px 0 12px 12px; padding: 12px 14px; background: var(--muted); border-radius: 12px; max-width: calc(100% - 12px); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
 .dl-tool-details pre, .dl-approval-details pre { overflow: auto; max-height: 360px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace,'Cascadia Code',monospace; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.6; }
 .dl-tool-details small { color: var(--muted-foreground); }
 .dl-tool-note { margin: 8px 0 12px 12px; color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.65; }
@@ -427,7 +427,7 @@ html[data-desktop-platform="windows"] [data-window-drag-region] { user-select: n
 .dl-edit-after { background: oklch(.7 .1 150 / .12); }
 .dl-edit-preview pre { margin: 7px 0 0; font-family: ui-monospace,'Cascadia Code',monospace; line-height: 1.6; max-height: 300px; overflow: auto; }
 .dl-pending { display: flex; align-items: center; gap: 8px; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); color: var(--muted-foreground); padding: 10px 3px 2px; }
-.dl-operation-error { color: var(--destructive); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); margin: 6px 0 10px; }
+.dl-operation-error { overflow-wrap: anywhere; color: var(--destructive); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); margin: 6px 0 10px; }
 .dl-conversation-bottom { height: 10px; }
 .dl-loading-messages { display: flex; flex-direction: column; gap: 22px; }
 .dl-load-history { display: flex; margin: 0 auto 26px; }
@@ -688,7 +688,7 @@ button.dl-activity-heading:hover { color: var(--foreground); }
 .dl-step-detail { --tool-code-size: calc(var(--code-font-size, 13px) * 16 / 13); min-width: 0; }
 .dl-step-detail > .dl-inline-diff { margin: 8px 0; }
 .dl-step-detail .dl-diff-lines { max-height: 144px; }
-.dl-tool-output { margin: 8px 0; overflow: hidden; border: 1px solid var(--settings-border); border-radius: 12px; background: color-mix(in srgb, var(--foreground) 4%, var(--background)); color: var(--muted-foreground); }
+.dl-tool-output { min-width: 0; max-width: 100%; margin: 8px 0; overflow: hidden; border: 1px solid var(--settings-border); border-radius: 12px; background: color-mix(in srgb, var(--foreground) 4%, var(--background)); color: var(--muted-foreground); }
 .dl-tool-output > header { display: flex; align-items: center; gap: 10px; padding: 6px 10px; font-size: var(--content-font-size, 16px); line-height: 1.5; }
 .dl-output-context { min-width: 0; margin-left: auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .dl-tool-output > header a { margin-left: auto; }
@@ -713,7 +713,7 @@ button.dl-activity-heading:hover { color: var(--foreground); }
 .dl-queue-editor { padding: 4px 0 12px; }.dl-queue-editor textarea { min-height: 85px; border-radius: 12px; }.dl-queue-editor>div { display: flex; justify-content: flex-end; gap: 5px; margin-top: 6px; }
 .dl-message-queue+.dl-composer-wrap { position: relative; z-index: 1; }
 @media(max-width:640px) { .dl-message-queue { margin-left: 10px; margin-right: 10px; padding-left: 10px; padding-right: 10px; }.dl-queue-text { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }.dl-queue-actions button { padding: 0 4px; } }
-.dl-operation-note { color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.6; margin: 8px 0 20px; }
+.dl-operation-note { overflow-wrap: anywhere; color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.6; margin: 8px 0 20px; }
 .dl-message-outcomes { margin: 16px 0 22px; display: flex; flex-direction: column; gap: 13px; }
 .dl-message-outcomes:empty { display: none; }
 .dl-outcome-artifact { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 13px; padding: 13px 15px; color: var(--foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); text-decoration: none; max-width: 580px; }
@@ -1132,3 +1132,12 @@ html[data-desktop-platform=windows] .dl-browser-tabs { padding-right: var(--dl-c
 @media(prefers-reduced-motion:reduce) { .dl-browser-download-progress::after { animation: none; } }
 
 .dl-browser-menu { animation: none; }
+
+.dl-browser-progress { height: 2px; flex: none; overflow: hidden; background: transparent; }
+.dl-browser-progress span { display: block; height: 100%; background: var(--primary); opacity: 0; transition: width .2s ease, opacity .2s ease; }
+.dl-browser-progress[data-loading=true] span { opacity: 1; }
+.dl-browser-progress[data-loading=true] span:not([style]) { width: 35%; animation: dl-browser-loading 1.4s ease-in-out infinite; }
+@keyframes dl-browser-loading { from { transform: translateX(-100%); } to { transform: translateX(385%); } }
+.dl-browser-favicon { width: 16px; height: 16px; object-fit: contain; flex: none; }
+.dl-browser-site-icon .dl-browser-favicon { width: 28px; height: 28px; }
+@media (prefers-reduced-motion: reduce) { .dl-browser-progress[data-loading=true] span:not([style]) { width: 100%; animation: none; } }

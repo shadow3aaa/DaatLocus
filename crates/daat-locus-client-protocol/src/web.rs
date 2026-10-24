@@ -7,7 +7,7 @@ pub const BROWSER_CURSOR_SCRIPT: &str = include_str!("browser-cursor.js");
 pub const BROWSER_METRICS_SCRIPT: &str = include_str!("browser-metrics.js");
 /// Namespace-local, device-wide browser; Actor resource authorization stays separate.
 pub const SHARED_BROWSER_PROFILE: &str =
-    "a29eb97c72b4a60415cce1cd4754a3738488354e71a46fbcd6f6c8111b1d86d35";
+    "29eb97c72b4a60415cce1cd4754a3738488354e71a46fbcd6f6c8111b1d86d35";
 
 /// Owner UI viewport in CSS coordinates. Never accepted as model arguments.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -280,5 +280,41 @@ impl Request {
                 Operation::Load { url } => !url.is_empty() && url.len() <= 8192,
                 Operation::Browser { command } => command.validate(),
             }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_browser_operations_pass_the_native_wire_contract() {
+        for command in [
+            BrowserCommand::List,
+            BrowserCommand::Open {
+                tab: "a".repeat(32),
+                url: "https://example.com/".into(),
+            },
+            BrowserCommand::Observe {
+                tab: "a".repeat(32),
+            },
+            BrowserCommand::Input {
+                tab: "a".repeat(32),
+                state_id: "b".repeat(32),
+                input: BrowserInput::Reload,
+            },
+            BrowserCommand::Close {
+                tab: "a".repeat(32),
+            },
+        ] {
+            let request = Request {
+                id: "c".repeat(32),
+                profile: SHARED_BROWSER_PROFILE.into(),
+                operation: Operation::Browser { command },
+            };
+            let decoded: Request =
+                serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+            assert!(decoded.validate(), "{:?}", decoded.operation);
+        }
     }
 }

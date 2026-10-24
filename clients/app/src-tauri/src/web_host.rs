@@ -11,6 +11,8 @@ use std::{
 use tauri::{Manager, WebviewBuilder, WebviewUrl, WindowBuilder};
 use tokio::sync::oneshot;
 
+pub(crate) type AppliedBounds = (String, i32, i32, u32, u32);
+
 struct Loading {
     id: String,
     started: bool,
@@ -21,6 +23,9 @@ struct Loading {
 pub struct NativeHost {
     pub(crate) app: tauri::AppHandle,
     pub(crate) root: PathBuf,
+    pub(crate) preferences: Arc<Mutex<crate::browser_preferences::Preferences>>,
+    pub(crate) targets: Arc<Mutex<HashMap<String, String>>>,
+    pub(crate) icons: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) library: Arc<Mutex<crate::browser_data::Library>>,
     pub(crate) zooms: Arc<Mutex<HashMap<String, f64>>>,
     pub(crate) loading: Arc<Mutex<HashMap<String, bool>>>,
@@ -28,6 +33,9 @@ pub struct NativeHost {
     pending: Arc<Mutex<HashMap<String, Loading>>>,
     visible: bool,
     pub(crate) panel: Arc<Mutex<Option<daat_locus_client_protocol::web::BrowserBounds>>>,
+    pub(crate) panel_insets: Arc<Mutex<(f64, f64)>>,
+    pub(crate) applied_occlusions: Arc<Mutex<HashMap<String, String>>>,
+    pub(crate) applied_bounds: Arc<Mutex<HashMap<String, AppliedBounds>>>,
     pub(crate) occlusions: Arc<Mutex<Vec<daat_locus_client_protocol::web::BrowserOcclusion>>>,
     pub(crate) probe_visible: bool,
     pub(crate) tab_order: Arc<Mutex<Vec<String>>>,
@@ -43,9 +51,21 @@ pub(crate) fn allowed_url(value: &url::Url, forbidden: &str) -> bool {
         && value.origin().ascii_serialization() != forbidden
 }
 impl NativeHost {
+    pub(crate) fn changed(&self) {
+        use tauri::Emitter;
+        if let Some(main) = self.app.get_webview("main") {
+            let _ = main.emit("dl-browser-changed", ());
+        }
+    }
+
     pub fn new(app: tauri::AppHandle, root: PathBuf, forbidden_origin: String) -> Self {
         let library = crate::browser_data::Library::load(&root);
         Self {
+            preferences: Arc::new(Mutex::new(crate::browser_preferences::Preferences::load(
+                &root,
+            ))),
+            targets: Default::default(),
+            icons: Default::default(),
             app,
             root,
             library: Arc::new(Mutex::new(library)),
@@ -53,9 +73,12 @@ impl NativeHost {
             loading: Default::default(),
             forbidden_origin,
             pending: Arc::new(Mutex::new(HashMap::new())),
-            visible: true,
+            visible: false,
             browser_states: Default::default(),
             panel: Default::default(),
+            panel_insets: Default::default(),
+            applied_bounds: Default::default(),
+            applied_occlusions: Default::default(),
             occlusions: Default::default(),
             probe_visible: false,
             tab_order: Default::default(),
@@ -195,7 +218,23 @@ impl NativeHost {
         let title_key = key.to_owned();
         let download_host = self.clone();
         let popup_host = self.clone();
-        let mut builder = WebviewBuilder::new(key, WebviewUrl::External(url))
+        let requested_url = url.clone();
+        if shared && url.as_str() != "about:blank" {
+            self.targets
+                .lock()
+                .map_err(|_| "Browser unavailable")?
+                .insert(key.into(), url.to_string());
+            self.loading
+                .lock()
+                .map_err(|_| "Browser unavailable")?
+                .insert(key.into(), true);
+        }
+        let initial_url = if shared {
+            url::Url::parse("about:blank").unwrap()
+        } else {
+            url
+        };
+        let mut builder = WebviewBuilder::new(key, WebviewUrl::External(initial_url))
             .on_navigation(move |url| {
                 navigation_host.navigation_allowed(url) || shared && url.as_str() == "about:blank"
             })
@@ -229,6 +268,7 @@ impl NativeHost {
             })
             .on_permission_request(|_, _| tauri::webview::PermissionResponse::Deny)
             .on_document_title_changed(move |view, title| {
+                title_host.changed();
                 title_host
                     .titles
                     .lock()
@@ -247,6 +287,15 @@ impl NativeHost {
                 }
             })
             .on_page_load(move |view, payload| {
+                if shared
+                    && payload.url().as_str() == "about:blank"
+                    && loading_host
+                        .targets
+                        .lock()
+                        .is_ok_and(|targets| targets.contains_key(&loading_key))
+                {
+                    return;
+                }
                 loading_host
                     .loading
                     .lock()
@@ -255,6 +304,17 @@ impl NativeHost {
                         loading_key.clone(),
                         matches!(payload.event(), tauri::webview::PageLoadEvent::Started),
                     );
+                loading_host.changed();
+                if shared
+                    && payload.url().as_str() != "about:blank"
+                    && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+                {
+                    loading_host
+                        .targets
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&loading_key);
+                }
                 if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
                     if let Ok(mut pending) = loading_host.pending.lock()
                         && let Some(loading) = pending.get_mut(&loading_key)
@@ -269,6 +329,12 @@ impl NativeHost {
                     return;
                 }
                 if shared && loading_host.navigation_allowed(payload.url()) {
+                    let metadata = loading_host.clone();
+                    let key = loading_key.clone();
+                    let view = view.clone();
+                    tauri::async_runtime::spawn(async move {
+                        metadata.capture_icon(&view, &key).await;
+                    });
                     let title = loading_host
                         .titles
                         .lock()
@@ -310,7 +376,15 @@ impl NativeHost {
             });
         #[cfg(windows)]
         {
-            builder = builder.data_directory(self.root.join("runtime/web-profiles").join(profile));
+            // Retain the existing browser store while correcting the malformed
+            // wire namespace. This directory name is local storage, not an ID.
+            let directory = if profile == daat_locus_client_protocol::web::SHARED_BROWSER_PROFILE {
+                format!("a{profile}")
+            } else {
+                profile.to_owned()
+            };
+            builder =
+                builder.data_directory(self.root.join("runtime/web-profiles").join(directory));
         }
         #[cfg(target_os = "macos")]
         {
@@ -332,7 +406,39 @@ impl NativeHost {
                 .lock()
                 .map_err(|_| "Browser unavailable")?
                 .push(key.to_owned());
+            let preferences = self
+                .preferences
+                .lock()
+                .map_err(|_| "Browser unavailable")?
+                .clone();
+            view.set_zoom(preferences.default_zoom)
+                .map_err(|e| e.to_string())?;
+            self.zooms
+                .lock()
+                .map_err(|_| "Browser unavailable")?
+                .insert(key.into(), preferences.default_zoom);
             self.select_page(key, false)?;
+            if requested_url.as_str() != "about:blank" {
+                let host = self.clone();
+                let key = key.to_owned();
+                let view = view.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = async {
+                        crate::browser_use::configure(&view, &preferences).await?;
+                        crate::browser_use::navigate(&view, requested_url, &preferences).await
+                    }
+                    .await
+                    {
+                        host.fail(&key, &error);
+                        host.loading
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(key, false);
+                        host.changed();
+                    }
+                });
+            }
+            self.changed();
         } else {
             let _ = view.set_auto_resize(true);
             let host = self.clone();
@@ -354,6 +460,30 @@ impl NativeHost {
         Ok(())
     }
     pub(crate) fn close_page(&self, label: &str) -> Result<(), String> {
+        self.targets
+            .lock()
+            .map_err(|_| "Browser unavailable")?
+            .remove(label);
+        self.icons
+            .lock()
+            .map_err(|_| "Browser unavailable")?
+            .remove(label);
+        self.loading
+            .lock()
+            .map_err(|_| "Browser unavailable")?
+            .remove(label);
+        self.zooms
+            .lock()
+            .map_err(|_| "Browser unavailable")?
+            .remove(label);
+        self.applied_bounds
+            .lock()
+            .map_err(|_| "Browser unavailable")?
+            .remove(label);
+        self.applied_occlusions
+            .lock()
+            .map_err(|_| "Browser unavailable")?
+            .remove(label);
         #[cfg(target_os = "macos")]
         {
             let label = label.to_owned();
@@ -426,14 +556,37 @@ impl NativeHost {
                 let _ = page.hide();
             }
         }
+        *self.selected.lock().map_err(|_| "Browser unavailable")? = Some(label.into());
         crate::browser_ui::resize(&self.app)?;
         view.show().map_err(|_| "Browser page could not show")?;
         if focus {
             view.set_focus()
                 .map_err(|_| "Browser page could not focus")?;
         }
-        *self.selected.lock().map_err(|_| "Browser unavailable")? = Some(label.into());
+        self.changed();
         Ok(())
+    }
+    pub(crate) async fn capture_icon(&self, view: &tauri::Webview, key: &str) {
+        let Ok(url) = view.url() else { return };
+        let Some(icon) = crate::browser_use::favicon(view).await else {
+            return;
+        };
+        if view.url().ok().as_ref() != Some(&url) || !self.is_browser_page(key) {
+            return;
+        }
+        self.icons
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.into(), icon.clone());
+        let mut library = self.library.lock().unwrap_or_else(|e| e.into_inner());
+        for visit in &mut library.history {
+            if url::Url::parse(&visit.url).is_ok_and(|old| old.origin() == url.origin()) {
+                visit.favicon = Some(icon.clone());
+            }
+        }
+        let _ = library.save(&self.root);
+        drop(library);
+        self.changed();
     }
     fn complete(&self, label: &str, id: &str, result: Result<Capture, String>) {
         if let Ok(mut pending) = self.pending.lock()
@@ -575,6 +728,8 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
         owner_occlusions: HashMap<usize, Vec<daat_locus_client_protocol::web::BrowserOcclusion>>,
         #[serde(default)]
         delays: HashMap<usize, u64>,
+        #[serde(default)]
+        resize_steps: HashMap<usize, Vec<(u32, u32)>>,
     }
     let bytes = std::fs::read(path)?;
     if bytes.len() > 64 * 1024 {
@@ -593,6 +748,7 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
         .ok_or("Web probe directory unavailable")?
         .to_owned();
     let app = tauri::Builder::default()
+        .on_window_event(|window,event|{if matches!(window.label(),"main"|"browser")&&matches!(event,tauri::WindowEvent::Resized(_)|tauri::WindowEvent::ScaleFactorChanged{..}){let _=crate::browser_ui::resize(window.app_handle());}})
         .invoke_handler(tauri::generate_handler![crate::browser_ui::browser_control])
         .setup(move |app| {
             let app = app.handle().clone();
@@ -747,15 +903,28 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                             Err(error)=>Some(serde_json::json!({"error":error})),
                         }
                     }else{None};
-                    let native_control=if let Some(view)=view{crate::browser_use::evaluate(&view,"({status:window.nativeControlResult || null})").await.ok()}else{None};
+                    let native_control=if let Some(view)=&view{crate::browser_use::evaluate(&view,"({status:window.nativeControlResult || null})").await.ok()}else{None};
                     let cursor=if let Some(key)=&selected {host.cursor_probe(key).await}else{None};
                     let ui=if manifest.ui_review {if let Some(view)=selected.as_deref().and_then(|key|host.app.get_webview(key)) {
                         crate::browser_use::evaluate(&view,"({text:[...document.querySelectorAll('.dl-browser-page,[data-slot=popover-content]')].map(node=>node.innerText).join('\\n'),downloadPopup:(()=>{const node=document.querySelector('.dl-browser-downloads');if(!node)return null;const rect=node.getBoundingClientRect();const list=node.querySelector('.dl-browser-download-scroll');return {x:rect.x,y:rect.y,width:rect.width,height:rect.height,scrollTop:list.scrollTop,scrollHeight:list.scrollHeight,clientHeight:list.clientHeight}})(),tabs:Array.from(document.querySelectorAll('[role=tab]')).map(node=>({text:node.textContent,selected:node.getAttribute('aria-selected')==='true',draggable:node.parentElement.draggable})),surface:{live:[...document.querySelectorAll('.dl-browser-viewport>iframe')].some(node=>getComputedStyle(node).display!=='none'),clipped:[...document.querySelectorAll('.dl-browser-viewport>iframe')].some(node=>getComputedStyle(node).maskImage!=='none')},language:document.documentElement.lang,width:innerWidth,height:innerHeight,scrollWidth:document.documentElement.scrollWidth,inputs:Array.from(document.querySelectorAll('input')).map(input=>({label:input.getAttribute('aria-label'),value:input.value})),buttons:Array.from(document.querySelectorAll('button')).map(button=>({label:button.getAttribute('aria-label')||button.innerText,disabled:button.disabled,rect:{x:button.getBoundingClientRect().x,y:button.getBoundingClientRect().y,width:button.getBoundingClientRect().width,height:button.getBoundingClientRect().height}}))})").await.ok()
                     }else{None}}else{None};
                     let mut cursor_frames=Vec::new();
                     if manifest.cursor_frames.contains(&index) && let Some(key)=&selected {for _ in 0..2{tokio::time::sleep(Duration::from_millis(100)).await;cursor_frames.push(host.cursor_probe(key).await);}}
+                    let mut resize_checks=Vec::new();
+                    if let Some(sizes)=manifest.resize_steps.get(&index) && let Some(window)=host.app.get_window("main") {
+                        for (width,height) in sizes {
+                            let start=std::time::Instant::now();
+                            window.set_size(tauri::LogicalSize::new(*width,*height)).unwrap();
+                            // Read through the real page loop after native resize delivery.
+                            tokio::time::sleep(Duration::from_millis(40)).await;
+                            let dimensions=if let Some(view)=&view {crate::browser_use::evaluate(view,"({width:innerWidth,height:innerHeight,language:navigator.language,languages:navigator.languages,locale:Intl.DateTimeFormat().resolvedOptions().locale})").await.ok()} else {None};
+                            resize_checks.push(serde_json::json!({"requested":[width,height],"page":dimensions,"elapsed_ms":start.elapsed().as_millis(),"panel":*host.panel.lock().unwrap()}));
+                        }
+                    }
+                    let metadata=if let Some(view)=&view {crate::browser_use::evaluate(view,"({language:navigator.language,languages:navigator.languages,locale:Intl.DateTimeFormat().resolvedOptions().locale,header:document.querySelector('#language')?.textContent})").await.ok()}else{None};
+                    let icons=host.icons.lock().unwrap().clone();
                     let library=if manifest.ui_review {serde_json::to_value(host.library.lock().unwrap().clone()).ok()}else{None};
-                    results.push(serde_json::json!({"command":command,"reply":reply,"parent":parent,"native_control":native_control,"cursor":cursor,"cursor_frames":cursor_frames,"ui":ui,"library":library,"owner_find":owner_find,"screenshot":screenshot,"layer":layer,"owner_workspace":owner_workspace}));
+                    results.push(serde_json::json!({"command":command,"reply":reply,"parent":parent,"native_control":native_control,"cursor":cursor,"cursor_frames":cursor_frames,"ui":ui,"library":library,"owner_find":owner_find,"screenshot":screenshot,"layer":layer,"owner_workspace":owner_workspace,"metadata":metadata,"icons":icons,"resize_checks":resize_checks}));
                 }
                 let result = serde_json::to_vec(&results)
                     .map_err(|error| error.to_string())

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { ArrowLeftIcon, ArrowRightIcon, CameraIcon, ChevronDownIcon, ChevronUpIcon, Clock3Icon, DownloadIcon, FolderOpenIcon, GlobeIcon, LoaderCircleIcon, MinusIcon, MoreHorizontalIcon, PanelLeftIcon, PlusIcon, PrinterIcon, RotateCwIcon, SearchIcon, Settings2Icon, Trash2Icon, XIcon } from "lucide-react";
+import { ArrowLeftIcon, ArrowRightIcon, CameraIcon, ChevronDownIcon, ChevronUpIcon, Clock3Icon, DownloadIcon, FolderOpenIcon, LoaderCircleIcon, MinusIcon, MoreHorizontalIcon, PanelLeftIcon, PlusIcon, PrinterIcon, RotateCwIcon, SearchIcon, Settings2Icon, Trash2Icon, XIcon } from "lucide-react";
 import { t } from "@/lib/i18n";
-import { browserControl, browserFind, browserLayout, browserLibrary, browserScreenshot, type BrowserAction, type BrowserFindAction, type BrowserFindResult, type BrowserLibrary, type BrowserLibraryAction, type BrowserWorkspace } from "@/lib/browser-workspace";
+import { browserControl, browserFind, browserLayout, browserLibrary, browserScreenshot, subscribeBrowserWorkspace, type BrowserAction, type BrowserFindAction, type BrowserFindResult, type BrowserLibrary, type BrowserLibraryAction, type BrowserWorkspace } from "@/lib/browser-workspace";
 import { browserDestination } from "@/lib/browser-address";
 import { browserShortcut } from "@/lib/browser-shortcuts";
 import { isAndroid } from "@/lib/mobile";
@@ -12,8 +12,9 @@ import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empt
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Field, FieldLabel, FieldGroup } from "@/components/ui/field";
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { BrowserSettings } from "@/components/settings/browser-settings";
+import { useBrowserPreferences, searchEngines } from "@/lib/browser-settings";
+import { BrowserSiteIcon } from "@/components/browser-site-icon";
 import { BrowserDownloads } from "@/components/browser-downloads";
 import { Popover, PopoverContent, PopoverTitle, PopoverTrigger } from "@/components/ui/popover";
 
@@ -50,7 +51,8 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
   const tabStrip=useRef<HTMLDivElement>(null);
   const [canDrag,setCanDrag]=useState(false);
   const [expanded,setExpanded]=useState(true);
-  const [engine,setEngine]=useState(()=>localStorage.getItem("dl.browser.search")??"https://www.google.com/search?q=");
+  const {value:browserSettings}=useBrowserPreferences();
+  const engine=searchEngines[browserSettings.search_engine];
   const viewport=useRef<HTMLDivElement>(null);
   const downloadsPopup=useRef<HTMLDivElement>(null);
   const input=useRef<HTMLInputElement>(null);
@@ -70,7 +72,7 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
     }catch{if(alive.current)setFailed(true);}
   }
   useEffect(()=>{
-    alive.current=true;let polling=false,frame=0,lastLayout="";
+    alive.current=true;let polling=false,again=false,frame=0,lastLayout="";
     const update=()=>{
       frame=0;const rect=viewport.current?.getBoundingClientRect();
       const overlays=Array.from(document.querySelectorAll<HTMLElement>('[data-slot="dialog-content"][data-state="open"], [data-slot="sheet-content"][data-state="open"], [data-slot="dropdown-menu-content"][data-state="open"], [data-slot="select-content"][data-state="open"], [data-slot="context-menu-content"][data-state="open"], [data-slot="popover-content"][data-state="open"]'));
@@ -83,11 +85,13 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
     const measure=()=>{if(!frame)frame=requestAnimationFrame(update);};
     const resize=new ResizeObserver(measure);if(viewport.current)resize.observe(viewport.current);
     const overlays=new MutationObserver(measure);overlays.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:["data-state","data-browser-surface"]});
-    const refresh=async()=>{if(polling||document.hidden||locking.current)return;polling=true;try{const value=await browserControl("list");if(alive.current){setWorkspace(value);measure();}}catch{if(alive.current)setFailed(true);}finally{polling=false;}};
+    const refresh=async()=>{if(document.hidden||locking.current)return;if(polling){again=true;return;}polling=true;try{const value=await browserControl("list");if(alive.current){setWorkspace(value);measure();}}catch{if(alive.current)setFailed(true);}finally{polling=false;if(again){again=false;void refresh();}}};
+    let disposed=false;let unsubscribe:(()=>void)|undefined;
+    void subscribeBrowserWorkspace(()=>{void refresh();}).then(stop=>{if(disposed)stop();else unsubscribe=stop;}).catch(()=>{});
     const visibility=()=>{measure();void refresh();};
     document.addEventListener("visibilitychange",visibility);window.addEventListener("resize",measure);
     const timer=setInterval(()=>{void refresh();},1000);measure();void refresh();void refreshLibrary();
-    return()=>{alive.current=false;clearInterval(timer);cancelAnimationFrame(frame);resize.disconnect();overlays.disconnect();document.removeEventListener("visibilitychange",visibility);window.removeEventListener("resize",measure);void browserLayout(null).catch(()=>{});};
+    return()=>{disposed=true;unsubscribe?.();alive.current=false;clearInterval(timer);cancelAnimationFrame(frame);resize.disconnect();overlays.disconnect();document.removeEventListener("visibilitychange",visibility);window.removeEventListener("resize",measure);void browserLayout(null).catch(()=>{});};
   },[]);
   useEffect(()=>{if(panel!=="downloads" && panel!=="history" && !home && !downloadPopover)return;void refreshLibrary();const timer=setInterval(()=>{if(!document.hidden)void refreshLibrary();},4000);return()=>clearInterval(timer);},[panel,home,downloadPopover]);
   useEffect(()=>{const media=matchMedia("(min-width: 768px)");const update=()=>setWide(media.matches);media.addEventListener("change",update);return()=>media.removeEventListener("change",update);},[]);
@@ -210,8 +214,8 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
     <div className="dl-browser-tabs" role="tablist" aria-label={t("browser_use.tabs")} data-window-drag-region>
       <Button variant="ghost" size="icon-sm" className="dl-apps-mobile-navigation" aria-label={t("navigation.open_sidebar")} onClick={onNavigation}><PanelLeftIcon/></Button>
       <div ref={tabStrip} className="dl-browser-tab-strip" onDoubleClick={event=>{if(event.target===event.currentTarget)void control("new_tab");}}>{workspace.pages.map(page=><div className="dl-browser-tab" key={page.tab} data-tab={page.tab} data-window-no-drag data-active={page.tab===workspace.selected} data-dragging={dragging===page.tab||undefined} data-drop={drop?.tab===page.tab?(drop.after?"after":"before"):undefined} draggable={false} onPointerDown={event=>{if(canDrag&&!busy&&event.button===0&&event.pointerType==="mouse"&&!(event.target as HTMLElement).closest('[data-slot="button"]'))pointer.current={id:event.pointerId,tab:page.tab,x:event.clientX,y:event.clientY};}} onPointerMove={movePointer} onPointerUp={dropPointer} onPointerCancel={resetDrag} onLostPointerCapture={resetDrag} onClickCapture={event=>{if(performance.now()<suppressClick.current){event.preventDefault();event.stopPropagation();}}} onMouseDown={event=>{if(event.button===1)event.preventDefault();}} onAuxClick={event=>{if(event.button===1){event.preventDefault();event.stopPropagation();void control("close",page.tab);}}}>
-        <button role="tab" type="button" tabIndex={page.tab===workspace.selected?0:-1} aria-selected={page.tab===workspace.selected} title={page.url==="about:blank"?t("browser_use.new_tab"):page.url} disabled={busy} onClick={()=>void control("select",page.tab)} onKeyDown={event=>{const code=event.key;if(!["ArrowLeft","ArrowRight","Home","End"].includes(code)||event.altKey||event.ctrlKey||event.metaKey)return;event.preventDefault();if(code==="ArrowLeft"||code==="ArrowRight")selectOffset(code==="ArrowLeft"?-1:1);else{const target=code==="Home"?workspace.pages[0]:workspace.pages.at(-1);if(target)void control("select",target.tab);}}}>{page.loading?<LoaderCircleIcon className="animate-spin"/>:<GlobeIcon/>}<span>{page.title||t("browser_use.new_tab")}</span></button>
-        <Button variant="ghost" size="icon-sm" disabled={busy} aria-label={t("browser_use.close_tab",{title:page.title||t("browser_use.new_tab")})} onClick={()=>void control("close",page.tab)}><XIcon/></Button>
+        <button role="tab" type="button" tabIndex={page.tab===workspace.selected?0:-1} aria-selected={page.tab===workspace.selected} title={page.url==="about:blank"?t("browser_use.new_tab"):page.url} disabled={busy} onClick={()=>void control("select",page.tab)} onKeyDown={event=>{const code=event.key;if(!["ArrowLeft","ArrowRight","Home","End"].includes(code)||event.altKey||event.ctrlKey||event.metaKey)return;event.preventDefault();if(code==="ArrowLeft"||code==="ArrowRight")selectOffset(code==="ArrowLeft"?-1:1);else{const target=code==="Home"?workspace.pages[0]:workspace.pages.at(-1);if(target)void control("select",target.tab);}}}>{page.loading?<LoaderCircleIcon className="animate-spin"/>:<BrowserSiteIcon src={page.favicon}/>}<span>{page.title||(page.url==="about:blank"?t("browser_use.new_tab"):host(page.url))}</span></button>
+        <Button variant="ghost" size="icon-sm" disabled={busy} aria-label={t("browser_use.close_tab",{title:page.title||(page.url==="about:blank"?t("browser_use.new_tab"):host(page.url))})} onClick={()=>void control("close",page.tab)}><XIcon/></Button>
       </div>)}</div>
       <Button variant="ghost" size="icon-sm" aria-label={t("browser_use.new_tab")} disabled={busy} onClick={()=>{void control("new_tab");setTimeout(focusAddress,100);}}><PlusIcon/></Button>
     </div>
@@ -242,6 +246,7 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
         <div className="dl-browser-zoom"><span>{t("browser_use.zoom")}</span><div><Button variant="ghost" size="icon-sm" aria-label={t("browser_use.zoom_out")} disabled={home||zoom<=0.25} onClick={()=>void libraryAction("zoom",String(Math.max(.25,zoom-.1)))}><MinusIcon/></Button><Button variant="ghost" size="sm" disabled={home} onClick={()=>void libraryAction("zoom","1")}>{Math.round(zoom*100)}%</Button><Button variant="ghost" size="icon-sm" aria-label={t("browser_use.zoom_in")} disabled={home||zoom>=5} onClick={()=>void libraryAction("zoom",String(Math.min(5,zoom+.1)))}><PlusIcon/></Button></div></div>
       <DropdownMenuSeparator/><DropdownMenuGroup><DropdownMenuItem onSelect={()=>showPanel("downloads")}><DownloadIcon/>{t("browser_use.downloads")}<kbd>Ctrl+J</kbd></DropdownMenuItem><DropdownMenuItem onSelect={()=>showPanel("history")}><Clock3Icon/>{t("browser_use.history")}<kbd>Ctrl+H</kbd></DropdownMenuItem><DropdownMenuItem onSelect={()=>setClear(true)}><Trash2Icon/>{t("browser_use.clear_data")}</DropdownMenuItem></DropdownMenuGroup><DropdownMenuSeparator/><DropdownMenuGroup><DropdownMenuItem onSelect={()=>showPanel("settings")}><Settings2Icon/>{t("browser_use.settings")}</DropdownMenuItem></DropdownMenuGroup></DropdownMenuContent></DropdownMenu>
     </header>
+    <div className="dl-browser-progress" data-loading={Boolean(current?.loading)&&!panel} role={current?.loading?"progressbar":undefined} aria-label={current?.loading?t("browser_settings.loading"):undefined} aria-valuemin={0} aria-valuemax={100} aria-valuenow={current?.loading?current.progress:undefined}><span style={current?.progress!==undefined?{width:`${current.progress}%`}:undefined}/></div>
     {failed && <Alert variant="destructive" className="dl-browser-error"><AlertDescription>{t("browser_use.unavailable")}</AlertDescription><Button variant="ghost" size="icon-sm" aria-label={t("common.close")} onClick={()=>setFailed(false)}><XIcon/></Button></Alert>}
     {notice && <div className="dl-browser-notice" role="status">{t(`browser_use.screenshot_${notice}`)}</div>}
     {find!==null && <form className="dl-browser-find" onSubmit={event=>{event.preventDefault();if(find)void searchPage("find_next");}}><InputGroup><InputGroupInput ref={findInput} autoFocus aria-label={t("browser_use.find")} value={find} aria-invalid={Boolean(find&&matches&&!matches.found)} onChange={event=>{++searchVersion.current;setMatches(null);setFind(event.target.value);}} onKeyDown={event=>{if(event.key==="Escape"){event.preventDefault();closeFind();}if(event.key==="Enter"&&event.shiftKey){event.preventDefault();if(find)void searchPage("find_previous");}}}/><InputGroupAddon align="inline-end"><span role="status">{find&&matches?(matches.count!==null?`${matches.index} / ${matches.count}`:!matches.found?t("browser_use.no_matches"):""):""}</span></InputGroupAddon></InputGroup><Button type="button" variant="ghost" size="icon-sm" disabled={!find||!matches?.found} aria-label={t("browser_use.previous_match")} onClick={()=>void searchPage("find_previous")}><ChevronUpIcon/></Button><Button variant="ghost" size="icon-sm" disabled={!find||!matches?.found} aria-label={t("browser_use.next_match")}><ChevronDownIcon/></Button><Button type="button" variant="ghost" size="icon-sm" aria-label={t("common.close")} onClick={closeFind}><XIcon/></Button></form>}
@@ -254,15 +259,15 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
           {Icon:DownloadIcon,label:"downloads",action:()=>showPanel("downloads"),key:"Ctrl+J"},
           {Icon:Settings2Icon,label:"settings",action:()=>showPanel("settings"),key:""},
         ].map(({Icon,label,action,key})=><button type="button" key={label} onClick={action}><Icon/><span>{t(`browser_use.${label}`)}</span>{key&&<kbd>{key}</kbd>}</button>)}</div></section>
-        {recommendations.length>0 && <section><h2>{t("browser_use.recommended")}</h2><div className="dl-browser-recommendations">{recommendations.map(item=><button type="button" key={item.id} onClick={()=>go(item.url)} title={item.url}><div className="dl-browser-site-icon" data-host={host(item.url)}><GlobeIcon/></div><span>{item.title||host(item.url)}</span></button>)}</div></section>}</>}
+        {recommendations.length>0 && <section><h2>{t("browser_use.recommended")}</h2><div className="dl-browser-recommendations">{recommendations.map(item=><button type="button" key={item.id} onClick={()=>go(item.url)} title={item.url}><div className="dl-browser-site-icon" data-host={host(item.url)}><BrowserSiteIcon src={item.favicon}/></div><span>{item.title||host(item.url)}</span></button>)}</div></section>}</>}
         {(panel==="history" || !panel) && <section><div className="dl-browser-section-heading"><h2>{t(panel?"browser_use.history":"browser_use.recent")}</h2>{!panel&&<Button variant="ghost" size="icon-sm" aria-expanded={expanded} aria-label={t("browser_use.recent")} onClick={()=>setExpanded(value=>!value)}>{expanded?<ChevronUpIcon/>:<ChevronDownIcon/>}</Button>}</div>
           {panel && <InputGroup><InputGroupAddon><SearchIcon/></InputGroupAddon><InputGroupInput aria-label={t("browser_use.search_history")} placeholder={t("browser_use.search_history")} value={query} onChange={event=>setQuery(event.target.value)}/></InputGroup>}
-          {(panel||expanded) && <div className="dl-browser-recent">{recent.slice(0,panel?undefined:6).map(item=><div key={item.id} className="dl-browser-history-row"><button type="button" onClick={()=>go(item.url)}><span className="dl-browser-row-icon"><GlobeIcon/></span><span><strong>{item.title||host(item.url)}</strong><small>{panel?item.url:t("browser_use.website")}</small></span><time dateTime={new Date(item.time).toISOString()}>{panel?`${date(item.time)} · `:""}{time(item.time)}</time></button>{panel&&<Button variant="ghost" size="icon-sm" aria-label={t("browser_use.remove_history")} onClick={()=>void libraryAction("remove_history",item.id)}><XIcon/></Button>}</div>)}</div>}
+          {(panel||expanded) && <div className="dl-browser-recent">{recent.slice(0,panel?undefined:6).map(item=><div key={item.id} className="dl-browser-history-row"><button type="button" onClick={()=>go(item.url)}><span className="dl-browser-row-icon"><BrowserSiteIcon src={item.favicon}/></span><span><strong>{item.title||host(item.url)}</strong><small>{panel?item.url:t("browser_use.website")}</small></span><time dateTime={new Date(item.time).toISOString()}>{panel?`${date(item.time)} · `:""}{time(item.time)}</time></button>{panel&&<Button variant="ghost" size="icon-sm" aria-label={t("browser_use.remove_history")} onClick={()=>void libraryAction("remove_history",item.id)}><XIcon/></Button>}</div>)}</div>}
           {recent.length===0 && <Empty><EmptyHeader><EmptyMedia variant="icon"><Clock3Icon/></EmptyMedia><EmptyTitle>{t(query?"browser_use.no_results":"browser_use.no_history")}</EmptyTitle></EmptyHeader></Empty>}
           {panel && library.next_offset!=null && <Button variant="ghost" onClick={()=>void refreshLibrary(library.next_offset!)}>{t("browser_use.load_more")}</Button>}
         </section>}
         {panel==="downloads" && <BrowserDownloads library={library} onAction={(action,value)=>void libraryAction(action,value)} onMore={()=>void refreshLibrary(library.next_offset!)}/>}
-        {panel==="settings" && <FieldGroup><Field><FieldLabel>{t("browser_use.search_engine")}</FieldLabel><Select value={engine} onValueChange={value=>{setEngine(value);localStorage.setItem("dl.browser.search",value);}}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent><SelectGroup><SelectItem value="https://www.google.com/search?q=">Google</SelectItem><SelectItem value="https://www.bing.com/search?q=">Bing</SelectItem><SelectItem value="https://duckduckgo.com/?q=">DuckDuckGo</SelectItem><SelectItem value="https://www.baidu.com/s?wd=">百度</SelectItem></SelectGroup></SelectContent></Select></Field><Field><FieldLabel>{t("browser_use.browsing_data")}</FieldLabel><Button variant="outline" onClick={()=>setClear(true)}>{t("browser_use.clear_data")}</Button></Field></FieldGroup>}
+        {panel==="settings" && <><BrowserSettings/><Button variant="outline" onClick={()=>setClear(true)}>{t("browser_use.clear_data")}</Button></>}
       </main></div>}
     </div>
     <Dialog open={clear} onOpenChange={setClear}><DialogContent><DialogTitle>{t("browser_use.clear_data")}</DialogTitle><DialogDescription>{t("browser_use.clear_data_description")}</DialogDescription><DialogFooter><Button variant="outline" onClick={()=>setClear(false)}>{t("common.cancel")}</Button><Button variant="destructive" onClick={()=>{setClear(false);void libraryAction("clear_data");}}>{t("browser_use.clear_data")}</Button></DialogFooter></DialogContent></Dialog>

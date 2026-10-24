@@ -992,7 +992,8 @@ OS-owner、profile 和实例的控制通道连接，不新增 HTTP 或第三方 
 页面失败只结束当前调用；断线、协议错误与超时不自动重放已发出的导航。
 Android 进程内经 JNI 消费同一请求协议，不依赖调试端口或 ADB。
 
-Web App 的正文采集仍为每个 Actor 使用独立 WebView。Windows 使用 WebView2 及 profile 内独立站点目录；
+Web App 的正文采集仍为每个 Actor 使用独立、不可见的 WebView，不弹出原生窗口或 Android 对话框；
+与 Owner 和 BrowserUse 共用的可见浏览器分离。Windows 使用 WebView2 及 profile 内独立站点目录；
 macOS 使用独立 WKWebView 的非持久数据存储，关闭后不承诺保留登录；
 Android 使用 AndroidX WebKit MULTI_PROFILE，提供方不支持时明确失败。
 这些页面与主账号 WebView 的 Cookie、存储及原生命令授权隔离；禁止文件 URL、
@@ -1025,6 +1026,12 @@ URL 内嵌凭据、主服务 origin、新弹窗、下载及网页设备权限。
 Owner 从左侧导航或手机抽屉进入 `/browser` 独立页面，占据与虚拟屏幕相同的
 内容区域，替换当前对话；不与对话并排，也不打开另一个浏览器窗口。标签栏、
 地址栏、主页、历史和下载页面复用共享 WebUI。
+窗口原生尺寸事件直接调整选中网页；连续布局更新合并为最新尺寸，普通缩放不隐藏或重新挂载网页。
+导航立即保留目标地址与加载状态，不切回主页；工具栏下显示独立加载进度，未知进度使用不定进度条。
+站点图标由原生浏览器获取（WKWebView 在页面普通跨域边界内采集），转换为有界 PNG，供标签栏、主页和历史记录使用。
+设置中的“浏览器”分类与浏览器内设置共用设备本地偏好：默认搜索引擎、网页语言和新标签默认缩放。
+偏好通过已认证 Owner 界面的窄补丁保存；网页语言在下次导航生效，不改变客户端界面语言。
+Windows 设置网页请求语言，macOS/Android 为显式导航设置请求语言；页面语言一并生效，不向网站开放设置或原生能力。
 下载在宽屏中使用按钮下方的可滚动悬浮面板，窄屏保留全屏二级页面与返回导航；
 面板沿用菜单的原生裁剪，保留运行中的网页，条目操作不会关闭下载面板。
 Windows/macOS 将原生网页子 WebView 挂到主窗口的页面视口；Android 将 WebView 挂到 Activity 对应视口。
@@ -1067,6 +1074,8 @@ WKWebView 快照和局部 AppKit 事件，Android 使用 WebView 输入与像素
 授予其他 Actor 该截图的资源引用权限。失败或断线后的效果不确定结果要求重新
 观察，不自动重放。读取页面信息与交互逐次验证当前 Owner 会话，仅可信
 主 WebView 可调用；权限绑定 WebView 标签，不能因网页挂到主窗口而继承。
+原生命令、HTTP 与资源传输按调用者 WebView 校验；原生窗口控制独立按 Window 操作，
+不得依赖单 WebView 窗口类型，以免挂入网页子视图后命令提取或主窗口查找失效。
 视觉移除只隐藏既有页面，在登出后仍可执行，不返回页面信息。第三方页面没有
 原生命令授权。Owner 和模型均可随时操作，无接管开关；Owner 输入会废除旧观察状态，
 模型重新观察后继续。页面互不独占，也不通过另一套输入权限绕过原有审批。
@@ -1324,4 +1333,3 @@ the ordinary tool, send/cancel delegated work, be edited or become steering.
 They remain cancellable. No foreign effects are replayed or provider transcripts
 injected into inference history. The shared WebUI renders a compact import card
 from the attachment's semantic media type, including queue/search/history previews.
-

@@ -1,4 +1,11 @@
 {
+  "browser_settings": {
+  "title": "Browser",
+  "language": "Website language",
+  "zoom": "Default page zoom",
+  "next_load": "Applies the next time a page loads",
+  "loading": "Loading page"
+},
   "reset_work": {
     "section": "Reset",
     "title": "Reset account work",

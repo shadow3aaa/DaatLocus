@@ -1,4 +1,11 @@
 {
+  "browser_settings": {
+  "title": "浏览器",
+  "language": "网页语言",
+  "zoom": "默认网页缩放",
+  "next_load": "在下次加载网页时生效",
+  "loading": "正在加载网页"
+},
   "reset_work": {
     "section": "重置",
     "title": "重置账号工作数据",

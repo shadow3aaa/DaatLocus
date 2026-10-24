@@ -47,6 +47,52 @@ internal object BrowserUse {
     }
     override fun dispatchGenericMotionEvent(event:MotionEvent):Boolean=if(cuts.any{it.contains(event.x,event.y)})false else super.dispatchGenericMotionEvent(event)
   }
+  private val requestedUrls=mutableMapOf<String,String>()
+  private val icons=mutableMapOf<String,String>()
+  private val languageScripts=mutableMapOf<WebView,androidx.webkit.ScriptHandler>()
+  fun changed(){WebHost.clientView.get()?.evaluateJavascript("window.dispatchEvent(new Event('dl-browser-changed'))",null)}
+  private fun preferences(owner:MainActivity):JSONObject {
+    val stored=owner.getSharedPreferences("browser-preferences",0)
+    return JSONObject().put("search_engine",stored.getString("search_engine","google")).put("language",stored.getString("language","system")).put("default_zoom",stored.getString("default_zoom","1")!!.toDouble())
+  }
+  private fun patchPreferences(owner:MainActivity,patch:JSONObject):JSONObject {
+    val next=preferences(owner)
+    for(key in patch.keys()){if(key !in listOf("search_engine","language","default_zoom"))throw IllegalArgumentException("Unknown browser setting");next.put(key,patch.get(key))}
+    if(next.getString("search_engine") !in listOf("google","bing","duckduckgo","baidu") || next.getString("language") !in listOf("system","zh-CN","en-US") || !next.getDouble("default_zoom").isFinite() || next.getDouble("default_zoom") !in .5..2.0)throw IllegalArgumentException("Invalid browser settings")
+    if(!owner.getSharedPreferences("browser-preferences",0).edit().putString("search_engine",next.getString("search_engine")).putString("language",next.getString("language")).putString("default_zoom",next.getDouble("default_zoom").toString()).commit())throw IllegalStateException("Browser settings could not be saved")
+    return next
+  }
+  fun configure(owner:MainActivity,view:WebView):String {
+    val language=preferences(owner).getString("language").let{if(it=="system")java.util.Locale.getDefault().toLanguageTag() else it}
+    if(androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)){
+      languageScripts.remove(view)?.remove()
+      val locale=JSONObject.quote(language)
+      val script="(()=>{const locale=$locale;for(const [key,value] of [['language',locale],['languages',[locale,locale.split('-')[0]]]])Object.defineProperty(Navigator.prototype,key,{get:()=>value,configurable:true})})()"
+      languageScripts[view]=androidx.webkit.WebViewCompat.addDocumentStartJavaScript(view,script,setOf("*"))
+    }
+    return language
+  }
+  private fun navigate(owner:MainActivity,key:String,view:WebView,url:String){
+    val language=configure(owner,view)
+    if(url!="about:blank")requestedUrls[key]=url else requestedUrls.remove(key)
+    changed();view.loadUrl(url,mapOf("Accept-Language" to "$language,${language.substringBefore('-')}"))
+  }
+  fun finished(owner:MainActivity,key:String,view:WebView,url:String){
+    if(url!="about:blank")requestedUrls.remove(key)
+    if(WebHost.allowed(url)&&!zooms.containsKey(key)){val zoom=preferences(owner).getDouble("default_zoom");view.zoomBy(zoom.toFloat());zooms[key]=zoom}
+    visit(owner,url,view.title ?: "");changed()
+  }
+  fun receivedIcon(owner:MainActivity,key:String,view:WebView,bitmap:Bitmap){
+    val small=Bitmap.createScaledBitmap(bitmap,32,32,true)
+    val bytes=ByteArrayOutputStream().also{small.compress(Bitmap.CompressFormat.PNG,100,it)}.toByteArray()
+    if(small!==bitmap)small.recycle()
+    if(bytes.size>32768)return
+    val icon="data:image/png;base64,"+Base64.encodeToString(bytes,Base64.NO_WRAP)
+    icons[key]=icon
+    val history=array(owner,"history");val origin=runCatching{java.net.URI(view.url ?: "").let{it.scheme+"://"+it.rawAuthority}}.getOrNull()
+    if(origin!=null){for(index in 0 until history.length()){val entry=history.getJSONObject(index);if(runCatching{java.net.URI(entry.getString("url")).let{it.scheme+"://"+it.rawAuthority}}.getOrNull()==origin)entry.put("favicon",icon)};saveArray(owner,"history",history)}
+    changed()
+  }
   private var workspace:Dialog?=null
   private var content:FrameLayout?=null
   private var selected:String?=null
@@ -66,6 +112,7 @@ internal object BrowserUse {
   fun mount(owner:MainActivity,key:String,view:WebView):Dialog {
     profile=key.substringBefore('-')
     val dialog=ensure(owner)
+    configure(owner,view)
     content?.addView(view,FrameLayout.LayoutParams(-1,-1))
     view.setOnTouchListener{_,event->if(event.action==MotionEvent.ACTION_DOWN)receipts.remove(key);false}
     view.setOnKeyListener{_,code,event->
@@ -88,7 +135,8 @@ internal object BrowserUse {
     content?.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(height,View.MeasureSpec.EXACTLY))
     content?.layout(0,0,width,height)
   }
-  fun remove(key:String){val index=tabOrder.indexOf(key);tabOrder.remove(key);if(selected==key)selected=tabOrder.filter{it.startsWith("$profile-")}.let{it.getOrNull(index.coerceAtMost(it.lastIndex))};selected?.let{select(it)}}
+  fun forget(view:WebView){languageScripts.remove(view)?.remove()}
+  fun remove(key:String){requestedUrls.remove(key);icons.remove(key);zooms.remove(key);val index=tabOrder.indexOf(key);tabOrder.remove(key);if(selected==key)selected=tabOrder.filter{it.startsWith("$profile-")}.let{it.getOrNull(index.coerceAtMost(it.lastIndex))};selected?.let{select(it)}}
   private fun select(key:String){if(!WebHost.pages.containsKey(key))return;selected=key;WebHost.pages.filterKeys{it.startsWith("$profile-")}.forEach{(id,page)->page.view.visibility=if(id==key)View.VISIBLE else View.GONE}}
   fun controlAsync(owner:MainActivity,command:JSONObject,done:(JSONObject)->Unit){
     fun fail(message:String){done(JSONObject().put("error",message))}
@@ -184,6 +232,8 @@ internal object BrowserUse {
         frame.invalidate()
         embedded=true;frame.visibility=View.VISIBLE;receipts.clear()
       }
+      "preferences"->return preferences(owner)
+      "set_preferences"->return patchPreferences(owner,JSONObject(command.getString("url")))
       "list"->Unit
       "move_tab"->{
         val target=command.optString("url").takeIf{it!="null"&&it.isNotEmpty()}?.let{"$profile-$it"}
@@ -211,13 +261,14 @@ internal object BrowserUse {
       "stop"->{WebHost.pages[key]?.view?.stopLoading()}
 
       "new_tab"->{val next="$profile-${java.util.UUID.randomUUID().toString().replace("-", "")}";WebHost.page(profile,next).view.loadUrl("about:blank")}
-      "open"->{val url=command.getString("url");if(!WebHost.allowed(url))throw IllegalArgumentException("Browser URL not allowed");val next="$profile-${java.util.UUID.randomUUID().toString().replace("-", "")}";WebHost.page(profile,next).view.loadUrl(url)}
+      "open"->{val url=command.getString("url");if(!WebHost.allowed(url))throw IllegalArgumentException("Browser URL not allowed");val next="$profile-${java.util.UUID.randomUUID().toString().replace("-", "")}";WebHost.page(profile,next).view.let{navigate(owner,next,it,url)}}
       "select"->{if(key==null||!WebHost.pages.containsKey(key))throw IllegalArgumentException("Browser page closed");select(key)}
       "close"->{if(key!=null)WebHost.close(key)}
       "navigate","back","forward","reload"->{
         val view=WebHost.pages[key]?.view ?: throw IllegalArgumentException("Select a browser page")
         receipts.clear()
-        when(action){"navigate"->{val url=command.getString("url");if(!WebHost.allowed(url))throw IllegalArgumentException("Browser URL not allowed");view.loadUrl(url)};"back"->view.goBack();"forward"->view.goForward();else->view.reload()}
+        configure(owner,view)
+        when(action){"navigate"->{val url=command.getString("url");if(!WebHost.allowed(url))throw IllegalArgumentException("Browser URL not allowed");navigate(owner,key!!,view,url)};"back"->view.goBack();"forward"->view.goForward();else->view.reload()}
       }
       else->throw IllegalArgumentException("Unsupported browser control")
     }
@@ -231,7 +282,7 @@ internal object BrowserUse {
     if(!WebHost.allowed(url))return
     val history=array(owner,"history")
     if(history.length()>0&&history.getJSONObject(history.length()-1).optString("url")==url){history.getJSONObject(history.length()-1).put("title",title).put("time",System.currentTimeMillis())}
-    else history.put(JSONObject().put("id",java.util.UUID.randomUUID().toString()).put("url",url).put("title",title).put("time",System.currentTimeMillis()))
+    else history.put(JSONObject().put("favicon",WebHost.pages.entries.firstOrNull{it.value.view.url==url}?.key?.let{icons[it]} ?: JSONObject.NULL).put("id",java.util.UUID.randomUUID().toString()).put("url",url).put("title",title).put("time",System.currentTimeMillis()))
     saveArray(owner,"history",history)
   }
   fun download(owner:MainActivity,view:WebView,url:String,agent:String?,disposition:String?,mime:String?){
@@ -265,8 +316,8 @@ internal object BrowserUse {
   private val loaded=mutableMapOf<String,()->Unit>()
   private val handler=Handler(Looper.getMainLooper())
   fun invalidate(key:String) { receipts.remove(key) }
-  private fun pageInfo(key:String,profile:String,page:WebHost.Page)=JSONObject().put("tab",key.removePrefix("$profile-")).put("url",page.view.url ?: "").put("title",if(page.view.url=="about:blank")"" else page.view.title ?: "").put("can_back",page.view.canGoBack()).put("can_forward",page.view.canGoForward()).put("zoom",zooms[key] ?: 1.0).put("loading",page.view.progress<100)
-  private fun pages(profile:String)=JSONArray().also { result -> WebHost.pages.filter { (key,page)->key.startsWith("$profile-")&&(page.view.url=="about:blank"||WebHost.allowed(page.view.url ?: "")) }.entries.sortedBy{tabOrder.indexOf(it.key)}.forEach { (key,page)->result.put(pageInfo(key,profile,page)) } }
+  private fun pageInfo(key:String,profile:String,page:WebHost.Page)=JSONObject().put("tab",key.removePrefix("$profile-")).put("url",requestedUrls[key] ?: page.view.url ?: "about:blank").put("title",if(page.view.url=="about:blank")"" else page.view.title ?: "").put("can_back",page.view.canGoBack()).put("can_forward",page.view.canGoForward()).put("zoom",zooms[key] ?: 1.0).put("loading",requestedUrls.containsKey(key)||page.view.progress<100).put("progress",page.view.progress).put("favicon",icons[key] ?: JSONObject.NULL)
+  private fun pages(profile:String)=JSONArray().also { result -> WebHost.pages.filter { (key,page)->key.startsWith("$profile-")&&(requestedUrls.containsKey(key)||page.view.url==null||page.view.url=="about:blank"||WebHost.allowed(page.view.url ?: "")) }.entries.sortedBy{tabOrder.indexOf(it.key)}.forEach { (key,page)->result.put(pageInfo(key,profile,page)) } }
   private fun shortcut(code:Int,event:KeyEvent):String?{
     val command=event.isCtrlPressed||event.isMetaPressed;val shift=event.isShiftPressed
     if(command&&!event.isAltPressed){
@@ -336,8 +387,8 @@ internal object BrowserUse {
     fun client(page:WebHost.Page) {
       page.view.webViewClient=object:WebViewClient(){
         override fun shouldOverrideUrlLoading(view:WebView,request:WebResourceRequest)=!WebHost.allowed(request.url.toString())
-        override fun onPageStarted(view:WebView,url:String,favicon:Bitmap?){invalidate(key)}
-        override fun onPageFinished(view:WebView,url:String){visit(owner,url,view.title ?: "");if(!WebHost.allowed(url)){fail("Browser URL is not allowed");return};loaded.remove(key)?.invoke()}
+        override fun onPageStarted(view:WebView,url:String,favicon:Bitmap?){invalidate(key);changed()}
+        override fun onPageFinished(view:WebView,url:String){finished(owner,key,view,url);if(!WebHost.allowed(url)){fail("Browser URL is not allowed");return};loaded.remove(key)?.invoke()}
         override fun onReceivedSslError(view:WebView,handler:SslErrorHandler,error:SslError){handler.cancel();invalidate(key);if(jobs[key]==id)fail("Browser certificate validation failed")}
         override fun onReceivedError(view:WebView,request:WebResourceRequest,error:WebResourceError){if(request.isForMainFrame){invalidate(key);if(jobs[key]==id)fail("Browser navigation failed")}}
       }
@@ -356,7 +407,7 @@ internal object BrowserUse {
       "open"->{
             val url=command.getString("url");if(!WebHost.allowed(url))throw IllegalArgumentException("Browser URL not allowed")
             if(WebHost.pages.containsKey(key))throw IllegalStateException("Browser page already exists; observe instead of replaying open")
-            val page=WebHost.page(profile,key);client(page);loaded[key]={handler.postDelayed({capture()},180)};page.view.loadUrl(url)
+            val page=WebHost.page(profile,key);client(page);loaded[key]={handler.postDelayed({capture()},180)};navigate(owner,key,page.view,url)
           }
           "observe"->{if(!WebHost.pages.containsKey(key))throw IllegalStateException("Browser page closed");capture()}
           "input"->{
@@ -367,7 +418,7 @@ internal object BrowserUse {
               try {
                 if(result.isDone||jobs[key]!=id)return@metrics
                 if(receipt.signature!=signature(page.view,value))throw IllegalStateException("Browser changed; observe again")
-                val input=command.getJSONObject("input");val kind=input.getString("kind")
+                val input=command.getJSONObject("input");val kind=input.getString("kind");if(kind in listOf("navigate","back","forward","reload"))configure(owner,page.view)
                 fun point():Pair<Float,Float>{val x=input.getDouble("x");val y=input.getDouble("y");if(!x.isFinite()||!y.isFinite()||x<0||y<0||x>=receipt.width||y>=receipt.height)throw IllegalArgumentException("Point outside observed browser image");return Pair((x/receipt.width*page.view.width).toFloat(),(y/receipt.height*page.view.height).toFloat())}
                 client(page)
                 val hint=JSONObject().put("kind",kind)
@@ -390,7 +441,7 @@ internal object BrowserUse {
                   "scroll"->{val(x,y)=point();mouse(page.view,MotionEvent.ACTION_SCROLL,x,y,0,(-input.getDouble("delta_x")/48).toFloat(),(-input.getDouble("delta_y")/48).toFloat())}
                   "type"->{val connection=page.view.onCreateInputConnection(EditorInfo());if(connection==null||!connection.commitText(input.getString("text"),1))throw IllegalStateException("Focus an editable field before typing")}
                   "key"->{val code=keyCode(input.getString("key"));val modifiers=input.getJSONArray("modifiers");var meta=0;for(i in 0 until modifiers.length())meta=meta or when(modifiers.getString(i)){"control"->KeyEvent.META_CTRL_ON;"alt"->KeyEvent.META_ALT_ON;"shift"->KeyEvent.META_SHIFT_ON;"meta"->KeyEvent.META_META_ON;else->throw IllegalArgumentException("Unsupported modifier")};val now=SystemClock.uptimeMillis();page.view.dispatchKeyEvent(KeyEvent(now,now,KeyEvent.ACTION_DOWN,code,0,meta));page.view.dispatchKeyEvent(KeyEvent(now,now,KeyEvent.ACTION_UP,code,0,meta))}
-                  "navigate"->{val url=input.getString("url");if(!WebHost.allowed(url))throw IllegalArgumentException("Browser URL not allowed");loaded[key]={handler.postDelayed({capture()},180)};page.view.loadUrl(url)}
+                  "navigate"->{val url=input.getString("url");if(!WebHost.allowed(url))throw IllegalArgumentException("Browser URL not allowed");loaded[key]={handler.postDelayed({capture()},180)};navigate(owner,key,page.view,url)}
                   "back"->{if(!page.view.canGoBack())throw IllegalStateException("No previous browser page");loaded[key]={handler.postDelayed({capture()},180)};page.view.goBack()}
                   "forward"->{if(!page.view.canGoForward())throw IllegalStateException("No next browser page");loaded[key]={handler.postDelayed({capture()},180)};page.view.goForward()}
                   "reload"->{loaded[key]={handler.postDelayed({capture()},180)};page.view.reload()}

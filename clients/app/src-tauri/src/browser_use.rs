@@ -51,6 +51,29 @@ pub(crate) async fn page_screenshot(view: &Webview) -> Result<String, String> {
     cursor_visibility(view, "resume").await;
     image
 }
+pub(crate) async fn favicon(view: &Webview) -> Option<String> {
+    #[cfg(windows)]
+    {
+        platform::favicon(view).await.ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // The ordinary page fetch boundary applies; no privileged shell fetch.
+        let script = "(()=>{const key=Symbol.for('dl.favicon');window[key]=null;const icon=document.querySelector('link[rel~=icon]')?.href||new URL('/favicon.ico',location.href).href;const image=new Image();image.crossOrigin='anonymous';image.onload=()=>{try{const canvas=document.createElement('canvas');canvas.width=32;canvas.height=32;canvas.getContext('2d').drawImage(image,0,0,32,32);window[key]=canvas.toDataURL('image/png')}catch{window[key]=''}};image.onerror=()=>window[key]='';image.src=icon;return true})()";
+        evaluate(view, script).await.ok()?;
+        for _ in 0..8 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let value = evaluate(view, "window[Symbol.for('dl.favicon')]")
+                .await
+                .ok()?;
+            if let Some(icon) = value.as_str() {
+                return (icon.starts_with("data:image/png;base64,") && icon.len() < 48_000)
+                    .then(|| icon.into());
+            }
+        }
+        None
+    }
+}
 pub(crate) async fn find(view: &Webview, action: &str, text: &str) -> Result<Value, String> {
     #[cfg(windows)]
     {
@@ -110,10 +133,19 @@ impl NativeHost {
         let mut pages = Vec::new();
         for (key, window) in self.app.webviews() {
             if let Some(tab) = key.strip_prefix(&prefix)
-                && let Ok(page) = page(&window, tab)
+                && let Ok(mut page) = page(&window, tab)
                 && (page.url == "about:blank"
                     || url::Url::parse(&page.url).is_ok_and(|url| self.navigation_allowed(&url)))
             {
+                if page.url == "about:blank"
+                    && let Some(target) = self
+                        .targets
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&key)
+                {
+                    page.url = target.clone();
+                }
                 pages.push(BrowserPage {
                     title: if page.url == "about:blank" {
                         String::new()
@@ -262,14 +294,29 @@ impl NativeHost {
                     hide_cursor(&window);
                     return Err("Browser page changed before input; observe again".into());
                 }
+                if matches!(
+                    &input,
+                    BrowserInput::Back | BrowserInput::Forward | BrowserInput::Reload
+                ) {
+                    let preferences = self
+                        .preferences
+                        .lock()
+                        .map_err(|_| "Browser unavailable")?
+                        .clone();
+                    configure(&window, &preferences).await?;
+                }
                 if let BrowserInput::Navigate { url } = &input {
                     let url = url::Url::parse(url).map_err(|_| "Invalid browser URL")?;
                     if !self.navigation_allowed(&url) {
                         return Err("Browser target is not allowed".into());
                     }
-                    window
-                        .navigate(url)
-                        .map_err(|_| "Navigation outcome unknown; observe before continuing")?;
+                    let preferences = self
+                        .preferences
+                        .lock()
+                        .map_err(|_| "Browser unavailable")?
+                        .clone();
+                    configure(&window, &preferences).await?;
+                    navigate(&window, url, &preferences).await?;
                 } else {
                     platform::input(&window, input).await?;
                 }
@@ -307,7 +354,10 @@ impl NativeHost {
         let window = self.app.get_webview(key).ok_or("Browser page is closed")?;
         cursor_visibility(&window, "prepare").await;
         self.select_page(key, false)?;
-        if !window.url().is_ok_and(|url| self.navigation_allowed(&url)) {
+        if !window
+            .url()
+            .is_ok_and(|url| url.as_str() == "about:blank" || self.navigation_allowed(&url))
+        {
             return Err("Browser page is still loading or its URL is not allowed".into());
         }
         // Retake only the observation when a transient layout/pointer event
@@ -407,9 +457,34 @@ impl NativeHost {
             if !self.navigation_allowed(&url) {
                 return Err("Browser target is not allowed".into());
             }
-            view.navigate(url)
-                .map_err(|_| "Browser navigation failed".into())
+            let preferences = self
+                .preferences
+                .lock()
+                .map_err(|_| "Browser unavailable")?
+                .clone();
+            configure(&view, &preferences).await?;
+            self.targets
+                .lock()
+                .map_err(|_| "Browser unavailable")?
+                .insert(key.into(), url.to_string());
+            self.loading
+                .lock()
+                .map_err(|_| "Browser unavailable")?
+                .insert(key.into(), true);
+            self.changed();
+            navigate(&view, url, &preferences).await
         } else {
+            if matches!(
+                &input,
+                BrowserInput::Back | BrowserInput::Forward | BrowserInput::Reload
+            ) {
+                let preferences = self
+                    .preferences
+                    .lock()
+                    .map_err(|_| "Browser unavailable")?
+                    .clone();
+                configure(&view, &preferences).await?;
+            }
             platform::input(&view, input).await
         }
     }
@@ -462,5 +537,35 @@ impl NativeHost {
         .ok()?;
         let png = platform::screenshot(&view).await.ok()?;
         Some(serde_json::json!({"state":state,"png":png}))
+    }
+}
+
+pub(crate) async fn configure(
+    view: &Webview,
+    preferences: &crate::browser_preferences::Preferences,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        platform::configure(view, &preferences.locale()).await
+    }
+    #[cfg(target_os = "macos")]
+    {
+        platform::configure(view, &preferences.language_script()).await
+    }
+}
+
+pub(crate) async fn navigate(
+    view: &Webview,
+    url: url::Url,
+    _preferences: &crate::browser_preferences::Preferences,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        view.navigate(url)
+            .map_err(|_| "Browser navigation failed".into())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        platform::navigate(view, &url, &_preferences.locale()).await
     }
 }

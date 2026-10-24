@@ -17,6 +17,8 @@ pub(crate) struct Visit {
     pub url: String,
     pub title: String,
     pub time: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favicon: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Download {
@@ -71,6 +73,17 @@ impl Library {
             url: url.into(),
             title: title.into(),
             time: now(),
+            favicon: self
+                .history
+                .iter()
+                .rev()
+                .find(|entry| {
+                    url::Url::parse(&entry.url)
+                        .ok()
+                        .zip(url::Url::parse(url).ok())
+                        .is_some_and(|(a, b)| a.origin() == b.origin())
+                })
+                .and_then(|entry| entry.favicon.clone()),
         });
     }
 }

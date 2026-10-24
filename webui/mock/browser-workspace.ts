@@ -1,8 +1,14 @@
 /** Development-only browser fixtures; no native bridge or external page requests. */
-import type { BrowserAction, BrowserBounds, BrowserWorkspace, BrowserLibraryAction, BrowserLibrary, BrowserFindAction, BrowserFindResult, BrowserOcclusion } from "../src/lib/browser-workspace";
+import type { BrowserAction, BrowserBounds, BrowserWorkspace, BrowserLibraryAction, BrowserLibrary, BrowserFindAction, BrowserFindResult, BrowserOcclusion, BrowserPreferences } from "../src/lib/browser-workspace";
 import cursorScript from "../../crates/daat-locus-client-protocol/src/browser-cursor.js?raw";
 import html2canvas from "html2canvas";
 import { browserShortcut } from "../src/lib/browser-shortcuts";
+const listeners=new Set<()=>void>();
+export async function subscribeBrowserWorkspace(callback:()=>void){listeners.add(callback);return()=>{listeners.delete(callback);};}
+const changed=()=>listeners.forEach(callback=>callback());
+let preferences:BrowserPreferences=JSON.parse(localStorage.getItem("dl.mock.browser.preferences")??'null')??{search_engine:"google",language:"system",default_zoom:1};
+export async function browserPreferences(patch?:Partial<BrowserPreferences>){if(patch){preferences={...preferences,...patch};localStorage.setItem("dl.mock.browser.preferences",JSON.stringify(preferences));}return structuredClone(preferences);}
+const icon="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABsUlEQVR4nGNgGGDAiE/SveLWf2pZtLNDDatdjLS2mJBDmOhpOTbzmehpOTZ7mOhtObp9TAwDDBiRXTMQgIUYRd7m/Ay5AWIY4v//MzD8+P2P4d2nvwzXHn5n2HDsA8PdZz+p7wBcgJGRgYGTjYlBWgSEWRmcDfkYZm59zbDx2AcGYgET0SqJMYyJgSHTV5TBQpObdiFw9eF3huIZT8C+Z2ZiZODnZmYw1+BmSHQXZuDlYgarATni1M2vDP/+EeFoBjIBKP7//P3P8PbTH4Ztpz4yNC15DpcTF2RlMFHjpm8UXL7/neEOUgLUVeSkrwNA4NbjHwwwICvKxkB3B3z+joh0bg7ijGZioBEAJVC6O4CXE2Hcl+9/6e8AJUl2OPvJm9/0dYCcGBuDuiwHnH/p3jf6FMXcHEwMpurcDPFuwmA+CLx4/xtcENHEAdrynAw72lXxqpm15Q1RpSBZDsAHQJbO2f6G4di1L0TrYaHEQlBx/PP3P4bXH/8wXLr3nWHz8Q8MD17+GloNEqaBshjFATtxdBpoDUD2Do4QGIhQgNnHhE2QXpZjOIAejkA3f8B7xwBtGZQ3QE+2wAAAAABJRU5ErkJggg==";
 export const browserSupported = () => true;
 const demo="https://example.com/browser-demo";
 let state: BrowserWorkspace={pages:[{tab:"home",url:"about:blank",title:""},{tab:"demo",url:demo,title:"光标与输入演示",can_back:false,can_forward:false}],selected:"home"};
@@ -27,6 +33,9 @@ if(scene==="downloads"){
     ...Array.from({length:12},(_,index)=>({id:`photo-${index}`,name:`screenshot-${index+1}.png`,status:"complete" as const,bytes:20480+index*1820})),
   ].map((item,index)=>({...item,url:demo,time:Date.now()-index*60000}));
 }
+for(const item of library.history)item.favicon=icon;
+for(const page of state.pages)if(page.url!=="about:blank")page.favicon=icon;
+if(scene==="loading"){state.selected="demo";state.pages[1].loading=true;setTimeout(()=>{state.pages[1].loading=false;changed();},12000);}
 let active=false;
 let surface:BrowserBounds|null=null;
 let occlusions:BrowserOcclusion[]=[];
@@ -104,11 +113,11 @@ export async function browserControl(action:BrowserAction,tab:string|null=null,u
   }
   if(action==="close"){const id=tab??state.selected;if(id){frames.get(id)?.remove();frames.delete(id);}}
   if(action==="close"){const index=state.pages.findIndex(page=>page.tab===(tab??state.selected));state.pages=state.pages.filter(page=>page.tab!==(tab??state.selected));if(!state.pages.some(page=>page.tab===state.selected))state.selected=state.pages[Math.min(index,state.pages.length-1)]?.tab??null;}
-  if(action==="open" || action==="new_tab"){const next={tab:crypto.randomUUID(),url:url??"about:blank",title:url?new URL(url).hostname:""};state.pages.push(next);state.selected=next.tab;}
+  if(action==="open" || action==="new_tab"){const next={tab:crypto.randomUUID(),url:url??"about:blank",title:url?new URL(url).hostname:"",zoom:preferences.default_zoom};state.pages.push(next);state.selected=next.tab;}
   const current=state.pages.find(page=>page.tab===state.selected);
   if(action==="navigate" && current && url){let history=histories.get(current.tab);if(!history){history={urls:[current.url],index:0};histories.set(current.tab,history);}history.urls.splice(history.index+1);history.urls.push(url);history.index++;current.url=url;current.title=new URL(url).hostname;}
   if(page && (action==="back" || action==="forward")){const history=histories.get(page.tab);if(history){history.index=Math.max(0,Math.min(history.urls.length-1,history.index+(action==="back"?-1:1)));page.url=history.urls[history.index];page.title=page.url==="about:blank"?"":new URL(page.url).hostname;}}
-  if(current && ["open","navigate","reload","back","forward"].includes(action)){current.loading=true;setTimeout(()=>{current.loading=false;},500);if(current.url!=="about:blank")library.history.unshift({id:crypto.randomUUID(),url:current.url,title:current.title,time:Date.now()});}
+  if(current && ["open","navigate","reload","back","forward"].includes(action)){current.loading=true;setTimeout(()=>{current.loading=false;current.favicon=icon;changed();},1800);if(current.url!=="about:blank")library.history.unshift({id:crypto.randomUUID(),url:current.url,title:current.title,time:Date.now()});}
   for(const item of state.pages){const history=histories.get(item.tab);item.can_back=Boolean(history && history.index>0);item.can_forward=Boolean(history && history.index<history.urls.length-1);}
   render();return structuredClone(state);
 }

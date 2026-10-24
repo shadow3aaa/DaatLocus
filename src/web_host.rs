@@ -78,6 +78,9 @@ impl Host {
             profile,
             operation,
         };
+        if !request.validate() {
+            return Err(miette!("Invalid native Web request"));
+        }
         let (reply, response) = oneshot::channel();
         sender
             .try_send(Pending { request, reply })
@@ -86,6 +89,12 @@ impl Host {
             .map_err(|_| miette!("Native Web request timed out; its navigation outcome is unknown, do not replay automatically"))?
             .map_err(|_| miette!("Native Web host disconnected; do not replay navigation automatically"))?
     }
+}
+fn validate_browser_page_url(url: &str) -> Result<()> {
+    if url == "about:blank" {
+        return Ok(());
+    }
+    crate::web_app::validate_url(url)
 }
 pub fn validate_reply(request: &Request, reply: &Reply) -> Result<()> {
     if reply.id != request.id
@@ -112,7 +121,7 @@ pub fn validate_reply(request: &Request, reply: &Reply) -> Result<()> {
             .as_ref()
             .ok_or_else(|| miette!("Native browser result missing"))?;
         for page in &browser.pages {
-            crate::web_app::validate_url(&page.url)?;
+            validate_browser_page_url(&page.url)?;
         }
         match command {
             BrowserCommand::Open { tab, .. }
@@ -122,7 +131,7 @@ pub fn validate_reply(request: &Request, reply: &Reply) -> Result<()> {
                     .observation
                     .as_ref()
                     .ok_or_else(|| miette!("Native browser screenshot missing"))?;
-                crate::web_app::validate_url(&observation.page.url)?;
+                validate_browser_page_url(&observation.page.url)?;
                 if &observation.page.tab != tab
                     || observation.width == 0
                     || observation.height == 0
@@ -165,6 +174,39 @@ pub fn resolve(request: &Request, reply: Reply) -> Result<Reply> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn browser_catalog_accepts_new_tabs_but_rejects_privileged_urls() {
+        let request = Request {
+            id: "c".repeat(32),
+            profile: daat_locus_client_protocol::web::SHARED_BROWSER_PROFILE.into(),
+            operation: Operation::Browser {
+                command: BrowserCommand::List,
+            },
+        };
+        for (url, valid) in [
+            ("about:blank", true),
+            ("https://example.com/", true),
+            ("file:///secret", false),
+            ("tauri://localhost/", false),
+            ("about:config", false),
+        ] {
+            let reply = Reply {
+                id: request.id.clone(),
+                capture: None,
+                error: None,
+                browser: Some(BrowserReply {
+                    pages: vec![daat_locus_client_protocol::web::BrowserPage {
+                        tab: "a".repeat(32),
+                        title: String::new(),
+                        url: url.into(),
+                    }],
+                    observation: None,
+                }),
+            };
+            assert_eq!(validate_reply(&request, &reply).is_ok(), valid, "{url}");
+        }
+    }
+
     #[tokio::test]
     async fn attachment_is_exclusive_and_dropped_calls_are_not_replayed_after_reconnect() {
         let host = Arc::new(Host::default());

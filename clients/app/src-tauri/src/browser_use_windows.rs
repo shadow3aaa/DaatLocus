@@ -6,7 +6,91 @@ use std::{
     time::Duration,
 };
 use tauri::Webview;
+pub async fn favicon(view: &Webview) -> Result<String, String> {
+    use webview2_com::{GetFaviconCompletedHandler, Microsoft::Web::WebView2::Win32::*};
+    use windows::core::Interface;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let failed = tx.clone();
+    view.with_webview(move |platform| {
+        let result = (|| -> windows::core::Result<()> {
+            unsafe {
+                let core: ICoreWebView2_15 = platform.controller().CoreWebView2()?.cast()?;
+                core.GetFavicon(
+                    COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG,
+                    &GetFaviconCompletedHandler::create(Box::new(move |status, stream| {
+                        let result = (|| -> Result<String, String> {
+                            use base64::Engine;
+                            status.map_err(|_| "Site icon unavailable")?;
+                            let stream = stream.ok_or("Site icon unavailable")?;
+                            let mut bytes = vec![0u8; 32_769];
+                            let mut read = 0;
+                            stream
+                                .Read(
+                                    bytes.as_mut_ptr().cast(),
+                                    bytes.len() as u32,
+                                    Some(&mut read),
+                                )
+                                .ok()
+                                .map_err(|_| "Site icon unavailable")?;
+                            bytes.truncate(read as usize);
+                            if bytes.len() > 32_768 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                                return Err("Invalid site icon".into());
+                            }
+                            Ok(format!(
+                                "data:image/png;base64,{}",
+                                base64::engine::general_purpose::STANDARD.encode(bytes)
+                            ))
+                        })();
+                        if let Some(tx) = tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                            let _ = tx.send(result);
+                        }
+                        Ok(())
+                    })),
+                )
+            }
+        })();
+        if result.is_err()
+            && let Some(tx) = failed.lock().unwrap_or_else(|e| e.into_inner()).take()
+        {
+            let _ = tx.send(Err("Site icon unavailable".into()));
+        }
+    })
+    .map_err(|_| "Site icon unavailable")?;
+    tokio::time::timeout(Duration::from_secs(3), rx)
+        .await
+        .map_err(|_| "Site icon timed out")?
+        .map_err(|_| "Site icon unavailable")?
+}
 pub fn shortcuts(view: &Webview, app: tauri::AppHandle) {
+    let metadata = app.clone();
+    let label = view.label().to_owned();
+    let _ = view.with_webview(move |platform| unsafe {
+        use tauri::Manager;
+        use webview2_com::{FaviconChangedEventHandler, Microsoft::Web::WebView2::Win32::*};
+        use windows::core::Interface;
+        if let Ok(core) = platform
+            .controller()
+            .CoreWebView2()
+            .and_then(|core| core.cast::<ICoreWebView2_15>())
+        {
+            let _ = core.add_FaviconChanged(
+                &FaviconChangedEventHandler::create(Box::new(move |_, _| {
+                    if let Some(host) = metadata.try_state::<crate::web_host::NativeHost>()
+                        && let Some(view) = metadata.get_webview(&label)
+                    {
+                        let host = host.inner().clone();
+                        let key = label.clone();
+                        tauri::async_runtime::spawn(async move {
+                            host.capture_icon(&view, &key).await;
+                        });
+                    }
+                    Ok(())
+                })),
+                &mut 0,
+            );
+        }
+    });
     let _=view.with_webview(move |platform|unsafe{
         use tauri::Manager;
         use webview2_com::{Microsoft::Web::WebView2::Win32::*,AcceleratorKeyPressedEventHandler};
@@ -486,5 +570,20 @@ pub async fn input(window: &Webview, input: BrowserInput) -> Result<(), String> 
             return Err("Navigation is dispatched by the page host".into());
         }
     }
+    Ok(())
+}
+
+pub async fn configure(view: &Webview, locale: &str) -> Result<(), String> {
+    let version = cdp(view, "Browser.getVersion", json!({})).await?;
+    let user_agent = version["userAgent"]
+        .as_str()
+        .ok_or("Browser language unavailable")?;
+    cdp(view,"Network.setUserAgentOverride",json!({"userAgent":user_agent,"acceptLanguage":format!("{locale},{}",locale.split('-').next().unwrap_or("en"))})).await?;
+    cdp(
+        view,
+        "Emulation.setLocaleOverride",
+        json!({"locale":locale}),
+    )
+    .await?;
     Ok(())
 }

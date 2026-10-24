@@ -43,41 +43,47 @@ pub(crate) fn resize(app: &tauri::AppHandle) -> Result<(), String> {
     let Ok(size) = window.inner_size() else {
         return Ok(());
     };
-    let (x, y, width, height) = if let Some(bounds) = panel {
-        let x = (bounds.x * bounds.scale)
-            .round()
-            .clamp(0.0, f64::from(size.width)) as u32;
-        let y = (bounds.y * bounds.scale)
-            .round()
-            .clamp(0.0, f64::from(size.height)) as u32;
-        (
-            x,
-            y,
-            (bounds.width * bounds.scale)
-                .round()
-                .clamp(1.0, f64::from(size.width.saturating_sub(x).max(1))) as u32,
-            (bounds.height * bounds.scale)
-                .round()
-                .clamp(1.0, f64::from(size.height.saturating_sub(y).max(1))) as u32,
-        )
-    } else {
-        (0, 0, size.width, size.height)
-    };
-    let order = host
-        .tab_order
+    let bounds = panel.map(|mut bounds| {
+        let scale = window.scale_factor().unwrap_or(bounds.scale);
+        let (right, bottom) = *host.panel_insets.lock().unwrap_or_else(|e| e.into_inner());
+        bounds.width = (f64::from(size.width) / scale - bounds.x - right).max(1.0);
+        bounds.height = (f64::from(size.height) / scale - bounds.y - bottom).max(1.0);
+        bounds.scale = scale;
+        *host.panel.lock().unwrap_or_else(|e| e.into_inner()) = Some(bounds);
+        bounds
+    });
+    let (x, y, width, height) = bounds
+        .map(|bounds| {
+            (
+                (bounds.x * bounds.scale).round() as i32,
+                (bounds.y * bounds.scale).round() as i32,
+                (bounds.width * bounds.scale).round() as u32,
+                (bounds.height * bounds.scale).round() as u32,
+            )
+        })
+        .unwrap_or((0, 0, size.width, size.height));
+    let selected = host
+        .selected
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    for key in order {
-        if let Some(view) = app.get_webview(&key) {
-            // Set both together: Wry's separate size setter reads a position
-            // relative to the original parent after a child is reparented.
-            view.set_bounds(tauri::Rect {
-                position: tauri::PhysicalPosition::new(x as i32, y as i32).into(),
-                size: tauri::PhysicalSize::new(width, height).into(),
-            })
-            .map_err(|e| e.to_string())?;
+    if let Some(key) = selected
+        && let Some(view) = app.get_webview(&key)
+    {
+        let geometry = (window.label().to_owned(), x, y, width, height);
+        let mut applied = host
+            .applied_bounds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if applied.get(&key) == Some(&geometry) {
+            return Ok(());
         }
+        view.set_bounds(tauri::Rect {
+            position: tauri::PhysicalPosition::new(x, y).into(),
+            size: tauri::PhysicalSize::new(width, height).into(),
+        })
+        .map_err(|e| e.to_string())?;
+        applied.insert(key, geometry);
     }
     host.browser_states
         .lock()
@@ -98,12 +104,23 @@ pub(crate) async fn set_panel(
     let app = host.app.clone();
     app.run_on_main_thread(move || {
         let result = (|| {
+            let previous = *host.panel.lock().map_err(|_| "Browser unavailable")?;
+            if let Some(bounds) = bounds
+                && let Some(window) = host.app.get_window("main")
             {
-                let mut current = host.panel.lock().map_err(|_| "Browser unavailable")?;
-                if *current == bounds {
-                    return Ok(());
-                }
-                *current = bounds;
+                let size = window.inner_size().map_err(|e| e.to_string())?;
+                *host
+                    .panel_insets
+                    .lock()
+                    .map_err(|_| "Browser unavailable")? = (
+                    (f64::from(size.width) / bounds.scale - bounds.x - bounds.width).max(0.0),
+                    (f64::from(size.height) / bounds.scale - bounds.y - bounds.height).max(0.0),
+                );
+            }
+            *host.panel.lock().map_err(|_| "Browser unavailable")? = bounds;
+            // Resizing an attached page never hides or reparents its native view.
+            if previous.is_some() == bounds.is_some() {
+                return resize(&host.app);
             }
             let order = host
                 .tab_order
@@ -174,8 +191,7 @@ pub async fn browser_control(
         set_panel(&host, None).await?;
         return Ok(serde_json::json!({}));
     }
-    let main = app.get_webview_window("main").ok_or("Client unavailable")?;
-    crate::transport::authorize_owner(&main).await?;
+    crate::transport::authorize_owner(&webview).await?;
     let occlusions = occlusions.unwrap_or_default();
     if occlusions.len() > 16 || occlusions.iter().any(|cut| !cut.validate()) {
         return Err("Invalid browser overlays".into());
@@ -197,6 +213,19 @@ pub async fn browser_control(
             .clone(),
     };
     match action.as_str() {
+        "preferences" => {
+            return serde_json::to_value(
+                &*host.preferences.lock().map_err(|_| "Browser unavailable")?,
+            )
+            .map_err(|e| e.to_string());
+        }
+        "set_preferences" => {
+            let patch = serde_json::from_str(&url.ok_or("Invalid browser settings")?)
+                .map_err(|_| "Invalid browser settings")?;
+            let mut preferences = host.preferences.lock().map_err(|_| "Browser unavailable")?;
+            *preferences = preferences.patch(&host.root, patch)?;
+            return serde_json::to_value(&*preferences).map_err(|e| e.to_string());
+        }
         "mount" => {
             let bounds = bounds
                 .filter(BrowserBounds::validate)
@@ -204,6 +233,7 @@ pub async fn browser_control(
             *host.occlusions.lock().map_err(|_| "Browser unavailable")? = occlusions;
             set_panel(&host, Some(bounds)).await?;
             apply_occlusions(&host).await?;
+            return Ok(serde_json::json!({}));
         }
         "list" => {}
         "move_tab" => {
@@ -416,24 +446,32 @@ pub async fn browser_control(
         "stop" => {
             if let Some(view) = key.as_deref().and_then(|key| host.app.get_webview(key)) {
                 let _ = view.eval("window.stop()");
+                host.loading
+                    .lock()
+                    .map_err(|_| "Browser unavailable")?
+                    .insert(view.label().into(), false);
+                host.changed();
             }
         }
         "select" => host.select_page(key.as_deref().ok_or("Select a browser page")?, true)?,
         "close" => host.close_page(key.as_deref().ok_or("Select a browser page")?)?,
         "open" => {
-            let tab = uuid::Uuid::new_v4().simple().to_string();
-            host.load(
-                daat_locus_client_protocol::web::Request {
-                    id: uuid::Uuid::new_v4().simple().to_string(),
-                    profile: SHARED_BROWSER_PROFILE.into(),
-                    operation: daat_locus_client_protocol::web::Operation::Load {
-                        url: url.ok_or("Enter a URL")?,
-                    },
-                },
-                format!("web-{SHARED_BROWSER_PROFILE}-{tab}"),
-                false,
-            )
-            .await?;
+            let url =
+                url::Url::parse(&url.ok_or("Enter a URL")?).map_err(|_| "Invalid browser URL")?;
+            if !host.navigation_allowed(&url) {
+                return Err("Browser URL is not allowed".into());
+            }
+            let key = format!(
+                "web-{SHARED_BROWSER_PROFILE}-{}",
+                uuid::Uuid::new_v4().simple()
+            );
+            let creating = host.clone();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            app.run_on_main_thread(move || {
+                let _ = tx.send(creating.create_page(SHARED_BROWSER_PROFILE, &key, url, true));
+            })
+            .map_err(|e| e.to_string())?;
+            rx.await.map_err(|_| "Browser unavailable")??;
         }
         "navigate" | "back" | "forward" | "reload" => {
             let input = match action.as_str() {
@@ -461,9 +499,16 @@ pub async fn browser_control(
         .map_err(|_| "Browser unavailable")?;
     if let Some(pages) = pages.as_array_mut() {
         for page in pages {
-            if let Some(tab) = page["tab"].as_str() {
+            if let Some(tab) = page["tab"].as_str().map(str::to_owned) {
                 let key = format!("{prefix}{tab}");
-                if selected.as_deref() == Some(tab)
+                let icon = host
+                    .icons
+                    .lock()
+                    .map_err(|_| "Browser unavailable")?
+                    .get(&key)
+                    .cloned();
+                page["favicon"] = serde_json::json!(icon);
+                if selected.as_deref() == Some(tab.as_str())
                     && let Some(view) = host.app.get_webview(&key)
                     && let Ok((back, forward)) = crate::browser_use::navigation(&view).await
                 {
@@ -534,15 +579,31 @@ pub(crate) async fn apply_occlusions(host: &NativeHost) -> Result<(), String> {
         .lock()
         .map_err(|_| "Browser unavailable")?
         .clone();
-    let order = host
-        .tab_order
+    let selected = host
+        .selected
         .lock()
         .map_err(|_| "Browser unavailable")?
         .clone();
-    for key in order {
-        if let Some(view) = host.app.get_webview(&key) {
-            crate::browser_use::occlude(&view, bounds, cuts.clone()).await?;
+    if let Some(key) = selected
+        && let Some(view) = host.app.get_webview(&key)
+    {
+        let signature =
+            serde_json::to_string(&(if cuts.is_empty() { None } else { bounds }, &cuts))
+                .map_err(|_| "Browser unavailable")?;
+        if host
+            .applied_occlusions
+            .lock()
+            .map_err(|_| "Browser unavailable")?
+            .get(&key)
+            == Some(&signature)
+        {
+            return Ok(());
         }
+        crate::browser_use::occlude(&view, bounds, cuts).await?;
+        host.applied_occlusions
+            .lock()
+            .map_err(|_| "Browser unavailable")?
+            .insert(key, signature);
     }
     host.browser_states
         .lock()

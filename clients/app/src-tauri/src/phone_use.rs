@@ -185,7 +185,7 @@ pub fn initialize() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tauri::command]
-pub async fn phone_use_status(window: tauri::WebviewWindow) -> Result<serde_json::Value, String> {
+pub async fn phone_use_status(window: tauri::Webview) -> Result<serde_json::Value, String> {
     crate::transport::authorize_owner(&window).await?;
     let bridge = BRIDGE.get().ok_or("PhoneUse unavailable")?.clone();
     tokio::task::spawn_blocking(move || {
@@ -205,7 +205,7 @@ pub struct DisplayPatch {
 
 #[tauri::command]
 pub async fn phone_use_display_configure(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     patch: DisplayPatch,
 ) -> Result<serde_json::Value, String> {
     crate::transport::authorize_owner(&window).await?;
@@ -220,7 +220,7 @@ pub async fn phone_use_display_configure(
 }
 #[tauri::command]
 pub async fn phone_use_configure(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     enabled: bool,
     method: String,
 ) -> Result<serde_json::Value, String> {
