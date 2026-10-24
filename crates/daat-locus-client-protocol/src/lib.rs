@@ -1,5 +1,6 @@
 //! Narrow account bootstrap requests over authenticated local OS-owner IPC.
 pub mod computer_use;
+pub mod web;
 
 use serde::{Deserialize, Serialize};
 

@@ -30,10 +30,6 @@ impl AppId {
         Ok(Self(name))
     }
 
-    pub fn browser() -> Self {
-        Self("browser".to_string())
-    }
-
     pub fn terminal() -> Self {
         Self("terminal".to_string())
     }

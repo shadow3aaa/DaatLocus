@@ -126,6 +126,10 @@ fn action(app: &tauri::AppHandle, id: &str) {
     }
 }
 pub fn run(options: Options) -> Result<()> {
+    #[cfg(feature = "web-contract")]
+    if let Some(manifest) = &options.web_probe {
+        return crate::web_host::probe(manifest);
+    }
     #[cfg(all(target_os = "macos", feature = "native-contract"))]
     let native_contract = options
         .native_gui_contract
@@ -147,6 +151,7 @@ pub fn run(options: Options) -> Result<()> {
             }
         }))
         .invoke_handler(tauri::generate_handler![
+            crate::browser_ui::browser_control,
             desktop_account,
             desktop_window,
             #[cfg(target_os = "macos")]
@@ -259,6 +264,11 @@ pub fn run(options: Options) -> Result<()> {
                 builder = builder.decorations(false);
             }
             builder.build()?;
+            crate::web_host::start(
+                app.handle().clone(),
+                backend.clone(),
+                status.url.trim_end_matches('/').into(),
+            );
             #[cfg(target_os = "macos")]
             {
                 use tauri::menu::{PredefinedMenuItem, Submenu};

@@ -12,6 +12,9 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 #[derive(Clone, Debug, Parser)]
 #[command(name = "daat-locus-app", version, about = "Daat Locus desktop client.")]
 pub struct Options {
+    #[cfg(feature = "web-contract")]
+    #[arg(long, hide = true)]
+    pub web_probe: Option<PathBuf>,
     #[cfg(all(target_os = "macos", feature = "native-contract"))]
     #[arg(long, hide = true, requires = "profile")]
     pub native_gui_contract: Option<PathBuf>,
@@ -48,6 +51,21 @@ pub struct Status {
     pub state: String,
 }
 impl Backend {
+    pub fn web_host(&self) -> Result<tokio::process::Child> {
+        let mut command = tokio::process::Command::new(&self.executable);
+        command
+            .arg("web-host")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        if let Some(profile) = &self.options.profile {
+            command.args(["--profile", profile]);
+        }
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
+        Ok(command.spawn()?)
+    }
     pub fn new(options: Options) -> Result<Self> {
         let client = std::env::current_exe()?;
         let executable = client

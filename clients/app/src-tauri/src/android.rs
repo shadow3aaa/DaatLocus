@@ -83,6 +83,7 @@ pub fn run() {
     let app = crate::transport::resources(tauri::Builder::default())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            crate::web_host_android::browser_control,
             desktop_account,
             crate::phone_use::phone_use_status,
             crate::phone_use::phone_use_configure,
@@ -102,6 +103,7 @@ pub fn run() {
                 tauri::async_runtime::block_on(MobileService::start(app.path().app_data_dir()?))
                     .map_err(|_| "Cannot start Daat Locus")?;
             let origin = url::Url::parse(&service.origin)?;
+            crate::web_host_android::start(service.web_host(), &service.origin)?;
             let _ = SERVICE.set(Arc::downgrade(&service));
             crate::transport::capability(app.handle())?;
             app.manage(crate::transport::Transport::new(Arc::new(

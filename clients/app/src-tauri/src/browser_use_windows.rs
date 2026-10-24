@@ -1,0 +1,490 @@
+//! WebView2's native CDP interface, without a listening debugging port.
+use daat_locus_client_protocol::web::BrowserInput;
+use serde_json::{Value, json};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tauri::Webview;
+pub fn shortcuts(view: &Webview, app: tauri::AppHandle) {
+    let _=view.with_webview(move |platform|unsafe{
+        use tauri::Manager;
+        use webview2_com::{Microsoft::Web::WebView2::Win32::*,AcceleratorKeyPressedEventHandler};
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState,VK_CONTROL,VK_MENU,VK_SHIFT};
+        let _=platform.controller().add_AcceleratorKeyPressed(&AcceleratorKeyPressedEventHandler::create(Box::new(move |_,args|{
+            let Some(args)=args else{return Ok(())};
+            let mut kind=COREWEBVIEW2_KEY_EVENT_KIND::default();args.KeyEventKind(&mut kind)?;
+            if kind!=COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN && kind!=COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN {return Ok(());}
+            let mut key=0;args.VirtualKey(&mut key)?;
+            let control=GetKeyState(VK_CONTROL as i32)<0;
+            let alt=GetKeyState(VK_MENU as i32)<0;
+            let shift=GetKeyState(VK_SHIFT as i32)<0;
+            let shortcut=if control && !alt {
+                match key {
+                    0x09=>Some(if shift {"previous-tab".into()}else{"next-tab".into()}),
+                    0x47=>Some(if shift {"find-previous".into()}else{"find-next".into()}),
+                    0xbb|0x6b=>Some("zoom-in".into()),
+                    _ if shift=>None,
+                    0x21=>Some("previous-tab".into()),0x22=>Some("next-tab".into()),
+                    0xbd|0x6d=>Some("zoom-out".into()),0x30=>Some("zoom-reset".into()),
+                    0x31..=0x39=>Some(format!("tab-{}",key-0x30)),
+                    0x4c|0x54|0x57|0x48|0x4a|0x46|0x50|0x52=>Some(char::from_u32(key).unwrap().to_ascii_lowercase().to_string()),
+                    _=>None,
+                }
+            }else if alt && !control && !shift {
+                match key {0x25=>Some("back".into()),0x27=>Some("forward".into()),0x44=>Some("l".into()),_=>None}
+            }else if !alt && !control {
+                match key {0x74 if !shift=>Some("r".into()),0x72=>Some(if shift {"find-previous".into()}else{"find-next".into()}),_=>None}
+            }else{None};
+            if let Some(shortcut)=shortcut && let Some(main)=app.get_webview("main") {
+                args.SetHandled(true)?;
+                let _=main.set_focus();
+                let _=main.eval(format!("window.dispatchEvent(new CustomEvent('dl-browser-shortcut',{{detail:{}}}))",serde_json::to_string(&shortcut).unwrap()));
+            }
+            Ok(())
+        })),&mut 0);
+    });
+}
+
+async fn cdp(window: &Webview, method: &str, parameters: Value) -> Result<Value, String> {
+    let method = method.to_owned();
+    let parameters = parameters.to_string();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let sender = Arc::new(Mutex::new(Some(sender)));
+    let failure = sender.clone();
+    window
+        .with_webview(move |view| {
+            let result = (|| -> windows::core::Result<()> {
+                unsafe {
+                    let core = view.controller().CoreWebView2()?;
+                    core.CallDevToolsProtocolMethod(
+                        &windows::core::HSTRING::from(method),
+                        &windows::core::HSTRING::from(parameters),
+                        &webview2_com::CallDevToolsProtocolMethodCompletedHandler::create(
+                            Box::new(move |status, value| {
+                                let result = status
+                                    .map_err(|_| {
+                                        "Native browser operation failed; observe before continuing"
+                                            .to_owned()
+                                    })
+                                    .and_then(|_| {
+                                        serde_json::from_str(&value)
+                                            .map_err(|_| "Invalid native browser response".into())
+                                    });
+                                if let Some(sender) =
+                                    sender.lock().unwrap_or_else(|e| e.into_inner()).take()
+                                {
+                                    let _ = sender.send(result);
+                                }
+                                Ok(())
+                            }),
+                        ),
+                    )
+                }
+            })();
+            if result.is_err()
+                && let Some(sender) = failure.lock().unwrap_or_else(|e| e.into_inner()).take()
+            {
+                let _ = sender.send(Err("Native browser operation could not start".into()));
+            }
+        })
+        .map_err(|_| "Native browser event loop unavailable")?;
+    tokio::time::timeout(Duration::from_secs(8), receiver)
+        .await
+        .map_err(|_| "Native browser operation timed out; do not replay")?
+        .map_err(|_| "Native browser operation interrupted; do not replay")?
+}
+pub async fn screenshot(window: &Webview) -> Result<String, String> {
+    let result = cdp(
+        window,
+        "Page.captureScreenshot",
+        json!({"format":"png","fromSurface":true,"captureBeyondViewport":false}),
+    )
+    .await?;
+    result["data"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or("Native browser screenshot missing".into())
+}
+pub async fn occlude(
+    view: &Webview,
+    bounds: Option<daat_locus_client_protocol::web::BrowserBounds>,
+    cuts: Vec<daat_locus_client_protocol::web::BrowserOcclusion>,
+) -> Result<(), String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    view.with_webview(move |platform| {
+        let result = (|| unsafe {
+            use windows_sys::Win32::{
+                Foundation::{POINT, RECT},
+                Graphics::Gdi::*,
+                UI::WindowsAndMessaging::{GetParent, GetWindowRect},
+            };
+            let mut handle = windows::Win32::Foundation::HWND::default();
+            platform
+                .controller()
+                .ParentWindow(&mut handle)
+                .map_err(|_| "Browser layer unavailable")?;
+            let handle = handle.0;
+            let Some(bounds) = bounds.filter(|_| !cuts.is_empty()) else {
+                if SetWindowRgn(handle, std::ptr::null_mut(), 1) == 0 {
+                    return Err("Browser layer could not reset");
+                }
+                return Ok(());
+            };
+            let mut window = RECT::default();
+            let mut origin = POINT { x: 0, y: 0 };
+            if GetWindowRect(handle, &mut window) == 0
+                || ClientToScreen(GetParent(handle), &mut origin) == 0
+            {
+                return Err("Browser layer bounds unavailable");
+            }
+            let region =
+                CreateRectRgn(0, 0, window.right - window.left, window.bottom - window.top);
+            if region.is_null() {
+                return Err("Browser layer unavailable");
+            }
+            for cut in cuts {
+                let x = (cut.x * bounds.scale).round() as i32 + origin.x - window.left;
+                let y = (cut.y * bounds.scale).round() as i32 + origin.y - window.top;
+                let width = (cut.width * bounds.scale).ceil() as i32;
+                let height = (cut.height * bounds.scale).ceil() as i32;
+                let radius = (cut.radius * bounds.scale)
+                    .min(f64::from(width.min(height)) / 2.0)
+                    .round() as i32;
+                let hole =
+                    CreateRoundRectRgn(x, y, x + width + 1, y + height + 1, radius * 2, radius * 2);
+                if hole.is_null() || CombineRgn(region, region, hole, RGN_DIFF) == 0 {
+                    if !hole.is_null() {
+                        DeleteObject(hole);
+                    }
+                    DeleteObject(region);
+                    return Err("Browser overlay could not be composed");
+                }
+                DeleteObject(hole);
+            }
+            if SetWindowRgn(handle, region, 1) == 0 {
+                DeleteObject(region);
+                return Err("Browser overlay could not be composed");
+            }
+            Ok(())
+        })()
+        .map_err(str::to_owned);
+        let _ = tx.send(result);
+    })
+    .map_err(|_| "Browser layer unavailable")?;
+    tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .map_err(|_| "Browser layer timed out")?
+        .map_err(|_| "Browser layer unavailable")?
+}
+#[cfg(feature = "web-contract")]
+pub async fn occlusion_probe(view: &Webview) -> Result<Value, String> {
+    let scale = view
+        .window()
+        .scale_factor()
+        .map_err(|_| "Browser unavailable")?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    view.with_webview(move |platform| unsafe {
+        use windows_sys::Win32::{
+            Foundation::{POINT, RECT},
+            Graphics::Gdi::*,
+            UI::WindowsAndMessaging::{GetParent, GetWindowRect},
+        };
+        let mut handle = windows::Win32::Foundation::HWND::default();
+        let result = platform.controller().ParentWindow(&mut handle)
+            .map_err(|_| "Browser unavailable".to_owned()).map(|_| {
+                let region = CreateRectRgn(0, 0, 0, 0);
+                let kind = GetWindowRgn(handle.0, region);
+                let mut rect = RECT::default();
+                let mut origin = POINT { x: 0, y: 0 };
+                GetWindowRect(handle.0, &mut rect);
+                ClientToScreen(GetParent(handle.0), &mut origin);
+                let value = json!({
+                    "has_region": kind != 0,
+                    "cut_visible": PtInRegion(region, (50.0 * scale) as i32, (50.0 * scale) as i32) != 0,
+                    "page_visible": PtInRegion(region, (800.0 * scale) as i32, (100.0 * scale) as i32) != 0,
+                    "position": [f64::from(rect.left - origin.x) / scale, f64::from(rect.top - origin.y) / scale],
+                });
+                DeleteObject(region);
+                value
+            });
+        let _ = tx.send(result);
+    }).map_err(|_| "Browser unavailable")?;
+    rx.await.map_err(|_| "Browser unavailable")?
+}
+pub async fn find(window: &Webview, action: &str, text: &str) -> Result<Value, String> {
+    let action = action.to_owned();
+    let text = text.to_owned();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let sender = Arc::new(Mutex::new(Some(sender)));
+    let failure = sender.clone();
+    let event_token = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let cleanup_token = event_token.clone();
+    window
+        .with_webview(move |platform| {
+            use webview2_com::Microsoft::Web::WebView2::Win32::*;
+            use windows::core::Interface;
+            fn status(find: &ICoreWebView2Find) -> windows::core::Result<Value> {
+                let (mut index, mut count) = (0, 0);
+                unsafe {
+                    find.ActiveMatchIndex(&mut index)?;
+                    find.MatchCount(&mut count)?;
+                }
+                Ok(json!({"found":count>0,"count":count,"index":if count>0 {index} else {0}}))
+            }
+            let result = (|| -> windows::core::Result<()> {
+                unsafe {
+                    let core = platform.controller().CoreWebView2()?;
+                    let find = core.cast::<ICoreWebView2_28>()?.Find()?;
+                    if action == "find_close" || text.is_empty() {
+                        find.Stop()?;
+                        if let Some(sender) = sender.lock().unwrap().take() {
+                            let _ = sender.send(Ok(json!({"found":false,"count":0,"index":0})));
+                        }
+                    } else if action == "find" {
+                        find.Stop()?;
+                        let options = core
+                            .cast::<ICoreWebView2_2>()?
+                            .Environment()?
+                            .cast::<ICoreWebView2Environment15>()?
+                            .CreateFindOptions()?;
+                        options.SetFindTerm(&windows::core::HSTRING::from(text))?;
+                        options.SetIsCaseSensitive(false)?;
+                        options.SetShouldMatchWord(false)?;
+                        options.SetShouldHighlightAllMatches(true)?;
+                        options.SetSuppressDefaultFindDialog(true)?;
+                        let current = find.clone();
+                        find.Start(
+                            &options,
+                            &webview2_com::FindStartCompletedHandler::create(Box::new(
+                                move |result| {
+                                    let value = result
+                                        .and_then(|_| status(&current))
+                                        .map_err(|_| "Page search failed".to_string());
+                                    if let Some(sender) = sender.lock().unwrap().take() {
+                                        let _ = sender.send(value);
+                                    }
+                                    Ok(())
+                                },
+                            )),
+                        )?;
+                    } else {
+                        let initial = status(&find)?;
+                        if initial["count"].as_i64().unwrap_or(0) <= 1 {
+                            if let Some(sender) = sender.lock().unwrap().take() {
+                                let _ = sender.send(Ok(initial));
+                            }
+                        } else {
+                            let current = find.clone();
+                            let registered = event_token.clone();
+                            let mut registration = 0;
+                            find.add_ActiveMatchIndexChanged(
+                                &webview2_com::FindActiveMatchIndexChangedEventHandler::create(
+                                    Box::new(move |_, _| {
+                                        let value = status(&current)
+                                            .map_err(|_| "Page search failed".to_string());
+                                        let _ = current.remove_ActiveMatchIndexChanged(
+                                            registered
+                                                .swap(0, std::sync::atomic::Ordering::Relaxed),
+                                        );
+                                        if let Some(sender) = sender.lock().unwrap().take() {
+                                            let _ = sender.send(value);
+                                        }
+                                        Ok(())
+                                    }),
+                                ),
+                                &mut registration,
+                            )?;
+                            event_token.store(registration, std::sync::atomic::Ordering::Relaxed);
+                            if action == "find_previous" {
+                                find.FindPrevious()?;
+                            } else {
+                                find.FindNext()?;
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+            })();
+            if result.is_err()
+                && let Some(sender) = failure.lock().unwrap().take()
+            {
+                let _ = sender.send(Err("Native page search unavailable".into()));
+            }
+        })
+        .map_err(|_| "Browser unavailable")?;
+    let result = tokio::time::timeout(Duration::from_secs(5), receiver).await;
+    let registration = cleanup_token.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if registration != 0 {
+        let _ = window.with_webview(move |platform| unsafe {
+            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_28;
+            use windows::core::Interface;
+            if let Ok(core) = platform.controller().CoreWebView2()
+                && let Ok(core) = core.cast::<ICoreWebView2_28>()
+                && let Ok(find) = core.Find()
+            {
+                let _ = find.remove_ActiveMatchIndexChanged(registration);
+            }
+        });
+    }
+    result
+        .map_err(|_| "Page search timed out")?
+        .map_err(|_| "Page search interrupted")?
+}
+pub async fn navigation(window: &Webview) -> Result<(bool, bool), String> {
+    let history = cdp(window, "Page.getNavigationHistory", json!({})).await?;
+    let index = history["currentIndex"].as_u64().unwrap_or(0) as usize;
+    let count = history["entries"].as_array().map_or(0, Vec::len);
+    Ok((index > 0, index + 1 < count))
+}
+pub async fn input(window: &Webview, input: BrowserInput) -> Result<(), String> {
+    match input {
+        BrowserInput::Move { x, y } => {
+            cdp(
+                window,
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseMoved","x":x,"y":y}),
+            )
+            .await?;
+        }
+        BrowserInput::Drag { x, y, to_x, to_y } => {
+            cdp(
+                window,
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseMoved","x":x,"y":y}),
+            )
+            .await?;
+            cdp(window,"Input.dispatchMouseEvent",json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":1})).await?;
+            for step in 1..=12 {
+                let t = f64::from(step) / 12.0;
+                cdp(window,"Input.dispatchMouseEvent",json!({"type":"mouseMoved","x":x+(to_x-x)*t,"y":y+(to_y-y)*t,"button":"left","buttons":1})).await?;
+            }
+            cdp(window,"Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":to_x,"y":to_y,"button":"left","buttons":0,"clickCount":1})).await?;
+        }
+        BrowserInput::Click {
+            x,
+            y,
+            button,
+            count,
+        } => {
+            cdp(
+                window,
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseMoved","x":x,"y":y}),
+            )
+            .await?;
+            for click in 1..=count {
+                cdp(
+                    window,
+                    "Input.dispatchMouseEvent",
+                    json!({"type":"mousePressed","x":x,"y":y,"button":button,"clickCount":click}),
+                )
+                .await?;
+                cdp(
+                    window,
+                    "Input.dispatchMouseEvent",
+                    json!({"type":"mouseReleased","x":x,"y":y,"button":button,"clickCount":click}),
+                )
+                .await?;
+            }
+        }
+        BrowserInput::Scroll {
+            x,
+            y,
+            delta_x,
+            delta_y,
+        } => {
+            cdp(
+                window,
+                "Input.dispatchMouseEvent",
+                json!({"type":"mouseWheel","x":x,"y":y,"deltaX":delta_x,"deltaY":delta_y}),
+            )
+            .await?;
+        }
+        BrowserInput::Type { text } => {
+            cdp(window, "Input.insertText", json!({"text":text})).await?;
+        }
+        BrowserInput::Key { key, modifiers } => {
+            let bits = modifiers.iter().fold(0, |bits, m| {
+                bits | match m.as_str() {
+                    "alt" => 1,
+                    "control" => 2,
+                    "meta" => 4,
+                    "shift" => 8,
+                    _ => 0,
+                }
+            });
+            let (code, key_code, text) = match key.as_str() {
+                "Enter" => ("Enter".into(), 13, "\r".into()),
+                "Tab" => ("Tab".into(), 9, String::new()),
+                "Escape" => ("Escape".into(), 27, String::new()),
+                "Backspace" => ("Backspace".into(), 8, String::new()),
+                "Delete" => ("Delete".into(), 46, String::new()),
+                "ArrowLeft" => ("ArrowLeft".into(), 37, String::new()),
+                "ArrowUp" => ("ArrowUp".into(), 38, String::new()),
+                "ArrowRight" => ("ArrowRight".into(), 39, String::new()),
+                "ArrowDown" => ("ArrowDown".into(), 40, String::new()),
+                "Home" => ("Home".into(), 36, String::new()),
+                "End" => ("End".into(), 35, String::new()),
+                "PageUp" => ("PageUp".into(), 33, String::new()),
+                "PageDown" => ("PageDown".into(), 34, String::new()),
+                "Space" => ("Space".into(), 32, " ".into()),
+                "F3" => ("F3".into(), 114, String::new()),
+                "F5" => ("F5".into(), 116, String::new()),
+                "+" | "=" => ("Equal".into(), 187, key.clone()),
+                "-" => ("Minus".into(), 189, key.clone()),
+                value if value.len() == 1 && value.as_bytes()[0].is_ascii_alphanumeric() => (
+                    format!(
+                        "{}{}",
+                        if value.as_bytes()[0].is_ascii_digit() {
+                            "Digit"
+                        } else {
+                            "Key"
+                        },
+                        value.to_ascii_uppercase()
+                    ),
+                    i32::from(value.as_bytes()[0].to_ascii_uppercase()),
+                    value.into(),
+                ),
+                _ => return Err("Unsupported browser key".into()),
+            };
+            let mut event = json!({"type":"keyDown","key":if key=="Space"{" "}else{&key},"code":code,"windowsVirtualKeyCode":key_code,"nativeVirtualKeyCode":key_code,"modifiers":bits});
+            if bits == 0 {
+                event["text"] = json!(text);
+            }
+            cdp(window, "Input.dispatchKeyEvent", event.clone()).await?;
+            event["type"] = json!("keyUp");
+            event.as_object_mut().unwrap().remove("text");
+            cdp(window, "Input.dispatchKeyEvent", event).await?;
+        }
+        BrowserInput::Reload => {
+            cdp(window, "Page.reload", json!({})).await?;
+        }
+        BrowserInput::Back | BrowserInput::Forward => {
+            let history = cdp(window, "Page.getNavigationHistory", json!({})).await?;
+            let index = history["currentIndex"]
+                .as_i64()
+                .ok_or("Browser history unavailable")?
+                + if matches!(input, BrowserInput::Back) {
+                    -1
+                } else {
+                    1
+                };
+            let target = usize::try_from(index)
+                .ok()
+                .and_then(|index| history["entries"].get(index))
+                .and_then(|entry| entry["id"].as_i64())
+                .ok_or("No browser history entry in that direction")?;
+            cdp(
+                window,
+                "Page.navigateToHistoryEntry",
+                json!({"entryId":target}),
+            )
+            .await?;
+        }
+        BrowserInput::Navigate { .. } => {
+            return Err("Navigation is dispatched by the page host".into());
+        }
+    }
+    Ok(())
+}

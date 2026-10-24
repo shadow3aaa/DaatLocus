@@ -33,7 +33,7 @@ impl Source {
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::Http { url, bearer_token } => {
-                crate::browser_app::validate_browser_url(url)?;
+                crate::web_app::validate_url(url)?;
                 let parsed = url::Url::parse(url).into_diagnostic()?;
                 if parsed.fragment().is_some()
                     || bearer_token

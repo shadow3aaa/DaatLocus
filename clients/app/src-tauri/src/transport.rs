@@ -164,6 +164,10 @@ impl Transport {
         *self.origin.write().unwrap() = origin;
         self.clear();
     }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub fn is_service_origin(&self, url: &Url) -> bool {
+        self.origin.read().unwrap().origin() == url.origin()
+    }
     pub fn clear(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         for (_, pending) in self.requests.lock().unwrap().drain() {
@@ -489,13 +493,12 @@ pub async fn native_resource_download(
 
 pub fn capability(app: &tauri::AppHandle) -> tauri::Result<()> {
     app.add_capability(serde_json::json!({
-        "identifier":"native-client", "windows":["main"], "local":true,
-        "permissions":["allow-desktop-account", "allow-desktop-window", "allow-phone-use-status", "allow-phone-use-configure", "allow-phone-use-display-configure", "allow-computer-use-status", "allow-computer-use-configure", "allow-computer-use-display-configure", "allow-computer-use-permission", "allow-native-http-start", "allow-native-http-write", "allow-native-http-send", "allow-native-http-read", "allow-native-http-cancel", "allow-native-resource-download"]
+        "identifier":"native-client", "webviews":["main"], "local":true,
+        "permissions":["allow-browser-control", "allow-desktop-account", "allow-desktop-window", "allow-phone-use-status", "allow-phone-use-configure", "allow-phone-use-display-configure", "allow-computer-use-status", "allow-computer-use-configure", "allow-computer-use-display-configure", "allow-computer-use-permission", "allow-native-http-start", "allow-native-http-write", "allow-native-http-send", "allow-native-http-read", "allow-native-http-cancel", "allow-native-resource-download"]
     }).to_string())
 }
 
 /// Local device capability settings still require the profile's current Owner session.
-#[cfg(any(target_os = "android", target_os = "macos"))]
 pub async fn authorize_owner(window: &WebviewWindow) -> Result<()> {
     authorize(window)?;
     let state = window.state::<Transport>();

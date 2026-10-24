@@ -92,69 +92,12 @@ impl DaatLocusPaths {
         self.root.join(RUNTIME_DIR_NAME)
     }
 
-    pub fn browser_runtime_dir(&self) -> PathBuf {
-        self.runtime_dir().join("browser")
-    }
-
     pub fn daemon_lock_file(&self) -> PathBuf {
         self.runtime_dir().join("daemon.lock")
     }
 
     pub fn models_dev_cache(&self) -> PathBuf {
         self.cache_dir().join("models-dev-api.json")
-    }
-
-    pub fn browser_executable_path(&self) -> PathBuf {
-        let dir = self.browser_runtime_dir();
-        let path;
-
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            path = dir
-                .join("chrome-mac-arm64")
-                .join("Google Chrome for Testing.app")
-                .join("Contents")
-                .join("MacOS")
-                .join("Google Chrome for Testing");
-        }
-
-        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        {
-            path = dir
-                .join("chrome-mac-x64")
-                .join("Google Chrome for Testing.app")
-                .join("Contents")
-                .join("MacOS")
-                .join("Google Chrome for Testing");
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            path = dir.join("chrome-linux64").join("chrome");
-        }
-
-        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-        {
-            path = dir.join("chrome-win64").join("chrome.exe");
-        }
-
-        #[cfg(all(target_os = "windows", target_arch = "x86"))]
-        {
-            path = dir.join("chrome-win32").join("chrome.exe");
-        }
-
-        #[cfg(not(any(
-            all(target_os = "macos", target_arch = "aarch64"),
-            all(target_os = "macos", target_arch = "x86_64"),
-            target_os = "linux",
-            all(target_os = "windows", target_arch = "x86_64"),
-            all(target_os = "windows", target_arch = "x86"),
-        )))]
-        {
-            path = dir.join("chromium").join("chrome");
-        }
-
-        path
     }
 
     pub fn logs_file(&self, file_name: &str) -> PathBuf {

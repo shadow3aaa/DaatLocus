@@ -13,6 +13,11 @@ pub struct BuiltinResource {
 }
 
 const FILES: &[(&str, &[u8])] = &[
+    #[cfg(any(windows, target_os = "macos", target_os = "android"))]
+    (
+        "skills/browser-use/SKILL.md",
+        include_bytes!("builtin_skills/browser-use/SKILL.md"),
+    ),
     #[cfg(target_os = "windows")]
     (
         "skills/windows-gui-use/SKILL.md",

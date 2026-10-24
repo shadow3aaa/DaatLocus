@@ -9,6 +9,8 @@ mod phone_use;
 #[cfg(target_os = "android")]
 mod transport;
 #[cfg(target_os = "android")]
+mod web_host_android;
+#[cfg(target_os = "android")]
 #[tauri::mobile_entry_point]
 pub fn run() {
     android::run();

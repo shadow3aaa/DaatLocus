@@ -137,7 +137,7 @@ impl App for ArtifactsApp {
         if resource.is_none()
             && let Some(url) = &args.url
         {
-            crate::browser_app::validate_browser_url(url)?;
+            crate::web_app::validate_url(url)?;
         }
         let prefix = format!("{}:", self.actor_id);
         let logical_id = args

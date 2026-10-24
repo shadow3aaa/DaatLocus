@@ -358,10 +358,7 @@ mod tests {
 
     #[test]
     fn sanitize_component_is_platform_safe() {
-        assert_eq!(
-            sanitize_component("browser__browser_snapshot", 40),
-            "browser__browser_snapshot"
-        );
+        assert_eq!(sanitize_component("web__run", 40), "web__run");
         assert_eq!(sanitize_component("call:1/ab", 12), "call-1-ab");
         assert_eq!(sanitize_component("", 8), "x");
         assert_eq!(sanitize_component("...", 8), "x");

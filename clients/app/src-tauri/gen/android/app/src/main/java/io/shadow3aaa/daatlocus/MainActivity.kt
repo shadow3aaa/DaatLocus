@@ -19,6 +19,23 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.graphics.Insets
 
 class MainActivity : TauriActivity() {
+  private var browserScreenshot:Pair<ByteArray,(Boolean,String?)->Unit>?=null
+  private val saveBrowserImage=registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("image/png")){uri->
+    val pending=browserScreenshot
+    browserScreenshot=null
+    if(pending!=null){
+      if(uri==null)pending.second(false,null)
+      else Thread{
+        try{contentResolver.openOutputStream(uri)?.use{it.write(pending.first)} ?: throw java.io.IOException("File unavailable");runOnUiThread{pending.second(true,null)}}
+        catch(_:Exception){runOnUiThread{pending.second(false,"Screenshot could not be saved")}}
+      }.start()
+    }
+  }
+  internal fun saveBrowserScreenshot(bytes:ByteArray,name:String,done:(Boolean,String?)->Unit){
+    if(browserScreenshot!=null)throw IllegalStateException("A screenshot is already being saved")
+    browserScreenshot=Pair(bytes,done)
+    try{saveBrowserImage.launch(name)}catch(error:Exception){browserScreenshot=null;throw error}
+  }
   private var multicast: WifiManager.MulticastLock? = null
   private val connectivity by lazy { getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager }
   private val networkHandler = Handler(Looper.getMainLooper())
@@ -43,6 +60,7 @@ class MainActivity : TauriActivity() {
       navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT,
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Color.TRANSPARENT else 0x801b1b1b.toInt()),
     )
+    WebHost.initialize(this)
     super.onCreate(savedInstanceState)
     PhoneUseController.initialize(applicationContext)
     connectivity.registerDefaultNetworkCallback(networkCallback)
@@ -71,6 +89,7 @@ class MainActivity : TauriActivity() {
   }
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
+    WebHost.clientView=java.lang.ref.WeakReference(webView)
     onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
       override fun handleOnBackPressed() {
         webView.evaluateJavascript("""
@@ -104,6 +123,7 @@ class MainActivity : TauriActivity() {
     super.onStop()
   }
   override fun onDestroy() {
+    WebHost.shutdown()
     connectivity.unregisterNetworkCallback(networkCallback)
     networkHandler.removeCallbacks(networkChanged)
     super.onDestroy()

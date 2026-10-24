@@ -100,6 +100,7 @@ async fn dispatch(
     use daemon::control::{self, Action, LaunchOptions};
     let opening = |status: &control::Status| daemon::open_client(status);
     match command {
+        cli::Command::WebHost => control::web_host(&root).await,
         #[cfg(windows)]
         cli::Command::Installer { action } => match action {
             cli::InstallerAction::Prepare {

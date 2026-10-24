@@ -21,6 +21,9 @@ pub struct MobileService {
 }
 
 impl MobileService {
+    pub fn web_host(&self) -> Arc<crate::web_host::Host> {
+        self.state.system.web_host()
+    }
     pub fn connectivity_changed(&self) {
         if let Some(stage) = &self.state.stage {
             stage.connectivity_changed();

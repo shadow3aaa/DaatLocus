@@ -55,6 +55,7 @@ struct Worker {
     task: JoinHandle<()>,
 }
 struct Inner {
+    web_host: Arc<crate::web_host::Host>,
     temporary: Mutex<Option<crate::runtime_temp::RuntimeTemp>>,
     builtin_resources: Vec<crate::builtin_resources::BuiltinResource>,
     app_registry: Arc<crate::mcp::Registry>,
@@ -441,6 +442,7 @@ impl ActorSystem {
         let builtin_resources = crate::builtin_resources::publish(&temporary)?;
         let system = Self {
             inner: Arc::new(Inner {
+                web_host: Arc::new(crate::web_host::Host::default()),
                 temporary: Mutex::new(Some(temporary)),
                 builtin_resources,
                 #[cfg(windows)]
@@ -491,6 +493,9 @@ impl ActorSystem {
     }
     pub fn store(&self) -> &ActorStore {
         &self.inner.store
+    }
+    pub fn web_host(&self) -> Arc<crate::web_host::Host> {
+        self.inner.web_host.clone()
     }
     pub fn app_registry(&self) -> Arc<crate::mcp::Registry> {
         self.inner.app_registry.clone()

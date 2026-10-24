@@ -1274,7 +1274,7 @@ mod tests {
         let mut actor = fixture.store.actor("root").unwrap();
         actor.config.permissions.writable_roots = vec![fixture.temp.path().to_path_buf()];
         actor.config.permissions.approval_mode = ApprovalMode::None;
-        actor.config.apps = vec!["files".into(), "terminal".into(), "browser".into()];
+        actor.config.apps = vec!["files".into(), "terminal".into(), "web".into()];
         fixture.store.save_actor(&actor).unwrap();
         fixture
             .ledger()

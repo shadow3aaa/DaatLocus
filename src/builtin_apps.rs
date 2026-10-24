@@ -3,20 +3,17 @@ use std::collections::HashSet;
 
 use miette::{Result, miette};
 
-#[cfg(not(target_os = "android"))]
-use crate::browser_app::BrowserApp;
-
 use crate::{
     actor_app::ActorApp,
     actors::{ActorRecord, ActorSystem},
     app::{App, AppManager, AppToolExecutionContext},
     artifacts_app::ArtifactsApp,
-    browser_app::ReadOnlyBrowserApp,
     config::Config,
     files_app::FilesApp,
     model_catalog::catalog_model_capacity,
     openskills::load_openskills_with_policy,
     terminal_app::TerminalApp,
+    web_app::WebApp,
 };
 
 pub const DEVICE_APPS: &[&str] = &[
@@ -25,7 +22,9 @@ pub const DEVICE_APPS: &[&str] = &[
     "files",
     #[cfg(not(target_os = "android"))]
     "terminal",
-    "browser",
+    "web",
+    #[cfg(any(windows, target_os = "macos", target_os = "android"))]
+    "browser_use",
     "artifacts",
     #[cfg(any(all(windows, target_arch = "x86_64"), target_os = "macos"))]
     "computer_use",
@@ -36,7 +35,8 @@ pub(crate) const ALL_APPS: &[&str] = &[
     "actors",
     "files",
     "terminal",
-    "browser",
+    "web",
+    "browser_use",
     "artifacts",
     "apps_manager",
     "computer_use",
@@ -86,11 +86,17 @@ pub fn create_apps(
             )),
             "files" => Box::new(FilesApp::new(state_dir.join("images"), supports_vision)),
             "terminal" if !cfg!(target_os = "android") => Box::new(TerminalApp::new()),
-            "browser" if cfg!(target_os = "android") || actor.remote_read_only => {
-                Box::new(ReadOnlyBrowserApp::new())
-            }
-            #[cfg(not(target_os = "android"))]
-            "browser" => Box::new(BrowserApp::new()),
+            "web" => Box::new(WebApp::new(
+                actor.id.clone(),
+                system.clone(),
+                actor.remote_read_only,
+            )),
+            "browser_use" => Box::new(crate::browser_use_app::BrowserUseApp::new(
+                actor.id.clone(),
+                system.clone(),
+                actor.remote_read_only,
+                supports_vision,
+            )),
             "artifacts" => Box::new(ArtifactsApp::new(actor.id.clone(), system.clone())),
             #[cfg(any(
                 all(windows, target_arch = "x86_64"),

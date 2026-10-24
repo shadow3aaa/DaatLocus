@@ -1,11 +1,19 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod backend;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod browser_data;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod browser_ui;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod browser_use;
 #[cfg(target_os = "macos")]
 mod computer_use;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod desktop;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod transport;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod web_host;
 #[cfg(windows)]
 mod windows_tray;
 

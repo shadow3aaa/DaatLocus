@@ -13,12 +13,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 native-contract = ["daat-locus-computer-use/native-contract"]
+web-contract = []
 
 [dependencies]
 clap = { version = "4.5.38", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.23.1"
 daat-locus-client-protocol = { path = "../../../crates/daat-locus-client-protocol" }
 sha2 = "0.11.0"
 tokio = { version = "1", features = ["process", "time", "rt-multi-thread", "macros", "io-util", "sync"] }
@@ -30,19 +33,28 @@ bytes = "1"
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "android"))'.dependencies]
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
+tauri-plugin-opener = "2"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 mimalloc = { workspace = true }
 rustls = { version = "0.23.44", default-features = false, features = ["ring", "std"] }
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "unstable"] }
 tauri-plugin-single-instance = "2"
 open = "5"
 sys-locale = "0.3"
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Controls", "Win32_UI_Accessibility", "Win32_UI_HiDpi", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm"] }
+webview2-com = "0.39.1"
+windows = {version="0.62.2",features=["Win32_System_Com","Win32_Foundation"]}
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Controls", "Win32_UI_Accessibility", "Win32_UI_HiDpi", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+block2 = "0.6.2"
+objc2-foundation = "0.3.2"
+objc2-app-kit = {version="0.3.2",default-features=false,features=["std","NSEvent","NSView","NSWindow","NSResponder","NSImage","NSImageRep","NSBitmapImageRep","NSGraphicsContext","objc2-core-graphics","block2"]}
+objc2-web-kit = {version="0.3.2",default-features=false,features=["std","WKWebView","WKWebViewConfiguration","WKWebsiteDataStore","WKSnapshotConfiguration","WKNavigation","block2"]}
 daat-locus-computer-use = { path = "../../../crates/daat-locus-computer-use" }
 
 [build-dependencies]
@@ -62,7 +74,5 @@ jni = "0.22"
 rustls-platform-verifier = "0.7"
 ndk-context = "0.1"
 miette = "7.6.0"
-tauri-plugin-opener = "2"
-
 [dev-dependencies]
 tempfile = "3"

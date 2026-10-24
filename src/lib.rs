@@ -6,9 +6,7 @@ pub mod actors;
 pub mod app;
 pub mod artifacts;
 pub mod artifacts_app;
-pub mod browser_app;
-#[cfg(not(target_os = "android"))]
-pub mod browser_install;
+pub mod browser_use_app;
 pub mod builtin_apps;
 pub mod builtin_resources;
 pub mod computer_use_app;
@@ -45,3 +43,5 @@ pub mod stage;
 pub mod system_info;
 pub mod terminal_app;
 pub mod tool_output_spill;
+pub mod web_app;
+pub mod web_host;

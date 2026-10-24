@@ -13,7 +13,7 @@ client are connected.
 - Core has the fixed IM presentation; every other Actor has the work presentation,
   including when opened in the main window. Reuse data/control hooks, not a
   container-dependent rendering mode. A narrow app navigation rail contains Home,
-  Apps, device-local Virtual Displays on Windows/Android, and the account menu;
+  Apps, the native shared Browser workspace, device-local Virtual Displays on Windows/Android, and the account menu;
   mobile uses a modal navigation drawer. There is one Core
   entry, no session/chat catalog or permanent Actor sidebar. Actor references
   open a conversation dialog. Settings use full-page categories.
@@ -36,7 +36,7 @@ client are connected.
 - The maintenance CLI uses clap for argument parsing, validation, help and version
   exits. Preserve the original terminal character logo and help palette. Parse
   arguments before opening storage or starting the runtime. Android embeds the same
-  core with app-private Files, HTTP Browser and an Owner-enabled PhoneUse native
+  core with app-private Files, Web and an Owner-enabled PhoneUse native
   backend. PhoneUse alone may use Shizuku or librootkotlinx Root authorization;
   the service and other Apps keep their ordinary UID and sandbox. Terminal and
   broader native Apps remain future work.
@@ -257,8 +257,22 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   and authenticated maintenance authority remain independent of filesystem scope.
 - Restrictive native process isolation needs platform-specific positive and
   negative tests. Never replace an unavailable sandbox with host execution.
-- Read-only Browser uses bounded HTTP GET without Chrome/page JavaScript,
+- The Web HTTP source uses bounded HTTP GET without page JavaScript,
   validates DNS/redirect destinations and does not inherit ambient credentials.
+  Rendered Web uses isolated device-native WebViews under existing approval;
+  never share the account WebView's storage or native command grants. Read-only
+  remote authority cannot navigate rendered pages.
+- BrowserUse operates one device-level shared browser workspace. All hosted
+  Actors share tabs and site sessions; per-Actor App instances are facades.
+  Owner opens `/browser` through the same navigation as Virtual Displays. It
+  replaces the content page, never a concurrent conversation pane or separate
+  visible window. Shared WebUI controls an embedded native viewport; detaching
+  it preserves tabs. Native command grants match the main WebView, not every
+  WebView parented to the main window. Hide preserves tabs;
+  Actor/App shutdown never closes the shared browser. Owner and models can operate at any
+  time; Owner input invalidates old screenshot states. Input uses one-use observations;
+  keep screenshots authorized through the calling Actor's resource ledger.
+  The account UI and third-party pages never share native command grants or cookies.
 
 ## Client Service Contract
 

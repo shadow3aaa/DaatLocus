@@ -146,6 +146,13 @@ Client-only development checks can omit custom-protocol and use the dev URL.
 Run `cargo test -p daat-locus-app` and its strict Clippy checks; native CI covers
 both platforms. Verify account login, attachments, resource popups, duplicate
 launch, hide/reopen, independent client exit and orderly service stop on a desktop.
+BrowserUse shares a device workspace across Actors. Run the opt-in native
+contracts documented in `clients/app/README.md` when changing capture or input.
+Verify the unified Owner entry, tab switching, hide/reopen, concurrent Owner input and
+that third-party pages cannot invoke native controls. Actor shutdown preserves
+tabs; screenshot resources remain scoped to the caller. macOS and Android need
+native runtime validation on those platforms; cross-compilation is not usability
+coverage.
 Native code uses fixed companion CLI operations and validates profile, executable
 and loopback origin. Keep WebView process/filesystem/shell capabilities disabled.
 
@@ -879,7 +886,7 @@ unwinding. The linker uses API-23-compatible APS2 packed relocations and 16 KiB
 ELF page alignment. Gradle compresses JNI libraries in the APK and extracts them
 at install time; this reduces download size at the cost of retaining an extracted
 library alongside the installed APK. Keep R8 and resource shrinking enabled.
-The Android dependency graph excludes the desktop Chromium/Viewpoint runtime;
+No platform bundles the retired Chromium/Viewpoint runtime;
 HTTP and device transports share ring while HTTPS retains platform certificate
 verification. Host build dependencies may still use another crypto provider and
 do not count toward the APK's runtime dependency graph.
@@ -942,6 +949,32 @@ by `PHONE_USE_RUNNER`, with `PHONE_USE_SHIZUKU_SERIAL`, `PHONE_USE_ROOT_SERIAL`,
 and private `PHONE_USE_TEST_SIGNING` (properties path) / `PHONE_USE_TEST_PASSWORD`.
 Provision JDK 17+, SDK/NDK, emulator authorization and disposable test accounts on
 that runner. An unconfigured/skipped runner is unavailable native coverage.
+
+## Web validation
+
+Run `DAAT_LOCUS_BUILD_WEBUI=0 cargo test --no-default-features --lib web_` for
+document pagination, version-bound links, Actor resource authorization, native
+mailbox failure handling, HTTP address validation and character decoding.
+
+On Windows or macOS, build `cargo build -p daat-locus-app --features web-contract`
+and run `python clients/app/scripts/test-web-host.py <path-to-native-executable>`.
+This opt-in test launches an isolated native host against local HTTP fixtures,
+without starting an account or replacing the installed application. It checks
+deep content, multiple main regions, shadow text, frame links, password/script
+exclusion, canvas notices and actual cookie separation. Probe support is absent
+from normal distribution builds.
+
+For live-site tuning, invoke that executable with `--web-probe <manifest.json>`.
+The manifest has `urls` (an array) and `output` (an absolute JSON capture path).
+Use a fresh temporary directory; it owns separate site profiles. The documented
+manual set is Example Domain, MDN's Array reference, Wikipedia's Rust article,
+openai/codex on GitHub, Hacker News, Baidu and Bilibili. Set
+`DAAT_LOCUS_WEB_CAPTURES` to the capture output and run
+`cargo test --no-default-features --lib native_website_captures -- --ignored --nocapture`
+to check known page content and write extracted text beside it. Live assertions
+may need review when source pages change; they are not deterministic CI tests.
+Never commit captures, site profiles or research clones. Compilation alone does
+not establish Android or macOS runtime coverage.
 
 ## MCP validation
 

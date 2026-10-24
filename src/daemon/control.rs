@@ -87,6 +87,7 @@ pub enum Action {
     Status,
     Stop,
     Bootstrap(daat_locus_client_protocol::BootstrapRequest),
+    WebHost,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -191,11 +192,7 @@ impl Server {
                 let bootstrap = bootstrap.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(30),
-                        respond(stream, &record, stop, bootstrap),
-                    )
-                    .await;
+                    let _ = respond(stream, &record, stop, bootstrap).await;
                 });
             }
         });
@@ -216,6 +213,7 @@ impl Server {
 }
 impl Drop for Server {
     fn drop(&mut self) {
+        self.stop.send_replace(true);
         self.task.abort();
         if load(&self.status.root)
             .ok()
@@ -236,29 +234,44 @@ async fn respond<S: AsyncRead + AsyncWrite + Unpin>(
     stop: watch::Sender<bool>,
     bootstrap: Option<crate::service::ServiceState>,
 ) -> Result<()> {
-    let bytes = zeroize::Zeroizing::new(read_frame(&mut stream, 64 * 1024).await?);
+    let bytes = zeroize::Zeroizing::new(
+        tokio::time::timeout(Duration::from_secs(30), read_frame(&mut stream, 64 * 1024))
+            .await
+            .map_err(|_| miette!("Control handshake timed out"))??,
+    );
     let request: Request = serde_json::from_slice(&bytes).into_diagnostic()?;
     if request.instance != status.instance {
         return Err(miette!("Daemon instance changed"));
     }
-    if let Action::Bootstrap(input) = request.action {
+    if matches!(request.action, Action::WebHost) {
         if *stop.borrow() {
             return Err(miette!("Service is stopping"));
         }
-        let state = bootstrap.ok_or_else(|| miette!("Account bootstrap unavailable"))?;
-        let reply = crate::service::native_bootstrap(state, &status.url, input).await?;
+        let state = bootstrap.ok_or_else(|| miette!("Native Web host unavailable"))?;
+        return serve_web_host(stream, state.system.web_host(), stop.subscribe()).await;
+    }
+    tokio::time::timeout(Duration::from_secs(30), async {
+        if let Action::Bootstrap(input) = request.action {
+            if *stop.borrow() {
+                return Err(miette!("Service is stopping"));
+            }
+            let state = bootstrap.ok_or_else(|| miette!("Account bootstrap unavailable"))?;
+            let reply = crate::service::native_bootstrap(state, &status.url, input).await?;
+            write_frame(&mut stream, &serde_json::to_vec(&reply).into_diagnostic()?).await?;
+            return stream.shutdown().await.into_diagnostic();
+        }
+        let mut reply = status.clone();
+        if matches!(request.action, Action::Stop) {
+            stop.send_replace(true);
+        }
+        if *stop.borrow() {
+            reply.state = State::Stopping;
+        }
         write_frame(&mut stream, &serde_json::to_vec(&reply).into_diagnostic()?).await?;
-        return stream.shutdown().await.into_diagnostic();
-    }
-    let mut reply = status.clone();
-    if matches!(request.action, Action::Stop) {
-        stop.send_replace(true);
-    }
-    if *stop.borrow() {
-        reply.state = State::Stopping;
-    }
-    write_frame(&mut stream, &serde_json::to_vec(&reply).into_diagnostic()?).await?;
-    stream.shutdown().await.into_diagnostic()
+        stream.shutdown().await.into_diagnostic()
+    })
+    .await
+    .map_err(|_| miette!("Control operation timed out"))?
 }
 async fn read_frame<S: AsyncRead + Unpin>(stream: &mut S, limit: usize) -> Result<Vec<u8>> {
     let length = stream.read_u32().await.into_diagnostic()? as usize;
@@ -278,7 +291,7 @@ async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, bytes: &[u8]) -> Res
     stream.flush().await.into_diagnostic()
 }
 pub async fn query(root: &Path, action: Action) -> Result<Option<Status>> {
-    if matches!(action, Action::Bootstrap(_)) {
+    if matches!(action, Action::Bootstrap(_) | Action::WebHost) {
         return Err(miette!("Use the account bootstrap dispatcher"));
     }
     let Some(record) = load(root)? else {
@@ -306,6 +319,65 @@ pub async fn query(root: &Path, action: Action) -> Result<Option<Status>> {
     .await
     .map_err(|_| miette!("Daemon control timed out"))??;
     Ok(Some(reply))
+}
+async fn serve_web_host<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    host: Arc<crate::web_host::Host>,
+    mut stop: watch::Receiver<bool>,
+) -> Result<()> {
+    let mut attachment = host.attach()?;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    loop {
+        let pending = tokio::select! {
+            _ = stop.changed() => return Ok(()),
+            unexpected = read_frame(&mut reader, 1024) => { unexpected?; return Err(miette!("Unexpected native Web frame")); },
+            pending = attachment.requests.recv() => match pending {Some(pending)=>pending,None=>return Ok(())},
+        };
+        if pending.reply.is_closed() {
+            continue;
+        }
+        let result = async {
+            write_frame(&mut writer, &serde_json::to_vec(&pending.request).into_diagnostic()?).await?;
+            let bytes = tokio::select! {
+                _ = stop.changed() => return Err(miette!("Service is stopping")),
+                response = tokio::time::timeout(Duration::from_secs(32),read_frame(&mut reader,12*1024*1024)) => response.map_err(|_|miette!("Native Web host timed out; do not replay navigation"))??,
+            };
+            let response=serde_json::from_slice(&bytes).into_diagnostic()?;
+            crate::web_host::validate_reply(&pending.request,&response)?;
+            Ok(response)
+        }.await;
+        let failed = result.is_err();
+        let _ = pending
+            .reply
+            .send(result.and_then(|response| crate::web_host::resolve(&pending.request, response)));
+        if failed {
+            return Err(miette!(
+                "Native Web host operation failed; reconnect without replay"
+            ));
+        }
+    }
+}
+/// An authenticated native stdio bridge, never an HTTP or WebView command.
+pub async fn web_host(root: &Path) -> Result<()> {
+    let record = load(root)?.ok_or_else(|| miette!("Service is not running"))?;
+    let mut stream = platform::connect(&record).await?;
+    write_frame(
+        &mut stream,
+        &serde_json::to_vec(&Request {
+            instance: record.instance,
+            action: Action::WebHost,
+        })
+        .into_diagnostic()?,
+    )
+    .await?;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+    tokio::select! {
+        result=tokio::io::copy(&mut stdin,&mut writer)=>{result.into_diagnostic()?;},
+        result=tokio::io::copy(&mut reader,&mut stdout)=>{result.into_diagnostic()?;},
+    }
+    Ok(())
 }
 pub async fn bootstrap(
     root: &Path,
@@ -421,6 +493,135 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn native_web_control_outlives_handshake_deadline_and_stops_with_server() {
+        use daat_locus_client_protocol::web::{Operation, Reply};
+        let temp = tempfile::tempdir().unwrap();
+        let system = crate::actors::ActorSystem::open_account_gated(
+            temp.path().join("actors"),
+            temp.path().join("workspace"),
+            crate::config::Config::default(),
+        )
+        .await
+        .unwrap();
+        let url = "http://127.0.0.1:41000".to_owned();
+        let state = crate::service::ServiceState::new(system.clone(), url.clone()).unwrap();
+        let server = Server::bind(
+            temp.path().into(),
+            temp.path().into(),
+            LaunchOptions {
+                profile: None,
+                listen: "127.0.0.1:41000".parse().unwrap(),
+                workspace: temp.path().join("workspace"),
+            },
+            url,
+            Some(state),
+        )
+        .await
+        .unwrap();
+        let mut native = platform::connect(server.status()).await.unwrap();
+        write_frame(
+            &mut native,
+            &serde_json::to_vec(&Request {
+                instance: server.status().instance,
+                action: Action::WebHost,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let host = system.web_host();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !host.available() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            host.available(),
+            "Authenticated native Web hosting is a persistent stream, not a single control reply"
+        );
+        tokio::time::resume();
+        let caller = host.clone();
+        let call =
+            tokio::spawn(async move { caller.request("a".repeat(64), Operation::Close).await });
+        let command: daat_locus_client_protocol::web::Request =
+            serde_json::from_slice(&read_frame(&mut native, 65536).await.unwrap()).unwrap();
+        write_frame(
+            &mut native,
+            &serde_json::to_vec(&Reply {
+                id: command.id,
+                capture: None,
+                browser: None,
+                error: None,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(call.await.unwrap().unwrap().is_none());
+        drop(server);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while host.available() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        system.shutdown().await;
+    }
+    #[tokio::test]
+    async fn web_host_page_failures_preserve_connection_but_mismatched_replies_disconnect() {
+        use daat_locus_client_protocol::web::{Operation, Reply, Request};
+        let host = Arc::new(crate::web_host::Host::default());
+        let (server, mut native) = tokio::io::duplex(65536);
+        let (_stop, receiver) = watch::channel(false);
+        let bridge = tokio::spawn(serve_web_host(server, host.clone(), receiver));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !host.available() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for wrong_id in [false, true] {
+            let caller = host.clone();
+            let call = tokio::spawn(async move {
+                caller
+                    .request(
+                        "a".repeat(64),
+                        Operation::Load {
+                            url: "https://example.com".into(),
+                        },
+                    )
+                    .await
+            });
+            let request: Request =
+                serde_json::from_slice(&read_frame(&mut native, 65536).await.unwrap()).unwrap();
+            let reply = Reply {
+                id: if wrong_id { "0".repeat(32) } else { request.id },
+                capture: None,
+                browser: None,
+                error: Some("Page unavailable".into()),
+            };
+            write_frame(&mut native, &serde_json::to_vec(&reply).unwrap())
+                .await
+                .unwrap();
+            assert!(call.await.unwrap().is_err());
+            if !wrong_id {
+                assert!(
+                    host.available(),
+                    "A website error must not close other pages"
+                );
+            }
+        }
+        assert!(bridge.await.unwrap().is_err());
+        assert!(!host.available());
+    }
     use super::*;
     #[tokio::test]
     async fn native_bootstrap_proves_os_owner_but_never_creates_a_session_or_edits_an_account() {

@@ -59,6 +59,9 @@ pub enum Command {
     /// Internal desktop bootstrap protocol; reads a bounded OPAQUE message from stdin.
     #[command(hide = true)]
     ClientBootstrap,
+    /// Internal authenticated native WebView host bridge.
+    #[command(hide = true)]
+    WebHost,
     /// Start the Actor service and WebUI in the foreground (the default).
     Serve,
     /// Start the service in the background, gracefully upgrading an older running build.

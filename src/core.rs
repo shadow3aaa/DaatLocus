@@ -76,66 +76,6 @@ pub struct TerminalTerminateArgs {
     pub session_id: String,
 }
 
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct BrowserOpenArgs {
-    pub url: String,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct BrowserSnapshotArgs {
-    pub page_id: String,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct BrowserWaitArgs {
-    pub page_id: String,
-    /// `dom` waits for any parsed DOM, `load` waits for complete readyState.
-    pub state: Option<String>,
-    pub timeout_ms: Option<u64>,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct BrowserClickArgs {
-    pub page_id: String,
-    pub element_ref: String,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct BrowserFillArgs {
-    pub page_id: String,
-    pub element_ref: String,
-    pub value: String,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct BrowserBackArgs {
-    pub page_id: String,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct BrowserForwardArgs {
-    pub page_id: String,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct BrowserReloadArgs {
-    pub page_id: String,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct BrowserClosePageArgs {
-    pub page_id: String,
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input_tokens: i64,

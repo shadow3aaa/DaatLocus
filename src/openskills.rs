@@ -1164,11 +1164,11 @@ mod tests {
             .map(|skill| skill.name.as_str())
             .collect();
         let expected: &[&str] = if cfg!(target_os = "windows") {
-            &["windows-gui-use"]
+            &["browser-use", "windows-gui-use"]
         } else if cfg!(target_os = "macos") {
-            &["macos-gui-use"]
+            &["browser-use", "macos-gui-use"]
         } else if cfg!(target_os = "android") {
-            &["android-gui-use"]
+            &["android-gui-use", "browser-use"]
         } else {
             &[]
         };

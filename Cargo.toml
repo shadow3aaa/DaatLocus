@@ -75,7 +75,6 @@ clap = { version = "4.5.38", features = ["derive"] }
 diffy = "0.5.0"
 futures-util = "0.3.31"
 libc = "0.2"
-md-5 = "0.11.0"
 miette = "7.6.0"
 parking_lot = "0.12.5"
 postcard = { version = "1.1.3", features = ["alloc", "use-std"] }
@@ -123,9 +122,13 @@ tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring
 flume = "0.12.0"
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
 dunce = "1.0.5"
+scraper = { version = "0.29.0", default-features = false }
+ego-tree = "0.11.1"
+encoding_rs = "0.8.42"
 
 [dev-dependencies]
 tempfile = "3.23.0"
+tokio = { version = "1.52.3", features = ["test-util"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 mimalloc = { workspace = true }
@@ -133,7 +136,6 @@ mimalloc = { workspace = true }
 [target.'cfg(target_os = "android")'.dependencies]
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
-viewpoint-core = "0.4"
 miette = { version = "7.6.0", features = ["fancy"] }
 
 [build-dependencies]
