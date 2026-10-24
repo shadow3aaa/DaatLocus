@@ -161,8 +161,8 @@ button, a, input, textarea { -webkit-tap-highlight-color: transparent; }
 button:not(:disabled), [role=button] { cursor: pointer; }
 :root { --dl-dialog-width: calc(100vw - 32px); --dl-window-bar: 0px; --dl-safe-top: env(safe-area-inset-top,0px); --dl-safe-right: env(safe-area-inset-right,0px); --dl-safe-bottom: env(safe-area-inset-bottom,0px); --dl-safe-left: env(safe-area-inset-left,0px); }
 @media(min-width:640px) { :root { --dl-dialog-width: 24rem; } }
-html[data-desktop-platform] { --dl-window-bar: 36px; }
-html[data-desktop-platform="windows"] { --dl-window-bar: 0px; --dl-caption-width: 138px; }
+html[data-desktop-platform="macos"] { --dl-caption-height: 52px; --dl-caption-width: 86px; }
+html[data-desktop-platform="windows"] { --dl-caption-height: 36px; --dl-caption-width: 138px; }
 .dl-app { height: 100dvh; padding-top: var(--dl-window-bar); background: var(--background); color: var(--chat-text); overflow: hidden; }
 .dl-app-shell { display: flex; height: 100%; min-height: 0; }
 .dl-navigation-rail { width: calc(52px + var(--dl-safe-left)); flex: none; display: flex; flex-direction: column; align-items: center; padding: calc(8px + var(--dl-safe-top)) 0 max(12px,var(--dl-safe-bottom)) var(--dl-safe-left); background: color-mix(in srgb,var(--foreground) 1.5%,var(--background)); }
@@ -311,16 +311,15 @@ html[data-desktop-platform] :is(.dl-main-search,.dl-actor-dialog-actions) { disp
   .dl-settings-page .dl-setting-row:has(.dl-theme-options) [data-slot=field-content] { align-self: stretch; }
   .dl-settings-page .dl-setting-control:has(.dl-theme-options) { justify-content: flex-start; }
 }
-.dl-window-titlebar { position: fixed; inset: 0 0 auto; height: var(--dl-window-bar); display: flex; align-items: center; user-select: none; background: var(--background); z-index: 20; }
-.dl-window-drag-area { align-self: stretch; flex: 1; }
-html[data-desktop-platform="macos"] .dl-window-drag-area { margin-left: 86px; }
+.dl-window-titlebar { position: fixed; inset: 0 0 auto; height: var(--dl-caption-height); display: flex; align-items: center; user-select: none; background: transparent; pointer-events: none; z-index: 60; }
+.dl-window-drag-area { align-self: stretch; flex: 1; pointer-events: none; }
+/* Native traffic lights sit inside the rail; the page itself reaches the top. */
+html[data-desktop-platform="macos"] .dl-navigation-rail { width: var(--dl-caption-width); padding-top: calc(var(--dl-caption-height) + 8px); }
 .dl-window-controls { display: flex; height: 100%; }
 .dl-window-controls [data-slot=button] { width: 46px; height: 100%; border-radius: 0; }
 .dl-window-controls [data-slot=button]:last-child:hover { background: var(--destructive); color: var(--primary-foreground); }
-/* The full Windows titlebar height is draggable through delegated hit testing,
+/* The full titlebar height is draggable through delegated hit testing,
    leaving underlying buttons and inputs interactive. */
-html[data-desktop-platform="windows"] .dl-window-titlebar { height: 36px; background: transparent; pointer-events: none; z-index: 60; }
-html[data-desktop-platform="windows"] .dl-window-drag-area { pointer-events: none; }
 html[data-desktop-platform="windows"] .dl-window-controls { margin-left: auto; pointer-events: auto; }
 html[data-desktop-platform="windows"] .dl-main-heading { padding-right: calc(var(--dl-caption-width) + 14px); pointer-events: auto; }
 html[data-desktop-platform="windows"] .dl-main-view>.dl-conversation>.dl-floating-search { right: calc(var(--dl-caption-width) + 14px); left: auto; translate: none; width: min(510px,calc(100% - var(--dl-caption-width) - 28px)); }
@@ -330,6 +329,8 @@ html[data-desktop-platform="windows"] [data-window-drag-region] { user-select: n
   html[data-desktop-platform="windows"] .dl-settings-sidebar>header { padding-right: var(--dl-caption-width); }
   html[data-desktop-platform="windows"] .dl-actor-dialog-heading { padding-right: calc(var(--dl-caption-width) + 52px); }
   html[data-desktop-platform="windows"] .dl-actor-dialog>[data-slot=dialog-close] { right: calc(var(--dl-caption-width) + 8px); }
+  html[data-desktop-platform="macos"] :is(.dl-main-heading,.dl-settings-sidebar>header,.dl-settings-page-heading,.dl-apps-header,.dl-actor-dialog-heading,.dl-sidebar-heading) { padding-left: var(--dl-caption-width); }
+  html[data-desktop-platform="macos"] .dl-main-view>.dl-conversation>.dl-floating-search { right: 14px; width: min(510px,calc(100% - var(--dl-caption-width) - 28px)); }
 }
 .dl-action-error { position: fixed; top: 74px; left: 50%; transform: translateX(-50%); z-index: 10; display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 30px); border-radius: 15px; background: var(--popover); box-shadow: var(--chat-shadow); padding: 4px 10px; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); color: var(--destructive); }
 .dl-account-menu { width: 240px; padding: 6px; border-radius: 14px; }

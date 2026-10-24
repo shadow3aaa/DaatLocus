@@ -33,6 +33,9 @@ Tauri/xtask 打包会先准备前端；纯无头服务使用 `cargo run --no-def
 每个场景同时提供 320px 和 390px 的窄屏预览。
 设置使用实际界面的入口。Actor 链接在桌面打开对话框，在窄屏打开带返回按钮的
 全屏对话。切换场景只重置 mock 数据。
+运行 `bun run dev:mock` 时设置 `DAAT_LOCUS_MOCK_MACOS=1`，可预览 macOS 标题区
+避让和 GUI 设置。窗口命令与隐私授权均为模拟；原生三色按钮和窗口拖动仍需使用
+实际 macOS 客户端验证。
 预览不提供真实认证；发行构建保留 OPAQUE/WASM，并排除预览路由。验证夹具使用
 `bun run typecheck:mock` 和 `bun test tests/mock-preview.test.ts`；后台行为仍以
 服务契约测试为准。

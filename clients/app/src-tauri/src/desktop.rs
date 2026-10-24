@@ -244,7 +244,10 @@ pub fn run(options: Options) -> Result<()> {
                 builder = builder
                     .title_bar_style(tauri::TitleBarStyle::Overlay)
                     .hidden_title(true)
-                    .traffic_light_position(tauri::LogicalPosition::new(14.0, 12.0));
+                    // Tao's vertical inset sizes the titlebar container; it is
+                    // not the button's distance from the top. Center the native
+                    // controls in the WebUI's 52-point rail header.
+                    .traffic_light_position(tauri::LogicalPosition::new(14.0, 28.0));
                 let mut id = [0u8; 16];
                 for (index, byte) in id.iter_mut().enumerate() {
                     *byte = u8::from_str_radix(&profile[index * 2..index * 2 + 2], 16).unwrap();

@@ -40,6 +40,9 @@ activity, approvals, queue, attachments, long content, login and connection stat
 Each scene also has 320px and 390px frame previews for responsive checks.
 Use the regular UI to open settings. Actor links open a dialog on desktop and a
 full-screen conversation with a back button on narrow screens.
+Set `DAAT_LOCUS_MOCK_MACOS=1` with `bun run dev:mock` to preview macOS caption
+spacing and GUI settings. Window commands and privacy grants are simulated;
+native traffic lights and window dragging still need a real macOS client check.
 Switching scenes resets only mock data. Authentication is deliberately unavailable
 in this preview; production builds retain the real OPAQUE/WASM path and omit the
 preview routes. Validate fixtures with `bun run typecheck:mock` and

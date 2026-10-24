@@ -48,7 +48,10 @@ both selections without starting a service or accessing an account.
 
 The main window blends its title area into the shared UI: Windows uses custom
 minimize/maximize/close controls and a drag area; macOS uses an overlay titlebar
-with native traffic lights. Window commands are limited to the verified main
+with native traffic lights reserved inside the navigation rail. Content reaches
+the top of the window; narrow layouts inset only the affected header controls.
+The transparent drag region leaves buttons and inputs interactive.
+Window commands are limited to the verified main
 conversation WebView and cannot target resource previews or backend operations.
 `--background` starts only in the tray. Browser entry has no native window controls.
 

@@ -1,4 +1,4 @@
-import { useEffect, useState, type MouseEvent } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { CopyIcon, MinusIcon, SquareIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,7 @@ export function DesktopTitlebar({ platform = desktopPlatform() }: { platform?: D
     return () => { live = false; clearTimeout(timer); window.removeEventListener("resize", update); };
   }, [platform]);
   useEffect(() => {
-    if (platform !== "windows") return;
+    if (!platform) return;
     function drag(event: globalThis.MouseEvent) {
       if (event.defaultPrevented || event.button !== 0 || !(event.target instanceof Element)) return;
       const bar = document.querySelector(".dl-window-titlebar")?.getBoundingClientRect();
@@ -30,14 +30,9 @@ export function DesktopTitlebar({ platform = desktopPlatform() }: { platform?: D
   }, [platform]);
   if (!platform) return null;
   function act(action: WindowAction) { void controlWindow(action).then(state => setMaximized(state.maximized)).catch(() => {}); }
-  function drag(event: MouseEvent<HTMLDivElement>) {
-    if (event.button !== 0 || event.target !== event.currentTarget) return;
-    event.preventDefault();
-    act(event.detail === 2 ? "toggle_maximize" : "drag");
-  }
   const maximizeLabel = maximized ? t("desktop_window.restore") : t("desktop_window.maximize");
   return <header className="dl-window-titlebar" aria-label={t("desktop_window.window_controls")}>
-    <div className="dl-window-drag-area" data-window-drag-region onMouseDown={platform === "macos" ? drag : undefined} />
+    <div className="dl-window-drag-area" data-window-drag-region />
     {platform === "windows" && <div className="dl-window-controls">
       <Button variant="ghost" size="icon-sm" aria-label={t("desktop_window.minimize")} title={t("desktop_window.minimize")} onClick={() => act("minimize")}><MinusIcon /></Button>
       <Button variant="ghost" size="icon-sm" aria-label={maximizeLabel} title={maximizeLabel} onClick={() => act("toggle_maximize")}>{maximized ? <CopyIcon /> : <SquareIcon />}</Button>
