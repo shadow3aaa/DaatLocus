@@ -50,12 +50,13 @@ impl ServiceState {
     pub fn new(system: ActorSystem, public_origin: String) -> miette::Result<Self> {
         let stage = crate::stage::host::Host::load(system.clone())
             .map_err(|_| miette::miette!("Cannot load private account state"))?;
+        let authentication = auth::Authentication::new(&system)?;
         Ok(Self {
             stage: Some(crate::stage::runtime::Runtime::new(stage)),
             system,
             origins: Arc::new(trusted_origins(vec![public_origin])),
             auth_flows: Arc::new(Mutex::new(HashMap::new())),
-            authentication: Arc::new(Mutex::new(auth::Authentication::new())),
+            authentication: Arc::new(Mutex::new(authentication)),
             codex_imports: Arc::new(Default::default()),
             listen_address: None,
             bootstrap_owner: false,
@@ -267,12 +268,10 @@ impl IntoResponse for ApiError {
 pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 pub(crate) async fn owner(state: &ServiceState, headers: &HeaderMap) -> ApiResult<()> {
-    if headers.contains_key(axum::http::header::AUTHORIZATION)
-        || !auth::authorize_session(state, headers).await
-    {
+    if headers.contains_key(axum::http::header::AUTHORIZATION) {
         return Err(ApiError::unauthorized());
     }
-    Ok(())
+    auth::authorize_session(state, headers).await
 }
 
 pub(crate) async fn access_actor(

@@ -302,6 +302,10 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   Remove the former Owner Token registry, Bearer path and token endpoints completely.
   Bind sessions to the account public-key namespace, exact profile and credential
   revision; use opaque HttpOnly cookies, never JavaScript/URL credential storage.
+  Persist only hashed, profile-local sessions across service restarts. Default to
+  30-day idle expiry with authenticated renewal; logout, credential changes and
+  device revocation invalidate sessions. Startup outages retain retryable login
+  recovery rather than opening the sign-in form.
   First registration needs a verified local OS-owner connection, not loopback alone.
   New devices join through OPAQUE account login without pairing codes or manual
   enrollment interfaces. Discovery hints cannot grant trust. Bind bootstrap to

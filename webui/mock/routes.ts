@@ -268,6 +268,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     }
   }
   if (path === "/v1/account/session" && method === "DELETE") return noContent();
+  if (path === "/v1/account/session" && method === "POST") return previewState.authenticated ? noContent() : json({code:"unauthorized"},401);
 
   // ---- stage --------------------------------------------------------------
   if (path === "/v1/imports" && method === "GET") return json({codex: previewState.id !== "imports-unsupported"});

@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { NavigationDrawer, NavigationRail } from "@/components/app-navigation";
 import { AccessGate } from "@/components/access-gate";
+import { AccountError } from "@/components/account-error";
+import { accountErrorCode } from "@/lib/account-errors";
 import { DesktopTitlebar } from "@/components/desktop-titlebar";
 import { NativeResourcePreview } from "@/components/native-resource-preview";
 import { VirtualDisplaysPage } from "@/components/virtual-displays-page";
@@ -18,7 +20,7 @@ import { useCoreStatus } from "@/hooks/use-core-status";
 import { coreConnectionMessage, coreConversationReady, getStage } from "@/lib/stage-api";
 import { configurePrimaryActor } from "@/lib/work-timeline";
 import type { ComposerModel } from "@/components/composer";
-import { ActorApiError, accessKey, getAccess, getActor, getConfig, getConfigReadiness, logoutSession, type Access } from "@/lib/actor-api";
+import { ActorApiError, accessKey, restoreSession, renewSession, getActor, getConfig, getConfigReadiness, logoutSession, type Access } from "@/lib/actor-api";
 import { clearConversationDrafts } from "@/hooks/use-actor-conversation";
 import { actorIdFromUrl, conversationUrl, configureConversationDevice, localActorId } from "@/lib/conversation-links";
 import { applyPreferences, readPreferences, savePreferences, type Preferences } from "@/lib/preferences";
@@ -31,6 +33,8 @@ export default function App() {
   const [preferences, setPreferences] = useState<Preferences>(readPreferences);
   const [access, setAccess] = useState<Access | null>(null);
   const [checking, setChecking] = useState(true);
+  const [startupError, setStartupError] = useState<string | null>(null);
+  const [startupAttempt, setStartupAttempt] = useState(0);
   const [entry, setEntry] = useState("core");
   const [actorStack, setActorStack] = useState<string[]>([]);
   const [models, setModels] = useState<ComposerModel[]>([]);
@@ -90,23 +94,55 @@ export default function App() {
     void refreshModels();
     return () => { controller.abort(); clearTimeout(timer); };
   }, [access, core?.synchronized, core?.model_ready, core?.config_revision]);
-  const configure = useCallback(async () => {
+  const configure = useCallback(async (signal?: AbortSignal) => {
     const epoch = ++authEpoch.current;
-    const result = await getAccess(); if (epoch !== authEpoch.current) return;
+    const result = await restoreSession({signal}); if (epoch !== authEpoch.current) return;
+    if (!result) { revoked(); return; }
     const linked = actorIdFromUrl(location.href, location.href);
-      const stage = await getStage();
+      const stage = await getStage({signal});
       if (epoch !== authEpoch.current) return;
       configureConversationDevice(stage?.stage_id ?? null);
       const entry = stage?.primary_actor_id ?? "core";
       setEntry(entry); configurePrimaryActor(entry); setActorStack(linked && localActorId(linked) !== entry ? [localActorId(linked)] : []);
-      const [configuration, readiness] = await Promise.allSettled([getConfig(), getConfigReadiness()]);
+      const [configuration, readiness] = await Promise.allSettled([getConfig({signal}), getConfigReadiness({signal})]);
       if (epoch !== authEpoch.current) return;
       if (configuration.status === "fulfilled") setModels(configuration.value.models.map(model => ({ name: model.name, label: model.model_id || model.name, effort: model.thinking_budget || "", isDefault: configuration.value.main_model === model.name })));
       setReady(readiness.status === "fulfilled" && readiness.value.ready);
       setAppsOpen(location.pathname === "/apps"); setVirtualDisplaysOpen(location.pathname === "/virtual-displays");
       setAccess(result);
-  }, []);
-  useEffect(() => { let live = true; setChecking(true); void configure().catch(error => { if (!live) return; if (error instanceof ActorApiError && [401,403,410].includes(error.status)) revoked(); else setAccess(null); }).finally(() => { if (live) setChecking(false); }); return () => { live = false; authEpoch.current++; }; }, [configure, revoked]);
+  }, [revoked]);
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    setChecking(true); setStartupError(null);
+    void configure(controller.signal).catch(error => {
+      if (controller.signal.aborted) return;
+      if (error instanceof ActorApiError && error.status === 401) revoked();
+      else {
+        setStartupError(accountErrorCode(error));
+        timer = setTimeout(() => setStartupAttempt(value => value + 1), 2000);
+      }
+    }).finally(() => { if (!controller.signal.aborted) setChecking(false); });
+    return () => { controller.abort(); clearTimeout(timer); authEpoch.current++; };
+  }, [configure, revoked, startupAttempt]);
+  useEffect(() => {
+    if (!access) return;
+    const controller = new AbortController();
+    let pending = false;
+    async function refresh() {
+      if (document.hidden || pending) return;
+      pending = true;
+      try { await renewSession({signal:controller.signal}); }
+      catch (error) {
+        if (!controller.signal.aborted && error instanceof ActorApiError && error.status === 401) revoked();
+      } finally { pending = false; }
+    }
+    const timer = setInterval(() => { void refresh(); }, 6 * 60 * 60 * 1000);
+    const resume = () => { void refresh(); };
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("online", resume);
+    return () => { controller.abort(); clearInterval(timer); document.removeEventListener("visibilitychange", resume); window.removeEventListener("online", resume); };
+  }, [access, revoked]);
   useEffect(() => { function pop() { const tab = settingsTabFromPath(location.pathname); if (tab) {setSettingsTab(tab);setSettings(true);return;} if (settings) {history.pushState(null, "", settingsPath(settingsTab));settingsPage.current?.close();return;} setAppsOpen(location.pathname === "/apps"); setVirtualDisplaysOpen(location.pathname === "/virtual-displays"); const linked = actorIdFromUrl(location.href, location.href); const id = linked ? localActorId(linked) : null; setActorStack(id && id !== entry ? [id] : []); } window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, [entry, settings, settingsTab]);
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
@@ -156,7 +192,7 @@ export default function App() {
     <DesktopTitlebar />
     <NativeResourcePreview />
     {access && logoutError && <div className="dl-action-error" role="alert"><span>{t("app.could_not_sign_out_try_again")}</span><Button variant="ghost" size="sm" onClick={() => { void logout(); }}>{t("app.retry")}</Button></div>}
-    {checking ? <div className="dl-app-loading" role="status"><span className="dl-loading-orbit" />{t("app.connecting")}</div> : !access ? <AccessGate onAuthenticated={configure} /> : <>
+    {checking ? <div className="dl-app-loading" role="status"><span className="dl-loading-orbit" />{t("app.connecting")}</div> : !access && startupError ? <div className="dl-app-loading" role="status"><AccountError code={startupError} /><Button variant="outline" onClick={() => setStartupAttempt(value => value + 1)}>{t("app.retry")}</Button></div> : !access ? <AccessGate onAuthenticated={() => setStartupAttempt(value => value + 1)} /> : <>
       <div className="dl-app-shell"><NavigationRail access={access} settings={settings} apps={appsOpen} virtualDisplays={virtualDisplaysOpen} virtualDisplaysSupported={virtualDisplaysSupported} onVirtualDisplays={openVirtualDisplays} onApps={openApps} onHome={home} onSettings={() => openSettings("general")} onLogout={() => void logout()} /><div className="dl-shell-body">
       {/* Keep the Core pane laid out so settings do not reset its reading position. */}
       <div className="dl-home-layout" data-inactive={settings || appsOpen || virtualDisplaysOpen} aria-hidden={settings || appsOpen || virtualDisplaysOpen || undefined} inert={settings || appsOpen || virtualDisplaysOpen || undefined}>

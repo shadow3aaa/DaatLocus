@@ -108,7 +108,7 @@ impl CredentialBundle {
         }
     }
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Metadata {
     pub account_id: String,
     pub name: String,

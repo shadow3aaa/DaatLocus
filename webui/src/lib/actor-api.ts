@@ -332,6 +332,15 @@ export async function request<T>(path: string, options: FetchOptions & {
   return response.status === 204 || options.empty ? undefined as T : await response.json() as T;
 }
 export const getAccess = (options?: FetchOptions) => request<Access>("/v1/access", options);
+export const renewSession = (options?: FetchOptions) => request<void>("/v1/account/session", { ...options, method: "POST" });
+/** Only a confirmed expired/revoked session opens login; outages remain retryable. */
+export async function restoreSession(options?: FetchOptions): Promise<Access | null> {
+  try { await renewSession(options); return await getAccess(options); }
+  catch (error) {
+    if (error instanceof ActorApiError && error.status === 401) return null;
+    throw error;
+  }
+}
 export const accessKey = (access: Access) => access.session_id ? `owner:${access.session_id}` : "owner";
 export const logoutSession = (options?: FetchOptions) => request<void>("/v1/account/session", { ...options, method: "DELETE" });
 export const listActors = (options: FetchOptions & {

@@ -14,6 +14,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, net::SocketAddr};
+mod sessions;
+use sessions::{BrowserSession, SESSION_SECONDS, Sessions};
 
 fn login_error(error: LoginError) -> ApiError {
     let status = match error {
@@ -48,15 +50,8 @@ fn login_error(error: LoginError) -> ApiError {
     }
 }
 
-const SESSION_SECONDS: i64 = 12 * 60 * 60;
 const ATTEMPT_MS: i64 = 120_000;
 const MAX_PENDING: usize = 128;
-const MAX_SESSIONS: usize = 4096;
-pub(super) struct BrowserSession {
-    pub account: Metadata,
-    expires_at_ms: i64,
-    pub public_id: String,
-}
 struct LoginAttempt {
     opaque: PendingLogin,
     account: Metadata,
@@ -86,7 +81,7 @@ struct RegistrationAttempt {
     expires: i64,
 }
 pub(super) struct Authentication {
-    sessions: HashMap<String, BrowserSession>,
+    sessions: Sessions,
     logins: HashMap<String, LoginAttempt>,
     registrations: HashMap<String, RegistrationAttempt>,
     remote_logins: HashMap<String, RemoteAttempt>,
@@ -94,20 +89,18 @@ pub(super) struct Authentication {
     attempts: HashMap<std::net::IpAddr, (i64, u32)>,
 }
 impl Authentication {
-    pub fn new() -> Self {
-        Self {
-            sessions: HashMap::new(),
+    pub fn new(system: &crate::actors::ActorSystem) -> miette::Result<Self> {
+        Ok(Self {
+            sessions: Sessions::open(system)?,
             logins: HashMap::new(),
             registrations: HashMap::new(),
             remote_logins: HashMap::new(),
             imports: HashMap::new(),
             attempts: HashMap::new(),
-        }
+        })
     }
     fn budget(&mut self, peer: SocketAddr) -> ApiResult<()> {
         let now = now();
-        self.sessions
-            .retain(|_, session| session.expires_at_ms > now);
         self.logins.retain(|_, state| state.expires > now);
         self.registrations.retain(|_, state| state.expires > now);
         self.remote_logins.retain(|_, state| state.expires > now);
@@ -357,7 +350,7 @@ pub(super) fn routes() -> Router<ServiceState> {
         .route("/v1/account/login/import", post(login_import))
         .route("/v1/account/login/cancel", post(login_cancel))
         .route("/v1/account/connection", axum::routing::put(connection))
-        .route("/v1/account/session", axum::routing::delete(logout))
+        .route("/v1/account/session", post(renew_session).delete(logout))
 }
 async fn info(
     State(state): State<ServiceState>,
@@ -497,7 +490,13 @@ async fn registration_finish(
     host.accounts
         .install(record, &pending.account_id)
         .map_err(ApiError::from_report)?;
-    state.authentication.lock().await.sessions.clear();
+    state
+        .authentication
+        .lock()
+        .await
+        .sessions
+        .clear()
+        .map_err(ApiError::from_report)?;
     if let Some(runtime) = state.stage.as_ref() {
         runtime.start().await.map_err(super::stages::failure)?;
     }
@@ -695,21 +694,23 @@ async fn login_finish(
     let mut authentication = state.authentication.lock().await;
     authentication
         .sessions
-        .retain(|_, session| session.expires_at_ms > now());
-    if let Some(previous) = cookie(&headers, &cookie_name(&state)) {
-        authentication.sessions.remove(&digest(&previous));
-    }
-    if authentication.sessions.len() >= MAX_SESSIONS {
-        return Err(login_error(LoginError::Busy));
-    }
-    authentication.sessions.insert(
-        digest(&secret),
-        BrowserSession {
-            account: pending.account,
-            expires_at_ms: now() + SESSION_SECONDS * 1000,
-            public_id: uuid::Uuid::new_v4().to_string(),
-        },
-    );
+        .insert(
+            digest(&secret),
+            BrowserSession {
+                account: pending.account,
+                expires_at_ms: now() + SESSION_SECONDS * 1000,
+                public_id: uuid::Uuid::new_v4().to_string(),
+            },
+            cookie(&headers, &cookie_name(&state)).map(|previous| digest(&previous)),
+            now(),
+        )
+        .map_err(|error| {
+            if error.downcast_ref::<sessions::SessionLimit>().is_some() {
+                login_error(LoginError::Busy)
+            } else {
+                ApiError::from_report(error)
+            }
+        })?;
     cookie_response(&state, &headers, &secret, SESSION_SECONDS)
 }
 async fn login_cancel(
@@ -881,39 +882,63 @@ async fn logout(State(state): State<ServiceState>, headers: HeaderMap) -> ApiRes
             .lock()
             .await
             .sessions
-            .remove(&digest(&secret));
+            .remove(&digest(&secret))
+            .map_err(ApiError::from_report)?;
     }
     cookie_response(&state, &headers, "", 0)
 }
-pub(super) async fn authorize_session(state: &ServiceState, headers: &HeaderMap) -> bool {
+async fn renew_session(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    mutation_origin(&state, &headers, true).await?;
+    super::owner(&state, &headers).await?;
+    let secret = cookie(&headers, &cookie_name(&state)).ok_or_else(ApiError::unauthorized)?;
+    let now = now();
+    let session = state
+        .authentication
+        .lock()
+        .await
+        .sessions
+        .renew(&digest(&secret), now)
+        .map_err(ApiError::from_report)?
+        .ok_or_else(ApiError::unauthorized)?;
+    cookie_response(
+        &state,
+        &headers,
+        &secret,
+        (session.expires_at_ms - now) / 1000,
+    )
+}
+pub(super) async fn authorize_session(state: &ServiceState, headers: &HeaderMap) -> ApiResult<()> {
     let Some(secret) = cookie(headers, &cookie_name(state)) else {
-        return false;
+        return Err(ApiError::unauthorized());
     };
     let key = digest(&secret);
     let account = {
-        let mut authentication = state.authentication.lock().await;
+        let authentication = state.authentication.lock().await;
         authentication
             .sessions
-            .retain(|_, session| session.expires_at_ms > now());
-        authentication
-            .sessions
-            .get(&key)
+            .get(&key, now())
             .map(|session| session.account.clone())
     };
     let Some(account) = account else {
-        return false;
+        return Err(ApiError::unauthorized());
     };
-    if host(state).is_ok_and(|host| {
-        host.account_id().as_deref() == Some(&account.account_id)
-            && device_not_revoked(host)
-            && host
-                .accounts
-                .authorizes(&account.account_id, &account.binding)
-    }) {
-        true
+    let host = host(state)?;
+    let current = host
+        .accounts
+        .current()
+        .map_err(|_| ApiError::unavailable())?;
+    if host.account_id().as_deref() == Some(&account.account_id)
+        && device_not_revoked(host)
+        && current.is_some_and(|current| {
+            current.account_id == account.account_id && current.binding() == account.binding
+        })
+    {
+        Ok(())
     } else {
-        state.authentication.lock().await.sessions.remove(&key);
-        false
+        Err(ApiError::unauthorized())
     }
 }
 pub(super) async fn client_session_id(state: &ServiceState, headers: &HeaderMap) -> Option<String> {
@@ -923,7 +948,7 @@ pub(super) async fn client_session_id(state: &ServiceState, headers: &HeaderMap)
         .lock()
         .await
         .sessions
-        .get(&digest(&secret))
+        .get(&digest(&secret), now())
         .map(|session| session.public_id.clone())
 }
 pub(super) async fn account_metadata(
@@ -936,7 +961,7 @@ pub(super) async fn account_metadata(
         .lock()
         .await
         .sessions
-        .get(&digest(&secret))
+        .get(&digest(&secret), now())
         .map(|session| session.account.clone())
 }
 

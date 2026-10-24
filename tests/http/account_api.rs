@@ -5,6 +5,124 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 #[tokio::test]
+async fn persistent_sessions_restore_after_restart_but_logout_and_password_changes_stay_revoked() {
+    let mut fixture = Fixture::new().await;
+    let cookie = fixture.cookie.read().clone();
+    let access = fixture
+        .owner(reqwest::Method::GET, "/v1/access")
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let persisted = std::fs::read_to_string(
+        fixture
+            .system
+            .account_credentials_dir()
+            .join("browser-sessions.json"),
+    )
+    .unwrap();
+    assert!(
+        !persisted.contains(cookie.split_once('=').unwrap().1),
+        "never persist a usable cookie secret"
+    );
+    assert!(
+        !persisted.contains(fixture.password.read().as_str()),
+        "never persist the login password"
+    );
+    fixture.restart_service().await;
+    let restored = fixture
+        .owner(reqwest::Method::GET, "/v1/access")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restored.status(), StatusCode::OK);
+    assert_eq!(
+        restored.json::<Value>().await.unwrap()["session_id"],
+        access["session_id"]
+    );
+    for (origin, marker) in [
+        (None, true),
+        (Some("https://attacker.invalid"), true),
+        (Some(fixture.url.as_str()), false),
+    ] {
+        let mut request = fixture
+            .client
+            .post(format!("{}/v1/account/session", fixture.url))
+            .header("cookie", &cookie);
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        if marker {
+            request = request.header("x-daat-request", "1");
+        }
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let renewed = fixture
+        .owner(reqwest::Method::POST, "/v1/account/session")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(renewed.status(), StatusCode::NO_CONTENT);
+    let renewed = renewed.headers()["set-cookie"].to_str().unwrap();
+    let max_age = renewed
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("Max-Age="))
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    assert!(max_age >= 29 * 24 * 60 * 60);
+    assert!(renewed.contains("HttpOnly") && renewed.contains("SameSite=Strict"));
+    assert_eq!(
+        fixture
+            .owner(reqwest::Method::DELETE, "/v1/account/session")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    fixture.restart_service().await;
+    assert_eq!(
+        fixture
+            .owner(reqwest::Method::POST, "/v1/account/session")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    fixture.login_cookie().await;
+    fixture
+        .change_password("changed isolated fixture password")
+        .await;
+    fixture.restart_service().await;
+    assert_eq!(
+        fixture
+            .owner(reqwest::Method::POST, "/v1/account/session")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    fixture.login_cookie().await;
+    assert_eq!(
+        fixture
+            .owner(reqwest::Method::GET, "/v1/access")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
 async fn account_registration_login_replay_and_profile_boundaries_are_enforced() {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
     let ready = Fixture::new().await;

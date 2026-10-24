@@ -40,6 +40,28 @@ impl Drop for Fixture {
     }
 }
 impl Fixture {
+    pub async fn restart_service(&mut self) {
+        self.server.abort();
+        let _ = (&mut self.server).await;
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        self.url = format!("http://{}", listener.local_addr().unwrap());
+        let state = ServiceState::new(self.system.clone(), self.url.clone())
+            .unwrap()
+            .with_listen_address(listener.local_addr().unwrap())
+            .with_codex_home(self._temp.path().join("codex"));
+        self.stage = state.stage.clone().unwrap();
+        self.auth = self.stage.host.accounts.clone();
+        self.server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+    }
     pub async fn native_bootstrap(
         &self,
         input: daat_locus_client_protocol::BootstrapRequest,
