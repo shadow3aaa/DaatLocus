@@ -136,27 +136,16 @@ drag, scroll and keyboard indicators. This transient decoration neither dispatch
 input nor displays typed text. It is excluded from model screenshots and hidden
 on Owner navigation input.
 
-Opt-in local native contracts (no personal accounts):
+Backend contracts use isolated local fixtures:
 
 ```powershell
-cargo build -p daat-locus-app --features web-contract
-python clients/app/scripts/test-web-host.py target/debug/daat-locus-app.exe
-python clients/app/scripts/test-browser-use.py target/debug/daat-locus-app.exe --embedded
-python clients/app/scripts/test-browser-use.py target/debug/daat-locus-app.exe --hidden
-python clients/app/scripts/test-browser-use.py target/debug/daat-locus-app.exe --embedded --reduced-motion
-python clients/app/scripts/test-browser-downloads.py target/debug/daat-locus-app.exe
-# With the standalone WebUI mock listening on 5177:
-python clients/app/scripts/test-browser-ui.py target/debug/daat-locus-app.exe target/browser-ui-review
-python clients/app/scripts/test-browser-page-actions.py target/debug/daat-locus-app.exe
+cargo test --no-default-features --lib web_
+cargo test --no-default-features --lib browser_use_app
 ```
 
-The BrowserUse contract checks trusted click/hover/drag, Unicode input, modified
-keys, real form submission, history, scrolling, screenshot pixels, stale-state
-rejection, painted cursor/model-screenshot separation, shared cookies/tab
-preservation and concurrent Owner input fencing. The download contract verifies
-original file bytes and visit persistence against a local fixture. The UI contract
-exercises mock menus, history filtering, omnibox navigation and tab preservation,
-and saves desktop/narrow screenshots without using a personal account.
+Verify native page capture, trusted input, isolation, downloads and popup behavior
+on each supported platform. Compilation alone does not establish native runtime
+coverage.
 
 Mock entry points: `/browser`, `/browser?view=history`, `/browser?view=downloads`,
 `/browser?view=settings`, `/browser?browser_scene=empty` and

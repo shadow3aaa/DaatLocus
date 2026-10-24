@@ -956,13 +956,9 @@ Run `DAAT_LOCUS_BUILD_WEBUI=0 cargo test --no-default-features --lib web_` for
 document pagination, version-bound links, Actor resource authorization, native
 mailbox failure handling, HTTP address validation and character decoding.
 
-On Windows or macOS, build `cargo build -p daat-locus-app --features web-contract`
-and run `python clients/app/scripts/test-web-host.py <path-to-native-executable>`.
-This opt-in test launches an isolated native host against local HTTP fixtures,
-without starting an account or replacing the installed application. It checks
-deep content, multiple main regions, shadow text, frame links, password/script
-exclusion, canvas notices and actual cookie separation. Probe support is absent
-from normal distribution builds.
+On Windows or macOS, opt-in native probe support is available through
+`cargo build -p daat-locus-app --features web-contract`. It is absent from normal
+distribution builds.
 
 For live-site tuning, invoke that executable with `--web-probe <manifest.json>`.
 The manifest has `urls` (an array) and `output` (an absolute JSON capture path).
