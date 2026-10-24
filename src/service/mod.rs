@@ -13,6 +13,7 @@ mod stages;
 mod stream;
 mod virtual_displays;
 mod webui;
+use crate::stage::observation::Query as ConversationRead;
 pub(crate) use auth::native_bootstrap;
 
 use crate::{
@@ -443,6 +444,11 @@ async fn get_actor(
     Path(actor): Path<String>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, false).await?;
+    if let Some(value) =
+        remote::core_read(&state, &headers, &actor, ConversationRead::Actor).await?
+    {
+        return Ok(Json(value));
+    }
     let record = state.system.actor(&actor).map_err(ApiError::from_report)?;
     let mut value = public_actor(&record);
     redact(&mut value, &state.system.config());
@@ -511,6 +517,20 @@ async fn search_messages(
     if text.is_empty() || text.len() > 512 || query.before.is_some_and(|n| n <= 0) {
         return Err(ApiError::invalid());
     }
+    if let Some(value) = remote::core_read(
+        &state,
+        &headers,
+        &actor,
+        ConversationRead::Search {
+            text: text.into(),
+            before: query.before,
+            limit: bounded(query.limit, 100)?.min(32) as u8,
+        },
+    )
+    .await?
+    {
+        return Ok(Json(value));
+    }
     let cursor = state
         .system
         .store()
@@ -533,6 +553,19 @@ async fn messages(
     Query(query): Query<HistoryQuery>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, false).await?;
+    if let Some(value) = remote::core_read(
+        &state,
+        &headers,
+        &actor,
+        ConversationRead::Messages {
+            before: query.before,
+            limit: bounded(query.limit, 100)?.min(32) as u8,
+        },
+    )
+    .await?
+    {
+        return Ok(Json(value));
+    }
     // Captured before the query: changes racing the load are replayed, never lost.
     let cursor = state
         .system
@@ -555,6 +588,16 @@ async fn message(
     Path((actor, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, false).await?;
+    if let Some(value) = remote::core_read(
+        &state,
+        &headers,
+        &actor,
+        ConversationRead::Message { id: id.clone() },
+    )
+    .await?
+    {
+        return Ok(Json(value));
+    }
     let message = state
         .system
         .store()
@@ -573,6 +616,16 @@ async fn tool_result(
     Path((actor, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, false).await?;
+    if let Some(value) = remote::core_read(
+        &state,
+        &headers,
+        &actor,
+        ConversationRead::Result { id: id.clone() },
+    )
+    .await?
+    {
+        return Ok(Json(value));
+    }
     let result = state
         .system
         .store()
@@ -595,6 +648,20 @@ async fn tool_results(
     access_actor(&state, &headers, &actor, false).await?;
     if query.before.is_some_and(|before| before < 0) {
         return Err(ApiError::invalid());
+    }
+    if let Some(value) = remote::core_read(
+        &state,
+        &headers,
+        &actor,
+        ConversationRead::Results {
+            message: id.clone(),
+            before: query.before,
+            limit: bounded(query.limit, 100)?.min(32) as u8,
+        },
+    )
+    .await?
+    {
+        return Ok(Json(value));
     }
     let message = state
         .system
@@ -671,6 +738,27 @@ async fn send_message(
         .system
         .send_user(&actor, request.content, attachments, key)
         .map_err(ApiError::from_report)?;
+    if actor == crate::stage::shared::ACTOR_ID && remote::core_source(&state).is_some() {
+        state
+            .system
+            .shared_core()
+            .ok_or_else(ApiError::unavailable)?
+            .forward_user_input(record.clone())
+            .await
+            .map_err(stages::failure)?;
+        if let Some(value) = remote::core_read(
+            &state,
+            &headers,
+            &actor,
+            ConversationRead::Message {
+                id: record.id.clone(),
+            },
+        )
+        .await?
+        {
+            return Ok((StatusCode::ACCEPTED, Json(value)));
+        }
+    }
     let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
     redact(&mut value, &state.system.config());
     Ok((StatusCode::ACCEPTED, Json(value)))
@@ -681,6 +769,19 @@ async fn cancel_message(
     Path((actor, message)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
     access_actor(&state, &headers, &actor, true).await?;
+    if remote::core_control(
+        &state,
+        &headers,
+        &actor,
+        crate::stage::protocol::ConversationAction::Cancel {
+            message: message.clone(),
+        },
+    )
+    .await?
+    .is_some()
+    {
+        return Ok(StatusCode::ACCEPTED);
+    }
     let record = state
         .system
         .store()

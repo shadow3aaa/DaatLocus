@@ -100,6 +100,12 @@ pub fn read(
     let source = system
         .actor(&actor.actor_id)
         .map_err(|_| StageError::Forbidden("Actor is unavailable"))?;
+    let event_head =
+        if actor.actor_id == super::shared::ACTOR_ID && matches!(query, Query::Messages { .. }) {
+            Some(super::journal::Journal::new(system.store()).current_cursor(&actor.actor_id)?)
+        } else {
+            None
+        };
     let fail = |_| StageError::Unavailable("Observation is unavailable");
     let mut value=match query {
         Query::InvocationMessage {id}=>{
@@ -129,6 +135,10 @@ pub fn read(
         Query::Approvals {before,limit} => serde_json::to_value(system.store().approvals(Some(&actor.actor_id),*before,*limit as usize).map_err(fail)?),
         Query::Approval {id} => {let record=system.store().approval(id).map_err(fail)?;if record.actor_id!=actor.actor_id{return Err(StageError::Forbidden("Approval belongs to another Actor"));}serde_json::to_value(record)},
     }.map_err(|_|StageError::Invalid("Cannot encode observation"))?;
+    if let Some(cursor) = event_head {
+        value["event_head"] = serde_json::to_value(cursor)
+            .map_err(|_| StageError::Invalid("Invalid conversation cursor"))?;
+    }
     // The service redactor also removes private tool protocol transcripts and credentials.
     crate::service::redact(&mut value, &system.config());
     Ok(value)

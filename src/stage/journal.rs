@@ -276,6 +276,9 @@ impl<'a> Journal<'a> {
     pub fn new(store: &'a ActorStore) -> Self {
         Self { store }
     }
+    pub(crate) fn current_cursor(&self, actor: &str) -> Result<Cursor> {
+        self.store.stage_transaction(|tx| Ok(head(tx, actor)?.0))
+    }
     pub fn page(
         &self,
         peer: StageId,

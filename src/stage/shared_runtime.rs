@@ -381,13 +381,42 @@ impl Controller {
                     .fence
                     .lock()
                     .permits(lease.leader, lease.epoch, Instant::now());
-                lease.leader != runtime.host.local
-                    && runtime.connected(lease.leader)
-                    && valid
-                    && shared_store::head(runtime.host.system.store())
-                        .is_ok_and(|head| head == desired.head)
+                lease.leader != runtime.host.local && runtime.connected(lease.leader) && valid
             })
         })
+    }
+    /// Browsing and forwarding use the authenticated worker, independently of
+    /// whether this device has hydrated its execution checkpoint.
+    pub(crate) fn read_source(&self) -> Option<StageId> {
+        if self.draining.load(Ordering::Acquire) || self.frozen.lock().is_some() {
+            return None;
+        }
+        let runtime = self.runtime().ok()?;
+        let source = self.fence.lock().leader(Instant::now())?;
+        (source != runtime.host.local && runtime.connected(source)).then_some(source)
+    }
+    pub(crate) async fn forward_user_input(
+        &self,
+        message: crate::actors::MessageRecord,
+    ) -> Result<()> {
+        let leader = self
+            .read_source()
+            .ok_or(StageError::Unavailable("Worker is reconnecting"))?;
+        self.push_resources(leader).await?;
+        match self
+            .request(
+                leader,
+                Request::Input {
+                    message: Box::new(message),
+                },
+            )
+            .await?
+        {
+            Response::InputAccepted => Ok(()),
+            _ => Err(StageError::Unavailable(
+                "Account input has not been accepted",
+            )),
+        }
     }
     fn invalidate(&self) {
         self.ready.store(false, Ordering::Release);
@@ -555,6 +584,9 @@ impl Controller {
             Request::Input { .. } => "input",
             Request::FreezeRecovery => "freeze_recovery",
             Request::RecoverySnapshot { .. } => "recovery_snapshot",
+            Request::SnapshotRange { .. } => "snapshot_range",
+            Request::Snapshot { .. } => "snapshot",
+            Request::Journal { .. } => "journal",
             Request::InstallRecovery { .. } => "install_recovery",
             Request::FinishRecovery { .. } => "finish_recovery",
             _ => "operation",
@@ -576,29 +608,42 @@ impl Controller {
                 20
             },
         );
-        let bytes = serde_json::to_vec(&request)
-            .map_err(|_| StageError::Invalid("Cannot encode core request"))?;
-        let content = ContentStore::new(runtime.host.system.store())
-            .store_source(shared::ACTOR_ID, &bytes)?
-            .content;
         let handle = runtime.handle(peer)?;
-        let response = handle
-            .rpc_with_timeout(Body::CoreRequest { content }, timeout)
-            .await?;
-        let Body::CoreResponse { content } = response else {
-            return Err(StageError::Invalid("Invalid core reply"));
+        let bytes = super::core_transfer::encode_request(
+            runtime.host.system.store(),
+            &request,
+            handle.packed_sync(),
+        )?;
+        let body = if handle.packed_sync() && bytes.len() <= super::core_transfer::INLINE_BYTES {
+            Body::CoreRequestInline { bytes }
+        } else {
+            Body::CoreRequest {
+                content: ContentStore::new(runtime.host.system.store())
+                    .store_source(shared::ACTOR_ID, &bytes)?
+                    .content,
+            }
         };
-        let bytes = handle
-            .content(
-                super::ActorAddress {
-                    stage_id: peer,
-                    actor_id: shared::ACTOR_ID.into(),
-                },
-                content,
-            )
-            .await?;
-        let response: Response = serde_json::from_slice(&bytes)
-            .map_err(|_| StageError::Invalid("Invalid core response"))?;
+        let response = handle.rpc_with_timeout(body, timeout).await?;
+        let bytes = match response {
+            Body::CoreResponse { content } => {
+                handle
+                    .content(
+                        super::ActorAddress {
+                            stage_id: peer,
+                            actor_id: shared::ACTOR_ID.into(),
+                        },
+                        content,
+                    )
+                    .await?
+            }
+            Body::CoreResponseInline { bytes } if handle.packed_sync() => bytes,
+            _ => return Err(StageError::Invalid("Invalid core reply")),
+        };
+        let response = super::core_transfer::decode_response(
+            runtime.host.system.store(),
+            &bytes,
+            handle.packed_sync(),
+        )?;
         tracing::debug!(peer=%peer,operation=label,elapsed_ms=began.elapsed().as_millis(),"Account device operation replied");
         if let Response::ApprovalDenied { rejection } = &response {
             let mut rejection = rejection.clone();
@@ -822,6 +867,40 @@ impl Controller {
                     )?,
                 })
             }
+            Request::SnapshotRange {
+                head,
+                token,
+                page,
+                recovery,
+            } => {
+                if recovery {
+                    let coordinator = runtime
+                        .coordination
+                        .read()
+                        .clone()
+                        .ok_or(StageError::Unavailable("Device consensus is unavailable"))?;
+                    coordinator.authorize(peer)?;
+                    if self.frozen.lock().is_none() || shared_store::head(system.store())? != head {
+                        return Err(StageError::Conflict("Recovery snapshot is not frozen"));
+                    }
+                    if let Some(frozen) = self.frozen.lock().as_mut() {
+                        frozen.1 = Instant::now();
+                    }
+                } else {
+                    let coordinated = self.coordinate(Operation::Inspect, vec![]).await?;
+                    if token.is_none() && coordinated.head != head {
+                        return Err(StageError::Conflict("Snapshot head is not current"));
+                    }
+                }
+                Ok(Response::SnapshotRange {
+                    pages: super::shared_snapshot::produce_range(
+                        system.store(),
+                        &head,
+                        token.as_deref(),
+                        page,
+                    )?,
+                })
+            }
             Request::Resources { records } => {
                 tracing::debug!(stage=%runtime.host.local,peer=%peer,"Installing account resources");
                 self.require_worker(runtime.host.local, self.epoch())
@@ -1037,6 +1116,40 @@ impl Controller {
             Request::ToolResult { message, call_id } => self.effect_result(&message, &call_id),
         }
     }
+    async fn snapshot_pages(
+        &self,
+        source: StageId,
+        head: Head,
+        token: Option<String>,
+        page: u32,
+        recovery: bool,
+    ) -> Result<Vec<super::shared_snapshot::Page>> {
+        let runtime = self.runtime()?;
+        let packed = source != runtime.host.local && runtime.handle(source)?.packed_sync();
+        let request = if packed {
+            Request::SnapshotRange {
+                head,
+                token,
+                page,
+                recovery,
+            }
+        } else if recovery {
+            Request::RecoverySnapshot { head, token, page }
+        } else {
+            Request::Snapshot { head, token, page }
+        };
+        match self.request(source, request).await? {
+            Response::Snapshot { page } if !packed => Ok(vec![page]),
+            Response::SnapshotRange { pages }
+                if packed
+                    && !pages.is_empty()
+                    && pages.len() <= super::shared_snapshot::RANGE_PAGES =>
+            {
+                Ok(pages)
+            }
+            _ => Err(StageError::Invalid("Expected bounded Core snapshot pages")),
+        }
+    }
     async fn restore_snapshot(&self, source: StageId, head: Head) -> Result<()> {
         let runtime = self.runtime()?;
         let account = runtime
@@ -1046,31 +1159,53 @@ impl Controller {
         let mut token = None;
         let mut page = 0;
         loop {
-            let Response::Snapshot { page: part } = self
-                .request(
-                    source,
-                    Request::Snapshot {
-                        head: head.clone(),
-                        token: token.clone(),
-                        page,
-                    },
-                )
+            for part in self
+                .snapshot_pages(source, head.clone(), token.clone(), page, false)
                 .await?
-            else {
-                return Err(StageError::Invalid("Expected core snapshot"));
-            };
-            if part.head != head || part.page != page {
-                return Err(StageError::Conflict("Snapshot boundary changed"));
+            {
+                if part.head != head
+                    || part.page != page
+                    || token.as_ref().is_some_and(|token| *token != part.token)
+                {
+                    return Err(StageError::Conflict("Snapshot boundary changed"));
+                }
+                self.snapshot_content(source, &part.entries).await?;
+                if super::shared_snapshot::receive(runtime.host.system.store(), &part, &account)? {
+                    return Ok(());
+                }
+                token = Some(part.token);
+                page += 1;
             }
-            for change in &part.entries {
-                self.content(source, &change.content).await?;
-                self.install_resource_change(source, change).await?;
+        }
+    }
+    async fn snapshot_content(
+        &self,
+        source: StageId,
+        entries: &[shared_store::Change],
+    ) -> Result<()> {
+        use futures_util::StreamExt;
+        // Independent verified blobs can share the bounded peer download
+        // window instead of paying two relay round trips for every record.
+        let references = entries
+            .iter()
+            .map(|change| change.content.clone())
+            .collect::<Vec<_>>();
+        let mut downloads = futures_util::stream::iter(references)
+            .map(|reference| async move { self.content(source, &reference).await })
+            .buffer_unordered(8);
+        while let Some(result) = downloads.next().await {
+            result?;
+            if let Some(frozen) = self.frozen.lock().as_mut() {
+                frozen.1 = Instant::now();
             }
-            if super::shared_snapshot::receive(runtime.host.system.store(), &part, &account)? {
-                break;
+        }
+        // Resource installation and the eventual page commit retain their
+        // original order; a failed download never publishes a partial page.
+        for change in entries {
+            self.install_resource_change(source, change).await?;
+            if let Some(frozen) = self.frozen.lock().as_mut() {
+                frozen.1 = Instant::now();
             }
-            token = Some(part.token);
-            page += 1;
         }
         Ok(())
     }
@@ -1216,54 +1351,42 @@ impl Controller {
             if let Some(frozen) = self.frozen.lock().as_mut() {
                 frozen.1 = Instant::now();
             }
-            let Response::Snapshot { page: part } = self
-                .request(
-                    source,
-                    Request::RecoverySnapshot {
-                        head: head.clone(),
-                        token: token.clone(),
-                        page,
-                    },
-                )
+            for part in self
+                .snapshot_pages(source, head.clone(), token.clone(), page, true)
                 .await?
-            else {
-                return Err(StageError::Invalid("Expected recovery snapshot"));
-            };
-            if part.head != head || part.page != page {
-                return Err(StageError::Conflict("Recovery snapshot changed"));
-            }
-            for change in &part.entries {
-                self.content(source, &change.content).await?;
-                self.install_resource_change(source, change).await?;
-                if let Some(frozen) = self.frozen.lock().as_mut() {
-                    frozen.1 = Instant::now();
+            {
+                if part.head != head
+                    || part.page != page
+                    || token.as_ref().is_some_and(|token| *token != part.token)
+                {
+                    return Err(StageError::Conflict("Recovery snapshot changed"));
                 }
+                self.snapshot_content(source, &part.entries).await?;
+                let authority = self
+                    .frozen
+                    .lock()
+                    .as_ref()
+                    .map(|(authority, _)| *authority)
+                    .ok_or(StageError::Conflict("Recovery is no longer frozen"))?;
+                self.require_authority(authority).await?;
+                let coordinator = runtime
+                    .coordination
+                    .read()
+                    .clone()
+                    .ok_or(StageError::Unavailable("Device consensus is unavailable"))?;
+                coordinator.authorize(source)?;
+                if super::shared_snapshot::receive_recovery(
+                    runtime.host.system.store(),
+                    &part,
+                    &account,
+                    runtime.host.local,
+                )? {
+                    return Ok(());
+                }
+                token = Some(part.token);
+                page += 1;
             }
-            let authority = self
-                .frozen
-                .lock()
-                .as_ref()
-                .map(|(authority, _)| *authority)
-                .ok_or(StageError::Conflict("Recovery is no longer frozen"))?;
-            self.require_authority(authority).await?;
-            let coordinator = runtime
-                .coordination
-                .read()
-                .clone()
-                .ok_or(StageError::Unavailable("Device consensus is unavailable"))?;
-            coordinator.authorize(source)?;
-            if super::shared_snapshot::receive_recovery(
-                runtime.host.system.store(),
-                &part,
-                &account,
-                runtime.host.local,
-            )? {
-                break;
-            }
-            token = Some(part.token);
-            page += 1;
         }
-        Ok(())
     }
     async fn reconcile(&self) -> Result<bool> {
         let runtime = self.runtime()?;
@@ -1517,29 +1640,27 @@ impl Controller {
                     .map(|entry| (entry.archive, entry.change))
                     .collect::<Vec<_>>()
             } else {
-                let Response::Snapshot { page: part } = self
-                    .request(
-                        peer,
-                        Request::RecoverySnapshot {
-                            head: status.head.clone(),
-                            token: token.clone(),
-                            page,
-                        },
-                    )
+                let mut entries = vec![];
+                for part in self
+                    .snapshot_pages(peer, status.head.clone(), token.clone(), page, true)
                     .await?
-                else {
-                    return Err(StageError::Invalid("Expected frozen conversation records"));
-                };
-                if part.head != status.head || part.page != page {
-                    return Err(StageError::Conflict("Recovery records changed"));
+                {
+                    if part.head != status.head
+                        || part.page != page
+                        || token.as_ref().is_some_and(|token| *token != part.token)
+                    {
+                        return Err(StageError::Conflict("Recovery records changed"));
+                    }
+                    token = Some(part.token);
+                    page += 1;
+                    snapshot = !part.last;
+                    entries.extend(
+                        part.entries
+                            .into_iter()
+                            .map(|change| (format!("active/{}", status.head.hash), change)),
+                    );
                 }
-                token = Some(part.token);
-                page += 1;
-                snapshot = !part.last;
-                part.entries
-                    .into_iter()
-                    .map(|change| (format!("active/{}", status.head.hash), change))
-                    .collect()
+                entries
             };
             for (branch, change) in entries {
                 if !matches!(
@@ -2246,8 +2367,7 @@ impl Controller {
         let runtime = self.runtime()?;
         let system = &runtime.host.system;
         let head = shared_store::head(system.store())?;
-        if desired.head == head
-            && let Some(lease) = &desired.lease
+        if let Some(lease) = &desired.lease
             && lease.leader != runtime.host.local
             && self
                 .fence

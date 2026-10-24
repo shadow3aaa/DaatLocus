@@ -4,7 +4,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::HeaderMap,
-    response::{Sse, sse::Event},
+    response::{IntoResponse, Response, Sse, sse::Event},
 };
 use futures_util::stream;
 use serde::Deserialize;
@@ -114,6 +114,29 @@ pub(super) async fn actor_events(
     Path(actor): Path<String>,
     Query(query): Query<EventsQuery>,
 ) -> ApiResult<Json<Value>> {
+    access_actor(&state, &headers, &actor, false).await?;
+    if actor == crate::stage::shared::ACTOR_ID
+        && let Some(source) = super::remote::core_source(&state)
+    {
+        let replica = crate::stage::sync::Replica::new(state.system.store());
+        let after = cursor(
+            &query,
+            &headers,
+            replica.client_cursor().map_err(super::stages::failure)?,
+        )?;
+        let mut items = replica
+            .client_events(&source, after)
+            .map_err(super::stages::failure)?;
+        items.truncate(bounded(query.limit, MAX_BATCH)?);
+        for item in &mut items {
+            super::remote::qualify_core(item, &source);
+        }
+        let next = items
+            .last()
+            .and_then(|value| value["seq"].as_i64())
+            .unwrap_or(after);
+        return Ok(Json(json!({"items":items,"next_cursor":next})));
+    }
     query_events(state, headers, Some(actor), query).await
 }
 
@@ -171,6 +194,12 @@ async fn make_stream(
                         ));
                     }
                 };
+                if feed.actor.as_deref() == Some(crate::stage::shared::ACTOR_ID)
+                    && super::remote::core_source(&feed.state).is_some()
+                {
+                    feed.ended = true;
+                    return Some((Ok(Event::default().event("resync").data("{}")), feed));
+                }
                 if let Some(value) = feed.queue.pop_front() {
                     let id = value
                         .get("seq")
@@ -241,8 +270,16 @@ pub(super) async fn actor_stream(
     headers: HeaderMap,
     Path(actor): Path<String>,
     Query(query): Query<EventsQuery>,
-) -> ApiResult<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>> {
-    make_stream(state, headers, Some(actor), query).await
+) -> ApiResult<Response> {
+    access_actor(&state, &headers, &actor, false).await?;
+    if actor == crate::stage::shared::ACTOR_ID
+        && let Some(source) = super::remote::core_source(&state)
+    {
+        return super::remote::core_stream(state, headers, source, query.after).await;
+    }
+    make_stream(state, headers, Some(actor), query)
+        .await
+        .map(IntoResponse::into_response)
 }
 pub(super) async fn catalog_stream(
     State(state): State<ServiceState>,

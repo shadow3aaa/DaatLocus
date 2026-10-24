@@ -144,6 +144,9 @@ impl Fixture {
         *self.password.write() = password.to_owned();
     }
     pub async fn new() -> Self {
+        Self::new_with_factory(Arc::new(NoModel)).await
+    }
+    pub async fn new_with_factory(factory: Arc<dyn ModelFactory>) -> Self {
         let mut config = Config {
             main_model: "mock".into(),
             ..Default::default()
@@ -163,12 +166,19 @@ impl Fixture {
                 ..Default::default()
             },
         );
-        Self::with_config(config).await
+        Self::with_factory_and_account(config, true, factory).await
     }
     pub async fn with_config(config: Config) -> Self {
         Self::with_config_and_account(config, true).await
     }
     pub async fn with_config_and_account(config: Config, initialize_account: bool) -> Self {
+        Self::with_factory_and_account(config, initialize_account, Arc::new(NoModel)).await
+    }
+    pub async fn with_factory_and_account(
+        config: Config,
+        initialize_account: bool,
+        factory: Arc<dyn ModelFactory>,
+    ) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -176,7 +186,7 @@ impl Fixture {
             temp.path().join("actors"),
             workspace,
             config,
-            Arc::new(NoModel),
+            factory,
         )
         .await
         .unwrap();

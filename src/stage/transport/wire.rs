@@ -5,6 +5,7 @@ use crate::stage::{
 };
 
 pub const ALPN: &[u8] = b"daat-locus-stage/2";
+pub const SYNC_ALPN: &[u8] = b"daat-locus-stage/3";
 const MAGIC: &[u8; 4] = b"DLB2";
 const HEADER: usize = 11;
 
@@ -13,8 +14,16 @@ pub enum Format {
     #[default]
     Json,
     BinaryZstd,
+    PackedSync,
 }
 impl Format {
+    pub fn negotiated(alpn: Option<&[u8]>) -> Self {
+        match alpn {
+            Some(SYNC_ALPN) => Self::PackedSync,
+            Some(ALPN) => Self::BinaryZstd,
+            _ => Self::Json,
+        }
+    }
     pub fn encode(self, frame: &Envelope) -> Result<Vec<u8>> {
         let Body::BlobChunk { bytes, .. } = &frame.body else {
             return frame.encode();
@@ -56,7 +65,7 @@ impl Format {
             return Envelope::decode(encoded);
         }
         let invalid = || StageError::Invalid("Invalid compact content frame");
-        if self != Self::BinaryZstd || encoded.len() < HEADER || encoded.len() > MAX_FRAME {
+        if self == Self::Json || encoded.len() < HEADER || encoded.len() > MAX_FRAME {
             return Err(invalid());
         }
         let flags = encoded[4];

@@ -51,6 +51,25 @@ impl<'a> Replica<'a> {
     pub fn new(store: &'a ActorStore) -> Self {
         Self { store }
     }
+    /// A paged Core view begins at a verified upstream head. This is only a
+    /// presentation cursor; it never marks the execution checkpoint synchronized.
+    pub(crate) fn start_core_tail(&self, address: &ActorAddress, cursor: &Cursor) -> Result<()> {
+        cursor.validate()?;
+        if address.actor_id != super::shared::ACTOR_ID {
+            return Err(StageError::Invalid(
+                "Only Core has a shared conversation tail",
+            ));
+        }
+        self.store.stage_transaction(|tx| {
+            ledger::peer(tx, address.stage_id, chrono::Utc::now().timestamp_millis())?;
+            initialize(tx)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO stage_replicas(stage,actor,epoch,durable,received,applied,head) VALUES(?1,?2,?3,?4,?4,?4,?4)",
+                params![address.stage_id.to_string(), address.actor_id, cursor.epoch.to_string(), cursor.sequence as i64],
+            )?;
+            Ok(())
+        })
+    }
     pub fn client_events(
         &self,
         address: &ActorAddress,

@@ -1272,6 +1272,7 @@ async fn device_pair(
     tokio::time::timeout(Duration::from_secs(15), async {
         while !net_a.core.read().as_ref().unwrap().permitted()
             || !net_b.core.read().as_ref().unwrap().accepts_input()
+            || net_b.core.read().as_ref().unwrap().status()["synchronized"] != true
         {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1279,6 +1280,47 @@ async fn device_pair(
     .await
     .expect("device pair did not synchronize");
     ((a_dir, a, net_a), (b_dir, b, net_b), relay)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_device_small_control_round_trip_uses_no_content_transfer() {
+    use crate::stage::{
+        core_wire::{Request, Response},
+        shared_store,
+    };
+    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) = device_pair(
+        Arc::new(ReplayProvider::new(vec![])),
+        Arc::new(ReplayProvider::new(vec![])),
+    )
+    .await;
+    assert!(net_b.handle(net_a.host.local).unwrap().packed_sync());
+    let request = Request::RecoveryStatus;
+    let hash = crate::stage::digest(&serde_json::to_vec(&request).unwrap());
+    let controller = net_b.core.read().as_ref().unwrap().clone();
+    let Response::RecoveryStatus { status } =
+        controller.request(net_a.host.local, request).await.unwrap()
+    else {
+        panic!("expected native control reply")
+    };
+    assert_eq!(status.head, shared_store::head(a.store()).unwrap());
+    let stored: bool = b
+        .store()
+        .stage_transaction(|tx| {
+            Ok(tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM stage_blobs WHERE hash=?1)",
+                [&hash],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(
+        !stored,
+        "a tiny control request still incurred a persisted content upload"
+    );
+    net_b.stop().await;
+    net_a.stop().await;
+    a.shutdown().await;
+    b.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

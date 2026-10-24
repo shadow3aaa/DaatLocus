@@ -329,7 +329,16 @@ async fn clear(
     ))
 }
 pub(super) fn qualify(value: &mut Value, target: &ActorAddress) {
-    let key = format!("{}~{}", target.stage_id, target.actor_id);
+    qualify_as(
+        value,
+        target,
+        &format!("{}~{}", target.stage_id, target.actor_id),
+    );
+}
+pub(super) fn qualify_core(value: &mut Value, target: &ActorAddress) {
+    qualify_as(value, target, crate::stage::shared::ACTOR_ID);
+}
+fn qualify_as(value: &mut Value, target: &ActorAddress, key: &str) {
     fn walk(value: &mut Value, target: &ActorAddress, key: &str) {
         match value {
             Value::Array(items) => {
@@ -344,12 +353,15 @@ pub(super) fn qualify(value: &mut Value, target: &ActorAddress) {
                     .is_some_and(|id| {
                         id == target.actor_id
                             || id == format!("{}:{}", target.stage_id, target.actor_id)
+                            || id == format!("{}~{}", target.stage_id, target.actor_id)
                     })
                 {
                     object.insert("actor_id".into(), key.into());
                 }
-                if object.get("id").and_then(Value::as_str) == Some(&target.actor_id)
-                    && (object.contains_key("remote") || object.contains_key("config"))
+                if object.get("id").and_then(Value::as_str).is_some_and(|id| {
+                    id == target.actor_id
+                        || id == format!("{}~{}", target.stage_id, target.actor_id)
+                }) && (object.contains_key("remote") || object.contains_key("config"))
                 {
                     object.insert("id".into(), key.into());
                 }
@@ -363,7 +375,14 @@ pub(super) fn qualify(value: &mut Value, target: &ActorAddress) {
                     );
                 }
                 if let Some(Value::String(url)) = object.get_mut("conversation_url")
+                    && key == crate::stage::shared::ACTOR_ID
+                    && *url == target.conversation_url()
+                {
+                    *url = "/actors/core".into();
+                }
+                if let Some(Value::String(url)) = object.get_mut("conversation_url")
                     && url.starts_with("/actors/")
+                    && !(key == crate::stage::shared::ACTOR_ID && url == "/actors/core")
                 {
                     *url = url.replacen(
                         "/actors/",
@@ -411,7 +430,7 @@ pub(super) fn qualify(value: &mut Value, target: &ActorAddress) {
             _ => {}
         }
     }
-    walk(value, target, &key);
+    walk(value, target, key);
 }
 async fn handle(state: &ServiceState, target: &ActorAddress) -> ApiResult<PeerHandle> {
     let runtime = stages::runtime(state)?;
@@ -448,6 +467,9 @@ async fn read(
     query: Read,
 ) -> ApiResult<Value> {
     let handle = authorize(state, headers, &target).await?;
+    let cursor = Replica::new(state.system.store())
+        .client_cursor()
+        .map_err(stages::failure)?;
     let Body::Observation { actor, content } = handle
         .rpc(Body::ReadQuery {
             actor: target.clone(),
@@ -466,19 +488,76 @@ async fn read(
         .await
         .map_err(stages::failure)?;
     let mut value: Value = serde_json::from_slice(&bytes).map_err(|_| ApiError::internal())?;
+    if target.actor_id == crate::stage::shared::ACTOR_ID
+        && let Some(head) = value.get("event_head")
+    {
+        let head = serde_json::from_value(head.clone()).map_err(|_| ApiError::internal())?;
+        Replica::new(state.system.store())
+            .start_core_tail(&target, &head)
+            .map_err(stages::failure)?;
+    }
     qualify(&mut value, &target);
     if let Some(object) = value.as_object_mut()
         && object.contains_key("items")
     {
-        object.insert(
-            "event_cursor".into(),
-            Replica::new(state.system.store())
-                .client_cursor()
-                .map_err(stages::failure)?
-                .into(),
-        );
+        object.insert("event_cursor".into(), cursor.into());
     }
     Ok(value)
+}
+pub(super) fn core_source(state: &ServiceState) -> Option<ActorAddress> {
+    Some(ActorAddress {
+        stage_id: state.system.shared_core()?.read_source()?,
+        actor_id: crate::stage::shared::ACTOR_ID.into(),
+    })
+}
+pub(super) async fn core_read(
+    state: &ServiceState,
+    headers: &HeaderMap,
+    actor: &str,
+    query: Read,
+) -> ApiResult<Option<Value>> {
+    if actor != crate::stage::shared::ACTOR_ID {
+        return Ok(None);
+    }
+    let Some(source) = core_source(state) else {
+        return Ok(None);
+    };
+    let mut value = read(state, headers, source.clone(), query).await?;
+    qualify_core(&mut value, &source);
+    Ok(Some(value))
+}
+pub(super) async fn core_control(
+    state: &ServiceState,
+    headers: &HeaderMap,
+    actor: &str,
+    action: crate::stage::protocol::ConversationAction,
+) -> ApiResult<Option<Value>> {
+    if actor != crate::stage::shared::ACTOR_ID {
+        return Ok(None);
+    }
+    let Some(source) = core_source(state) else {
+        return Ok(None);
+    };
+    if let crate::stage::protocol::ConversationAction::Amend { message, .. }
+    | crate::stage::protocol::ConversationAction::Steer { message, .. } = &action
+    {
+        let original = read(
+            state,
+            headers,
+            source.clone(),
+            Read::Message {
+                id: message.clone(),
+            },
+        )
+        .await?;
+        let original = serde_json::from_value(original).map_err(|_| ApiError::internal())?;
+        if crate::conversation_import::is_import(&original) {
+            return Err(ApiError::invalid());
+        }
+    }
+    let mut value = control(state, headers, source.clone(), action).await?;
+    qualify_core(&mut value, &source);
+    Ok(Some(value))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -646,6 +725,25 @@ async fn approval(
 #[serde(deny_unknown_fields)]
 struct Resolution {
     decision: String,
+}
+pub(super) async fn core_approval_resolution(
+    state: ServiceState,
+    headers: HeaderMap,
+    target: ActorAddress,
+    id: String,
+    decision: &str,
+) -> ApiResult<Json<Value>> {
+    let Json(mut value) = resolve_approval(
+        State(state),
+        headers,
+        Path((target.stage_id, target.actor_id.clone(), id)),
+        Json(Resolution {
+            decision: decision.into(),
+        }),
+    )
+    .await?;
+    qualify_core(&mut value, &target);
+    Ok(Json(value))
 }
 async fn resolve_approval(
     State(state): State<ServiceState>,
@@ -854,6 +952,7 @@ impl Drop for Watch {
 }
 struct Feed {
     ended: bool,
+    core_alias: bool,
     state: ServiceState,
     headers: HeaderMap,
     target: ActorAddress,
@@ -866,12 +965,37 @@ async fn events(
     h: HeaderMap,
     Path((stage, id)): Path<(StageId, String)>,
     Query(q): Query<List>,
-) -> ApiResult<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>> {
+) -> ApiResult<Response> {
     let target = address(stage, id)?;
+    event_feed(s, h, target, q.after, false).await
+}
+pub(super) async fn core_stream(
+    state: ServiceState,
+    headers: HeaderMap,
+    target: ActorAddress,
+    after: Option<i64>,
+) -> ApiResult<Response> {
+    event_feed(state, headers, target, after, true).await
+}
+async fn event_feed(
+    s: ServiceState,
+    h: HeaderMap,
+    target: ActorAddress,
+    after: Option<i64>,
+    core_alias: bool,
+) -> ApiResult<Response> {
     let handle = authorize(&s, &h, &target).await?;
     let view = uuid::Uuid::new_v4();
     handle
-        .watch(&target.actor_id, view, SubscriptionLevel::Detail)
+        .watch(
+            &target.actor_id,
+            view,
+            if core_alias {
+                SubscriptionLevel::Summary
+            } else {
+                SubscriptionLevel::Detail
+            },
+        )
         .map_err(stages::failure)?;
     let after = h
         .get("last-event-id")
@@ -879,12 +1003,13 @@ async fn events(
         .map(str::parse::<i64>)
         .transpose()
         .map_err(|_| ApiError::invalid())?
-        .unwrap_or(q.after.unwrap_or(0));
+        .unwrap_or(after.unwrap_or(0));
     if after < 0 {
         return Err(ApiError::invalid());
     }
     let feed = Feed {
         ended: false,
+        core_alias,
         state: s,
         headers: h,
         target: target.clone(),
@@ -906,6 +1031,15 @@ async fn events(
                 if feed.state.system.is_stopping() {
                     return None;
                 }
+                if feed.core_alias && core_source(&feed.state).as_ref() != Some(&feed.target) {
+                    let permitted = owner(&feed.state, &feed.headers).await.is_ok();
+                    let has_local_view = feed.state.system.shared_core().is_some_and(|core| core.status()["synchronized"] == true);
+                    let kind = if !permitted { "access_revoked" }
+                        else if core_source(&feed.state).is_some() || has_local_view { "resync" }
+                        else { "error" };
+                    feed.ended = true;
+                    return Some((Ok::<_, Infallible>(Event::default().event(kind).data("{}")), feed));
+                }
                 if let Err(error) = authorize(&feed.state, &feed.headers, &feed.target).await {
                     feed.ended = true;
                     return Some((
@@ -926,7 +1060,11 @@ async fn events(
                 if let Some(mut value) = feed.queue.pop_front() {
                     let cursor = value["seq"].as_i64().unwrap_or(feed.cursor);
                     feed.cursor = cursor;
-                    qualify(&mut value, &feed.target);
+                    if feed.core_alias {
+                        qualify_core(&mut value, &feed.target);
+                    } else {
+                        qualify(&mut value, &feed.target);
+                    }
                     let kind = if value.get("resync").is_some() {
                         "resync"
                     } else {
@@ -960,7 +1098,7 @@ async fn events(
                 }}
             }
         },
-    )))
+    )).into_response())
 }
 async fn resource(
     State(s): State<ServiceState>,

@@ -145,6 +145,7 @@ impl ChannelSender {
 }
 pub struct PeerChannel {
     pub peer: VerifiedPeer,
+    pub(crate) packed_sync: bool,
     pub sender: ChannelSender,
     pub incoming: mpsc::Receiver<Result<Incoming>>,
     pub closed: watch::Receiver<Failure>,
@@ -166,12 +167,14 @@ impl PeerChannel {
         authorize: impl Fn(&Envelope, &SendScope) -> Result<()> + Send + Sync + 'static,
     ) -> Self {
         let (reader, writer) = tokio::io::split(stream);
-        Self::new(
+        let mut channel = Self::new(
             peer,
             Box::new(StreamReader(reader, format)),
             Box::new(StreamWriter(writer, format)),
             authorize,
-        )
+        );
+        channel.packed_sync = format == transport::wire::Format::PackedSync;
+        channel
     }
     fn new(
         peer: VerifiedPeer,
@@ -214,6 +217,8 @@ impl PeerChannel {
                                 | super::protocol::Body::CoordinationResponse { .. }
                                 | super::protocol::Body::CoreRequest { .. }
                                 | super::protocol::Body::CoreResponse { .. }
+                                | super::protocol::Body::CoreRequestInline { .. }
+                                | super::protocol::Body::CoreResponseInline { .. }
                         );
                         let permits = if is_control {
                             incoming_control
@@ -283,6 +288,7 @@ impl PeerChannel {
         );
         Self {
             peer,
+            packed_sync: false,
             sender,
             incoming,
             closed,

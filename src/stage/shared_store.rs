@@ -964,6 +964,192 @@ mod tests {
         MessageStatus, ReplyTarget,
     };
     use uuid::Uuid;
+    #[test]
+    fn bulk_snapshot_packages_records_without_changing_the_committed_history() {
+        use crate::stage::{core_transfer, core_wire::Response, shared_snapshot};
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = store(a_dir.path());
+        let b = store(b_dir.path());
+        let leader = StageId::new();
+        let answer =
+            "A repeated but complete answer, preserved during initialization.\n".repeat(100);
+        let mut ids = vec![];
+        for n in 0..300 {
+            let mut message = input();
+            message.content = format!("Archived request {n}");
+            let record = a.enqueue(message, None).unwrap();
+            a.finish_message(&record.id, MessageStatus::Completed, Some(&answer), None)
+                .unwrap();
+            ids.push(record.id);
+        }
+        while let Some(batch) = capture(&a, "account-a", leader, 1).unwrap() {
+            commit(&a, &batch, leader).unwrap();
+        }
+        let expected = head(&a).unwrap();
+        let mut page = 0;
+        let mut token = None;
+        let mut transfers = 0;
+        let mut total_pages = 0;
+        let mut raw_bytes = 0;
+        let mut wire_bytes = 0;
+        loop {
+            let pages =
+                shared_snapshot::produce_range(&a, &expected, token.as_deref(), page).unwrap();
+            assert!(pages.len() <= shared_snapshot::RANGE_PAGES);
+            assert!(pages.len() > 1 || transfers > 0);
+            raw_bytes += pages
+                .iter()
+                .flat_map(|page| &page.entries)
+                .map(|entry| entry.content.size as usize)
+                .sum::<usize>();
+            let last = pages.last().unwrap().clone();
+            total_pages += pages.len();
+            let bytes =
+                core_transfer::encode_response(&a, &Response::SnapshotRange { pages }, true)
+                    .unwrap();
+            wire_bytes += bytes.len();
+            let Response::SnapshotRange { pages } =
+                core_transfer::decode_response(&b, &bytes, true).unwrap()
+            else {
+                panic!("expected snapshot range")
+            };
+            for part in pages {
+                shared_snapshot::receive(&b, &part, "account-a").unwrap();
+            }
+            transfers += 1;
+            if last.last {
+                break;
+            }
+            page = last.page + 1;
+            token = Some(last.token);
+        }
+        assert_eq!(head(&b).unwrap(), expected);
+        for id in ids {
+            assert_eq!(
+                b.message(&id).unwrap().reply.as_deref(),
+                Some(answer.as_str())
+            );
+        }
+        assert!(
+            transfers * 4 < total_pages,
+            "bulk initialization still makes one RPC per small page"
+        );
+        assert!(
+            wire_bytes * 5 < raw_bytes,
+            "bulk records were not compressed together"
+        );
+        eprintln!(
+            "bulk fixture: {raw_bytes} record bytes -> {wire_bytes} packet bytes; {total_pages} pages in {transfers} range requests"
+        );
+    }
+    #[test]
+    fn packed_transfers_reject_corruption_and_expansion_before_caching_any_record() {
+        use crate::stage::{core_transfer, core_wire::Response, shared_snapshot};
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = store(a_dir.path());
+        let b = store(b_dir.path());
+        let records = [b"first record".as_slice(), b"second record".as_slice()];
+        let entries = records
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| Change {
+                entity: Entity::Event,
+                key: format!("event-{index}"),
+                revision: 1,
+                ordinal: index as u64 + 1,
+                content: ContentStore::new(&a)
+                    .store_source(ACTOR_ID, bytes)
+                    .unwrap()
+                    .content,
+            })
+            .collect::<Vec<_>>();
+        let value = Response::Snapshot {
+            page: shared_snapshot::Page {
+                token: Uuid::new_v4().to_string(),
+                account: "account-a".into(),
+                head: Head::default(),
+                page: 0,
+                last: true,
+                entries: entries.clone(),
+            },
+        };
+        let good = core_transfer::encode_response(&a, &value, true).unwrap();
+        assert!(
+            core_transfer::decode_response(&b, &good, false).is_err(),
+            "packing requires negotiation"
+        );
+        let mut corrupted = good.clone();
+        *corrupted.last_mut().unwrap() ^= 1;
+        let mut oversized = good.clone();
+        oversized[5..9].copy_from_slice(&u32::MAX.to_be_bytes());
+        let mut bomb = good[..9].to_vec();
+        bomb[4] = 1;
+        bomb.extend(zstd::bulk::compress(&vec![b'x'; 4096], 1).unwrap());
+        for invalid in [corrupted, oversized, good[..good.len() - 1].to_vec(), bomb] {
+            assert!(core_transfer::decode_response(&b, &invalid, true).is_err());
+            for entry in &entries {
+                assert!(
+                    ContentStore::new(&b)
+                        .verified_bytes(&entry.content)
+                        .is_err()
+                );
+            }
+        }
+        core_transfer::decode_response(&b, &good, true).unwrap();
+        for (entry, expected) in entries.iter().zip(records) {
+            assert_eq!(
+                ContentStore::new(&b)
+                    .verified_bytes(&entry.content)
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+    #[test]
+    fn small_controls_remain_plain_and_oversized_records_use_resumable_content() {
+        use crate::stage::{
+            core_transfer,
+            core_wire::{Request, Response},
+            shared_snapshot,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let a = store(directory.path());
+        let bytes = core_transfer::encode_request(&a, &Request::RecoveryStatus, true).unwrap();
+        assert_eq!(bytes, br#"{"kind":"recovery_status"}"#);
+        let large = vec![b'z'; 4 * 1024 * 1024 + 1];
+        let reference = ContentStore::new(&a)
+            .store_source(ACTOR_ID, &large)
+            .unwrap()
+            .content;
+        let response = Response::Snapshot {
+            page: shared_snapshot::Page {
+                token: Uuid::new_v4().to_string(),
+                account: "account-a".into(),
+                head: Head::default(),
+                page: 0,
+                last: true,
+                entries: vec![Change {
+                    entity: Entity::History,
+                    key: "large".into(),
+                    revision: 1,
+                    ordinal: 1,
+                    content: reference.clone(),
+                }],
+            },
+        };
+        let bytes = core_transfer::encode_response(&a, &response, true).unwrap();
+        assert!(bytes.len() < core_transfer::INLINE_BYTES);
+        assert!(matches!(
+            core_transfer::decode_response(&a, &bytes, false).unwrap(),
+            Response::Snapshot { .. }
+        ));
+        assert_eq!(
+            ContentStore::new(&a).verified_bytes(&reference).unwrap(),
+            large
+        );
+    }
     pub(super) fn store(path: &std::path::Path) -> ActorStore {
         let store = ActorStore::open(&path.join("actors.sqlite")).unwrap();
         store
@@ -1102,7 +1288,7 @@ mod tests {
         assert!(b.deliver(ACTOR_ID, &input.id, "late", "Too late").is_err());
     }
     #[test]
-    fn compacted_checkpoint_history_recovers_from_frozen_bounded_pages() {
+    fn compacted_checkpoint_history_recovers_through_a_long_active_snapshot() {
         let a_dir = tempfile::tempdir().unwrap();
         let b_dir = tempfile::tempdir().unwrap();
         let a = store(a_dir.path());
@@ -1117,10 +1303,15 @@ mod tests {
         let expected = head(&a).unwrap();
         let mut token = None;
         let mut number = 0;
-        loop {
-            let page =
-                super::super::shared_snapshot::produce(&a, &expected, token.as_deref(), number)
-                    .unwrap();
+        let last = loop {
+            let page = super::super::shared_snapshot::produce_at(
+                &a,
+                &expected,
+                token.as_deref(),
+                number,
+                number as i64 * 120_000,
+            )
+            .unwrap();
             assert!(page.entries.len() <= 24);
             for change in &page.entries {
                 let bytes = ContentStore::new(&a)
@@ -1131,15 +1322,25 @@ mod tests {
                     .unwrap();
             }
             if super::super::shared_snapshot::receive(&b, &page, "account-a").unwrap() {
-                break;
+                break page;
             }
             assert_eq!(head(&b).unwrap(), Head::default());
             token = Some(page.token);
             number += 1;
-        }
+        };
         assert_eq!(head(&b).unwrap(), expected);
         assert_eq!(b.messages(ACTOR_ID, None, 100).unwrap().items.len(), 75);
         assert!(a_dir.path() != b.actor(ACTOR_ID).unwrap().config.workspace);
+        assert!(matches!(
+            super::super::shared_snapshot::produce_at(
+                &a,
+                &expected,
+                Some(&last.token),
+                last.page,
+                last.page as i64 * 120_000 + 300_001,
+            ),
+            Err(StageError::Unavailable("Snapshot expired"))
+        ));
     }
     #[test]
     fn incoming_checkpoint_replaces_unpublished_order_without_losing_pending_input() {

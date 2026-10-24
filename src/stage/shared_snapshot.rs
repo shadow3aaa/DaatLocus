@@ -9,6 +9,7 @@ use crate::actors::store::ActorStore;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 const PAGE: usize = 24;
+pub(crate) const RANGE_PAGES: usize = 16;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Page {
@@ -40,8 +41,53 @@ fn entity(value: &str) -> Result<Entity> {
     }
 }
 pub fn produce(store: &ActorStore, head: &Head, token: Option<&str>, page: u32) -> Result<Page> {
+    produce_at(
+        store,
+        head,
+        token,
+        page,
+        chrono::Utc::now().timestamp_millis(),
+    )
+}
+pub(crate) fn produce_range(
+    store: &ActorStore,
+    head: &Head,
+    token: Option<&str>,
+    page: u32,
+) -> Result<Vec<Page>> {
+    let mut token = token.map(str::to_owned);
+    let mut pages = vec![];
+    let mut size = 0u64;
+    for offset in 0..RANGE_PAGES as u32 {
+        let part = produce(
+            store,
+            head,
+            token.as_deref(),
+            page.checked_add(offset)
+                .ok_or(StageError::Invalid("Snapshot page overflow"))?,
+        )?;
+        size = part
+            .entries
+            .iter()
+            .fold(size, |sum, change| sum.saturating_add(change.content.size));
+        let last = part.last;
+        token = Some(part.token.clone());
+        pages.push(part);
+        if last || size >= 2 * 1024 * 1024 {
+            break;
+        }
+    }
+    Ok(pages)
+}
+pub(super) fn produce_at(
+    store: &ActorStore,
+    head: &Head,
+    token: Option<&str>,
+    page: u32,
+    now: i64,
+) -> Result<Page> {
     store.stage_transaction(|tx|{
-        initialize(tx)?;let now=chrono::Utc::now().timestamp_millis();
+        initialize(tx)?;
         tx.execute("DELETE FROM core_snapshot_rows WHERE token IN (SELECT token FROM core_snapshots WHERE created<?1)",[now-300000])?;
         tx.execute("DELETE FROM core_snapshots WHERE created<?1",[now-300000])?;
         let token=if let Some(token)=token {uuid::Uuid::parse_str(token).map_err(|_|StageError::Invalid("Invalid snapshot token"))?;token.to_owned()} else {
@@ -50,13 +96,19 @@ pub fn produce(store: &ActorStore, head: &Head, token: Option<&str>, page: u32) 
             if current!=*head{return Err(StageError::Conflict("Snapshot head changed"));}
             let token=uuid::Uuid::new_v4().to_string();
             tx.execute("INSERT INTO core_snapshots VALUES(?1,?2,?3)",params![token,serde_json::to_string(head).map_err(|_|StageError::Invalid("Invalid snapshot head"))?,now])?;
-            let rows=tx.prepare("SELECT r.entity,r.remote_key,o.ordinal,r.record FROM core_rows r JOIN core_order o ON o.entity=r.entity AND o.remote_key=r.remote_key ORDER BY CASE r.entity WHEN 'resources' THEN 0 WHEN 'configuration' THEN 1 WHEN 'messages' THEN 2 WHEN 'history' THEN 3 WHEN 'tools' THEN 4 WHEN 'approvals' THEN 5 ELSE 6 END,o.ordinal")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,Vec<u8>>(3)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
-            for (pos,(kind,key,ordinal,record)) in rows.into_iter().enumerate(){let change=Change{entity:entity(&kind)?,key,revision:1,ordinal:ordinal as u64,content:BlobRef{hash:super::digest(&record),size:record.len() as u64,version:1}};
+            // Freeze on disk while holding the transaction, without collecting
+            // an account's entire history into a second in-memory copy.
+            let mut statement=tx.prepare("SELECT r.entity,r.remote_key,o.ordinal,r.record FROM core_rows r JOIN core_order o ON o.entity=r.entity AND o.remote_key=r.remote_key ORDER BY CASE r.entity WHEN 'resources' THEN 0 WHEN 'configuration' THEN 1 WHEN 'messages' THEN 2 WHEN 'history' THEN 3 WHEN 'tools' THEN 4 WHEN 'approvals' THEN 5 ELSE 6 END,o.ordinal")?;
+            let rows=statement.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,Vec<u8>>(3)?)))?;
+            for (pos,row) in rows.enumerate(){let (kind,key,ordinal,record)=row?;let change=Change{entity:entity(&kind)?,key,revision:1,ordinal:ordinal as u64,content:BlobRef{hash:super::digest(&record),size:record.len() as u64,version:1}};
                 tx.execute("INSERT INTO core_snapshot_rows VALUES(?1,?2,?3,?4)",params![token,pos as i64,serde_json::to_string(&change).map_err(|_|StageError::Invalid("Invalid snapshot row"))?,record])?;}
             token
         };
         let recorded:String=tx.query_row("SELECT head FROM core_snapshots WHERE token=?1",[&token],|r|r.get(0)).optional()?.ok_or(StageError::Unavailable("Snapshot expired"))?;
         if serde_json::from_str::<Head>(&recorded).map_err(|_|StageError::Invalid("Invalid snapshot head"))?!=*head{return Err(StageError::Conflict("Snapshot token targets another head"));}
+        // Expire abandoned transfers, not active ones whose total duration
+        // exceeds five minutes on a high-latency relay connection.
+        tx.execute("UPDATE core_snapshots SET created=?2 WHERE token=?1",params![token,now])?;
         let rows=tx.prepare("SELECT change,record FROM core_snapshot_rows WHERE token=?1 AND pos>=?2 ORDER BY pos LIMIT ?3")?.query_map(params![token,page as i64*PAGE as i64,PAGE as i64+1],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
         let last=rows.len()<=PAGE;let mut entries=vec![];
         for (change,record) in rows.into_iter().take(PAGE){let change:Change=serde_json::from_str(&change).map_err(|_|StageError::Invalid("Invalid snapshot row"))?;blob::put(tx,ACTOR_ID,&record)?;entries.push(change);}

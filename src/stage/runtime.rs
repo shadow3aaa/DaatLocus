@@ -470,12 +470,8 @@ impl Runtime {
             if self.network_generation() != network_epoch || self.is_stopped() {
                 return Err(StageError::Unavailable("Relay connection changed"));
             }
-            let format = if stream.get_ref().1.alpn_protocol() == Some(super::transport::wire::ALPN)
-            {
-                super::transport::wire::Format::BinaryZstd
-            } else {
-                super::transport::wire::Format::Json
-            };
+            let format =
+                super::transport::wire::Format::negotiated(stream.get_ref().1.alpn_protocol());
             let owner = self.clone();
             let check = verified.clone();
             self.attach(
@@ -533,11 +529,7 @@ impl Runtime {
     ) {
         let owner = self.clone();
         let check = verified.clone();
-        let format = if stream.get_ref().1.alpn_protocol() == Some(super::transport::wire::ALPN) {
-            super::transport::wire::Format::BinaryZstd
-        } else {
-            super::transport::wire::Format::Json
-        };
+        let format = super::transport::wire::Format::negotiated(stream.get_ref().1.alpn_protocol());
         self.attach(
             PeerChannel::stream_format(verified, stream, format, move |frame, scope| {
                 owner.authorize_send(&check, frame, scope)

@@ -214,7 +214,11 @@ pub fn server(identity: &DeviceIdentity, allowed: &[DeviceProfile]) -> Result<Tl
             key(identity),
         )
         .map_err(|_| StageError::Invalid("Invalid Stage TLS identity"))?;
-    config.alpn_protocols = vec![super::wire::ALPN.to_vec(), b"daat-locus-stage/1".to_vec()];
+    config.alpn_protocols = vec![
+        super::wire::SYNC_ALPN.to_vec(),
+        super::wire::ALPN.to_vec(),
+        b"daat-locus-stage/1".to_vec(),
+    ];
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 pub fn client(identity: &DeviceIdentity, peer: &DeviceProfile) -> Result<TlsConnector> {
@@ -233,7 +237,11 @@ pub fn client(identity: &DeviceIdentity, peer: &DeviceProfile) -> Result<TlsConn
             key(identity),
         )
         .map_err(|_| StageError::Invalid("Invalid Stage TLS identity"))?;
-    config.alpn_protocols = vec![super::wire::ALPN.to_vec(), b"daat-locus-stage/1".to_vec()];
+    config.alpn_protocols = vec![
+        super::wire::SYNC_ALPN.to_vec(),
+        super::wire::ALPN.to_vec(),
+        b"daat-locus-stage/1".to_vec(),
+    ];
     Ok(TlsConnector::from(Arc::new(config)))
 }
 pub fn server_name(peer: StageId) -> Result<ServerName<'static>> {
@@ -249,7 +257,7 @@ pub async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
         .map_err(|_| StageError::Unavailable("Stage TLS handshake timed out"))??;
     if !matches!(
         tls.get_ref().1.alpn_protocol(),
-        Some(super::wire::ALPN | b"daat-locus-stage/1")
+        Some(super::wire::SYNC_ALPN | super::wire::ALPN | b"daat-locus-stage/1")
     ) {
         return Err(StageError::Forbidden("Stage TLS protocol mismatch"));
     }
@@ -268,7 +276,7 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
     .map_err(|_| StageError::Unavailable("Stage TLS handshake timed out"))??;
     if !matches!(
         tls.get_ref().1.alpn_protocol(),
-        Some(super::wire::ALPN | b"daat-locus-stage/1")
+        Some(super::wire::SYNC_ALPN | super::wire::ALPN | b"daat-locus-stage/1")
     ) {
         return Err(StageError::Forbidden("Stage TLS protocol mismatch"));
     }
@@ -283,20 +291,28 @@ mod tests {
     async fn stage_alpn_negotiates_compact_and_falls_back_for_either_legacy_side() {
         let a = DeviceIdentity::generate().unwrap();
         let b = DeviceIdentity::generate().unwrap();
-        for (legacy_server, legacy_client, expected) in [
-            (false, false, super::super::wire::ALPN),
-            (true, false, b"daat-locus-stage/1".as_slice()),
-            (false, true, b"daat-locus-stage/1".as_slice()),
+        for (server_versions, client_versions, expected) in [
+            (3, 3, super::super::wire::SYNC_ALPN),
+            (2, 3, super::super::wire::ALPN),
+            (3, 2, super::super::wire::ALPN),
+            (1, 3, b"daat-locus-stage/1".as_slice()),
+            (3, 1, b"daat-locus-stage/1".as_slice()),
         ] {
             let acceptor = server(&a, &[b.profile()]).unwrap();
             let connector = client(&b, &a.profile()).unwrap();
             let mut server_config = acceptor.config().as_ref().clone();
             let mut client_config = connector.config().as_ref().clone();
-            if legacy_server {
-                server_config.alpn_protocols = vec![b"daat-locus-stage/1".to_vec()];
+            if server_versions < 3 {
+                server_config.alpn_protocols.remove(0);
             }
-            if legacy_client {
-                client_config.alpn_protocols = vec![b"daat-locus-stage/1".to_vec()];
+            if server_versions < 2 {
+                server_config.alpn_protocols.remove(0);
+            }
+            if client_versions < 3 {
+                client_config.alpn_protocols.remove(0);
+            }
+            if client_versions < 2 {
+                client_config.alpn_protocols.remove(0);
             }
             let acceptor = TlsAcceptor::from(Arc::new(server_config));
             let connector = TlsConnector::from(Arc::new(client_config));

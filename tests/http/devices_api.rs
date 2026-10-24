@@ -727,3 +727,332 @@ async fn core_readiness_rejects_unsynchronized_input_without_queuing_it() {
     assert!(messages["items"].as_array().unwrap().is_empty());
     controller.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_replication() {
+    use daat_locus::{
+        actors::MessageStatus,
+        stage::{ledger::StageLedger, shared_store},
+    };
+    use reqwest::Method;
+    let relay = crate::support::relay::Relay::new().await;
+    let a = Fixture::new_with_factory(std::sync::Arc::new(CoreViewModel)).await;
+    let b = Fixture::with_factory_and_account(
+        a.system.config(),
+        false,
+        std::sync::Arc::new(CoreViewModel),
+    )
+    .await;
+    let mut expected = Vec::new();
+    for n in 0..45 {
+        let record = a
+            .system
+            .send_user("core", format!("Archived request {n}"), vec![], None)
+            .unwrap();
+        a.system
+            .store()
+            .finish_message(
+                &record.id,
+                MessageStatus::Completed,
+                Some("Archived reply"),
+                None,
+            )
+            .unwrap();
+        expected.push(record.id);
+    }
+    let request = b.stage.host.initialize(false).unwrap();
+    let account = a.stage.host.account_id().unwrap();
+    b.stage
+        .host
+        .join(
+            fixture_enrollment(&a.stage.host, &request, true, vec![]).unwrap(),
+            &account,
+        )
+        .unwrap();
+    StageLedger::attach(b.system.store(), b.stage.host.local)
+        .import_peer(
+            a.stage.host.enrollment().unwrap(),
+            vec![],
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    shared_store::initialize(b.system.store(), &account).unwrap();
+    let database =
+        rusqlite::Connection::open(b._temp.path().join("actors/actors.sqlite3")).unwrap();
+    database.execute_batch("CREATE TRIGGER hold_execution_replica BEFORE INSERT ON core_rows BEGIN SELECT RAISE(FAIL,'execution checkpoint deliberately held'); END;").unwrap();
+    for fixture in [&a, &b] {
+        let mut settings = fixture.stage.host.settings();
+        settings.mode = daat_locus::stage::host::Connectivity::Relay;
+        settings.relay_origin = Some(relay.endpoint.clone());
+        fixture.stage.host.save_settings(settings).unwrap();
+        fixture.stage.start().await.unwrap();
+    }
+    a.system.resume_execution().await.unwrap();
+    crate::support::relay::wait(|| b.stage.handle(a.stage.host.local).is_ok())
+        .await
+        .unwrap();
+    wait_for_account_configuration(&a, &b, "lazy conversation view", |config| {
+        config.models.contains_key("mock")
+    })
+    .await;
+    b.login_cookie().await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let status = b.stage.core_status().unwrap();
+            if status["ready"] == true && status["synchronized"] == false {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("connected learner must admit forwarded inputs before importing its execution context");
+    assert_eq!(
+        shared_store::head(b.system.store()).unwrap(),
+        daat_locus::stage::shared::Head::default()
+    );
+    assert!(
+        b.system
+            .store()
+            .messages("core", None, 100)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let unauthorized = b
+        .client
+        .get(format!("{}/v1/actors/core/messages?limit=5", b.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    let response = b
+        .owner(Method::GET, "/v1/actors/core/messages?limit=5")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: Value = response.json().await.unwrap();
+    let ids: Vec<_> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, expected[40..].to_vec());
+    assert!(
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["actor_id"] == "core")
+    );
+    let source_view: Value = b
+        .owner(
+            Method::GET,
+            &format!(
+                "/v1/stages/{}/actors/core/messages?limit=5",
+                a.stage.host.local
+            ),
+        )
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let qualified_core = format!("{}~core", a.stage.host.local);
+    assert!(
+        source_view["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["actor_id"] == qualified_core)
+    );
+    let before = page["next_cursor"]
+        .as_i64()
+        .expect("older messages remain paginated");
+    let response = b
+        .owner(
+            Method::GET,
+            &format!("/v1/actors/core/messages?limit=5&before={before}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let older: Value = response.json().await.unwrap();
+    let ids: Vec<_> = older["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, expected[35..40].to_vec());
+    // A view cursor must not hydrate or certify the execution checkpoint.
+    assert!(
+        b.system
+            .store()
+            .messages("core", None, 100)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let mut events = b
+        .owner(
+            Method::GET,
+            &format!(
+                "/v1/actors/core/event-stream?after={}",
+                page["event_cursor"].as_i64().unwrap()
+            ),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(events.status(), StatusCode::OK);
+    let original = a.system.store().message(&expected[44]).unwrap();
+    let mut next = original.clone();
+    next.seq = 0;
+    next.id = uuid::Uuid::new_v4().to_string();
+    next.content = "A newly published completed message".into();
+    next.created_at_ms += 100;
+    next.updated_at_ms += 100;
+    let next = a.system.store().enqueue(next, None).unwrap();
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !text.contains(&next.id) {
+            let bytes = events
+                .chunk()
+                .await
+                .unwrap()
+                .expect("incremental stream ended early");
+            text.push_str(std::str::from_utf8(&bytes).unwrap());
+        }
+    })
+    .await
+    .expect("latest Core updates must stream without a full execution replica");
+    assert!(
+        !text.contains(&expected[0]),
+        "opening the stream must not replay archived message history"
+    );
+    assert_eq!(
+        shared_store::head(b.system.store()).unwrap(),
+        daat_locus::stage::shared::Head::default()
+    );
+    let incremental: Value = b
+        .owner(Method::GET, "/v1/actors/core/events?after=0")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        incremental["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["event"]["message_id"] == next.id)
+    );
+    assert!(
+        incremental["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["actor_id"] == "core")
+    );
+    drop(events);
+    b.system.resume_execution().await.unwrap();
+    let submit = || {
+        b.owner(Method::POST, "/v1/actors/core/messages")
+        .header("idempotency-key", "forward-before-execution-sync")
+        .json(&json!({"content":"Forward this without importing execution history", "attachments":[]}))
+    };
+    let reply = submit().send().await.unwrap();
+    assert_eq!(reply.status(), StatusCode::ACCEPTED);
+    let sent: Value = reply.json().await.unwrap();
+    let retry: Value = submit().send().await.unwrap().json().await.unwrap();
+    assert_eq!(
+        retry["id"], sent["id"],
+        "forwarded retries must retain the durable input identity"
+    );
+    let sent_id = sent["id"].as_str().unwrap();
+    let source = a.system.store().message(sent_id).unwrap();
+    assert!(matches!(
+        source.source,
+        daat_locus::actors::MessageSource::User
+    ));
+    assert!(source.remote_authority.is_none() && source.delegation_grant.is_none());
+    assert_eq!(
+        b.stage.core_status().unwrap()["worker_stage_id"],
+        a.stage.host.local.to_string()
+    );
+    assert_eq!(
+        shared_store::head(b.system.store()).unwrap(),
+        daat_locus::stage::shared::Head::default()
+    );
+    let cancelled = b
+        .owner(
+            Method::POST,
+            &format!("/v1/actors/core/messages/{sent_id}/cancel"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status(), StatusCode::ACCEPTED);
+    crate::support::relay::wait(|| {
+        a.system.store().message(sent_id).unwrap().status == MessageStatus::Cancelled
+    })
+    .await
+    .unwrap();
+    database
+        .execute_batch("DROP TRIGGER hold_execution_replica;")
+        .unwrap();
+    a.stage.stop().await;
+    b.stage.stop().await;
+    a.system.shutdown().await;
+    b.system.shutdown().await;
+}
+
+struct CoreViewModel;
+impl daat_locus::actors::ModelFactory for CoreViewModel {
+    fn build(
+        &self,
+        _: &str,
+        _: &Config,
+    ) -> miette::Result<std::sync::Arc<dyn daat_locus::core::ModelProvider>> {
+        Ok(std::sync::Arc::new(Self))
+    }
+}
+#[async_trait::async_trait]
+impl daat_locus::core::ModelProvider for CoreViewModel {
+    async fn complete_json(
+        &self,
+        _: daat_locus::model_protocol::PromptRequest,
+        _: daat_locus::core::ModelRequestOptions,
+    ) -> miette::Result<Value> {
+        panic!("Core view fixture must not request a review model")
+    }
+    async fn complete_agent_turn(
+        &self,
+        _: daat_locus::model_protocol::AgentTurnRequest,
+        _: daat_locus::core::ModelRequestOptions,
+    ) -> miette::Result<daat_locus::model_protocol::AgentTurnStreamResult> {
+        std::future::pending().await
+    }
+    fn request_budget_limits(&self) -> daat_locus::context_budget::RequestBudgetLimits {
+        daat_locus::context_budget::RequestBudgetLimits {
+            context_window_tokens: 100_000,
+            auto_compact_threshold_tokens: 90_000,
+            reserved_output_tokens: 1000,
+        }
+    }
+    fn token_usage_info(&self) -> daat_locus::core::TokenUsageInfo {
+        Default::default()
+    }
+    fn model_name(&self) -> String {
+        "core-view-fixture".into()
+    }
+}

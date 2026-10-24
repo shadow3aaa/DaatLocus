@@ -339,11 +339,15 @@ pub enum Command {
 }
 #[derive(Clone)]
 pub struct PeerHandle {
+    packed_sync: bool,
     commands: mpsc::Sender<Command>,
     metrics: Arc<parking_lot::Mutex<super::scheduler::Traffic>>,
     stop: tokio::sync::watch::Sender<bool>,
 }
 impl PeerHandle {
+    pub(crate) fn packed_sync(&self) -> bool {
+        self.packed_sync
+    }
     pub(crate) fn disconnect(&self) {
         self.stop.send_replace(true);
     }
@@ -497,6 +501,7 @@ impl PeerLink {
         let (tx, commands) = mpsc::channel(32);
         let (stop_tx, stop) = tokio::sync::watch::channel(false);
         let metrics = channel.metrics.clone();
+        let packed_sync = channel.packed_sync;
         (
             Self {
                 work_generation: None,
@@ -510,6 +515,7 @@ impl PeerLink {
                 sent_revocations: std::collections::HashSet::new(),
                 host,
                 handle: PeerHandle {
+                    packed_sync,
                     commands: tx.clone(),
                     metrics: metrics.clone(),
                     stop: stop_tx.clone(),
@@ -527,6 +533,7 @@ impl PeerLink {
                 download_cursor: None,
             },
             PeerHandle {
+                packed_sync,
                 commands: tx,
                 metrics,
                 stop: stop_tx,
@@ -1228,6 +1235,8 @@ impl PeerLink {
                     | Body::ConversationResult { .. }
                     | Body::ResourceStored { .. }
                     | Body::CoordinationResponse { .. }
+                    | Body::CoreResponse { .. }
+                    | Body::CoreResponseInline { .. }
             )
         {
             return Ok(());
@@ -1483,8 +1492,15 @@ impl PeerLink {
                 }));
                 Ok(())
             }
-            Body::CoreRequest { content } => {
+            Body::CoreRequest { .. } | Body::CoreRequestInline { .. } => {
                 self.account_credential_authority()?;
+                if matches!(frame.body, Body::CoreRequestInline { .. })
+                    && !self.handle.packed_sync()
+                {
+                    return Err(StageError::Forbidden(
+                        "Inline Core calls require protocol negotiation",
+                    ));
+                }
                 self.core_tasks.retain(|task| !task.is_finished());
                 if self.core_tasks.len() >= 8 {
                     return Err(StageError::Capacity("Core control task budget reached"));
@@ -1499,23 +1515,32 @@ impl PeerLink {
                 let host = self.host.clone();
                 let handle = self.handle.clone();
                 let sender = self.channel.sender.clone();
-                let content = content.clone();
+                let body = frame.body.clone();
                 let peer = self.channel.peer.stage_id();
                 let generation = self.generation;
                 let request_id = frame.message_id;
                 self.core_tasks.push(tokio::spawn(async move {
                     let result = async {
-                        let bytes = handle
-                            .content(
-                                ActorAddress {
-                                    stage_id: peer,
-                                    actor_id: super::shared::ACTOR_ID.into(),
-                                },
-                                content,
-                            )
-                            .await?;
-                        let request: super::core_wire::Request = serde_json::from_slice(&bytes)
-                            .map_err(|_| StageError::Invalid("Invalid core control payload"))?;
+                        let bytes = match body {
+                            Body::CoreRequestInline { bytes } => bytes,
+                            Body::CoreRequest { content } => {
+                                handle
+                                    .content(
+                                        ActorAddress {
+                                            stage_id: peer,
+                                            actor_id: super::shared::ACTOR_ID.into(),
+                                        },
+                                        content,
+                                    )
+                                    .await?
+                            }
+                            _ => unreachable!(),
+                        };
+                        let request = super::core_transfer::decode_request(
+                            host.system.store(),
+                            &bytes,
+                            handle.packed_sync(),
+                        )?;
                         core.handle(peer, request).await
                     }
                     .await;
@@ -1534,10 +1559,25 @@ impl PeerLink {
                             code: "core_operation_rejected".into(),
                         }
                     });
-                    if let Ok(bytes) = serde_json::to_vec(&response)
-                        && let Ok(manifest) = ContentStore::new(host.system.store())
-                            .store_source(super::shared::ACTOR_ID, &bytes)
-                    {
+                    if let Ok(bytes) = super::core_transfer::encode_response(
+                        host.system.store(),
+                        &response,
+                        handle.packed_sync(),
+                    ) {
+                        let body = if handle.packed_sync()
+                            && bytes.len() <= super::core_transfer::INLINE_BYTES
+                        {
+                            Body::CoreResponseInline { bytes }
+                        } else {
+                            let Ok(manifest) = ContentStore::new(host.system.store())
+                                .store_source(super::shared::ACTOR_ID, &bytes)
+                            else {
+                                return;
+                            };
+                            Body::CoreResponse {
+                                content: manifest.content,
+                            }
+                        };
                         let time = now();
                         let response = Envelope {
                             version: 1,
@@ -1549,9 +1589,7 @@ impl PeerLink {
                             in_reply_to: Some(request_id),
                             created_at_ms: time,
                             expires_at_ms: time + 60000,
-                            body: Body::CoreResponse {
-                                content: manifest.content,
-                            },
+                            body,
                         };
                         let _ = sender
                             .send_wait(response, Class::Control, SendScope::Core)

@@ -4,6 +4,7 @@ pub mod blob;
 pub mod channel;
 pub mod connection;
 pub mod coordination;
+mod core_transfer;
 pub mod core_wire;
 pub mod delivery;
 mod device_name;

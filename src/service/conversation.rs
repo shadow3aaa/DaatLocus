@@ -65,6 +65,19 @@ async fn queue(
     if query.after.is_some_and(|cursor| cursor < 0) {
         return Err(ApiError::invalid());
     }
+    if let Some(value) = super::remote::core_read(
+        &state,
+        &headers,
+        &actor,
+        super::ConversationRead::Queue {
+            after: query.after,
+            limit: bounded(query.limit, 100)?.min(32) as u8,
+        },
+    )
+    .await?
+    {
+        return Ok(Json(value));
+    }
     let page = state
         .system
         .store()
@@ -89,10 +102,24 @@ async fn steer(
     Json(input): Json<Steer>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, true).await?;
-    reject_import_edit(&state, &actor, &message)?;
     if input.target_message_id.len() > 128 || input.expected_updated_at_ms < 0 {
         return Err(ApiError::invalid());
     }
+    if let Some(value) = super::remote::core_control(
+        &state,
+        &headers,
+        &actor,
+        crate::stage::protocol::ConversationAction::Steer {
+            message: message.clone(),
+            target: input.target_message_id.clone(),
+            expected: input.expected_updated_at_ms,
+        },
+    )
+    .await?
+    {
+        return Ok(Json(value));
+    }
+    reject_import_edit(&state, &actor, &message)?;
     let record = state
         .system
         .steer_queued(
@@ -115,13 +142,47 @@ async fn edit(
     Json(input): Json<Edit>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, true).await?;
-    reject_import_edit(&state, &actor, &message)?;
     if input.content.len() > 64 * 1024
         || input.content.trim().is_empty() && input.attachments.is_empty()
         || input.expected_updated_at_ms < 0
     {
         return Err(ApiError::invalid());
     }
+    if let Some(original) = super::remote::core_read(
+        &state,
+        &headers,
+        &actor,
+        super::ConversationRead::Message {
+            id: message.clone(),
+        },
+    )
+    .await?
+    {
+        let original: crate::actors::MessageRecord =
+            serde_json::from_value(original).map_err(|_| ApiError::internal())?;
+        if original
+            .attachments
+            .iter()
+            .map(|attachment| &attachment.id)
+            .ne(input.attachments.iter())
+        {
+            return Err(ApiError::invalid());
+        }
+        let value = super::remote::core_control(
+            &state,
+            &headers,
+            &actor,
+            crate::stage::protocol::ConversationAction::Amend {
+                message,
+                expected: input.expected_updated_at_ms,
+                content: Some(input.content),
+            },
+        )
+        .await?
+        .ok_or_else(ApiError::unavailable)?;
+        return Ok(Json(value));
+    }
+    reject_import_edit(&state, &actor, &message)?;
     let mut attachments = Vec::new();
     for id in input.attachments {
         let resource = state
@@ -249,6 +310,20 @@ async fn activity(
     Query(query): Query<Activity>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, false).await?;
+    if let Some(value) = super::remote::core_read(
+        &state,
+        &headers,
+        &actor,
+        super::ConversationRead::Activity {
+            message: id.clone(),
+            after: query.after.unwrap_or(0),
+            limit: bounded(query.limit, 100)?.min(32) as u8,
+        },
+    )
+    .await?
+    {
+        return Ok(Json(value));
+    }
     let message = state
         .system
         .store()

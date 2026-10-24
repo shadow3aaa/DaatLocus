@@ -185,6 +185,10 @@ pub enum Body {
     CoreRequest {
         content: BlobRef,
     },
+    CoreRequestInline {
+        #[serde(with = "chunk_bytes")]
+        bytes: Vec<u8>,
+    },
     CoordinationRequest {
         request: Box<super::coordination::Request>,
     },
@@ -199,6 +203,10 @@ pub enum Body {
     },
     CoreResponse {
         content: BlobRef,
+    },
+    CoreResponseInline {
+        #[serde(with = "chunk_bytes")]
+        bytes: Vec<u8>,
     },
     ReadQuery {
         actor: ActorAddress,
@@ -451,6 +459,11 @@ impl Envelope {
             }
             Body::Authorize { actor } | Body::ActorAccess { actor, .. } => actor.validate()?,
             Body::CoreRequest { content } | Body::CoreResponse { content } => content.validate()?,
+            Body::CoreRequestInline { bytes } | Body::CoreResponseInline { bytes }
+                if bytes.len() > super::core_transfer::INLINE_BYTES =>
+            {
+                return Err(StageError::Invalid("Inline core payload exceeds budget"));
+            }
             Body::ReadQuery { actor, query } => {
                 actor.validate()?;
                 if actor.stage_id != local {

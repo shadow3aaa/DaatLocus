@@ -94,6 +94,12 @@ pub enum Request {
         token: Option<String>,
         page: u32,
     },
+    SnapshotRange {
+        head: Head,
+        token: Option<String>,
+        page: u32,
+        recovery: bool,
+    },
     Resources {
         records: Vec<crate::resources::Resource>,
     },
@@ -165,6 +171,9 @@ pub enum Response {
     },
     Snapshot {
         page: super::shared_snapshot::Page,
+    },
+    SnapshotRange {
+        pages: Vec<super::shared_snapshot::Page>,
     },
     QueueCleared {
         count: usize,

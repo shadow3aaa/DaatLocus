@@ -42,6 +42,20 @@ async fn list(
         return Err(ApiError::invalid());
     }
     let limit = bounded(query.limit, 100)?;
+    if !query.awaiting_owner
+        && let Some(value) = super::remote::core_read(
+            &state,
+            &headers,
+            &actor,
+            super::ConversationRead::Approvals {
+                before: query.before,
+                limit: limit.min(32) as u8,
+            },
+        )
+        .await?
+    {
+        return Ok(Json(value));
+    }
     let page = if query.awaiting_owner {
         state
             .system
@@ -118,6 +132,17 @@ async fn detail(
     Path((actor, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, false).await?;
+    if !id.contains('~')
+        && let Some(value) = super::remote::core_read(
+            &state,
+            &headers,
+            &actor,
+            super::ConversationRead::Approval { id: id.clone() },
+        )
+        .await?
+    {
+        return Ok(Json(value));
+    }
     if let Some((stage, id)) = split_device_id(&id) {
         owner(&state, &headers).await?;
         let value = device_approval(&state, stage, id, None).await?;
@@ -158,6 +183,22 @@ async fn resolve(
 ) -> ApiResult<Json<Value>> {
     manage(&state, &headers).await?;
     access_actor(&state, &headers, &actor, false).await?;
+    if actor == crate::stage::shared::ACTOR_ID
+        && !id.contains('~')
+        && let Some(source) = super::remote::core_source(&state)
+    {
+        return super::remote::core_approval_resolution(
+            state,
+            headers,
+            source,
+            id,
+            match request.decision {
+                Decision::Approve => "approve",
+                Decision::Deny => "deny",
+            },
+        )
+        .await;
+    }
     if let Some((stage, raw)) = split_device_id(&id) {
         let value = device_approval(&state, stage, raw, None).await?;
         if value["actor_id"] != actor && value["actor_id"] != format!("{stage}~{actor}") {
