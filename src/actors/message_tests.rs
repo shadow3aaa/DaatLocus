@@ -125,10 +125,11 @@ async fn messages_interrupt_inference_and_resume_the_original_without_replaying_
         Some("Original request finished")
     );
     assert!(provider.dropped.load(Ordering::Acquire));
-    let requests = provider.requests.lock();
-    assert!(requests[2].messages.iter().any(|row| matches!(row, AgentMessage::User { content } if content.as_text().contains("New collaboration evidence") && content.as_text().contains("Source: Actor core"))));
-    assert!(requests[3].messages.iter().any(|row| matches!(row, AgentMessage::Assistant { content, .. } if content == "Incoming message handled")));
-    drop(requests);
+    {
+        let requests = provider.requests.lock();
+        assert!(requests[2].messages.iter().any(|row| matches!(row, AgentMessage::User { content } if content.as_text().contains("New collaboration evidence") && content.as_text().contains("Source: Actor core"))));
+        assert!(requests[3].messages.iter().any(|row| matches!(row, AgentMessage::Assistant { content, .. } if content == "Incoming message handled")));
+    }
     assert_eq!(
         std::fs::read_to_string(directory.path().join("workspace/once.txt")).unwrap(),
         "one effect"
@@ -426,17 +427,18 @@ async fn messages_wait_for_the_whole_started_tool_group_and_never_split_its_obse
         Some("Incoming input processed")
     );
     assert_eq!(effects.load(Ordering::SeqCst), 2);
-    let requests = provider.requests.lock();
-    let observations: Vec<_> = requests[1]
-        .messages
-        .iter()
-        .filter_map(|row| match row {
-            AgentMessage::Tool { tool_call_id, .. } => Some(tool_call_id.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(observations, ["first-effect", "second-effect"]);
-    drop(requests);
+    {
+        let requests = provider.requests.lock();
+        let observations: Vec<_> = requests[1]
+            .messages
+            .iter()
+            .filter_map(|row| match row {
+                AgentMessage::Tool { tool_call_id, .. } => Some(tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(observations, ["first-effect", "second-effect"]);
+    }
     system.shutdown().await;
 }
 
