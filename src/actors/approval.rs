@@ -367,7 +367,7 @@ async fn automatic_review(
         .as_ref()
         .ok_or_else(|| miette!("Approval application is missing"))?;
     let proposed_call = call;
-    let runtime_reads = match crate::sandbox::runtime_read_roots() {
+    let runtime_reads = match crate::sandbox::runtime_read_scopes() {
         Ok(roots) => roots,
         Err(_) => return Ok(Err(ReviewFailure::Configuration)),
     };
@@ -379,7 +379,7 @@ async fn automatic_review(
             "remembered_permissions":system.store().sandbox_scopes()?,
             "authorized_baseline":{"system_temporary_paths":crate::sandbox::system_temporary_paths()
                 .iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<String>>(),
-                "runtime_read_roots":runtime_reads},
+                "runtime_read_scopes":runtime_reads},
             "source_call":proposed_call,
             "requested_additional_filesystem_access":record.requested,
             "requested_scopes":record.scopes})

@@ -24,8 +24,10 @@ lasting extent when judging the application. There are no operation fingerprints
 Approval never overrides authenticated remote restrictions, device revocation,
 resource-reference ownership or other hard authority. Platform baseline temporary
 directories listed in authorized_baseline are already allowed; do not request
-additional scope solely for those directories. Its runtime_read_roots already
+additional scope solely for those directories. Its runtime_read_scopes already
 allow reads of OS runtime files; they do not grant writes.
+An entry with recursive=false permits only that exact path, including when the
+path is the root directory. Its descendants still need their own scope.
 
 Approval grants sandbox scope only. It does not execute or replay the source
 call. A denial is final for this automatic review; the Actor's application may

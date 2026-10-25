@@ -1,6 +1,6 @@
 ; Adapted from OpenAI Codex (Apache-2.0), revision 89461ea6833832b0551ce24ee32205824d5c108d.
 ; OS services, metadata traversal and device handles. Data-file reads are
-; generated from the common runtime_read_roots policy in macos.rs.
+; generated from the common runtime_read_scopes policy in macos.rs.
 
 (allow system-mac-syscall (mac-policy-name "vnguard"))
 

@@ -120,7 +120,9 @@ async fn native_runtime_reads_match_the_common_policy_and_explicit_denials() {
     }
     let root = scoped_directory();
     #[cfg(windows)]
-    let file = super::runtime_read_roots().unwrap()[0].join("win.ini");
+    let file = super::runtime_read_scopes().unwrap()[0]
+        .path
+        .join("win.ini");
     #[cfg(target_os = "linux")]
     let file = std::path::PathBuf::from("/etc/hosts");
     #[cfg(target_os = "macos")]

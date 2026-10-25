@@ -2,7 +2,7 @@
 
 mod baseline;
 pub mod capabilities;
-pub use baseline::runtime_read_roots;
+pub use baseline::{RuntimeReadScope, runtime_read_scopes};
 mod denial;
 #[cfg(windows)]
 pub mod process_spawn;
@@ -807,11 +807,9 @@ impl FileSystemSandboxPolicy {
             if path_is_system_temporary(path) {
                 return true;
             }
-            if runtime_read_roots().is_ok_and(|roots| {
-                roots
-                    .iter()
-                    .any(|root| path_is_or_descends_resolved(path, root))
-            }) {
+            if runtime_read_scopes()
+                .is_ok_and(|scopes| scopes.iter().any(|scope| scope.covers(path)))
+            {
                 return true;
             }
             if self.full_disk_read {

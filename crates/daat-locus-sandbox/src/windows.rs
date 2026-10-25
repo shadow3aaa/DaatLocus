@@ -506,7 +506,10 @@ fn build_request(
     options: &SandboxProcessOptions,
 ) -> io::Result<ExecutionRequest> {
     let fs = &policy.filesystem;
-    let mut read = super::runtime_read_roots()?.to_vec();
+    let mut read = super::runtime_read_scopes()?
+        .iter()
+        .map(|scope| scope.path.clone())
+        .collect::<Vec<_>>();
     read.extend(fs.readable_roots.clone());
     let mut write = fs
         .writable_roots

@@ -141,11 +141,14 @@ fn push_root_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolicy) ->
         // Establish the mount point before applying the shared temporary roots
         // and explicit grants. Every host path uses the common policy below.
         args.extend(["--tmpfs".to_string(), "/tmp".to_string()]);
-        for root in policy_paths_with_resolved(
-            super::runtime_read_roots().map_err(|error| miette!("{error}"))?,
-        )
-        .into_iter()
-        .chain(policy_paths_with_resolved(&policy.readable_roots))
+        let runtime_roots = super::runtime_read_scopes()
+            .map_err(|error| miette!("{error}"))?
+            .iter()
+            .map(|scope| scope.path.clone())
+            .collect::<Vec<_>>();
+        for root in policy_paths_with_resolved(&runtime_roots)
+            .into_iter()
+            .chain(policy_paths_with_resolved(&policy.readable_roots))
         {
             push_existing_mount(args, "--ro-bind", &root);
         }

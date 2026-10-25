@@ -24,7 +24,7 @@ struct Profile {
     parameters: Vec<String>,
 }
 impl Profile {
-    fn filter(&mut self, path: &Path) -> Result<String> {
+    fn filter(&mut self, path: &Path, recursive: bool) -> Result<String> {
         let path = path
             .to_str()
             .filter(|value| !value.contains('\0'))
@@ -33,12 +33,24 @@ impl Profile {
         self.parameters.push(format!("-D{key}={path}"));
         // Paths are arguments, never executable SBPL. Literal also covers an
         // absent path itself (including its first creation), not only children.
+        if !recursive {
+            return Ok(format!("(literal (param \"{key}\"))"));
+        }
         Ok(format!(
             "(require-any (literal (param \"{key}\")) (subpath (param \"{key}\")))"
         ))
     }
     fn rule(&mut self, action: &str, operations: &str, path: &Path) -> Result<()> {
-        let filter = self.filter(path)?;
+        self.scoped_rule(action, operations, path, true)
+    }
+    fn scoped_rule(
+        &mut self,
+        action: &str,
+        operations: &str,
+        path: &Path,
+        recursive: bool,
+    ) -> Result<()> {
+        let filter = self.filter(path, recursive)?;
         self.rules
             .push_str(&format!("({action} {operations} {filter})\n"));
         Ok(())
@@ -62,10 +74,12 @@ pub fn wrap_command(
     if fs.full_disk_read || fs.full_disk_write {
         profile.rule("allow", read_ops, Path::new("/"))?;
     } else {
-        let mut roots = super::runtime_read_roots()
-            .map_err(|error| miette!("{error}"))?
-            .to_vec();
-        roots.extend(fs.readable_roots.clone());
+        for scope in super::runtime_read_scopes().map_err(|error| miette!("{error}"))? {
+            for path in policy_paths_with_resolved(std::slice::from_ref(&scope.path)) {
+                profile.scoped_rule("allow", read_ops, &path, scope.recursive)?;
+            }
+        }
+        let mut roots = fs.readable_roots.clone();
         roots.extend(super::system_temporary_paths().iter().cloned());
         roots.extend(fs.writable_roots.iter().map(|root| root.root.clone()));
         for root in policy_paths_with_resolved(&roots) {
@@ -89,7 +103,7 @@ pub fn wrap_command(
             if !fs.deny_all_writes {
                 profile.rule("allow", "file-write*", &root)?;
             }
-            profile.filter(&root)?;
+            profile.filter(&root, false)?;
             // Keep authority anchors from being unlinked/replaced while a
             // sandboxed process (or one of its descendants) is running.
             let literal_key = profile.parameters.len() - 1;
@@ -137,7 +151,7 @@ pub fn wrap_command(
         }
     }
     for path in ancestors {
-        profile.filter(&path)?;
+        profile.filter(&path, false)?;
         let key = profile.parameters.len() - 1;
         profile.rules.push_str(&format!("(deny file-write-unlink (require-all (vnode-type DIRECTORY) (literal (param \"DL_PATH_{key}\"))))\n"));
     }
