@@ -610,3 +610,14 @@ pub async fn configure(view: &Webview, locale: &str) -> Result<(), String> {
     .await?;
     Ok(())
 }
+
+#[cfg(feature = "web-contract")]
+pub(crate) fn input_focus() -> Value {
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        let mut state: GUITHREADINFO = std::mem::zeroed();
+        state.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        let available = GetGUIThreadInfo(0, &mut state) != 0;
+        json!({"foreground":GetForegroundWindow() as usize,"available":available,"focus":state.hwndFocus as usize,"active":state.hwndActive as usize})
+    }
+}

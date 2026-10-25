@@ -202,7 +202,7 @@ impl NativeHost {
                 .map_err(|_| "Web navigation failed".into());
         }
         let window = if shared {
-            crate::browser_ui::page_window(self)?
+            crate::browser_ui::parking_window(self, key)?
         } else {
             WindowBuilder::new(&self.app, key)
                 .title("Web")
@@ -236,6 +236,7 @@ impl NativeHost {
             url
         };
         let mut builder = WebviewBuilder::new(key, WebviewUrl::External(initial_url))
+            .focused(false)
             .on_navigation(move |url| {
                 navigation_host.navigation_allowed(url) || shared && url.as_str() == "about:blank"
             })
@@ -415,7 +416,7 @@ impl NativeHost {
                 .lock()
                 .map_err(|_| "Browser unavailable")?
                 .insert(key.into(), preferences.default_zoom);
-            self.select_page(key, false)?;
+            view.show().map_err(|error| error.to_string())?;
             if requested_url.as_str() != "about:blank" {
                 let host = self.clone();
                 let key = key.to_owned();
@@ -517,6 +518,11 @@ impl NativeHost {
                 view.close().map_err(|_| "Browser page could not close")?;
             }
         }
+        if let Some(parking) = self.app.get_window(label) {
+            parking
+                .close()
+                .map_err(|_| "Browser page window could not close")?;
+        }
         let was_selected = self
             .selected
             .lock()
@@ -565,14 +571,8 @@ impl NativeHost {
         if let Some(key) = displaced {
             crate::browser_ui::apply_page_fullscreen(self, &key, false);
         }
-        for (key, page) in self.app.webviews() {
-            if self.is_browser_page(&key) {
-                let _ = page.hide();
-            }
-        }
         *self.selected.lock().map_err(|_| "Browser unavailable")? = Some(label.into());
-        crate::browser_ui::resize(&self.app)?;
-        view.show().map_err(|_| "Browser page could not show")?;
+        crate::browser_ui::present_selected(self)?;
         if focus {
             view.set_focus()
                 .map_err(|_| "Browser page could not focus")?;
@@ -726,6 +726,10 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
         #[serde(default)]
         panel_steps: HashMap<usize, Option<daat_locus_client_protocol::web::BrowserBounds>>,
         #[serde(default)]
+        owner_select: HashMap<usize, String>,
+        #[serde(default)]
+        inspect_tabs: bool,
+        #[serde(default)]
         owner_steps:
             std::collections::HashMap<usize, daat_locus_client_protocol::web::BrowserInput>,
         #[serde(default)]
@@ -803,6 +807,9 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                         let bounds=bounds.map(|mut bounds|{bounds.scale=host.app.get_window("main").unwrap().scale_factor().unwrap();bounds});
                         crate::browser_ui::set_panel(&host,bounds).await.unwrap();
                     }
+                    if let Some(tab) = manifest.owner_select.get(&index) {
+                        host.select_page(&format!("web-{profile}-{tab}"), false).unwrap();
+                    }
                     if let Some(input) = manifest.owner_steps.get(&index) {
                         let key=host.selected.lock().unwrap().clone().unwrap();
                         host.owner_input(&key,input.clone()).await.unwrap();
@@ -878,7 +885,9 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                             command: command.clone(),
                         },
                     };
+                    let focus_before = crate::browser_use::input_focus(&host.app).await;
                     let reply = host.execute(request).await;
+                    let focus_after = crate::browser_use::input_focus(&host.app).await;
                     if let Some(observation) = reply
                         .browser
                         .as_ref()
@@ -964,9 +973,18 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                         }
                     }
                     let metadata=if let Some(view)=&view {crate::browser_use::evaluate(view,"({language:navigator.language,languages:navigator.languages,locale:Intl.DateTimeFormat().resolvedOptions().locale,header:document.querySelector('#language')?.textContent})").await.ok()}else{None};
+                    let mut tab_states=serde_json::Map::new();
+                    if manifest.inspect_tabs {
+                        for page in host.pages(&profile) {
+                            if let Some(view)=host.app.get_webview(&format!("web-{profile}-{}",page.tab)) {
+                                let state=crate::browser_use::evaluate(&view,"({value:document.querySelector('input')?.value,active:document.activeElement?.tagName,focus:document.hasFocus(),scrollY,width:innerWidth,height:innerHeight})").await.unwrap();
+                                tab_states.insert(page.tab,state);
+                            }
+                        }
+                    }
                     let icons=host.icons.lock().unwrap().clone();
                     let library=if manifest.ui_review {serde_json::to_value(host.library.lock().unwrap().clone()).ok()}else{None};
-                    results.push(serde_json::json!({"command":command,"reply":reply,"parent":parent,"native_control":native_control,"cursor":cursor,"cursor_frames":cursor_frames,"ui":ui,"library":library,"owner_find":owner_find,"screenshot":screenshot,"layer":layer,"owner_workspace":owner_workspace,"shell":shell,"metadata":metadata,"icons":icons,"resize_checks":resize_checks}));
+                    results.push(serde_json::json!({"command":command,"reply":reply,"parent":parent,"native_control":native_control,"cursor":cursor,"cursor_frames":cursor_frames,"ui":ui,"library":library,"owner_find":owner_find,"screenshot":screenshot,"layer":layer,"owner_workspace":owner_workspace,"shell":shell,"metadata":metadata,"icons":icons,"resize_checks":resize_checks,"focus_before":focus_before,"focus_after":focus_after,"tab_states":tab_states}));
                 }
                 let result = serde_json::to_vec(&results)
                     .map_err(|error| error.to_string())

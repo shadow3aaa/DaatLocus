@@ -126,11 +126,20 @@ internal object BrowserUse {
   private var workspace:Dialog?=null
   private var content:FrameLayout?=null
   private var selected:String?=null
+  // Transparent, non-focusable native roots keep each background page attached
+  // without covering the Owner surface or sharing its keyboard recipient.
+  private data class BackgroundPage(val dialog:Dialog,val root:FrameLayout)
+  private val parking=mutableMapOf<String,BackgroundPage>()
+  private var modelInputDepth=0
+  private inline fun <T> modelInput(block:()->T):T {
+    modelInputDepth++
+    return try{block()}finally{modelInputDepth--}
+  }
   private val tabOrder=mutableListOf<String>()
   private var profile=""
   private var embedded=false
   private var cursorScript=""
-  fun shutdown(){workspace?.dismiss();content?.let{(it.parent as? ViewGroup)?.removeView(it)};workspace=null;content=null;selected=null;embedded=false;composition?.page=null;composition=null;jobs.clear();loaded.clear();frames.clear();tabOrder.clear()}
+  fun shutdown(){workspace?.dismiss();content?.let{(it.parent as? ViewGroup)?.removeView(it)};workspace=null;content=null;selected=null;embedded=false;composition?.page=null;composition=null;parking.clear();jobs.clear();loaded.clear();frames.clear();tabOrder.clear()}
   private fun ensure(owner:MainActivity):Dialog {
     workspace?.let{return it}
     val dialog=Dialog(owner)
@@ -141,19 +150,32 @@ internal object BrowserUse {
   }
   fun mount(owner:MainActivity,key:String,view:WebView):Dialog {
     profile=key.substringBefore('-')
-    val dialog=ensure(owner)
+    ensure(owner)
     configure(owner,view)
-    content?.addView(view,FrameLayout.LayoutParams(-1,-1))
+    val dialog=Dialog(owner)
+    val root=FrameLayout(owner)
+    root.importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+    dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+    dialog.setContentView(root)
+    dialog.setCancelable(false)
+    val background=BackgroundPage(dialog,root)
+    parking[key]=background
+    dialog.window?.let{window->
+      window.addFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+      window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+      window.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN or android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+      window.attributes=window.attributes.apply{alpha=0f;dimAmount=0f}
+    }
+    root.addView(view,FrameLayout.LayoutParams(-1,-1))
+    dialog.show()
     view.setOnKeyListener{_,code,event->
-      if(event.action!=KeyEvent.ACTION_DOWN)return@setOnKeyListener false
+      if(modelInputDepth>0||event.action!=KeyEvent.ACTION_DOWN)return@setOnKeyListener false
       val letter=shortcut(code,event) ?: return@setOnKeyListener false
       WebHost.clientView.get()?.let{client->client.requestFocus();client.evaluateJavascript("window.dispatchEvent(new CustomEvent('dl-browser-shortcut',{detail:'$letter'}))",null)};true
     }
-    selected=key
     if(key !in tabOrder)tabOrder.add(key)
     view.visibility=View.VISIBLE
-    layoutOffscreen(owner)
-    handler.post{select(key)}
+    layoutParking(owner,background,view)
     return dialog
   }
   private fun layoutOffscreen(owner:MainActivity){
@@ -165,8 +187,32 @@ internal object BrowserUse {
     content?.layout(0,0,width,height)
   }
   fun forget(view:WebView){languageScripts.remove(view)?.remove()}
-  fun remove(key:String){frames.remove(key);requestedUrls.remove(key);icons.remove(key);zooms.remove(key);val index=tabOrder.indexOf(key);tabOrder.remove(key);if(selected==key)selected=tabOrder.filter{it.startsWith("$profile-")}.let{it.getOrNull(index.coerceAtMost(it.lastIndex))};selected?.let{select(it)}}
-  private fun select(key:String){if(!WebHost.pages.containsKey(key))return;selected=key;WebHost.pages.filterKeys{it.startsWith("$profile-")}.forEach{(id,page)->page.view.visibility=if(id==key)View.VISIBLE else View.GONE}}
+  private fun layoutParking(owner:MainActivity,background:BackgroundPage,view:WebView){
+    val root=background.root
+    val width=view.width.takeIf{it>0} ?: WebHost.clientView.get()?.width?.takeIf{it>0} ?: owner.resources.displayMetrics.widthPixels
+    val height=view.height.takeIf{it>0} ?: WebHost.clientView.get()?.height?.takeIf{it>0} ?: owner.resources.displayMetrics.heightPixels
+    background.dialog.window?.setLayout(width.coerceAtLeast(1),height.coerceAtLeast(1))
+    root.measure(View.MeasureSpec.makeMeasureSpec(width.coerceAtLeast(1),View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(height.coerceAtLeast(1),View.MeasureSpec.EXACTLY))
+    root.layout(0,0,width.coerceAtLeast(1),height.coerceAtLeast(1))
+  }
+  fun remove(key:String){
+    frames.remove(key);requestedUrls.remove(key);icons.remove(key);zooms.remove(key);parking.remove(key)
+    val index=tabOrder.indexOf(key);tabOrder.remove(key)
+    if(selected==key){selected=null;tabOrder.getOrNull(index.coerceAtMost(tabOrder.lastIndex))?.let{select(it)}}
+  }
+  private fun select(key:String){
+    val page=WebHost.pages[key] ?: return
+    if(selected==key)return
+    selected?.let{old->WebHost.pages[old]?.view?.let{view->parking[old]?.let{background->
+      (view.parent as? ViewGroup)?.removeView(view);background.root.addView(view,FrameLayout.LayoutParams(-1,-1))
+      WebHost.activity.get()?.let{owner->layoutParking(owner,background,view)}
+    }}}
+    (page.view.parent as? ViewGroup)?.removeView(page.view)
+    content?.addView(page.view,FrameLayout.LayoutParams(-1,-1))
+    selected=key
+    page.view.visibility=View.VISIBLE
+    WebHost.activity.get()?.let{layoutOffscreen(it)}
+  }
   fun controlAsync(owner:MainActivity,command:JSONObject,done:(JSONObject)->Unit){
     fun fail(message:String){done(JSONObject().put("error",message))}
     try{
@@ -279,6 +325,7 @@ internal object BrowserUse {
         val foreground=(0 until regions.length()).map{index->val region=regions.getJSONObject(index);val left=(region.getDouble("x")*scale).toFloat();val top=(region.getDouble("y")*scale).toFloat();android.graphics.RectF(left,top,left+(region.getDouble("width")*scale).toFloat(),top+(region.getDouble("height")*scale).toFloat())}
         container.update(x,y,width,height,foreground)
         embedded=true;frame.visibility=View.VISIBLE;
+        if(selected==null)tabOrder.firstOrNull()?.let{select(it)}
       }
       "preferences"->return preferences(owner)
       "set_preferences"->return patchPreferences(owner,JSONObject(command.getString("url")))
@@ -308,8 +355,8 @@ internal object BrowserUse {
       "print"->{val view=WebHost.pages[key]?.view ?: throw IllegalArgumentException("Select a browser page");val manager=owner.getSystemService(android.content.Context.PRINT_SERVICE) as android.print.PrintManager;manager.print(view.title ?: "Web page",view.createPrintDocumentAdapter(view.title ?: "Web page"),null)}
       "stop"->{WebHost.pages[key]?.view?.stopLoading()}
 
-      "new_tab"->{val next="$profile-${java.util.UUID.randomUUID().toString().replace("-", "")}";WebHost.page(profile,next).view.loadUrl("about:blank")}
-      "open"->{val url=command.getString("url");if(!WebHost.allowed(url))throw IllegalArgumentException("Browser URL not allowed");val next="$profile-${java.util.UUID.randomUUID().toString().replace("-", "")}";WebHost.page(profile,next).view.let{navigate(owner,next,it,url)}}
+      "new_tab"->{val next="$profile-${java.util.UUID.randomUUID().toString().replace("-", "")}";WebHost.page(profile,next).view.loadUrl("about:blank");select(next)}
+      "open"->{val url=command.getString("url");if(!WebHost.allowed(url))throw IllegalArgumentException("Browser URL not allowed");val next="$profile-${java.util.UUID.randomUUID().toString().replace("-", "")}";WebHost.page(profile,next).view.let{navigate(owner,next,it,url)};select(next)}
       "select"->{if(key==null||!WebHost.pages.containsKey(key))throw IllegalArgumentException("Browser page closed");select(key)}
       "close"->{if(key!=null)WebHost.close(key)}
       "navigate","back","forward","reload"->{
@@ -387,6 +434,20 @@ internal object BrowserUse {
   private fun metrics(view:WebView,script:String,done:(JSONObject)->Unit,fail:(String)->Unit) {
     view.evaluateJavascript(script) { value -> try { val decoded=JSONTokener(value).nextValue();done(if(decoded is String)JSONObject(decoded)else decoded as JSONObject) }catch(_:Exception){fail("Browser inspection failed")} }
   }
+  // Synchronize with a published renderer frame, never with Owner idleness or
+  // a stable DOM. Pages and Owner input remain live while the callback is pending.
+  private fun frameReady(view:WebView,done:()->Unit,fail:(String)->Unit){
+    var completed=false
+    val timeout=Runnable{if(!completed){completed=true;fail("Browser rendering is unavailable; observe before continuing")}}
+    handler.postDelayed(timeout,8000)
+    view.postVisualStateCallback(SystemClock.uptimeMillis(),object:WebView.VisualStateCallback(){
+      override fun onComplete(requestId:Long){
+        if(completed)return
+        completed=true;handler.removeCallbacks(timeout);done()
+      }
+    })
+    view.invalidate()
+  }
   fun request(owner:MainActivity,profile:String,id:String,command:JSONObject,script:String,cursor:String):String {
     cursorScript=cursor
     val result=CompletableFuture<String>()
@@ -398,7 +459,6 @@ internal object BrowserUse {
       if(result.isDone||jobs[key]!=id)return
       val page=WebHost.pages[key] ?: run {fail("Browser page closed");return}
       val view=page.view
-      select(key)
       val width=view.width;val height=view.height
       if(width<=0||height<=0||width.toLong()*height>8_000_000){fail("Browser viewport exceeds image budget");return}
       val bitmap=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888)
@@ -420,7 +480,7 @@ internal object BrowserUse {
     }
     fun capture(){
       val view=WebHost.pages[key]?.view ?: run{fail("Browser page closed");return}
-      cursor(view,JSONObject().put("kind","prepare")){cursor(view,JSONObject().put("kind","suspend")){captureFrame()}}
+      cursor(view,JSONObject().put("kind","prepare")){cursor(view,JSONObject().put("kind","suspend")){frameReady(view,{captureFrame()},::fail)}}
     }
     fun client(page:WebHost.Page) {
       page.view.webViewClient=object:WebViewClient(){
@@ -434,7 +494,7 @@ internal object BrowserUse {
     owner.runOnUiThread {
       if(result.isDone)return@runOnUiThread
       try {
-        if(!owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))throw IllegalStateException("Open the native client to operate its browser")
+        if(owner.isFinishing||owner.isDestroyed)throw IllegalStateException("Native browser Activity is unavailable")
         val action=command.getString("action")
         if(action=="list"){finish();return@runOnUiThread}
         if(!tab.matches(Regex("[0-9a-f]{32}")))throw IllegalArgumentException("Invalid browser page")
@@ -452,7 +512,7 @@ internal object BrowserUse {
             val page=WebHost.pages[key] ?: throw IllegalStateException("Browser page closed")
             val images=frames[key]
             val frame=images?.firstOrNull{it.id==command.getString("state_id")} ?: images?.lastOrNull() ?: ImageFrame("",page.view.width.coerceAtLeast(1),page.view.height.coerceAtLeast(1))
-            metrics(page.view,script,{value ->
+            frameReady(page.view,{ metrics(page.view,script,{value ->
               try {
                 if(result.isDone||jobs[key]!=id)return@metrics
                 val input=command.getJSONObject("input");val kind=input.getString("kind");if(kind in listOf("navigate","back","forward","reload"))configure(owner,page.view)
@@ -470,10 +530,22 @@ internal object BrowserUse {
                 try{
                   if(result.isDone||jobs[key]!=id)return@cursor
                   if(!WebHost.pages.containsKey(key)){fail("Browser page closed");return@cursor}
+                  modelInput {
+                  if(page.view.parent===parking[key]?.root){
+                    page.view.requestFocus()
+                    page.view.onWindowFocusChanged(true)
+                  }
                   when(kind){
                   "move"->{val(x,y)=point();mouse(page.view,MotionEvent.ACTION_HOVER_MOVE,x,y,0)}
-                  "drag"->{val(x,y)=point();val toX=input.getDouble("to_x");val toY=input.getDouble("to_y");if(!toX.isFinite()||!toY.isFinite()||toX<0||toY<0||toX>=frame.width||toY>=frame.height)throw IllegalArgumentException("Drag endpoint outside image");val endX=(toX/frame.width*page.view.width).toFloat();val endY=(toY/frame.height*page.view.height).toFloat();mouse(page.view,MotionEvent.ACTION_DOWN,x,y,MotionEvent.BUTTON_PRIMARY);for(step in 1..12){val t=step/12f;mouse(page.view,MotionEvent.ACTION_MOVE,x+(endX-x)*t,y+(endY-y)*t,MotionEvent.BUTTON_PRIMARY)};mouse(page.view,MotionEvent.ACTION_UP,endX,endY,0)}
-                  "click"->{val(x,y)=point();repeat(input.getInt("count")){mouse(page.view,MotionEvent.ACTION_DOWN,x,y,when(input.getString("button")){"right"->MotionEvent.BUTTON_SECONDARY;"middle"->MotionEvent.BUTTON_TERTIARY;else->MotionEvent.BUTTON_PRIMARY});mouse(page.view,MotionEvent.ACTION_UP,x,y,0)}}
+                  "drag"->{val(x,y)=point();val toX=input.getDouble("to_x");val toY=input.getDouble("to_y");if(!toX.isFinite()||!toY.isFinite()||toX<0||toY<0||toX>=frame.width||toY>=frame.height)throw IllegalArgumentException("Drag endpoint outside image");val endX=(toX/frame.width*page.view.width).toFloat();val endY=(toY/frame.height*page.view.height).toFloat();mouse(page.view,MotionEvent.ACTION_DOWN,x,y,MotionEvent.BUTTON_PRIMARY);for(step in 1..12){val t=step/12f;mouse(page.view,MotionEvent.ACTION_MOVE,x+(endX-x)*t,y+(endY-y)*t,MotionEvent.BUTTON_PRIMARY)};mouse(page.view,MotionEvent.ACTION_UP,endX,endY,0,actionButton=MotionEvent.BUTTON_PRIMARY)}
+                  "click"->{
+                    val(x,y)=point()
+                    val button=when(input.getString("button")){"right"->MotionEvent.BUTTON_SECONDARY;"middle"->MotionEvent.BUTTON_TERTIARY;else->MotionEvent.BUTTON_PRIMARY}
+                    repeat(input.getInt("count")){
+                      mouse(page.view,MotionEvent.ACTION_DOWN,x,y,button)
+                      mouse(page.view,MotionEvent.ACTION_UP,x,y,0,actionButton=button)
+                    }
+                  }
                   "scroll"->{val(x,y)=point();mouse(page.view,MotionEvent.ACTION_SCROLL,x,y,0,(-input.getDouble("delta_x")/48).toFloat(),(-input.getDouble("delta_y")/48).toFloat())}
                   "type"->{val connection=page.view.onCreateInputConnection(EditorInfo());if(connection==null||!connection.commitText(input.getString("text"),1))throw IllegalStateException("Focus an editable field before typing")}
                   "key"->{val code=keyCode(input.getString("key"));val modifiers=input.getJSONArray("modifiers");var meta=0;for(i in 0 until modifiers.length())meta=meta or when(modifiers.getString(i)){"control"->KeyEvent.META_CTRL_ON;"alt"->KeyEvent.META_ALT_ON;"shift"->KeyEvent.META_SHIFT_ON;"meta"->KeyEvent.META_META_ON;else->throw IllegalArgumentException("Unsupported modifier")};val now=SystemClock.uptimeMillis();page.view.dispatchKeyEvent(KeyEvent(now,now,KeyEvent.ACTION_DOWN,code,0,meta));page.view.dispatchKeyEvent(KeyEvent(now,now,KeyEvent.ACTION_UP,code,0,meta))}
@@ -482,12 +554,12 @@ internal object BrowserUse {
                   "forward"->{if(!page.view.canGoForward())throw IllegalStateException("No next browser page");loaded[key]={handler.postDelayed({capture()},180)};page.view.goForward()}
                   "reload"->{loaded[key]={handler.postDelayed({capture()},180)};page.view.reload()}
                   else->throw IllegalArgumentException("Unsupported browser input")
-                }
+                } }
                 if(!loaded.containsKey(key))handler.postDelayed({capture()},250)
                 }catch(error:Exception){fail(error.message ?: "Browser input outcome unknown; observe again")}
                 }
               }catch(error:Exception){fail(error.message ?: "Browser input outcome unknown; observe again")}
-            },::fail)
+            },::fail) },::fail)
           }
           else->throw IllegalArgumentException("Unknown browser operation")
         }
@@ -499,11 +571,28 @@ internal object BrowserUse {
     if(cursorScript.isEmpty()){done?.invoke();return}
     try{view.evaluateJavascript("($cursorScript)($event)"){done?.invoke()}}catch(_:Exception){done?.invoke()}
   }
-  private fun mouse(view:WebView,action:Int,x:Float,y:Float,buttons:Int,horizontal:Float=0f,vertical:Float=0f){
+  // Android's public MotionEvent constructors omit the changed mouse button.
+  // This availability-checked platform setter respects hidden-API enforcement;
+  // no global event injection, permission change or enforcement bypass is used.
+  private val mouseActionButton by lazy {
+    try{MotionEvent::class.java.getMethod("setActionButton",Int::class.javaPrimitiveType)}
+    catch(error:ReflectiveOperationException){throw IllegalStateException("Native browser mouse buttons are unavailable",error)}
+  }
+  private fun mouse(view:WebView,action:Int,x:Float,y:Float,buttons:Int,horizontal:Float=0f,vertical:Float=0f,actionButton:Int=0){
     val properties=MotionEvent.PointerProperties().apply{id=0;toolType=MotionEvent.TOOL_TYPE_MOUSE}
     val coords=MotionEvent.PointerCoords().apply{this.x=x;this.y=y;setAxisValue(MotionEvent.AXIS_HSCROLL,horizontal);setAxisValue(MotionEvent.AXIS_VSCROLL,vertical)}
-    val now=SystemClock.uptimeMillis();val event=MotionEvent.obtain(now,now,action,1,arrayOf(properties),arrayOf(coords),0,buttons,1f,1f,0,0,InputDevice.SOURCE_MOUSE,0)
-    try{if(action==MotionEvent.ACTION_SCROLL||action==MotionEvent.ACTION_HOVER_MOVE)view.dispatchGenericMotionEvent(event)else view.dispatchTouchEvent(event)}finally{event.recycle()}
+    // Chromium intentionally consumes mouse ACTION_DOWN/UP without sending DOM
+    // events. Its native mouse path requires BUTTON_PRESS/RELEASE instead.
+    val nativeAction=when(action){MotionEvent.ACTION_DOWN->MotionEvent.ACTION_BUTTON_PRESS;MotionEvent.ACTION_UP->MotionEvent.ACTION_BUTTON_RELEASE;else->action}
+    val changed=when(action){MotionEvent.ACTION_DOWN->buttons;MotionEvent.ACTION_UP->actionButton;else->0}
+    val setter=if(changed!=0)mouseActionButton else null
+    val now=SystemClock.uptimeMillis()
+    val event=MotionEvent.obtain(now,now,nativeAction,1,arrayOf(properties),arrayOf(coords),0,buttons,1f,1f,0,0,InputDevice.SOURCE_MOUSE,0)
+    try{
+      setter?.invoke(event,changed)
+      if(action==MotionEvent.ACTION_SCROLL||action==MotionEvent.ACTION_HOVER_MOVE)view.dispatchGenericMotionEvent(event)
+      else view.onTouchEvent(event)
+    }finally{event.recycle()}
   }
   private fun keyCode(key:String):Int=when(key){
     "Enter"->KeyEvent.KEYCODE_ENTER;"Tab"->KeyEvent.KEYCODE_TAB;"Escape"->KeyEvent.KEYCODE_ESCAPE;"Backspace"->KeyEvent.KEYCODE_DEL;"Delete"->KeyEvent.KEYCODE_FORWARD_DEL

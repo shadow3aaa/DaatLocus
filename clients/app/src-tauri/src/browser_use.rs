@@ -347,7 +347,6 @@ impl NativeHost {
     ) -> Result<BrowserObservation, String> {
         let window = self.app.get_webview(key).ok_or("Browser page is closed")?;
         cursor_visibility(&window, "prepare").await;
-        self.select_page(key, false)?;
         if !window
             .url()
             .is_ok_and(|url| url.as_str() == "about:blank" || self.navigation_allowed(&url))
@@ -526,4 +525,14 @@ pub(crate) async fn navigate(
     {
         platform::navigate(view, &url, &_preferences.locale()).await
     }
+}
+
+#[cfg(feature = "web-contract")]
+pub(crate) async fn input_focus(app: &tauri::AppHandle) -> Result<Value, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(platform::input_focus());
+    })
+    .map_err(|error| error.to_string())?;
+    rx.await.map_err(|error| error.to_string())
 }

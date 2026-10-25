@@ -291,7 +291,12 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   Native command grants match the main WebView, not every
   WebView parented to the main window. Hide preserves tabs;
   Actor/App shutdown never closes the shared browser. Owner and models can operate at any
-  time; page changes and Owner input never invalidate or block browser operations.
+  time. Model operations target a tab without changing the Owner's selected tab,
+  route, native keyboard focus or foreground window. Keep background pages live
+  with independent native input recipients and screenshots; only Owner actions
+  attach/select a page. Same-tab Owner/model actions remain independent, with no
+  ownership locks, reservations or stale-input blocking. Page changes and Owner
+  input never invalidate or block browser operations.
   Observation references only identify screenshot coordinates and remain reusable;
   keep screenshots authorized through the calling Actor's resource ledger.
   The account UI and third-party pages never share native command grants or cookies.

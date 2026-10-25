@@ -18,19 +18,68 @@ pub(crate) fn ensure_window(host: &NativeHost) -> Result<Window, String> {
         .build()
         .map_err(|e| e.to_string())
 }
-pub(crate) fn page_window(host: &NativeHost) -> Result<Window, String> {
-    if host
+// Each background page keeps its own native responder tree. Showing a page to
+// the Owner changes only its parent; model operations never mount or select it.
+pub(crate) fn parking_window(host: &NativeHost, key: &str) -> Result<Window, String> {
+    if let Some(window) = host.app.get_window(key) {
+        return Ok(window);
+    }
+    WindowBuilder::new(&host.app, key)
+        .title("Browser page")
+        .inner_size(1100.0, 800.0)
+        .visible(false)
+        .focused(false)
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn present_selected(host: &NativeHost) -> Result<(), String> {
+    let selected = host
+        .selected
+        .lock()
+        .map_err(|_| "Browser unavailable")?
+        .clone();
+    let attached = host
         .panel
         .lock()
         .map_err(|_| "Browser unavailable")?
-        .is_some()
-    {
-        host.app
-            .get_window("main")
-            .ok_or("Client unavailable".into())
-    } else {
-        ensure_window(host)
+        .is_some();
+    let order = host
+        .tab_order
+        .lock()
+        .map_err(|_| "Browser unavailable")?
+        .clone();
+    for key in order {
+        let Some(view) = host.app.get_webview(&key) else {
+            continue;
+        };
+        let target = if selected.as_deref() == Some(&key) {
+            if attached {
+                host.app.get_window("main").ok_or("Client unavailable")?
+            } else {
+                ensure_window(host)?
+            }
+        } else {
+            parking_window(host, &key)?
+        };
+        if view.window().label() != target.label() {
+            view.reparent(&target).map_err(|error| error.to_string())?;
+            if selected.as_deref() != Some(key.as_str()) {
+                let size = view.size().map_err(|error| error.to_string())?;
+                target.set_size(size).map_err(|error| error.to_string())?;
+                view.set_position(tauri::PhysicalPosition::new(0, 0))
+                    .map_err(|error| error.to_string())?;
+            }
+            host.applied_bounds
+                .lock()
+                .map_err(|_| "Browser unavailable")?
+                .remove(&key);
+        }
+        // A live controller in a hidden native window can render and receive
+        // view-local input without sharing the visible page's keyboard responder.
+        view.show().map_err(|error| error.to_string())?;
     }
+    resize(&host.app)
 }
 pub(crate) fn resize(app: &tauri::AppHandle) -> Result<(), String> {
     let Some(host) = app.try_state::<NativeHost>() else {
@@ -118,6 +167,17 @@ fn attached_fullscreen(host: &NativeHost) -> Option<String> {
 /// A page requesting DOM fullscreen covers the whole window while the shell steps
 /// aside; leaving fullscreen (Esc, navigation, tab change) restores both.
 pub(crate) fn apply_page_fullscreen(host: &NativeHost, key: &str, fullscreen: bool) {
+    // A background document cannot replace the Owner's shell or move focus.
+    if fullscreen
+        && host
+            .selected
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+            != Some(key)
+    {
+        return;
+    }
     {
         let mut current = host.fullscreen.lock().unwrap_or_else(|e| e.into_inner());
         if fullscreen {
@@ -145,10 +205,6 @@ pub(crate) fn apply_page_fullscreen(host: &NativeHost, key: &str, fullscreen: bo
             } else {
                 shell.show()
             };
-        }
-        if let Some(page) = updating.app.get_webview(&page_key) {
-            // Entering and leaving fullscreen both continue inside the page.
-            let _ = page.set_focus();
         }
         let _ = resize(&updating.app);
         let host = updating.clone();
@@ -238,39 +294,7 @@ pub(crate) async fn set_panel(
             if previous.is_some() == bounds.is_some() {
                 return resize(&host.app);
             }
-            let order = host
-                .tab_order
-                .lock()
-                .map_err(|_| "Browser unavailable")?
-                .clone();
-            if order.is_empty() {
-                return Ok(());
-            }
-            let window = page_window(&host)?;
-            let selected = host
-                .selected
-                .lock()
-                .map_err(|_| "Browser unavailable")?
-                .clone();
-            for key in &order {
-                if let Some(view) = host.app.get_webview(key) {
-                    view.hide().map_err(|e| e.to_string())?;
-                }
-            }
-            for key in &order {
-                if let Some(view) = host.app.get_webview(key)
-                    && view.window().label() != window.label()
-                {
-                    view.reparent(&window).map_err(|e| e.to_string())?;
-                }
-            }
-            resize(&host.app)?;
-            if let Some(view) = selected
-                .as_deref()
-                .and_then(|key| host.app.get_webview(key))
-            {
-                view.show().map_err(|e| e.to_string())?;
-            }
+            present_selected(&host)?;
             Ok::<_, String>(())
         })();
         let _ = tx.send(result);
@@ -370,12 +394,15 @@ pub async fn browser_control(
             let host = host.clone();
             let (tx, rx) = tokio::sync::oneshot::channel();
             app.run_on_main_thread(move || {
-                let _ = tx.send(host.create_page(
-                    SHARED_BROWSER_PROFILE,
-                    &key,
-                    url::Url::parse("about:blank").unwrap(),
-                    true,
-                ));
+                let _ = tx.send(
+                    host.create_page(
+                        SHARED_BROWSER_PROFILE,
+                        &key,
+                        url::Url::parse("about:blank").unwrap(),
+                        true,
+                    )
+                    .and_then(|()| host.select_page(&key, false)),
+                );
             })
             .map_err(|e| e.to_string())?;
             rx.await.map_err(|_| "Browser unavailable")??;
@@ -574,7 +601,11 @@ pub async fn browser_control(
             let creating = host.clone();
             let (tx, rx) = tokio::sync::oneshot::channel();
             app.run_on_main_thread(move || {
-                let _ = tx.send(creating.create_page(SHARED_BROWSER_PROFILE, &key, url, true));
+                let _ = tx.send(
+                    creating
+                        .create_page(SHARED_BROWSER_PROFILE, &key, url, true)
+                        .and_then(|()| creating.select_page(&key, false)),
+                );
             })
             .map_err(|e| e.to_string())?;
             rx.await.map_err(|_| "Browser unavailable")??;

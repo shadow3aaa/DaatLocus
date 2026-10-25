@@ -41,6 +41,9 @@ public final class ReleaseStartupTest extends Instrumentation {
         status.putString("test", arguments != null && "phone".equals(arguments.getString("mode")) ? "phoneUseNativeContract" : syncCheck ? "existingAccountSyncAndInput" : syncDiagnostics ? "existingAccountSync" : "freshInstallLoadsAccountLogin");
         status.putInt("numtests", 1);
         status.putInt("current", 1);
+        if (arguments != null && "browser".equals(arguments.getString("mode"))) {
+            status.putString("test", "browserBackgroundIsolation");
+        }
         sendStatus(1, status);
         Bundle result = new Bundle();
         try {
@@ -48,6 +51,13 @@ public final class ReleaseStartupTest extends Instrumentation {
             Activity activity = startActivitySync(new Intent(Intent.ACTION_MAIN)
                 .setClassName(getTargetContext(), "io.shadow3aaa.daatlocus.MainActivity")
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            if (arguments != null && "browser".equals(arguments.getString("mode"))) {
+                result.putString("checks", BrowserBackgroundTest.run(this, (MainActivity) activity));
+                sendStatus(0, status);
+                result.putString("stream", "\nOK (BrowserUse background contract)\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if (arguments != null && "phone".equals(arguments.getString("mode"))) {
                 result.putString("checks", PhoneUseTest.run(this, activity, arguments));
                 sendStatus(0, status);

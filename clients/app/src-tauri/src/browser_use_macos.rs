@@ -377,17 +377,7 @@ fn dispatch_input(web: &WKWebView, input: BrowserInput) -> Result<(), String> {
                 let _: () = msg_send![&*responder,insertText:&*text, replacementRange:NSRange::new(isize::MAX as _,0)];
             }
             BrowserInput::Key { key, modifiers } => {
-                let responder = match page_responder(view) {
-                    Ok(responder) => responder,
-                    Err(_) => {
-                        // Select only this window's page responder, without
-                        // activating the window or changing the OS key window.
-                        if !native_window.makeFirstResponder(Some(view)) {
-                            return Err("Browser page cannot receive keys".into());
-                        }
-                        page_responder(view)?
-                    }
-                };
+                let responder = page_responder(view)?;
                 let flags = modifiers
                     .iter()
                     .fold(NSEventModifierFlags::empty(), |flags, m| {
@@ -457,21 +447,28 @@ unsafe fn middle_button(event: &NSEvent) -> Result<Retained<NSEvent>, String> {
 }
 fn page_responder(view: &NSView) -> Result<Retained<NSResponder>, String> {
     let window = view.window().ok_or("Browser window closed")?;
-    let responder = window
-        .firstResponder()
-        .ok_or("Focus a browser field first")?;
-    // A sibling chrome/hidden tab must never receive this page's input.
-    let belongs = unsafe {
-        let is_view: bool = msg_send![&*responder,isKindOfClass:NSView::class()];
-        is_view && {
-            let child: bool = msg_send![&*responder,isDescendantOf:view];
-            child
+    if let Some(responder) = window.firstResponder() {
+        let belongs = unsafe {
+            let is_view: bool = msg_send![&*responder,isKindOfClass:NSView::class()];
+            is_view && {
+                let child: bool = msg_send![&*responder,isDescendantOf:view];
+                child
+            }
+        };
+        if belongs {
+            return Ok(responder);
         }
-    };
-    if !belongs {
-        return Err("Focus a field in this browser page before typing".into());
     }
-    Ok(responder)
+    // WebKit keeps DOM focus per page even when its native view moves between
+    // its private background window and the Owner's visible viewport.
+    let mut pending = view.subviews().to_vec();
+    while let Some(child) = pending.pop() {
+        if child.respondsToSelector(sel!(insertText:replacementRange:)) {
+            return Ok(child.into_super());
+        }
+        pending.extend(child.subviews().to_vec());
+    }
+    Err("Focus an editable field in this browser page before typing".into())
 }
 fn key_info(key: &str) -> Result<(u16, String), String> {
     let special = match key {
@@ -600,4 +597,20 @@ pub async fn navigate(view: &Webview, url: &url::Url, locale: &str) -> Result<()
     })
     .map_err(|_| "Browser navigation failed")?;
     rx.await.map_err(|_| "Browser navigation failed")?
+}
+
+#[cfg(feature = "web-contract")]
+pub(crate) fn input_focus() -> serde_json::Value {
+    unsafe {
+        let (point, key, pid, buttons) = physical_input_state();
+        let app: *mut objc2::runtime::AnyObject =
+            msg_send![objc2::class!(NSApplication), sharedApplication];
+        let window: *mut objc2::runtime::AnyObject = msg_send![app, keyWindow];
+        let responder: *mut objc2::runtime::AnyObject = if window.is_null() {
+            std::ptr::null_mut()
+        } else {
+            msg_send![window, firstResponder]
+        };
+        serde_json::json!({"key":key,"application":pid,"responder":responder as usize,"pointer":[point.x,point.y],"buttons":buttons})
+    }
 }

@@ -48,7 +48,7 @@ object WebHost {
     fail(profile, "Web page closed")
     pages.remove(profile)?.let {
       it.view.stopLoading()
-      if(profile.length==64){it.dialog.setOnDismissListener(null);it.dialog.dismiss()} else { (it.view.parent as? ViewGroup)?.removeView(it.view);BrowserUse.remove(profile) }
+      if(profile.length==64){it.dialog.setOnDismissListener(null);it.dialog.dismiss()} else { (it.view.parent as? ViewGroup)?.removeView(it.view);it.dialog.dismiss();BrowserUse.remove(profile) }
       BrowserUse.forget(it.view)
       it.view.destroy()
     }

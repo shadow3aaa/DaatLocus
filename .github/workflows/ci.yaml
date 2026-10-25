@@ -90,6 +90,8 @@ jobs:
       - run: bun scripts/build-webui.ts
       - run: cargo clippy --locked -p daat-locus-app --all-targets -- -D warnings
       - run: cargo test --locked -p daat-locus-app
+      - name: Verify native background tab and keyboard isolation
+        run: cargo test --locked -p daat-locus-app --features web-contract --test browser_live background_tabs_do_not_change_owner_selection_or_keyboard_focus -- --ignored
       - run: cargo build --locked -p daat-locus-app --features custom-protocol
   webui:
     runs-on: ubuntu-latest

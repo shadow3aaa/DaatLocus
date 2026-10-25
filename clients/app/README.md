@@ -102,7 +102,10 @@ uses the same native clipping as the browser menu, keeping the web page live.
 Leaving the browser or opening its full-page library detaches that viewport;
 popup menus leave it mounted and running. Both detachment and stopping an Actor
 preserve tabs. The Owner and models can operate at any time;
-Owner input invalidates old observations. BrowserUse site storage is isolated from
+Model operations never change the Owner's selected tab or native keyboard focus.
+Background pages retain independent native input recipients and live snapshots.
+The Owner can inspect and operate any page at any time; same-tab actions have no
+ownership lock, and Owner input does not invalidate coordinate observations. BrowserUse site storage is isolated from
 both the account UI and Web's per-Actor document capture.
 The shell and visited pages are independent WebViews. Rounded popup regions are
 clipped from the native page layer, with input passing through to the shell;
@@ -124,10 +127,10 @@ desktop copies a PNG image to the native clipboard; Android saves it to Download
 (Android 7–9 uses the system save dialog). Find supports highlights, next/previous,
 Enter/Shift+Enter and Escape, clearing native matches when closed or leaving a tab.
 
-Input uses screenshot pixels and a one-use observation ID. Native DOM/viewport
-changes, user input and a newer observation reject stale operations. Windows uses
+Input uses screenshot pixels and a reusable observation ID for coordinate dimensions.
+Native DOM/viewport changes, Owner input and newer observations do not reject input. Windows uses
 WebView2's native CDP methods, macOS local AppKit events and WKWebView snapshots,
-and Android WebView native input and PixelCopy. No debug port, arbitrary evaluation
+and Android WebView native input and explicit page snapshots. No debug port, arbitrary evaluation
 or system-wide input is exposed. PNGs are published in the calling Actor's resource
 ledger. Interrupted effects are never replayed automatically.
 
@@ -215,3 +218,19 @@ Native downloads use the system save dialog (Android SAF) from Rust. Only the
 authorized resource path and a suggested name cross IPC; the selected destination
 and session cookies never reach JavaScript. Filesystem/dialog plugins have no
 JavaScript permission grants.
+
+Background-tab isolation has a native two-page regression on Windows and macOS:
+
+```sh
+cargo test --locked -p daat-locus-app --features web-contract --test browser_live background_tabs_do_not_change_owner_selection_or_keyboard_focus -- --ignored
+```
+
+It checks native focus and Owner selection across model open/input/observe/close,
+continued Owner text input in another page, actual background snapshot pixels,
+and switching to the same live page. Windows also runs the existing same-page
+Owner/model input and native composition checks in that test target.
+Android's instrumentation runner provides the matching real-WebView contract
+with `-e mode browser`; run it in an isolated install/profile with the debug
+build (`-PdaatTestBuildType=debug`) for loopback fixture HTTP. It checks the
+Activity's actual keyboard recipient, background page paint/input, Owner tab
+switches and same-tab input, without registering an account or using a model.

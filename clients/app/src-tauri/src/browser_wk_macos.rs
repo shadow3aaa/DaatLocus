@@ -114,6 +114,11 @@ pub(crate) fn prepare(view: &Webview, shared: bool) {
     let label = view.label().to_owned();
     let _ = view.with_webview(move |platform| unsafe {
         let web = &*platform.inner().cast::<WKWebView>();
+        // A background tab must keep rendering without ordering any window
+        // forward. Owner visibility is independent of the page's render lifetime.
+        if shared && web.respondsToSelector(sel!(_setWindowOcclusionDetectionEnabled:)) {
+            let _: () = msg_send![web,_setWindowOcclusionDetectionEnabled:false];
+        }
         // The shared shell already reserves titlebar/toolbar space. WebKit's
         // automatic titlebar inset shifts trusted input away from screenshots,
         // including when the backstage window is hidden.

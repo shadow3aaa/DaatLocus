@@ -1,5 +1,5 @@
 //! Opt-in native WebView2 integration. Uses only an isolated local fixture.
-#![cfg(all(windows, feature = "web-contract"))]
+#![cfg(all(any(windows, target_os = "macos"), feature = "web-contract"))]
 
 use serde_json::{Value, json};
 use std::{
@@ -62,6 +62,8 @@ impl Fixture {
                     r#"<!doctype html><html data-native-browser><meta charset="utf-8"><link rel="stylesheet" href="/shell.css"><style>html,body{margin:0;background:transparent}header{height:100px;box-sizing:border-box}button{position:fixed;left:100px;top:200px;width:200px;height:200px;border:0;background:rgba(255,0,0,.5);box-shadow:0 0 20px #0008}.dl-browser-progress{position:fixed;left:0;right:0;top:138px}</style><header class="dl-browser-tabs">Shell</header><div class="dl-browser-progress"></div><div id="viewport" style="position:fixed;left:80px;top:140px;right:0;bottom:0"><div style="position:absolute;left:350px;top:60px;width:100px;height:100px;background:rgba(0,0,255,.5)" onclick="window.tips=(window.tips||0)+1"></div></div><script type="module">import {browserForeground} from "/collector.js";window.DLComposition={browserForeground};</script><button onclick="window.clicks=(window.clicks||0)+1">Overlay</button>"#
                 } else if request.starts_with("GET /composition-page ") {
                     r#"<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;background:rgb(0,200,0)}</style><input aria-label="Native field" style="position:fixed;left:600px;top:100px;width:200px;height:40px"><script>document.onclick=()=>window.nativeControlResult=String(Number(window.nativeControlResult||0)+1)</script>"#
+                } else if request.starts_with("GET /background ") {
+                    r#"<!doctype html><meta charset="utf-8"><title>Background fixture</title><style>html,body{margin:0;background:rgb(0,200,0);height:2000px}input{position:fixed;left:10%;top:10%;width:60%;height:40px}</style><input aria-label="Background input">"#
                 } else {
                     r#"<!doctype html><meta charset="utf-8"><title>Live browser fixture</title>
 <style>body{height:2000px}input{position:fixed;left:10%;top:10%;width:60%;height:40px}</style>
@@ -89,6 +91,7 @@ impl Drop for Fixture {
     }
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "requires Windows WebView2; run with --features web-contract --test browser_live -- --ignored"]
 fn live_inputs_survive_mutations_owner_actions_and_resize_until_the_tab_closes() {
@@ -100,6 +103,7 @@ fn live_inputs_survive_mutations_owner_actions_and_resize_until_the_tab_closes()
     let manifest = json!({
         "output":output,"hidden_browser":true,"relative_points":true,"ui_review":true,
         "panel_steps":{"0":{"x":80,"y":140,"width":1200,"height":860,"scale":1}},
+        "owner_select":{"1":tab},
         "delays":{"2":1200},
         "owner_steps":{"3":{"kind":"type","text":"U"}},
         "resize_steps":{"4":[[900,700],[1100,820]]},
@@ -168,6 +172,7 @@ fn live_inputs_survive_mutations_owner_actions_and_resize_until_the_tab_closes()
     cleanup(root);
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "requires a visible Windows desktop and WebView2; run opt-in native integration"]
 fn transparent_shell_composes_above_the_page_and_routes_native_clicks() {
@@ -188,6 +193,7 @@ fn transparent_shell_composes_above_the_page_and_routes_native_clicks() {
     let tab = "b".repeat(32);
     let manifest = json!({"output":output,"shell_url":format!("{}shell",fixture.address),"relative_points":true,"ui_review":true,
         "panel_steps":{"0":{"x":80,"y":140,"width":1200,"height":860,"scale":1}},
+        "owner_select":{"1":tab},
         "owner_clicks":{"1":[[150,250],[450,250],[500,300]],"2":[[150,250],[450,250],[500,300]],"3":[[700,260]]},
         "owner_text":{"3":"DL中文"},
         "resize_steps":{"1":[[900,700],[1100,820]]},
@@ -281,6 +287,125 @@ fn transparent_shell_composes_above_the_page_and_routes_native_clicks() {
             .iter()
             .any(|field| field["label"] == "Native field" && field["value"] == "DL中文"),
         "native keyboard focus: {fields:?}"
+    );
+    cleanup(root);
+}
+
+#[test]
+#[ignore = "requires native WebView2 or WKWebView; run opt-in native integration"]
+fn background_tabs_do_not_change_owner_selection_or_keyboard_focus() {
+    use base64::Engine;
+    let fixture = Fixture::start(None);
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("background.json");
+    let a = "a".repeat(32);
+    let b = "b".repeat(32);
+    let input = |tab: &str, value: Value| json!({"action":"input","tab":tab,"state_id":"latest","input":value});
+    let shortcut_modifier = if cfg!(target_os = "macos") {
+        "meta"
+    } else {
+        "control"
+    };
+    let mut manifest = json!({
+        "output":output,"hidden_browser":false,"relative_points":true,"inspect_tabs":true,
+        "panel_steps":{"0":{"x":0,"y":0,"width":1100,"height":800,"scale":1}},
+        "owner_select":{"1":a,"7":b,"8":a},
+        "owner_steps":{"2":{"kind":"click","x":200,"y":120,"button":"left","count":1}},
+        "browser_steps":[
+            {"action":"open","tab":a,"url":fixture.address},
+            {"action":"observe","tab":a},
+            {"action":"open","tab":b,"url":format!("{}background",fixture.address)},
+            input(&b,json!({"kind":"click","x":0.2,"y":0.13,"button":"left","count":1})),
+            input(&b,json!({"kind":"type","text":"Agent"})),
+            input(&b,json!({"kind":"key","key":"L","modifiers":[shortcut_modifier]})),
+            {"action":"observe","tab":b},
+            {"action":"observe","tab":a},
+            {"action":"observe","tab":b},
+            {"action":"close","tab":b}
+        ]
+    });
+    #[cfg(windows)]
+    {
+        manifest["owner_clicks"] = json!({"2":[[200,120]]});
+        manifest["owner_text"] = json!({"3":"U","4":"V","5":"W"});
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for (step, text) in [("4", "U"), ("5", "V"), ("6", "W")] {
+            manifest["owner_steps"][step] = json!({"kind":"type","text":text});
+        }
+    }
+    let path = root.path().join("background-manifest.json");
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_daat-locus-app"))
+        .arg("--web-probe")
+        .arg(path)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(100);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("Background browser integration timed out");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "{:?}", std::fs::read_to_string(&output));
+    let steps: Vec<Value> = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+    assert_eq!(steps.len(), 10);
+    for (index, step) in steps.iter().enumerate() {
+        assert!(
+            step["reply"]["error"].is_null(),
+            "step {index}: {}",
+            step["reply"]
+        );
+        let expected = if index == 0 {
+            Value::Null
+        } else if index == 7 {
+            json!(b)
+        } else {
+            json!(a)
+        };
+        assert_eq!(
+            step["owner_workspace"]["selected"], expected,
+            "selection at {index}"
+        );
+        assert!(
+            step["focus_before"]["Ok"].is_object(),
+            "native focus probe failed at {index}: {}",
+            step["focus_before"]
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            step["focus_before"]["Ok"]["available"], true,
+            "foreground keyboard information unavailable"
+        );
+        assert_eq!(
+            step["focus_before"], step["focus_after"],
+            "native focus at {index}"
+        );
+    }
+    assert_eq!(steps[6]["tab_states"][&a]["value"], "UVW");
+    assert_eq!(steps[6]["tab_states"][&b]["value"], "Agent");
+    assert_eq!(steps[8]["tab_states"][&b]["value"], "Agent");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(
+            steps[4]["reply"]["browser"]["observation"]["png_base64"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+    let image = tauri::image::Image::from_bytes(&bytes).unwrap();
+    let pixel = &image.rgba()[..4];
+    assert!(
+        u16::from(pixel[1]) > u16::from(pixel[0]) + 64
+            && u16::from(pixel[1]) > u16::from(pixel[2]) + 64
+            && pixel[3] == 255,
+        "background snapshot must show the green fixture, not the Owner's white page: {pixel:?}"
     );
     cleanup(root);
 }
