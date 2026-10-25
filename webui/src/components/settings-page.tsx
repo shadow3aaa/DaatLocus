@@ -1,11 +1,12 @@
 import { t } from "@/lib/i18n";
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
-import { ArrowLeftIcon, DownloadIcon, GlobeIcon, MonitorIcon, SearchIcon, SettingsIcon, ShieldCheckIcon, SlidersHorizontalIcon, SunIcon, UserRoundIcon } from "lucide-react";
+import { ArrowLeftIcon, BarChart3Icon, DownloadIcon, GlobeIcon, MonitorIcon, SearchIcon, SettingsIcon, ShieldCheckIcon, SlidersHorizontalIcon, SunIcon, UserRoundIcon } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { AppearanceSettings } from "@/components/settings/appearance-settings";
+import { UsageSettings } from "@/components/settings/usage-settings";
 import { ImportSettings } from "@/components/settings/import-settings";
 import { getImportCapabilities } from "@/lib/conversation-import";
 import { SettingsSection, SettingsGroup, SettingsRow } from "@/components/settings/structure";
@@ -29,9 +30,9 @@ import { MacComputerUseSettings } from "@/components/settings/macos-computer-use
 import { BrowserSettings } from "@/components/settings/browser-settings";
 import { browserSupported } from "@/lib/browser-workspace";
 
-export type SettingsTab = "general" | "personal" | "account" | "permissions" | "models" | "import" | "gui" | "browser";
+export type SettingsTab = "general" | "personal" | "account" | "permissions" | "usage" | "models" | "import" | "gui" | "browser";
 export type SettingsPageHandle = { close(): void };
-const paths: Record<SettingsTab, string> = {general: "general", personal: "appearance", account: "devices", permissions: "permissions", models: "providers", import: "import", gui: "gui", browser:"browser"};
+const paths: Record<SettingsTab, string> = {general: "general", personal: "appearance", account: "devices", permissions: "permissions", usage: "usage", models: "providers", import: "import", gui: "gui", browser:"browser"};
 export function settingsPath(tab: SettingsTab) { return `/settings/${paths[tab]}`; }
 export function settingsTabFromPath(path: string): SettingsTab | null {
   return (Object.keys(paths) as SettingsTab[]).find(tab => path === settingsPath(tab)) ?? null;
@@ -140,6 +141,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
       {id: "account" as const, label: t("settings_dialog.configuration"), icon: UserRoundIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), t("account_editor.connectivity"), t("access_gate.public_connection_service"), t("reset_work.title")].join(" ")},
       ...(isAndroid() || isMacDesktop() || computerUseSupported ? [{id: "gui" as const, label: t("gui_use.title"), icon: MonitorIcon, keywords: ["Shizuku Root ComputerUse PhoneUse macOS", t("gui_use.advanced"), t("computer_use_settings.resolution")].join(" ")}] : []),
       {id: "permissions" as const, label: t("settings_dialog.permissions"), icon: ShieldCheckIcon, keywords: t("settings_dialog.approval_mode")},
+      {id: "usage" as const, label: t("usage_page.title"), icon: BarChart3Icon, keywords: [t("usage_page.history"), t("usage_page.agent_ranking"), t("usage_page.cache_ranking"), t("usage_page.column_used")].join(" ")},
       {id: "models" as const, label: t("providers_settings.providers"), icon: SlidersHorizontalIcon, keywords: [t("composer.models"), t("composer.default_model"), t("provider_editor.api_key")].join(" ")},
     ] : []),
   ];
@@ -171,6 +173,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
             {(["none","ask","auto"] as const).map(mode=><ToggleGroupItem key={mode} value={mode}>{modeLabel(mode)}</ToggleGroupItem>)}
           </ToggleGroup>
         </SettingsRow></SettingsGroup></SettingsSection></div>}
+        {canManage && <div hidden={tab !== "usage"}>{tab === "usage" && <UsageSettings />}</div>}
         {canManage ? <div hidden={tab !== "models"}>
           {loading && !config ? <div className="dl-settings-loading" role="status"><Spinner />{t("settings_dialog.loading_configuration")}</div> : config ? <ProvidersSettings config={config} onChange={value => {setConfig(value);setDirty(JSON.stringify(value) !== savedConfig.current);setNotice(null);}} onSave={submitConfig} pending={locked} dirty={dirty} /> : null}
         </div> : null}

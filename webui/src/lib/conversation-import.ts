@@ -1,4 +1,5 @@
 import { request, type Attachment, type MessageRecord } from "./actor-api";
+import { isInternalNotification } from "./conversation-messages";
 import { t } from "./i18n";
 
 import { CODEX_IMPORT_MEDIA_TYPE } from "./import-types";
@@ -7,9 +8,10 @@ export type ImportPreview = {resource_id: string; title: string; message_count: 
 export function importedConversation(message: Pick<MessageRecord, "attachments">): Attachment | undefined {
   return message.attachments.find(item => item.media_type === CODEX_IMPORT_MEDIA_TYPE);
 }
-export function messageDisplayText(message: Pick<MessageRecord, "content" | "attachments">) {
+export function messageDisplayText(message: Pick<MessageRecord, "content" | "attachments" | "source">) {
   const source = importedConversation(message);
-  return source ? `${t("imports.bubble_title")} · ${source.name}` : message.content;
+  if (source) return `${t("imports.bubble_title")} · ${source.name}`;
+  return isInternalNotification(message) ? "" : message.content;
 }
 export type CodexConversation = {id: string; title: string; updated_at_ms: number; archived: boolean};
 export const getImportCapabilities = (signal?: AbortSignal) => request<{codex: boolean}>("/v1/imports",{signal});

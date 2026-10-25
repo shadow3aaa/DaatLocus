@@ -21,7 +21,7 @@ export const scenarios = [
   {id:"work", label:"工作对话", actor:"research"},
   {id:"activity-replay", label:"工作活动 · 分步演示", actor:"research"},
   {id:"activity-overflow", label:"工作活动 · 长时间执行与事件补载", actor:"research"},
-  {id:"activity-guidance", label:"工作活动 · 执行中追加引导消息", actor:"research"},
+  {id:"activity-guidance", label:"工作活动 · 执行中收到新消息", actor:"research"},
   {id:"activity-prose", label:"工作活动 · 正文与思考交错增量", actor:"research"},
   {id:"activity-thinking", label:"工作活动 · 思考中的连续工具组", actor:"research"},
   {id:"activity-tools", label:"工作活动 · 工具执行中", actor:"research"},
@@ -33,7 +33,7 @@ export const scenarios = [
   {id:"running", label:"正在执行与工具活动", actor:"research"},
   {id:"approval", label:"等待批准 · 长参数", actor:"research"},
   {id:"failure", label:"失败与重试", actor:"research"},
-  {id:"queue", label:"排队与引导", actor:"research"},
+  {id:"queue", label:"处理中收到新消息", actor:"research"},
   {id:"attachments", label:"图片与文件附件", actor:ROOT_ACTOR_ID},
   {id:"long-content", label:"长历史、代码、表格与差异", actor:"research"},
   {id:"history", label:"历史刻度与悬停预览", actor:"research"},
@@ -116,7 +116,7 @@ export function activateScenario(id: string): boolean {
     const followUp = message(core, "这些模板部分来自模板要求吗？");
     touchMessage(followUp, {reply: "我核对一下这两项的来源，区分老师明确要求的内容和我整理文档时加的结构。"});
     const report = deliver("按我读取指导书后的记录，这两类内容有要求依据，但具体表格是我整理的：\n\n- 需求提出：记录需求编号、提出人、日期与原始描述。\n- 修订记录：记录评审后改了什么，以及待确定问题清单。\n\n表格样式和栏目是否必须原样保留，还需核对原文。");
-    addTool(core, {id: newId(), actor_id: ROOT_ACTOR_ID, message_id: report.id, call_id: newId(), name: "actors__send", summary: "核对原文", error: null, started_at_ms: now()-1000, finished_at_ms: now(), arguments: {}, model_content: "已交给研究员", outcome: {actor_id: "research", name: "研究员"}, payload: null});
+    addTool(core, {id: newId(), actor_id: ROOT_ACTOR_ID, message_id: report.id, call_id: newId(), name: "actors__message", summary: "核对原文", error: null, started_at_ms: now()-1000, finished_at_ms: now(), arguments: {}, model_content: "已交给研究员", outcome: {actor_id: "research", name: "研究员", show_to_user: false}, payload: null});
     deliver("我也会检查原文，确认哪些必须保留，哪些可以删简。");
     addMessage(core, {kind: "request", source: {kind: "user"}, reply_to: {kind: "user"}, content: "好，再看看原文。", status: "queued"});
     addMessage(core, {kind: "request", source: {kind: "user"}, reply_to: {kind: "user"}, content: "保留需要确认的地方。", status: "queued"});
@@ -168,7 +168,7 @@ export function activateScenario(id: string): boolean {
     touchMessage(record,{reply:"这轮布局检查已完成。\n\n- 保留历史消息的阅读位置。\n- 输入框展开时，末尾仍然完整可见。\n- 窄屏使用全屏对话和返回按钮。\n\n还检查了长段落、列表和代码的换行。"});
     // The task started outside the newest page. Opening its card should still
     // enter at the newest edge; only an explicit search should fetch that input.
-    const task = core.tools.find(tool => tool.result.name === "actors__send");
+    const task = core.tools.find(tool => tool.result.name === "actors__message");
     if (task) task.result.outcome = {actor_id:"research",name:"检查消息滚动与输入框布局",message_id:work.messages[0].id};
   }
   if(id==="long-content") {

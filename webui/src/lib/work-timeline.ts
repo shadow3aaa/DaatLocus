@@ -1,7 +1,7 @@
 import { t } from "@/lib/i18n";
 import type { ToolRef } from "@/hooks/use-actor-conversation";
 import type { EventRecord, MessageRecord } from "./actor-api";
-export type WorkSegment = { kind: "text"; seq: number; generation: number; channel: "assistant" | "reasoning"; content: string } | { kind: "tools"; seq: number; callIds: string[] } | { kind: "guidance"; seq: number; message: MessageRecord };
+export type WorkSegment = { kind: "text"; seq: number; generation: number; channel: "assistant" | "reasoning"; content: string } | { kind: "tools"; seq: number; callIds: string[] };
 export function mergeActivity(current: EventRecord[], incoming: EventRecord[], actorId: string, messageId: string): EventRecord[] {
   const records = new Map<number, EventRecord>();
   for (const record of [...current, ...incoming]) if (record.actor_id === actorId && "message_id" in record.event && record.event.message_id === messageId) records.set(record.seq, record);
@@ -17,18 +17,12 @@ export function extendActivityHistory(history: EventRecord[], live: EventRecord[
   if (window[0].seq > through) return {records: history, through, gap: true};
   return {records: mergeActivity(history, window, actorId, messageId), through: latest, gap: false};
 }
-export function workTimeline(events: EventRecord[], message: MessageRecord, complete = true, guidance: MessageRecord[] = []): WorkSegment[] {
+export function workTimeline(events: EventRecord[], message: MessageRecord, complete = true): WorkSegment[] {
   const items = mergeActivity([], events, message.actor_id, message.id);
   const lastGeneration = Math.max(0, ...items.flatMap(({event}) => "generation" in event ? [event.generation] : []));
   const output: WorkSegment[] = [];
   const seenCalls = new Set<string>();
-  const guides = [...new Map(guidance.filter(item => item.actor_id === message.actor_id && item.kind === "steering" && item.status === "completed" && item.in_reply_to === message.id).map(item => [item.id, item])).values()].sort((a,b) => a.created_at_ms - b.created_at_ms || a.seq - b.seq);
-  let nextGuide = 0;
   for (const record of items) {
-    while (nextGuide < guides.length && guides[nextGuide].created_at_ms <= record.created_at_ms) {
-      const guide = guides[nextGuide++];
-      output.push({kind:"guidance",seq:guide.seq,message:guide});
-    }
     const event = record.event;
     if (event.type === "generation_delta" && (event.channel === "assistant" || event.channel === "reasoning")) {
       if (message.status === "completed" && message.reply && event.channel === "assistant" && event.generation === (message.final_generation ?? (complete ? lastGeneration : -1))) continue;
@@ -43,8 +37,6 @@ export function workTimeline(events: EventRecord[], message: MessageRecord, comp
       else output.push({ kind: "tools", seq: record.seq, callIds: [event.call_id] });
     }
   }
-  // A paginated prefix must reach a guide's send time before displaying it.
-  if (complete) for (const guide of guides.slice(nextGuide)) output.push({kind:"guidance",seq:guide.seq,message:guide});
   return output;
 }
 // Tool-start facts also restore unfinished work after reconnect; summary pages
@@ -67,16 +59,15 @@ export function isLiveReasoning(segment: WorkSegment, index: number, segments: W
 }
 export type WorkActivitySegment =
   | Extract<WorkSegment, { kind: "text" }>
-  | Extract<WorkSegment, { kind: "guidance" }>
   | { kind: "activity"; seq: number; callIds: string[]; thinking: string | null };
 
 // Reasoning updates the current activity's headline; only actual assistant prose
 // separates groups. Historical reasoning never becomes another disclosure body.
-export function workActivityTimeline(events: EventRecord[], message: MessageRecord, complete = true, live = true, guidance: MessageRecord[] = []): WorkActivitySegment[] {
-  const segments = workTimeline(events, message, complete, guidance);
+export function workActivityTimeline(events: EventRecord[], message: MessageRecord, complete = true, live = true): WorkActivitySegment[] {
+  const segments = workTimeline(events, message, complete);
   const output: WorkActivitySegment[] = [];
   for (const [index, segment] of segments.entries()) {
-    if (segment.kind === "guidance" || segment.kind === "text" && segment.channel === "assistant") {
+    if (segment.kind === "text" && segment.channel === "assistant") {
       output.push(segment);
       continue;
     }
@@ -102,7 +93,7 @@ export function workActivityTimeline(events: EventRecord[], message: MessageReco
     const previous = visible.at(-1);
     // Progress flushes can interleave assistant and reasoning chunks. Hidden
     // reasoning is not a paragraph boundary; preserve the original Markdown.
-    // Tool groups, guidance and distinct generations still separate prose.
+    // Tool groups and distinct generations still separate prose.
     if (segment.kind === "text" && previous?.kind === "text" && previous.generation === segment.generation && previous.channel === segment.channel) previous.content += segment.content;
     else visible.push(segment);
   }

@@ -1,3 +1,4 @@
+import { isInternalNotification } from "@/lib/conversation-messages";
 import { importedConversation, messageDisplayText } from "@/lib/conversation-import";
 import { ImportConversationBubble } from "@/components/import-conversation";
 import { getCurrentWebUiLanguage, t } from "@/lib/i18n";
@@ -36,10 +37,10 @@ export function PrimaryTranscript({ messages, working, receiptMessageId, ...prop
 export function PrimaryTurn({ message, chat, access, onActor, receiptMessageId, searchQuery }: Props & { receiptMessageId?: string }) {
   const user = isUserSource(message);
   const tools = chat.tools.filter(tool => tool.message_id === message.id);
-  const tasks = tools.filter(tool => !tool.error && ["actors__create", "actors__import_conversation", "actors__send", "actors__steer"].includes(domainToolName(tool.name)) && tool.outcome);
+  const tasks = tools.filter(tool => !tool.error && ["actors__create", "actors__import_conversation", "actors__message"].includes(domainToolName(tool.name)) && tool.outcome && (domainToolName(tool.name) !== "actors__message" || asObject(tool.outcome).show_to_user !== false));
   const taskTarget = (tool: typeof tasks[number]) => { const info = asObject(tool.outcome); return actorIdFromUrl(asText(info.conversation_url), typeof location === "undefined" ? undefined : location.href) || asText(info.actor_id) || asText(info.id); };
-  const delegated = new Set(tasks.filter(tool => domainToolName(tool.name) === "actors__send").map(taskTarget));
-  const references = tasks.filter(tool => taskTarget(tool) && (["actors__send", "actors__steer"].includes(domainToolName(tool.name)) || !delegated.has(taskTarget(tool))));
+  const delegated = new Set(tasks.filter(tool => domainToolName(tool.name) === "actors__message").map(taskTarget));
+  const references = tasks.filter(tool => taskTarget(tool) && (["actors__message"].includes(domainToolName(tool.name)) || !delegated.has(taskTarget(tool))));
   if (!user && message.reply_to.kind !== "user" && !(message.reply_to.kind === "remote" && message.reply_to.user)) return null;
   const filtering = Boolean(searchQuery?.trim());
   const input = (user && (!filtering || matchesConversationText(messageDisplayText(message), searchQuery!)));
@@ -49,11 +50,11 @@ export function PrimaryTurn({ message, chat, access, onActor, receiptMessageId, 
   if (!input && !response) return null;
   return <article className="dl-message-turn dl-primary-turn" data-first-side={input ? "user" : "assistant"} data-last-side={response ? "assistant" : "user"} id={`message-${message.actor_id}-${message.id}`}>
     {input && <div className="dl-primary-inputs">
-    {user && <div className="dl-message dl-message-user">{message.kind === "steering" && <small className="dl-guidance-label">{t("conversation_turns.guidance_for_the_current_task")}</small>}<MessageContextMenu content={messageDisplayText(message)}><div className="dl-primary-bubble-row"><div className="dl-bubble dl-bubble-user">{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{message.content && <p className="dl-user-text">{message.content}</p>}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</div><CopyMessage content={messageDisplayText(message)} /></div></MessageContextMenu>{(!receiptMessageId || receiptMessageId === message.id) && <MessageReceipt message={message} />}</div>}
+    {user && <div className="dl-message dl-message-user"><MessageContextMenu content={messageDisplayText(message)}><div className="dl-primary-bubble-row"><div className="dl-bubble dl-bubble-user">{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{message.content && <p className="dl-user-text">{message.content}</p>}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</div><CopyMessage content={messageDisplayText(message)} /></div></MessageContextMenu>{(!receiptMessageId || receiptMessageId === message.id) && <MessageReceipt message={message} />}</div>}
     </div>}
     {response && <div className="dl-primary-response">
     {reply && <div className="dl-message dl-message-assistant"><MessageContextMenu content={message.reply || ""}><div className="dl-primary-bubble-row"><div className="dl-bubble dl-bubble-assistant"><Markdown content={message.reply || ""} onActor={onActor} /></div><CopyMessage content={message.reply || ""} /></div></MessageContextMenu></div>}
-    {!filtering && references.map(tool => { const info = asObject(tool.outcome); const target = taskTarget(tool); return target ? <ActorReference key={tool.id} actorId={target} label={asText(info.name)} messageId={asText(info.message_id)} guidance={info.kind === "steering"} detail={info.kind === "steering" ? t("conversation_turns.guidance_for_the_current_task") : undefined} onOpen={onActor} /> : null; })}
+    {!filtering && references.map(tool => { const info = asObject(tool.outcome); const target = taskTarget(tool); return target ? <ActorReference key={tool.id} actorId={target} label={asText(info.name)} messageId={asText(info.message_id)} onOpen={onActor} /> : null; })}
     {!filtering && (outcomes.artifacts.length > 0 || outcomes.changes.length > 0) && <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />}
     {!filtering && <Decisions message={message} chat={chat} access={access} />}
     {!filtering && user && <OutcomeStatus message={message} />}
@@ -65,14 +66,14 @@ function MessageReceipt({ message }: { message: MessageRecord }) {
 }
 export function WorkTurn({ message, chat, access, onActor, searchQuery }: Props) {
   const user = isUserSource(message);
+  const internal = isInternalNotification(message);
   const searchMode = searchQuery !== undefined;
   const inputMatches = !searchQuery || matchesConversationText(messageDisplayText(message), searchQuery);
   const replyMatches = !searchQuery || matchesConversationText(message.reply || "", searchQuery);
   const tools = chat.tools.filter(tool => tool.message_id === message.id);
   return <article className="dl-message-turn dl-work-turn" id={`message-${message.actor_id}-${message.id}`}>
-    {inputMatches && message.kind === "steering" && <small className="dl-guidance-label" role="status">{t(message.status === "completed" ? "conversation_turns.guidance_applied" : "conversation_turns.guidance_not_applied")}</small>}
-    {inputMatches && (message.content || message.attachments.length > 0) && <MessageContextMenu content={user ? messageDisplayText(message) : ""}><div className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}><div className={cn(user && "dl-work-prompt")}>{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</div>{user && message.content && <div className="dl-work-user-actions"><CopyMessage content={messageDisplayText(message)} /></div>}</div></MessageContextMenu>}
-    {!searchMode && !["delivery", "steering"].includes(message.kind) && <WorkRound message={message} events={chat.events} tools={tools} guidance={chat.messages.filter(item => item.kind === "steering" && item.status === "completed" && item.in_reply_to === message.id)} onActor={onActor} />}
+    {inputMatches && !internal && (message.content || message.attachments.length > 0) && <MessageContextMenu content={user ? messageDisplayText(message) : ""}><div className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}><div className={cn(user && "dl-work-prompt")}>{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</div>{user && message.content && <div className="dl-work-user-actions"><CopyMessage content={messageDisplayText(message)} /></div>}</div></MessageContextMenu>}
+    {!searchMode && (internal || message.kind !== "delivery") && <WorkRound message={message} events={chat.events} tools={tools} onActor={onActor} />}
     {!searchMode && <Decisions message={message} chat={chat} access={access} />}
     {replyMatches && message.reply && <MessageContextMenu content={message.reply}><div className="dl-work-final"><Markdown content={message.reply} onActor={onActor} /><CopyMessage content={message.reply} /></div></MessageContextMenu>}
     {!searchMode && <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />}

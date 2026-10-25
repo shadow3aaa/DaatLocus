@@ -108,9 +108,9 @@ function seed(): void {
       reply:
         "已经交给工作对话检查，完成后会把结果发到这里。",
       tool: {
-        name: "actors__send",
+        name: "actors__message",
         summary: "检查消息滚动与输入框布局",
-        arguments: { actor_id: "research", content: "检查消息滚动与输入框布局。" },
+        arguments: { actor_id: "research", content: "检查消息滚动与输入框布局。", show_to_user: true },
         payload: {
           path: ".",
           entries: [
@@ -121,7 +121,7 @@ function seed(): void {
           next_cursor: null,
         },
         model_content: "README.md\nsrc/\npackage.json",
-        outcome: { actor_id: "research", name: "检查消息滚动与输入框布局" },
+        outcome: { actor_id: "research", name: "检查消息滚动与输入框布局", show_to_user: true },
       },
     },
     {

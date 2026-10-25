@@ -9,7 +9,6 @@ import { Composer, type ComposerModel } from "@/components/composer";
 import { ConversationConnection } from "@/components/conversation-connection";
 import { ConversationHistory } from "@/components/conversation-history";
 import { PrimaryTranscript, WorkTurn } from "@/components/conversation-turns";
-import { MessageQueue } from "@/components/message-queue";
 import { partitionConversationMessages } from "@/lib/conversation-messages";
 import { isPrimaryActor, isUserDelivery, isUserSource } from "@/lib/work-timeline";
 import { OwnerApprovalNotice } from "@/components/owner-approval-notice";
@@ -58,10 +57,9 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const canConverse = !archived && actor?.access?.converse !== false;
   const name = actor?.config?.name || actor?.name || (actorId === "core" ? "Daat Locus" : "Actor");
   const workingMessages = chat.messages.filter(message => message.status === "running" || message.status === "queued");
-  const active = workingMessages.find(message => message.status === "running");
-  const queue = useMemo(() => partitionConversationMessages(chat.messages, primaryView).queue, [chat.messages, primaryView]);
+  const active = [...workingMessages].reverse().find(message => message.status === "running");
   const sourceMessages = useMemo(() => filtering ? matchingConversationMessages(search.ready && !search.failed ? search.items : [], chat.messages, searchQuery) : chat.messages, [filtering, search.ready, search.failed, search.items, chat.messages, searchQuery]);
-  const visibleMessages = useMemo(() => partitionConversationMessages(sourceMessages, primaryView).transcript.filter(message => !(message.status === "cancelled" && message.started_at_ms == null && ["user", "remote_user"].includes(message.source.kind)) && !(!primaryView && !searchOpen && message.kind === "steering" && message.status === "completed" && sourceMessages.some(parent => parent.id === message.in_reply_to)) && (!filtering || !primaryView || (isUserSource(message) && matchesConversationText(message.content, searchQuery)) || (isUserDelivery(message) && matchesConversationText(message.reply || "", searchQuery)))), [sourceMessages, primaryView, filtering, searchOpen, searchQuery]);
+  const visibleMessages = useMemo(() => partitionConversationMessages(sourceMessages, primaryView).transcript.filter(message => !(message.status === "cancelled" && message.started_at_ms == null && ["user", "remote_user"].includes(message.source.kind)) && (!filtering || !primaryView || (isUserSource(message) && matchesConversationText(message.content, searchQuery)) || (isUserDelivery(message) && matchesConversationText(message.reply || "", searchQuery)))), [sourceMessages, primaryView, filtering, searchOpen, searchQuery]);
   const presentationChat = filtering ? {...chat, messages: sourceMessages} : chat;
   const receiptMessageId = primaryView ? [...chat.messages].reverse().find(message => isUserSource(message) && !(message.status === "cancelled" && message.started_at_ms == null))?.id : undefined;
   useEffect(() => { follow.current = true; olderAnchor.current = null; setAtBottom(true); setLocalError(""); filePreparation.current = { actorId, busy: false }; setPreparingFiles(false); }, [actorId]);
@@ -114,7 +112,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
       // Layout heights stay correct during the dialog's scale animation.
       section.style.setProperty("--dl-footer-space", `${controls.offsetHeight}px`);
       if (header) section.style.setProperty("--dl-header-space", `${header.offsetHeight}px`);
-      // Growing drafts and attachment/queue controls change the reserved space,
+      // Growing drafts and attachment controls change the reserved space,
       // while the message viewport itself continues behind those controls.
       if (follow.current && scroll.current && scroll.current.scrollTop !== 0) scroll.current.scrollTop = 0;
       if (scroll.current) {
@@ -251,8 +249,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
         {!compact && canManage && <OwnerApprovalNotice actorId={actorId} onActor={onActor} onAccessRevoked={onAccessRevoked} />}
         {!atBottom && <Button className="dl-jump-bottom" variant="outline" size="icon" aria-label={t("conversation_pane.jump_to_latest")} onClick={bottom}><ArrowDownIcon /></Button>}
         {errors && <div className="dl-client-error" role="alert"><span>{errors}</span><Button size="sm" variant="ghost" onClick={() => { setLocalError(""); void chat.refresh(); }}><RefreshCwIcon data-icon="inline-start" />{t("app.retry")}</Button></div>}
-        <MessageQueue messages={queue} active={active} chat={chat} access={access} />
-        <Composer presentation={primaryView ? "primary" : "work"} key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} working={Boolean(active)} onStop={() => { if (active) void chat.cancel(active.id).catch(() => {}); }} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.actor_archived") : !ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : !primaryView ? t("conversation_pane.message_value0", {value0: name}) : t("composer.message")} compact={compact} />
+        <Composer key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} working={Boolean(active)} onStop={() => { if (active) void chat.cancel(active.id).catch(() => {}); }} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.actor_archived") : !ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : t("composer.message")} compact={compact} />
       </div>
   </section>;
 }

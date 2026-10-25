@@ -172,10 +172,10 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
       }
       const callId = newId(), resultId = newId(), started = now();
       const text = "已经交给工作对话检查，完成后会把结果发到这里。";
-      emitEvent(actorId, { type: "tool_started", message_id: reply.id, call_id: callId, name: "actors__send" });
+      emitEvent(actorId, { type: "tool_started", message_id: reply.id, call_id: callId, name: "actors__message" });
       if (!(await rest(run, 250))) return cancelRun(actor, user, reply, "");
-      addTool(actor, { id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__send", summary: "检查消息滚动与输入框布局", error: null, started_at_ms: started, finished_at_ms: now(), arguments: { actor_id: "research", content: user.content }, model_content: "请求已送达。", outcome: { actor_id: "research", name: "检查消息滚动与输入框布局" }, payload: null });
-      emitEvent(actorId, { type: "tool_finished", message_id: reply.id, call_id: callId, name: "actors__send", result_id: resultId, summary: "检查消息滚动与输入框布局", error: null, outcome: { actor_id: "research", name: "检查消息滚动与输入框布局" } });
+      addTool(actor, { id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__message", summary: "检查消息滚动与输入框布局", error: null, started_at_ms: started, finished_at_ms: now(), arguments: { actor_id: "research", content: user.content, show_to_user: true }, model_content: "请求已送达。", outcome: { actor_id: "research", name: "检查消息滚动与输入框布局", show_to_user: true }, payload: null });
+      emitEvent(actorId, { type: "tool_finished", message_id: reply.id, call_id: callId, name: "actors__message", result_id: resultId, summary: "检查消息滚动与输入框布局", error: null, outcome: { actor_id: "research", name: "检查消息滚动与输入框布局", show_to_user: true } });
       completeRun(actor, user, reply, text);
       return;
     }

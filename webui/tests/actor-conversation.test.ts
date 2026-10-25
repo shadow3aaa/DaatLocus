@@ -5,29 +5,26 @@ import { partitionConversationMessages } from "../src/lib/conversation-messages"
 const event = (seq: number, value: ActorEvent, actor = "root"): EventRecord => ({ seq, actor_id: actor, created_at_ms: seq, event: value });
 const message = (id: string, seq: number, status: MessageRecord["status"] = "queued"): MessageRecord => ({ id, seq, actor_id: "root", kind: "request", source: { kind: "user", }, reply_to: { kind: "user", }, in_reply_to: null, content: id, attachments: [], status, cancel_requested: false, reply: null, error: null, created_at_ms: 1, updated_at_ms: 1 });
 describe("conversation semantic reducer", () => {
-  test("all pending work inputs use the composer queue and move into the transcript when started", () => {
+  test("the initial page restores an older active input without a queue request", () => {
     const active = message("active", 1, "running");
-    const user = message("owner-queued", 2);
-    const actor = {...message("actor-queued", 3),source:{kind:"actor" as const,actor_id:"core"}};
-    const remote = {...message("remote-queued", 4),source:{kind:"remote_actor" as const,stage_id:"00000000-0000-4000-8000-000000000001",actor_id:"researcher",invocation_id:"00000000-0000-4000-8000-000000000002"}};
-    const guide = {...message("guidance-queued", 5),kind:"steering" as const,source:actor.source,in_reply_to:active.id};
-    const result = {...message("result-queued", 6),kind:"result" as const,source:actor.source};
-    const progress = {...message("progress-queued", 7),kind:"progress" as const,source:actor.source};
-    const done = message("completed", 8, "completed");
-    let state = conversationReducer(initialConversation("root"),{type:"queue",page:{items:[user,actor,remote,guide,result,progress],active,next_cursor:null}});
-    state = conversationReducer(state,{type:"message",message:done});
-    const queued = partitionConversationMessages(state.messages,false);
-    expect(queued.queue.map(item=>item.id)).toEqual(["owner-queued","actor-queued","remote-queued","guidance-queued","result-queued","progress-queued"]);
-    expect(queued.transcript.map(item=>item.id)).toEqual(["active","completed"]);
-    state = conversationReducer(state,{type:"event",record:event(10,{type:"message_updated",message_id:actor.id,status:"running"})});
-    // An in-flight queue page from before the start must not put the task back.
-    state = conversationReducer(state,{type:"queue",page:{items:[actor],next_cursor:null}});
-    const started = partitionConversationMessages(state.messages,false);
-    expect(started.queue.map(item=>item.id)).toEqual(["owner-queued","remote-queued","guidance-queued","result-queued","progress-queued"]);
-    expect(started.transcript.map(item=>item.id)).toEqual(["active","actor-queued","completed"]);
-    const primary = partitionConversationMessages(state.messages,true);
-    expect(primary.queue).toEqual([]);
-    expect(primary.transcript.map(item=>item.id)).toEqual(["active","owner-queued","actor-queued","remote-queued","guidance-queued","result-queued","progress-queued","completed"]);
+    let state = conversationReducer(initialConversation("root"), {type:"page",initial:true,page:{items:[message("latest", 100)],active,next_cursor:100,event_cursor:7}});
+    expect(state.messages.map(item=>item.id)).toEqual(["active","latest"]);
+    state = conversationReducer(state,{type:"message",message:{...active,updated_at_ms:2,status:"completed"}});
+    state = conversationReducer(state,{type:"page",page:{items:[message("older", 99)],active,next_cursor:99}});
+    expect(state.messages.find(item=>item.id === "active")?.status).toBe("completed");
+    expect(state.cursor).toBe(7);
+  });
+  test("all incoming messages stay in chronological conversation order before and after receipt", () => {
+    const inputs = [message("active", 1, "running"), message("owner", 2),
+      {...message("actor", 3),source:{kind:"actor" as const,actor_id:"core"}},
+      {...message("result", 4),kind:"result" as const},
+      {...message("progress", 5),kind:"progress" as const}];
+    let state = conversationReducer(initialConversation("root"), {type:"page",page:{items:inputs,next_cursor:null}});
+    for (const primary of [false,true]) expect(partitionConversationMessages(state.messages,primary).transcript.map(item=>item.id)).toEqual(["active","owner","actor","result","progress"]);
+    state = conversationReducer(state,{type:"event",record:event(10,{type:"message_updated",message_id:"actor",status:"running"})});
+    state = conversationReducer(state,{type:"page",page:{items:[inputs[2]],next_cursor:null}});
+    expect(state.messages.find(item=>item.id === "actor")?.status).toBe("running");
+    expect(partitionConversationMessages(state.messages,false).transcript.map(item=>item.id)).toEqual(["active","owner","actor","result","progress"]);
   });
   test("session markers identify the exact account login", () => {
     expect(sameAccessSession("owner:selected", {kind:"owner",session_id:"selected",manage:true})).toBe(true);

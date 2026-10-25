@@ -58,13 +58,12 @@
     "use_default_model": "跟随默认模型",
     "manage_models_and_connections": "在设置中管理模型与连接",
     "stop_task": "停止当前任务",
-    "queue_message": "加入队列",
     "send_message": "发送消息"
   },
   "conversation_content": {
     "completed": "已完成",
     "incomplete": "项未完成",
-    "queued": "已排队",
+    "queued": "待接收",
     "in_progress": "进行中",
     "stopped": "已停止",
     "interrupted": "已中断",
@@ -122,16 +121,11 @@
     "history_message": "消息",
     "jump_to_message": "跳转到消息：{{message}}",
     "add_a_model_to_send_messages": "配置模型后即可发送消息",
-    "message_value0": "给 {{value0}} 发消息…",
     "set_up_model": "添加一个模型，开始对话",
     "model_required": "尚未配置可用模型。",
     "start_conversation": "发送消息，开始对话。"
   },
   "conversation_turns": {
-    "guidance_pending": "引导等待应用",
-    "guidance_applied": "引导已应用",
-    "guidance_not_applied": "引导未应用",
-    "guidance_from_core_applied": "Daat Locus 的引导已应用",
     "model_authentication_failed": "模型凭据无效或已过期，请更新提供商设置。",
     "model_access_denied": "提供商拒绝了访问，请检查凭据及模型权限。",
     "model_certificate_revoked": "模型服务的证书已被吊销，请检查服务地址或网络代理。",
@@ -144,7 +138,6 @@
     "model_region_unavailable": "提供商不允许在当前地区使用此模型。",
     "model_request_failed": "模型请求失败，请检查提供商设置后重试。",
     "action_not_approved": "本次操作未获批准。",
-    "guidance_for_the_current_task": "用于引导当前任务",
     "this_task_is_incomplete_send_a_message_to_continue": "这次任务未完成，可继续发送消息。",
     "queued_message_withdrawn": "排队输入已撤回。",
     "task_stopped_completed_actions_are_retained": "任务已停止，已经完成的操作会保留。",
@@ -184,26 +177,7 @@
     "more_files_one": "再显示 {{count}} 个文件",
     "more_files_other": "再显示 {{count}} 个文件"
   },
-  "message_queue": {
-    "action_failed_try_again": "操作未完成，请重试。",
-    "queued_message_value0": "排队消息：{{value0}}",
-    "applying_guidance": "引导中…",
-    "guide_task_value0": "引导当前任务：{{value0}}",
-    "guide": "引导",
-    "add_this_message_to_the_current_task": "将此消息加入当前任务，保留已经完成的操作",
-    "no_task_is_running": "当前没有正在执行的任务",
-    "withdraw_queued_message_value0": "撤回排队消息：{{value0}}",
-    "withdraw": "撤回",
-    "more_message_actions_value0": "更多排队消息操作：{{value0}}",
-    "edit_message": "修改消息",
-    "clear_queue": "清空排队消息",
-    "edit_queued_message": "修改排队消息",
-    "cancel": "取消",
-    "save": "保存",
-    "queued_messages": "排队消息",
-    "could_not_load_the_queue": "排队消息暂时无法加载。",
-    "show_more_queued_messages": "显示更多排队消息"
-  },
+
   "owner_approval_notice": {
     "actors_awaiting_approval": "等待批准的 Actor",
     "actions_awaiting_approval": "项操作等待批准",
@@ -516,6 +490,7 @@
     "clear_data_description": "清除浏览器的 Cookie、缓存和网站数据。网站登录状态会退出，已下载的文件和历史记录会保留。"
   },
   "tool_presentation": {
+    "message_actor": "发送消息",
     "action_not_approved": "{{action}} · 未获批准",
     "archive_actor": "归档 Actor",
     "unarchive_actor": "取消归档 Actor",
@@ -667,6 +642,7 @@
     "max": "最高"
   },
   "app": {
+    "save": "保存",
     "none": "无",
     "low": "低",
     "medium": "中",
@@ -889,5 +865,43 @@
     "unsupported": "此设备不支持虚拟屏幕",
     "empty": "暂无虚拟屏幕",
     "waiting": "等待屏幕画面"
+  },
+  "usage_page": {
+    "title": "使用情况",
+    "history": "历史记录",
+    "history_description": "查看各代理任务的用量与额度消耗情况",
+    "range": "统计区间",
+    "range_days": "{{count}} 天",
+    "group_by": "按功能",
+    "group_agent": "按代理",
+    "group_cache": "按缓存",
+    "older": "更早",
+    "newer": "更新",
+    "chart_label": "最近 {{count}} 天的用量",
+    "chart_total": "区间合计 {{value}} tokens",
+    "segment_cached": "命中缓存",
+    "segment_uncached": "未命中缓存",
+    "loading": "正在汇总用量",
+    "failed": "暂时无法读取用量记录",
+    "no_data": "暂无用量记录",
+    "no_cache_data": "暂无缓存命中记录",
+    "agent_ranking": "代理用量排行",
+    "agent_ranking_description": "按所选区间的 token 用量排序，展开查看明细",
+    "cache_ranking": "缓存率排行",
+    "cache_ranking_description": "缓存命中率越高，重复上下文消耗的额度越少",
+    "column_agent": "代理",
+    "column_share": "占区间用量",
+    "column_used": "已用额度",
+    "column_cache_rate": "缓存命中率",
+    "column_cached": "缓存 tokens",
+    "detail_used": "区间用量",
+    "detail_input": "输入 tokens",
+    "detail_cached": "命中缓存 tokens",
+    "detail_output": "输出 tokens",
+    "detail_reasoning": "推理 tokens",
+    "detail_total": "累计用量",
+    "detail_cache_rate": "缓存命中率",
+    "archived": "已归档",
+    "unavailable": "—"
   }
 }

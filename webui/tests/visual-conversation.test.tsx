@@ -4,7 +4,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { PrimaryTranscript, PrimaryTurn, WorkTurn } from "../src/components/conversation-turns";
 import { WorkRound } from "../src/components/work-round";
 import { Activities } from "../src/components/conversation-content";
-import { MessageQueue } from "../src/components/message-queue";
 import { Composer } from "../src/components/composer";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import { activityTools, isLiveReasoning, mergeActivity, workActivityTimeline, workTimeline } from "../src/lib/work-timeline";
@@ -14,6 +13,19 @@ const message: MessageRecord = { seq: 1,id:"m",actor_id:"root",source:{kind:"use
 const event = (seq:number,event:EventRecord["event"]): EventRecord => ({seq,actor_id:"root",created_at_ms:seq,event});
 const memory = (): Storage => { const data = new Map<string,string>(); return { get length(){return data.size;},clear(){data.clear();},getItem(key){return data.get(key)??null;},key(index){return [...data.keys()][index]??null;},removeItem(key){data.delete(key);},setItem(key,value){data.set(key,value);} }; };
 describe("fixed presentation and chronological source", () => {
+  test("Core shows an explicit delegation once and keeps internal collaboration out of task cards", () => {
+    const initial = {...message,actor_id:"core",id:"initial",content:"Delegate work",status:"completed" as const};
+    const internal = {...initial,id:"followup",source:{kind:"actor" as const,actor_id:"research"},reply_to:{kind:"user" as const},content:"Internal evidence"};
+    const tool = (messageId: string, show: boolean) => ({id:`tool-${messageId}`,message_id:messageId,call_id:messageId,name:"actors__message",summary:"",error:null,status:"completed" as const,outcome:{actor_id:"research",name:"TASK_REFERENCE",message_id:messageId,show_to_user:show}});
+    const chat = {messages:[initial,internal],tools:[tool(initial.id,true),tool(internal.id,false)],approvals:[],events:[]} as unknown as Parameters<typeof PrimaryTranscript>[0]["chat"];
+    const html = renderToStaticMarkup(<PrimaryTranscript messages={[initial,internal]} working={false} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
+    expect(html.match(/aria-label="[^"]*TASK_REFERENCE[^"]*"/g)).toHaveLength(1);
+    expect(html).not.toContain("Internal evidence");
+    expect(renderToStaticMarkup(<PrimaryTurn message={internal} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />)).toBe("");
+    const reply = renderToStaticMarkup(<PrimaryTurn message={{...internal,reply:"Meaningful user update"}} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
+    expect(reply).toContain("Meaningful user update");
+    expect(reply).not.toContain("TASK_REFERENCE");
+  });
   test("Core has one conversation status after new inputs even while an older input is running", () => {
     const old = {...message,actor_id:"core",content:"OLDER_INPUT"};
     const latest = {...old,id:"latest",status:"queued" as const,content:"LATEST_INPUT"};
@@ -27,44 +39,20 @@ describe("fixed presentation and chronological source", () => {
     expect(render([old,latest], false)).not.toContain('role="status"');
     expect(render([old,latest], true, "")).not.toContain('role="status"');
   });
-  test("a busy Core remains an IM composer while a work Actor retains stop controls", () => {
-    const props: Parameters<typeof Composer>[0] = {value:"",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,working:true,onStop:()=>{},canManage:false,models:[],modelName:"",onModelChange:()=>{}};
-    const render = (presentation: "primary" | "work", value = "") => renderToStaticMarkup(<Composer {...props} presentation={presentation} value={value} />);
-    const stop = `aria-label="${i18n.t("composer.stop_task")}"`;
-    const send = `aria-label="${i18n.t("composer.send_message")}"`;
-    expect(render("primary")).toContain(send);
-    expect(render("primary")).not.toContain(stop);
-    expect(render("primary", "new input")).toContain(send);
-    expect(render("work")).toContain(stop);
+  test("the shared composer can send a new message while work is running", () => {
+    const props: Parameters<typeof Composer>[0] = {value:"New input",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,working:true,onStop:()=>{},canManage:false,models:[],modelName:"",onModelChange:()=>{}};
+    const html = renderToStaticMarkup(<Composer {...props} />);
+    expect(html).toContain(`aria-label="${i18n.t("composer.send_message")}"`);
+    expect(html).not.toContain(`aria-label="${i18n.t("composer.stop_task")}"`);
+    expect(html).not.toContain('disabled=""');
   });
   test("Core shows newly queued user messages before the running input finishes", () => {
     const queued = {...message,id:"new-input",actor_id:"core",status:"queued" as const,content:"NEW_IM_INPUT"};
     const chat = {messages:[message,queued],tools:[],approvals:[],events:[]} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
     expect(renderToStaticMarkup(<PrimaryTurn message={queued} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />)).toContain("NEW_IM_INPUT");
   });
-  test("work history identifies applied and unapplied guidance", () => {
-    const chat = {messages:[],tools:[],approvals:[],events:[],toolNext:{}} as unknown as Parameters<typeof WorkTurn>[0]["chat"];
-    for (const [kind,status,key] of [
-      ["steering","completed","conversation_turns.guidance_applied"],
-      ["steering","cancelled","conversation_turns.guidance_not_applied"],
-    ] as const) {
-      const input = {...message,source:{kind:"actor" as const,actor_id:"core"},kind,status,reply:null,content:"Added constraint CORE_GUIDANCE"};
-      const html = renderToStaticMarkup(<WorkTurn message={input} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
-      expect(html).toContain(`role="status">${i18n.t(key)}`);
-      expect(html).toContain("CORE_GUIDANCE");
-      expect(html).not.toContain(i18n.t("conversation_content.ready"));
-    }
-  });
-  test("Core presents guidance as a compact request reference instead of its tool pipeline", () => {
-    const stage="00000000-0000-4000-8000-000000000002";
-    const update={...message,actor_id:"core",status:"completed" as const,reply:null};
-    const tool={seq:1,id:"guide-result",message_id:update.id,call_id:"guide-call",name:"actors__steer",summary:"Guidance awaiting application",error:null,outcome:{actor_id:"worker",conversation_url:`/stages/${stage}/actors/worker`,message_id:"guide",target_message_id:"original",kind:"steering",status:"queued"}};
-    const chat={messages:[update],tools:[tool],approvals:[],events:[]} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
-    const html=renderToStaticMarkup(<PrimaryTurn message={update} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
-    expect(html).toContain('class="dl-actor-reference"');
-    expect(html).toContain(i18n.t("conversation_turns.guidance_for_the_current_task"));
-    expect(html).not.toContain("Guidance awaiting application");
-  });
+
+
   test("search filters individual conversation sides and work presentation hides intermediate disclosures", () => {
     const record = {...message, content:"UNMATCHED_USER_INPUT", reply:"MATCHED_FINAL_REPLY",status:"completed" as const};
     const chat = {messages:[],tools:[],approvals:[],events:[],toolNext:{}} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
@@ -75,33 +63,9 @@ describe("fixed presentation and chronological source", () => {
       expect(html).not.toContain(" aria-expanded=");
     }
   });
-  test("queue previews use authorized resource addresses instead of attachment URLs", () => {
-    const queued = {...message,status:"queued" as const,attachments:[{id:"image-id",name:"preview.png",media_type:"image/png",size_bytes:42,uri:"https://untrusted.example/private"}]};
-    const chat = {queueCursor:null} as unknown as Parameters<typeof MessageQueue>[0]["chat"];
-    const html = renderToStaticMarkup(<TooltipProvider><MessageQueue messages={[queued]} active={message} chat={chat} access={{kind:"owner",manage:true}} /></TooltipProvider>);
-    expect(html).toContain("/v1/actors/root/resources/image-id");expect(html).not.toContain("untrusted.example");
-  });
-  test("collaborator requests share queue rows while only user inputs expose mutation controls", () => {
-    const chat = {queueCursor:null} as unknown as Parameters<typeof MessageQueue>[0]["chat"];
-    const owner = {...message,id:"owner-queued",status:"queued" as const,content:"OWNER_QUEUE_TEXT"};
-    const collaborator = {...owner,id:"actor-queued",source:{kind:"actor" as const,actor_id:"core"},content:"ACTOR_QUEUE_TEXT"};
-    const guide = {...collaborator,id:"guide-queued",kind:"steering" as const,content:"GUIDE_QUEUE_TEXT",in_reply_to:message.id};
-    const render = (messages:MessageRecord[]) => renderToStaticMarkup(<TooltipProvider><MessageQueue messages={messages} active={message} chat={chat} access={{kind:"owner",manage:true}} /></TooltipProvider>);
-    const queued = render([collaborator,guide]);
-    expect(queued).toContain("ACTOR_QUEUE_TEXT");
-    expect(queued).toContain("GUIDE_QUEUE_TEXT");
-    expect(queued).toContain(i18n.t("message_queue.applying_guidance"));
-    expect(queued).not.toContain(`aria-label="${i18n.t("message_queue.withdraw_queued_message_value0",{value0:collaborator.content})}"`);
-    expect(queued).not.toContain(`aria-label="${i18n.t("message_queue.guide_task_value0",{value0:collaborator.content})}"`);
-    const own = render([owner]);
-    expect(own).toContain(`aria-label="${i18n.t("message_queue.withdraw_queued_message_value0",{value0:owner.content})}"`);
-    expect(own).toContain(`aria-label="${i18n.t("message_queue.guide_task_value0",{value0:owner.content})}"`);
-  });
-  test("queue pagination stays available after all loaded inputs start running", () => {
-    const chat = {queueCursor:24} as unknown as Parameters<typeof MessageQueue>[0]["chat"];
-    const html = renderToStaticMarkup(<TooltipProvider><MessageQueue messages={[]} active={message} chat={chat} access={{kind:"owner",manage:true}} /></TooltipProvider>);
-    expect(html).toContain(i18n.t("message_queue.show_more_queued_messages"));
-  });
+
+
+
   test("primary IM excludes live model text, reasoning and tool pipeline", () => {
     const chat = {messages:[],tools:[],approvals:[],generations:{m:{assistant:"INTERNAL_STAGE",reasoning:"INTERNAL_THOUGHT"}},events:[],amend:async()=>{},refresh:async()=>{}} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
     const html = renderToStaticMarkup(<PrimaryTurn message={message} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);

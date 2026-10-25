@@ -21,7 +21,6 @@ export type ConversationState = {
   approvals: api.ApprovalRecord[];
   cursor: number;
   nextCursor: number | null;
-  queueCursor: number | null;
   deleted: boolean;
 };
 export type ConversationAction = {
@@ -32,11 +31,8 @@ export type ConversationAction = {
   actor: api.ActorDetail;
 } | {
   type: "page";
-  page: api.Page<api.MessageRecord>;
+  page: api.ConversationPage;
   initial?: boolean;
-} | {
-  type: "queue";
-  page: api.Page<api.MessageRecord> & { active?: api.MessageRecord | null };
 } | {
   type: "message";
   message: api.MessageRecord;
@@ -56,7 +52,7 @@ export type ConversationAction = {
   type: "cursor";
   cursor: number;
 };
-export function initialConversation(actorId: string | null): ConversationState { return { actorId, actor: null, messages: [], events: [], generations: {}, tools: [], toolNext: {}, approvals: [], cursor: 0, nextCursor: null, queueCursor: null, deleted: false }; }
+export function initialConversation(actorId: string | null): ConversationState { return { actorId, actor: null, messages: [], events: [], generations: {}, tools: [], toolNext: {}, approvals: [], cursor: 0, nextCursor: null, deleted: false }; }
 const terminal = (status: api.MessageStatus) => !["queued", "running"].includes(status);
 function mergeMessages(current: api.MessageRecord[], incoming: api.MessageRecord[]): api.MessageRecord[] {
   const values = new Map(current.map(message => [message.id, message]));
@@ -80,10 +76,9 @@ export function conversationReducer(state: ConversationState, action: Conversati
     case "reset": return initialConversation(action.actorId);
     case "actor": return action.actor.id === state.actorId ? { ...state, actor: action.actor } : state;
     case "cursor": return action.cursor > state.cursor ? { ...state, cursor: action.cursor } : state;
-    case "page": return { ...state, messages: mergeMessages(state.messages, action.page.items.filter(message => message.actor_id === state.actorId)), nextCursor: action.page.next_cursor,
+    case "page": return { ...state, messages: mergeMessages(state.messages, [...action.page.items, ...(action.page.active ? [action.page.active] : [])].filter(message => message.actor_id === state.actorId)), nextCursor: action.page.next_cursor,
       cursor: action.initial ? Math.max(state.cursor, action.page.event_cursor ?? 0) : state.cursor };
     case "message": return action.message.actor_id === state.actorId ? { ...state, messages: mergeMessages(state.messages, [action.message]) } : state;
-    case "queue": return { ...state, messages: mergeMessages(state.messages, [...action.page.items, ...(action.page.active ? [action.page.active] : [])].filter(message => message.actor_id === state.actorId)), queueCursor: action.page.next_cursor };
     case "tools": return action.actorId === state.actorId ? { ...state, tools: mergeTools(state.tools, action.tools.map(tool => ({ ...tool, status: "completed" }))), toolNext: { ...state.toolNext, [action.messageId]: action.nextCursor } } : state;
     case "approval": {
       if (action.approval.actor_id !== state.actorId)
@@ -320,8 +315,9 @@ export function useActorConversation(actorId: string | null, options: Conversati
           for (const approval of approvalPage.items)
             dispatch({ type: "approval", approval });
           // Small references only. Details remain unloaded until explicitly opened.
-          for (let start = 0; start < page.items.length; start += 4)
-            await Promise.all(page.items.slice(start, start + 4).map(async (message) => {
+          const visible = [...new Map([...page.items, ...(page.active ? [page.active] : [])].map(message => [message.id, message])).values()];
+          for (let start = 0; start < visible.length; start += 4)
+            await Promise.all(visible.slice(start, start + 4).map(async (message) => {
               const refs = await api.listToolSummaries(actorId!, message.id, { limit: 30, signal: abort.signal });
               if (valid(generation))
                 dispatch({ type: "tools", actorId: actorId!, messageId: message.id, nextCursor: refs.next_cursor, tools: refs.items });
@@ -486,32 +482,6 @@ export function useActorConversation(actorId: string | null, options: Conversati
     }
   }, [actorId, enabled, draftEntry, draftKey, valid]);
   const removeAttachment = useCallback((id: string) => { const entry = draftEntry(); entry.attachments = entry.attachments.filter(item => item.id !== id); setAttachments([...entry.attachments]); notifyDraft(draftKey); }, [draftEntry, draftKey]);
-  const amend = useCallback(async (message: api.MessageRecord, content?: string) => {
-    if (!actorId) return;
-    const generation = epoch.current;
-    const updated = content === undefined ? await api.withdrawQueuedMessage(actorId, message) : await api.editQueuedMessage(actorId, message, content);
-    if (valid(generation)) dispatch({ type: "message", message: updated });
-    return updated;
-  }, [actorId, valid]);
-  const steer = useCallback(async (message: api.MessageRecord, target: string) => {
-    if (!actorId) return;
-    const generation = epoch.current;
-    const updated = await api.steerQueuedMessage(actorId, message, target);
-    if (valid(generation)) dispatch({ type: "message", message: updated });
-    return updated;
-  }, [actorId, valid]);
-  const loadQueue = useCallback(async (after?: number) => {
-    if (!actorId) return;
-    const generation = epoch.current;
-    const page = await api.listQueuedMessages(actorId, { after, signal: controller.current?.signal });
-    if (valid(generation)) dispatch({ type: "queue", page });
-  }, [actorId, valid]);
-  useEffect(() => {
-    let live = true;
-    if (enabled && actorId && !loading) void loadQueue().catch(failure => { if (live) setError(errorText(failure)); });
-    return () => { live = false; };
-  }, [actorId, enabled, loading, loadQueue, reload]);
-  const clearQueue = useCallback(async () => { if (!actorId) return; const result = await api.clearQueuedMessages(actorId); await refresh(); return result; }, [actorId, refresh]);
   const loadToolDetails = useCallback(async (resultId: string) => {
     if (!actorId)
       return;
@@ -528,6 +498,6 @@ export function useActorConversation(actorId: string | null, options: Conversati
   return { ...(current ? state : initialConversation(actorId)), live: current ? live : new Map<string, GenerationDraft>(),
     draft: current ? draft : draftEntry().text, setDraft, attachments: current ? attachments : draftEntry().attachments, uploading, addAttachments, removeAttachment,
     loading: loading || Boolean(actorId && enabled && !current), loadingOlder, hasMore: current && state.nextCursor !== null, more: current && state.nextCursor !== null, loadOlder, loadMore: loadOlder,
-    sending, send, cancel, amend, steer, loadQueue, clearQueue, error, streamStatus, connected: streamStatus === "connected", refresh, refreshActor,
+    sending, send, cancel, error, streamStatus, connected: streamStatus === "connected", refresh, refreshActor,
     loadTools, loadMoreTools, loadToolDetails, fetchResult: loadToolDetails, toolDetails: current ? toolDetails : {} };
 }

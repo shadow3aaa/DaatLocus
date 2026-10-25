@@ -15,6 +15,8 @@ import type {
   MessageRecord,
   Page,
   SetupConfigRequest,
+  TokenUsage,
+  TokenUsageInfo,
 } from "../src/lib/actor-api";
 import type { CoreStatus, Device, DeviceSettings, PublicLoginStatus, StageInfo } from "../src/lib/stage-api";
 import { cancelTurn, isActorBusy, submitTurn } from "./engine";
@@ -156,10 +158,34 @@ function attachmentsFromIds(ids: unknown): Attachment[] {
 }
 
 const RE_ACTOR = /^\/v1\/actors\/([^/]+)$/;
+
+/** Deterministic per-agent usage fixture; the Usage page consumes the real wire shape. */
+function mockUsage(id: string, _createdAt: number): TokenUsageInfo {
+  let seed = 0;
+  for (const character of id) seed = (seed * 31 + character.charCodeAt(0)) >>> 0;
+  const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+  const today = new Date();
+  const daily: { date: string; usage: TokenUsage }[] = [];
+  const total: TokenUsage = { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, total_tokens: 0 };
+  for (let offset = 29; offset >= 0; offset--) {
+    const day = new Date(today.getFullYear(), today.getMonth(), today.getDate() - offset);
+    // Quiet days stay absent, like real history.
+    if (random() < .3) continue;
+    const input = Math.round((60_000 + random() * 240_000) * (1 + (29 - offset) / 40));
+    const cached = Math.round(input * (.45 + random() * .4));
+    const output = Math.round(input * (.08 + random() * .1));
+    const reasoning = Math.round(output * (.15 + random() * .3));
+    const usage: TokenUsage = { input_tokens: input, cached_input_tokens: cached, output_tokens: output, reasoning_output_tokens: reasoning, total_tokens: input + output };
+    for (const key of Object.keys(total) as (keyof TokenUsage)[]) total[key] += usage[key];
+    daily.push({ date: `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`, usage });
+  }
+  return { total_token_usage: total, last_token_usage: daily.at(-1)?.usage ?? { ...total, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, total_tokens: 0 }, model_context_window: 200_000, daily_token_usage: daily };
+}
+const RE_ACTOR_USAGE = /^\/v1\/actors\/([^/]+)\/usage$/;
 const RE_MESSAGES = /^\/v1\/actors\/([^/]+)\/messages$/;
 const RE_MESSAGE_SEARCH = /^\/v1\/actors\/([^/]+)\/messages\/search$/;
 const RE_MESSAGE = /^\/v1\/actors\/([^/]+)\/messages\/([^/]+)$/;
-const RE_MESSAGE_ACTION = /^\/v1\/actors\/([^/]+)\/messages\/([^/]+)\/(cancel|edit|withdraw|steer)$/;
+const RE_MESSAGE_ACTION = /^\/v1\/actors\/([^/]+)\/messages\/([^/]+)\/(cancel|edit|withdraw)$/;
 const RE_ACTIVITY = /^\/v1\/actors\/([^/]+)\/messages\/([^/]+)\/activity$/;
 const RE_RESULTS = /^\/v1\/actors\/([^/]+)\/messages\/([^/]+)\/results$/;
 const RE_RESULT = /^\/v1\/actors\/([^/]+)\/results\/([^/]+)$/;
@@ -331,6 +357,12 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     const next = start + limit < store.order.length && ids.length ? ids[ids.length - 1] : null;
     return json({ items, next_cursor: next } satisfies Page<NonNullable<ReturnType<typeof getActor>>["summary"], string>);
   }
+  if ((match = RE_ACTOR_USAGE.exec(path))) {
+    const actor = getActor(decodeSegment(match[1]));
+    if (!actor) return notFound("Unknown actor");
+    if (method !== "GET") return null;
+    return json(mockUsage(actor.summary.id, actor.summary.created_at_ms));
+  }
   if ((match = RE_ACTOR.exec(path))) {
     const actor = getActor(decodeSegment(match[1]));
     if (!actor) return notFound("Unknown actor");
@@ -368,7 +400,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
       const limit = limitParam(url, "limit", 30);
       if ((before !== null && before < 0) || limit === null) return invalidRequest();
       const page = pageDesc(actor.messages, before, limit);
-      return json({ ...page, event_cursor: actor.eventSeq });
+      return json({ ...page, ...(before === null ? {active:[...actor.messages].reverse().find(message=>message.status === "running") ?? null} : {}), event_cursor: actor.eventSeq });
     }
     if (method === "POST") {
       // Backend (src/service/mod.rs): optional key, 1..=128 ASCII graphic.
@@ -447,10 +479,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
       emitEvent(actor.summary.id, { type: "message_updated", message_id: message.id, status: "cancelled" });
       return json(message);
     }
-    // steer: re-target a queued message as steering input for a running turn.
-    if (typeof body.target_message_id !== "string") return invalidRequest("target_message_id must be a string");
-    touchMessage(message, { kind: "steering", in_reply_to: body.target_message_id });
-    return json(message);
+    return invalidRequest("Unknown message action");
   }
   if ((match = RE_ACTIVITY.exec(path)) && method === "GET") {
     const actor = getActor(decodeSegment(match[1]));

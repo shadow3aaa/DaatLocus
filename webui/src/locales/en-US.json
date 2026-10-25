@@ -58,13 +58,12 @@
     "use_default_model": "Use default model",
     "manage_models_and_connections": "Manage models and connections",
     "stop_task": "Stop task",
-    "queue_message": "Queue message",
     "send_message": "Send message"
   },
   "conversation_content": {
     "completed": "Completed",
     "incomplete": "incomplete",
-    "queued": "Queued",
+    "queued": "Awaiting receipt",
     "in_progress": "In progress",
     "stopped": "Stopped",
     "interrupted": "Interrupted",
@@ -122,16 +121,11 @@
     "history_message": "Message",
     "jump_to_message": "Jump to message: {{message}}",
     "add_a_model_to_send_messages": "Add a model to send messages",
-    "message_value0": "Message {{value0}}…",
     "set_up_model": "Add a model to start",
     "model_required": "No model is configured yet.",
     "start_conversation": "Send a message to start a conversation."
   },
   "conversation_turns": {
-    "guidance_pending": "Guidance awaiting application",
-    "guidance_applied": "Guidance applied",
-    "guidance_not_applied": "Guidance not applied",
-    "guidance_from_core_applied": "Guidance from Daat Locus applied",
     "model_authentication_failed": "Model credentials are invalid or expired. Update the provider settings.",
     "model_access_denied": "The provider denied access. Check the credentials and model permissions.",
     "model_certificate_revoked": "The model service certificate was revoked. Check the service address or network proxy.",
@@ -144,7 +138,6 @@
     "model_region_unavailable": "The provider does not allow this model in your current region.",
     "model_request_failed": "The model request failed. Check the provider settings and try again.",
     "action_not_approved": "This action was not approved.",
-    "guidance_for_the_current_task": "Guidance for the current task",
     "this_task_is_incomplete_send_a_message_to_continue": "This task is incomplete. Send a message to continue.",
     "queued_message_withdrawn": "Queued message withdrawn.",
     "task_stopped_completed_actions_are_retained": "Task stopped. Completed actions are retained.",
@@ -184,26 +177,7 @@
     "more_files_one": "Show {{count}} more file",
     "more_files_other": "Show {{count}} more files"
   },
-  "message_queue": {
-    "action_failed_try_again": "Action failed. Try again.",
-    "queued_message_value0": "Queued message: {{value0}}",
-    "applying_guidance": "Applying guidance…",
-    "guide_task_value0": "Guide task: {{value0}}",
-    "guide": "Guide",
-    "add_this_message_to_the_current_task": "Add this message to the current task",
-    "no_task_is_running": "No task is running",
-    "withdraw_queued_message_value0": "Withdraw queued message: {{value0}}",
-    "withdraw": "Withdraw",
-    "more_message_actions_value0": "More message actions: {{value0}}",
-    "edit_message": "Edit message",
-    "clear_queue": "Clear queue",
-    "edit_queued_message": "Edit queued message",
-    "cancel": "Cancel",
-    "save": "Save",
-    "queued_messages": "Queued messages",
-    "could_not_load_the_queue": "Could not load the queue.",
-    "show_more_queued_messages": "Show more queued messages"
-  },
+
   "owner_approval_notice": {
     "actors_awaiting_approval": "Actors awaiting approval",
     "actions_awaiting_approval": "actions awaiting approval",
@@ -516,6 +490,7 @@
     "clear_data_description": "Clear browser cookies, cache and site data. You will be signed out of websites. Downloads and browsing history will remain."
   },
   "tool_presentation": {
+    "message_actor": "Message Actor",
     "action_not_approved": "{{action}} · Not approved",
     "archive_actor": "Archive Actor",
     "unarchive_actor": "Unarchive Actor",
@@ -667,6 +642,7 @@
     "max": "Maximum"
   },
   "app": {
+    "save": "Save",
     "none": "None",
     "low": "Low",
     "medium": "Medium",
@@ -889,5 +865,43 @@
     "unsupported": "Virtual displays are not supported on this device",
     "empty": "No virtual displays",
     "waiting": "Waiting for an image"
+  },
+  "usage_page": {
+    "title": "Usage",
+    "history": "History",
+    "history_description": "See how each agent uses tokens and quota",
+    "range": "Range",
+    "range_days": "{{count}} days",
+    "group_by": "Group by",
+    "group_agent": "By agent",
+    "group_cache": "By cache",
+    "older": "Older",
+    "newer": "Newer",
+    "chart_label": "Token usage over the last {{count}} days",
+    "chart_total": "{{value}} tokens in range",
+    "segment_cached": "Cached",
+    "segment_uncached": "Uncached",
+    "loading": "Collecting usage",
+    "failed": "Usage records are unavailable right now",
+    "no_data": "No usage recorded yet",
+    "no_cache_data": "No cache hits recorded yet",
+    "agent_ranking": "Agent usage ranking",
+    "agent_ranking_description": "Ordered by tokens used in the selected range; expand a row for details",
+    "cache_ranking": "Cache hit rate ranking",
+    "cache_ranking_description": "A higher hit rate means repeated context costs less quota",
+    "column_agent": "Agent",
+    "column_share": "Share of usage",
+    "column_used": "Used",
+    "column_cache_rate": "Cache hit rate",
+    "column_cached": "Cached tokens",
+    "detail_used": "Tokens in range",
+    "detail_input": "Input tokens",
+    "detail_cached": "Cached tokens",
+    "detail_output": "Output tokens",
+    "detail_reasoning": "Reasoning tokens",
+    "detail_total": "All-time tokens",
+    "detail_cache_rate": "Cache hit rate",
+    "archived": "Archived",
+    "unavailable": "—"
   }
 }

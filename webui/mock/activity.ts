@@ -99,7 +99,7 @@ export function seedProseActivityPreview(actor: ActorStore) {
 export function seedGuidanceActivityPreview(actor: ActorStore) {
   seedActivityPreview(actor);
   const state = preview!;
-  const guide = addMessage(actor,{kind:"steering",source:{kind:"user"},reply_to:{kind:"user"},in_reply_to:state.input.id,content:"无需截图，直接汇报吧。",status:"completed"});
+  const guide = addMessage(actor,{kind:"request",source:{kind:"user"},reply_to:{kind:"user"},in_reply_to:state.input.id,content:"无需截图，直接汇报吧。",status:"completed"});
   emitEvent(actor.summary.id,{type:"message_added",message_id:guide.id});
   emitEvent(actor.summary.id,{type:"message_updated",message_id:guide.id,status:"completed"});
   text(state,"assistant","收到，接下来只核对结果并汇报，不再准备截图。");

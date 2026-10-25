@@ -105,7 +105,7 @@ export type MessageRecord = {
   actor_id: string;
   source: MessageSource;
   reply_to: ReplyTarget;
-  kind: "request" | "result" | "steering" | "delivery" | "progress";
+  kind: "request" | "result" | "delivery" | "progress";
   in_reply_to: string | null;
   content: string;
   attachments: Attachment[];
@@ -347,27 +347,41 @@ export const listActors = (options: FetchOptions & {
   after?: string;
   limit?: number;
 } = {}) => request<Page<ActorSummary, string>>(query("/v1/actors", { after: options.after, limit: options.limit ?? 50 }), options);
+export type TokenUsage = {
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  reasoning_output_tokens: number;
+  total_tokens: number;
+};
+export type DailyTokenUsage = {
+  date: string;
+  usage: TokenUsage;
+};
+export type TokenUsageInfo = {
+  total_token_usage: TokenUsage;
+  last_token_usage: TokenUsage;
+  model_context_window: number | null;
+  daily_token_usage: DailyTokenUsage[];
+};
+export const getActorUsage = (id: string, options?: FetchOptions) => request<TokenUsageInfo>(`${actorPath(id)}/usage`, options);
 export const getActor = (id: string, options?: FetchOptions) => request<ActorDetail>(actorPath(id), options);
 export const patchActorPreferences = (id: string, preferences: {
   model?: string | null;
   // Account-wide; accepted only for Core.
   approval_mode?: ApprovalMode;
 }, options?: FetchOptions) => request<ActorDetail>(actorPath(id), { ...options, method: "PATCH", body: preferences });
+export type ConversationPage = Page<MessageRecord> & { active?: MessageRecord | null };
 export const listMessages = (actor: string, options: FetchOptions & {
   before?: number;
   limit?: number;
-} = {}) => request<Page<MessageRecord>>(query(`${actorPath(actor)}/messages`, { before: options.before, limit: options.limit ?? 30 }), options);
+} = {}) => request<ConversationPage>(query(`${actorPath(actor)}/messages`, { before: options.before, limit: options.limit ?? 30 }), options);
 export const getMessage = (actor: string, id: string, options?: FetchOptions) => request<MessageRecord>(`${actorPath(actor)}/messages/${segment(id)}`, options);
 export const sendMessage = (actor: string, input: {
   content: string;
   attachments: string[];
 }, idempotencyKey: string, options?: FetchOptions) => request<MessageRecord>(`${actorPath(actor)}/messages`, { ...options, method: "POST", body: input, headers: { "Idempotency-Key": idempotencyKey } });
 export const cancelMessage = (actor: string, id: string, options?: FetchOptions) => request<void>(`${actorPath(actor)}/messages/${segment(id)}/cancel`, { ...options, method: "POST", empty: true });
-export const editQueuedMessage = (actor: string, message: MessageRecord, content: string, options?: FetchOptions) => request<MessageRecord>(`${actorPath(actor)}/messages/${segment(message.id)}/edit`, { ...options, method: "POST", body: { content, attachments: message.attachments.map(item => item.id), expected_updated_at_ms: message.updated_at_ms } });
-export const withdrawQueuedMessage = (actor: string, message: MessageRecord, options?: FetchOptions) => request<MessageRecord>(`${actorPath(actor)}/messages/${segment(message.id)}/withdraw`, { ...options, method: "POST", body: { expected_updated_at_ms: message.updated_at_ms } });
-export const clearQueuedMessages = (actor: string, options?: FetchOptions) => request<{ cancelled_count: number }>(`${actorPath(actor)}/queue/clear`, { ...options, method: "POST" });
-export const listQueuedMessages = (actor: string, options: FetchOptions & { after?: number; limit?: number } = {}) => request<Page<MessageRecord> & { active?: MessageRecord | null }>(query(`${actorPath(actor)}/queue`, { after: options.after, limit: options.limit ?? 24 }), options);
-export const steerQueuedMessage = (actor: string, message: MessageRecord, target: string, options?: FetchOptions) => request<MessageRecord>(`${actorPath(actor)}/messages/${segment(message.id)}/steer`, { ...options, method: "POST", body: { target_message_id: target, expected_updated_at_ms: message.updated_at_ms } });
 export const listMessageActivity = (actor: string, message: string, options: FetchOptions & { after?: number; limit?: number } = {}) => request<Page<EventRecord>>(query(`${actorPath(actor)}/messages/${segment(message)}/activity`, { after: options.after, limit: options.limit ?? 100 }), options);
 export const validateAttachment = async (actor: string, item: Attachment, options?: FetchOptions) => {
   const uri = resourceUrl(actor, item.id);

@@ -15,11 +15,11 @@ export function modeLabel(mode: ApprovalMode): string {
 }
 function effortLabel(value?: string): string { return value && ["none","minimal","low","medium","high","xhigh","max"].includes(value) ? t(`effort.${value}`) : value || ""; }
 
-export function Composer({ value, onValueChange, onSubmit, attachments, onFiles, onRemoveAttachment, uploading, busy, working, onStop, disabled, submissionDisabled, canManage, models, modelName, onModelChange, placeholder = t("composer.message"), compact = false, presentation = "work" }: {
+export function Composer({ value, onValueChange, onSubmit, attachments, onFiles, onRemoveAttachment, uploading, busy, working, onStop, disabled, submissionDisabled, canManage, models, modelName, onModelChange, placeholder = t("composer.message"), compact = false }: {
   value: string; onValueChange(value: string): void; onSubmit(): void; attachments: Attachment[]; onFiles(files: File[]): void;
   onRemoveAttachment(id: string): void; uploading: boolean; busy: boolean; working: boolean; onStop(): void;
   disabled?: boolean; submissionDisabled?: boolean; canManage: boolean;
-  models: ComposerModel[]; modelName: string; onModelChange(name: string): void; placeholder?: string; compact?: boolean; presentation?: "primary" | "work";
+  models: ComposerModel[]; modelName: string; onModelChange(name: string): void; placeholder?: string; compact?: boolean;
 }) {
   const text = useRef<HTMLTextAreaElement>(null);
   const file = useRef<HTMLInputElement>(null);
@@ -43,7 +43,7 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
   function keyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); if (canSend) onSubmit(); }
   }
-  return <div className={cn("dl-composer-wrap", compact && "dl-composer-compact", presentation === "primary" && "dl-primary-composer")}>
+  return <div className={cn("dl-composer-wrap", compact && "dl-composer-compact", "dl-primary-composer")}>
     <InputGroup className={cn("dl-composer", dragging && "dl-composer-dragging")} onDragOver={event => { if (!disabled && !uploading && event.dataTransfer.types.includes("Files")) { event.preventDefault(); setDragging(true); } }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); if (!disabled && !uploading) onFiles(Array.from(event.dataTransfer.files)); }}>
       {(attachments.length > 0 || uploading) && <InputGroupAddon align="block-start" className="dl-composer-attachments">
         {attachments.map(item => <div className="dl-attachment" key={item.id}>
@@ -54,20 +54,20 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
       </InputGroupAddon>}
       <InputGroupTextarea ref={text} aria-label={t("composer.message_2")} placeholder={placeholder} value={value} disabled={disabled} onChange={event => onValueChange(event.target.value)} onKeyDown={keyDown} onPaste={event => { const files = Array.from(event.clipboardData.files); if (files.length && !disabled) { event.preventDefault(); if (!uploading) onFiles(files); } }} className="dl-composer-textarea" rows={1} />
       <InputGroupAddon align="block-end" className="dl-composer-toolbar">
-        <DropdownMenu><DropdownMenuTrigger asChild><InputGroupButton size="icon-sm" aria-label={t("composer.add_attachment")} disabled={disabled || uploading}><PlusIcon /></InputGroupButton></DropdownMenuTrigger>
+        <DropdownMenu><DropdownMenuTrigger asChild><InputGroupButton size="icon-sm" className="dl-attachment-trigger" aria-label={t("composer.add_attachment")} disabled={disabled || uploading}><PlusIcon /></InputGroupButton></DropdownMenuTrigger>
           <DropdownMenuContent align="start" side="top" className="dl-composer-add-menu"><DropdownMenuLabel>{t("composer.add")}</DropdownMenuLabel><DropdownMenuGroup>
             <DropdownMenuItem onSelect={() => file.current?.click()}><PaperclipIcon data-icon="inline-start" />{t("composer.files_and_images")}</DropdownMenuItem>
             {!isAndroid() && <DropdownMenuItem onSelect={() => folder.current?.click()}><FolderIcon data-icon="inline-start" />{t("composer.folder")}<span className="dl-menu-hint">{t("composer.attach_folder")}</span></DropdownMenuItem>}
           </DropdownMenuGroup></DropdownMenuContent>
         </DropdownMenu>
-        <div className="dl-composer-toolbar-spacer" />
-        {canManage && presentation === "work" && <DropdownMenu><DropdownMenuTrigger asChild><InputGroupButton disabled={disabled || busy || working} className="dl-model-trigger"><span className="dl-model-name">{selected?.label || t("composer.default_model")}</span>{selected?.effort && <span className="dl-model-effort">{effortLabel(selected.effort)}</span>}<ChevronDownIcon data-icon="inline-end" /></InputGroupButton></DropdownMenuTrigger>
+        {canManage && <DropdownMenu><DropdownMenuTrigger asChild><InputGroupButton disabled={disabled || busy || working} aria-label={`${t("composer.models")}: ${selected?.label || t("composer.default_model")}`} className="dl-model-trigger"><span className="dl-model-name">{selected?.label || t("composer.default_model")}</span>{selected?.effort && <span className="dl-model-effort">{effortLabel(selected.effort)}</span>}<ChevronDownIcon data-icon="inline-end" /></InputGroupButton></DropdownMenuTrigger>
           <DropdownMenuContent align="end" side="top" className="dl-model-menu"><DropdownMenuLabel>{t("composer.models")}</DropdownMenuLabel><DropdownMenuRadioGroup value={preference} onValueChange={onModelChange}>
             <DropdownMenuRadioItem value="">{t("composer.use_default_model")}</DropdownMenuRadioItem>
             {models.map(model => <DropdownMenuRadioItem value={model.name} key={model.name}><span className="dl-menu-choice"><span>{model.label}</span>{(model.effort || model.name !== model.label) && <small>{effortLabel(model.effort) || model.name}</small>}</span></DropdownMenuRadioItem>)}
           </DropdownMenuRadioGroup></DropdownMenuContent>
         </DropdownMenu>}
-        {working && presentation === "work" && <InputGroupButton size="icon-sm" variant="default" className="dl-send-button dl-stop-button" aria-label={t("composer.stop_task")} disabled={busy} onClick={onStop}><SquareIcon fill="currentColor" strokeWidth={0} /></InputGroupButton>}{(presentation === "primary" || !working || canSend) && <InputGroupButton size="icon-sm" variant="default" className="dl-send-button" aria-label={working && presentation !== "primary" ? t("composer.queue_message") : t("composer.send_message")} disabled={!canSend} onClick={onSubmit}>{busy ? <Spinner /> : <ArrowUpIcon />}</InputGroupButton>}
+        {working && !value.trim() && attachments.length === 0 && <InputGroupButton size="icon-sm" variant="default" className="dl-send-button dl-stop-button" aria-label={t("composer.stop_task")} disabled={busy} onClick={onStop}><SquareIcon fill="currentColor" strokeWidth={0} /></InputGroupButton>}
+        <InputGroupButton size="icon-sm" variant="default" className="dl-send-button" aria-label={t("composer.send_message")} disabled={!canSend} onClick={onSubmit}>{busy ? <Spinner /> : <ArrowUpIcon />}</InputGroupButton>
       </InputGroupAddon>
     </InputGroup>
     <input ref={file} className="sr-only" aria-hidden="true" tabIndex={-1} type="file" multiple onChange={event => { onFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
