@@ -1149,3 +1149,14 @@ html[data-desktop-platform=windows] .dl-browser-tabs { padding-right: var(--dl-c
    reveals the independent webpage below it; all chrome keeps its own paint. */
 html[data-native-browser], html[data-native-browser] body,
 html[data-native-browser] :is(#root,.dl-app,.dl-shell-body,.dl-main-view,.dl-browser-page,.dl-browser-viewport) { background: transparent; }
+
+/* Rounded browser edges expose the shell, not the native surface beneath it.
+   Paint only the outside arcs so the webpage viewport stays transparent. */
+@media (min-width: 768px) {
+  html[data-native-browser] #root .dl-shell-body {
+    --dl-browser-corner-background: color-mix(in srgb,var(--foreground) 1.5%,var(--background));
+    background:
+      radial-gradient(circle at 100% 100%,transparent 15px,var(--dl-browser-corner-background) 15px) top left / 16px 16px no-repeat,
+      radial-gradient(circle at 100% 0,transparent 15px,var(--dl-browser-corner-background) 15px) bottom left / 16px 16px no-repeat;
+  }
+}
