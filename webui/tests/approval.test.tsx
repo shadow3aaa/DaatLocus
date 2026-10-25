@@ -1,27 +1,20 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import i18n from "../src/lib/i18n";
-import { Approval } from "../src/components/conversation-content";
 import { WorkTurn } from "../src/components/conversation-turns";
 import { messageDisplayText } from "../src/lib/conversation-import";
 import { partitionConversationMessages } from "../src/lib/conversation-messages";
 import type { ApprovalRecord, MessageRecord } from "../src/lib/actor-api";
 
-test("only manual approvals render a decision control", () => {
-  const record: ApprovalRecord = {
-    seq:1,id:"approval",actor_id:"worker",message_id:"input",
-    call:{id:"call",name:"files__read_file",arguments:{path:"/reference"}},
-    requested:{readable_roots:["/reference"],writable_roots:[],operation_details:null},
-    mode:"auto",decision:"pending",reason:"private review",created_at_ms:1,resolved_at_ms:null,
-  };
-  for (const decision of ["application_required", "pending", "approved", "denied", "cancelled"] as const) {
-    expect(renderToStaticMarkup(<Approval record={{...record,decision}} canManage onResolved={()=>{}} />)).toBe("");
+test("automatic review records stay out of the work transcript", () => {
+  const record: ApprovalRecord={seq:1,id:"private-review",message_id:"input",call:{id:"call",name:"files__read_file",arguments:{path:"PRIVATE_PATH"}},requested:{readable_roots:["PRIVATE_PATH"],writable_roots:[]},decision:"pending",reason:"PRIVATE_REVIEW_REASON",created_at_ms:1,resolved_at_ms:null};
+  const message: MessageRecord={seq:1,id:"input",actor_id:"worker",source:{kind:"user"},reply_to:{kind:"user"},kind:"request",in_reply_to:null,content:"Create the report",attachments:[],status:"completed",cancel_requested:false,reply:"Report complete",error:null,created_at_ms:1,updated_at_ms:1};
+  for(const decision of ["application_required","pending","approved","denied","cancelled"] as const) {
+    const chat={messages:[message],tools:[],approvals:[{...record,decision}],events:[],generations:{},toolNext:{}} as unknown as Parameters<typeof WorkTurn>[0]["chat"];
+    const html=renderToStaticMarkup(<WorkTurn message={message} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}}/>);
+    expect(html).toContain("Report complete");
+    for(const value of [record.id,record.reason,"PRIVATE_PATH"])expect(html).not.toContain(value);
   }
-  expect(renderToStaticMarkup(<Approval record={{...record,mode:"ask",decision:"application_required"}} canManage onResolved={()=>{}} />)).toBe("");
-  const manual=renderToStaticMarkup(<Approval record={{...record,mode:"ask"}} canManage onResolved={()=>{}} />);
-  expect(manual).toContain('type="button"');
-  expect(manual).not.toContain('type="checkbox"');
-  expect(manual).not.toContain(record.reason);
 });
 
 test("an appeal decision notification is immediate, hidden and never inline guidance", () => {

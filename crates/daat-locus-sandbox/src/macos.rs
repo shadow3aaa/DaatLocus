@@ -62,7 +62,11 @@ pub fn wrap_command(
     if fs.full_disk_read || fs.full_disk_write {
         profile.rule("allow", read_ops, Path::new("/"))?;
     } else {
-        let mut roots = fs.readable_roots.clone();
+        let mut roots = super::runtime_read_roots()
+            .map_err(|error| miette!("{error}"))?
+            .to_vec();
+        roots.extend(fs.readable_roots.clone());
+        roots.extend(super::system_temporary_paths().iter().cloned());
         roots.extend(fs.writable_roots.iter().map(|root| root.root.clone()));
         for root in policy_paths_with_resolved(&roots) {
             profile.rule("allow", read_ops, &root)?;
@@ -71,7 +75,16 @@ pub fn wrap_command(
     if fs.full_disk_write {
         profile.rule("allow", "file-write*", Path::new("/"))?;
     }
-    for root in &fs.writable_roots {
+    let mut writable_roots = fs.writable_roots.clone();
+    writable_roots.extend(
+        super::system_temporary_paths()
+            .iter()
+            .map(|root| super::WritableRoot {
+                root: root.clone(),
+                read_only_subpaths: vec![],
+            }),
+    );
+    for root in &writable_roots {
         for root in policy_paths_with_resolved(std::slice::from_ref(&root.root)) {
             profile.rule("allow", "file-write*", &root)?;
             profile.filter(&root)?;
@@ -85,6 +98,9 @@ pub fn wrap_command(
         for path in policy_paths_with_resolved(&root.read_only_subpaths) {
             profile.rule("deny", "file-write*", &path)?;
         }
+    }
+    if fs.deny_all_writes {
+        profile.rules.push_str("(deny file-write*)\n");
     }
     let deny_read = &fs.deny_read_paths;
     let deny_write = &fs.deny_write_paths;
@@ -278,6 +294,7 @@ mod tests {
         SandboxPolicy {
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: false,
+                deny_all_writes: false,
                 full_disk_write: false,
                 readable_roots: vec![root.to_owned()],
                 writable_roots: vec![WritableRoot {

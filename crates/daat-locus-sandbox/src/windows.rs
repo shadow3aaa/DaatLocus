@@ -210,6 +210,14 @@ pub fn spawn_restricted_async(
         };
     let mut request = build_request(policy, program, args.clone(), &options)?;
     if let Some(capture_document) = capture_output.as_deref() {
+        // We call BaseContainerRunner directly rather than MXC's config
+        // builder. Starting a trace alone does not enable OS event emission;
+        // deny-and-record requires this capability as well. Never enable
+        // permissiveLearningMode: collection must preserve every denial.
+        request
+            .policy
+            .capabilities
+            .push("learningModeLogging".into());
         request.policy.capture_denials = Some(CaptureDenialsConfig {
             output_path: Some(unicode(capture_document)?),
             ..Default::default()
@@ -470,10 +478,8 @@ fn known_folder(folder: &windows::core::GUID) -> io::Result<PathBuf> {
     Ok(PathBuf::from(value?))
 }
 
-fn platform_roots() -> io::Result<Vec<PathBuf>> {
-    use windows::Win32::UI::Shell::{
-        FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86,
-    };
+pub(super) fn platform_roots() -> io::Result<Vec<PathBuf>> {
+    use windows::Win32::UI::Shell::{FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86};
     let mut buffer = vec![0u16; 32768];
     let length = unsafe {
         windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW(
@@ -487,11 +493,7 @@ fn platform_roots() -> io::Result<Vec<PathBuf>> {
     let mut roots = vec![PathBuf::from(std::ffi::OsString::from_wide(
         &buffer[..length],
     ))];
-    for folder in [
-        FOLDERID_ProgramFiles,
-        FOLDERID_ProgramFilesX86,
-        FOLDERID_ProgramData,
-    ] {
+    for folder in [FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86] {
         roots.push(known_folder(&folder)?);
     }
     Ok(roots)
@@ -504,7 +506,7 @@ fn build_request(
     options: &SandboxProcessOptions,
 ) -> io::Result<ExecutionRequest> {
     let fs = &policy.filesystem;
-    let mut read = platform_roots()?;
+    let mut read = super::runtime_read_roots()?.to_vec();
     read.extend(fs.readable_roots.clone());
     let mut write = fs
         .writable_roots
@@ -522,6 +524,9 @@ fn build_request(
     // sandboxed children always receive them without any approval scope.
     read.extend(system_temporary_paths().iter().cloned());
     write.extend(system_temporary_paths().iter().cloned());
+    if fs.deny_all_writes {
+        write.clear();
+    }
     let mut readonly = fs.deny_write_paths.clone();
     readonly.extend(
         fs.writable_roots
@@ -697,6 +702,7 @@ mod tests {
         SandboxPolicy {
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: false,
+                deny_all_writes: false,
                 full_disk_write: false,
                 readable_roots: vec![root.to_owned()],
                 writable_roots: vec![WritableRoot {
@@ -795,7 +801,7 @@ mod tests {
         if !crate::test_support::native_sandbox_available() {
             return;
         }
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::scoped_directory();
         let root = temp.path().join("work");
         let tools = temp.path().join("tools");
         std::fs::create_dir(&root).unwrap();
@@ -856,7 +862,7 @@ mod tests {
         if !crate::test_support::native_sandbox_available() {
             return;
         }
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::scoped_directory();
         let root = temp.path().join("work");
         std::fs::create_dir(&root).unwrap();
         let inside = root.join("inside.txt");
@@ -1175,6 +1181,7 @@ mod capture_denial_tests {
             ],
             SandboxProcessOptions {
                 capture_denials: capture,
+                current_dir: Some(root.clone()),
                 stdin: SandboxStdio::Null,
                 stdout: SandboxStdio::Piped,
                 stderr: SandboxStdio::Piped,
@@ -1187,14 +1194,14 @@ mod capture_denial_tests {
         let (out, err, status) = tokio::time::timeout(Duration::from_secs(60), async {
             tokio::try_join!(
                 async {
-                    let mut text = String::new();
-                    stdout.read_to_string(&mut text).await?;
-                    Ok::<_, std::io::Error>(text)
+                    let mut text = Vec::new();
+                    stdout.read_to_end(&mut text).await?;
+                    Ok::<_, std::io::Error>(String::from_utf8_lossy(&text).into_owned())
                 },
                 async {
-                    let mut text = String::new();
-                    stderr.read_to_string(&mut text).await?;
-                    Ok::<_, std::io::Error>(text)
+                    let mut text = Vec::new();
+                    stderr.read_to_end(&mut text).await?;
+                    Ok::<_, std::io::Error>(String::from_utf8_lossy(&text).into_owned())
                 },
                 async {
                     loop {
@@ -1220,17 +1227,15 @@ mod capture_denial_tests {
         if !BaseContainerRunner::is_capture_denials_usable() {
             return;
         }
-        let home = std::env::var_os("USERPROFILE")
-            .map(PathBuf::from)
-            .expect("capture probe requires a home directory");
-        let secret = home.join(format!("daat-capture-probe-{}.txt", std::process::id()));
+        let directory = crate::test_support::scoped_directory();
+        let secret = directory.path().join("daat-capture-probe.txt");
         std::fs::write(&secret, "capture probe secret").unwrap();
         let script = format!(
-            "try {{ Get-Content -LiteralPath '{}' | Out-Null }} catch {{}}; exit 0",
+            "try {{ $null=[IO.File]::ReadAllText('{}'); exit 73 }} catch {{exit 0}}",
             secret.to_string_lossy().replace('\'', "''")
         );
-        let (_success, _output, denials) = run_powershell(&script, true).await;
-        let _ = std::fs::remove_file(&secret);
+        let (success, output, denials) = run_powershell(&script, true).await;
+        assert!(success, "capture must preserve the read denial: {output}");
         assert!(
             denials.iter().any(|record| {
                 record.access == Access::Read
@@ -1250,9 +1255,9 @@ mod capture_denial_tests {
             return;
         }
         let script = "$p = Join-Path $env:TEMP ('daat-temp-probe-' + [Guid]::NewGuid().ToString('N') + '.txt'); \
-Set-Content -LiteralPath $p -Value 'ok'; \
-$ok = (Get-Content -LiteralPath $p).Trim() -eq 'ok'; \
-Remove-Item -LiteralPath $p -Force; \
+[IO.File]::WriteAllText($p, 'ok'); \
+$ok = [IO.File]::ReadAllText($p) -eq 'ok'; \
+[IO.File]::Delete($p); \
 if ($ok) { 'temp-ok' } else { throw 'temp probe failed' }";
         let (success, output, _) = run_powershell(script, false).await;
         assert!(success, "output={output}");

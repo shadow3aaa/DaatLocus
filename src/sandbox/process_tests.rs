@@ -1,9 +1,9 @@
-//! The App policy stays scoped while native programs receive host read access.
+//! Host tools and native programs enforce the same explicit filesystem scopes.
 use super::{RuntimeSandboxPolicy, StrongFilesystemSandboxMode, WritableRoot};
 use std::{path::Path, time::Duration};
 
 #[tokio::test]
-async fn terminal_reads_and_executes_outside_workspace_but_cannot_write_there() {
+async fn terminal_requires_the_same_read_scope_as_files_and_keeps_external_writes_denied() {
     if !super::test_support::native_sandbox_available() {
         return;
     }
@@ -36,38 +36,65 @@ async fn terminal_reads_and_executes_outside_workspace_but_cannot_write_there() 
         .is_err()
     );
     let command = command(&tools, &outside);
-    let mut process =
-        crate::terminal_app::process::TerminalProcess::spawn(&command, root.to_str(), &policy)
+    for granted in [false, true] {
+        let mut process_policy = policy.clone();
+        if granted {
+            process_policy.filesystem.readable_roots.push(tools.clone());
+            let file = crate::file_io::read_file(
+                &root,
+                &process_policy,
+                &crate::file_io::ReadFileArgs {
+                    path: outside.to_string_lossy().into_owned(),
+                    start_line: None,
+                    line_count: None,
+                },
+            )
             .unwrap();
-    let status = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if let Some(status) = process.try_wait().unwrap() {
-                break status;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(file.content, "outside fixture");
         }
-    })
-    .await
-    .expect("native process timed out");
-    assert!(
-        process
-            .wait_for_output_drained(Duration::from_secs(2))
-            .await
-    );
-    let output = process.output_since(0).text;
-    assert!(status.success(), "{status}: {output}");
-    assert!(output.contains("external-tool-ran"), "{output}");
-    assert!(output.contains("outside fixture"), "{output}");
-    assert!(output.contains("outside-write-denied"), "{output}");
-    assert_eq!(
-        std::fs::read_to_string(&outside).unwrap(),
-        "outside fixture"
-    );
-    assert!(!tools.join("created.txt").exists());
-    assert_eq!(
-        std::fs::read_to_string(root.join("output.txt")).unwrap(),
-        "workspace output"
-    );
+        let mut process = crate::terminal_app::process::TerminalProcess::spawn(
+            &command,
+            root.to_str(),
+            &process_policy,
+        )
+        .unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(status) = process.try_wait().unwrap() {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("native process timed out");
+        assert!(
+            process
+                .wait_for_output_drained(Duration::from_secs(2))
+                .await
+        );
+        let output = process.output_since(0).text;
+        if !granted {
+            assert!(
+                !status.success(),
+                "ungranted external program executed: {output}"
+            );
+            continue;
+        }
+        assert!(status.success(), "{status}: {output}");
+        assert!(output.contains("external-tool-ran"), "{output}");
+        assert!(output.contains("outside fixture"), "{output}");
+        assert!(output.contains("outside-write-denied"), "{output}");
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "outside fixture"
+        );
+        assert!(!tools.join("created.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("output.txt")).unwrap(),
+            "workspace output"
+        );
+    }
     assert!(!policy.is_path_readable(&outside));
 }
 

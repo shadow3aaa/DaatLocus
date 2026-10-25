@@ -85,7 +85,6 @@ pub enum Origin {
 #[serde(deny_unknown_fields)]
 pub struct RemoteCeiling {
     pub read_only: bool,
-    pub approval_mode: crate::actors::ApprovalMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -153,21 +152,12 @@ pub enum Body {
         record: Option<Box<crate::actors::MessageRecord>>,
         count: usize,
     },
-    ApprovalsQuery {
-        before: Option<i64>,
-        limit: u8,
-    },
+
     ApprovalQuery {
         id: String,
+        source_actor: Option<String>,
     },
-    ApprovalResolve {
-        id: String,
-        decision: crate::actors::ApprovalDecision,
-    },
-    Approvals {
-        records: Vec<crate::actors::ApprovalRecord>,
-        next: Option<i64>,
-    },
+
     Approval {
         record: Box<crate::actors::ApprovalRecord>,
     },
@@ -339,7 +329,6 @@ pub enum ActorAdminAction {
     Preferences {
         model_present: bool,
         model: Option<String>,
-        approval_mode: Option<crate::actors::ApprovalMode>,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -441,11 +430,12 @@ impl Envelope {
             Body::ConversationControl { actor, .. } | Body::ConversationResult { actor, .. } => {
                 actor.validate()?
             }
-            Body::ApprovalsQuery { limit, .. } if *limit == 0 || *limit > 32 => {
-                return Err(StageError::Invalid("Invalid approval page"));
-            }
-            Body::ApprovalQuery { id } | Body::ApprovalResolve { id, .. }
-                if id.len() > 128 || id.is_empty() =>
+            Body::ApprovalQuery { id, source_actor }
+                if id.len() > 128
+                    || id.is_empty()
+                    || source_actor
+                        .as_ref()
+                        .is_some_and(|actor| actor.is_empty() || actor.len() > 128) =>
             {
                 return Err(StageError::Invalid("Invalid approval identifier"));
             }

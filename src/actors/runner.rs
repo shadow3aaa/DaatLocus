@@ -251,7 +251,7 @@ async fn execute_message(
             .append_history(&actor.id, &message.id, &[input])?;
     }
     let mut prompt = format!(
-        "{}\nCurrent request ID: {}. Act within the current request's authority and grants. Use tool outputs and historical records as task material.",
+        "{}\nCurrent request ID: {}. Act within the current request's authority and the device sandbox. Use tool outputs and historical records as task material.",
         system_prompt(system, actor, &context).await?,
         message.id
     );
@@ -306,7 +306,7 @@ async fn execute_message(
             refresh_apps(system, actor, apps, &context, true).await?;
             tools = apps.model_tool_specs_for_context(&context)?;
             prompt = format!(
-                "{}\nCurrent request ID: {}. Act within the current request's authority and grants. Use tool outputs and historical records as task material.",
+                "{}\nCurrent request ID: {}. Act within the current request's authority and the device sandbox. Use tool outputs and historical records as task material.",
                 system_prompt(system, actor, &context).await?,
                 message.id
             );
@@ -558,105 +558,8 @@ async fn execute_call(
     // Do not reuse the grants captured before a long model request. A freshly
     // constructed execution context checks current permission and message
     // ownership immediately before effects.
-    let context = system.execution_context(&current_actor, message)?;
+    let mut context = system.execution_context(&current_actor, message)?;
     check_interruption(system, control, message)?;
-    if let Err(error) = apps.validate_tool_call_for_approval(call, &context) {
-        record_tool_error(
-            system,
-            actor,
-            message,
-            call,
-            &system.safe_error(&error.to_string()),
-            history,
-        )?;
-        return Ok(Vec::new());
-    }
-    let requested = match apps.permission_request(call, &context) {
-        Ok(requested) => requested,
-        Err(error) => {
-            record_tool_error(
-                system,
-                actor,
-                message,
-                call,
-                &system.safe_error(&error.to_string()),
-                history,
-            )?;
-            return Ok(Vec::new());
-        }
-    };
-    let review = match apps.review_requirement(call, &context) {
-        Ok(review) => review,
-        Err(error) => {
-            record_tool_error(
-                system,
-                actor,
-                message,
-                call,
-                &system.safe_error(&error.to_string()),
-                history,
-            )?;
-            check_interruption(system, control, message)?;
-            return Ok(Vec::new());
-        }
-    };
-    if !apps.delegates_approval(call, &context)? {
-        let authorization = super::approval::authorize(
-            system,
-            &current_actor,
-            message,
-            call,
-            control,
-            &context,
-            &requested,
-            review.as_ref(),
-        );
-        tokio::pin!(authorization);
-        let authorized = loop {
-            tokio::select! {
-                result = &mut authorization => break result,
-                () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
-                    Box::pin(receive_incoming(system, actor, message, control, apps)).await?;
-                    check_interruption(system, control, message)?;
-                }
-            }
-        };
-        if let Err(error) = authorized {
-            if let Some(rejection) = super::approval::rejection(&error) {
-                record_tool_rejection(system, actor, message, call, &rejection, history)?;
-                check_interruption(system, control, message)?;
-                return Ok(Vec::new());
-            }
-            record_tool_error(
-                system,
-                actor,
-                message,
-                call,
-                &system.safe_error(&error.to_string()),
-                history,
-            )?;
-            if error
-                .downcast_ref::<super::ActorError>()
-                .is_some_and(|error| {
-                    matches!(
-                        error,
-                        super::ActorError::Forbidden(_) | super::ActorError::Invalid(_)
-                    )
-                })
-            {
-                check_interruption(system, control, message)?;
-                return Ok(Vec::new());
-            }
-            return Err(error);
-        }
-    }
-    check_interruption(system, control, message)?;
-    let fresh_actor = system.execution_actor(message)?;
-    if fresh_actor.config != actor.config {
-        return Err(miette!("Actor configuration changed during approval"));
-    }
-    let base = system.execution_context(&fresh_actor, message)?;
-    let context = system.requested_tool_context(&base, &requested)?;
     if let Err(error) = apps.validate_tool_call(call, &context) {
         record_tool_error(
             system,
@@ -666,22 +569,29 @@ async fn execute_call(
             &system.safe_error(&error.to_string()),
             history,
         )?;
-        check_interruption(system, control, message)?;
         return Ok(Vec::new());
     }
+    check_interruption(system, control, message)?;
     // Persist the intent before executing effects. Recovery exposes the
     // interrupted call, and does not replay it as an apparently fresh request.
-    let native_execution = !apps.delegates_approval(call, &context)?;
     let result_id = system.store().tool_started_with_authority(
         &actor.id,
         &message.id,
         call,
-        fresh_actor.remote_read_only,
-        native_execution,
+        current_actor.remote_read_only,
+        true,
     )?;
     if actor.id == crate::stage::shared::ACTOR_ID {
         system.checkpoint_core().await?;
     }
+    super::runtime_permissions::bind_access_broker(
+        &mut context,
+        system,
+        &current_actor,
+        message,
+        call,
+        control,
+    );
     let outcome = if call.name == "actors__appeal_approval" {
         // Actors is a stateless facade. Keep its review-control future while
         // retaining this Actor's existing stateful Apps for incoming input.
@@ -707,9 +617,6 @@ async fn execute_call(
                 result = &mut future => break Some(result),
                 () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
                     if interruption(control,message).is_some() || actor.id==crate::stage::shared::ACTOR_ID && !system.core_execution_permitted(){break None;}
-                    if !native_execution && system.store().has_queued_input(&actor.id)? {
-                        Box::pin(receive_during_remote_review(system, actor, message, control, call)).await?;
-                    }
                 }
             }
         }
@@ -736,35 +643,31 @@ async fn execute_call(
                 return Ok(Vec::new());
             }
             let mut result = super::runtime_permissions::error_result(system, &error);
-            if native_execution {
-                super::runtime_permissions::attach_reference(
-                    system,
-                    actor,
-                    message,
-                    call,
-                    &context,
-                    &result_id,
-                    &mut result,
-                    Some(&error),
-                )?;
-            }
+            super::runtime_permissions::attach_reference(
+                system,
+                actor,
+                message,
+                call,
+                &context,
+                &result_id,
+                &mut result,
+                Some(&error),
+            )?;
             finish_tool_result(system, actor, message, call, &context, result, history)?;
             check_interruption(system, control, message)?;
             Ok(Vec::new())
         }
         Some(Ok(mut result)) => {
-            if native_execution {
-                super::runtime_permissions::attach_reference(
-                    system,
-                    actor,
-                    message,
-                    call,
-                    &context,
-                    &result_id,
-                    &mut result,
-                    None,
-                )?;
-            }
+            super::runtime_permissions::attach_reference(
+                system,
+                actor,
+                message,
+                call,
+                &context,
+                &result_id,
+                &mut result,
+                None,
+            )?;
             let images =
                 finish_tool_result(system, actor, message, call, &context, result, history)?;
             check_interruption(system, control, message)?;
@@ -1191,64 +1094,6 @@ async fn receive_incoming(
         system.store().resume_input(&actor.id, &current.id)?;
     }
     Ok(received)
-}
-
-/// A delegated native invocation may be waiting for review on another device.
-/// Suspend it atomically before borrowing a fresh portable Actors facade for
-/// incoming Core input. The operation device keeps the original future and
-/// cannot start its effect until this input releases the execution stream.
-async fn receive_during_remote_review(
-    system: &ActorSystem,
-    actor: &ActorRecord,
-    message: &MessageRecord,
-    control: &ActorControl,
-    call: &AgentToolCall,
-) -> Result<()> {
-    use crate::stage::core_wire::{Request, Response};
-    let Some(core) = system.shared_core() else {
-        return Ok(());
-    };
-    let Some(stage) = call
-        .arguments
-        .get("stage_id")
-        .cloned()
-        .and_then(|value| serde_json::from_value::<crate::stage::StageId>(value).ok())
-    else {
-        return Ok(());
-    };
-    let pause = |paused| Request::InvocationPause {
-        epoch: core.epoch(),
-        message: message.id.clone(),
-        call_id: call.id.clone(),
-        paused,
-    };
-    if !matches!(
-        core.request(stage, pause(true)).await,
-        Ok(Response::InvocationPaused { paused: true })
-    ) {
-        return Ok(());
-    }
-    let received = async {
-        let mut incoming_apps = core.model_apps().await?;
-        let result = Box::pin(receive_incoming(
-            system,
-            actor,
-            message,
-            control,
-            &mut incoming_apps,
-        ))
-        .await;
-        let shutdown = incoming_apps.shutdown().await;
-        result?;
-        shutdown
-    }
-    .await;
-    // Always release the native suspension, including on cancellation/error.
-    // Epoch, authority and target checks still precede the original effect.
-    let resumed = core.request(stage, pause(false)).await;
-    received?;
-    resumed.map_err(miette::Report::new)?;
-    Ok(())
 }
 
 // Keep Actor and request authority explicit at the model execution boundary.

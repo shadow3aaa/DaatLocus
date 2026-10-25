@@ -161,6 +161,7 @@ fn native_actor_take_input_give_revocation_and_inflight_handoff() {
         .id
         .clone();
     let mut context = AppToolExecutionContext {
+        access_broker: None,
         execution_cwd: profile.clone(),
         sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),
         tool_output_max_tokens: 4000,

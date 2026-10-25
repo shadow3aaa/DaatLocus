@@ -7,7 +7,6 @@ use super::{
 use crate::actors::store::ActorStore;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::collections::HashSet;
 use uuid::Uuid;
 
 impl ActorStore {
@@ -92,14 +91,24 @@ pub(crate) fn actor_message_state(
 
 pub const DEFAULT_BACKLOG_BYTES: u64 = 128 * 1024 * 1024;
 const RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// Authenticated remote-device restrictions, independent of Actor identity.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ActorGrant {
-    pub actor_id: String,
+pub struct DeviceAuthority {
     pub read: bool,
     pub converse: bool,
     pub delegate: bool,
     pub read_only: bool,
+}
+impl Default for DeviceAuthority {
+    fn default() -> Self {
+        Self {
+            read: true,
+            converse: true,
+            delegate: true,
+            read_only: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,7 +116,7 @@ pub struct ActorGrant {
 pub struct PeerRecord {
     pub device: DeviceProfile,
     pub enrollment: Enrollment,
-    pub grants: Vec<ActorGrant>,
+    pub authority: DeviceAuthority,
     pub revoked: bool,
     pub generation: u64,
     pub connection_nonce: Option<Uuid>,
@@ -164,18 +173,14 @@ pub(crate) fn peer(tx: &Transaction<'_>, id: StageId, now: i64) -> Result<PeerRe
     }
     Ok(record)
 }
-pub(crate) fn grant(tx: &Transaction<'_>, peer: &PeerRecord, actor: &str) -> Result<ActorGrant> {
+pub(crate) fn authorize_actor(
+    tx: &Transaction<'_>,
+    peer: &PeerRecord,
+    actor: &str,
+) -> Result<DeviceAuthority> {
+    actor_exists(tx, actor)?;
     if core_read(tx, actor)? {
-        return Ok(ActorGrant {
-            actor_id: actor.into(),
-            read: true,
-            converse: true,
-            delegate: false,
-            read_only: false,
-        });
-    }
-    if let Some(grant) = peer.grants.iter().find(|grant| grant.actor_id == actor) {
-        return Ok(grant.clone());
+        return Ok(peer.authority.clone());
     }
     let owned: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='stage_account_actors')",
@@ -189,16 +194,64 @@ pub(crate) fn grant(tx: &Transaction<'_>, peer: &PeerRecord, actor: &str) -> Res
             |r| r.get::<_, bool>(0),
         )?
     {
-        return Ok(ActorGrant {
-            actor_id: actor.into(),
-            read: true,
-            converse: true,
-            delegate: true,
-            read_only: false,
-        });
+        return Ok(peer.authority.clone());
     }
-    Err(StageError::Forbidden("Actor is outside device grants"))
+    Err(StageError::Forbidden(
+        "Actor belongs to another account or has no verified account ownership",
+    ))
 }
+
+/// One-time retirement of Actor-specific device access lists. Restrictions are
+/// intersected across the device, so migration can only reduce remote authority.
+fn migrate_device_authority(tx: &Transaction<'_>) -> Result<()> {
+    let records = tx
+        .prepare(
+            "SELECT id,record FROM stage_peers WHERE json_type(record,'$.grants') IS NOT NULL",
+        )?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (id, record) in records {
+        let mut value: serde_json::Value = decode(record)?;
+        let entries = value
+            .get("grants")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(StageError::Invalid("Invalid legacy device authority"))?;
+        let mut authority: DeviceAuthority = value
+            .get("authority")
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()
+            .map_err(|_| StageError::Invalid("Invalid device authority"))?
+            .unwrap_or_default();
+        for entry in entries {
+            let flag = |name| {
+                entry
+                    .get(name)
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or(StageError::Invalid("Invalid legacy device authority"))
+            };
+            authority.read &= flag("read")?;
+            authority.converse &= flag("converse")?;
+            authority.delegate &= flag("delegate")?;
+            authority.read_only |= flag("read_only")?;
+        }
+        value
+            .as_object_mut()
+            .ok_or(StageError::Invalid("Invalid device record"))?
+            .remove("grants");
+        value["authority"] = serde_json::to_value(authority)
+            .map_err(|_| StageError::Invalid("Invalid device authority"))?;
+        let record: PeerRecord = serde_json::from_value(value)
+            .map_err(|_| StageError::Invalid("Invalid device record"))?;
+        tx.execute(
+            "UPDATE stage_peers SET record=?1 WHERE id=?2",
+            params![encode(&record)?, id],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn inherit_account_ownership(store: &ActorStore, parent: &str, actor: &str) -> Result<()> {
     store.stage_transaction(|tx|{
         tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
@@ -209,20 +262,38 @@ pub fn inherit_account_ownership(store: &ActorStore, parent: &str, actor: &str) 
 /// Bind the device's existing Actor tree when its verified account core starts.
 /// Never overwrite a recorded account or traverse through another account's Actor.
 pub(crate) fn initialize_account_ownership(store: &ActorStore, account: &str) -> Result<()> {
-    store.stage_transaction(|tx| {
-        let trusted: TrustRoot = decode(tx.query_row(
-            "SELECT value FROM stage_meta WHERE key='root'", [], |r| r.get(0),
-        )?)?;
-        if trusted.group_id != account {
-            return Err(StageError::Forbidden("Actor account does not match device trust"));
+    store.stage_transaction(|tx| bind_account_tree(tx, account))
+}
+fn bind_account_tree(tx: &Transaction<'_>, account: &str) -> Result<()> {
+    let trusted: TrustRoot = decode(tx.query_row(
+        "SELECT value FROM stage_meta WHERE key='root'",
+        [],
+        |r| r.get(0),
+    )?)?;
+    if trusted.group_id != account {
+        return Err(StageError::Forbidden(
+            "Actor account does not match device trust",
+        ));
+    }
+    let shared: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_meta')",
+        [],
+        |row| row.get(0),
+    )?;
+    if shared {
+        let bound: Option<String> = tx
+            .query_row(
+                "SELECT value FROM core_meta WHERE key='account'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if bound.as_deref().is_some_and(|bound| bound != account) {
+            return Err(StageError::Forbidden("Core belongs to another account"));
         }
-        let shared:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_meta')",[],|row|row.get(0))?;
-        if shared {
-            let bound:Option<String>=tx.query_row("SELECT value FROM core_meta WHERE key='account'",[],|row|row.get(0)).optional()?;
-            if bound.as_deref().is_some_and(|bound|bound!=account){return Err(StageError::Forbidden("Core belongs to another account"));}
-        }
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
-        tx.execute(
+    }
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
+    tx.execute(
             "WITH RECURSIVE owned(actor) AS (
                 SELECT id FROM actors WHERE id IN ('root','core')
                   AND NOT EXISTS(SELECT 1 FROM stage_account_actors WHERE actor=id AND account!=?1)
@@ -232,9 +303,9 @@ pub(crate) fn initialize_account_ownership(store: &ActorStore, account: &str) ->
              ) INSERT OR IGNORE INTO stage_account_actors SELECT actor,?1 FROM owned",
             [account],
         )?;
-        Ok(())
-    })
+    Ok(())
 }
+
 pub(crate) fn core_read(tx: &Transaction<'_>, actor: &str) -> Result<bool> {
     if actor != super::shared::ACTOR_ID {
         return Ok(false);
@@ -303,6 +374,7 @@ impl<'a> StageLedger<'a> {
               CREATE TABLE IF NOT EXISTS stage_received_results(peer TEXT NOT NULL,invocation TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(peer,invocation));
               CREATE TABLE IF NOT EXISTS stage_message_content(actor TEXT NOT NULL,hash TEXT NOT NULL,message TEXT NOT NULL,field TEXT NOT NULL,size INTEGER NOT NULL,PRIMARY KEY(actor,hash));
               CREATE TABLE IF NOT EXISTS stage_inbox(peer TEXT NOT NULL,invocation TEXT NOT NULL,actor TEXT NOT NULL,digest TEXT NOT NULL,expires INTEGER NOT NULL,finished INTEGER,confirmed INTEGER NOT NULL DEFAULT 0,record TEXT NOT NULL,frame BLOB NOT NULL,PRIMARY KEY(peer,invocation));")?;
+            migrate_device_authority(tx)?;
             let saved:Option<String>=tx.query_row("SELECT value FROM stage_meta WHERE key='local'",[],|row|row.get(0)).optional()?;
             let public:Option<String>=tx.query_row("SELECT value FROM stage_public_meta WHERE key='stage'",[],|row|row.get(0)).optional()?;
             if public.as_deref().is_some_and(|id|id!=local.to_string()){return Err(StageError::Conflict("Public Stage identity cannot change during enrollment"));}
@@ -312,6 +384,7 @@ impl<'a> StageLedger<'a> {
             if let Some(trusted)=trusted && decode::<TrustRoot>(trusted)?!=*root { return Err(StageError::Conflict("Group trust cannot change implicitly")); }
             tx.execute("INSERT OR IGNORE INTO stage_meta(key,value) VALUES('local',?1)",[local.to_string()])?;
             tx.execute("INSERT OR IGNORE INTO stage_meta(key,value) VALUES('root',?1)",[encode(root)?])?;
+            bind_account_tree(tx, &root.group_id)?;
             // A process may have performed an effect before its final result was recorded.
             let mut pending=tx.prepare("SELECT peer,invocation,record FROM stage_inbox WHERE json_extract(record,'$.state')='running'")?;
             let rows=pending.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;drop(pending);
@@ -348,10 +421,10 @@ impl<'a> StageLedger<'a> {
             tx.execute("DELETE FROM stage_control_exports WHERE expires<?1",[now])?;let count:i64=tx.query_row("SELECT COUNT(*) FROM stage_control_exports",[],|r|r.get(0))?;if count>=128{return Err(StageError::Capacity("Control export budget reached"));}
             tx.execute("INSERT INTO stage_control_exports VALUES(?1,?2,?3,?4,?5)",params![peer_id.to_string(),export.to_string(),content.hash,content.size as i64,now+60000])?;Ok(())})
     }
-    pub fn actor_grant(&self, id: StageId, actor: &str, now: i64) -> Result<ActorGrant> {
+    pub fn authorize_actor(&self, id: StageId, actor: &str, now: i64) -> Result<DeviceAuthority> {
         self.store.stage_transaction(|tx| {
             let current = peer(tx, id, now)?;
-            grant(tx, &current, actor)
+            authorize_actor(tx, &current, actor)
         })
     }
     pub fn manages_actor(&self, id: StageId, actor: &str, now: i64) -> Result<bool> {
@@ -375,11 +448,11 @@ impl<'a> StageLedger<'a> {
             )?)
         })
     }
-    /// Owner-only entry point. Membership grants network eligibility, not Actor access.
+    /// Verified enrollment and device-wide remote authority. Actor access still requires account ownership.
     pub fn import_peer(
         &self,
         enrollment: Enrollment,
-        grants: Vec<ActorGrant>,
+        authority: DeviceAuthority,
         now: i64,
     ) -> Result<PeerRecord> {
         self.store.stage_transaction(|tx| {
@@ -389,12 +462,8 @@ impl<'a> StageLedger<'a> {
             let revoked = super::revocation::removed_in(tx)?;
             let member=verify_enrollment(&root,&enrollment.chain,now,&revoked)?;
             if member.device.stage_id==self.local { return Err(StageError::Invalid("Invalid peer")); }
-            let mut names=HashSet::new();
-            for grant in &grants {
-                super::ActorAddress {stage_id:self.local,actor_id:grant.actor_id.clone()}.validate()?;
-                if !names.insert(&grant.actor_id) || grant.converse&&!grant.read || grant.delegate&&!grant.converse { return Err(StageError::Invalid("Invalid Actor grants")); }
-                let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM actors WHERE id=?1)",[&grant.actor_id],|row|row.get(0))?;
-                if !exists { return Err(StageError::Invalid("Actor grant target does not exist")); }
+            if authority.converse && !authority.read || authority.delegate && !authority.converse {
+                return Err(StageError::Invalid("Invalid device authority"));
             }
             let old:Option<String>=tx.query_row("SELECT record FROM stage_peers WHERE id=?1",[member.device.stage_id.to_string()],|row|row.get(0)).optional()?;
             let old=old.map(decode::<PeerRecord>).transpose()?;
@@ -413,7 +482,7 @@ impl<'a> StageLedger<'a> {
             let profile=encode(&member.device)?;
             if seen.as_deref().is_some_and(|seen|seen!=profile) { return Err(StageError::Conflict("Join credential was already consumed")); }
             tx.execute("INSERT OR IGNORE INTO stage_joins(id,profile) VALUES(?1,?2)",params![member.join_id.to_string(),profile])?;
-            let record=PeerRecord {device:member.device,enrollment,grants,revoked:false,generation:old.as_ref().map_or(0,|peer|peer.generation),connection_nonce:old.and_then(|peer|peer.connection_nonce)};
+            let record=PeerRecord {device:member.device,enrollment,authority,revoked:false,generation:old.as_ref().map_or(0,|peer|peer.generation),connection_nonce:old.and_then(|peer|peer.connection_nonce)};
             tx.execute("INSERT INTO stage_peers(id,record,revoked) VALUES(?1,?2,0) ON CONFLICT(id) DO UPDATE SET record=excluded.record",params![record.device.stage_id.to_string(),encode(&record)?])?;
             Ok(record)
         })
@@ -575,7 +644,7 @@ impl<'a> StageLedger<'a> {
         self.store.stage_transaction(|tx| {
             let peer = peer(tx, id, now)?;
             actor_exists(tx, actor)?;
-            if !grant(tx, &peer, actor)?.read {
+            if !authorize_actor(tx, &peer, actor)?.read {
                 return Err(StageError::Forbidden("Content is outside Actor grants"));
             }
             let (message, field): (String, String) = tx
@@ -711,7 +780,7 @@ impl<'a> StageLedger<'a> {
         self.store.stage_transaction(|tx| {
             let peer=peer(tx,id,now)?;frame.validate(id,self.local,peer.generation,now)?;
             actor_exists(tx,&target.actor_id)?;
-            let permission=grant(tx,&peer,&target.actor_id)?;
+            let permission=authorize_actor(tx,&peer,&target.actor_id)?;
             if !permission.converse || matches!(origin,super::protocol::Origin::Actor{..})&&!permission.delegate { return Err(StageError::Forbidden("Device cannot invoke this Actor")); }
             if let Some((previous,mut receipt))=receipt(tx,id,invocation)? { if previous!=hash { return Err(StageError::Conflict("Invocation identifier changed content")); }receipt.duplicate=true;return Ok(receipt); }
             if crate::actors::store::actor_tx(tx, &target.actor_id).map_err(|_| StageError::Forbidden("Actor is unavailable"))?.status == crate::actors::ActorStatus::Archived {
@@ -730,17 +799,9 @@ impl<'a> StageLedger<'a> {
                     if stored != *attachment{return Err(StageError::Conflict("Attachment content changed"));}
                     admitted_attachments.push(crate::actors::Attachment{id:stored.id.clone(),name:stored.name,media_type:stored.media_type,size_bytes:stored.content.size,uri:format!("/v1/actors/{}/resources/{}",target.actor_id,stored.id)});
                 }
-                let actor=crate::actors::store::actor_tx(tx,&target.actor_id).map_err(|_|StageError::Forbidden("Actor is unavailable"))?;
+                let _actor=crate::actors::store::actor_tx(tx,&target.actor_id).map_err(|_|StageError::Forbidden("Actor is unavailable"))?;
                 let remote_ceiling = match origin {super::protocol::Origin::Actor{ceiling,..}=>Some(ceiling),super::protocol::Origin::User=>None};
                 let read_only=permission.read_only||remote_ceiling.is_some_and(|ceiling|ceiling.read_only);
-                let workspace=actor.config.workspace.clone();
-                if !actor.config.permissions.readable_roots.iter().any(|root|workspace.starts_with(root)) {return Err(StageError::Forbidden("Actor workspace is unavailable"));}
-                let mut capabilities=actor.config.permissions.clone();
-                let remembered=crate::actors::grants::filesystem_scopes(tx,&actor.id).map_err(|_|StageError::Invalid("Invalid remembered filesystem scope"))?;
-                crate::actors::grants::extend_permissions(&mut capabilities,&remembered);
-                if read_only {capabilities.writable_roots.clear();}
-                if let Some(ceiling)=remote_ceiling
-                    && crate::actors::permissions::approval_strength(capabilities.approval_mode) < crate::actors::permissions::approval_strength(ceiling.approval_mode) { capabilities.approval_mode=ceiling.approval_mode; }
                 let user=matches!(origin,super::protocol::Origin::User);
                 let source=match origin {super::protocol::Origin::User=>crate::actors::MessageSource::RemoteUser {stage_id:id,invocation_id:invocation},super::protocol::Origin::Actor {actor,..}=>crate::actors::MessageSource::RemoteActor {stage_id:id,actor_id:actor.actor_id.clone(),invocation_id:invocation}};
                 let related = if let Body::Invoke { related_message: Some(related), .. } = &frame.body {
@@ -751,7 +812,7 @@ impl<'a> StageLedger<'a> {
                         super::delivery::related_reply_input(tx, id, *related, &target.actor_id, origin)?
                     }
                 } else { None };
-                let input=crate::actors::MessageRecord {seq:0,id:Uuid::new_v4().to_string(),actor_id:target.actor_id.clone(),source,reply_to:crate::actors::ReplyTarget::Remote {stage_id:id,invocation_id:invocation,user},kind:crate::actors::MessageKind::Request,in_reply_to:related,delegation_grant:Some(crate::actors::DelegationGrant {read_only,permissions:capabilities}),remote_authority:Some(crate::actors::RemoteAuthority {peer:id,grant_actor:target.actor_id.clone(),reply_for:None}),content,attachments:admitted_attachments,status:crate::actors::MessageStatus::Queued,cancel_requested:false,started_at_ms:None,finished_at_ms:None,final_generation:None,reply:None,error:None,created_at_ms:now,updated_at_ms:now};
+                let input=crate::actors::MessageRecord {seq:0,id:Uuid::new_v4().to_string(),actor_id:target.actor_id.clone(),source,reply_to:crate::actors::ReplyTarget::Remote {stage_id:id,invocation_id:invocation,user},kind:crate::actors::MessageKind::Request,in_reply_to:related,remote_authority:Some(crate::actors::RemoteAuthority {peer:id,read_only,origin_actor:target.actor_id.clone(),reply_for:None}),content,attachments:admitted_attachments,status:crate::actors::MessageStatus::Queued,cancel_requested:false,started_at_ms:None,finished_at_ms:None,final_generation:None,reply:None,error:None,created_at_ms:now,updated_at_ms:now};
                 Some(crate::actors::store::insert_message(tx,input).map_err(|_|StageError::Unavailable("Actor inbox could not be persisted"))?.id)
             }else{None};
             let receipt=Receipt {invocation,actor_id:target.actor_id.clone(),state:InvocationState::DurableReceived,result:None,duplicate:false,message_id};
@@ -766,7 +827,7 @@ impl<'a> StageLedger<'a> {
             let (_, mut value) = receipt(tx, id, invocation)?
                 .ok_or(StageError::Invalid("Invocation was not received"))?;
             actor_exists(tx, &value.actor_id)?;
-            if !grant(tx, &peer, &value.actor_id)?.converse {
+            if !authorize_actor(tx, &peer, &value.actor_id)?.converse {
                 return Err(StageError::Forbidden("Actor capability was revoked"));
             }
             if value.state != InvocationState::DurableReceived {
@@ -834,7 +895,7 @@ impl<'a> StageLedger<'a> {
             let (_, value) = receipt(tx, id, invocation)?
                 .ok_or(StageError::Invalid("Invocation was not received"))?;
             actor_exists(tx, &value.actor_id)?;
-            if !grant(tx, &peer, &value.actor_id)?.read {
+            if !authorize_actor(tx, &peer, &value.actor_id)?.read {
                 return Err(StageError::Forbidden("Result access was revoked"));
             }
             Ok(value)
@@ -1034,7 +1095,7 @@ fn transfer_size(frame: &Envelope, encoded: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actors::{ActorConfig, ActorPermissions, ActorRecord, ActorStatus};
+    use crate::actors::{ActorConfig, ActorRecord, ActorStatus};
     use crate::stage::{
         ActorAddress, digest,
         identity::DeviceIdentity,
@@ -1064,7 +1125,6 @@ mod tests {
                         apps: vec!["files".into()],
                         model: None,
                         instructions: String::new(),
-                        permissions: ActorPermissions::workspace(temp.path().to_path_buf()),
                     },
                     status: ActorStatus::Idle,
                     created_at_ms: 1000,
@@ -1098,16 +1158,17 @@ mod tests {
                 &fixture.enrollment.root,
             )
             .unwrap();
+            initialize_account_ownership(&fixture.store, &fixture.enrollment.root.group_id)
+                .unwrap();
             ledger
                 .import_peer(
                     fixture.enrollment.clone(),
-                    vec![ActorGrant {
-                        actor_id: "root".into(),
+                    DeviceAuthority {
                         read: true,
                         converse: true,
                         delegate: false,
                         read_only: true,
-                    }],
+                    },
                     1000,
                 )
                 .unwrap();
@@ -1178,7 +1239,7 @@ mod tests {
         assert!(
             fixture
                 .ledger()
-                .actor_grant(peer, "root", 2001)
+                .authorize_actor(peer, "root", 2001)
                 .unwrap()
                 .read
         );
@@ -1284,26 +1345,22 @@ mod tests {
 
     #[test]
     fn remote_actor_sender_ceiling_survives_admission_as_private_server_state() {
-        use crate::actors::ApprovalMode;
         use crate::stage::protocol::RemoteCeiling;
         let fixture = Fixture::new();
         let peer = fixture.remote.profile().stage_id;
         let mut actor = fixture.store.actor("root").unwrap();
-        actor.config.permissions.writable_roots = vec![fixture.temp.path().to_path_buf()];
-        actor.config.permissions.approval_mode = ApprovalMode::None;
         actor.config.apps = vec!["files".into(), "terminal".into(), "web".into()];
         fixture.store.save_actor(&actor).unwrap();
         fixture
             .ledger()
             .import_peer(
                 fixture.enrollment.clone(),
-                vec![ActorGrant {
-                    actor_id: "root".into(),
+                DeviceAuthority {
                     read: true,
                     converse: true,
                     delegate: true,
                     read_only: false,
-                }],
+                },
                 2000,
             )
             .unwrap();
@@ -1315,10 +1372,7 @@ mod tests {
                     actor_id: "root".into(),
                 },
                 request_id: Uuid::new_v4(),
-                ceiling: RemoteCeiling {
-                    read_only: true,
-                    approval_mode: ApprovalMode::Ask,
-                },
+                ceiling: RemoteCeiling { read_only: true },
             };
         }
         let receipt = fixture
@@ -1326,10 +1380,7 @@ mod tests {
             .accept_actor_input(peer, &frame, "request".into(), 2001)
             .unwrap();
         let input = fixture.store.message(&receipt.message_id.unwrap()).unwrap();
-        let ceiling = input.delegation_grant.as_ref().unwrap();
-        assert_eq!(ceiling.permissions.approval_mode, ApprovalMode::Ask);
-        assert!(ceiling.read_only);
-        assert!(ceiling.permissions.writable_roots.is_empty());
+        assert!(input.remote_authority.as_ref().unwrap().read_only);
 
         assert!(input.remote_authority.is_some());
         assert!(
@@ -1619,13 +1670,12 @@ mod tests {
                     root: fixture.enrollment.root.clone(),
                     chain: fixture.enrollment.chain[..1].to_vec(),
                 },
-                vec![ActorGrant {
-                    actor_id: "root".into(),
+                DeviceAuthority {
                     read: true,
                     converse: true,
                     delegate: false,
                     read_only: true,
-                }],
+                },
                 2000,
             )
             .unwrap();
@@ -2123,23 +2173,34 @@ mod tests {
             fixture.store.save_actor(&actor).unwrap();
         }
         fixture.store.stage_transaction(|tx| {
-            tx.execute_batch("CREATE TABLE stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL); INSERT INTO stage_account_actors VALUES('foreign','another-account');")?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL); INSERT INTO stage_account_actors VALUES('foreign','another-account');")?;
             Ok(())
         }).unwrap();
         initialize_account_ownership(&fixture.store, &account).unwrap();
         initialize_account_ownership(&fixture.store, &account).unwrap();
         let peer = fixture.remote.profile().stage_id;
         for id in ["legacy", "nested"] {
-            assert!(fixture.ledger().actor_grant(peer, id, 2001).unwrap().read);
+            assert!(
+                fixture
+                    .ledger()
+                    .authorize_actor(peer, id, 2001)
+                    .unwrap()
+                    .read
+            );
             assert!(fixture.ledger().manages_actor(peer, id, 2001).unwrap());
         }
         for id in ["foreign", "foreign-child"] {
-            assert!(fixture.ledger().actor_grant(peer, id, 2001).is_err());
+            assert!(fixture.ledger().authorize_actor(peer, id, 2001).is_err());
             assert!(!fixture.ledger().manages_actor(peer, id, 2001).unwrap());
         }
         assert!(initialize_account_ownership(&fixture.store, "another-account").is_err());
         fixture.ledger().revoke(peer).unwrap();
-        assert!(fixture.ledger().actor_grant(peer, "legacy", 2001).is_err());
+        assert!(
+            fixture
+                .ledger()
+                .authorize_actor(peer, "legacy", 2001)
+                .is_err()
+        );
     }
     #[test]
     fn old_retry_cannot_reexecute_after_confirmed_dedup_cleanup() {
@@ -2226,7 +2287,7 @@ mod tests {
             crate::actors::MessageSource::RemoteUser { .. }
         ));
         assert!(message.remote_authority.is_some());
-        assert!(message.delegation_grant.as_ref().unwrap().read_only);
+        assert!(message.remote_authority.as_ref().unwrap().read_only);
         assert!(
             !serde_json::to_value(message)
                 .unwrap()

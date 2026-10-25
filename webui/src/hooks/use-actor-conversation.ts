@@ -47,6 +47,7 @@ export type ConversationAction = {
   tools: api.ToolSummary[];
 } | {
   type: "approval";
+  actorId: string;
   approval: api.ApprovalRecord;
 } | {
   type: "cursor";
@@ -81,7 +82,7 @@ export function conversationReducer(state: ConversationState, action: Conversati
     case "message": return action.message.actor_id === state.actorId ? { ...state, messages: mergeMessages(state.messages, [action.message]) } : state;
     case "tools": return action.actorId === state.actorId ? { ...state, tools: mergeTools(state.tools, action.tools.map(tool => ({ ...tool, status: "completed" }))), toolNext: { ...state.toolNext, [action.messageId]: action.nextCursor } } : state;
     case "approval": {
-      if (action.approval.actor_id !== state.actorId)
+      if (action.actorId !== state.actorId)
         return state;
       const previous = state.approvals.find(item => item.id === action.approval.id);
       if (previous && previous.decision !== "pending" && action.approval.decision === "pending")
@@ -313,7 +314,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
           if (!valid(generation))
             return;
           for (const approval of approvalPage.items)
-            dispatch({ type: "approval", approval });
+            dispatch({ type: "approval", actorId: actorId!, approval });
           // Small references only. Details remain unloaded until explicitly opened.
           const visible = [...new Map([...page.items, ...(page.active ? [page.active] : [])].map(message => [message.id, message])).values()];
           for (let start = 0; start < visible.length; start += 4)
@@ -354,7 +355,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
               const approval = await api.getApproval(event.approval_id, actorId!, { signal: abort.signal });
               if (!valid(generation))
                 return;
-              dispatch({ type: "approval", approval });
+              dispatch({ type: "approval", actorId: actorId!, approval });
             }
             if (options.includeActivity !== false || !["generation_started", "generation_delta", "tool_started"].includes(event.type)) dispatch({ type: "event", record });
           },

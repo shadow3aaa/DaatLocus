@@ -115,19 +115,6 @@ impl App for AccountActors {
     fn id(&self) -> AppId {
         AppId::new("actors").expect("Actors App")
     }
-    fn delegates_approval(&self, call: &AgentToolCall) -> bool {
-        matches!(
-            call.name.as_str(),
-            "list"
-                | "create"
-                | "import_conversation"
-                | "message"
-                | "status"
-                | "cancel"
-                | "archive"
-                | "unarchive"
-        )
-    }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         let mut specs = self.local.tool_specs();
         for spec in &mut specs {
@@ -156,11 +143,12 @@ impl App for AccountActors {
         specs.push(AppToolSpec {name:"devices".into(), description:"List authorized account devices and actual connectivity. Select an explicit stage_id for hosted Actor operations. Offline targets are never silently moved.".into(),input_schema:model_schema_for::<EmptyAppArgs>()});
         specs
     }
-    fn before_tool_call(
-        &self,
+
+    async fn execute_tool(
+        &mut self,
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
-    ) -> miette::Result<()> {
+    ) -> miette::Result<AppToolExecutionResult> {
         let caller = context
             .actor_call
             .as_ref()
@@ -175,14 +163,6 @@ impl App for AccountActors {
         }
         self.system.record_for_tool(shared::ACTOR_ID, caller)?;
         self.local.check_import_operation(call, context)?;
-        Ok(())
-    }
-    async fn execute_tool(
-        &mut self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> miette::Result<AppToolExecutionResult> {
-        self.before_tool_call(call, context)?;
         if call.name == "devices" {
             return Ok(AppToolExecutionResult::new(
                 "Account devices",

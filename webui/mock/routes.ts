@@ -8,7 +8,6 @@ import { advanceActivityPreview } from "./activity";
  */
 import type {
   Access,
-  ApprovalMode,
   ApprovalRecord,
   Attachment,
   ConfigReadiness,
@@ -38,7 +37,6 @@ import {
   maxSeq,
   newId,
   now,
-  resolveApprovalRecord,
   stageSettings,
   store,
   toolSummary,
@@ -375,11 +373,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
         if (body.model !== null && typeof body.model !== "string") return invalidRequest("model must be a string or null");
         if (config) config.model = body.model as string | null;
       }
-      if (body.approval_mode !== undefined) {
-        const mode = body.approval_mode;
-        if (mode !== "auto" && mode !== "ask" && mode !== "none") return invalidRequest("approval_mode must be auto, ask or none");
-        if (config) config.permissions.approval_mode = mode as ApprovalMode;
-      }
+
       const ts = now();
       actor.summary.updated_at_ms = ts;
       actor.detail.updated_at_ms = ts;
@@ -544,10 +538,10 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
 
   // ---- approvals ----------------------------------------------------------
   if (path === "/v1/approvals" && method === "GET") {
-    const awaiting = url.searchParams.get("awaiting_owner") === "true";
+    if ([...url.searchParams.keys()].some(key=>!["before","limit"].includes(key))) return json({code:"invalid_query"},400);
     const all: ApprovalRecord[] = [];
     for (const actor of store.actors.values()) all.push(...actor.approvals);
-    const items = awaiting ? all.filter(record => record.decision === "pending" && record.mode === "ask") : all;
+    const items = all;
     const limit = limitParam(url, "limit", 30);
     if (limit === null) return invalidRequest();
     const page = pageDesc(items, intParam(url, "before"), limit);
@@ -556,10 +550,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
   if ((match = RE_ACTOR_APPROVALS.exec(path)) && method === "GET") {
     const actor = getActor(decodeSegment(match[1]));
     if (!actor) return notFound("Unknown actor");
-    const awaiting = url.searchParams.get("awaiting_owner") === "true";
-    const items = awaiting
-      ? actor.approvals.filter(record => record.decision === "pending" && record.mode === "ask")
-      : actor.approvals;
+    const items = actor.approvals;
     const limit = limitParam(url, "limit", 30);
     if (limit === null) return invalidRequest();
     const page = pageDesc(items, intParam(url, "before"), limit);
@@ -572,22 +563,8 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     const record = actor.approvals.find(item => item.id === approvalId);
     if (!record) return notFound("Unknown approval");
     if (method === "GET") return json(record);
-    if (method === "POST") {
-      const body = await jsonBody(req);
-      // Backend denies unknown fields: {"decision"} only (src/service/approvals.rs).
-      if (!body || Object.keys(body).some(key => key !== "decision")) return invalidRequest();
-      const decision = body.decision;
-      if (decision !== "approve" && decision !== "deny") return invalidRequest("decision must be approve or deny");
-      if (record.mode !== "ask") return conflict("This action does not await an owner decision");
-      if (record.decision !== "pending") return conflict("Approval is already resolved");
-      const resolved = resolveApprovalRecord(
-        record.id,
-        decision === "approve" ? "approved" : "denied",
-        decision === "approve" ? "Approved by Owner" : "Denied by Owner",
-      );
-      return resolved ? json(resolved) : notFound("Unknown approval");
-    }
-    return null;
+
+    return json({code:"method_not_allowed"},405);
   }
   if ((match = RE_APPROVAL.exec(path))) {
     const approvalId = decodeSegment(match[1]);
@@ -595,23 +572,8 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
       const record = findApproval(approvalId);
       return record ? json(record) : notFound("Unknown approval");
     }
-    if (method === "POST") {
-      const body = await jsonBody(req);
-      if (!body || Object.keys(body).some(key => key !== "decision")) return invalidRequest();
-      const decision = body.decision;
-      if (decision !== "approve" && decision !== "deny") return invalidRequest("decision must be approve or deny");
-      const record = findApproval(approvalId);
-      if (!record) return notFound("Unknown approval");
-      if (record.mode !== "ask") return conflict("This action does not await an owner decision");
-      if (record.decision !== "pending") return conflict("Approval is already resolved");
-      const resolved = resolveApprovalRecord(
-        approvalId,
-        decision === "approve" ? "approved" : "denied",
-        decision === "approve" ? "Approved by Owner" : "Denied by Owner",
-      );
-      return resolved ? json(resolved) : notFound("Unknown approval");
-    }
-    return null;
+
+    return json({code:"method_not_allowed"},405);
   }
 
   // ---- attachments / resources ---------------------------------------------

@@ -340,20 +340,18 @@ impl Host {
                 "Enrollment belongs to another device",
             ));
         }
-        let ledger = if self.account_id().is_none() {
-            StageLedger::initialize(self.system.store(), self.local, &own.root)?
-        } else {
-            StageLedger::attach(self.system.store(), self.local)
-        };
+        if self.account_id().is_none() {
+            StageLedger::initialize(self.system.store(), self.local, &own.root)?;
+        }
         self.persist("enrollment", &own)?;
         *self.enrollment.write() = Some(own.clone());
-        // Issuer membership provides connection authentication, never Actor grants.
+        // Issuer membership provides connection authentication, never Actor-specific grants.
         for length in 1..own.chain.len() {
             let enrollment = Enrollment {
                 root: own.root.clone(),
                 chain: own.chain[..length].to_vec(),
             };
-            ledger.import_peer(enrollment, vec![], chrono::Utc::now().timestamp_millis())?;
+            self.discover_member(enrollment)?;
         }
         Ok(())
     }
@@ -368,11 +366,12 @@ impl Host {
             issuer.expires_at_ms.min(now + 180 * 24 * 60 * 60 * 1000),
             true,
         )?;
-        StageLedger::attach(self.system.store(), self.local).import_peer(
-            enrollment.clone(),
-            vec![],
-            now,
-        )?;
+        let ledger = StageLedger::attach(self.system.store(), self.local);
+        let authority = ledger
+            .stored_peer(request.device.stage_id)?
+            .map(|peer| peer.authority)
+            .unwrap_or_default();
+        ledger.import_peer(enrollment.clone(), authority, now)?;
         Ok(enrollment)
     }
     pub fn renew_account_authority(&self) -> Result<Enrollment> {
@@ -426,11 +425,11 @@ impl Host {
             return Ok(());
         }
         let ledger = StageLedger::attach(self.system.store(), self.local);
-        let grants = ledger
+        let authority = ledger
             .stored_peer(member.device.stage_id)?
-            .map(|p| p.grants)
+            .map(|p| p.authority)
             .unwrap_or_default();
-        ledger.import_peer(enrollment, grants, now)?;
+        ledger.import_peer(enrollment, authority, now)?;
         Ok(())
     }
     pub fn save_settings(&self, candidate: Settings) -> Result<()> {

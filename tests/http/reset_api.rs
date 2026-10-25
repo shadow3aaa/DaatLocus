@@ -1,6 +1,5 @@
 //! Explicit account reset removes work, never configuration or user files.
 use crate::support::Fixture;
-use daat_locus::actors::ApprovalMode;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
@@ -29,16 +28,15 @@ async fn account_reset_removes_actors_approvals_and_resources_but_preserves_iden
             .join_request(chrono::Utc::now().timestamp_millis())
             .unwrap(),
         true,
-        vec![daat_locus::stage::ledger::ActorGrant {
-            actor_id: actor.clone(),
+        daat_locus::stage::ledger::DeviceAuthority {
             read: true,
             converse: true,
             delegate: true,
-            read_only: false,
-        }],
+            read_only: true,
+        },
     )
     .unwrap();
-    let approval = fixture.approval(&actor, ApprovalMode::Ask).await;
+    let approval = fixture.approval(&actor).await;
     let workspace = fixture.system.actor(&actor).unwrap().config.workspace;
     let user_file = workspace.join("keep.txt");
     std::fs::write(&user_file, "user project contents").unwrap();
@@ -79,7 +77,12 @@ async fn account_reset_removes_actors_approvals_and_resources_but_preserves_iden
     assert!(fixture.system.store().approval(&approval.id).is_err());
     assert_eq!(fixture.system.store().actors().unwrap().len(), 1);
     let root = fixture.system.actor("core").unwrap();
-    assert_eq!(root.config.permissions.approval_mode, ApprovalMode::Auto);
+    assert!(
+        serde_json::to_value(&root.config)
+            .unwrap()
+            .get("permissions")
+            .is_none()
+    );
     assert_eq!(
         fixture.system.actor("core").unwrap().config.apps,
         ["actors"]
@@ -132,8 +135,8 @@ async fn account_reset_removes_actors_approvals_and_resources_but_preserves_iden
     .unwrap();
     assert_eq!(peer.device, remote.profile());
     assert!(
-        peer.grants.is_empty(),
-        "reset must remove old per-Actor device grants"
+        peer.authority.read_only,
+        "work reset must preserve authenticated remote device restrictions"
     );
     assert_eq!(
         serde_json::to_value(fixture.stage.host.settings()).unwrap(),

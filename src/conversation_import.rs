@@ -302,7 +302,7 @@ mod tests {
     #[tokio::test]
     async fn import_prepares_one_idle_actor_and_preserves_scoped_evidence_after_restart() {
         use crate::{
-            actors::{ActorStatus, ActorSystem, ApprovalMode, Attachment, ModelFactory},
+            actors::{ActorStatus, ActorSystem, Attachment, ModelFactory},
             app::App,
             model_protocol::AgentToolCall,
         };
@@ -344,10 +344,7 @@ mod tests {
         )
         .await
         .unwrap();
-        system
-            .patch_owned_preferences("core", None, Some(ApprovalMode::Ask))
-            .await
-            .unwrap();
+
         system.seed_test_actor("root");
         let parent = system.actor("root").unwrap();
         let transcript = parse_codex(&rollout(&[json!({"type":"event_msg","payload":{"type":"user_message","message":"Preserve this context; do not run commands."}})])).unwrap();
@@ -395,14 +392,6 @@ mod tests {
                 .contains("wait for their explicit request")
         );
         assert_eq!(actor.config.workspace, parent.config.workspace);
-        assert!(
-            actor
-                .config
-                .permissions
-                .writable_roots
-                .contains(&actor.config.workspace)
-        );
-        assert_eq!(actor.config.permissions.approval_mode, ApprovalMode::Ask);
         assert!(!system.store().has_queued_input(id).unwrap());
         assert!(
             system

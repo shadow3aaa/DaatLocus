@@ -6,13 +6,10 @@ import { ArrowUpIcon, ChevronDownIcon, FileIcon, FolderIcon, PaperclipIcon, Plus
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
-import type { ApprovalMode, Attachment } from "@/lib/actor-api";
+import type { Attachment } from "@/lib/actor-api";
 import { cn } from "@/lib/utils";
 
 export type ComposerModel = { name: string; label: string; effort?: string; isDefault?: boolean };
-export function modeLabel(mode: ApprovalMode): string {
-  return t({auto:"composer.auto_approval", ask:"composer.ask_for_approval", none:"composer.full_access"}[mode]);
-}
 function effortLabel(value?: string): string { return value && ["none","minimal","low","medium","high","xhigh","max"].includes(value) ? t(`effort.${value}`) : value || ""; }
 
 export function Composer({ value, onValueChange, onSubmit, attachments, onFiles, onRemoveAttachment, uploading, busy, working, onStop, disabled, submissionDisabled, canManage, models, modelName, onModelChange, placeholder = t("composer.message"), compact = false }: {

@@ -72,7 +72,8 @@ pub fn initialize(store: &ActorStore, account: &str) -> Result<()> {
             // A purely local Core can already have history before relay mode is
             // enabled. Seed it once; triggers track subsequent changes.
             for (entity,key) in [(Entity::Message,"id"),(Entity::History,"seq"),(Entity::Tool,"id"),(Entity::Approval,"id"),(Entity::Event,"seq")] {
-                tx.execute(&format!("INSERT INTO core_dirty(entity,local_key,revision) SELECT ?1,CAST({key} AS TEXT),1 FROM {} WHERE actor_id='core' ON CONFLICT(entity,local_key) DO NOTHING",entity.name()),[entity.name()])?;
+                let source = if entity == Entity::Approval { "message_id IN (SELECT id FROM messages WHERE actor_id='core')" } else { "actor_id='core'" };
+                tx.execute(&format!("INSERT INTO core_dirty(entity,local_key,revision) SELECT ?1,CAST({key} AS TEXT),1 FROM {} WHERE {source} ON CONFLICT(entity,local_key) DO NOTHING",entity.name()),[entity.name()])?;
             }
             tx.execute("INSERT INTO core_dirty VALUES('configuration','core',1) ON CONFLICT DO NOTHING",[])?;
             tx.execute("INSERT INTO core_meta VALUES('local_history_pending','1') ON CONFLICT(key) DO UPDATE SET value='1'",[])?;
@@ -83,8 +84,9 @@ pub fn initialize(store: &ActorStore, account: &str) -> Result<()> {
         tx.execute("INSERT OR IGNORE INTO core_meta VALUES('importing','0')",[])?;
         for (entity,key) in [(Entity::Message,"id"),(Entity::History,"seq"),(Entity::Tool,"id"),(Entity::Approval,"id"),(Entity::Event,"seq")] {
             let table=entity.name();
+            let source = if entity == Entity::Approval { "EXISTS(SELECT 1 FROM messages WHERE id=NEW.message_id AND actor_id='core')" } else { "NEW.actor_id='core'" };
             for action in ["INSERT","UPDATE"] {
-                let sql=format!("CREATE TRIGGER IF NOT EXISTS core_{table}_{action} AFTER {action} ON {table} WHEN NEW.actor_id='core' AND (SELECT value FROM core_meta WHERE key='importing')='0' BEGIN INSERT INTO core_dirty(entity,local_key,revision) VALUES('{table}',CAST(NEW.{key} AS TEXT),1) ON CONFLICT(entity,local_key) DO UPDATE SET revision=revision+1; END;");
+                let sql=format!("CREATE TRIGGER IF NOT EXISTS core_{table}_{action} AFTER {action} ON {table} WHEN {source} AND (SELECT value FROM core_meta WHERE key='importing')='0' BEGIN INSERT INTO core_dirty(entity,local_key,revision) VALUES('{table}',CAST(NEW.{key} AS TEXT),1) ON CONFLICT(entity,local_key) DO UPDATE SET revision=revision+1; END;");
                 tx.execute_batch(&sql)?;
             }
         }
@@ -130,7 +132,9 @@ fn source(tx: &Transaction<'_>, entity: Entity, key: &str) -> Result<Value> {
             "SELECT json_object('done',done,'record',json(record)) FROM tools WHERE actor_id='core' AND id=?1"
         }
         Entity::Message => "SELECT record FROM messages WHERE actor_id='core' AND id=?1",
-        Entity::Approval => "SELECT record FROM approvals WHERE actor_id='core' AND id=?1",
+        Entity::Approval => {
+            "SELECT record FROM approvals WHERE message_id IN (SELECT id FROM messages WHERE actor_id='core') AND id=?1"
+        }
     };
     let value: String = tx.query_row(sql, [key], |r| r.get(0))?;
     let mut value: Value = serde_json::from_str(&value)
@@ -578,13 +582,13 @@ pub(crate) fn apply(
         Entity::Approval => {
             let mut record: ApprovalRecord = serde_json::from_value(value)
                 .map_err(|_| StageError::Invalid("Invalid approval"))?;
-            if record.actor_id != ACTOR_ID || record.id != change.key {
+            if record.id != change.key {
                 return Err(StageError::Forbidden("Approval belongs to another Actor"));
             }
             require_message(tx, &record.message_id)?;
             let seq: Option<i64> = tx
                 .query_row(
-                    "SELECT seq FROM approvals WHERE id=?1 AND actor_id='core'",
+                    "SELECT seq FROM approvals WHERE id=?1 AND message_id IN (SELECT id FROM messages WHERE actor_id='core')",
                     [&record.id],
                     |r| r.get(0),
                 )
@@ -597,7 +601,7 @@ pub(crate) fn apply(
                 )?;
             } else {
                 tx.execute(
-                    "INSERT INTO approvals(id,actor_id,message_id,record) VALUES(?1,'core',?2,'')",
+                    "INSERT INTO approvals(id,message_id,record) VALUES(?1,?2,'')",
                     params![record.id, record.message_id],
                 )?;
                 record.seq = tx.last_insert_rowid();
@@ -848,9 +852,11 @@ mod tests {
         };
         b.tool_started(ACTOR_ID, &unknown.id, &call).unwrap();
         let mut pending = input();
-        pending.delegation_grant = Some(crate::actors::DelegationGrant {
+        pending.remote_authority = Some(crate::actors::RemoteAuthority {
+            peer: source,
+            origin_actor: ACTOR_ID.into(),
+            reply_for: None,
             read_only: true,
-            permissions: crate::actors::ActorPermissions::workspace(b_dir.path().to_path_buf()),
         });
         let pending = b.enqueue(pending, None).unwrap();
         let batch = capture(&b, "account-a", target, 2).unwrap().unwrap();
@@ -889,7 +895,7 @@ mod tests {
         let restored = b.message(&pending.id).unwrap();
         assert_eq!(restored.status, MessageStatus::Queued);
         assert!(
-            restored.delegation_grant.unwrap().read_only,
+            restored.remote_authority.unwrap().read_only,
             "private input constraints must survive restoration"
         );
         assert_eq!(
@@ -960,8 +966,8 @@ mod tests {
         );
     }
     use crate::actors::{
-        ActorConfig, ActorPermissions, ActorRecord, ActorStatus, MessageKind, MessageSource,
-        MessageStatus, ReplyTarget,
+        ActorConfig, ActorRecord, ActorStatus, MessageKind, MessageSource, MessageStatus,
+        ReplyTarget,
     };
     use uuid::Uuid;
     #[test]
@@ -1165,7 +1171,6 @@ mod tests {
                     apps: vec!["files".into()],
                     model: None,
                     instructions: String::new(),
-                    permissions: ActorPermissions::workspace(path.to_path_buf()),
                 },
                 status: ActorStatus::Idle,
                 created_at_ms: 1,
@@ -1184,7 +1189,7 @@ mod tests {
             reply_to: ReplyTarget::User,
             kind: MessageKind::Request,
             in_reply_to: None,
-            delegation_grant: None,
+
             remote_authority: None,
             content: "hello shared Actor".into(),
             attachments: vec![],

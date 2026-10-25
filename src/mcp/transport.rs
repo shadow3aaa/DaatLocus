@@ -106,6 +106,12 @@ pub struct Session {
     pub dirty: Arc<AtomicBool>,
 }
 impl Session {
+    pub fn ensure_policy(&self, current: &crate::sandbox::RuntimeSandboxPolicy) -> Result<()> {
+        if let Some(child) = &self.child {
+            child.0.ensure_policy(&current.native)?;
+        }
+        Ok(())
+    }
     pub async fn connect(source: &Source, context: &AppToolExecutionContext) -> Result<Self> {
         source.validate()?;
         let dirty = Arc::new(AtomicBool::new(false));
@@ -141,7 +147,7 @@ impl Session {
                 #[cfg(windows)]
                 let (command, arguments) =
                     windows_command(command, arguments, &context.execution_cwd, environment)?;
-                let policy = context.sandbox_policy.for_process();
+                let policy = context.sandbox_policy.clone();
                 let cwd = dunce::simplified(&context.execution_cwd).to_path_buf();
                 let command = command.clone();
                 let arguments = arguments.clone();

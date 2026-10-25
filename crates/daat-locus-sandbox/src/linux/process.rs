@@ -381,7 +381,10 @@ pub fn spawn_restricted_async(
         "--seccomp",
         &filter.as_raw_fd().to_string(),
     ]);
-    command.args(super::create_bwrap_args(&filesystem, command_argv));
+    command.args(
+        super::create_bwrap_args(&filesystem, command_argv)
+            .map_err(|error| io::Error::other(error.to_string()))?,
+    );
     let spawn_options = options.clone();
     if !policy.filesystem.full_disk_read && !policy.filesystem.full_disk_write {
         command.env("TMPDIR", "/tmp");
@@ -582,6 +585,7 @@ mod tests {
         SandboxPolicy {
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: false,
+                deny_all_writes: false,
                 full_disk_write: false,
                 readable_roots: vec![root.to_owned()],
                 writable_roots: vec![WritableRoot {

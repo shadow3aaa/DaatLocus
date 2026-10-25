@@ -93,82 +93,23 @@ impl StageReceiver {
                     count,
                 }
             }
-            Body::ApprovalsQuery { before, limit } => {
-                let page = self
-                    .system
-                    .store()
-                    .pending_approvals(None, *before, *limit as usize)
-                    .map_err(|_| StageError::Unavailable("Cannot read pending approvals"))?;
-                let mut records = vec![];
-                for record in page.items {
-                    if self
-                        .system
-                        .store()
-                        .native_approval(&record.id)
-                        .unwrap_or(false)
-                        && ledger.manages_actor(peer.stage_id(), &record.actor_id, now)?
-                    {
-                        records.push(record);
-                    }
-                }
-                Body::Approvals {
-                    records,
-                    next: page.next_cursor,
-                }
-            }
-            Body::ApprovalQuery { id } => {
+            Body::ApprovalQuery { id, source_actor } => {
                 let record = self
                     .system
                     .store()
                     .approval(id)
                     .map_err(|_| StageError::Unavailable("Approval is unavailable"))?;
-                if !ledger.manages_actor(peer.stage_id(), &record.actor_id, now)?
+                let origin = record
+                    .source_actor(self.system.store())
+                    .map_err(|_| StageError::Invalid("Application source is unavailable"))?;
+                if source_actor.as_ref().is_some_and(|actor| *actor != origin)
+                    || !ledger.manages_actor(peer.stage_id(), &origin, now)?
                     || !self.system.store().native_approval(id).unwrap_or(false)
                 {
                     return Err(StageError::Forbidden(
                         "Approval is outside device authority",
                     ));
                 }
-                Body::Approval {
-                    record: Box::new(record),
-                }
-            }
-            Body::ApprovalResolve { id, decision } => {
-                let record = self
-                    .system
-                    .store()
-                    .approval(id)
-                    .map_err(|_| StageError::Unavailable("Approval is unavailable"))?;
-                if !ledger.manages_actor(peer.stage_id(), &record.actor_id, now)?
-                    || !self.system.store().native_approval(id).unwrap_or(false)
-                {
-                    return Err(StageError::Forbidden("Device cannot resolve this approval"));
-                }
-                if record.mode != crate::actors::ApprovalMode::Ask
-                    || record.decision != crate::actors::ApprovalDecision::Pending
-                    || !matches!(
-                        decision,
-                        crate::actors::ApprovalDecision::Approved
-                            | crate::actors::ApprovalDecision::Denied
-                    )
-                {
-                    return Err(StageError::Conflict(
-                        "Approval does not await an owner decision",
-                    ));
-                }
-                let input = self
-                    .system
-                    .store()
-                    .message(&record.message_id)
-                    .map_err(|_| StageError::Unavailable("Approval request is unavailable"))?;
-                if input.cancel_requested || input.status != crate::actors::MessageStatus::Running {
-                    return Err(StageError::Conflict("Execution is no longer active"));
-                }
-                let record = self
-                    .system
-                    .store()
-                    .resolve_approval(id, *decision, "Resolved by account Owner on another device")
-                    .map_err(|_| StageError::Conflict("Approval changed"))?;
                 Body::Approval {
                     record: Box::new(record),
                 }
@@ -180,7 +121,7 @@ impl StageReceiver {
                 self.system
                     .actor(&actor.actor_id)
                     .map_err(|_| StageError::Forbidden("Actor is unavailable"))?;
-                let access = ledger.actor_grant(peer.stage_id(), &actor.actor_id, now)?;
+                let access = ledger.authorize_actor(peer.stage_id(), &actor.actor_id, now)?;
                 Body::ActorAccess {
                     actor: actor.clone(),
                     read: access.read,
@@ -206,7 +147,7 @@ impl StageReceiver {
                     .into_iter()
                     .filter(|actor| after.as_ref().is_none_or(|after| &actor.id > after))
                 {
-                    if let Ok(grant) = ledger.actor_grant(peer.stage_id(), &actor.id, now)
+                    if let Ok(grant) = ledger.authorize_actor(peer.stage_id(), &actor.id, now)
                         && grant.read
                     {
                         actors.push(super::protocol::RemoteActor {
@@ -399,11 +340,12 @@ impl StageReceiver {
                 "Invocation text exceeds admission budget",
             ));
         }
-        let grant = super::ledger::StageLedger::attach(self.system.store(), local).actor_grant(
-            peer.stage_id(),
-            &target.actor_id,
-            chrono::Utc::now().timestamp_millis(),
-        )?;
+        let grant = super::ledger::StageLedger::attach(self.system.store(), local)
+            .authorize_actor(
+                peer.stage_id(),
+                &target.actor_id,
+                chrono::Utc::now().timestamp_millis(),
+            )?;
         if !grant.converse {
             return Err(StageError::Forbidden("Device cannot invoke this Actor"));
         }

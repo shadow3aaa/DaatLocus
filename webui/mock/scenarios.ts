@@ -31,13 +31,13 @@ export const scenarios = [
   {id:"loading", label:"消息加载中", actor:ROOT_ACTOR_ID},
   {id:"request-error", label:"读取失败与重试", actor:ROOT_ACTOR_ID},
   {id:"running", label:"正在执行与工具活动", actor:"research"},
-  {id:"approval", label:"等待批准 · 长参数", actor:"research"},
+  {id:"approval", label:"范围申请 · Core 确认", actor:"research"},
   {id:"failure", label:"失败与重试", actor:"research"},
   {id:"queue", label:"处理中收到新消息", actor:"research"},
   {id:"attachments", label:"图片与文件附件", actor:ROOT_ACTOR_ID},
   {id:"long-content", label:"长历史、代码、表格与差异", actor:"research"},
   {id:"history", label:"历史刻度与悬停预览", actor:"research"},
-  {id:"many-approvals", label:"跨对话审批分页", actor:ROOT_ACTOR_ID},
+  {id:"many-approvals", label:"范围申请历史分页", actor:ROOT_ACTOR_ID},
   {id:"connecting", label:"正在连接", actor:ROOT_ACTOR_ID},
   {id:"reconnecting", label:"事件流断线重连", actor:ROOT_ACTOR_ID},
   {id:"synchronizing", label:"同步中", actor:ROOT_ACTOR_ID},
@@ -74,7 +74,6 @@ export function activateScenario(id: string): boolean {
   const core=store.actors.get(ROOT_ACTOR_ID)!;
   const work=store.actors.get("research")!;
   if(id==="approval"||id==="long-content") {
-    Object.assign(work.detail.config!.permissions,{writable_roots:["webui/src"]});
   }
   const clear=(actor:ActorStore)=>{actor.messages=[];actor.events=[];actor.tools=[];actor.approvals=[];actor.messageSeq=0;actor.eventSeq=0;actor.toolSeq=0;};
   if (id.startsWith("activity-") || id === "thinking-only") {
@@ -132,20 +131,17 @@ export function activateScenario(id: string): boolean {
     emitEvent(work.summary.id,{type:"tool_started",message_id:active.id,call_id:call,name:toolName});
     if(id!=="failure") setActorStatus(work,"running");
     if(id==="approval") {
-      const approval=addApproval(work,{message_id:active.id,mode:"ask",call:{id:call,name:"files__edit_file",arguments:{path:"webui/src/components/conversation-pane.tsx",edits:Array.from({length:24},(_,i)=>({name:`布局修改 ${i+1}`,old_text:"padding-bottom: 24px;",new_text:"padding-bottom: calc(var(--dl-footer-space) + 24px);"}))}},requested:{readable_roots:["webui/src"],writable_roots:["webui/src"],operation_details:{path:"webui/src/components/conversation-pane.tsx"}}});
-      emitEvent(work.summary.id,{type:"approval_requested",message_id:active.id,approval_id:approval.id,call_id:call,name:approval.call.name});
-      work.detail.config!.permissions.approval_mode="ask";
-      store.approvalWakers.set(approval.id,decision=>{
-        if(store.actors.get(work.summary.id)!==work) return;
-        const finished=now(), resultId=newId(), approved=decision==="approved";
-        const reply=approved?"修改已完成，输入框下方的留白已经更新。":"这次修改未获批准，文件保持原样。";
-        const error=approved?null:"approval_denied";
-        addTool(work,{id:resultId,actor_id:work.summary.id,message_id:active.id,call_id:call,name:toolName,summary:reply,error,started_at_ms:active.started_at_ms!,finished_at_ms:finished,arguments:approval.call.arguments,model_content:reply,outcome:null,payload:null});
-        emitEvent(work.summary.id,{type:"tool_finished",message_id:active.id,call_id:call,name:toolName,result_id:resultId,summary:reply,error});
-        touchMessage(active,{status:"completed",reply,finished_at_ms:finished,final_generation:2});
-        emitEvent(work.summary.id,{type:"message_updated",message_id:active.id,status:"completed"});
-        setActorStatus(work,"idle");
-      });
+      const approval=addApproval(work,{message_id:active.id,call:{id:call,name:"files__edit_file",arguments:{path:"/reports/layout.tsx",old_text:"padding-bottom: 24px;",new_text:"padding-bottom: 32px;"}},requested:{readable_roots:[],writable_roots:["/reports"]}});
+      approval.decision="denied";
+      approval.reason="The requested directory is outside the current sandbox scope.";
+      approval.resolved_at_ms=now();
+      emitEvent(work.summary.id,{type:"approval_resolved",message_id:active.id,approval_id:approval.id,decision:"denied",reason:approval.reason});
+      const reply="需要额外的目录写入范围，已将申请提交给 Core。";
+      touchMessage(active,{status:"completed",reply,finished_at_ms:now(),final_generation:2});
+      emitEvent(work.summary.id,{type:"message_updated",message_id:active.id,status:"completed"});
+      setActorStatus(work,"idle");
+      const request=message(core,"请生成布局报告。" );
+      touchMessage(request,{reply:"生成报告需要写入 /reports 目录，是否同意？"});
     }
     if(id==="failure") touchMessage(active,{status:"failed",reply:null,error:"provider_unavailable"});
     if(id==="queue") for(const content of ["再检查一下 320px 宽度。","把长代码和表格也加入检查。","记得保留输入框里的草稿。"]){const queued=addMessage(work,{kind:"request",source:{kind:"user"},reply_to:{kind:"user"},content,status:"queued"});emitEvent(work.summary.id,{type:"message_added",message_id:queued.id});}
@@ -188,7 +184,7 @@ export function activateScenario(id: string): boolean {
     store.attachments.set(image.id,{attachment:image,bytes:imageBytes,media_type:image.media_type});
     const record=message(core,"帮我看看这份布局检查记录。" );record.attachments=[image,attachment];
   }
-  if(id==="many-approvals") for(let i=0;i<64;i++) {const record=message(work,`检查 ${i+1}` ,true);addApproval(work,{message_id:record.id,mode:"ask",call:{id:newId(),name:"files__read_file",arguments:{path:`webui/src/check-${i+1}.tsx`}},requested:{readable_roots:["webui/src"],writable_roots:[]}});}
+  if(id==="many-approvals") for(let i=0;i<64;i++) {const record=message(work,`检查 ${i+1}` ,true);addApproval(work,{message_id:record.id,call:{id:newId(),name:"files__read_file",arguments:{path:`webui/src/check-${i+1}.tsx`}},requested:{readable_roots:["webui/src"],writable_roots:[]}});}
   if(id==="devices") previewState.devices=[
     {stage_id:"laptop",label:"笔记本",connection:{status:"online",route:"lan",generation:1,retry_at_ms:0}},
     {stage_id:"phone",label:"手机",connection:{status:"connecting",route:null,generation:2,retry_at_ms:0}},

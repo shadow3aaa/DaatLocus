@@ -183,14 +183,19 @@ pub(crate) fn completed(host: &Host, record: &Record) {
 
 /// The marker and all work deletion commit together. Never reset SQLite sequence
 /// counters: already-open clients must not mistake new events for old cursors.
-pub(crate) fn replace(store: &ActorStore, record: &Record, root: &ActorRecord) -> Result<()> {
+pub(crate) fn replace(
+    store: &ActorStore,
+    record: &Record,
+    root: &ActorRecord,
+    device_workspace: &std::path::Path,
+) -> Result<()> {
     store.stage_transaction(|tx| {
         let has_core: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='core_meta')", [], |row| row.get(0))?;
         let synchronized = has_core && tx.query_row("SELECT EXISTS(SELECT 1 FROM core_meta WHERE key='synchronized' AND value='1')", [], |row| row.get::<_, bool>(0))?;
         // Explicitly retain credentials, device identity/enrollment, revocations,
         // transport generations and Raft votes/logs/membership.
         const TABLES: &[&str] = &[
-            "account_approval_refs", "stage_local_approvals", "stage_local_tool_results", "approvals", "tools",
+            "sandbox_scopes", "stage_local_approvals", "stage_local_tool_results", "approvals", "tools",
             "idempotency", "resources", "history", "messages", "actor_event_index",
             "events", "actor_event_heads", "actor_text_heads", "actor_journal_meta",
             "stage_snapshot_pages", "stage_account_actors", "actors",
@@ -219,16 +224,10 @@ pub(crate) fn replace(store: &ActorStore, record: &Record, root: &ActorRecord) -
         if synchronized {
             tx.execute("INSERT INTO core_meta VALUES('synchronized','1')", [])?;
         }
-        let peers = tx.prepare("SELECT id,record FROM stage_peers")?
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        for (id, value) in peers {
-            let mut peer: super::ledger::PeerRecord = serde_json::from_str(&value)
-                .map_err(|_| StageError::Invalid("Invalid device grants"))?;
-            peer.grants.clear();
-            tx.execute("UPDATE stage_peers SET record=?1 WHERE id=?2",
-                params![serde_json::to_string(&peer).map_err(|_| StageError::Invalid("Cannot reset device grants"))?, id])?;
-        }
+        let workspace_scope = crate::sandbox::SandboxScope::filesystem(device_workspace, true)
+            .map_err(|_| StageError::Invalid("Invalid device workspace after reset"))?;
+        crate::sandbox::scopes::remember(tx, &[workspace_scope])
+            .map_err(|_| StageError::Invalid("Cannot initialize device sandbox after reset"))?;
         tx.execute("INSERT INTO actors(id,parent_id,depth,record) VALUES(?1,NULL,0,?2)",
             params![root.id, serde_json::to_string(root).map_err(|_| StageError::Invalid("Cannot reset Core Actor"))?])?;
         tx.execute("INSERT INTO account_work_reset VALUES(1,?1,1) ON CONFLICT(singleton) DO UPDATE SET record=excluded.record,cleanup_pending=1",
@@ -398,20 +397,29 @@ mod tests {
         let record = issue(&a.host).unwrap();
         // Crash boundary: the deletion/marker transaction committed, file cleanup
         // and Core creation did not run. Reopen the real database and device keys.
+        let mut root = a.host.system.actor(crate::stage::shared::ACTOR_ID).unwrap();
+        root.config.workspace = directory.path().join("actor-only-directory");
+        std::fs::create_dir(&root.config.workspace).unwrap();
         replace(
             a.host.system.store(),
             &record,
-            &a.host.system.actor(crate::stage::shared::ACTOR_ID).unwrap(),
+            &root,
+            a.host.system.device_workspace(),
         )
         .unwrap();
+        let scopes = a.host.system.store().sandbox_scopes().unwrap();
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(
+            scopes[0].path,
+            std::fs::canonicalize(a.host.system.device_workspace()).unwrap()
+        );
+        assert_ne!(
+            scopes[0].path,
+            std::fs::canonicalize(&root.config.workspace).unwrap()
+        );
         let system = ActorSystem::open_account_gated(
             a.host.system.infrastructure_dir(),
-            a.host
-                .system
-                .actor(crate::stage::shared::ACTOR_ID)
-                .unwrap()
-                .config
-                .workspace,
+            a.host.system.device_workspace().to_owned(),
             Config::default(),
         )
         .await
@@ -465,6 +473,7 @@ mod tests {
             b.host.system.store(),
             &first,
             &b.host.system.actor(crate::stage::shared::ACTOR_ID).unwrap(),
+            b.host.system.device_workspace(),
         )
         .unwrap();
         initialize(&b.host).unwrap();
@@ -477,6 +486,7 @@ mod tests {
             a.host.system.store(),
             &applied,
             &a.host.system.actor(crate::stage::shared::ACTOR_ID).unwrap(),
+            a.host.system.device_workspace(),
         )
         .unwrap();
         initialize(&a.host).unwrap();

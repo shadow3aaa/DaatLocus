@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    actors::ToolPermissionRequest,
     model_protocol::{AgentContentPart, AgentToolCall, AgentToolInputSpec, AgentToolSpec},
     sandbox::RuntimeSandboxPolicy,
     schema_utils::{validate_model_facing_schema, validate_value_against_schema},
@@ -144,6 +143,7 @@ pub struct ActorCallContext {
 
 #[derive(Clone)]
 pub struct AppToolExecutionContext {
+    pub access_broker: Option<std::sync::Arc<dyn crate::sandbox::access::SandboxAccessBroker>>,
     pub execution_cwd: PathBuf,
     pub sandbox_policy: RuntimeSandboxPolicy,
     pub tool_output_max_tokens: usize,
@@ -153,6 +153,9 @@ pub struct AppToolExecutionContext {
 }
 
 impl AppToolExecutionContext {
+    pub fn files(&self) -> crate::sandbox::access::FileSystem<'_> {
+        crate::sandbox::access::FileSystem::new(self)
+    }
     pub fn resolve_tool_path(&self, path: &Path, base: Option<&Path>) -> PathBuf {
         RuntimeSandboxPolicy::resolve_path(path, base.or(Some(&self.execution_cwd)))
     }
@@ -160,13 +163,6 @@ impl AppToolExecutionContext {
 
 #[async_trait]
 pub trait App: Send + Sync {
-    fn review_requirement(
-        &self,
-        _call: &AgentToolCall,
-        _context: &AppToolExecutionContext,
-    ) -> Result<Option<crate::actors::AppReview>> {
-        Ok(None)
-    }
     fn managed_revision(&self) -> Option<u64> {
         None
     }
@@ -182,10 +178,6 @@ pub trait App: Send + Sync {
     fn can_passivate(&self) -> bool {
         false
     }
-    /// Forwarded operations are reviewed by the App on their target device.
-    fn delegates_approval(&self, _call: &AgentToolCall) -> bool {
-        false
-    }
     fn id(&self) -> AppId;
 
     fn tool_specs(&self) -> Vec<AppToolSpec> {
@@ -194,22 +186,6 @@ pub trait App: Send + Sync {
 
     fn tool_specs_for_context(&self, _context: &AppToolExecutionContext) -> Vec<AppToolSpec> {
         self.tool_specs()
-    }
-
-    fn permission_request(
-        &self,
-        _call: &AgentToolCall,
-        _context: &AppToolExecutionContext,
-    ) -> Result<ToolPermissionRequest> {
-        Ok(ToolPermissionRequest::default())
-    }
-
-    fn before_tool_call(
-        &self,
-        _call: &AgentToolCall,
-        _context: &AppToolExecutionContext,
-    ) -> Result<()> {
-        Ok(())
     }
 
     async fn execute_tool(
@@ -239,17 +215,6 @@ impl AppManager {
                     .map(|revision| (id.as_str().to_owned(), revision))
             })
             .collect()
-    }
-    pub fn review_requirement(
-        &self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<Option<crate::actors::AppReview>> {
-        let (id, call) = self.dispatch(call)?;
-        self.apps
-            .get(&id)
-            .ok_or_else(|| miette!("App is missing"))?
-            .review_requirement(&call, context)
     }
     pub async fn prepare_managed(
         &mut self,
@@ -298,17 +263,6 @@ impl AppManager {
     }
     pub fn can_passivate(&self) -> bool {
         self.apps.values().all(|app| app.can_passivate())
-    }
-    pub fn delegates_approval(
-        &self,
-        call: &AgentToolCall,
-        _context: &AppToolExecutionContext,
-    ) -> Result<bool> {
-        let (id, call) = self.dispatch(call)?;
-        Ok(self
-            .apps
-            .get(&id)
-            .is_some_and(|app| app.delegates_approval(&call)))
     }
     pub fn new(apps: Vec<Box<dyn App>>) -> Result<Self> {
         let mut order = Vec::with_capacity(apps.len());
@@ -404,7 +358,7 @@ impl AppManager {
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
     ) -> Result<AppToolExecutionResult> {
-        let (id, app_call) = self.validated_dispatch(call, context)?;
+        let (id, app_call) = self.schema_dispatch(call, context)?;
         self.apps
             .get_mut(&id)
             .ok_or_else(|| miette!("App is missing"))?
@@ -417,41 +371,7 @@ impl AppManager {
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
     ) -> Result<()> {
-        self.validated_dispatch(call, context).map(|_| ())
-    }
-
-    pub fn validate_tool_call_for_approval(
-        &self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<()> {
         self.schema_dispatch(call, context).map(|_| ())
-    }
-
-    pub fn permission_request(
-        &self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<ToolPermissionRequest> {
-        let (id, app_call) = self.schema_dispatch(call, context)?;
-        self.apps
-            .get(&id)
-            .ok_or_else(|| miette!("App is missing"))?
-            .permission_request(&app_call, context)?
-            .canonicalized()
-    }
-
-    fn validated_dispatch(
-        &self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<(AppId, AgentToolCall)> {
-        let (id, app_call) = self.schema_dispatch(call, context)?;
-        self.apps
-            .get(&id)
-            .ok_or_else(|| miette!("App is missing"))?
-            .before_tool_call(&app_call, context)?;
-        Ok((id, app_call))
     }
 
     fn schema_dispatch(
@@ -474,14 +394,6 @@ impl AppManager {
         Ok((id, app_call))
     }
 
-    pub fn before_tool_call(
-        &self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<()> {
-        self.validate_tool_call(call, context)
-    }
-
     pub async fn execute_tool_for_app(
         &mut self,
         app_id: &AppId,
@@ -491,7 +403,7 @@ impl AppManager {
         app_id
             .demangle_tool_name(&call.name)
             .ok_or_else(|| miette!("tool is not addressed to App `{app_id}`"))?;
-        let (_, app_call) = self.validated_dispatch(call, context)?;
+        let (_, app_call) = self.schema_dispatch(call, context)?;
         let app = self
             .apps
             .get_mut(app_id)
@@ -567,6 +479,7 @@ mod tests {
             "An App must opt in to idle reconstruction"
         );
         let context = AppToolExecutionContext {
+            access_broker: None,
             execution_cwd: std::env::temp_dir(),
             sandbox_policy: RuntimeSandboxPolicy::disabled(),
             tool_output_max_tokens: 1000,

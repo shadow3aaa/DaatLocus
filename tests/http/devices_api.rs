@@ -2,7 +2,6 @@
 use crate::support::Fixture;
 use crate::support::fixture_enrollment;
 use daat_locus::actors::ApprovalDecision;
-use daat_locus::actors::ApprovalMode;
 use daat_locus::config::Config;
 use daat_locus::config::ProviderConfig;
 use reqwest::StatusCode;
@@ -80,14 +79,14 @@ async fn account_model_definitions_sync_privately_without_replacing_device_prefe
     b.stage
         .host
         .join(
-            fixture_enrollment(&a.stage.host, &request, true, vec![]).unwrap(),
+            fixture_enrollment(&a.stage.host, &request, true, Default::default()).unwrap(),
             &a.stage.host.account_id().unwrap(),
         )
         .unwrap();
     StageLedger::attach(b.system.store(), b.stage.host.local)
         .import_peer(
             a.stage.host.enrollment().unwrap(),
-            vec![],
+            Default::default(),
             chrono::Utc::now().timestamp_millis(),
         )
         .unwrap();
@@ -229,7 +228,8 @@ async fn a_paired_device_without_enrollment_authority_cannot_import_login_creden
     let a = Fixture::new().await;
     let b = Fixture::with_config_and_account(a.system.config(), false).await;
     let request = b.stage.host.initialize(false).unwrap();
-    let enrollment = fixture_enrollment(&a.stage.host, &request, false, vec![]).unwrap();
+    let enrollment =
+        fixture_enrollment(&a.stage.host, &request, false, Default::default()).unwrap();
     b.stage
         .host
         .join(enrollment, &a.stage.host.account_id().unwrap())
@@ -237,7 +237,7 @@ async fn a_paired_device_without_enrollment_authority_cannot_import_login_creden
     StageLedger::attach(b.system.store(), b.stage.host.local)
         .import_peer(
             a.stage.host.enrollment().unwrap(),
-            vec![],
+            Default::default(),
             chrono::Utc::now().timestamp_millis(),
         )
         .unwrap();
@@ -309,11 +309,11 @@ async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_ac
     rusqlite::Connection::open(a._temp.path().join("actors/actors.sqlite3"))
         .unwrap()
         .execute(
-            "INSERT INTO stage_account_actors VALUES(?1,'another-account')",
+            "INSERT OR REPLACE INTO stage_account_actors VALUES(?1,'another-account')",
             [&secret],
         )
         .unwrap();
-    let enrollment = fixture_enrollment(&a.stage.host, &request, true, vec![]).unwrap();
+    let enrollment = fixture_enrollment(&a.stage.host, &request, true, Default::default()).unwrap();
     b.stage
         .host
         .join(enrollment, &a.stage.host.account_id().unwrap())
@@ -321,7 +321,7 @@ async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_ac
     StageLedger::attach(b.system.store(), b.stage.host.local)
         .import_peer(
             a.stage.host.enrollment().unwrap(),
-            vec![],
+            Default::default(),
             chrono::Utc::now().timestamp_millis(),
         )
         .unwrap();
@@ -476,45 +476,31 @@ async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_ac
         changed.text().await.unwrap()
     );
     assert!(changed.json::<Value>().await.unwrap()["config"]["model"].is_null());
-    let approval = a.approval(&target, ApprovalMode::Ask).await;
+    let approval = a.approval(&target).await;
     let remote_id = format!("{}~{}", a.stage.host.local, approval.id);
-    let pending = b
-        .owner(
-            reqwest::Method::GET,
-            "/v1/approvals?awaiting_owner=true&limit=1",
-        )
-        .send()
-        .await
-        .unwrap()
-        .json::<Value>()
-        .await
-        .unwrap();
-    assert_eq!(pending["items"][0]["id"], remote_id);
     let endpoint = format!("/v1/approvals/{remote_id}");
-    assert_eq!(
-        b.owner(reqwest::Method::POST, &endpoint)
-            .json(&json!({"decision":"approve","arguments":{"path":"changed"}}))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-    let resolved = b
-        .owner(reqwest::Method::POST, &endpoint)
-        .json(&json!({"decision":"approve"}))
+    let detail = b
+        .owner(reqwest::Method::GET, &endpoint)
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        resolved.status(),
-        StatusCode::OK,
-        "{}",
-        resolved.text().await.unwrap()
-    );
+    assert_eq!(detail.status(), StatusCode::OK);
+    let detail: Value = detail.json().await.unwrap();
+    assert_eq!(detail["id"], remote_id);
+    for decision in ["approve", "deny"] {
+        assert_eq!(
+            b.owner(reqwest::Method::POST, &endpoint)
+                .json(&json!({"decision":decision}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+    }
     assert_eq!(
         a.system.store().approval(&approval.id).unwrap().decision,
-        ApprovalDecision::Approved
+        ApprovalDecision::Pending
     );
     assert_eq!(
         a.system
@@ -593,14 +579,14 @@ async fn joining_devices_are_replicas_and_offline_replicas_do_not_block_the_acco
         .stage
         .host
         .join(
-            fixture_enrollment(&desktop.stage.host, &request, true, vec![]).unwrap(),
+            fixture_enrollment(&desktop.stage.host, &request, true, Default::default()).unwrap(),
             &desktop.stage.host.account_id().unwrap(),
         )
         .unwrap();
     StageLedger::attach(phone.system.store(), phone.stage.host.local)
         .import_peer(
             desktop.stage.host.enrollment().unwrap(),
-            vec![],
+            Default::default(),
             chrono::Utc::now().timestamp_millis(),
         )
         .unwrap();
@@ -765,14 +751,14 @@ async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_repl
     b.stage
         .host
         .join(
-            fixture_enrollment(&a.stage.host, &request, true, vec![]).unwrap(),
+            fixture_enrollment(&a.stage.host, &request, true, Default::default()).unwrap(),
             &account,
         )
         .unwrap();
     StageLedger::attach(b.system.store(), b.stage.host.local)
         .import_peer(
             a.stage.host.enrollment().unwrap(),
-            vec![],
+            Default::default(),
             chrono::Utc::now().timestamp_millis(),
         )
         .unwrap();
@@ -984,7 +970,7 @@ async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_repl
         source.source,
         daat_locus::actors::MessageSource::User
     ));
-    assert!(source.remote_authority.is_none() && source.delegation_grant.is_none());
+    assert!(source.remote_authority.is_none());
     assert_eq!(
         b.stage.core_status().unwrap()["worker_stage_id"],
         a.stage.host.local.to_string()

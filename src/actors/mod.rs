@@ -1,9 +1,8 @@
 mod context;
-pub mod grants;
 pub(crate) mod migrations;
 mod types;
+pub use crate::sandbox::SandboxScope;
 pub use context::{AgentContext, HistoryAnchor, TaskHandoff};
-pub use grants::{AppReview, ApprovalFingerprint, ApprovalScope};
 pub use types::*;
 pub mod approval;
 pub mod permissions;

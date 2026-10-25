@@ -24,28 +24,6 @@ pub struct DenialRecord {
     pub source: DenialSource,
 }
 
-/// Which observations the current implementation can actually produce.
-/// A supported native sandbox does not imply native denial-event collection:
-/// Windows collects native records only when the host's MXC PSEC/V2
-/// learning-mode capture API is available (probed per spawn), and every
-/// other backend reports `false`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DenialCoverage {
-    pub policy_preflight: bool,
-    pub native_process: bool,
-}
-
-pub const fn denial_coverage() -> DenialCoverage {
-    DenialCoverage {
-        policy_preflight: true,
-        // Windows collects native deny-and-record events through the MXC
-        // PSEC/V2 learning-mode backend when the host advertises it; the
-        // capture is probed per spawn and never falls back to elevated
-        // WPR capture. Other backends do not collect native records.
-        native_process: cfg!(target_os = "windows"),
-    }
-}
-
 /// A denied policy preflight. Callers may downcast a `miette::Report` to this
 /// type rather than interpreting display text, stderr, or an OS error number.
 #[derive(Clone, Debug, PartialEq, Eq)]

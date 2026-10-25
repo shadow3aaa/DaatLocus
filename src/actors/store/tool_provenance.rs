@@ -21,7 +21,7 @@ fn authority(input: &MessageRecord) -> Result<String> {
         &serde_json::to_vec(&serde_json::json!({
             "actor": input.actor_id, "message": input.id, "source": input.source,
             "reply_to": input.reply_to, "kind": input.kind, "in_reply_to": input.in_reply_to,
-            "delegation": input.delegation_grant, "remote": input.remote_authority,
+            "remote": input.remote_authority,
         }))
         .into_diagnostic()?,
     ))

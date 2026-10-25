@@ -142,7 +142,7 @@ fn manifest(tx: &Transaction<'_>, hash: &str) -> Result<Manifest> {
 fn authorize(tx: &Transaction<'_>, peer: StageId, actor: &str, hash: &str, now: i64) -> Result<()> {
     let peer = ledger::peer(tx, peer, now)?;
     ledger::actor_exists(tx, actor)?;
-    if !ledger::core_read(tx, actor)? && !ledger::grant(tx, &peer, actor)?.read {
+    if !ledger::authorize_actor(tx, &peer, actor)?.read {
         return Err(StageError::Forbidden("Content is outside Actor grants"));
     }
     let associated: bool = tx.query_row(

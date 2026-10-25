@@ -178,16 +178,6 @@
     "more_files_one": "Show {{count}} more file",
     "more_files_other": "Show {{count}} more files"
   },
-
-  "owner_approval_notice": {
-    "actors_awaiting_approval": "Actors awaiting approval",
-    "actions_awaiting_approval": "actions awaiting approval",
-    "could_not_load_approvals_click_to_retry": "Could not load approvals. Click to retry.",
-    "value0_conversations_awaiting_approval": "{{value0}} conversations awaiting approval",
-    "view_conversations_awaiting_approval": "View conversations awaiting approval",
-    "open_conversation_to_review": "Open conversation to review",
-    "more_conversations_awaiting_approval": "More conversations awaiting approval"
-  },
   "search_dialog": {
     "search_failed_try_again": "Search failed. Try again.",
     "could_not_load_earlier_results": "Could not load earlier results.",
@@ -310,13 +300,10 @@
     "settings_categories": "Settings categories",
     "configuration": "Account & devices",
     "appearance": "Appearance",
-    "permissions": "Permissions",
     "theme": "Theme",
     "system": "System",
     "light": "Light",
     "dark": "Dark",
-    "action_approval": "Action approval",
-    "approval_mode": "Approval mode",
     "loading_configuration": "Loading configuration…",
     "discard_changes": "Discard unsaved changes?",
     "keep_editing": "Keep editing",
@@ -356,7 +343,6 @@
     "permission_approved_reason": "Permission was remembered. The original operation has not run.",
     "permission_status": "Permissions",
     "request_permission": "Request permission",
-    "appeal_permission": "Ask for permission reconsideration",
     "not_approved": "Not approved",
     "deliver_result": "Deliver result",
     "could_not_open_the_result": "Could not open the result.",
@@ -381,11 +367,6 @@
     "page_action_completed": "Page action completed.",
     "partial_document": "Part of the document is shown.",
     "action_completed": "Action completed.",
-    "additional_read_access": "Additional read access",
-    "additional_write_access": "Additional write access",
-    "review_criteria": "Review criteria",
-    "includes_subdirectories": "Includes subdirectories",
-    "execution_details": "Execution details",
     "elapsed_value": "Elapsed {{value}}",
     "exit_code_value": "Exit code {{value}}"
   },
@@ -549,7 +530,6 @@
     "readable_paths": "Readable paths",
     "writable_paths": "Writable paths",
     "action": "Action",
-    "action_details": "Action details",
     "title": "Title",
     "description": "Description",
     "type": "Type",

@@ -44,7 +44,7 @@ client are connected.
   every operation. Restrictive process isolation must fail
   closed when the platform cannot enforce it.
   The explicitly approved ComputerUse desktop capability is an exception to the
-  project filesystem sandbox: target GUI apps retain this Windows user's file
+  device filesystem sandbox: target GUI apps retain this Windows user's file
   access. Keep this exception inside ComputerUse; other Apps retain their sandbox.
   Reject read-only remote authority and exclude Daat Locus's own processes/windows.
 - Do not restore deleted modules merely to make the old product run or compile.
@@ -64,8 +64,8 @@ client are connected.
 - App is a domain state machine exposing tools. It is the only tool abstraction.
 - Standard MCP servers install as device-local App instances through AppsManager or
   the Owner Apps page. Adapt nonportable schemas inside DL; never require a custom
-  MCP protocol. List/inspect/refresh skip review but retain hard permissions;
-  install/enable/close require existing approval. Refresh only at settled tool-group
+  MCP protocol. All operations obey the common device sandbox and authenticated hard authority;
+  Apps declare no action review requirements or permission fingerprints. Refresh only at settled tool-group
   boundaries or the next input, preserving Actor identity/history and unchanged Apps.
   Core constructs only the portable Actors App. Other Actors receive every
   device-provided App; there are no Actor App or tool capability allowlists.
@@ -81,16 +81,15 @@ client are connected.
   on the same device install the same device-provided Apps; creation cannot select
   Apps. Do not retain App access lists, tool allowlists, delegation App ceilings,
   local read-only Actor identities or recipient lists. Hosted Actors perform
-  research and filesystem/process/browser work with their project sandbox and
-  the device-shared remembered approvals. Authenticated remote authority and Actor-resource
+  research and filesystem/process/browser work with the account device sandbox.
+  Workspace directories select execution locations and never define Actor authority. Authenticated remote authority and Actor-resource
   reference ownership remain execution boundaries, independent of App installation.
 - Actor configuration is internal creation/persistence state, not a user management
   surface. Do not expose editors or client/native RPCs that rewrite Apps, workspace,
   instructions or filesystem roots.
-  Owner settings switch one account-wide Full access / Ask / Auto mode for all existing
-  and future Actors; executors have no individual approval-mode selector. Model selection
-  stays a composer preference. Actor creation happens through the Actors App,
-  with inherited creation constraints. Actors have no individual deletion operation.
+  Model selection stays a composer preference. There is no account or Actor
+  Full access / Ask / Auto selector. Actor creation happens through the Actors App,
+  without permission inheritance. Actors have no individual deletion operation.
 - All Actors retain identity, configuration, context, and history outside an
   explicit Owner account-wide work reset. This settings-only maintenance operation
   stops execution, clears Actors, history, resources and grants across devices,
@@ -107,12 +106,11 @@ client are connected.
   Preserve identity, configuration, context, history, resources and grants.
   Unarchive restores message admission without replay; Core cannot be archived.
 - Project, investigation and general Actors use the same core and device Apps.
-  Project workspaces grant recursive filesystem access from their top directory.
-  Enforce sandbox and authenticated remote restrictions in tools, not only prompts.
-  Native processes (Terminal and MCP stdio) may read and execute host files at any
-  location; only writes are restricted to configured/remembered writable scopes.
-  Files App reads remain scoped. Keep explicit authority denials, native isolation,
-  process cleanup and authenticated remote restrictions when deriving process policy.
+  Every Actor on a device uses the account's shared sandbox scopes. Workspace is
+  an execution directory, never a permission boundary. Files, Terminal and MCP
+  use the same resolved filesystem authority. Descendant/background processes
+  inherit that authority without dropping grants or gaining host-service access.
+  Keep native isolation, process cleanup and authenticated remote restrictions.
 - Guest conversation sharing, PIN sessions and quick-tunnel publication are removed.
   Accounts run either purely locally or interconnect through one public relay.
   Remove device-direct LAN, SSH, WebRTC, ICE/STUN and hole-punching paths.
@@ -162,14 +160,15 @@ A fresh single-device account runs locally. Availability during partition takes
 precedence over a global single-writer guarantee; local branches are not Raft commits.
 Ordinary Actors remain hosted. Never approximate the core
 by merging independent roots. Resume inference, never replay uncertain App effects.
-Every effect still requires device-side epoch, authorization, approval and sandbox checks.
+Every effect still requires device-side epoch, authenticated authority and sandbox checks.
+Sandbox expansion uses the unified review/application path.
 
 - Each Actor has one serial inference/tool execution stream; Actors advance concurrently.
   All messages, progress, results and runtime notices are durable immediate inputs.
   Use one Actors App message operation; do not expose queued versus steering modes.
   New input interrupts speculative inference or retry backoff and is received at the
-  next settled tool-group boundary. Waiting pre-execution approval must not prevent
-  receiving messages. Preserve the waiting invocation and immutable approval.
+  next settled tool-group boundary. Explicit applications awaiting automatic review
+  must not prevent receiving messages. Preserve the waiting invocation and immutable scope.
   Suspend unfinished inputs without completing or cancelling their work; resume
   inference from durable observations without replaying effects. Each input retains
   its own authority, origin, reply target and delivery references. Related-message
@@ -208,61 +207,35 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   immediate message: inserted at the running request's next boundary, otherwise
   claimed as its next input); it must not run a Core App tool or require Core
   execution-context replication for approval.
-- Apps declare operations requiring review, their review criteria and semantic
-  approval fingerprints. Undeclared ordinary operations do not require review.
-  Sandbox access outside existing or remembered roots independently requires
-  review, regardless of which App requested access.
-  For native process filesystem access this applies to writes; host reads and
-  executable locations do not require additional filesystem approval.
-  Internal search discovery/loading of repository `.gitignore` and global Git
-  ignore configuration/rules is exempt from Actor filesystem scope and review.
-  Keep repository-boundary discovery, library-managed ignore loading and private
-  rule contents; this grants no Actor file access.
-  Search targets, returned file contents and explicit rule-file reads retain
-  ordinary Actor permissions.
-- Ordinary tool schemas and arguments contain no runtime review fields. Runtime
-  checks existing grants first, then suspends pre-execution calls requiring review.
-  It records immutable arguments/scopes and supplies the current input and operation
-  facts to Ask/Auto. Approval resumes the same not-yet-started invocation after
-  authority, cancellation and target checks; no model retry is needed.
-  Cancellation or reconfiguration aborts waiting calls without executing effects.
-  Equivalent reviewed denials within an input reuse their original decision rather
-  than starting another automatic review. Semantic action or scope changes require
-  a fresh fingerprint. Appeal control operations do not require review.
-- A completed App invocation retains its original payload/output and may append a
-  device-local result reference. This does not itself diagnose a sandbox denial.
-  Typed sandbox denials can also supply an immutable approval reference; otherwise
-  the model proposes explicit missing read/write roots through appeal_approval.
-  Terminal commands declare no inline scope parameters; new filesystem scope comes
-  only from these references and applications, whose directory roots cover subtrees.
-  Never infer scope from stderr, errno or command text. Result references bind to
-  the original call and current input authority on the device that executed it;
-  copied observations are not native execution proof. The unified appeal_approval
-  control reviews references not previously reviewed; reviewed Ask/Auto denials
-  instead go to Core for a decision based on Owner authorization, never another Auto review.
-  A post-execution reference approval remembers scope without replaying the call.
-- Ask waits for Owner approval of immutable arguments and requested scope. None
-  omits review and can use the operation's requested extra filesystem scope.
-  Ask/Auto rejection is a structured permission decision, not a tool or input
-  execution failure. Preserve its reason and source approval reference across
-  devices and activity/history views; prevent the denied effect while allowing
-  authorized alternatives. Never automatically retry the denied operation.
-  Approval memory is automatic, with no opt-in control or reminder. Display review
-  cards only for Ask; automatic review stays out of the conversation UI.
-  Approved fingerprints and filesystem scopes persist for the device: every Actor
-  on this device reuses them, and other devices keep separate memory. Reuse
-  equivalent approved actions; merge covered filesystem scopes, with directories
-  recursively covering children (including entries added after the approval) and
-  write grants covering reads. Policy, target or meaningful argument changes
-  require a new action fingerprint. Keep remembered grants separate from Actor
-  configuration and reclaim them when Actor data is removed by account reset.
-  Never broaden authenticated remote authority or Actor-resource reference
-  ownership through review or remembered grants.
-- Models cannot change the account approval mode. Only Owner settings change it;
-  execution resolves the current account mode rather than an Actor's creation snapshot.
-  Cancellation/reconfiguration must invalidate waiting approvals.
-  Owner HTTP resolution is only for Ask Pending; reviewed-denial appeals use the Core-mediated
-  conversation path and remain separate from the original denied decision.
+- Apps declare no permission requests, action review criteria, approval bypasses
+  or operation fingerprints. All access is enforced by common sandbox infrastructure.
+  Permissions belong to the account on the executing device, never an Actor.
+  Only actual sandbox boundaries trigger review. If the backend can safely suspend
+  the original operation, independently auto-review and resume only after the
+  device scope and actual execution policy are updated. Otherwise return the
+  limitation and let the Actor apply explicitly. Never replay whole tool effects.
+- Explicit applications synchronously wait for automatic review if the originating
+  incident has not been reviewed. Approval immediately remembers device scope and
+  returns success without Core. Denial asynchronously forwards to Core and returns
+  submitted; previously denied incidents skip automatic review. Deduplicate using
+  immutable incident identity, never semantic operation hashes. Core checks Owner
+  authorization and uses the existing consent-message decision mechanism.
+- Applications and grants contain no Actor authorization key. Preserve request
+  provenance separately for audit, resource ownership and reply delivery. Keep
+  denials immutable and bind Core decisions to the original scope and authority.
+  Cancellation, reconfiguration, reset and stale path bindings fence pending work.
+  New scope does not update existing OS process policies by assertion: confirm
+  backend application, or retain the old policy and require an explicit restart.
+- Ordinary tool arguments contain no runtime review fields. Preserve original
+  result/output and attach device-local source references. Only typed sandbox
+  observations identify denied targets; never parse stderr, errno or command text.
+  Models may propose exact missing roots against a native result reference, without
+  claiming that reference proves a denial. Grants never replay the original call.
+- Device scopes survive Actor creation, archival and cleanup; account work reset
+  explicitly clears them. Directory scopes recursively cover future descendants;
+  writes cover reads. No Actor-local grants, delegated scope snapshots, fingerprint
+  memory, Ask cards, direct approval HTTP writes or approval-mode settings remain.
+  Remote hard authority and resource ownership cannot be broadened by sandbox grants.
 - Opened filesystem targets must stay within the effective policy; an earlier
   canonical-path check alone does not justify unsafe symlink-following I/O.
 - Runtime directory names and roots, including `.daat-locus`, have no built-in
@@ -275,7 +248,7 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   negative tests. Never replace an unavailable sandbox with host execution.
 - The Web HTTP source uses bounded HTTP GET without page JavaScript,
   validates DNS/redirect destinations and does not inherit ambient credentials.
-  Rendered Web uses isolated device-native WebViews under existing approval;
+  Rendered Web uses isolated device-native WebViews under authenticated device authority;
   never share the account WebView's storage or native command grants. Read-only
   remote authority cannot navigate rendered pages.
 - BrowserUse operates one device-level shared browser workspace. All hosted
@@ -308,10 +281,9 @@ Every effect still requires device-side epoch, authorization, approval and sandb
 - Re-check authorization for every live-stream emission and heartbeat, including
   expired/revoked account sessions. Register wakes before queries and
   respect consumer backpressure. No repeated full-runtime snapshots.
-- Owner accesses any Actor; account approval mode and conversation model
-  preferences are user-editable. Core is the default entry; no Actor has a deletion
+- Owner accesses any Actor; conversation model preferences are user-editable. Core is the default entry; no Actor has a deletion
   control. Conversation URLs locate an Actor and never grant access.
-  Global Owner approvals aggregate action controls. No guest share authorization exists.
+  Owner decisions use Core conversation consent. No guest share authorization exists.
 - Construct source/reply/authority metadata on the server. Accept only opaque
   attachment IDs; a client path or forged source cannot grant access.
 - Cookie writes require a trusted Origin and the request header; don't trust

@@ -6,9 +6,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::{
-    actors::{ActorSystem, ToolPermissionRequest},
+    actors::ActorSystem,
     app::{App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
-    artifacts::{ArtifactKind, ArtifactRequest, store_artifact, store_resource_artifact},
+    artifacts::{ArtifactKind, ArtifactRequest, store_admitted_bytes, store_artifact},
     model_protocol::AgentToolCall,
     schema_utils::model_schema_for,
 };
@@ -29,7 +29,7 @@ enum Kind {
 struct PresentArgs {
     /// Existing Actor-scoped resource ID or internal URI returned by any App. No filesystem access is needed.
     resource: Option<String>,
-    /// Local image/SVG/HTML path, subject to the Actor's file permissions. Publishes a snapshot unaffected by later file changes.
+    /// Local image/SVG/HTML path, subject to the device sandbox. Publishes a snapshot unaffected by later file changes.
     path: Option<String>,
     /// Inline SVG or HTML.
     content: Option<String>,
@@ -82,28 +82,6 @@ impl App for ArtifactsApp {
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         vec![AppToolSpec { name: "present".into(), description: "Present an existing resource from any App, an authorized local image/SVG/HTML path, inline SVG/HTML, or an external URL. Set exactly one source. Reuse artifact_id for a new version. Returned internal resource URIs can be used directly in links or image embeds; they remain Actor-scoped references.".into(), input_schema: model_schema_for::<PresentArgs>() }]
     }
-    fn permission_request(
-        &self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<ToolPermissionRequest> {
-        let args = PresentArgs::parse(call)?;
-        let readable_roots = if let Some(path) = args.path {
-            let actual = crate::file_io::resolve_file_path(&context.execution_cwd, &path)?;
-            if context.sandbox_policy.is_path_readable(&actual) {
-                Vec::new()
-            } else {
-                vec![actual]
-            }
-        } else {
-            Vec::new()
-        };
-        Ok(ToolPermissionRequest {
-            operation_details: serde_json::Value::Null,
-            readable_roots,
-            writable_roots: Vec::new(),
-        })
-    }
     async fn execute_tool(
         &mut self,
         call: &AgentToolCall,
@@ -148,7 +126,7 @@ impl App for ArtifactsApp {
         } else {
             format!("{prefix}{logical_id}")
         };
-        let request = ArtifactRequest {
+        let mut request = ArtifactRequest {
             path: args.path,
             content: args.content,
             url: if resource.is_some() { None } else { args.url },
@@ -168,7 +146,18 @@ impl App for ArtifactsApp {
             }
             let bytes = crate::resources::bytes(&self.system, &self.actor_id, &resource)
                 .map_err(|error| miette!("{error}"))?;
-            store_resource_artifact(&request, bytes, &resource.name)?
+            store_admitted_bytes(&request, bytes, &resource.name)?
+        } else if let Some(path) = request.path.take() {
+            let path = context.resolve_tool_path(std::path::Path::new(&path), None);
+            let bytes = context
+                .files()
+                .read_bytes(&path, crate::artifacts::MAX_ARTIFACT_FILE_BYTES)
+                .await?;
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("artifact");
+            store_admitted_bytes(&request, bytes, name)?
         } else {
             store_artifact(&request, &context.execution_cwd, &context.sandbox_policy)?
         };
@@ -305,8 +294,6 @@ mod tests {
             } else {
                 &resource_context
             };
-            let permission = app.permission_request(&request, execution).unwrap();
-            assert!(permission.readable_roots.is_empty());
             let result = app.execute_tool(&request, execution).await.unwrap();
             assert_eq!(result.payload["kind"], "image");
             assert_eq!(result.payload["mime_type"], "image/png");
@@ -327,12 +314,6 @@ mod tests {
             png
         );
         let outside_call = call("path", &outside.to_string_lossy());
-        assert_eq!(
-            app.permission_request(&outside_call, &context)
-                .unwrap()
-                .readable_roots,
-            vec![outside.canonicalize().unwrap()]
-        );
         assert!(app.execute_tool(&outside_call, &context).await.is_err());
         for reference in [
             foreign.id.clone(),
@@ -348,7 +329,6 @@ mod tests {
         }
         let mut ambiguous = call("resource", &resource.id);
         ambiguous.arguments["path"] = json!(local);
-        assert!(app.permission_request(&ambiguous, &context).is_err());
         assert!(app.execute_tool(&ambiguous, &context).await.is_err());
         std::fs::write(stored.path, b"tampered resource").unwrap();
         assert!(

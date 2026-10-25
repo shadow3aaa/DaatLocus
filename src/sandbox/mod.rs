@@ -1,4 +1,8 @@
-//! Daat Locus composition of the independent sandbox library.
+pub mod access;
+pub(crate) mod scopes;
+pub use scopes::{SandboxScope, SandboxScopeRequest};
+
+// Daat Locus composition of the independent sandbox library.
 
 use std::{
     ops::{Deref, DerefMut},
@@ -24,14 +28,6 @@ impl RuntimeSandboxPolicy {
 
     pub fn resolve_path(path: &Path, base: Option<&Path>) -> PathBuf {
         SandboxPolicy::resolve_path(path, base)
-    }
-
-    /// Native programs may read/execute host files; only their writes are scoped.
-    /// The original App policy is unchanged. Explicit authority denials survive.
-    pub fn for_process(&self) -> Self {
-        let mut policy = self.clone();
-        policy.filesystem.full_disk_read = true;
-        policy
     }
 }
 

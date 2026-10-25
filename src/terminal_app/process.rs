@@ -61,6 +61,9 @@ struct OutputSegment {
 }
 
 impl TerminalProcess {
+    pub(super) fn ensure_policy(&self, current: &RuntimeSandboxPolicy) -> miette::Result<()> {
+        self.child.ensure_policy(&current.native)
+    }
     pub fn spawn(
         command: &str,
         workdir: Option<&str>,
@@ -97,7 +100,7 @@ impl TerminalProcess {
         spawn_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> std::io::Result<Self> {
         let (shell_program, shell_args) = shell_invocation(command);
-        let process_policy = sandbox_policy.for_process();
+        let process_policy = sandbox_policy.clone();
         let mut child = SandboxAsyncChild::spawn_shell(
             &process_policy,
             &shell_program,
@@ -586,7 +589,10 @@ mod tests {
             .unwrap();
         let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
         policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
-        policy.filesystem.full_disk_read = false;
+        // PowerShell's provider normalizes paths through readable ancestors.
+        // This case isolates closed log handles; native contract tests cover
+        // denial of that normalization under a narrower read scope.
+        policy.filesystem.full_disk_read = true;
         policy.filesystem.full_disk_write = false;
         policy.filesystem.readable_roots = vec![workspace.path().to_path_buf()];
         policy.filesystem.writable_roots = vec![crate::sandbox::WritableRoot {

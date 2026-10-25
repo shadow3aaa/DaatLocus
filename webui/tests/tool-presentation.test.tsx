@@ -1,7 +1,7 @@
 import i18n from "../src/lib/i18n";
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ToolDetail, ApprovalDetails } from "../src/components/tool-details";
+import { ToolDetail } from "../src/components/tool-details";
 import { ToolParameters } from "../src/components/tool-parameters";
 import { readableSummary, activityLabel, approvalNotice } from "../src/lib/tool-presentation";
 import { Activities } from "../src/components/conversation-content";
@@ -105,11 +105,9 @@ describe("tool observations are product content, never protocol dumps", () => {
     const label=activityLabel({seq:1,...result({name,outcome:{app:{name:"Example",tool:"lookup.with space"}}})});
     expect(label.label).toBe("Example");expect(label.detail).toBe("lookup.with space");
   });
-  test("MCP approval inspects decoded original parameters rather than the JSON adapter", () => {
-    const html=renderToStaticMarkup(<ApprovalDetails result={{arguments_json:'{"path":"exact <file>","value":null}'}} requested={{readable_roots:[],writable_roots:[],operation_details:{app:{id:"mcp_00000000000000000000000000000001",name:"Records"},tool:"lookup",parameters:{path:"exact <file>",value:null}}}}/>);
-    expect(html).toContain("Records");expect(html).toContain("lookup");expect(html).toContain("exact &lt;file&gt;");
-    expect(html).not.toContain("arguments_json");expect(html).not.toContain("&quot;path&quot;");
-    expect(html).toContain(i18n.t("tool_parameters.not_specified"));
+  test("MCP structured results preserve original values without adapter JSON", () => {
+    const html=renderToStaticMarkup(<ToolDetail result={result({name:"mcp_00000000000000000000000000000001__lookup",payload:{structuredContent:{path:"exact <file>",value:null}}})}/>);
+    expect(html).toContain("exact &lt;file&gt;");expect(html).not.toContain("arguments_json");expect(html).not.toContain("&quot;path&quot;");expect(html).toContain(i18n.t("tool_parameters.not_specified"));
   });
   test("resource readers do not expose serialized tool output", () => {
     const html = renderToStaticMarkup(<ToolDetail result={result({name:"actors__read_resource",payload:{content:'{"internal":"HIDDEN_COMPLETE_OUTPUT"}',resource_id:"opaque-id"}})} />);
@@ -164,17 +162,17 @@ describe("tool observations are product content, never protocol dumps", () => {
     expect(html).not.toContain("&quot;refresh&quot;");
     expect(html).not.toContain("HIDDEN_MODEL_PROTOCOL");
   });
-  test("approval fields preserve exact values, absence and requested roots without serialization", () => {
+  test("structured scalar facts preserve exact values and absence without serialization", () => {
     const args = Object.freeze({ command: "echo <danger>", max_chars: 0, refresh: false, expected_sha256: null });
-    const html = renderToStaticMarkup(<ApprovalDetails result={args} requested={{ readable_roots: ["C:/read"], writable_roots: ["C:/write"] }} />);
-    for (const value of ["echo &lt;danger&gt;", "C:/read", "C:/write"]) expect(html).toContain(value);
+    const html = renderToStaticMarkup(<ToolParameters value={args} />);
+    for (const value of ["echo &lt;danger&gt;"]) expect(html).toContain(value);
     expect(html).toContain(i18n.t("tool_parameters.not_specified"));
     expect(html).toContain(i18n.t("tool_parameters.no"));
     expect(html).toContain("<span>0</span>");
     expect(html).not.toContain("expected_sha256");
     expect(html).not.toContain("<danger>");
   });
-  test("nested approval data has a disclosure rather than an encoded object", () => {
+  test("nested structured data has a disclosure rather than an encoded object", () => {
     const html = renderToStaticMarkup(<ToolParameters value={{ environment: { HOME: "/workspace", FLAG: "on" } }} />);
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain("&quot;HOME&quot;");

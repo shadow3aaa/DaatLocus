@@ -1,9 +1,10 @@
 //! Actor identities, capability checks and asynchronous mailbox routing.
 use super::{
-    permissions::{canonical_path, check_child, normalize_config, protect_private_path},
+    permissions::{canonical_path, normalize_config, protect_private_path},
     store::ActorStore,
     *,
 };
+use crate::sandbox::SandboxScopeRequest;
 use crate::{
     app::{ActorCallContext, AppToolExecutionContext},
     artifacts::ArtifactReference,
@@ -36,17 +37,18 @@ impl ModelFactory for Providers {
         Ok(Arc::from(provider))
     }
 }
+#[derive(Clone)]
 pub struct ActorControl {
-    pub wake: Notify,
-    pub stop: AtomicBool,
-    pub cancelled: Mutex<HashSet<String>>,
+    pub wake: Arc<Notify>,
+    pub stop: Arc<AtomicBool>,
+    pub cancelled: Arc<Mutex<HashSet<String>>>,
 }
 impl Default for ActorControl {
     fn default() -> Self {
         Self {
-            wake: Notify::new(),
-            stop: AtomicBool::new(false),
-            cancelled: Mutex::new(HashSet::new()),
+            wake: Arc::new(Notify::new()),
+            stop: Arc::new(AtomicBool::new(false)),
+            cancelled: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -206,15 +208,8 @@ impl ActorSystem {
     /// policy belongs to the device exposing the instance.
     pub(crate) fn core_device_actor(&self) -> Result<ActorRecord> {
         let mut actor = self.actor(crate::stage::shared::ACTOR_ID)?;
-        let identity = actor.config.permissions.clone();
         actor.config.workspace = self.device_workspace().to_owned();
         actor.config.apps = vec!["actors".into()];
-        actor.config.permissions = self.device_permissions()?;
-        if super::permissions::approval_strength(identity.approval_mode)
-            > super::permissions::approval_strength(actor.config.permissions.approval_mode)
-        {
-            actor.config.permissions.approval_mode = identity.approval_mode;
-        }
         Ok(actor)
     }
     pub(crate) fn app_actor(&self, id: &str) -> Result<ActorRecord> {
@@ -279,62 +274,21 @@ impl ActorSystem {
                             .stage_local_id()
                             .map_err(|_| forbidden("Remote authority is unavailable"))?,
                     )
-                    .actor_grant(
+                    .authorize_actor(
                         authority.peer,
-                        &authority.grant_actor,
+                        &authority.origin_actor,
                         chrono::Utc::now().timestamp_millis(),
                     )
                     .map_err(|_| forbidden("Remote Actor capability is unavailable"))?,
                 )
             };
-            if authority.grant_actor != actor.id
+            if authority.origin_actor != actor.id
                 && granted.as_ref().is_none_or(|grant| !grant.delegate)
             {
                 return Err(forbidden("Remote authority cannot delegate"));
             }
-            let ceiling = message
-                .delegation_grant
-                .as_ref()
-                .ok_or_else(|| forbidden("Remote request has no immutable capability ceiling"))?;
-            let permission = &mut actor.config.permissions;
-            super::grants::extend_permissions(
-                permission,
-                &self.store().filesystem_approval_scopes(&actor.id)?,
-            );
             actor.remote_read_only |=
-                ceiling.read_only || granted.as_ref().is_some_and(|grant| grant.read_only);
-            if super::permissions::approval_strength(permission.approval_mode)
-                < super::permissions::approval_strength(ceiling.permissions.approval_mode)
-            {
-                permission.approval_mode = ceiling.permissions.approval_mode;
-            }
-            let intersect = |current: &[PathBuf], bound: &[PathBuf]| -> Vec<PathBuf> {
-                let mut roots = Vec::new();
-                for a in current {
-                    for b in bound {
-                        if a.starts_with(b) {
-                            roots.push(a.clone());
-                        } else if b.starts_with(a) {
-                            roots.push(b.clone());
-                        }
-                    }
-                }
-                roots.sort();
-                roots.dedup();
-                roots
-            };
-            permission.readable_roots = intersect(
-                &permission.readable_roots,
-                &ceiling.permissions.readable_roots,
-            );
-            permission.writable_roots = if actor.remote_read_only {
-                vec![]
-            } else {
-                intersect(
-                    &permission.writable_roots,
-                    &ceiling.permissions.writable_roots,
-                )
-            };
+                granted.as_ref().is_some_and(|grant| grant.read_only) || authority.read_only;
         }
         Ok(actor)
     }
@@ -436,6 +390,7 @@ impl ActorSystem {
         std::fs::create_dir_all(&delivery_dir).into_diagnostic()?;
         protect_private_path(&delivery_dir)?;
         let store = ActorStore::open(&data_dir.join("actors.sqlite3"))?;
+        store.initialize_device_sandbox(&workspace)?;
         store.recover()?;
         let temporary =
             crate::runtime_temp::RuntimeTemp::create(&data_dir.with_file_name("runtime"))?;
@@ -514,38 +469,14 @@ impl ActorSystem {
             .iter()
             .map(|app| (*app).to_owned())
             .collect();
-        actor.config.permissions = self.device_permissions().unwrap();
         self.prepare_dirs(id).unwrap();
         self.store().save_actor(&actor).unwrap();
     }
-    fn device_permissions(&self) -> Result<ActorPermissions> {
-        let mut permissions = ActorPermissions::workspace(self.inner.workspace.clone());
-        // This is a device ceiling; the Owner's persisted Actor mode supplies review.
-        permissions.approval_mode = ApprovalMode::None;
-        if let Some(home) = std::env::home_dir() {
-            let skills = home.join(".agents/skills");
-            if skills.is_dir() {
-                permissions.readable_roots.push(canonical_path(&skills)?);
-            }
-        }
-        permissions.readable_roots.sort();
-        permissions.readable_roots.dedup();
-        Ok(permissions)
-    }
     fn hosted_config(&self, mut config: ActorConfig) -> Result<ActorConfig> {
-        config.permissions.approval_mode = self.account_approval_mode()?;
         config.apps = crate::builtin_apps::DEVICE_APPS
             .iter()
             .map(|app| (*app).to_owned())
             .collect();
-        config
-            .permissions
-            .readable_roots
-            .push(config.workspace.clone());
-        config
-            .permissions
-            .writable_roots
-            .push(config.workspace.clone());
         normalize_config(config)
     }
     pub fn infrastructure_dir(&self) -> PathBuf {
@@ -626,14 +557,6 @@ impl ActorSystem {
     pub fn actor(&self, id: &str) -> Result<ActorRecord> {
         self.store().actor(id)
     }
-    pub(crate) fn account_approval_mode(&self) -> Result<ApprovalMode> {
-        Ok(self
-            .store()
-            .actor(crate::stage::shared::ACTOR_ID)?
-            .config
-            .permissions
-            .approval_mode)
-    }
     pub fn actor_data_dir(&self, id: &str) -> PathBuf {
         self.inner.delivery_dir.join(id)
     }
@@ -675,7 +598,7 @@ impl ActorSystem {
         }
         #[cfg(target_os = "android")]
         crate::computer_use_app::android::reset_resources()?;
-        crate::stage::reset::replace(self.store(), record, &root)
+        crate::stage::reset::replace(self.store(), record, &root, self.device_workspace())
             .map_err(|error| miette::miette!("{error}"))?;
         crate::stage::reset::cleanup(self).map_err(|error| miette::miette!("{error}"))?;
         drop(pause);
@@ -683,8 +606,6 @@ impl ActorSystem {
     }
     fn initial_core(&self) -> Result<ActorRecord> {
         let workspace = self.inner.workspace.clone();
-        let mut permissions = self.device_permissions()?;
-        permissions.approval_mode = ApprovalMode::Auto;
         let root = ActorRecord {
             remote_read_only: false,
             id: crate::stage::shared::ACTOR_ID.into(),
@@ -696,7 +617,6 @@ impl ActorSystem {
                 apps: vec!["actors".into()],
                 model: None,
                 instructions: String::new(),
-                permissions,
             })?,
             context: Default::default(),
             status: ActorStatus::Idle,
@@ -825,55 +745,10 @@ impl ActorSystem {
         )
     }
 
-    /// Facts needed to review a delegation, without provider secrets, another
-    /// Actor's history, or instructions. A result is judged against the request
-    /// that caused it, rather than treating another Actor's answer as user intent.
-    pub fn approval_facts(
-        &self,
-        actor: &ActorRecord,
-        message: &MessageRecord,
-        call: &crate::model_protocol::AgentToolCall,
-    ) -> Result<serde_json::Value> {
-        let target = if call.name == "actors__message" {
-            let id = call
-                .arguments
-                .get("actor_id")
-                .and_then(|id| id.as_str())
-                .ok_or_else(|| invalid("Missing recipient Actor"))?;
-            let recipient = self.actor(id)?;
-            Some(serde_json::json!({
-                "id": recipient.id,
-                "name": recipient.config.name,
-                "workspace": recipient.config.workspace,
-                "apps": recipient.config.apps,
-                "grants": recipient.config.permissions,
-            }))
-        } else {
-            None
-        };
-        let originating_request =
-            if matches!(message.kind, MessageKind::Result | MessageKind::Progress) {
-                message
-                    .in_reply_to
-                    .as_deref()
-                    .and_then(|id| self.store().message(id).ok())
-                    .filter(|original| original.actor_id == actor.id)
-                    .map(|original| {
-                        serde_json::json!({
-                            "id": original.id, "content": original.content,
-                            "source": original.source,
-                        })
-                    })
-            } else {
-                None
-            };
-        Ok(serde_json::json!({ "recipient": target, "originating_request": originating_request }))
-    }
-
     pub fn requested_tool_context(
         &self,
         base: &AppToolExecutionContext,
-        requested: &ToolPermissionRequest,
+        requested: &SandboxScopeRequest,
     ) -> Result<AppToolExecutionContext> {
         let call = base
             .actor_call
@@ -1039,15 +914,16 @@ impl ActorSystem {
         let parent = self.actor(parent)?;
         self.create(&parent, config, None, None)
     }
-    pub fn create_from_actor(
+    pub async fn create_from_actor(
         &self,
         sender: &str,
         config: ActorConfig,
         context: &AppToolExecutionContext,
     ) -> Result<ActorRecord> {
         self.create_from_actor_with_resource(sender, config, context, None)
+            .await
     }
-    pub(crate) fn import_from_actor(
+    pub(crate) async fn import_from_actor(
         &self,
         sender: &str,
         config: ActorConfig,
@@ -1055,8 +931,9 @@ impl ActorSystem {
         context: &AppToolExecutionContext,
     ) -> Result<ActorRecord> {
         self.create_from_actor_with_resource(sender, config, context, Some(resource))
+            .await
     }
-    fn create_from_actor_with_resource(
+    async fn create_from_actor_with_resource(
         &self,
         sender: &str,
         config: ActorConfig,
@@ -1074,23 +951,6 @@ impl ActorSystem {
             .as_ref()
             .ok_or_else(|| forbidden("Missing Actor creation authority"))?;
         self.record_for_tool(sender, call)?;
-        let mut ceiling = self.record_for_tool(sender, call)?.config;
-        ceiling.permissions.readable_roots =
-            context.sandbox_policy.filesystem.readable_roots.clone();
-        ceiling.permissions.writable_roots = context
-            .sandbox_policy
-            .filesystem
-            .writable_roots
-            .iter()
-            .map(|root| root.root.clone())
-            .collect();
-        if !context.sandbox_policy.is_path_readable(&config.workspace)
-            || !context.sandbox_policy.is_path_writable(&config.workspace)
-        {
-            return Err(forbidden(
-                "Actor workspace exceeds this operation's authorized scope",
-            ));
-        }
         if self
             .store()
             .message(&call.message_id)?
@@ -1098,15 +958,15 @@ impl ActorSystem {
             .as_ref()
             .is_some_and(|authority| authority.reply_for.is_none())
         {
-            return Err(forbidden(
-                "External requests cannot create unrestricted Actors",
-            ));
+            return Err(forbidden("External requests cannot create Actors"));
         }
-        check_child(&ceiling, &config)?;
+        self.validate_config(&config)?;
+        let policy = context.files().ensure_directory(&config.workspace).await?;
+        self.record_for_tool(sender, call)?;
         self.create(
             &parent,
             config,
-            Some(&context.sandbox_policy),
+            Some(&policy),
             resource.map(|resource| (resource, call.message_id.as_str())),
         )
     }
@@ -1150,7 +1010,6 @@ impl ActorSystem {
     ) -> Result<ApprovalRecord> {
         let actor = self.record_for_tool(&caller.actor_id, caller)?;
         if actor.remote_read_only
-            || actor.config.permissions.approval_mode != self.store().approval(approval_id)?.mode
             || !self
                 .account_actor_ids(&actor.id)?
                 .contains(crate::stage::shared::ACTOR_ID)
@@ -1190,7 +1049,7 @@ impl ActorSystem {
         let record = self.store().approval(approval_id)?;
         if !self
             .account_actor_ids(crate::stage::shared::ACTOR_ID)?
-            .contains(&record.actor_id)
+            .contains(&record.source_actor(self.store())?)
             || !self.store().native_approval(approval_id)?
         {
             return Err(forbidden("Appeal does not belong to this account device"));
@@ -1240,7 +1099,7 @@ impl ActorSystem {
         let decision = authorization.decision;
         let original = self.store().message(&record.message_id)?;
         let actor = self.execution_actor(&original)?;
-        if actor.remote_read_only || actor.config.permissions.approval_mode != record.mode {
+        if actor.remote_read_only {
             return Err(forbidden("Appeal permission mode or authority changed"));
         }
         if decision == ApprovalDecision::Approved {
@@ -1274,8 +1133,8 @@ impl ActorSystem {
             }
         }
         let record = self.store().resolve_approval_appeal(authorization)?;
-        self.wake(&record.actor_id);
-        if record.actor_id == crate::stage::shared::ACTOR_ID
+        self.wake(&record.source_actor(self.store())?);
+        if record.source_actor(self.store())? == crate::stage::shared::ACTOR_ID
             && let Some(core) = self.shared_core()
         {
             core.notify();
@@ -1289,7 +1148,7 @@ impl ActorSystem {
         explanation: &str,
     ) -> Result<ApprovalRecord> {
         let record = self.core_approval_appeal(approval_id)?;
-        if record.actor_id != crate::stage::shared::ACTOR_ID {
+        if record.source_actor(self.store())? != crate::stage::shared::ACTOR_ID {
             return Err(forbidden(
                 "Core cannot appeal another Actor's denial on its behalf",
             ));
@@ -1324,30 +1183,30 @@ impl ActorSystem {
             .filter(|actor| {
                 allowed.contains(&actor.id)
                     && remote.is_none_or(|authority| {
-                        self.remote_actor_grant(authority, &actor.id)
+                        self.remote_device_authority(authority, &actor.id)
                             .is_ok_and(|grant| grant.read)
                     })
             })
             .collect())
     }
-    fn remote_actor_grant(
+    fn remote_device_authority(
         &self,
         authority: &RemoteAuthority,
         actor: &str,
-    ) -> Result<crate::stage::ledger::ActorGrant> {
+    ) -> Result<crate::stage::ledger::DeviceAuthority> {
         let local = self
             .store()
             .stage_local_id()
             .map_err(|_| forbidden("Remote device authority is unavailable"))?;
         crate::stage::ledger::StageLedger::attach(self.store(), local)
-            .actor_grant(authority.peer, actor, now())
+            .authorize_actor(authority.peer, actor, now())
             .map_err(|_| forbidden("Remote Actor authority is unavailable"))
     }
     pub(crate) fn ensure_delegation_authority(&self, input: &MessageRecord) -> Result<()> {
         if let Some(authority) = &input.remote_authority
             && authority.reply_for.is_none()
         {
-            let grant = self.remote_actor_grant(authority, &authority.grant_actor)?;
+            let grant = self.remote_device_authority(authority, &authority.origin_actor)?;
             if !grant.delegate {
                 return Err(forbidden("Remote authority cannot delegate work"));
             }
@@ -1383,13 +1242,7 @@ impl ActorSystem {
             if id != crate::stage::shared::ACTOR_ID {
                 return Err(forbidden("Device App policy belongs to the shared Actor"));
             }
-            if input.remote_authority.is_some() {
-                super::permissions::check_recipient(&actor.config, policy)?;
-            }
             let actor = self.core_device_actor()?;
-            if super::permissions::check_recipient(&actor.config, policy).is_err() {
-                return Err(forbidden("Device App grants changed during the operation"));
-            }
             let mut actor = actor;
             actor.remote_read_only |= call.remote_read_only;
             actor.config = policy.clone();
@@ -1467,17 +1320,8 @@ impl ActorSystem {
                     .as_ref()
                     .ok_or_else(|| forbidden("Missing delegation authority"))?,
             )?;
-            source.config.permissions.readable_roots =
-                context.sandbox_policy.filesystem.readable_roots.clone();
-            source.config.permissions.writable_roots = context
-                .sandbox_policy
-                .filesystem
-                .writable_roots
-                .iter()
-                .map(|root| root.root.clone())
-                .collect();
         }
-        let recipient = self.actor(target)?;
+        let _recipient = self.actor(target)?;
         if !self.account_actor_ids(sender)?.contains(target) {
             return Err(forbidden("Recipient belongs to another account"));
         }
@@ -1510,43 +1354,9 @@ impl ActorSystem {
         }
         if current.remote_authority.is_some() {
             message.remote_authority = current.remote_authority.clone();
-            message.delegation_grant = Some(DelegationGrant {
-                read_only: source.remote_read_only,
-                permissions: recipient.config.permissions.clone(),
-            });
-            let ceiling = message.delegation_grant.as_mut().expect("remote ceiling");
-            if super::permissions::approval_strength(ceiling.permissions.approval_mode)
-                < super::permissions::approval_strength(source.config.permissions.approval_mode)
-            {
-                ceiling.permissions.approval_mode = source.config.permissions.approval_mode;
+            if let Some(authority) = &mut message.remote_authority {
+                authority.read_only |= source.remote_read_only;
             }
-            ceiling.permissions.readable_roots.retain(|root| {
-                source
-                    .config
-                    .permissions
-                    .readable_roots
-                    .iter()
-                    .any(|bound| root.starts_with(bound))
-            });
-            if !ceiling
-                .permissions
-                .readable_roots
-                .iter()
-                .any(|root| recipient.config.workspace.starts_with(root))
-            {
-                return Err(forbidden(
-                    "Delegation exceeds remote filesystem capabilities",
-                ));
-            }
-            ceiling.permissions.writable_roots.retain(|root| {
-                !ceiling.read_only
-                    && source
-                        .config
-                        .permissions
-                        .writable_roots
-                        .iter()
-                        .any(|bound| root.starts_with(bound))
-            });
         }
         let message = self.store().enqueue(message, None)?;
         self.wake(target);
@@ -1568,7 +1378,7 @@ impl ActorSystem {
             reply_to,
             kind: MessageKind::Request,
             in_reply_to: None,
-            delegation_grant: None,
+
             remote_authority: None,
             content,
             attachments,
@@ -1667,58 +1477,38 @@ impl ActorSystem {
     }
     pub async fn update_owned(&self, id: &str, config: ActorConfig) -> Result<ActorRecord> {
         if id == crate::stage::shared::ACTOR_ID && self.shared_core().is_some() {
-            return Err(forbidden(
-                "Shared Actor only accepts model and approval preferences",
-            ));
+            return Err(forbidden("Shared Actor only accepts model preferences"));
         }
         self.update_owned_with(id, |_| normalize_config(config))
             .await
     }
-    /// Apply conversation model/account approval preferences under the lifecycle lock.
+    /// Apply conversation model preferences under the lifecycle lock.
     pub async fn patch_owned_preferences(
         &self,
         id: &str,
         model: Option<Option<String>>,
-        approval_mode: Option<ApprovalMode>,
     ) -> Result<ActorRecord> {
-        if approval_mode.is_some() && id != crate::stage::shared::ACTOR_ID {
-            return Err(invalid(
-                "Approval mode is an account preference; update Core",
-            ));
-        }
         if id == crate::stage::shared::ACTOR_ID
             && let Some(core) = self.shared_core()
         {
-            core.preferences(model, approval_mode)
+            core.preferences(model)
                 .await
                 .map_err(|error| miette::miette!("{error}"))?;
             return self.actor(id);
         }
-        self.apply_owned_preferences(id, model, approval_mode).await
+        self.apply_owned_preferences(id, model).await
     }
     pub(crate) async fn apply_owned_preferences(
         &self,
         id: &str,
         model: Option<Option<String>>,
-        approval_mode: Option<ApprovalMode>,
     ) -> Result<ActorRecord> {
-        if approval_mode.is_some() && id != crate::stage::shared::ACTOR_ID {
-            return Err(invalid(
-                "Approval mode is an account preference; update Core",
-            ));
-        }
         self.update_owned_with(id, |mut config| {
             if let Some(model) = model {
                 config.model = model;
             }
-            if let Some(mode) = approval_mode {
-                config.permissions.approval_mode = mode;
-            }
             let checked = normalize_config(config.clone())?;
-            if checked.workspace != config.workspace
-                || checked.permissions.readable_roots != config.permissions.readable_roots
-                || checked.permissions.writable_roots != config.permissions.writable_roots
-            {
+            if checked.workspace != config.workspace {
                 return Err(forbidden(
                     "Preference changes cannot rebind filesystem grants",
                 ));
@@ -1735,8 +1525,6 @@ impl ActorSystem {
         let _lifecycle = self.inner.lifecycle.lock().await;
         let mut actor = self.actor(id)?;
         let config = update(actor.config.clone())?;
-        let account_mode_changed = id == crate::stage::shared::ACTOR_ID
-            && config.permissions.approval_mode != actor.config.permissions.approval_mode;
         let config = if id == crate::stage::shared::ACTOR_ID {
             config
         } else {
@@ -1750,11 +1538,7 @@ impl ActorSystem {
             &config.workspace,
         )?;
         let pause = Reconfiguration::begin(&self.inner.reconfiguring, &self.inner.metadata);
-        let affected = if account_mode_changed {
-            self.account_actor_ids(id)?
-        } else {
-            std::collections::HashSet::from([id.to_owned()])
-        };
+        let affected = std::collections::HashSet::from([id.to_owned()]);
         let workers: Vec<_> = {
             let mut workers = self.inner.workers.lock();
             affected
@@ -1913,11 +1697,12 @@ impl ActorSystem {
             .get(config.actor_model_name(actor.config.model.as_deref()))
             .map_or(4096, |model| model.tool_output_max_tokens);
         let mut sandbox_policy =
-            super::permissions::policy(&actor.config, &self.actor_data_dir(&actor.id));
+            crate::sandbox::scopes::policy(&self.store().sandbox_scopes()?, actor.remote_read_only);
         if actor.id != crate::stage::shared::ACTOR_ID {
             sandbox_policy.builtin_resources = self.inner.builtin_resources.clone();
         }
-        let mut context = AppToolExecutionContext {
+        let context = AppToolExecutionContext {
+            access_broker: None,
             execution_cwd: actor.config.workspace.clone(),
             sandbox_policy,
             tool_output_max_tokens,
@@ -1929,39 +1714,6 @@ impl ActorSystem {
                 device_policy: device_policy.clone(),
             }),
         };
-        // Grants use canonical paths captured at review time. A replacement
-        // symlink must not silently rebind an old decision to a new target.
-        let remote = self
-            .store()
-            .message(message_id)
-            .is_ok_and(|message| message.remote_authority.is_some());
-        if !remote {
-            for scope in self.store().filesystem_approval_scopes(
-                &context.actor_call.as_ref().expect("Actor context").actor_id,
-            )? {
-                if let Some((path, write)) = scope.active_filesystem() {
-                    if write && actor.remote_read_only {
-                        continue;
-                    }
-                    let requested = ToolPermissionRequest {
-                        readable_roots: if write {
-                            vec![]
-                        } else {
-                            vec![path.to_path_buf()]
-                        },
-                        writable_roots: if write {
-                            vec![path.to_path_buf()]
-                        } else {
-                            vec![]
-                        },
-                        operation_details: serde_json::Value::Null,
-                    };
-                    if let Ok(expanded) = self.requested_tool_context(&context, &requested) {
-                        context = expanded;
-                    }
-                }
-            }
-        }
         Ok(context)
     }
     pub fn message_content(
@@ -2182,7 +1934,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn actor_archive_retains_history_across_recovery_and_unarchive_needs_no_review() {
+    async fn actor_archive_retains_history_across_recovery_and_unarchive() {
         use crate::{
             app::AppManager,
             model_protocol::{AgentMessage, AgentToolCall},
@@ -2219,84 +1971,65 @@ mod tests {
             )
             .unwrap();
         let mut input = system.store().claim_next("core").unwrap().unwrap_or(input);
-        for mode in [ApprovalMode::Ask, ApprovalMode::Auto] {
-            let mut core = system.actor("core").unwrap();
-            core.config.permissions.approval_mode = mode;
-            system.store().save_actor(&core).unwrap();
-            let mut apps = AppManager::new(vec![Box::new(crate::actor_app::ActorApp::new(
-                "core".into(),
-                system.clone(),
-            ))])
-            .unwrap();
-            for name in ["archive", "unarchive"] {
-                let core = system.actor("core").unwrap();
-                let context = system.execution_context(&core, &input).unwrap();
-                let call = AgentToolCall {
-                    id: format!("{mode:?}-{name}"),
-                    name: format!("actors__{name}"),
-                    arguments: serde_json::json!({"stage_id":null,"actor_id":"root"}),
-                };
-                apps.validate_tool_call_for_approval(&call, &context)
-                    .unwrap();
-                let requested = apps.permission_request(&call, &context).unwrap();
-                let review = apps.review_requirement(&call, &context).unwrap();
-                let approved = crate::actors::approval::authorize(
-                    &system,
-                    &core,
-                    &input,
-                    &call,
-                    &Arc::new(ActorControl::default()),
-                    &context,
-                    &requested,
-                    review.as_ref(),
-                )
-                .await
-                .unwrap();
-                let result = apps.execute_tool(&call, &approved).await.unwrap();
-                let archived = name == "archive";
-                assert_eq!(
-                    result.payload["status"],
-                    if archived { "archived" } else { "idle" }
-                );
-                if archived {
-                    assert!(
-                        system
-                            .send_user("root", "Blocked".into(), vec![], None)
-                            .is_err()
-                    );
-                    assert!(system.store().claim_next("root").unwrap().is_none());
-                    // Lifecycle cleanup and process recovery must not unarchive it.
-                    system.store().interrupt_actor("root", "Cleanup").unwrap();
-                    system.update_owned_with("root", Ok).await.unwrap();
-                    let reopened =
-                        ActorStore::open(&directory.path().join("data/actors.sqlite3")).unwrap();
-                    reopened.recover().unwrap();
-                    assert_eq!(
-                        reopened.actor("root").unwrap().status,
-                        ActorStatus::Archived
-                    );
-                    // Recovery interrupts Core, so re-establish this test's next direct input.
-                    input = system
-                        .send_user("core", "Unarchive root".into(), vec![], None)
-                        .unwrap();
-                    input = system.store().claim_next("core").unwrap().unwrap_or(input);
-                }
-                let mut expected_config = before.config.clone();
-                expected_config.permissions.approval_mode = mode;
-                assert_eq!(system.actor("root").unwrap().config, expected_config);
-                assert_eq!(system.actor("root").unwrap().context, before.context);
-                assert!(system.store().history("root", 10).unwrap() == history);
-                assert_eq!(
+
+        let mut apps = AppManager::new(vec![Box::new(crate::actor_app::ActorApp::new(
+            "core".into(),
+            system.clone(),
+        ))])
+        .unwrap();
+        for name in ["archive", "unarchive"] {
+            let core = system.actor("core").unwrap();
+            let context = system.execution_context(&core, &input).unwrap();
+            let call = AgentToolCall {
+                id: format!("archive-lifecycle-{name}"),
+                name: format!("actors__{name}"),
+                arguments: serde_json::json!({"stage_id":null,"actor_id":"root"}),
+            };
+            apps.validate_tool_call(&call, &context).unwrap();
+            let result = apps.execute_tool(&call, &context).await.unwrap();
+            let archived = name == "archive";
+            assert_eq!(
+                result.payload["status"],
+                if archived { "archived" } else { "idle" }
+            );
+            if archived {
+                assert!(
                     system
-                        .store()
-                        .message(&previous.id)
-                        .unwrap()
-                        .reply
-                        .as_deref(),
-                    Some("Retained answer")
+                        .send_user("root", "Blocked".into(), vec![], None)
+                        .is_err()
                 );
+                assert!(system.store().claim_next("root").unwrap().is_none());
+                // Lifecycle cleanup and process recovery must not unarchive it.
+                system.store().interrupt_actor("root", "Cleanup").unwrap();
+                system.update_owned_with("root", Ok).await.unwrap();
+                let reopened =
+                    ActorStore::open(&directory.path().join("data/actors.sqlite3")).unwrap();
+                reopened.recover().unwrap();
+                assert_eq!(
+                    reopened.actor("root").unwrap().status,
+                    ActorStatus::Archived
+                );
+                // Recovery interrupts Core, so re-establish this test's next direct input.
+                input = system
+                    .send_user("core", "Unarchive root".into(), vec![], None)
+                    .unwrap();
+                input = system.store().claim_next("core").unwrap().unwrap_or(input);
             }
+            let expected_config = before.config.clone();
+            assert_eq!(system.actor("root").unwrap().config, expected_config);
+            assert_eq!(system.actor("root").unwrap().context, before.context);
+            assert!(system.store().history("root", 10).unwrap() == history);
+            assert_eq!(
+                system
+                    .store()
+                    .message(&previous.id)
+                    .unwrap()
+                    .reply
+                    .as_deref(),
+                Some("Retained answer")
+            );
         }
+
         assert!(
             system
                 .store()
@@ -2925,8 +2658,6 @@ mod tests {
         std::fs::write(&blocked, "not a directory").unwrap();
         let mut proposed = old.clone();
         proposed.workspace = blocked.join("child");
-        proposed.permissions.readable_roots = vec![proposed.workspace.clone()];
-        proposed.permissions.writable_roots = vec![proposed.workspace.clone()];
         assert!(
             system
                 .update_owned(FIXTURE_ACTOR_ID, proposed)

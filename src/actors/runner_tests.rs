@@ -24,196 +24,138 @@ enum MockReply {
 
 #[tokio::test]
 async fn approval_rejection_is_not_a_tool_or_input_failure() {
-    use super::super::{ApprovalDecision, ApprovalMode};
-    for mode in [ApprovalMode::Auto, ApprovalMode::Ask] {
-        let outside = crate::sandbox::test_support::scoped_directory();
-        let target = outside.path().join("not-authorized.txt");
-        let reason = "The requested output folder is not authorized <private>";
-        let provider = Arc::new(ReplayProvider::new(vec![
-            MockReply::Calls(vec![AgentToolCall {
-                id: "rejected-write".into(),
-                name: "files__write_file".into(),
-                arguments: json!({"path":target,"content":"must not be written","expected_sha256":null}),
-            }]),
-            MockReply::Answer("I will use an authorized alternative."),
-        ]));
-        provider
-            .review_replies
-            .lock()
-            .push_back(json!({"decision":"deny","reason":reason}));
-        let (_dir, system) = runtime(provider.clone()).await;
-        system.install_local_core().unwrap();
+    let outside = crate::sandbox::test_support::scoped_directory();
+    let target = outside.path().join("not-authorized.txt");
+    let reason = "The requested output folder is not authorized <private>";
+    let provider = Arc::new(ReplayProvider::new(vec![
+        MockReply::Calls(vec![AgentToolCall {
+            id: "rejected-write".into(),
+            name: "files__write_file".into(),
+            arguments: json!({"path":target,"content":"must not be written","expected_sha256":null}),
+        }]),
+        MockReply::Answer("I will use an authorized alternative."),
+    ]));
+    provider
+        .review_replies
+        .lock()
+        .push_back(json!({"decision":"deny","reason":reason}));
+    let (_dir, system) = runtime(provider.clone()).await;
+    system.install_local_core().unwrap();
+    let input = system
+        .send_user("root", "Create the output".into(), vec![], None)
+        .unwrap();
+
+    let finished = wait_completed(&system, &input.id).await;
+    assert_eq!(
+        finished.status,
+        MessageStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert!(finished.error.is_none());
+    assert!(!target.exists(), "rejection must prevent the effect");
+    assert!(
+        !system
+            .store()
+            .sandbox_scopes()
+            .unwrap()
+            .iter()
+            .any(|scope| scope.write && target.starts_with(&scope.path))
+    );
+    let record = system
+        .store()
+        .approvals(Some("root"), None, 10)
+        .unwrap()
+        .items
+        .pop()
+        .unwrap();
+    let tools = system
+        .store()
+        .tool_summaries("root", &input.id, None, 10)
+        .unwrap()
+        .items;
+    assert_eq!(tools.len(), 1);
+    assert!(tools.iter().all(|tool| tool.error.is_none()));
+    let original = system.store().tool_result(&tools[0].id).unwrap();
+    assert!(
+        original.started_at_ms.is_some(),
+        "the tool entered its original invocation and suspended at the filesystem boundary"
+    );
+    let tool = &tools[0];
+    let expected = json!({"approval":{"decision":"denied","approval_id":record.id,
+        "stage_id":system.store().public_stage_id().unwrap().to_string(),"reason":reason}});
+    assert!(tool.error.is_none());
+    assert_eq!(tool.outcome.as_ref(), Some(&expected));
+    let detail = system.store().tool_result(&tool.id).unwrap();
+    assert!(detail.error.is_none());
+    assert_eq!(detail.payload, expected);
+    let events = system.store().events(0, Some("root"), false, 100).unwrap();
+    assert!(events.iter().any(|event| matches!(&event.event,
+        ActorEvent::ToolFinished {call_id, error:None, outcome:Some(outcome), ..}
+            if call_id == "rejected-write" && outcome == &expected)));
+    {
+        let requests = provider.requests.lock();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].messages.iter().any(|row| matches!(row,
+            AgentMessage::Tool {content,..} if content.contains(&record.id)
+                && content.contains(reason) && !content.starts_with("App error:"))));
+    }
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn filesystem_boundary_approval_resumes_original_call_without_a_model_retry() {
+    let outside = crate::sandbox::test_support::scoped_directory();
+    let target = outside.path().join("approved-output.txt");
+    let provider = Arc::new(ReplayProvider::new(vec![
+        MockReply::Calls(vec![AgentToolCall {
+            id: "original-write".into(),
+            name: "files__write_file".into(),
+            arguments: json!({"path":target,"content":"original call output","expected_sha256":null}),
+        }]),
+        MockReply::Answer("Output created"),
+    ]));
+    provider
+        .review_replies
+        .lock()
+        .push_back(json!({"decision":"approve","reason":"Requested output"}));
+    let (_dir, system) = runtime(provider.clone()).await;
+    system.install_local_core().unwrap();
+    let input = system
+        .send_user("root", "Create the output".into(), vec![], None)
+        .unwrap();
+
+    let finished = wait_completed(&system, &input.id).await;
+    assert_eq!(
+        finished.status,
+        MessageStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "original call output"
+    );
+    assert_eq!(
         system
-            .patch_owned_preferences("core", None, Some(mode))
-            .await
-            .unwrap();
-        let input = system
-            .send_user("root", "Create the output".into(), vec![], None)
-            .unwrap();
-        if mode == ApprovalMode::Ask {
-            let pending = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    if let Some(record) = system
-                        .store()
-                        .pending_approvals(Some("root"), None, 10)
-                        .unwrap()
-                        .items
-                        .pop()
-                    {
-                        break record;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
-            system
-                .store()
-                .resolve_approval(&pending.id, ApprovalDecision::Denied, reason)
-                .unwrap();
-        }
-        let finished = wait_completed(&system, &input.id).await;
-        assert_eq!(
-            finished.status,
-            MessageStatus::Completed,
-            "{:?}",
-            finished.error
-        );
-        assert!(finished.error.is_none());
-        assert!(!target.exists(), "rejection must prevent the effect");
-        assert!(system.store().approval_scopes("root").unwrap().is_empty());
-        let record = system
+            .store()
+            .tool_summaries("root", &input.id, None, 10)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(
+        system
             .store()
             .approvals(Some("root"), None, 10)
             .unwrap()
             .items
-            .pop()
-            .unwrap();
-        let tools = system
-            .store()
-            .tool_summaries("root", &input.id, None, 10)
-            .unwrap()
-            .items;
-        assert_eq!(tools.len(), 1);
-        assert!(tools.iter().all(|tool| tool.error.is_none()));
-        let original = system.store().tool_result(&tools[0].id).unwrap();
-        assert!(
-            original.started_at_ms.is_none(),
-            "the original operation must not start"
-        );
-        let tool = &tools[0];
-        let expected = json!({"approval":{"decision":"denied","approval_id":record.id,
-            "stage_id":system.store().public_stage_id().unwrap().to_string(),"mode":mode,"reason":reason}});
-        assert!(tool.error.is_none());
-        assert_eq!(tool.outcome.as_ref(), Some(&expected));
-        let detail = system.store().tool_result(&tool.id).unwrap();
-        assert!(detail.error.is_none());
-        assert_eq!(detail.payload, expected);
-        let events = system.store().events(0, Some("root"), false, 100).unwrap();
-        assert!(events.iter().any(|event| matches!(&event.event,
-            ActorEvent::ToolFinished {call_id, error:None, outcome:Some(outcome), ..}
-                if call_id == "rejected-write" && outcome == &expected)));
-        {
-            let requests = provider.requests.lock();
-            assert_eq!(requests.len(), 2);
-            assert!(requests[1].messages.iter().any(|row| matches!(row,
-                AgentMessage::Tool {content,..} if content.contains(&record.id)
-                    && content.contains(reason) && !content.starts_with("App error:"))));
-        }
-        system.shutdown().await;
-    }
-}
-
-#[tokio::test]
-async fn preflight_approval_executes_original_call_without_a_model_retry() {
-    use super::super::{ApprovalDecision, ApprovalMode};
-    for mode in [ApprovalMode::Auto, ApprovalMode::Ask] {
-        let outside = crate::sandbox::test_support::scoped_directory();
-        let target = outside.path().join("approved-output.txt");
-        let provider = Arc::new(ReplayProvider::new(vec![
-            MockReply::Calls(vec![AgentToolCall {
-                id: "original-write".into(),
-                name: "files__write_file".into(),
-                arguments: json!({"path":target,"content":"original call output","expected_sha256":null}),
-            }]),
-            MockReply::Answer("Output created"),
-        ]));
-        provider
-            .review_replies
-            .lock()
-            .push_back(json!({"decision":"approve","reason":"Requested output"}));
-        let (_dir, system) = runtime(provider.clone()).await;
-        system.install_local_core().unwrap();
-        system
-            .patch_owned_preferences("core", None, Some(mode))
-            .await
-            .unwrap();
-        let input = system
-            .send_user("root", "Create the output".into(), vec![], None)
-            .unwrap();
-        if mode == ApprovalMode::Ask {
-            let pending = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    if let Some(record) = system
-                        .store()
-                        .pending_approvals(Some("root"), None, 10)
-                        .unwrap()
-                        .items
-                        .pop()
-                    {
-                        break record;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
-            assert!(
-                !target.exists(),
-                "waiting for approval must not execute effects"
-            );
-            assert_eq!(
-                provider.requests.lock().len(),
-                1,
-                "inference waits on the original call"
-            );
-            system
-                .store()
-                .resolve_approval(&pending.id, ApprovalDecision::Approved, "Requested output")
-                .unwrap();
-        }
-        let finished = wait_completed(&system, &input.id).await;
-        assert_eq!(
-            finished.status,
-            MessageStatus::Completed,
-            "{:?}",
-            finished.error
-        );
-        assert_eq!(
-            std::fs::read_to_string(&target).unwrap(),
-            "original call output"
-        );
-        assert_eq!(
-            system
-                .store()
-                .tool_summaries("root", &input.id, None, 10)
-                .unwrap()
-                .items
-                .len(),
-            1
-        );
-        assert_eq!(
-            system
-                .store()
-                .approvals(Some("root"), None, 10)
-                .unwrap()
-                .items
-                .len(),
-            1
-        );
-        assert!(!system.store().approval_scopes("root").unwrap().is_empty());
-        system.shutdown().await;
-    }
+            .len(),
+        1
+    );
+    assert!(!system.store().sandbox_scopes().unwrap().is_empty());
+    system.shutdown().await;
 }
 
 #[tokio::test]
@@ -326,7 +268,7 @@ async fn app_installation_refreshes_tools_between_protocol_groups_without_replay
 }
 
 #[tokio::test]
-async fn apps_manager_queries_and_refresh_complete_in_ask_mode_without_approval() {
+async fn apps_manager_queries_and_refresh_preserve_installed_apps() {
     let provider = Arc::new(ReplayProvider::new(vec![
         MockReply::Calls(vec![
             AgentToolCall {
@@ -343,10 +285,7 @@ async fn apps_manager_queries_and_refresh_complete_in_ask_mode_without_approval(
         MockReply::Answer("Done"),
     ]));
     let (_dir, system) = runtime(provider).await;
-    system
-        .patch_owned_preferences("core", None, Some(super::super::ApprovalMode::Ask))
-        .await
-        .unwrap();
+
     let input = system
         .send_user("root", "Inspect available Apps".into(), vec![], None)
         .unwrap();
@@ -376,7 +315,7 @@ async fn apps_manager_queries_and_refresh_complete_in_ask_mode_without_approval(
 
 #[cfg(any(windows, target_os = "macos", target_os = "android"))]
 #[tokio::test]
-async fn invalid_browser_review_arguments_do_not_abort_the_tool_group_or_input() {
+async fn invalid_browser_arguments_do_not_abort_the_tool_group_or_input() {
     let tab = format!("\"{}\"", "a".repeat(32));
     let provider = Arc::new(ReplayProvider::new(vec![
         MockReply::Calls(vec![
@@ -447,10 +386,10 @@ async fn invalid_browser_review_arguments_do_not_abort_the_tool_group_or_input()
         .find(|tool| tool.call_id == "invalid-observation-id")
         .unwrap();
     assert!(observation_error.error.is_some());
-    assert!(observation_error.started_at_ms.is_none());
+    assert!(observation_error.started_at_ms.is_some());
     assert!(
-        invalid.started_at_ms.is_none(),
-        "Invalid calls must not start native effects"
+        invalid.started_at_ms.is_some(),
+        "Domain target validation runs inside the original invocation"
     );
     assert!(
         tools
@@ -477,7 +416,7 @@ async fn invalid_browser_review_arguments_do_not_abort_the_tool_group_or_input()
 }
 
 #[tokio::test]
-async fn yield_skips_review_but_malformed_calls_do_not_silence_a_reply() {
+async fn yield_preserves_delivery_and_malformed_calls_do_not_silence_a_reply() {
     for (arguments, silent) in [(json!({}), true), (json!({"content":"invalid"}), false)] {
         let provider = Arc::new(ReplayProvider::new(vec![
             MockReply::Calls(vec![AgentToolCall {
@@ -488,13 +427,9 @@ async fn yield_skips_review_but_malformed_calls_do_not_silence_a_reply() {
             MockReply::Answer("This input still needs a reply."),
         ]));
         let (_dir, system) = runtime(provider.clone()).await;
-        let mut actor = system.actor("root").unwrap();
-        actor.config.permissions.writable_roots.clear();
+        let actor = system.actor("root").unwrap();
         system.store().save_actor(&actor).unwrap();
-        system
-            .patch_owned_preferences("core", None, Some(super::super::ApprovalMode::Ask))
-            .await
-            .unwrap();
+
         let input = system
             .send_user("root", "Process this update".into(), vec![], None)
             .unwrap();
@@ -833,6 +768,8 @@ struct ReplayProvider {
     usage_bias: std::sync::atomic::AtomicUsize,
     review_requests: parking_lot::Mutex<Vec<PromptRequest>>,
     review_replies: parking_lot::Mutex<VecDeque<serde_json::Value>>,
+    review_blocked: AtomicBool,
+    review_release: tokio::sync::Notify,
 }
 
 impl ReplayProvider {
@@ -847,6 +784,8 @@ impl ReplayProvider {
             usage_bias: std::sync::atomic::AtomicUsize::new(0),
             review_requests: parking_lot::Mutex::new(Vec::new()),
             review_replies: parking_lot::Mutex::new(VecDeque::new()),
+            review_blocked: AtomicBool::new(false),
+            review_release: tokio::sync::Notify::new(),
         }
     }
 }
@@ -867,6 +806,9 @@ impl ModelProvider for ReplayProvider {
         _: ModelRequestOptions,
     ) -> Result<serde_json::Value> {
         self.review_requests.lock().push(request);
+        if self.review_blocked.load(Ordering::Acquire) {
+            self.review_release.notified().await;
+        }
         Ok(self
             .review_replies
             .lock()
@@ -1284,7 +1226,7 @@ async fn switching_local_core_to_relay_preserves_existing_history_without_replay
     let request = remote.initialize(false).unwrap();
     remote
         .join(
-            fixture_enrollment(&host, &request, true, vec![]).unwrap(),
+            fixture_enrollment(&host, &request, true, Default::default()).unwrap(),
             &account,
         )
         .unwrap();
@@ -1349,14 +1291,14 @@ async fn device_pair(
     let request = host_b.initialize(false).unwrap();
     host_b
         .join(
-            fixture_enrollment(&host_a, &request, true, vec![]).unwrap(),
+            fixture_enrollment(&host_a, &request, true, Default::default()).unwrap(),
             &host_a.account_id().unwrap(),
         )
         .unwrap();
     StageLedger::attach(b.store(), host_b.local)
         .import_peer(
             host_a.enrollment().unwrap(),
-            vec![],
+            Default::default(),
             chrono::Utc::now().timestamp_millis(),
         )
         .unwrap();
@@ -1535,23 +1477,15 @@ async fn messages_route_to_a_busy_worker_on_another_device() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn remote_preflight_review_continues_only_approved_operations_without_failing_core() {
-    use super::super::ApprovalMode;
+async fn remote_sandbox_review_resumes_authorized_access_without_failing_core() {
     for verdict in ["deny", "approve"] {
         let core_model = Arc::new(ReplayProvider::new(vec![]));
         let device_model = Arc::new(ReplayProvider::new(vec![]));
         let ((_a_dir, a, net_a), (b_dir, b, net_b), _relay) =
             device_pair(core_model.clone(), device_model.clone()).await;
-        a.patch_owned_preferences("core", None, Some(ApprovalMode::Auto))
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(15), async {
-            while b.account_approval_mode().unwrap() != ApprovalMode::Auto {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap();
+
+        let baseline_a = a.store().sandbox_scopes().unwrap();
+        let baseline_b = b.store().sandbox_scopes().unwrap();
         let workspace = b_dir.path().join("unapproved-project");
         std::fs::create_dir(&workspace).unwrap();
         let reason = "The proposed workspace needs the Owner's confirmation";
@@ -1596,7 +1530,7 @@ async fn remote_preflight_review_continues_only_approved_operations_without_fail
             .unwrap();
         if verdict == "deny" {
             let expected = json!({"approval":{"decision":"denied","approval_id":decision.id,
-                "stage_id":net_b.host.local.to_string(),"reason":reason,"mode":"auto"}});
+                "stage_id":net_b.host.local.to_string(),"reason":reason}});
             assert_eq!(tools[0].outcome.as_ref(), Some(&expected));
         } else {
             assert_eq!(decision.decision, super::super::ApprovalDecision::Approved);
@@ -1609,11 +1543,18 @@ async fn remote_preflight_review_continues_only_approved_operations_without_fail
                 .any(|actor| actor.config.name == "Unapproved project"),
             verdict == "approve"
         );
-        assert_eq!(
-            b.store().approval_scopes("core").unwrap().is_empty(),
-            verdict == "deny"
-        );
-        assert!(a.store().approval_scopes("core").unwrap().is_empty());
+        if verdict == "deny" {
+            assert_eq!(b.store().sandbox_scopes().unwrap(), baseline_b);
+        } else {
+            assert!(
+                b.store()
+                    .sandbox_scopes()
+                    .unwrap()
+                    .iter()
+                    .any(|scope| scope.path == workspace.canonicalize().unwrap())
+            );
+        }
+        assert_eq!(a.store().sandbox_scopes().unwrap(), baseline_a);
         assert_eq!(core_model.review_requests.lock().len(), 1);
         assert!(device_model.review_requests.lock().is_empty());
         assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
@@ -1627,21 +1568,11 @@ async fn remote_preflight_review_continues_only_approved_operations_without_fail
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn remote_automatic_review_uses_busy_core_worker_without_moving_it_or_sharing_device_grants()
 {
-    use super::super::ApprovalMode;
     let core_model = Arc::new(ReplayProvider::new(vec![MockReply::Pending]));
     let device_model = Arc::new(ReplayProvider::new(vec![]));
     let ((_a_dir, a, net_a), (b_dir, b, net_b), _relay) =
         device_pair(core_model.clone(), device_model.clone()).await;
-    a.patch_owned_preferences("core", None, Some(ApprovalMode::Auto))
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while b.account_approval_mode().unwrap() != ApprovalMode::Auto {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+
     let thinking = a
         .send_user(
             "core",
@@ -1699,10 +1630,16 @@ async fn remote_automatic_review_uses_busy_core_worker_without_moving_it_or_shar
             facts["application"]["task"],
             b.store().message(&request.id).unwrap().content
         );
-        assert_eq!(facts["proposed_call"]["arguments"]["path"], json!(target));
+        assert_eq!(facts["source_call"]["arguments"]["path"], json!(target));
     }
-    assert!(!b.store().approval_scopes("root").unwrap().is_empty());
-    assert!(a.store().approval_scopes("root").unwrap().is_empty());
+    assert!(!b.store().sandbox_scopes().unwrap().is_empty());
+    assert!(
+        !a.store()
+            .sandbox_scopes()
+            .unwrap()
+            .iter()
+            .any(|scope| target.starts_with(&scope.path))
+    );
     assert_eq!(
         a.store().message(&thinking.id).unwrap().status,
         MessageStatus::Running
@@ -1943,7 +1880,7 @@ async fn connected_learners_continue_after_authority_loss_and_rejoin_without_rep
     let enrollment_request = host_c.initialize(false).unwrap();
     host_c
         .join(
-            fixture_enrollment(&net_a.host, &enrollment_request, true, vec![]).unwrap(),
+            fixture_enrollment(&net_a.host, &enrollment_request, true, Default::default()).unwrap(),
             &net_a.host.account_id().unwrap(),
         )
         .unwrap();
@@ -2185,21 +2122,21 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     let host_b = Host::load(b.clone()).unwrap();
     host_a.initialize(true).unwrap();
     let request_b = host_b.initialize(false).unwrap();
-    let enrollment = fixture_enrollment(&host_a, &request_b, true, vec![]).unwrap();
+    let enrollment = fixture_enrollment(&host_a, &request_b, true, Default::default()).unwrap();
     host_b
         .join(enrollment, &host_a.account_id().unwrap())
         .unwrap();
     StageLedger::attach(b.store(), host_b.local)
         .import_peer(
             host_a.enrollment().unwrap(),
-            vec![],
+            Default::default(),
             chrono::Utc::now().timestamp_millis(),
         )
         .unwrap();
     let request_c = host_c.initialize(false).unwrap();
     host_c
         .join(
-            fixture_enrollment(&host_a, &request_c, true, vec![]).unwrap(),
+            fixture_enrollment(&host_a, &request_c, true, Default::default()).unwrap(),
             &host_a.account_id().unwrap(),
         )
         .unwrap();
@@ -2264,16 +2201,11 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
         "higher priority must not preempt a healthy worker"
     );
     let constraints = a.actor(shared::ACTOR_ID).unwrap().config;
-    b.patch_owned_preferences(
-        shared::ACTOR_ID,
-        None,
-        Some(super::super::ApprovalMode::None),
-    )
-    .await
-    .unwrap();
+    b.patch_owned_preferences(shared::ACTOR_ID, None)
+        .await
+        .unwrap();
     let saved = a.actor(shared::ACTOR_ID).unwrap().config;
-    let mut expected = constraints;
-    expected.permissions.approval_mode = super::super::ApprovalMode::None;
+    let expected = constraints;
     assert_eq!(
         saved, expected,
         "shared mode preference must not rewrite creation constraints"
@@ -2715,18 +2647,15 @@ async fn runtime(provider: Arc<ReplayProvider>) -> (tempfile::TempDir, ActorSyst
     .await
     .unwrap();
     system.seed_test_actor("root");
-    system
-        .patch_owned_preferences("core", None, Some(super::super::ApprovalMode::None))
-        .await
-        .unwrap();
+
     (directory, system)
 }
 
 #[tokio::test]
-async fn remote_delegation_retains_readonly_authority_and_original_review_mode() {
+async fn remote_delegation_retains_readonly_authority() {
     use crate::stage::{
         identity::DeviceIdentity,
-        ledger::{ActorGrant, StageLedger},
+        ledger::{DeviceAuthority, StageLedger},
     };
     let (_directory, system, _) = paused_runtime().await;
     let child = system
@@ -2750,13 +2679,12 @@ async fn remote_delegation_retains_readonly_authority_and_original_review_mode()
     ledger
         .import_peer(
             enrollment,
-            vec![ActorGrant {
-                actor_id: "root".into(),
+            DeviceAuthority {
                 read: true,
                 converse: true,
                 delegate: true,
                 read_only: true,
-            }],
+            },
             now,
         )
         .unwrap();
@@ -2771,7 +2699,7 @@ async fn remote_delegation_retains_readonly_authority_and_original_review_mode()
         reply_to: super::super::ReplyTarget::User,
         kind: super::super::MessageKind::Request,
         in_reply_to: None,
-        delegation_grant: None,
+
         remote_authority: None,
         content: "Delegate a read-only investigation".into(),
         attachments: vec![],
@@ -2785,16 +2713,10 @@ async fn remote_delegation_retains_readonly_authority_and_original_review_mode()
         created_at_ms: now,
         updated_at_ms: now,
     };
-    let mut permissions = system.actor("root").unwrap().config.permissions;
-    permissions.approval_mode = super::super::ApprovalMode::Ask;
-    permissions.writable_roots.clear();
-    input.delegation_grant = Some(super::super::DelegationGrant {
-        read_only: true,
-        permissions,
-    });
     input.remote_authority = Some(super::super::RemoteAuthority {
+        read_only: true,
         peer: remote.profile().stage_id,
-        grant_actor: "root".into(),
+        origin_actor: "root".into(),
         reply_for: None,
     });
     let input = system.store().enqueue(input, None).unwrap();
@@ -2804,18 +2726,13 @@ async fn remote_delegation_retains_readonly_authority_and_original_review_mode()
         .unwrap();
     let execution = system.execution_actor(&delegated).unwrap();
     assert!(execution.remote_read_only);
-    assert!(execution.config.permissions.writable_roots.is_empty());
-    assert_eq!(
-        execution.config.permissions.approval_mode,
-        super::super::ApprovalMode::Ask
-    );
     system.store().claim_next(&child.id).unwrap().unwrap();
     let context = system.execution_context(&execution, &delegated).unwrap();
     assert!(
         system
             .requested_tool_context(
                 &context,
-                &super::super::ToolPermissionRequest {
+                &crate::sandbox::SandboxScopeRequest {
                     writable_roots: vec![child.config.workspace.clone()],
                     ..Default::default()
                 }
@@ -2833,13 +2750,12 @@ async fn remote_delegation_retains_readonly_authority_and_original_review_mode()
                 false,
             )
             .unwrap(),
-            vec![ActorGrant {
-                actor_id: "root".into(),
+            DeviceAuthority {
                 read: true,
                 converse: true,
                 delegate: false,
                 read_only: true,
-            }],
+            },
             now,
         )
         .unwrap();
@@ -2873,7 +2789,7 @@ async fn native_stage_tcp_routes_durable_user_work_and_resumes_a_shared_actor_vi
     use crate::stage::{
         ActorAddress,
         host::Host,
-        ledger::{ActorGrant, StageLedger},
+        ledger::{DeviceAuthority, StageLedger},
         protocol::{Body, SubscriptionLevel},
         runtime::Runtime,
         sync::Replica,
@@ -2888,21 +2804,20 @@ async fn native_stage_tcp_routes_durable_user_work_and_resumes_a_shared_actor_vi
     let host_b = Host::load(b.clone()).unwrap();
     host_a.initialize(true).unwrap();
     let request_b = host_b.initialize(false).unwrap();
-    let grants = vec![ActorGrant {
-        actor_id: "root".into(),
+    let authority = DeviceAuthority {
         read: true,
         converse: true,
         delegate: true,
         read_only: true,
-    }];
-    let enrollment_b = fixture_enrollment(&host_a, &request_b, false, grants.clone()).unwrap();
+    };
+    let enrollment_b = fixture_enrollment(&host_a, &request_b, false, authority.clone()).unwrap();
     host_b
         .join(enrollment_b, &host_a.account_id().unwrap())
         .unwrap();
     StageLedger::attach(b.store(), host_b.local)
         .import_peer(
             host_a.enrollment().unwrap(),
-            grants,
+            authority,
             chrono::Utc::now().timestamp_millis(),
         )
         .unwrap();
@@ -2985,7 +2900,9 @@ async fn native_stage_tcp_routes_durable_user_work_and_resumes_a_shared_actor_vi
         })
         .await
         .unwrap();
-    assert!(matches!(directory,Body::Directory{actors,..}if actors.len()==1));
+    assert!(
+        matches!(directory,Body::Directory{actors,..}if actors.len()==2 && actors.iter().any(|actor| actor.address.actor_id=="root") && actors.iter().any(|actor|actor.address.actor_id=="core"))
+    );
     handle.unwatch("root", view);
     net_a.stop().await;
     net_b.stop().await;
@@ -2999,7 +2916,7 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
         blob::ContentStore,
         delivery::Deliveries,
         identity::DeviceIdentity,
-        ledger::{ActorGrant, StageLedger},
+        ledger::{DeviceAuthority, StageLedger},
         protocol::{BlobAccess, Body},
         receiver::StageReceiver,
         transport::tls,
@@ -3046,17 +2963,18 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
         .unwrap();
     let ledger_a = StageLedger::initialize(a.store(), a_id, &own.root).unwrap();
     let ledger_b = StageLedger::initialize(b.store(), b_id, &own.root).unwrap();
-    ledger_a.import_peer(member_b, vec![], now).unwrap();
+    ledger_a
+        .import_peer(member_b, Default::default(), now)
+        .unwrap();
     ledger_b
         .import_peer(
             own,
-            vec![ActorGrant {
-                actor_id: "root".into(),
+            DeviceAuthority {
                 read: true,
                 converse: true,
                 delegate: true,
                 read_only: false,
-            }],
+            },
             now,
         )
         .unwrap();
@@ -3234,13 +3152,26 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
         .find(|message| message.kind == super::super::MessageKind::Result)
         .unwrap();
     assert_eq!(reply_input.in_reply_to, Some(original.id));
+    let mut foreign = a.actor("root").unwrap();
+    foreign.id = "foreign-root".into();
+    foreign.parent_id = None;
+    a.store().save_actor(&foreign).unwrap();
+    a.store()
+        .stage_transaction(|tx| {
+            tx.execute(
+                "INSERT INTO stage_account_actors VALUES('foreign-root','another-account')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     let mut forbidden = reply.clone();
     forbidden.message_id = uuid::Uuid::new_v4();
     forbidden.body = Body::BlobManifestQuery {
         access: BlobAccess::Actor {
             actor: ActorAddress {
                 stage_id: a_id,
-                actor_id: "root".into(),
+                actor_id: "foreign-root".into(),
             },
         },
         content: manifest.content,
@@ -3254,7 +3185,7 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
     use crate::stage::{
         ActorAddress,
         identity::DeviceIdentity,
-        ledger::{ActorGrant, StageLedger},
+        ledger::{DeviceAuthority, StageLedger},
         protocol::{BlobRef, Body, Envelope, Origin, invocation_id},
         transport::tls,
     };
@@ -3274,10 +3205,9 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
     system
         .store()
         .stage_transaction(|tx| {
-            super::super::grants::remember(
+            crate::sandbox::scopes::remember(
                 tx,
-                "root",
-                &[super::super::ApprovalScope::filesystem(&approved, true).unwrap()],
+                &[super::super::SandboxScope::filesystem(&approved, true).unwrap()],
             )
             .unwrap();
             Ok(())
@@ -3313,13 +3243,12 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
     ledger
         .import_peer(
             enrollment,
-            vec![ActorGrant {
-                actor_id: "root".into(),
+            DeviceAuthority {
                 read: true,
                 converse: true,
                 delegate: false,
                 read_only: true,
-            }],
+            },
             now,
         )
         .unwrap();
@@ -3471,7 +3400,7 @@ fn enqueue_root(system: &ActorSystem, content: &str) -> MessageRecord {
                 reply_to: super::super::ReplyTarget::User,
                 kind: super::super::MessageKind::Request,
                 in_reply_to: None,
-                delegation_grant: None,
+
                 remote_authority: None,
                 content: content.into(),
                 attachments: vec![],
@@ -3627,6 +3556,20 @@ async fn files_allow_requested_runtime_scope() {
     let runtime = system.actor_state_dir("root").join("runtime.txt");
     std::fs::create_dir_all(runtime.parent().unwrap()).unwrap();
     std::fs::write(&runtime, "requested runtime content\n").unwrap();
+    system
+        .store()
+        .stage_transaction(|tx| {
+            crate::sandbox::scopes::remember(
+                tx,
+                &[
+                    crate::sandbox::SandboxScope::filesystem(runtime.parent().unwrap(), false)
+                        .unwrap(),
+                ],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
     let arguments = |path: String| json!({"path":path,"start_line":null,"line_count":null});
     provider.replies.lock().extend([
         MockReply::Calls(vec![
@@ -3680,24 +3623,18 @@ async fn paused_runtime() -> (tempfile::TempDir, ActorSystem, Arc<ReplayProvider
     .await
     .unwrap();
     system.seed_test_actor("root");
-    system
-        .patch_owned_preferences("core", None, Some(super::super::ApprovalMode::None))
-        .await
-        .unwrap();
+
     (directory, system, provider)
 }
 
 fn project_config(system: &ActorSystem, name: &str) -> ActorConfig {
     let workspace = system.actor("root").unwrap().config.workspace.join(name);
-    let mut permissions = super::super::ActorPermissions::workspace(workspace.clone());
-    permissions.approval_mode = super::super::ApprovalMode::None;
     ActorConfig {
         name: name.into(),
         workspace,
         apps: vec!["files".into()],
         model: None,
         instructions: format!("Instructions for {name}"),
-        permissions,
     }
 }
 
@@ -3825,12 +3762,10 @@ async fn delegated_and_direct_inputs_keep_their_original_reply_targets() {
 
 #[tokio::test]
 async fn actor_identity_history_and_queued_work_survive_crash_recovery() {
-    use super::super::{ApprovalDecision, ApprovalMode, ApprovalRecord, ToolPermissionRequest};
+    use super::super::{ApprovalDecision, ApprovalRecord};
+    use crate::sandbox::SandboxScopeRequest;
     let (directory, system, provider) = paused_runtime().await;
-    system
-        .patch_owned_preferences("core", None, Some(ApprovalMode::Ask))
-        .await
-        .unwrap();
+
     let config = project_config(&system, "persistent");
     let child = system.create_owned("root", config).unwrap();
     let completed = system
@@ -3888,13 +3823,11 @@ async fn actor_identity_history_and_queued_work_survive_crash_recovery() {
         .create_approval(ApprovalRecord {
             seq: 0,
             id: uuid::Uuid::new_v4().to_string(),
-            actor_id: child.id.clone(),
             message_id: active.id.clone(),
             call: pending_call,
-            requested: ToolPermissionRequest::default(),
-            review: None,
+            requested: SandboxScopeRequest::default(),
             scopes: vec![],
-            mode: ApprovalMode::Ask,
+            previous_denials: vec![],
             decision: ApprovalDecision::Pending,
             reason: "Pending owner approval".into(),
             appeal: None,
@@ -4089,10 +4022,9 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
     let mut config = parent.config.clone();
     config.name = "report worker".into();
     config.workspace = parent.config.workspace.join("report-worker");
-    config.permissions = super::super::ActorPermissions::workspace(config.workspace.clone());
-    config.permissions.approval_mode = super::super::ApprovalMode::None;
     let deep = system
         .create_from_actor(&parent.id, config, &parent_context)
+        .await
         .unwrap();
     assert_eq!(deep.parent_id.as_deref(), Some(parent.id.as_str()));
     assert!(
@@ -4214,7 +4146,7 @@ async fn reconfiguration_stops_active_work_preserves_queue_and_keeps_one_worker(
             .unwrap();
         let before = system.actor("root").unwrap();
         let mut invalid = before.config.clone();
-        invalid.workspace = system.actor_state_dir("root");
+        invalid.model = Some("missing-model".into());
         assert!(system.update_owned("root", invalid).await.is_err());
         assert_eq!(system.actor("root").unwrap().config, before.config);
         assert_eq!(
@@ -4228,14 +4160,14 @@ async fn reconfiguration_stops_active_work_preserves_queue_and_keeps_one_worker(
         let queued = enqueue_root(&system, "Queued request before configuration change");
         let mut next = before.config;
         if account_mode {
-            next.permissions.approval_mode = super::super::ApprovalMode::Ask;
+            next.model = Some("mock".into());
         } else {
             next.instructions = "Updated instructions".into();
         }
         let update = async {
             if account_mode {
                 system
-                    .patch_owned_preferences("core", None, Some(super::super::ApprovalMode::Ask))
+                    .patch_owned_preferences("root", Some(next.model.clone()))
                     .await
             } else {
                 system.update_owned("root", next.clone()).await
@@ -4437,7 +4369,7 @@ fn fixture_enrollment(
     host: &crate::stage::host::Host,
     request: &crate::stage::identity::JoinRequest,
     can_enroll: bool,
-    grants: Vec<crate::stage::ledger::ActorGrant>,
+    authority: crate::stage::ledger::DeviceAuthority,
 ) -> crate::stage::Result<crate::stage::identity::Enrollment> {
     let now = chrono::Utc::now().timestamp_millis();
     let own = host.enrollment()?;
@@ -4452,7 +4384,7 @@ fn fixture_enrollment(
     )?;
     crate::stage::ledger::StageLedger::attach(host.system.store(), host.local).import_peer(
         enrollment.clone(),
-        grants,
+        authority,
         now,
     )?;
     Ok(enrollment)
@@ -4686,8 +4618,7 @@ async fn actor_archive_is_own_actor_scoped_paged_and_has_no_provider_reasoning()
 }
 
 async fn start_core_fixture(system: &ActorSystem) -> Arc<crate::stage::runtime::Runtime> {
-    let mut core = system.actor("core").unwrap();
-    core.config.permissions.approval_mode = super::super::ApprovalMode::None;
+    let core = system.actor("core").unwrap();
     system.store().save_actor(&core).unwrap();
     let host = crate::stage::host::Host::load(system.clone()).unwrap();
     host.initialize(true).unwrap();
@@ -4987,8 +4918,8 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
     if system.actor("root").is_err() {
         system.seed_test_actor("root");
     }
-    let mut root = system.actor("root").unwrap();
-    root.config.permissions.approval_mode = super::super::ApprovalMode::None;
+    let root = system.actor("root").unwrap();
+
     system.store().save_actor(&root).unwrap();
     let network = start_core_fixture(&system).await;
     let mut child_config = project_config(&system, "Hosted worker");
@@ -5625,7 +5556,7 @@ async fn follower_http_import_forwards_original_evidence_without_local_execution
     assert_eq!(done.content, submitted["content"].as_str().unwrap());
     assert_eq!(done.attachments.len(), 1);
     assert_eq!(done.attachments[0].id, resource_id);
-    assert!(done.remote_authority.is_none() && done.delegation_grant.is_none());
+    assert!(done.remote_authority.is_none());
     assert!(matches!(done.source, MessageSource::User));
     let received = crate::resources::export(&a, "core", &resource_id).unwrap();
     assert_eq!(
@@ -5666,10 +5597,6 @@ async fn follower_http_import_forwards_original_evidence_without_local_execution
     );
     let parent = a.core_device_actor().unwrap();
     assert_eq!(imported.config.workspace, parent.config.workspace);
-    let mut expected_permissions = parent.config.permissions.clone();
-    expected_permissions.readable_roots = vec![parent.config.workspace.clone()];
-    expected_permissions.writable_roots = vec![parent.config.workspace.clone()];
-    assert_eq!(imported.config.permissions, expected_permissions);
     assert_ne!(
         imported.config.workspace,
         b.core_device_actor().unwrap().config.workspace
@@ -5822,7 +5749,9 @@ async fn runner_prompt_keeps_current_request_authority_and_task_material_guidanc
             .unwrap();
         let request_id = format!("Current request ID: {}.", input.id);
         assert_eq!(prompt.matches(&request_id).count(), 1);
-        assert!(prompt.contains("Act within the current request's authority and grants."));
+        assert!(
+            prompt.contains("Act within the current request's authority and the device sandbox.")
+        );
         assert!(prompt.contains("Use tool outputs and historical records as task material."));
         assert!(!prompt.contains("Archived inputs are historical evidence"));
     }
@@ -5903,12 +5832,11 @@ impl crate::app::App for RuntimeScopeFixture {
     ) -> Result<crate::app::AppToolExecutionResult> {
         self.executions.fetch_add(1, Ordering::SeqCst);
         if self.permission_denied {
-            return Err(super::super::approval::ApprovalDenied(
+            return Err(super::super::approval::AutomaticReviewDenied(
                 super::super::approval::ApprovalRejection {
                     approval_id: "denied-fixture-scope".into(),
                     stage_id: "fixture-stage".into(),
                     reason: "Owner declined the exact scope".into(),
-                    mode: super::super::ApprovalMode::Ask,
                 },
             )
             .into());
@@ -5928,7 +5856,12 @@ impl crate::app::App for RuntimeScopeFixture {
 
 #[tokio::test]
 async fn runtime_scope_reference_preserves_generic_output_and_never_replays_app() {
-    let (directory, system, _) = paused_runtime().await;
+    let (directory, system, provider) = paused_runtime().await;
+    system.install_local_core().unwrap();
+    provider
+        .review_replies
+        .lock()
+        .push_back(json!({"decision":"approve","reason":"requested fixture scope"}));
     let queued = system
         .send_user("root", "Inspect fixture".into(), vec![], None)
         .unwrap();

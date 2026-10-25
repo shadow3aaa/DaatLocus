@@ -5,7 +5,7 @@ use super::{
     shared_store::Batch,
 };
 use crate::{
-    actors::{ApprovalMode, MessageRecord},
+    actors::MessageRecord,
     app::{AppToolExecutionResult, AppToolSpec},
     model_protocol::AgentToolCall,
 };
@@ -18,7 +18,6 @@ pub struct Configuration {
     pub instructions: String,
     pub model: Option<String>,
     pub apps: Vec<String>,
-    pub approval_mode: crate::actors::ApprovalMode,
 }
 impl Configuration {
     pub fn from_actor(actor: &crate::actors::ActorRecord) -> Self {
@@ -29,7 +28,6 @@ impl Configuration {
             instructions: config.instructions.clone(),
             model: config.model.clone(),
             apps: config.apps.clone(),
-            approval_mode: config.permissions.approval_mode,
         }
     }
     pub fn apply(&self, config: &mut crate::actors::ActorConfig) {
@@ -37,7 +35,6 @@ impl Configuration {
         config.instructions = self.instructions.clone();
         config.model = self.model.clone();
         config.apps = vec!["actors".into()];
-        config.permissions.approval_mode = self.approval_mode;
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,7 +109,6 @@ pub enum Request {
     Preferences {
         model_present: bool,
         model: Option<String>,
-        approval_mode: Option<ApprovalMode>,
     },
     Catalog {
         epoch: u64,
@@ -136,12 +132,6 @@ pub enum Request {
         revision: String,
         call: AgentToolCall,
         identity_read_only: bool,
-    },
-    InvocationPause {
-        epoch: u64,
-        message: String,
-        call_id: String,
-        paused: bool,
     },
     ToolResult {
         message: String,
@@ -193,9 +183,6 @@ pub enum Response {
         batches: Vec<Batch>,
     },
     InputAccepted,
-    InvocationPaused {
-        paused: bool,
-    },
     ToolResult {
         result: Option<AppToolExecutionResult>,
         uncertain: bool,
@@ -251,13 +238,12 @@ mod preference_tests {
             )
             .is_err()
         );
-        let value = serde_json::json!({"kind":"preferences","model_present":true,"model":null,"approval_mode":null});
+        let value = serde_json::json!({"kind":"preferences","model_present":true,"model":null});
         assert!(matches!(
             serde_json::from_value::<Request>(value).unwrap(),
             Request::Preferences {
                 model_present: true,
-                model: None,
-                approval_mode: None
+                model: None
             }
         ));
     }

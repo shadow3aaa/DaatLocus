@@ -185,7 +185,7 @@ fn head(tx: &Transaction<'_>, actor: &str) -> Result<(Cursor, u64)> {
 }
 fn authorize(tx: &Transaction<'_>, id: StageId, actor: &str, now: i64) -> Result<()> {
     let peer = ledger::peer(tx, id, now)?;
-    if !ledger::core_read(tx, actor)? && !ledger::grant(tx, &peer, actor)?.read {
+    if !ledger::authorize_actor(tx, &peer, actor)?.read {
         return Err(StageError::Forbidden("Actor is outside device grants"));
     }
     // A retained deletion tombstone is readable with the previous exact grant.
@@ -225,7 +225,6 @@ fn message_fact(tx: &Transaction<'_>, id: &str) -> Result<Fact> {
     metadata.content.clear();
     metadata.reply = None;
     metadata.error = None;
-    metadata.delegation_grant = None;
     metadata.remote_authority = None;
     Ok(Fact::Message {
         metadata: Box::new(metadata),

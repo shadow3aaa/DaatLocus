@@ -386,18 +386,6 @@ pub(crate) fn ensure_authorized_read(
     }
 }
 
-pub(crate) fn read_requires_permission(path: &Path, policy: &RuntimeSandboxPolicy) -> Result<bool> {
-    guarded_directory::local_path(path)
-        .map_err(|_| miette!("remote or device file paths are unsupported"))?;
-    if policy.is_path_readable(path) {
-        return Ok(false);
-    }
-    Ok(!matches!(
-        builtin_resource_for_path(path, policy),
-        Ok(Some(resource)) if read_builtin_bytes(resource, resource.content.len() as u64).is_ok()
-    ))
-}
-
 fn builtin_resource_for_path<'a>(
     path: &Path,
     policy: &'a RuntimeSandboxPolicy,
@@ -1386,7 +1374,7 @@ mod tests {
         let (directory, policy, path) = builtin_fixture();
         assert!(!policy.is_path_readable(&path));
         assert!(!policy.is_path_writable(&path));
-        assert!(!read_requires_permission(&path, &policy).unwrap());
+        assert!(ensure_authorized_read(&path, &policy, "filesystem boundary").is_ok());
         ensure_authorized_read(&path, &policy, "built-in skill").unwrap();
         let result = read_file(
             directory.path(),
@@ -1403,7 +1391,7 @@ mod tests {
 
         let extra = path.with_file_name("extra.md");
         fs::write(&extra, BUILTIN_BYTES).unwrap();
-        assert!(read_requires_permission(&extra, &policy).unwrap());
+        assert!(ensure_authorized_read(&extra, &policy, "filesystem boundary").is_err());
         assert!(read_authorized_bytes(&extra, u64::MAX, &policy).is_err());
         assert!(
             list_directory(
@@ -1430,13 +1418,13 @@ mod tests {
             fs::write(&path, &bytes).unwrap();
             assert!(read_authorized_bytes(&path, u64::MAX, &policy).is_err());
             assert!(ensure_authorized_read(&path, &policy, "skill").is_err());
-            assert!(read_requires_permission(&path, &policy).unwrap());
+            assert!(ensure_authorized_read(&path, &policy, "filesystem boundary").is_err());
             assert_eq!(
                 read_authorized_bytes(&path, u64::MAX, &approved).unwrap(),
                 bytes
             );
             ensure_authorized_read(&path, &approved, "ordinary file").unwrap();
-            assert!(!read_requires_permission(&path, &approved).unwrap());
+            assert!(ensure_authorized_read(&path, &approved, "filesystem boundary").is_ok());
             assert!(read_builtin_bytes(&approved.builtin_resources[0], u64::MAX).is_err());
             assert!(!approved.is_path_readable(&directory.path().join("unrequested")));
             assert!(!approved.is_path_writable(&path));
@@ -1462,7 +1450,7 @@ mod tests {
         let requested =
             resolve_read_file_path(directory.path(), &policy, &traversal.to_string_lossy())
                 .unwrap();
-        assert!(read_requires_permission(&requested, &policy).unwrap());
+        assert!(ensure_authorized_read(&requested, &policy, "filesystem boundary").is_err());
         assert!(read_authorized_bytes(&traversal, u64::MAX, &policy).is_err());
         assert!(
             read_file(
@@ -1478,7 +1466,7 @@ mod tests {
         // The caller supplies this relative string directly. In particular,
         // the production cwd join must not erase evidence before validation.
         let requested = resolve_read_file_path(parent, &policy, "child/../SKILL.md").unwrap();
-        assert!(read_requires_permission(&requested, &policy).unwrap());
+        assert!(ensure_authorized_read(&requested, &policy, "filesystem boundary").is_err());
         assert!(
             read_file(
                 parent,
@@ -1638,7 +1626,7 @@ mod tests {
         assert!(read_authorized_bytes(&alias, u64::MAX, &policy).is_err());
         let requested =
             resolve_read_file_path(directory.path(), &policy, &alias.to_string_lossy()).unwrap();
-        assert!(read_requires_permission(&requested, &policy).unwrap());
+        assert!(ensure_authorized_read(&requested, &policy, "filesystem boundary").is_err());
 
         let moved_file = directory.path().join("moved.md");
         fs::rename(&path, &moved_file).unwrap();

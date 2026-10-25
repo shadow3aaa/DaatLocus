@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    actors::ToolPermissionRequest,
     app::{App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
     core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWaitMode, TerminalWriteStdinArgs},
     model_protocol::AgentToolCall,
@@ -42,7 +41,6 @@ struct TerminalSession {
     output_offset: usize,
     last_activity: Instant,
     state: TerminalSessionState,
-    approved_roots: ToolPermissionRequest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,23 +217,7 @@ impl TerminalApp {
             .await
             .map_err(|err| miette!("failed to spawn terminal process: {err}"))?,
         );
-        session.approved_roots = ToolPermissionRequest {
-            operation_details: serde_json::Value::Null,
-            readable_roots: sandbox_policy
-                .filesystem
-                .readable_roots
-                .iter()
-                .filter(|path| sandbox_policy.is_path_readable(path))
-                .cloned()
-                .collect(),
-            writable_roots: sandbox_policy
-                .filesystem
-                .writable_roots
-                .iter()
-                .map(|root| root.root.clone())
-                .filter(|path| sandbox_policy.is_path_writable(path))
-                .collect(),
-        };
+
         session.output_offset = 0;
         session.state.command = Some(command);
         session.state.status = "running".to_string();
@@ -444,7 +426,6 @@ impl TerminalApp {
             process: None,
             output_offset: 0,
             last_activity: Instant::now(),
-            approved_roots: ToolPermissionRequest::default(),
             state: TerminalSessionState {
                 session_id: session_id.clone(),
                 process_id: None,
@@ -844,97 +825,11 @@ impl App for TerminalApp {
         ]
     }
 
-    fn review_requirement(
-        &self,
+    async fn execute_tool(
+        &mut self,
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
-    ) -> Result<Option<crate::actors::AppReview>> {
-        let review = match call.name.as_str() {
-            "terminal_exec" => true,
-            "terminal_write_stdin" => !parse_terminal_tool_args::<TerminalWriteStdinArgs>(call)?
-                .text
-                .is_empty(),
-            "terminal_terminate" => true,
-            _ => false,
-        };
-        let mut arguments = call.arguments.clone();
-        if let Some(object) = arguments.as_object_mut() {
-            for field in ["yield_time_ms", "max_chars", "wait_mode"] {
-                object.remove(field);
-            }
-        }
-        Ok(review.then(|| crate::actors::AppReview::new("terminal/process/v1",
-            "Review the exact command or process input and working directory for requested effects, destructive changes, network publication, credential use and data disclosure. A directory grant alone does not authorize arbitrary shell effects. Reads and writes inside the platform's system temporary directories are baseline-authorized and are not out-of-bounds effects. Empty output polling requires no review.",
-            serde_json::json!({"tool":call.name,"arguments":arguments,"cwd":context.execution_cwd}))))
-    }
-    fn permission_request(
-        &self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<ToolPermissionRequest> {
-        if context
-            .actor_call
-            .as_ref()
-            .is_some_and(|caller| caller.remote_read_only)
-        {
-            return Err(miette!(
-                "Remote read-only authority cannot run native processes"
-            ));
-        }
-        let mut request = ToolPermissionRequest::default();
-        let session_id = match call.name.as_str() {
-            "terminal_exec" => {
-                let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
-                let workdir = args.workdir.as_deref().unwrap_or(
-                    context
-                        .execution_cwd
-                        .to_str()
-                        .ok_or_else(|| miette!("workspace path is not UTF-8"))?,
-                );
-                request
-                    .readable_roots
-                    .push(crate::file_io::resolve_file_path(
-                        &context.execution_cwd,
-                        workdir,
-                    )?);
-                args.session_id
-                    .filter(|id| !id.trim().is_empty() && id.trim().to_lowercase() != "null")
-            }
-            "terminal_write_stdin" => {
-                Some(parse_terminal_tool_args::<TerminalWriteStdinArgs>(call)?.session_id)
-            }
-            _ => None,
-        };
-        if let Some(id) = session_id {
-            let session = self
-                .sessions
-                .get(&id)
-                .ok_or_else(|| miette!("unknown terminal session"))?;
-            request
-                .readable_roots
-                .extend(session.approved_roots.readable_roots.clone());
-            request
-                .writable_roots
-                .extend(session.approved_roots.writable_roots.clone());
-        }
-        request.readable_roots.sort();
-        request.readable_roots.dedup();
-        request.writable_roots.sort();
-        request.writable_roots.dedup();
-        request
-            .readable_roots
-            .retain(|path| !terminal_process_policy(context).is_path_readable(path));
-        request
-            .writable_roots
-            .retain(|path| !context.sandbox_policy.is_path_writable(path));
-        Ok(request)
-    }
-
-    fn before_tool_call(
-        &self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<()> {
+    ) -> Result<AppToolExecutionResult> {
         if context
             .actor_call
             .as_ref()
@@ -945,36 +840,21 @@ impl App for TerminalApp {
             ));
         }
         let process_policy = terminal_process_policy(context);
-        if call.name == "terminal_exec" {
-            let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
-            let workdir = args.workdir.as_deref().map_or_else(
-                || context.execution_cwd.clone(),
-                |path| context.resolve_tool_path(Path::new(path), None),
-            );
-            process_policy.ensure_path_readable(&workdir, "terminal workdir")?;
-        }
+
         if call.name == "terminal_write_stdin" {
             let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
             let session = self
                 .sessions
                 .get(&args.session_id)
                 .ok_or_else(|| miette!("unknown terminal session"))?;
-            for path in &session.approved_roots.readable_roots {
-                process_policy.ensure_path_readable(path, "terminal session read root")?;
-            }
-            for path in &session.approved_roots.writable_roots {
-                process_policy.ensure_path_writable(path, "terminal session write root")?;
+            if !args.text.is_empty() {
+                session
+                    .process
+                    .as_ref()
+                    .ok_or_else(|| miette!("Terminal process is unavailable"))?
+                    .ensure_policy(&process_policy)?;
             }
         }
-        Ok(())
-    }
-
-    async fn execute_tool(
-        &mut self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<AppToolExecutionResult> {
-        self.before_tool_call(call, context)?;
         match call.name.as_str() {
             "terminal_exec" => {
                 let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
@@ -1167,7 +1047,7 @@ impl App for TerminalApp {
 }
 
 fn terminal_process_policy(context: &AppToolExecutionContext) -> RuntimeSandboxPolicy {
-    let mut policy = context.sandbox_policy.for_process();
+    let mut policy = context.sandbox_policy.clone();
     if context.actor_call.is_some() {
         policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
     }
@@ -1378,6 +1258,7 @@ mod tests {
             native: crate::sandbox::SandboxPolicy {
                 filesystem: FileSystemSandboxPolicy {
                     full_disk_read: true,
+                    deny_all_writes: false,
                     full_disk_write: true,
                     readable_roots: Vec::new(),
                     writable_roots: Vec::new(),
@@ -1963,6 +1844,7 @@ mod tests {
             )
         };
         let context = AppToolExecutionContext {
+            access_broker: None,
             execution_cwd: directory.path().to_path_buf(),
             sandbox_policy: test_sandbox_policy(),
             tool_output_max_tokens: 1000,
@@ -2198,6 +2080,7 @@ mod tests {
             policy.filesystem.full_disk_write = false;
             policy.filesystem.readable_roots = vec![workspace.clone(), root];
             let context = AppToolExecutionContext {
+                access_broker: None,
                 execution_cwd: workspace.clone(),
                 sandbox_policy: policy,
                 tool_output_max_tokens: 1000,
@@ -2240,62 +2123,66 @@ fn non_temporary_scratch() -> tempfile::TempDir {
         .unwrap()
 }
 
-#[test]
-fn session_extra_roots_are_requested_again_before_stdin() {
+#[tokio::test]
+async fn live_terminal_rejects_new_input_after_scope_change_but_keeps_observation_available() {
+    if !crate::sandbox::test_support::native_sandbox_available() {
+        return;
+    }
     let dir = non_temporary_scratch();
-    let outside = non_temporary_scratch();
-    let root = outside.path().canonicalize().unwrap();
-    let mut app = TerminalApp::new();
-    let session_id = app.create_session();
-    app.sessions.get_mut(&session_id).unwrap().approved_roots = ToolPermissionRequest {
-        operation_details: serde_json::Value::Null,
-        readable_roots: vec![root.clone()],
-        writable_roots: vec![root.clone()],
-    };
     let mut policy = RuntimeSandboxPolicy::disabled();
     policy.filesystem.full_disk_read = false;
     policy.filesystem.full_disk_write = false;
     policy.filesystem.readable_roots = vec![dir.path().into()];
+    policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
     let base = AppToolExecutionContext {
+        access_broker: None,
         execution_cwd: dir.path().into(),
         sandbox_policy: policy,
         tool_output_max_tokens: 1000,
         turn_epoch: 1,
         actor_call: None,
     };
-    let call = AgentToolCall {
-        id: "call".into(),
-        name: "terminal_write_stdin".into(),
-        arguments: json!({"session_id": session_id, "text":"", "wait_mode":null, "yield_time_ms":null, "max_chars":null}),
+    let mut app = TerminalApp::new();
+    let start = AgentToolCall {
+        id: "start".into(),
+        name: "terminal_exec".into(),
+        arguments: json!({"command":if cfg!(windows) {"Start-Sleep -Seconds 20"} else {"sleep 20"},
+            "session_id":null,"workdir":null,"yield_time_ms":25,"max_chars":1000}),
     };
-    let request = app.permission_request(&call, &base).unwrap();
-    assert!(request.readable_roots.is_empty());
-    assert_eq!(
-        request.writable_roots.as_slice(),
-        std::slice::from_ref(&root)
-    );
-    assert!(app.before_tool_call(&call, &base).is_err());
-    let mut effective = base.clone();
-    effective
+    let started = app.execute_tool(&start, &base).await.unwrap();
+    let session = started.payload["session"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut changed = base.clone();
+    changed
         .sandbox_policy
         .filesystem
         .readable_roots
-        .push(root.clone());
-    effective
-        .sandbox_policy
-        .filesystem
-        .writable_roots
-        .push(crate::sandbox::WritableRoot {
-            root,
-            read_only_subpaths: vec![],
-        });
-    app.before_tool_call(&call, &effective).unwrap();
-    assert!(
-        app.permission_request(&call, &effective)
-            .unwrap()
-            .readable_roots
-            .is_empty()
+        .push(dir.path().join("new-scope"));
+    let input = AgentToolCall {
+        id: "continue".into(),
+        name: "terminal_write_stdin".into(),
+        arguments: json!({"session_id":session,"text":"echo must-not-be-replayed\n","wait_mode":null,"yield_time_ms":25,"max_chars":1000}),
+    };
+    let error = app.execute_tool(&input, &changed).await.unwrap_err();
+    assert!(error.to_string().contains("Explicitly restart"), "{error}");
+    let mut poll = input;
+    poll.arguments["text"] = json!("");
+    let observed = app.execute_tool(&poll, &changed).await.unwrap();
+    assert_eq!(observed.payload["session"]["session_id"], session);
+    assert_eq!(
+        app.sessions.len(),
+        1,
+        "scope changes cannot silently recreate a process"
     );
+    assert!(
+        !observed.payload["output"]
+            .as_str()
+            .unwrap()
+            .contains("must-not-be-replayed")
+    );
+    app.shutdown().await.unwrap();
 }
 
 #[test]

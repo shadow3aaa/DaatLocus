@@ -1,5 +1,4 @@
 //! Authenticated host infrastructure. Actors and Apps never select a transport.
-pub mod approval_index;
 pub mod blob;
 pub mod channel;
 pub mod connection;

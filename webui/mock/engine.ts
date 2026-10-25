@@ -1,14 +1,13 @@
 /**
  * Fake actor execution engine. A send starts a turn: after a short delay the
  * engine creates a running result message, streams reasoning + assistant
- * deltas, runs one simulated `files__list_directory` tool round (gated by an
- * actor mode is "ask"), then completes the turn and dequeues the next request.
+ * deltas, runs one simulated `files__list_directory` tool round,
+ * then completes the turn and receives the next request.
  */
-import type { ApprovalDecision, JsonValue, MessageRecord } from "../src/lib/actor-api";
+import type { MessageRecord } from "../src/lib/actor-api";
 import { registerRunClearer } from "./fixtures";
 import { CODEX_IMPORT_MEDIA_TYPE } from "../src/lib/import-types";
 import {
-  addApproval,
   addTool,
   createActor,
   emitEvent,
@@ -85,7 +84,7 @@ export function cancelTurn(messageId: string): boolean {
   const run = runsByUserMessage.get(messageId) ?? (messageId ? findRunByReply(messageId) : undefined);
   if (!run || run.cancelled) return false;
   run.cancelled = true;
-  // Release a pending approval wait so the engine can observe the cancel.
+  // Cancel any unfinished scope-review audit records for this input.
   if (run.replyId) {
     const actor = getActor(run.actorId);
     for (const approval of actor?.approvals ?? [])
@@ -162,7 +161,7 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
       if (imported) {
         if (!(await rest(run, 700))) return cancelRun(actor, user, reply, "");
         const id = newId(), config = actor.detail.config!;
-        const importedActor = createActor({id, name: "Athena", parent_id: ROOT_ACTOR_ID, apps: ["actors", "files", "web", "browser_use"], model: config.model, approval_mode: config.permissions.approval_mode, readable_roots: config.permissions.readable_roots, writable_roots: config.permissions.writable_roots, workspace: config.workspace, instructions: imported.name});
+        const importedActor = createActor({id, name: "Athena", parent_id: ROOT_ACTOR_ID, apps: ["actors", "files", "web", "browser_use"], model: config.model, workspace: config.workspace, instructions: imported.name});
         emitEvent(id, {type: "actor_changed", actor: importedActor.summary});
         const callId = newId(), resultId = newId(), outcome = {id, name: "Athena", conversation_url: `/actors/${id}`};
         addTool(actor, {id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__import_conversation", summary: "Imported conversation", error: null, model_content: "Actor prepared", arguments: {resource_id: imported.id, name: "Athena", instructions: imported.name}, outcome, payload: outcome});
@@ -193,52 +192,27 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
       emitEvent(actorId, { type: "generation_delta", message_id: reply.id, generation: 1, channel: "assistant", text: chunk });
     }
 
-    // One simulated tool round, gated by an approval in "ask" mode.
-    const mode = actor.detail.config?.permissions.approval_mode ?? "none";
     const callId = newId();
-    let denied = false;
-    if (mode === "ask") {
-      const record = addApprovalSafe(actor, reply.id, callId);
-      if (record) {
-        emitEvent(actorId, {
-          type: "approval_requested",
-          approval_id: record.id,
-          message_id: reply.id,
-          call_id: callId,
-          name: "files__list_directory",
-        });
-        const decision = await new Promise<ApprovalDecision>(resolve => {
-          store.approvalWakers.set(record.id, resolve);
-          run.wake = () => resolve("cancelled");
-        });
-        run.wake = null;
-        if (run.cancelled) return cancelRun(actor, user, reply, assistantText);
-        denied = decision !== "approved";
-      }
-    }
-
     const toolStarted = now();
     emitEvent(actorId, { type: "tool_started", message_id: reply.id, call_id: callId, name: "files__list_directory" });
     if (!(await rest(run, 250))) return cancelRun(actor, user, reply, assistantText);
     const toolFinished = now();
 
-    const error = denied ? "Approval denied by Owner" : null;
+    const error = null;
     const resultId = newId();
     addTool(actor, {
       id: resultId,
       message_id: reply.id,
       call_id: callId,
       name: "files__list_directory",
-      summary: denied ? "files list denied" : "Listed 3 entries in .",
+      summary: "Listed 3 entries in .",
       error,
       started_at_ms: toolStarted,
       finished_at_ms: toolFinished,
-      outcome: denied ? null : { path: ".", entries: 3 },
+      outcome: { path: ".", entries: 3 },
       actor_id: actorId,
       arguments: { path: "." },
-      payload: denied
-        ? { denied: true }
-        : {
+      payload: {
             path: ".",
             entries: [
               { name: "README.md", kind: "file", size_bytes: 4096 },
@@ -247,7 +221,7 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
             ],
             next_cursor: null,
           },
-      model_content: denied ? "The Owner denied this files__list_directory call." : "README.md\nsrc/\npackage.json",
+      model_content: "README.md\nsrc/\npackage.json",
     });
     emitEvent(actorId, {
       type: "tool_finished",
@@ -255,16 +229,14 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
       call_id: callId,
       name: "files__list_directory",
       result_id: resultId,
-      summary: denied ? "files list denied" : "Listed 3 entries in .",
+      summary: "Listed 3 entries in .",
       error,
       started_at_ms: toolStarted,
       finished_at_ms: toolFinished,
-      outcome: denied ? null : { path: ".", entries: 3 },
+      outcome: { path: ".", entries: 3 },
     });
 
-    const closing = denied
-      ? "\n这次文件访问没有获批，任务已停止，之前的检查记录仍然保留。\n"
-      : "\n已经找到相关文件，可以继续检查具体的布局规则。\n";
+    const closing = "\n已经找到相关文件，可以继续检查具体的布局规则。\n";
     for (const chunk of chunkAround(closing, 24)) {
       if (!(await rest(run, 30))) return cancelRun(actor, user, reply, assistantText);
       assistantText += chunk;
@@ -283,22 +255,6 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
     }
   }
 }
-
-function addApprovalSafe(actor: ActorStore, messageId: string, callId: string) {
-  const permissions = actor.detail.config?.permissions;
-  const call: { id: string; name: string; arguments: JsonValue } = { id: callId, name: "files__list_directory", arguments: { path: "." } };
-  return addApproval(actor, {
-    message_id: messageId,
-    call,
-    requested: {
-      readable_roots: permissions?.readable_roots ?? [],
-      writable_roots: permissions?.writable_roots ?? [],
-      operation_details: { path: "." },
-    },
-    mode: "ask",
-  });
-}
-
 
 function completeRun(actor: ActorStore, user: MessageRecord, reply: MessageRecord, text: string): void {
   if (store.actors.get(actor.summary.id) !== actor) return;

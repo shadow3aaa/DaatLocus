@@ -609,7 +609,7 @@ impl Runtime {
                     return Ok(());
                 }
                 if !StageLedger::attach(self.host.system.store(), self.host.local)
-                    .actor_grant(verified.stage_id(), actor, time)?
+                    .authorize_actor(verified.stage_id(), actor, time)?
                     .read
                 {
                     return Err(StageError::Forbidden("Actor access was revoked"));
