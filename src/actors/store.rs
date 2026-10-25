@@ -11,7 +11,9 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 mod approval_appeals;
-mod core_guidance;
+#[cfg(test)]
+#[path = "store/history_handoff_tests.rs"]
+mod history_handoff_tests;
 mod review_applications;
 mod tool_provenance;
 
@@ -19,6 +21,15 @@ pub struct ActorStore {
     db: Mutex<Connection>,
     changed: Arc<Notify>,
 }
+fn task_handoff_db(db: &Connection, actor: &str, input: &str) -> Option<TaskHandoff> {
+    let current = message_tx(db, input)
+        .ok()
+        .filter(|message| message.actor_id == actor)?;
+    Some(TaskHandoff::from_message(&current, |id| {
+        message_tx(db, id).ok()
+    }))
+}
+
 fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -101,8 +112,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
         ],
         "actors__create"
         | "actors__import_conversation"
-        | "actors__send"
-        | "actors__steer"
+        | "actors__message"
         | "actors__archive"
         | "actors__unarchive" => &[
             "id",
@@ -113,7 +123,8 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
             "stage_id",
             "status",
             "kind",
-            "target_message_id",
+            "reply_to",
+            "show_to_user",
         ],
         "files__write_file" | "files__edit_file" | "files__copy_file" => {
             &["path", "created", "byte_count", "sha256"]
@@ -130,8 +141,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
         domain_name,
         "actors__create"
             | "actors__import_conversation"
-            | "actors__send"
-            | "actors__steer"
+            | "actors__message"
             | "actors__archive"
             | "actors__unarchive"
     ) {
@@ -283,7 +293,7 @@ fn save_resource(
     sql(tx.execute("INSERT INTO resources(actor_id,id,record) VALUES(?1,?2,?3) ON CONFLICT(actor_id,id) DO UPDATE SET record=excluded.record",params![resource.actor_id,resource.id,encode(&data)?]))?;
     Ok(())
 }
-fn message_tx(tx: &Transaction<'_>, id: &str) -> Result<MessageRecord> {
+fn message_tx(tx: &Connection, id: &str) -> Result<MessageRecord> {
     decode(
         sql(tx
             .query_row("SELECT record FROM messages WHERE id=?1", [id], |r| {
@@ -554,21 +564,23 @@ impl ActorStore {
                 .query_row("SELECT COUNT(*) FROM actors", [], |r| r.get(0)))
         })
     }
-    /// Only executable inbox entries activate a worker; steering belongs to an
-    /// already running input. Query the mailbox index without decoding records.
+    /// Every queued entry activates a worker: an immediate message whose target is
+    /// still running is inserted at that target's boundary, otherwise it is claimed.
+    /// Query the mailbox index without decoding records.
     pub(crate) fn has_queued_input(&self, actor: &str) -> Result<bool> {
         database_io(|| {
             sql(self.db.lock().query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE actor_id=?1 AND status='\"queued\"' AND json_extract(record,'$.kind')!='steering')",
-            [actor], |r| r.get(0),
-        ))
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE actor_id=?1 AND status='\"queued\"')",
+                [actor],
+                |r| r.get(0),
+            ))
         })
     }
     pub(crate) fn queued_actor_ids(&self) -> Result<Vec<String>> {
         database_io(|| {
             let db = self.db.lock();
             let mut stmt = sql(db.prepare(
-            "SELECT DISTINCT actor_id FROM messages WHERE status='\"queued\"' AND json_extract(record,'$.kind')!='steering' ORDER BY actor_id",
+            "SELECT DISTINCT actor_id FROM messages WHERE status='\"queued\"' ORDER BY actor_id",
         ))?;
             sql(stmt.query_map([], |r| r.get(0)))?
                 .collect::<rusqlite::Result<_>>()
@@ -621,35 +633,14 @@ impl ActorStore {
             if id == crate::stage::shared::ACTOR_ID {
                 return Err(ActorError::Conflict("Core cannot be archived".into()).into());
             }
-            if archived && actor.status != ActorStatus::Archived {
-                // Include pending collaborator inputs: yielding a turn is not completion
-                // of delegated work. Admission and this check use the same transaction.
-                let pending: bool = sql(tx.query_row(
-                "WITH RECURSIVE inputs(id,actor,request) AS (
-                    SELECT id,actor_id,json_extract(record,'$.reply_to.request_id') FROM messages WHERE status IN ('\"queued\"','\"running\"')
-                    UNION SELECT m.id,m.actor_id,json_extract(m.record,'$.reply_to.request_id') FROM messages m JOIN inputs i ON m.id=i.request
-                ) SELECT EXISTS(SELECT 1 FROM inputs WHERE actor=?1)",
-                [id], |r| r.get(0),
-            ))?;
-                let has_remote: bool = sql(tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='stage_outbox')",
-                    [],
-                    |r| r.get(0),
+            if archived {
+                // Archiving discards queued inbox inputs (user, result and receipt
+                // messages alike) so they never run after an unarchive. Running
+                // inputs are left to finish; only queued rows are removed.
+                sql(tx.execute(
+                    "DELETE FROM messages WHERE actor_id=?1 AND status='\"queued\"'",
+                    [id],
                 ))?;
-                let remote_pending = has_remote && sql(tx.query_row(
-                "WITH RECURSIVE inputs(id,actor,request) AS (
-                    SELECT m.id,m.actor_id,json_extract(m.record,'$.reply_to.request_id') FROM stage_sent s JOIN stage_outbox o ON o.invocation=s.invocation AND o.peer=s.peer JOIN messages m ON m.id=json_extract(s.record,'$.request_id') WHERE o.completed=0
-                    UNION SELECT m.id,m.actor_id,json_extract(m.record,'$.reply_to.request_id') FROM messages m JOIN inputs i ON m.id=i.request
-                ) SELECT EXISTS(SELECT 1 FROM inputs WHERE actor=?1)",
-                [id], |r| r.get::<_, bool>(0),
-            ))?;
-                if actor.status != ActorStatus::Idle || pending || remote_pending {
-                    return Err(ActorError::Conflict(
-                    "Actor must be idle with no pending inputs or delegated work before archival"
-                        .into(),
-                )
-                .into());
-                }
             }
             let status = if archived {
                 ActorStatus::Archived
@@ -681,6 +672,15 @@ impl ActorStore {
             self.commit(tx)
         })
     }
+    /// Optional, runtime-owned task lookup; never infer links from message prose.
+    pub(crate) fn task_handoff(&self, actor: &str, input: &str) -> Option<TaskHandoff> {
+        database_io(|| {
+            let db = self.db.lock();
+            Ok::<_, miette::Report>(task_handoff_db(&db, actor, input))
+        })
+        .ok()
+        .flatten()
+    }
     pub(crate) fn reset_model_context(&self, id: &str, message: &str) -> Result<AgentMessage> {
         database_io(|| {
             let mut db = self.db.lock();
@@ -689,6 +689,7 @@ impl ActorStore {
             let anchor = HistoryAnchor {
                 message_id: message.to_owned(),
                 reset_id: Uuid::new_v4(),
+                handoff: task_handoff_db(&tx, id, message),
             };
             let recovery = anchor.recovery_message();
             sql(tx.execute(
@@ -728,8 +729,8 @@ impl ActorStore {
             };
             let db = self.db.lock();
             let local: i64 = sql(db.query_row(
-                "SELECT MIN(seq) FROM history WHERE actor_id=?1 AND message_id=?2 AND record=?3",
-                params![id, anchor.message_id, encode(&anchor.recovery_message())?],
+                "SELECT MIN(seq) FROM history WHERE actor_id=?1 AND message_id=?2 AND record IN (?3,?4)",
+                params![id, anchor.message_id, encode(&anchor.recovery_message())?, encode(&anchor.legacy_recovery_message())?],
                 |row| row.get::<_, Option<i64>>(0),
             ))?
             .ok_or_else(|| miette::miette!("Working context anchor is unavailable"))?;
@@ -739,6 +740,34 @@ impl ActorStore {
             Ok(local)
         })
     }
+    /// Bounded locators for direct same-Actor Progress/Result inputs only. New
+    /// Requests are independent even if related; this is not a complete event tree.
+    pub(crate) fn related_task_inputs(
+        &self,
+        actor: &str,
+        task: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Page<Value>> {
+        database_io(|| {
+            let db = self.db.lock();
+            let limit = limit.clamp(1, 32);
+            let mut statement = sql(db.prepare("SELECT seq,record FROM messages WHERE actor_id=?1 AND seq>?2 AND id<>?3 AND json_extract(record,'$.kind') IN ('progress','result') AND json_extract(record,'$.in_reply_to')=?3 ORDER BY seq LIMIT ?4"))?;
+            let records = sql(statement
+                .query_map(params![actor, after, task, (limit + 1) as i64], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                }))?
+            .map(|row| {
+                let (seq, record) = sql(row)?;
+                Ok((seq, decode::<MessageRecord>(record)?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+            let next_cursor = (records.len() > limit).then(|| records[limit - 1].0);
+            let items = records.into_iter().take(limit).map(|(seq, input)| serde_json::json!({"sequence":seq,"message_id":input.id,"kind":input.kind})).collect();
+            Ok(Page { items, next_cursor })
+        })
+    }
+
     /// Pagination bounds I/O, never the number of retained messages or steps.
     pub(crate) fn history_page(
         &self,
@@ -808,17 +837,58 @@ impl ActorStore {
         })
     }
     pub fn claim_next(&self, actor_id: &str) -> Result<Option<MessageRecord>> {
+        self.claim_input(actor_id, None)
+    }
+    /// Publish a resumed input even when it predates the client's history page.
+    /// This advances no effects and does not change its authority or start time.
+    pub(crate) fn resume_input(&self, actor: &str, id: &str) -> Result<()> {
+        database_io(|| {
+            let mut db = self.db.lock();
+            let tx = sql(db.transaction())?;
+            let mut input = message_tx(&tx, id)?;
+            if input.actor_id != actor
+                || input.status != MessageStatus::Running
+                || input.cancel_requested
+            {
+                return Err(ActorError::Forbidden("Input cannot resume".into()).into());
+            }
+            input.updated_at_ms = now().max(input.updated_at_ms + 1);
+            save_message(&tx, &input)?;
+            self.commit(tx)
+        })
+    }
+    /// Claim at a safe boundary of this Actor's current execution. Other open
+    /// requests retain their authority and completion state while suspended.
+    pub(crate) fn claim_incoming(
+        &self,
+        actor_id: &str,
+        active: &str,
+    ) -> Result<Option<MessageRecord>> {
+        self.claim_input(actor_id, Some(active))
+    }
+    fn claim_input(&self, actor_id: &str, active: Option<&str>) -> Result<Option<MessageRecord>> {
         database_io(|| {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
             let mut actor = actor_tx(&tx, actor_id)?;
-            if actor.status != ActorStatus::Idle {
+            if actor.status == ActorStatus::Archived {
+                return Ok(None);
+            }
+            if let Some(active) = active {
+                let current = message_tx(&tx, active)?;
+                if current.actor_id != actor_id
+                    || current.status != MessageStatus::Running
+                    || current.cancel_requested
+                {
+                    return Ok(None);
+                }
+            } else if actor.status != ActorStatus::Idle {
                 return Ok(None);
             }
             // A replica/lifecycle transition can leave Actor status idle while its
             // interrupted input is still recorded as running. Recovery must repair
             // that input before the serial inbox claims any later request.
-            if sql(tx.query_row(
+            if active.is_none() && sql(tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM messages WHERE actor_id=?1 AND status='\"running\"')",
                 [actor_id],
                 |r| r.get::<_, bool>(0),
@@ -828,9 +898,9 @@ impl ActorStore {
             let shared = actor_id == crate::stage::shared::ACTOR_ID
             && sql(tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_order')", [], |r| r.get::<_,bool>(0)))?;
             let query = if shared {
-                "SELECT m.id FROM messages m LEFT JOIN core_order o ON o.entity='messages' AND o.remote_key=m.id WHERE m.actor_id=?1 AND m.status='\"queued\"' AND json_extract(m.record,'$.kind')!='steering' ORDER BY o.ordinal IS NULL,o.ordinal,m.seq LIMIT 1"
+                "SELECT m.id FROM messages m LEFT JOIN core_order o ON o.entity='messages' AND o.remote_key=m.id WHERE m.actor_id=?1 AND m.status='\"queued\"' ORDER BY o.ordinal IS NULL,o.ordinal,m.seq LIMIT 1"
             } else {
-                "SELECT id FROM messages WHERE actor_id=?1 AND status='\"queued\"' AND json_extract(record,'$.kind')!='steering' ORDER BY seq LIMIT 1"
+                "SELECT id FROM messages WHERE actor_id=?1 AND status='\"queued\"' ORDER BY seq LIMIT 1"
             };
             let id = sql(tx
                 .query_row(query, [actor_id], |r| r.get::<_, String>(0))
@@ -946,107 +1016,7 @@ impl ActorStore {
             Ok(count)
         })
     }
-    /// Bind an immutable queued input to the exact execution selected by the user.
-    pub fn steer_queued(
-        &self,
-        actor: &str,
-        id: &str,
-        target: &str,
-        expected: i64,
-    ) -> Result<MessageRecord> {
-        database_io(|| {
-            let mut db = self.db.lock();
-            let tx = sql(db.transaction())?;
-            let mut message = message_tx(&tx, id)?;
-            let active = message_tx(&tx, target)?;
-            if message.actor_id != actor
-                || active.actor_id != actor
-                || !matches!(
-                    message.source,
-                    MessageSource::User | MessageSource::RemoteUser { .. }
-                )
-            {
-                return Err(
-                    ActorError::Forbidden("This input cannot guide this execution".into()).into(),
-                );
-            }
-            if message.status != MessageStatus::Queued
-                || message.kind != MessageKind::Request
-                || message.updated_at_ms != expected
-                || active.status != MessageStatus::Running
-                || active.cancel_requested
-            {
-                return Err(ActorError::Conflict(
-                    "The queued input or active execution changed".into(),
-                )
-                .into());
-            }
-            message.kind = MessageKind::Steering;
-            message.in_reply_to = Some(active.id);
-            message.updated_at_ms = now().max(message.updated_at_ms + 1);
-            save_message(&tx, &message)?;
-            self.commit(tx)?;
-            Ok(message)
-        })
-    }
-    pub(crate) fn pending_steering(&self, actor: &str, target: &str) -> Result<Vec<MessageRecord>> {
-        database_io(|| {
-            let db = self.db.lock();
-            let mut statement = sql(db.prepare("SELECT record FROM messages WHERE actor_id=?1 AND status='\"queued\"' AND json_extract(record,'$.kind')='steering' AND json_extract(record,'$.in_reply_to')=?2 ORDER BY seq LIMIT 32"))?;
-            let rows = sql(statement.query_map(params![actor, target], |r| r.get::<_, String>(0)))?;
-            rows.map(|r| decode(sql(r)?)).collect()
-        })
-    }
-    /// Core is an IM peer: a fresh owner input supersedes speculative inference,
-    /// while collaborators' progress remains ordinary serial inbox work.
-    pub(crate) fn core_user_input_waiting(&self) -> Result<bool> {
-        database_io(|| {
-            sql(self.db.lock().query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE actor_id='core' AND status='\"queued\"' AND json_extract(record,'$.kind')='request' AND json_extract(record,'$.source.kind') IN ('user','remote_user') AND json_extract(record,'$.cancel_requested')=0)",
-            [],
-            |row| row.get(0),
-        ))
-        })
-    }
-    pub(crate) fn apply_steering(
-        &self,
-        actor: &str,
-        target: &str,
-        input: &MessageRecord,
-        content: &AgentMessage,
-    ) -> Result<bool> {
-        database_io(|| {
-            let mut db = self.db.lock();
-            let tx = sql(db.transaction())?;
-            let mut current = message_tx(&tx, &input.id)?;
-            let active = message_tx(&tx, target)?;
-            if active.actor_id != actor
-                || active.status != MessageStatus::Running
-                || active.cancel_requested
-            {
-                return Ok(false);
-            }
-            if current.actor_id != actor
-                || current.kind != MessageKind::Steering
-                || current.in_reply_to.as_deref() != Some(target)
-                || current.status != MessageStatus::Queued
-                || current.cancel_requested
-                || current.updated_at_ms != input.updated_at_ms
-            {
-                return Ok(false);
-            }
-            sql(tx.execute(
-                "INSERT INTO history(actor_id,message_id,record) VALUES(?1,?2,?3)",
-                params![actor, target, encode(content)?],
-            ))?;
-            current.status = MessageStatus::Completed;
-            current.finished_at_ms = Some(now());
-            current.updated_at_ms = now().max(current.updated_at_ms + 1);
-            save_message(&tx, &current)?;
-            self.commit(tx)?;
-            Ok(true)
-        })
-    }
+    /// Read a bounded page of inputs not yet received by the Actor.
     pub fn queued_messages(
         &self,
         actor: &str,
@@ -1087,7 +1057,7 @@ impl ActorStore {
     pub fn running_message(&self, actor: &str) -> Result<Option<MessageRecord>> {
         database_io(|| {
             let db = self.db.lock();
-            let value:Option<String>=sql(db.query_row("SELECT record FROM messages WHERE actor_id=?1 AND status='\"running\"' ORDER BY seq LIMIT 1",[actor],|r|r.get(0)).optional())?;
+            let value:Option<String>=sql(db.query_row("SELECT record FROM messages WHERE actor_id=?1 AND status='\"running\"' ORDER BY seq DESC LIMIT 1",[actor],|r|r.get(0)).optional())?;
             value.map(decode).transpose()
         })
     }
@@ -1133,7 +1103,7 @@ impl ActorStore {
     }
     pub fn current_message(&self, actor_id: &str) -> Result<Option<MessageRecord>> {
         database_io(|| {
-            let row=sql(self.db.lock().query_row("SELECT record FROM messages WHERE actor_id=?1 AND status='\"running\"' ORDER BY seq LIMIT 1",[actor_id],|r|r.get::<_,String>(0)).optional())?;
+            let row=sql(self.db.lock().query_row("SELECT record FROM messages WHERE actor_id=?1 AND status='\"running\"' ORDER BY seq DESC LIMIT 1",[actor_id],|r|r.get::<_,String>(0)).optional())?;
             row.map(decode).transpose()
         })
     }
@@ -2038,22 +2008,8 @@ impl ActorStore {
                 message.final_generation = sql(tx.query_row("SELECT MAX(json_extract(record,'$.generation')) FROM events WHERE actor_id=?1 AND json_extract(record,'$.message_id')=?2 AND json_extract(record,'$.type')='generation_started'", params![message.actor_id, message.id], |row| row.get(0)))?;
             }
             save_message(&tx, &message)?;
-            // User guides retain their queued input. Core guides bind an exact
-            // delegation and report non-application rather than becoming new work.
-            let mut unapplied = None;
-            let guides = sql(tx.prepare("SELECT record FROM messages WHERE actor_id=?1 AND status='\"queued\"' AND json_extract(record,'$.kind')='steering' AND json_extract(record,'$.in_reply_to')=?2"))?.query_map(params![message.actor_id,message.id],|r|r.get::<_,String>(0)).map_err(|error|miette::miette!("{error}"))?.collect::<rusqlite::Result<Vec<_>>>().into_diagnostic()?;
-            for data in guides {
-                let mut guide: MessageRecord = decode(data)?;
-                if matches!(&guide.source, MessageSource::Actor { actor_id } if actor_id == crate::stage::shared::ACTOR_ID)
-                {
-                    unapplied = Some(core_guidance::not_applied(&tx, &mut guide)?);
-                    continue;
-                }
-                guide.kind = MessageKind::Request;
-                guide.in_reply_to = None;
-                guide.updated_at_ms = now().max(guide.updated_at_ms + 1);
-                save_message(&tx, &guide)?;
-            }
+            // Immediate messages still queued here keep waiting: without a live
+            // target they are claimed and run exactly like any other inbox message.
             let pending = {
                 let mut stmt=sql(tx.prepare("SELECT record FROM approvals WHERE message_id=?1 AND json_extract(record,'$.decision') IN ('pending','application_required')"))?;
                 let rows = sql(stmt.query_map([id], |r| r.get::<_, String>(0)))?;
@@ -2082,9 +2038,16 @@ impl ActorStore {
             }
             if was_running {
                 let mut actor = actor_tx(&tx, &message.actor_id)?;
-                actor.status = ActorStatus::Idle;
-                actor.updated_at_ms = now();
-                save_actor(&tx, &actor)?;
+                if actor.status != ActorStatus::Archived {
+                    let running: bool = sql(tx.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE actor_id=?1 AND status='\"running\"')", [&message.actor_id], |row| row.get(0)))?;
+                    actor.status = if running {
+                        ActorStatus::Running
+                    } else {
+                        ActorStatus::Idle
+                    };
+                    actor.updated_at_ms = now();
+                    save_actor(&tx, &actor)?;
+                }
             }
             // A deliberate yield closes only this inbox input. No placeholder result
             // may wake the requester or escape as an empty remote delivery.
@@ -2210,7 +2173,7 @@ impl ActorStore {
                 None
             };
             self.commit(tx)?;
-            Ok(routed.or(unapplied))
+            Ok(routed)
         })
     }
     pub fn request_cancel(&self, id: &str) -> Result<MessageRecord> {
@@ -2409,7 +2372,7 @@ mod outcome_tests {
             actor_id: "core".into(),
             message_id: "message".into(),
             call_id: "call".into(),
-            name: "actors__send".into(),
+            name: "actors__message".into(),
             arguments: serde_json::json!({"stage_id":stage,"actor_id":"child","content":"private input"}),
             payload: serde_json::json!({"actor_id":"child","conversation_url":"/actors/child"}),
             model_content: "private model transcript".into(),

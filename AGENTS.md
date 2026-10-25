@@ -82,7 +82,7 @@ client are connected.
   Apps. Do not retain App access lists, tool allowlists, delegation App ceilings,
   local read-only Actor identities or recipient lists. Hosted Actors perform
   research and filesystem/process/browser work with their project sandbox and
-  Actor-local remembered approvals. Authenticated remote authority and Actor-resource
+  the device-shared remembered approvals. Authenticated remote authority and Actor-resource
   reference ownership remain execution boundaries, independent of App installation.
 - Actor configuration is internal creation/persistence state, not a user management
   surface. Do not expose editors or client/native RPCs that rewrite Apps, workspace,
@@ -100,8 +100,10 @@ client are connected.
   individual Actor deletion in the client, HTTP API or native protocol.
   Completion, idleness, restart or worker shutdown must not recycle an Actor.
   Core may archive/unarchive hosted Actors only on an explicit Owner request,
-  without review. Archive only idle Actors with no pending inputs or delegated
-  work; persist the state and reject new messages on every local/remote path.
+  without review. Archival no longer requires an idle Actor or an empty inbox:
+  queued inputs are discarded on archival and unfinished delegated work does not
+  block it; running work is left to finish. Persist the state and reject new
+  messages on every local/remote path.
   Preserve identity, configuration, context, history, resources and grants.
   Unarchive restores message admission without replay; Core cannot be archived.
 - Project, investigation and general Actors use the same core and device Apps.
@@ -162,12 +164,20 @@ Ordinary Actors remain hosted. Never approximate the core
 by merging independent roots. Resume inference, never replay uncertain App effects.
 Every effect still requires device-side epoch, authorization, approval and sandbox checks.
 
-- Actor inboxes are serial; Actors advance concurrently. Preserve durable input,
-  tool protocol groups, origin, replies and delivery references across delegation.
-  Core chooses send for queued work or steer for guidance bound to its exact
-  delegated request. Apply guidance only at settled tool-group boundaries under
-  the original authority; never promote Core prose to Owner approval. Report
-  unapplied Core guidance if its target ends; do not create another task from it.
+- Each Actor has one serial inference/tool execution stream; Actors advance concurrently.
+  All messages, progress, results and runtime notices are durable immediate inputs.
+  Use one Actors App message operation; do not expose queued versus steering modes.
+  New input interrupts speculative inference or retry backoff and is received at the
+  next settled tool-group boundary. Waiting pre-execution approval must not prevent
+  receiving messages. Preserve the waiting invocation and immutable approval.
+  Suspend unfinished inputs without completing or cancelling their work; resume
+  inference from durable observations without replaying effects. Each input retains
+  its own authority, origin, reply target and delivery references. Related-message
+  IDs express correlation only, never authorization. Never promote Actor prose to
+  Owner approval or let a restricted input borrow another input's authority.
+  Core must explicitly choose show_to_user on each message: show meaningful task
+  links to the Owner, and keep routine internal coordination out of the Core transcript.
+  This choice never changes delivery timing, execution, authority or result correlation.
 - Core handles short coordination turns. Explicit durable deliveries can precede
   turn completion; yielding waits for the current tool protocol group to settle.
   Completing an input does not complete its delegated work. Progress and results
@@ -194,8 +204,10 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   denied call or treat worker prose as Owner authorization.
   Core sends a bounded native
   decision to the operation device. That device checks the original scope and
-  hard authority, records its local grant and notifies the Actor; it must not
-  run a Core App tool or require Core execution-context replication for approval.
+  hard authority, records its local grant and notifies the Actor (an internal
+  immediate message: inserted at the running request's next boundary, otherwise
+  claimed as its next input); it must not run a Core App tool or require Core
+  execution-context replication for approval.
 - Apps declare operations requiring review, their review criteria and semantic
   approval fingerprints. Undeclared ordinary operations do not require review.
   Sandbox access outside existing or remembered roots independently requires
@@ -221,6 +233,8 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   device-local result reference. This does not itself diagnose a sandbox denial.
   Typed sandbox denials can also supply an immutable approval reference; otherwise
   the model proposes explicit missing read/write roots through appeal_approval.
+  Terminal commands declare no inline scope parameters; new filesystem scope comes
+  only from these references and applications, whose directory roots cover subtrees.
   Never infer scope from stderr, errno or command text. Result references bind to
   the original call and current input authority on the device that executed it;
   copied observations are not native execution proof. The unified appeal_approval
@@ -235,9 +249,11 @@ Every effect still requires device-side epoch, authorization, approval and sandb
   authorized alternatives. Never automatically retry the denied operation.
   Approval memory is automatic, with no opt-in control or reminder. Display review
   cards only for Ask; automatic review stays out of the conversation UI.
-  Approved fingerprints persist per Actor. Reuse equivalent approved actions;
-  merge covered filesystem scopes, with directories recursively covering children
-  and write grants covering reads. Policy, target or meaningful argument changes
+  Approved fingerprints and filesystem scopes persist for the device: every Actor
+  on this device reuses them, and other devices keep separate memory. Reuse
+  equivalent approved actions; merge covered filesystem scopes, with directories
+  recursively covering children (including entries added after the approval) and
+  write grants covering reads. Policy, target or meaningful argument changes
   require a new action fingerprint. Keep remembered grants separate from Actor
   configuration and reclaim them when Actor data is removed by account reset.
   Never broaden authenticated remote authority or Actor-resource reference

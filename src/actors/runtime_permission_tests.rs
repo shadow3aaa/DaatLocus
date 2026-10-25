@@ -690,3 +690,101 @@ async fn runtime_shared_result_reference_stays_on_source_device_and_rejects_unkn
     system.shutdown().await;
     other.shutdown().await;
 }
+#[tokio::test]
+async fn terminal_scope_appeal_without_inline_roots_remembers_the_directory_subtree() {
+    use crate::app::{App, AppToolExecutionResult};
+    use crate::sandbox::{Access, DenialRecord, DenialSource};
+    let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
+        json!({"decision":"approve","reason":"Use the requested fixture directory"}),
+    )));
+    let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+    let target = dir.path().join("requested");
+    std::fs::create_dir(&target).unwrap();
+    let call = AgentToolCall {
+        id: "terminal-scope-appeal".into(),
+        name: "terminal_exec".into(),
+        arguments: json!({
+            "command":"echo fixture","session_id":null,"workdir":null,
+            "yield_time_ms":null,"max_chars":null
+        }),
+    };
+    let base = system.execution_context(&actor, &message).unwrap();
+    // The terminal declares no inline scope; its review input must not carry
+    // the retired additional_* fields.
+    let review = crate::terminal_app::TerminalApp::new()
+        .review_requirement(&call, &base)
+        .unwrap()
+        .expect("terminal commands carry review criteria");
+    let action = review.action.to_string();
+    assert!(!action.contains("additional_read_roots"));
+    assert!(!action.contains("additional_write_roots"));
+    // A native denial becomes an immutable reference; the directory appeal runs
+    // through the review channel and remembers the whole subtree.
+    let tool_result_id = system
+        .store()
+        .tool_started(&actor.id, &message.id, &call)
+        .unwrap();
+    let mut denied = AppToolExecutionResult::new("fixture denial", json!({}), None);
+    denied.sandbox_denials = vec![
+        DenialRecord {
+            access: Access::Read,
+            path: target.clone(),
+            source: DenialSource::Native,
+        },
+        DenialRecord {
+            access: Access::Write,
+            path: target.clone(),
+            source: DenialSource::Native,
+        },
+    ];
+    runtime_permission::attach_reference(
+        &system,
+        &actor,
+        &message,
+        &call,
+        &base,
+        &tool_result_id,
+        &mut denied,
+        None,
+    )
+    .unwrap();
+    let reference = denied.permission_reference.unwrap();
+    assert!(reference.approval_id.is_some());
+    system
+        .store()
+        .tool_finished_with_reference(
+            &actor.id,
+            &message.id,
+            &call,
+            json!({"output":"Permission denied","exit_code":1,"running":false}),
+            "Permission denied",
+            "Fixture denial",
+            None,
+            Some(&tool_result_id),
+        )
+        .unwrap();
+    let record = runtime_permission::submit(
+        &system,
+        &actor,
+        &message,
+        &ActorControl::default(),
+        &base,
+        ApplicationSource::ToolResult {
+            tool_result_id: tool_result_id.clone(),
+            readable_roots: vec![target.clone()],
+            writable_roots: vec![],
+        },
+        runtime_application(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(record.decision, ApprovalDecision::Approved);
+    assert_eq!(reviewer.requests.lock().len(), 1);
+    let next = system.execution_context(&actor, &message).unwrap();
+    assert!(next.sandbox_policy.is_path_readable(&target));
+    assert!(
+        next.sandbox_policy
+            .is_path_readable(&target.join("new/deep/file.txt"))
+    );
+    system.shutdown().await;
+}

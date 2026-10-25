@@ -586,13 +586,14 @@ impl ActorSystem {
             )
             .map_err(|error| miette::miette!("{error}"))
     }
-    pub fn send_stage_from_actor(
+    pub fn message_stage_from_actor(
         &self,
         sender: &str,
         current_id: &str,
         target: crate::stage::ActorAddress,
         content: String,
         call_id: &str,
+        related: Option<&str>,
     ) -> Result<crate::stage::protocol::Envelope> {
         let current = self.store().message(current_id)?;
         if current.actor_id != sender
@@ -608,13 +609,14 @@ impl ActorSystem {
             .stage_local_id()
             .map_err(|error| miette::miette!("{error}"))?;
         crate::stage::delivery::Deliveries::new(self.store(), local)
-            .queue(
+            .queue_related(
                 &source,
                 Some(&current),
                 target,
                 (content, Vec::new()),
                 now(),
                 call_id,
+                related,
             )
             .map_err(|error| miette::miette!("{error}"))
     }
@@ -832,7 +834,7 @@ impl ActorSystem {
         message: &MessageRecord,
         call: &crate::model_protocol::AgentToolCall,
     ) -> Result<serde_json::Value> {
-        let target = if call.name == "actors__send" {
+        let target = if call.name == "actors__message" {
             let id = call
                 .arguments
                 .get("actor_id")
@@ -1399,7 +1401,7 @@ impl ActorSystem {
         let message = self.store().message(id)?;
         if !matches!(&message.source, MessageSource::Actor { actor_id } if actor_id == sender)
             || !matches!(&message.reply_to, ReplyTarget::Actor { actor_id, .. } if actor_id == sender)
-            || !matches!(message.kind, MessageKind::Request | MessageKind::Steering)
+            || !matches!(message.kind, MessageKind::Request)
         {
             return Err(forbidden("Request was not delegated by this Actor"));
         }
@@ -1421,74 +1423,23 @@ impl ActorSystem {
         }
         Ok(delivery)
     }
-    pub fn send_from_actor(
+    pub fn message_from_actor(
         &self,
         sender: &str,
         current_id: &str,
         target: &str,
         content: String,
     ) -> Result<MessageRecord> {
-        self.send_from_actor_with_context(sender, current_id, target, content, None)
+        self.message_from_actor_with_context(sender, current_id, target, content, None, None)
     }
-    pub(crate) fn steer_from_core(
-        &self,
-        caller: &crate::app::ActorCallContext,
-        target: &str,
-        content: String,
-    ) -> Result<MessageRecord> {
-        let core = crate::stage::shared::ACTOR_ID;
-        if caller.actor_id != core
-            || self.inner.reconfiguring.load(Ordering::Acquire)
-            || self.inner.stopping.load(Ordering::Acquire)
-        {
-            return Err(forbidden("Core guidance is not currently authorized"));
-        }
-        let source = self.record_for_tool(core, caller)?;
-        let input = self.store().message(&caller.message_id)?;
-        // Guidance uses an existing task's authority. An externally scoped input
-        // must not borrow broader authority by steering an unrelated request.
-        if source.remote_read_only || input.remote_authority.is_some() {
-            return Err(forbidden(
-                "Remote-authority inputs must queue work under their own authority",
-            ));
-        }
-        if content.trim().is_empty() || content.len() > 64 * 1024 {
-            return Err(invalid("Invalid guidance size"));
-        }
-        let original = self.delegated_request(core, target)?;
-        if original.kind != MessageKind::Request
-            || original.actor_id == core
-            || !self.account_actor_ids(core)?.contains(&original.actor_id)
-        {
-            return Err(forbidden(
-                "Guidance target is not an account request delegated by Core",
-            ));
-        }
-        let mut guide = self.make_message(
-            &original.actor_id,
-            MessageSource::Actor {
-                actor_id: core.into(),
-            },
-            ReplyTarget::Actor {
-                actor_id: core.into(),
-                request_id: input.id.clone(),
-            },
-            content,
-            vec![],
-        );
-        guide.kind = MessageKind::Steering;
-        guide.in_reply_to = Some(original.id);
-        let guide = self.store().enqueue_core_guidance(&input.id, guide)?;
-        self.wake(&guide.actor_id);
-        Ok(guide)
-    }
-    pub(crate) fn send_from_actor_with_context(
+    pub(crate) fn message_from_actor_with_context(
         &self,
         sender: &str,
         current_id: &str,
         target: &str,
         content: String,
         context: Option<&AppToolExecutionContext>,
+        related: Option<&str>,
     ) -> Result<MessageRecord> {
         if self.inner.reconfiguring.load(Ordering::Acquire)
             || self.inner.stopping.load(Ordering::Acquire)
@@ -1548,6 +1499,15 @@ impl ActorSystem {
             content,
             vec![],
         );
+        if let Some(related) = related {
+            let original = self.store().message(related)?;
+            let received_from_target = original.actor_id == sender
+                && matches!(&original.source, MessageSource::Actor { actor_id } if actor_id == target);
+            if original.actor_id != target && !received_from_target {
+                return Err(forbidden("Related message is outside this conversation"));
+            }
+            message.in_reply_to = Some(original.id);
+        }
         if current.remote_authority.is_some() {
             message.remote_authority = current.remote_authority.clone();
             message.delegation_grant = Some(DelegationGrant {
@@ -1679,27 +1639,6 @@ impl ActorSystem {
         {
             core.notify();
         }
-        Ok(result)
-    }
-    pub async fn steer_queued(
-        &self,
-        actor: &str,
-        message: &str,
-        target: &str,
-        expected: i64,
-    ) -> Result<MessageRecord> {
-        if actor == crate::stage::shared::ACTOR_ID
-            && let Some(core) = self.shared_core()
-        {
-            return core
-                .steer(message, target, expected)
-                .await
-                .map_err(|error| miette::miette!("{error}"));
-        }
-        let result = self
-            .store()
-            .steer_queued(actor, message, target, expected)?;
-        self.wake(actor);
         Ok(result)
     }
     pub fn cancel(&self, actor_id: &str, message_id: &str) -> Result<()> {
@@ -2049,8 +1988,7 @@ impl ActorSystem {
             message.in_reply_to.as_deref().unwrap_or("none"),
             message.content
         );
-        if matches!(message.kind, MessageKind::Result | MessageKind::Progress)
-            && let Some(id) = message.in_reply_to.as_deref()
+        if let Some(id) = message.in_reply_to.as_deref()
             && let Ok(original) = self.store().message(id)
             && original.actor_id == actor.id
         {
@@ -2210,7 +2148,7 @@ mod tests {
         }
     }
     async fn fixture() -> (tempfile::TempDir, ActorSystem) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::sandbox::test_support::scoped_directory();
         let mut config = Config {
             main_model: "mock".into(),
             ..Default::default()
@@ -2377,7 +2315,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn actor_archive_rejects_pending_inbox_and_delegated_work() {
+    async fn actor_archive_discards_queued_inputs_and_ignores_delegated_work() {
         let (_directory, system) = fixture().await;
         let core_input = system
             .send_user("core", "Archive root".into(), vec![], None)
@@ -2387,37 +2325,65 @@ mod tests {
             .execution_context(&system.actor("core").unwrap(), &core_input)
             .unwrap();
         let caller = context.actor_call.as_ref().unwrap();
-        let input = system
+        let queued = system
             .send_user("root", "Work".into(), vec![], None)
             .unwrap();
+        // Queued inputs no longer prevent archival; they are discarded instead.
+        system
+            .archive_from_core("root", true, caller)
+            .await
+            .unwrap();
+        assert_eq!(system.actor("root").unwrap().status, ActorStatus::Archived);
+        assert!(!system.store().has_queued_input("root").unwrap());
         assert!(
-            system
-                .archive_from_core("root", true, caller)
-                .await
-                .is_err()
+            system.store().message(&queued.id).is_err(),
+            "queued inputs are discarded on archival"
         );
+        system
+            .archive_from_core("root", false, caller)
+            .await
+            .unwrap();
+        assert!(
+            system.store().claim_next("root").unwrap().is_none(),
+            "a discarded input never runs after unarchive"
+        );
+        let input = system
+            .send_user("root", "Work again".into(), vec![], None)
+            .unwrap();
         system.store().claim_next("root").unwrap().unwrap();
-        assert!(
-            system
-                .archive_from_core("root", true, caller)
-                .await
-                .is_err()
+        // A running input still does not prevent archival; it is left to finish.
+        system
+            .archive_from_core("root", true, caller)
+            .await
+            .unwrap();
+        assert_eq!(system.actor("root").unwrap().status, ActorStatus::Archived);
+        assert_eq!(
+            system.store().message(&input.id).unwrap().status,
+            MessageStatus::Running
         );
+        system
+            .archive_from_core("root", false, caller)
+            .await
+            .unwrap();
         system.seed_test_actor("child");
         let delegated = system
-            .send_from_actor("root", &input.id, "child", "Research".into())
+            .message_from_actor("root", &input.id, "child", "Research".into())
             .unwrap();
         system
             .store()
             .finish_message(&input.id, MessageStatus::Completed, Some("Delegated"), None)
             .unwrap();
         assert_eq!(system.actor("root").unwrap().status, ActorStatus::Idle);
-        assert!(
-            system
-                .archive_from_core("root", true, caller)
-                .await
-                .is_err()
-        );
+        // Unfinished delegated work still does not block archival.
+        system
+            .archive_from_core("root", true, caller)
+            .await
+            .unwrap();
+        assert_eq!(system.actor("root").unwrap().status, ActorStatus::Archived);
+        system
+            .archive_from_core("root", false, caller)
+            .await
+            .unwrap();
         system
             .store()
             .finish_message(
@@ -2427,25 +2393,26 @@ mod tests {
                 None,
             )
             .unwrap();
-        // The result itself must be consumed before archival is safe.
-        assert!(
-            system
-                .archive_from_core("root", true, caller)
-                .await
-                .is_err()
-        );
-        let result = system.store().claim_next("root").unwrap().unwrap();
+        // The delivered result queues for root and the next archive discards it.
+        assert!(system.store().has_queued_input("root").unwrap());
         system
-            .store()
-            .finish_message(&result.id, MessageStatus::Completed, Some("Done"), None)
+            .archive_from_core("root", true, caller)
+            .await
             .unwrap();
+        assert_eq!(system.actor("root").unwrap().status, ActorStatus::Archived);
+        assert!(!system.store().has_queued_input("root").unwrap());
+        system
+            .archive_from_core("root", false, caller)
+            .await
+            .unwrap();
+        assert!(system.store().claim_next("root").unwrap().is_none());
         system
             .archive_from_core("root", true, caller)
             .await
             .unwrap();
         assert!(
             system
-                .send_from_actor("core", &core_input.id, "root", "Another task".into())
+                .message_from_actor("core", &core_input.id, "root", "Another task".into())
                 .is_err()
         );
         assert_eq!(system.actor("root").unwrap().status, ActorStatus::Archived);
@@ -2472,18 +2439,21 @@ mod tests {
                 let sent = system.send_user("root", "Concurrent input".into(), vec![], None);
                 (archive.join().unwrap(), sent)
             });
-            assert_ne!(archived.is_ok(), sent.is_ok());
+            // Archival always succeeds and discards queued inputs, while admission
+            // still respects the archived flag written in the same store.
+            archived.expect("archival does not require an idle Actor");
+            assert_eq!(system.actor("root").unwrap().status, ActorStatus::Archived);
+            assert!(
+                !system.store().has_queued_input("root").unwrap(),
+                "archival discards queued inputs"
+            );
             if let Ok(input) = sent {
-                assert_eq!(system.actor("root").unwrap().status, ActorStatus::Idle);
-                system
-                    .store()
-                    .finish_message(&input.id, MessageStatus::Completed, Some("Done"), None)
-                    .unwrap();
-            } else {
-                assert_eq!(system.actor("root").unwrap().status, ActorStatus::Archived);
-                assert!(!system.store().has_queued_input("root").unwrap());
-                system.store().set_archived("root", false).unwrap();
+                assert!(
+                    system.store().message(&input.id).is_err(),
+                    "an input admitted before archival is discarded"
+                );
             }
+            system.store().set_archived("root", false).unwrap();
         }
         system.shutdown().await;
     }
@@ -2981,7 +2951,6 @@ mod tests {
                 .unwrap();
         let survivor_path = survivor.path().to_path_buf();
         let context = system.owner_app_context().unwrap();
-        assert!(!context.sandbox_policy.is_path_writable(&instance));
         assert!(context.sandbox_policy.builtin_resources.is_empty());
         assert!(instance.is_dir());
         system.shutdown().await;

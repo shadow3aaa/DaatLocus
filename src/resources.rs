@@ -3,6 +3,10 @@ use crate::actors::{ActorSystem, StoredResource};
 use crate::stage::{Result, StageError, blob::ContentStore, protocol::BlobRef};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+
+// Input forwarding and background synchronization can install the same blob
+// concurrently. Keep immutable ledger checks and local publication together.
+static INSTALLATION: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resource {
@@ -401,6 +405,7 @@ pub fn export_all(system: &ActorSystem, actor: &str) -> Result<Vec<Resource>> {
         .collect()
 }
 pub fn install(system: &ActorSystem, actor: &str, resource: &Resource) -> Result<()> {
+    let _installation = INSTALLATION.lock();
     resource.validate()?;
     let bytes = ContentStore::new(system.store()).verified_bytes(&resource.content)?;
     ContentStore::new(system.store()).store_source(actor, &bytes)?;
@@ -636,7 +641,20 @@ mod tests {
         ContentStore::new(target.store())
             .store_source("root", &bytes)
             .unwrap();
-        install(&target, "root", &record).unwrap();
+        let start = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let installers: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        install(&target, "root", &record)
+                    })
+                })
+                .collect();
+            for installer in installers {
+                installer.join().unwrap().unwrap();
+            }
+        });
         let local = target.store().resource("root", "upload-1").unwrap();
         assert!(local.path.starts_with(target.actor_data_dir("root")));
         assert_ne!(local.path, file);

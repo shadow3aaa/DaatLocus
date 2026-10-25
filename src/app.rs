@@ -111,6 +111,11 @@ pub struct AppToolExecutionResult {
     pub overflow_continuation: Option<String>,
     #[serde(default)]
     pub model_images: Vec<AgentContentPart>,
+    /// Native sandbox denial records observed while this call executed.
+    /// Bounded, local to the executing device, and never inferred from
+    /// output, errno or command text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sandbox_denials: Vec<crate::sandbox::DenialRecord>,
 }
 
 impl AppToolExecutionResult {
@@ -123,6 +128,7 @@ impl AppToolExecutionResult {
             model_content,
             overflow_continuation: None,
             model_images: Vec::new(),
+            sandbox_denials: Vec::new(),
         }
     }
 }

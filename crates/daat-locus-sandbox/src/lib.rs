@@ -5,7 +5,8 @@ mod denial;
 #[cfg(windows)]
 pub mod process_spawn;
 pub use denial::{
-    Access, AccessDenied, DenialCoverage, DenialRecord, DenialSource, denial_coverage,
+    Access, AccessDenied, DenialCoverage, DenialRecord, DenialSource, MAX_CAPTURE_DENIALS,
+    denial_coverage, denials_from_capture_document,
 };
 
 #[cfg(all(
@@ -26,6 +27,7 @@ use std::{
     path::{Component, Path, PathBuf},
     pin::Pin,
     process::Stdio,
+    sync::OnceLock,
     task::{Context, Poll},
 };
 
@@ -54,6 +56,52 @@ impl WritableRoot {
                     .any(|subpath| path_is_or_descends_logical_or_resolved(path, subpath))
         })
     }
+}
+
+/// Process-runtime temporary directories that never require a sandbox scope.
+///
+/// Reads and writes inside the platform's shared temporary directories are
+/// baseline-authorized: they are not an approval scope and never produce a
+/// missing-permission denial. Explicit deny rules still take precedence, and
+/// an unrestricted policy is unaffected.
+pub fn system_temporary_paths() -> &'static [PathBuf] {
+    static CACHE: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut roots: Vec<PathBuf> = Vec::new();
+        push_unique_root(&mut roots, std::env::temp_dir());
+        for key in ["TEMP", "TMP", "TMPDIR"] {
+            if let Some(value) = std::env::var_os(key) {
+                let path = PathBuf::from(value);
+                if path.is_absolute() {
+                    push_unique_root(&mut roots, path);
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            push_unique_root(&mut roots, PathBuf::from("/tmp"));
+            push_unique_root(&mut roots, PathBuf::from("/var/tmp"));
+        }
+        #[cfg(windows)]
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            push_unique_root(&mut roots, PathBuf::from(root).join("Temp"));
+        }
+        roots
+    })
+}
+
+fn push_unique_root(roots: &mut Vec<PathBuf>, path: PathBuf) {
+    let path = normalize_path(&path);
+    if !roots.iter().any(|existing| existing == &path) {
+        roots.push(path);
+    }
+}
+
+fn path_is_system_temporary(path: &Path) -> bool {
+    system_temporary_paths().iter().any(|root| {
+        path_is_or_descends_resolved(path, root)
+            || path_is_or_descends_logical_or_resolved(path, root)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +147,11 @@ pub struct SandboxProcessOptions {
     pub stderr: SandboxStdio,
     /// A cancelled startup must never launch a process after slow native preparation.
     pub spawn_cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Enable native deny-and-record capture for this child where the backend
+    /// supports it (Windows MXC PSEC/V2 learning mode). Capture keeps every
+    /// denial enforced and only records it; unsupported hosts ignore the
+    /// request and run with the current behavior.
+    pub capture_denials: bool,
 }
 
 impl PartialEq for SandboxProcessOptions {
@@ -110,6 +163,7 @@ impl PartialEq for SandboxProcessOptions {
             && self.stderr == other.stderr
             && self.spawn_cancelled.as_ref().map(std::sync::Arc::as_ptr)
                 == other.spawn_cancelled.as_ref().map(std::sync::Arc::as_ptr)
+            && self.capture_denials == other.capture_denials
     }
 }
 impl Eq for SandboxProcessOptions {}
@@ -310,6 +364,19 @@ impl SandboxAsyncChild {
             SandboxAsyncChildInner::Windows(child) => {
                 child.take_stderr().map(SandboxChildStderr::from_pipe)
             }
+        }
+    }
+
+    /// Native denial records captured for a finished sandboxed child.
+    ///
+    /// Empty unless capture was requested, the backend produced records, and
+    /// the child reached a terminal state. Records are bounded and only name
+    /// filesystem read/write targets that the sandbox actually denied.
+    pub fn take_denials(&mut self) -> Vec<denial::DenialRecord> {
+        match &mut self.inner {
+            #[cfg(target_os = "windows")]
+            SandboxAsyncChildInner::Windows(child) => child.take_denials(),
+            _ => Vec::new(),
         }
     }
 
@@ -711,6 +778,9 @@ impl FileSystemSandboxPolicy {
             if path_is_denied(path, &self.deny_read_paths) {
                 return false;
             }
+            if path_is_system_temporary(path) {
+                return true;
+            }
             if self.full_disk_read {
                 return true;
             }
@@ -731,6 +801,9 @@ impl FileSystemSandboxPolicy {
             }
             if path_is_denied(path, &self.deny_write_paths) {
                 return false;
+            }
+            if path_is_system_temporary(path) {
+                return true;
             }
             if self.full_disk_write {
                 return true;
@@ -985,6 +1058,7 @@ mod tests {
             stdout: SandboxStdio::Piped,
             stderr: SandboxStdio::Piped,
             spawn_cancelled: None,
+            capture_denials: false,
         };
 
         let mut child = SandboxAsyncChild::spawn_shell(&policy, &program, args, options)
@@ -1236,5 +1310,30 @@ exit 42
             policy.shell_spawn_spec("bash", vec!["-lc".to_string(), "pwd".to_string()]);
         assert_eq!(spawn_spec.program, Path::new("/usr/bin/sandbox-exec"));
         assert!(spawn_spec.args.iter().any(|arg| arg == "--"));
+    }
+}
+
+#[cfg(test)]
+mod system_temp_tests {
+    use super::*;
+
+    #[test]
+    fn system_temporary_paths_never_require_a_scope() {
+        let temp = std::env::temp_dir();
+        let mut policy = SandboxPolicy::disabled();
+        policy.filesystem.full_disk_read = false;
+        policy.filesystem.full_disk_write = false;
+        policy.filesystem.readable_roots = vec![];
+        policy.filesystem.writable_roots = vec![];
+        let sandbox = policy.clone();
+        assert!(sandbox.is_path_readable(&temp.join("daat-scope-check.txt")));
+        assert!(sandbox.is_path_writable(&temp.join("daat-scope-check.txt")));
+        assert!(sandbox.ensure_path_readable(&temp, "temp").is_ok());
+        assert!(sandbox.ensure_path_writable(&temp, "temp").is_ok());
+        let mut denied = sandbox.clone();
+        denied.filesystem.deny_write_paths = vec![temp.clone()];
+        assert!(!denied.is_path_writable(&temp.join("daat-scope-check.txt")));
+        let outside = sandbox.clone();
+        assert!(!outside.is_path_writable(&temp.parent().unwrap().join("daat-outside-check")));
     }
 }

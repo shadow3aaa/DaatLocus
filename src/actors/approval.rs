@@ -1,6 +1,9 @@
 //! App-declared and sandbox review with durable Actor-local fingerprints.
 
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 
 use daat_locus_macros::model_schema;
 use miette::{Result, miette};
@@ -58,6 +61,30 @@ impl ReviewFailure {
             }
         }
     }
+
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::Arguments => "arguments",
+            Self::Configuration => "configuration",
+            Self::Budget => "budget",
+            Self::Request => "request",
+            Self::Timeout => "timeout",
+            Self::InvalidResponse => "invalid_response",
+        }
+    }
+
+    /// The stored denial reason appends the stable category for later queries.
+    pub(crate) fn denial_reason(&self) -> String {
+        format!("{} [review_failure={}]", self.reason(), self.code())
+    }
+}
+
+/// Review log identifiers; absent when the reviewer runs without the caller's
+/// approval record, for example across the Core review RPC.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ReviewLogContext<'a> {
+    pub approval_id: Option<&'a str>,
+    pub actor_id: Option<&'a str>,
 }
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -334,7 +361,7 @@ async fn authorize_record(
                 decision: ReviewDecision::Deny,
                 reason,
             }) => (ApprovalDecision::Denied, reason),
-            Err(failure) => (ApprovalDecision::Denied, failure.reason().into()),
+            Err(failure) => (ApprovalDecision::Denied, failure.denial_reason()),
         };
         ensure_current(system, actor, message, control)?;
         let reason = bounded_reason(system, &reason);
@@ -467,9 +494,19 @@ async fn automatic_review(
     control: &ActorControl,
     record: &ApprovalRecord,
 ) -> Result<std::result::Result<ReviewVerdict, ReviewFailure>> {
+    let started = Instant::now();
     let facts = match system.approval_facts(actor, message, call) {
         Ok(facts) => facts,
-        Err(_) => return Ok(Err(ReviewFailure::Arguments)),
+        Err(_) => {
+            tracing::warn!(
+                approval_id = %record.id,
+                actor_id = %actor.id,
+                failure = ReviewFailure::Arguments.code(),
+                elapsed_ms = started.elapsed().as_millis(),
+                "Automatic review facts are unavailable"
+            );
+            return Ok(Err(ReviewFailure::Arguments));
+        }
     };
     let application = record
         .application
@@ -482,6 +519,8 @@ async fn automatic_review(
                 "kind":message.kind,"in_reply_to":message.in_reply_to},
             "application":application,
             "remembered_permissions":system.store().approval_scopes(&actor.id)?,
+            "authorized_baseline":{"system_temporary_paths":crate::sandbox::system_temporary_paths()
+                .iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<String>>()},
             "operation_facts":facts,"proposed_call":proposed_call,
             "requested_additional_filesystem_access":record.requested,
             "app_review":record.review,"unapproved_scopes":record.scopes})
@@ -490,12 +529,35 @@ async fn automatic_review(
     // goes to the already selected account worker; local accounts use this host.
     let future = async {
         if let Some(core) = system.shared_core() {
-            core.review_approval(input)
-                .await
-                .map_err(|_| ReviewFailure::Request)?
+            core.review_approval(input).await.map_err(|error| {
+                tracing::warn!(
+                    approval_id = %record.id,
+                    actor_id = %actor.id,
+                    failure = ReviewFailure::Request.code(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    error = %system.safe_error(&error.to_string()),
+                    "Automatic review RPC failed"
+                );
+                ReviewFailure::Request
+            })?
         } else if system.local_core() {
-            review_on_core(system, input).await
+            review_on_core(
+                system,
+                input,
+                ReviewLogContext {
+                    approval_id: Some(&record.id),
+                    actor_id: Some(&actor.id),
+                },
+            )
+            .await
         } else {
+            tracing::warn!(
+                approval_id = %record.id,
+                actor_id = %actor.id,
+                failure = ReviewFailure::Request.code(),
+                elapsed_ms = started.elapsed().as_millis(),
+                "Automatic review is unavailable without a Core worker"
+            );
             Err(ReviewFailure::Request)
         }
     };
@@ -507,6 +569,10 @@ async fn automatic_review(
         notified.as_mut().enable();
         ensure_current(system, actor, message, control)?;
         if system.store().approval(&record.id)?.decision != ApprovalDecision::Pending {
+            tracing::debug!(
+                approval_id = %record.id,
+                "Automatic review was superseded by a resolved approval"
+            );
             return Ok(Err(ReviewFailure::Request));
         }
         loop {
@@ -526,13 +592,32 @@ async fn automatic_review(
 pub(crate) async fn review_on_core(
     system: &ActorSystem,
     facts: String,
+    log: ReviewLogContext<'_>,
 ) -> std::result::Result<ReviewVerdict, ReviewFailure> {
+    let started = Instant::now();
+    let approval_id = log.approval_id.unwrap_or("unknown");
+    let actor_id = log.actor_id.unwrap_or("unknown");
     if facts.len() > 256 * 1024 {
+        tracing::warn!(
+            approval_id,
+            actor_id,
+            failure = ReviewFailure::Arguments.code(),
+            facts_bytes = facts.len(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "Automatic review input exceeds the automatic review limit"
+        );
         return Err(ReviewFailure::Arguments);
     }
-    let provider = system
-        .approval_provider()
-        .map_err(|_| ReviewFailure::Configuration)?;
+    let provider = system.approval_provider().map_err(|_| {
+        tracing::warn!(
+            approval_id,
+            actor_id,
+            failure = ReviewFailure::Configuration.code(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "Automatic review model could not be initialized"
+        );
+        ReviewFailure::Configuration
+    })?;
     let schema = model_schema_for::<ReviewVerdict>();
     let request = PromptRequest {
         tool_name: "review_app_call".into(),
@@ -543,29 +628,76 @@ pub(crate) async fn review_on_core(
         retry_messages: vec![],
         current_user_message: facts,
     };
-    let options = ModelRequestOptions::for_prompt(provider.as_ref(), &request, None)
-        .map_err(|_| ReviewFailure::Budget)?;
+    let options =
+        ModelRequestOptions::for_prompt(provider.as_ref(), &request, None).map_err(|_| {
+            tracing::warn!(
+                approval_id,
+                actor_id,
+                failure = ReviewFailure::Budget.code(),
+                elapsed_ms = started.elapsed().as_millis(),
+                "Automatic review input exceeds the model budget"
+            );
+            ReviewFailure::Budget
+        })?;
     let value = provider
         .complete_json(request, options)
         .await
         .map_err(|error| {
-            if error
-                .downcast_ref::<crate::providers::ModelRequestFailure>()
+            let provider_failure = error.downcast_ref::<crate::providers::ModelRequestFailure>();
+            let failure = if provider_failure
                 .is_some_and(|failure| failure.kind == crate::providers::ModelFailureKind::Timeout)
             {
                 ReviewFailure::Timeout
             } else {
                 ReviewFailure::Request
-            }
+            };
+            tracing::warn!(
+                approval_id,
+                actor_id,
+                failure = failure.code(),
+                provider_code = provider_failure.map_or("none", |failure| failure.code()),
+                elapsed_ms = started.elapsed().as_millis(),
+                error = %system.safe_error(&crate::core::model_request_error_detail(&error)),
+                "Automatic review model request failed"
+            );
+            failure
         })?;
-    validate_value_against_schema(&value, &schema, "approval verdict")
-        .map_err(|_| ReviewFailure::InvalidResponse)?;
-    serde_json::from_value(value).map_err(|_| ReviewFailure::InvalidResponse)
+    validate_value_against_schema(&value, &schema, "approval verdict").map_err(|error| {
+        tracing::warn!(
+            approval_id,
+            actor_id,
+            failure = ReviewFailure::InvalidResponse.code(),
+            elapsed_ms = started.elapsed().as_millis(),
+            error = %error,
+            "Automatic review model decision was rejected"
+        );
+        ReviewFailure::InvalidResponse
+    })?;
+    let verdict: ReviewVerdict = serde_json::from_value(value).map_err(|error| {
+        tracing::warn!(
+            approval_id,
+            actor_id,
+            failure = ReviewFailure::InvalidResponse.code(),
+            elapsed_ms = started.elapsed().as_millis(),
+            error = %error,
+            "Automatic review decision could not be parsed"
+        );
+        ReviewFailure::InvalidResponse
+    })?;
+    tracing::debug!(
+        approval_id,
+        actor_id,
+        decision = ?verdict.decision,
+        elapsed_ms = started.elapsed().as_millis(),
+        "Automatic review decision received"
+    );
+    Ok(verdict)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::{
         config::{Config, ModelConfig, ProviderConfig},
         context_budget::RequestBudgetLimits,
@@ -677,7 +809,7 @@ mod tests {
         reviewer: Arc<Reviewer>,
         configure: impl FnOnce(&mut Config, &std::path::Path),
     ) -> (tempfile::TempDir, ActorSystem, ActorRecord, MessageRecord) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::sandbox::test_support::scoped_directory();
         let workspace = dir.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let mut config = Config {
@@ -850,8 +982,8 @@ mod tests {
             id: "new-command".into(),
             name: "terminal__terminal_exec".into(),
             arguments: json!({
-            "command":"echo fixture","session_id":null,"workdir":null,"additional_read_roots":null,
-            "additional_write_roots":null,"yield_time_ms":null,"max_chars":null}),
+            "command":"echo fixture","session_id":null,"workdir":null,
+            "yield_time_ms":null,"max_chars":null}),
         };
         let base = system.execution_context(&actor, &message).unwrap();
         apps.validate_tool_call_for_approval(&call, &base).unwrap();
@@ -1361,7 +1493,7 @@ mod tests {
                 )
                 .unwrap();
             let worker_input = system.store().claim_next(&actor.id).unwrap().unwrap();
-            let update = system.send_from_actor(&actor.id, &worker_input.id, "core", "Independent verification finished; the output directory still needs the Owner-approved grant.".into()).unwrap();
+            let update = system.message_from_actor(&actor.id, &worker_input.id, "core", "Independent verification finished; the output directory still needs the Owner-approved grant.".into()).unwrap();
             // Leave the worker idle so the eventual approval notification can
             // become its next input; no cancelled or replayed effect is involved.
             system
@@ -1464,6 +1596,84 @@ mod tests {
             reviewer.requests.lock().len(),
             1,
             "Owner resolution and a granted retry must not run Auto again"
+        );
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_approved_appeal_delivers_immediately_while_its_request_still_runs() {
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
+            json!({"decision":"deny","reason":"Confirm the requested output directory"}),
+        )));
+        let (dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer).await;
+        let output = dir.path().join("project-output");
+        std::fs::create_dir(&output).unwrap();
+        let target = output.join("result.txt");
+        let mut apps =
+            crate::builtin_apps::create_apps(&actor, system.clone(), &system.config()).unwrap();
+        let write = AgentToolCall {
+            id: "write-project-output".into(),
+            name: "files__write_file".into(),
+            arguments: json!({"path":target,"content":"Owner-approved output","expected_sha256":null}),
+        };
+        let denied = execute_control(&system, &actor, &message, &mut apps, &write)
+            .await
+            .unwrap_err();
+        let approval_id = rejection(&denied).unwrap().approval_id;
+        system
+            .appeal_from_actor(
+                &system
+                    .execution_context(&actor, &message)
+                    .unwrap()
+                    .actor_call
+                    .unwrap(),
+                &approval_id,
+                "The requested build output needs write access to this directory",
+            )
+            .unwrap();
+        let record = system.store().approval(&approval_id).unwrap();
+        let appeal = record.appeal.clone().unwrap();
+        let authorization = super::super::ApprovalAppealAuthorization {
+            approval_id: record.id.clone(),
+            core_message_id: appeal.core_message_id,
+            decision_message_id: "core-owner-decision".into(),
+            owner_message_id: Some("core-owner-decision".into()),
+            scopes_digest: scopes_digest(&record).unwrap(),
+            decision: ApprovalDecision::Approved,
+            reason: "The Owner approved the requested directory".into(),
+        };
+        let resolved = system
+            .apply_appeal_authorization(&authorization)
+            .await
+            .unwrap();
+        let notice = system
+            .store()
+            .message(
+                resolved
+                    .appeal
+                    .as_ref()
+                    .unwrap()
+                    .notification_id
+                    .as_deref()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(notice.kind, super::super::MessageKind::Request);
+        assert_eq!(notice.in_reply_to.as_deref(), Some(message.id.as_str()));
+        assert_eq!(notice.status, MessageStatus::Queued);
+        assert_eq!(
+            system.store().message(&message.id).unwrap().status,
+            MessageStatus::Running
+        );
+        assert!(system.store().has_queued_input(&actor.id).unwrap());
+        // If the request ends first, the same message waits as a normal input.
+        system
+            .store()
+            .finish_message(&message.id, MessageStatus::Completed, None, None)
+            .unwrap();
+        assert_eq!(
+            system.store().claim_next(&actor.id).unwrap().unwrap().id,
+            notice.id
         );
         system.shutdown().await;
     }
@@ -2015,8 +2225,8 @@ mod tests {
         assert_eq!(message.id, response.id);
         let proposed = AgentToolCall {
             id: "followup-call".into(),
-            name: "actors__send".into(),
-            arguments: json!({"actor_id":target.id,"content":"Continue the requested read"}),
+            name: "actors__message".into(),
+            arguments: json!({"reply_to":null,"actor_id":target.id,"content":"Continue the requested read"}),
         };
         authorize_simple(
             &system,
@@ -2092,7 +2302,53 @@ mod tests {
         assert!(error.downcast_ref::<AutomaticReviewDenied>().is_some());
         let record = approval(&system, &message.id).await;
         assert_eq!(record.decision, ApprovalDecision::Denied);
-        assert_eq!(record.reason, ReviewFailure::Timeout.reason());
+        assert_eq!(
+            record.reason,
+            format!(
+                "{} [review_failure={}]",
+                ReviewFailure::Timeout.reason(),
+                ReviewFailure::Timeout.code()
+            )
+        );
+        assert_eq!(reviewer.requests.lock().len(), 1);
+        system.shutdown().await;
+    }
+
+    #[test]
+    fn review_failure_denial_reason_carries_a_stable_category() {
+        assert_eq!(
+            ReviewFailure::Request.denial_reason(),
+            concat!(
+                "Automatic review model request failed; this operation was denied ",
+                "[review_failure=request]"
+            )
+        );
+        assert_eq!(ReviewFailure::Arguments.code(), "arguments");
+        assert_eq!(ReviewFailure::Configuration.code(), "configuration");
+        assert_eq!(ReviewFailure::Budget.code(), "budget");
+        assert_eq!(ReviewFailure::Request.code(), "request");
+        assert_eq!(ReviewFailure::Timeout.code(), "timeout");
+        assert_eq!(ReviewFailure::InvalidResponse.code(), "invalid_response");
+    }
+
+    #[tokio::test]
+    async fn review_request_failure_records_a_stable_category() {
+        let reviewer = Arc::new(Reviewer::new(ReviewReply::Fail));
+        let (_dir, system, actor, message) = fixture(ApprovalMode::Auto, reviewer.clone()).await;
+        let error = authorize_simple(&system, &actor, &message, &call(), &ActorControl::default())
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<AutomaticReviewDenied>().is_some());
+        let record = approval(&system, &message.id).await;
+        assert_eq!(record.decision, ApprovalDecision::Denied);
+        assert_eq!(
+            record.reason,
+            format!(
+                "{} [review_failure={}]",
+                ReviewFailure::Request.reason(),
+                ReviewFailure::Request.code()
+            )
+        );
         assert_eq!(reviewer.requests.lock().len(), 1);
         system.shutdown().await;
     }
@@ -2443,7 +2699,6 @@ mod tests {
             arguments: json!({
                 "command":format!("cat '{}'", properties.display()),
                 "session_id":null,"workdir":null,
-                "additional_read_roots":[signing],"additional_write_roots":null,
                 "yield_time_ms":null,"max_chars":null
             }),
         };
@@ -2535,7 +2790,6 @@ mod tests {
             name: "terminal_exec".into(),
             arguments: json!({
                 "command":command,"session_id":null,"workdir":write_root,
-                "additional_read_roots":[read_root],"additional_write_roots":[write_root],
                 "yield_time_ms":1000,"max_chars":2000
             }),
         }
@@ -2543,7 +2797,7 @@ mod tests {
 
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     #[tokio::test]
-    async fn approved_terminal_scope_runs_natively_only_after_explicit_retry() {
+    async fn terminal_directory_appeal_grants_scope_and_the_retry_runs_natively() {
         if !crate::sandbox::test_support::native_sandbox_available() {
             return;
         }
@@ -2565,26 +2819,96 @@ mod tests {
         let base = system.execution_context(&actor, &message).unwrap();
         assert!(!base.sandbox_policy.is_path_readable(&reads));
         assert!(!base.sandbox_policy.is_path_writable(&writes));
-        assert!(app.before_tool_call(&call, &base).is_err());
-        let requested = app.permission_request(&call, &base).unwrap();
-        let review = app.review_requirement(&call, &base).unwrap();
-        let effective = super::authorize(
+        // The terminal declares no inline roots: the operation fails closed in
+        // the native sandbox, and the structured denial becomes an appealable
+        // reference resolved through the review channel.
+        let tool_result_id = system
+            .store()
+            .tool_started(&actor.id, &message.id, &call)
+            .unwrap();
+        let mut denied = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut result = app.execute_tool(&call, &base).await.unwrap();
+            while result.payload["running"].as_bool() == Some(true) {
+                let poll = AgentToolCall {
+                    id: "poll-denied-terminal".into(),
+                    name: "terminal_write_stdin".into(),
+                    arguments: json!({
+                        "session_id":result.payload["session"]["session_id"],
+                        "text":"","wait_mode":"timeout","yield_time_ms":1000,"max_chars":2000
+                    }),
+                };
+                result = app.execute_tool(&poll, &base).await.unwrap();
+            }
+            result
+        })
+        .await
+        .expect("denied native command did not finish");
+        assert!(!writes.join("result.txt").exists());
+        assert!(!outside.exists());
+        crate::actors::runtime_permissions::attach_reference(
             &system,
             &actor,
             &message,
             &call,
+            &base,
+            &tool_result_id,
+            &mut denied,
+            None,
+        )
+        .unwrap();
+        let reference = denied.permission_reference.as_ref().unwrap();
+        assert_eq!(reference.tool_result_id, tool_result_id);
+        // Platforms may report only an execution result rather than a typed
+        // denial. The immutable result can still support explicit scope review.
+        system
+            .store()
+            .tool_finished_with_reference(
+                &actor.id,
+                &message.id,
+                &call,
+                denied.payload.clone(),
+                denied.model_content.as_deref().unwrap_or(""),
+                &denied.summary,
+                None,
+                Some(&tool_result_id),
+            )
+            .unwrap();
+        // A directory application through the review channel remembers the whole
+        // subtree without executing the original command.
+        let record = crate::actors::runtime_permissions::submit(
+            &system,
+            &actor,
+            &message,
             &ActorControl::default(),
             &base,
-            &requested,
-            review.as_ref(),
+            crate::actors::runtime_permissions::ApplicationSource::ToolResult {
+                tool_result_id: tool_result_id.clone(),
+                readable_roots: vec![reads.clone()],
+                writable_roots: vec![writes.clone()],
+            },
+            super::super::ReviewApplication {
+                task: "Run the approved fixture cache command".into(),
+                reason: "The denied terminal command only touches these fixture directories".into(),
+            },
         )
         .await
         .unwrap();
+        assert_eq!(record.decision, ApprovalDecision::Approved);
+        let effective = system.execution_context(&actor, &message).unwrap();
         assert!(
             !writes.join("result.txt").exists(),
             "approval must not execute the proposed command"
         );
         assert!(!effective.sandbox_policy.is_path_writable(&outside));
+        assert!(effective.sandbox_policy.is_path_readable(&reads));
+        assert!(effective.sandbox_policy.is_path_writable(&writes));
+        assert!(
+            effective
+                .sandbox_policy
+                .is_path_writable(&writes.join("nested/new.txt")),
+            "a directory grant covers paths added later"
+        );
+        app.before_tool_call(&call, &effective).unwrap();
         let result = tokio::time::timeout(Duration::from_secs(30), async {
             let mut result = app.execute_tool(&call, &effective).await.unwrap();
             while result.payload["running"].as_bool() == Some(true) {
@@ -2641,26 +2965,72 @@ mod tests {
             let call = scoped_terminal_call(&outside, &outside, &dir.path().join("unrequested"));
             let mut app = crate::terminal_app::TerminalApp::new();
             let base = system.execution_context(&actor, &message).unwrap();
-            let requested = app.permission_request(&call, &base).unwrap();
-            let review = app.review_requirement(&call, &base).unwrap();
-            let error = super::authorize(
+            let tool_result_id = system
+                .store()
+                .tool_started(&actor.id, &message.id, &call)
+                .unwrap();
+            let mut denied =
+                crate::app::AppToolExecutionResult::new("fixture denial", json!({}), None);
+            denied.sandbox_denials = vec![
+                crate::sandbox::DenialRecord {
+                    access: crate::sandbox::Access::Read,
+                    path: outside.clone(),
+                    source: crate::sandbox::DenialSource::Native,
+                },
+                crate::sandbox::DenialRecord {
+                    access: crate::sandbox::Access::Write,
+                    path: outside.clone(),
+                    source: crate::sandbox::DenialSource::Native,
+                },
+            ];
+            crate::actors::runtime_permissions::attach_reference(
                 &system,
                 &actor,
                 &message,
                 &call,
+                &base,
+                &tool_result_id,
+                &mut denied,
+                None,
+            )
+            .unwrap();
+            system
+                .store()
+                .tool_finished_with_reference(
+                    &actor.id,
+                    &message.id,
+                    &call,
+                    json!({"output":"Permission denied","exit_code":1,"running":false}),
+                    "Permission denied",
+                    "Fixture denial",
+                    None,
+                    Some(&tool_result_id),
+                )
+                .unwrap();
+            let refused = crate::actors::runtime_permissions::submit(
+                &system,
+                &actor,
+                &message,
                 &ActorControl::default(),
                 &base,
-                &requested,
-                review.as_ref(),
+                crate::actors::runtime_permissions::ApplicationSource::ToolResult {
+                    tool_result_id: tool_result_id.clone(),
+                    readable_roots: vec![outside.clone()],
+                    writable_roots: vec![outside.clone()],
+                },
+                super::super::ReviewApplication {
+                    task: "Inspect the fixture cache".into(),
+                    reason: "Read the exact fixture directory reported by the tool".into(),
+                },
             )
-            .await
-            .err()
-            .expect("review must deny the requested scope");
-            assert!(rejection(&error).is_some());
+            .await;
+            assert!(refused.is_err());
             let fresh = system.execution_context(&actor, &message).unwrap();
             assert!(!fresh.sandbox_policy.is_path_readable(&outside));
             assert!(!fresh.sandbox_policy.is_path_writable(&outside));
-            assert!(app.execute_tool(&call, &fresh).await.is_err());
+            let denied = app.execute_tool(&call, &fresh).await.unwrap();
+            assert_ne!(denied.payload["session"]["exit_code"].as_i64(), Some(0));
+            app.shutdown().await.unwrap();
             assert!(!outside.join("result.txt").exists());
             assert_eq!(reviewer.requests.lock().len(), 1);
             system.shutdown().await;

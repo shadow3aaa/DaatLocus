@@ -24,10 +24,6 @@ pub struct TerminalExecArgs {
     /// Existing session id to reuse; null or empty creates a new session. Never invent a session id.
     pub session_id: Option<String>,
     pub workdir: Option<String>,
-    /// Exact additional read directories to request through approval; null when unnecessary.
-    pub additional_read_roots: Option<Vec<String>>,
-    /// Exact additional write directories to request through approval; null when unnecessary.
-    pub additional_write_roots: Option<Vec<String>>,
     pub yield_time_ms: Option<u64>,
     pub max_chars: Option<usize>,
 }

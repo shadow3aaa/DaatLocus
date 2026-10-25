@@ -133,44 +133,97 @@ pub(crate) fn attach_reference(
     result: &mut AppToolExecutionResult,
     error: Option<&miette::Report>,
 ) -> Result<()> {
-    // Only a typed sandbox record identifies a denied target. Never parse output,
-    // errno, command text, or an operating-system PermissionDenied diagnostic.
-    let approval_id = error
-        .and_then(|error| {
-            error
-                .downcast_ref::<crate::sandbox::AccessDenied>()
-                .or_else(|| {
-                    error
-                        .chain()
-                        .find_map(|cause| cause.downcast_ref::<crate::sandbox::AccessDenied>())
-                })
-        })
-        .and_then(|denial| {
-            let target = base.resolve_tool_path(&denial.record.path, None);
-            let requested = ToolPermissionRequest {
-                readable_roots: if denial.record.access == crate::sandbox::Access::Read {
-                    vec![target.clone()]
-                } else {
-                    vec![]
-                },
-                writable_roots: if denial.record.access == crate::sandbox::Access::Write {
-                    vec![target.clone()]
-                } else {
-                    vec![]
-                },
-                operation_details: serde_json::Value::Null,
-            };
-            // An unavailable or forbidden proposal must not erase the App result.
-            create_scope_application(system, actor, message, call, base, requested)
-                .ok()
-                .map(|record| record.id)
-        });
+    // Only typed sandbox records identify a denied target: a policy-preflight
+    // denial carried by the error, or deny-and-record events the child's
+    // backend captured. Never parse output, errno, command text, or an
+    // operating-system PermissionDenied diagnostic.
+    let mut proposed = ToolPermissionRequest {
+        readable_roots: vec![],
+        writable_roots: vec![],
+        operation_details: serde_json::Value::Null,
+    };
+    if let Some(denial) = error.and_then(sandbox_denial) {
+        push_denial_scope(
+            &mut proposed,
+            base,
+            &denial.record.path,
+            denial.record.access,
+        );
+    }
+    for denial in &result.sandbox_denials {
+        push_denial_scope(&mut proposed, base, &denial.path, denial.access);
+    }
+    let approval_id = if proposed.readable_roots.is_empty() && proposed.writable_roots.is_empty() {
+        None
+    } else {
+        // An unavailable or forbidden proposal must not erase the App result.
+        create_scope_application(system, actor, message, call, base, proposed)
+            .ok()
+            .map(|record| record.id)
+    };
     result.permission_reference = Some(PermissionReference {
         tool_result_id: id.into(),
         stage_id: system.store().public_stage_id()?.to_string(),
         approval_id,
     });
     Ok(())
+}
+
+fn sandbox_denial(error: &miette::Report) -> Option<&crate::sandbox::AccessDenied> {
+    error
+        .downcast_ref::<crate::sandbox::AccessDenied>()
+        .or_else(|| {
+            error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<crate::sandbox::AccessDenied>())
+        })
+}
+
+fn push_denial_scope(
+    request: &mut ToolPermissionRequest,
+    base: &AppToolExecutionContext,
+    path: &std::path::Path,
+    access: crate::sandbox::Access,
+) {
+    let target = base.resolve_tool_path(path, None);
+    let roots = match access {
+        crate::sandbox::Access::Read => &mut request.readable_roots,
+        crate::sandbox::Access::Write => &mut request.writable_roots,
+    };
+    if !roots.iter().any(|existing| existing == &target) {
+        roots.push(target);
+    }
+}
+
+/// Appends a bounded, model-facing summary of captured native denials.
+pub(crate) fn append_denial_summary(
+    denials: &[crate::sandbox::DenialRecord],
+    content: &mut String,
+) {
+    if denials.is_empty() {
+        return;
+    }
+    const SHOWN: usize = 8;
+    let shown = denials
+        .iter()
+        .take(SHOWN)
+        .map(|denial| {
+            let access = match denial.access {
+                crate::sandbox::Access::Read => "read",
+                crate::sandbox::Access::Write => "write",
+            };
+            format!("{access} {}", denial.path.display())
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let suffix = if denials.len() > SHOWN {
+        format!(" (+{} more)", denials.len() - SHOWN)
+    } else {
+        String::new()
+    };
+    content.push_str(&format!(
+        "\nSandbox denials recorded while this call ran: {shown}{suffix}.\nUse the result reference above if those exact paths are needed.\n"
+    ));
 }
 
 pub(crate) fn error_result(system: &ActorSystem, error: &miette::Report) -> AppToolExecutionResult {
@@ -243,4 +296,59 @@ pub(crate) async fn submit(
     }
     super::approval::submit_application(system, actor, message, control, base, &id, application)
         .await
+}
+
+#[cfg(test)]
+mod native_denial_tests {
+    use super::*;
+    use crate::sandbox::{Access, DenialRecord, DenialSource};
+
+    fn base() -> AppToolExecutionContext {
+        AppToolExecutionContext {
+            execution_cwd: std::env::temp_dir(),
+            sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),
+            tool_output_max_tokens: 1024,
+            turn_epoch: 0,
+            actor_call: None,
+        }
+    }
+
+    #[test]
+    fn native_records_fill_the_requested_scope_for_both_accesses() {
+        let base = base();
+        let mut request = ToolPermissionRequest {
+            readable_roots: vec![],
+            writable_roots: vec![],
+            operation_details: serde_json::Value::Null,
+        };
+        let file = base.execution_cwd.join("denied.txt");
+        let out = base.execution_cwd.join("denied-out");
+        push_denial_scope(&mut request, &base, &file, Access::Read);
+        push_denial_scope(&mut request, &base, &file, Access::Read);
+        push_denial_scope(&mut request, &base, &out, Access::Write);
+        assert_eq!(request.readable_roots, vec![file.clone()]);
+        assert_eq!(request.writable_roots, vec![out.clone()]);
+    }
+
+    #[test]
+    fn denial_summary_is_bounded_and_lists_accesses() {
+        let mut content = String::from("body");
+        let records = (0..10)
+            .map(|index| DenialRecord {
+                access: if index % 2 == 0 {
+                    Access::Read
+                } else {
+                    Access::Write
+                },
+                path: std::env::temp_dir().join(format!("p{index}")),
+                source: DenialSource::Native,
+            })
+            .collect::<Vec<_>>();
+        append_denial_summary(&records, &mut content);
+        assert!(content.contains("(+2 more)"));
+        assert!(content.contains("read "));
+        assert!(content.contains("write "));
+        append_denial_summary(&[], &mut content);
+        assert_eq!(content.matches("Sandbox denials recorded").count(), 1);
+    }
 }

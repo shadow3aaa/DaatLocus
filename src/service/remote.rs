@@ -32,10 +32,6 @@ pub(super) fn routes() -> Router<ServiceState> {
             axum::routing::post(withdraw),
         )
         .route(
-            "/v1/stages/{stage}/actors/{actor}/messages/{message}/steer",
-            axum::routing::post(steer),
-        )
-        .route(
             "/v1/stages/{stage}/actors/{actor}/queue/clear",
             axum::routing::post(clear),
         )
@@ -287,32 +283,6 @@ async fn withdraw(
         .await?,
     ))
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Steer {
-    target_message_id: String,
-    expected_updated_at_ms: i64,
-}
-async fn steer(
-    State(s): State<ServiceState>,
-    h: HeaderMap,
-    Path((stage, actor, message)): Path<(StageId, String, String)>,
-    Json(input): Json<Steer>,
-) -> ApiResult<Json<Value>> {
-    Ok(Json(
-        control(
-            &s,
-            &h,
-            address(stage, actor)?,
-            crate::stage::protocol::ConversationAction::Steer {
-                message,
-                target: input.target_message_id,
-                expected: input.expected_updated_at_ms,
-            },
-        )
-        .await?,
-    ))
-}
 async fn clear(
     State(s): State<ServiceState>,
     h: HeaderMap,
@@ -397,7 +367,7 @@ fn qualify_as(value: &mut Value, target: &ActorAddress, key: &str) {
                         .is_some_and(|name| {
                             name.ends_with("artifacts__present")
                                 || name.ends_with("actors__create")
-                                || name.ends_with("actors__send")
+                                || name.ends_with("actors__message")
                         });
                 if has_domain_content
                     && let Some(Value::Object(payload)) = object.get_mut("payload")
@@ -538,9 +508,7 @@ pub(super) async fn core_control(
     let Some(source) = core_source(state) else {
         return Ok(None);
     };
-    if let crate::stage::protocol::ConversationAction::Amend { message, .. }
-    | crate::stage::protocol::ConversationAction::Steer { message, .. } = &action
-    {
+    if let crate::stage::protocol::ConversationAction::Amend { message, .. } = &action {
         let original = read(
             state,
             headers,

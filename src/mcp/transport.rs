@@ -171,6 +171,9 @@ impl Session {
                                 stdout: SandboxStdio::Piped,
                                 stderr: SandboxStdio::Null,
                                 spawn_cancelled: Some(cancelled),
+                                // MCP children record native denials where
+                                // the host supports deny-and-record.
+                                capture_denials: true,
                             },
                         )
                         .map(ProcessGuard)
@@ -254,5 +257,15 @@ impl Session {
             let _ = tokio::time::timeout(Duration::from_secs(3), service.cancel()).await;
         }
         self.child.take();
+    }
+
+    /// Native denial records the MCP child captured, when available.
+    /// Sessions are long-lived, so records finalize when the child exits.
+    #[allow(dead_code)] // Surfaced once MCP call results consume it.
+    pub fn take_denials(&mut self) -> Vec<crate::sandbox::DenialRecord> {
+        self.child
+            .as_mut()
+            .map(|guard| guard.0.take_denials())
+            .unwrap_or_default()
     }
 }

@@ -7,7 +7,7 @@ async fn terminal_reads_and_executes_outside_workspace_but_cannot_write_there() 
     if !super::test_support::native_sandbox_available() {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::sandbox::test_support::scoped_directory();
     let root = temp.path().join("work");
     let tools = temp.path().join("tools");
     std::fs::create_dir(&root).unwrap();

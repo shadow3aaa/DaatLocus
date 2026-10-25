@@ -743,7 +743,15 @@ impl<'a> StageLedger<'a> {
                     && crate::actors::permissions::approval_strength(capabilities.approval_mode) < crate::actors::permissions::approval_strength(ceiling.approval_mode) { capabilities.approval_mode=ceiling.approval_mode; }
                 let user=matches!(origin,super::protocol::Origin::User);
                 let source=match origin {super::protocol::Origin::User=>crate::actors::MessageSource::RemoteUser {stage_id:id,invocation_id:invocation},super::protocol::Origin::Actor {actor,..}=>crate::actors::MessageSource::RemoteActor {stage_id:id,actor_id:actor.actor_id.clone(),invocation_id:invocation}};
-                let input=crate::actors::MessageRecord {seq:0,id:Uuid::new_v4().to_string(),actor_id:target.actor_id.clone(),source,reply_to:crate::actors::ReplyTarget::Remote {stage_id:id,invocation_id:invocation,user},kind:crate::actors::MessageKind::Request,in_reply_to:None,delegation_grant:Some(crate::actors::DelegationGrant {read_only,permissions:capabilities}),remote_authority:Some(crate::actors::RemoteAuthority {peer:id,grant_actor:target.actor_id.clone(),reply_for:None}),content,attachments:admitted_attachments,status:crate::actors::MessageStatus::Queued,cancel_requested:false,started_at_ms:None,finished_at_ms:None,final_generation:None,reply:None,error:None,created_at_ms:now,updated_at_ms:now};
+                let related = if let Body::Invoke { related_message: Some(related), .. } = &frame.body {
+                    if let Some((_, previous)) = receipt(tx, id, *related)? {
+                        if previous.actor_id != target.actor_id { return Err(StageError::Forbidden("Related invocation belongs to another Actor")); }
+                        previous.message_id
+                    } else {
+                        super::delivery::related_reply_input(tx, id, *related, &target.actor_id, origin)?
+                    }
+                } else { None };
+                let input=crate::actors::MessageRecord {seq:0,id:Uuid::new_v4().to_string(),actor_id:target.actor_id.clone(),source,reply_to:crate::actors::ReplyTarget::Remote {stage_id:id,invocation_id:invocation,user},kind:crate::actors::MessageKind::Request,in_reply_to:related,delegation_grant:Some(crate::actors::DelegationGrant {read_only,permissions:capabilities}),remote_authority:Some(crate::actors::RemoteAuthority {peer:id,grant_actor:target.actor_id.clone(),reply_for:None}),content,attachments:admitted_attachments,status:crate::actors::MessageStatus::Queued,cancel_requested:false,started_at_ms:None,finished_at_ms:None,final_generation:None,reply:None,error:None,created_at_ms:now,updated_at_ms:now};
                 Some(crate::actors::store::insert_message(tx,input).map_err(|_|StageError::Unavailable("Actor inbox could not be persisted"))?.id)
             }else{None};
             let receipt=Receipt {invocation,actor_id:target.actor_id.clone(),state:InvocationState::DurableReceived,result:None,duplicate:false,message_id};
@@ -1129,6 +1137,7 @@ mod tests {
                 created_at_ms: 2000,
                 expires_at_ms: 12000,
                 body: Body::Invoke {
+                    related_message: None,
                     origin: Origin::User,
                     target: ActorAddress {
                         stage_id: self.local.profile().stage_id,
@@ -1153,16 +1162,18 @@ mod tests {
             .ledger()
             .accept_actor_input(peer, &first, "request".into(), 2000)
             .unwrap();
-        assert!(fixture.store.set_archived("root", true).is_err());
-        fixture
-            .store
-            .finish_message(
-                received.message_id.as_deref().unwrap(),
-                crate::actors::MessageStatus::Completed,
-                Some("Done"),
-                None,
-            )
-            .unwrap();
+        fixture.store.set_archived("root", true).unwrap();
+        assert!(
+            !fixture.store.has_queued_input("root").unwrap(),
+            "archival discards queued inputs"
+        );
+        assert!(
+            fixture
+                .store
+                .message(received.message_id.as_deref().unwrap())
+                .is_err(),
+            "discarded inputs are removed from the inbox"
+        );
         fixture.store.set_archived("root", true).unwrap();
         assert!(
             fixture
@@ -1197,7 +1208,8 @@ mod tests {
                 .unwrap()
                 .items
                 .len(),
-            1
+            0,
+            "the discarded input is gone and admission stayed closed"
         );
         fixture.store.set_archived("root", false).unwrap();
         fixture
@@ -1211,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn actor_archive_waits_for_remote_delegations_even_after_its_input_finishes() {
+    fn actor_archive_does_not_wait_for_outstanding_remote_delegations() {
         let fixture = Fixture::new();
         let peer = fixture.remote.profile().stage_id;
         let receipt = fixture
@@ -1251,7 +1263,11 @@ mod tests {
             fixture.store.actor("root").unwrap().status,
             ActorStatus::Idle
         );
-        assert!(fixture.store.set_archived("root", true).is_err());
+        fixture.store.set_archived("root", true).unwrap();
+        assert_eq!(
+            fixture.store.actor("root").unwrap().status,
+            ActorStatus::Archived
+        );
         fixture
             .ledger()
             .record_result(
@@ -1263,6 +1279,7 @@ mod tests {
             )
             .unwrap();
         fixture.store.set_archived("root", true).unwrap();
+        assert!(!fixture.store.has_queued_input("root").unwrap());
     }
 
     #[test]

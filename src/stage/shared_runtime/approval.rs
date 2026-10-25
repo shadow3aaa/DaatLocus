@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     actors::{
         ApprovalDecision, ApprovalRecord,
-        approval::{ReviewFailure, ReviewVerdict},
+        approval::{ReviewFailure, ReviewLogContext, ReviewVerdict},
     },
     app::ActorCallContext,
 };
@@ -95,19 +95,46 @@ impl Controller {
     ) -> Result<std::result::Result<ReviewVerdict, ReviewFailure>> {
         let (leader, epoch) = {
             let fence = self.fence.lock();
-            (
-                fence.leader(Instant::now()).ok_or(StageError::Unavailable(
-                    "Core worker is unavailable for approval",
-                ))?,
-                fence.epoch(),
-            )
+            let leader = fence.leader(Instant::now()).ok_or_else(|| {
+                tracing::warn!(
+                    failure = "core_worker_unavailable",
+                    "Automatic review RPC failed: Core worker is unavailable for approval"
+                );
+                StageError::Unavailable("Core worker is unavailable for approval")
+            })?;
+            (leader, fence.epoch())
         };
-        match self
+        let response = self
             .request(leader, Request::ReviewApproval { epoch, facts })
-            .await?
-        {
-            Response::ApprovalReview { verdict } => Ok(verdict),
-            _ => Err(StageError::Invalid("Invalid approval review response")),
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    leader = %leader,
+                    failure = "rpc_failed",
+                    error = %error,
+                    "Automatic review RPC failed"
+                );
+                error
+            })?;
+        match response {
+            Response::ApprovalReview { verdict } => {
+                if let Err(failure) = &verdict {
+                    tracing::warn!(
+                        leader = %leader,
+                        failure = failure.code(),
+                        "Automatic review model request failed on the Core worker"
+                    );
+                }
+                Ok(verdict)
+            }
+            _ => {
+                tracing::warn!(
+                    leader = %leader,
+                    failure = "invalid_response",
+                    "Automatic review RPC returned an invalid response"
+                );
+                Err(StageError::Invalid("Invalid approval review response"))
+            }
         }
     }
 
@@ -118,13 +145,25 @@ impl Controller {
     ) -> Result<Response> {
         let runtime = self.runtime()?;
         self.require_worker(runtime.host.local, epoch).await?;
-        let future = crate::actors::approval::review_on_core(&runtime.host.system, facts);
+        let future = crate::actors::approval::review_on_core(
+            &runtime.host.system,
+            facts,
+            ReviewLogContext::default(),
+        );
         tokio::pin!(future);
         loop {
             tokio::select! {
-                verdict = &mut future => return Ok(Response::ApprovalReview{verdict}),
+                verdict = &mut future => {
+                    tracing::debug!(stage = %runtime.host.local, "Automatic review request completed");
+                    return Ok(Response::ApprovalReview{verdict});
+                }
                 () = tokio::time::sleep(Duration::from_millis(250)) => {
                     if !self.fence.lock().permits(runtime.host.local,epoch,Instant::now()) {
+                        tracing::warn!(
+                            stage = %runtime.host.local,
+                            failure = "core_worker_changed",
+                            "Automatic review aborted: Core worker changed"
+                        );
                         return Err(StageError::Forbidden("Core worker changed during review"));
                     }
                 }

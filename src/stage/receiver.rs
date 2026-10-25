@@ -77,16 +77,6 @@ impl StageReceiver {
                                 .map_err(|_| StageError::Conflict("Queued input changed"))?,
                         )
                     }
-                    ConversationAction::Steer {
-                        message,
-                        target,
-                        expected,
-                    } => Some(
-                        self.system
-                            .store()
-                            .steer_queued(&actor.actor_id, message, target, *expected)
-                            .map_err(|_| StageError::Conflict("Input or execution changed"))?,
-                    ),
                     ConversationAction::ClearQueue => {
                         count = self
                             .system
@@ -399,6 +389,7 @@ impl StageReceiver {
             origin,
             attachments,
             content,
+            ..
         } = &frame.body
         else {
             return Err(StageError::Invalid("Expected invocation input"));

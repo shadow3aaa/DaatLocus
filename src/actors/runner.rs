@@ -241,10 +241,9 @@ async fn execute_message(
         refresh_apps(system, actor, apps, &context, false).await?;
     }
     let mut tools = apps.model_tool_specs_for_context(&context)?;
-    let resuming = actor.id == crate::stage::shared::ACTOR_ID
-        && system
-            .store()
-            .has_history_for_message(&actor.id, &message.id)?;
+    let resuming = system
+        .store()
+        .has_history_for_message(&actor.id, &message.id)?;
     if !resuming {
         let input = AgentMessage::user_content(system.message_content(actor, message, &context)?);
         system
@@ -280,8 +279,7 @@ async fn execute_message(
         }
         crate::stage::digest(&serde_json::to_vec(&(model_name, model, provider)).into_diagnostic()?)
     };
-    let mut history =
-        load_working_history(system, actor, provider.as_ref(), &prompt, &tools, &binding)?;
+    let mut history: Vec<AgentMessage>;
     let mut call_ids = std::collections::HashSet::new();
     let mut after = 0;
     loop {
@@ -335,33 +333,16 @@ async fn execute_message(
             )?;
             return Ok(Some(String::new()));
         }
-        if core_user_input_waiting(system, actor)? {
-            // Only reached between settled protocol groups. Keep the old input
-            // and completed observations in history, then let the next inbox
-            // input continue the conversation under its own authority. This is
-            // not cancellation of the Actor or any delegated work.
-            system.store().append_history(
-                &actor.id,
-                &message.id,
-                &[AgentMessage::assistant("")],
-            )?;
-            return Ok(None);
-        }
-        for guide in system.store().pending_steering(&actor.id, &message.id)? {
-            let mut update = guide.clone();
-            update.content = format!(
-                "Guidance for the current task. Preserve the source below; this does not confer Owner approval or change the original task's authority and grants.\n{}",
-                guide.content
-            );
-            let input =
-                AgentMessage::user_content(system.message_content(actor, &update, &context)?);
-            if system
-                .store()
-                .apply_steering(&actor.id, &message.id, &guide, &input)?
-            {
-                history.push(input);
-            }
-        }
+        Box::pin(receive_incoming(system, actor, message, control, apps)).await?;
+        history = load_working_history(
+            system,
+            message,
+            provider.as_ref(),
+            &prompt,
+            &tools,
+            &binding,
+        )?;
+        check_interruption(system, control, message)?;
         if actor.id == crate::stage::shared::ACTOR_ID {
             system.checkpoint_core().await?;
         }
@@ -409,18 +390,13 @@ async fn execute_message(
                 {
                     return Err(error);
                 }
-                history = vec![system.store().reset_model_context(&actor.id, &message.id)?];
+                system.store().reset_model_context(&actor.id, &message.id)?;
                 overflow_recoveries += 1;
                 continue;
             }
             Err(error) => return Err(error),
         };
-        if core_user_input_waiting(system, actor)?
-            || !system
-                .store()
-                .pending_steering(&actor.id, &message.id)?
-                .is_empty()
-        {
+        if system.store().has_queued_input(&actor.id)? {
             continue;
         }
         let response = response.protocol();
@@ -624,8 +600,8 @@ async fn execute_call(
             return Ok(Vec::new());
         }
     };
-    if !apps.delegates_approval(call, &context)?
-        && let Err(error) = super::approval::authorize(
+    if !apps.delegates_approval(call, &context)? {
+        let authorization = super::approval::authorize(
             system,
             &current_actor,
             message,
@@ -634,35 +610,45 @@ async fn execute_call(
             &context,
             &requested,
             review.as_ref(),
-        )
-        .await
-    {
-        if let Some(rejection) = super::approval::rejection(&error) {
-            record_tool_rejection(system, actor, message, call, &rejection, history)?;
-            check_interruption(system, control, message)?;
-            return Ok(Vec::new());
+        );
+        tokio::pin!(authorization);
+        let authorized = loop {
+            tokio::select! {
+                result = &mut authorization => break result,
+                () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
+                    Box::pin(receive_incoming(system, actor, message, control, apps)).await?;
+                    check_interruption(system, control, message)?;
+                }
+            }
+        };
+        if let Err(error) = authorized {
+            if let Some(rejection) = super::approval::rejection(&error) {
+                record_tool_rejection(system, actor, message, call, &rejection, history)?;
+                check_interruption(system, control, message)?;
+                return Ok(Vec::new());
+            }
+            record_tool_error(
+                system,
+                actor,
+                message,
+                call,
+                &system.safe_error(&error.to_string()),
+                history,
+            )?;
+            if error
+                .downcast_ref::<super::ActorError>()
+                .is_some_and(|error| {
+                    matches!(
+                        error,
+                        super::ActorError::Forbidden(_) | super::ActorError::Invalid(_)
+                    )
+                })
+            {
+                check_interruption(system, control, message)?;
+                return Ok(Vec::new());
+            }
+            return Err(error);
         }
-        record_tool_error(
-            system,
-            actor,
-            message,
-            call,
-            &system.safe_error(&error.to_string()),
-            history,
-        )?;
-        if error
-            .downcast_ref::<super::ActorError>()
-            .is_some_and(|error| {
-                matches!(
-                    error,
-                    super::ActorError::Forbidden(_) | super::ActorError::Invalid(_)
-                )
-            })
-        {
-            check_interruption(system, control, message)?;
-            return Ok(Vec::new());
-        }
-        return Err(error);
     }
     check_interruption(system, control, message)?;
     let fresh_actor = system.execution_actor(message)?;
@@ -696,13 +682,35 @@ async fn execute_call(
     if actor.id == crate::stage::shared::ACTOR_ID {
         system.checkpoint_core().await?;
     }
-    let future = apps.execute_tool(call, &context);
-    tokio::pin!(future);
-    let outcome = loop {
-        tokio::select! {
-            result = &mut future => break Some(result),
-            () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
-                if interruption(control,message).is_some() || actor.id==crate::stage::shared::ACTOR_ID && !system.core_execution_permitted(){break None;}
+    let outcome = if call.name == "actors__appeal_approval" {
+        // Actors is a stateless facade. Keep its review-control future while
+        // retaining this Actor's existing stateful Apps for incoming input.
+        use crate::app::App;
+        let mut facade = crate::actor_app::ActorApp::new(actor.id.clone(), system.clone());
+        let control_call = call.with_name("appeal_approval");
+        let future = facade.execute_tool(&control_call, &context);
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                result = &mut future => break Some(result),
+                () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
+                    if check_interruption(system, control, message).is_err() { break None; }
+                    Box::pin(receive_incoming(system, actor, message, control, apps)).await?;
+                }
+            }
+        }
+    } else {
+        let future = apps.execute_tool(call, &context);
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                result = &mut future => break Some(result),
+                () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
+                    if interruption(control,message).is_some() || actor.id==crate::stage::shared::ACTOR_ID && !system.core_execution_permitted(){break None;}
+                    if !native_execution && system.store().has_queued_input(&actor.id)? {
+                        Box::pin(receive_during_remote_review(system, actor, message, control, call)).await?;
+                    }
+                }
             }
         }
     };
@@ -804,6 +812,7 @@ fn finish_tool_result(
     if let Some(reference) = &result.permission_reference {
         reference.append_to(&mut model_content);
     }
+    super::runtime_permissions::append_denial_summary(&result.sandbox_denials, &mut model_content);
     system.store().tool_finished_with_reference(
         &actor.id,
         &message.id,
@@ -935,8 +944,37 @@ async fn system_prompt(
 /// Discard only incomplete replay groups from a bounded history query. The
 /// durable history is untouched; tool results never become free-standing input.
 fn balanced_history(history: Vec<AgentMessage>) -> Vec<AgentMessage> {
-    let groups = history_groups(&history);
-    groups.into_iter().flatten().collect()
+    // An approval can suspend a protocol group while another input is handled.
+    // Present complete groups atomically in settlement order, retaining source
+    // order in durable history. Incomplete intents never enter a model request.
+    let mut settled = Vec::new();
+    let mut pending: Vec<(AgentMessage, Vec<String>, Vec<AgentMessage>)> = Vec::new();
+    for row in history {
+        match &row {
+            AgentMessage::AssistantToolCallProtocol { calls, .. } if !calls.is_empty() => {
+                let ids = calls.iter().map(|call| call.id.clone()).collect();
+                pending.push((row, ids, Vec::new()));
+            }
+            AgentMessage::Tool { tool_call_id, .. } => {
+                if let Some(index) = pending.iter().rposition(|(_, ids, results)| {
+                    ids.contains(tool_call_id)
+                        && !results.iter().any(|result| {
+                            matches!(result,
+                        AgentMessage::Tool { tool_call_id: id, .. } if id == tool_call_id)
+                        })
+                }) {
+                    pending[index].2.push(row);
+                    if pending[index].1.len() == pending[index].2.len() {
+                        let (protocol, _, results) = pending.remove(index);
+                        settled.push(protocol);
+                        settled.extend(results);
+                    }
+                }
+            }
+            _ => settled.push(row),
+        }
+    }
+    history_groups(&settled).into_iter().flatten().collect()
 }
 
 fn history_groups(history: &[AgentMessage]) -> Vec<Vec<AgentMessage>> {
@@ -990,27 +1028,42 @@ fn context_baseline(
 
 fn load_working_history(
     system: &ActorSystem,
-    actor: &ActorRecord,
+    current: &MessageRecord,
     provider: &dyn ModelProvider,
     prompt: &str,
     tools: &[AgentToolSpec],
     binding: &str,
 ) -> Result<Vec<AgentMessage>> {
-    let start = system.store().context_start(&actor.id)?;
+    let actor_id = &current.actor_id;
+    let start = system.store().context_start(actor_id)?;
+    let anchor = system.store().actor(actor_id)?.context.anchor;
     let mut after = start.saturating_sub(1);
     let mut history = Vec::new();
-    let baseline = context_baseline(system, &actor.id, binding)?;
+    let baseline = context_baseline(system, actor_id, binding)?;
     loop {
-        let page = system.store().history_page(&actor.id, after, None, 128)?;
+        let page = system.store().history_page(actor_id, after, None, 128)?;
         if page.is_empty() {
             return Ok(balanced_history(history));
         }
-        for (seq, _, row) in page {
+        for (seq, _, mut row) in page {
             after = seq;
+            if seq == start
+                && let Some(recovery) = &anchor
+            {
+                // Nested input resets and new requests share a window anchor,
+                // not a task identity. Only render the actual current task here.
+                row = recovery
+                    .for_input(
+                        &current.id,
+                        system.store().task_handoff(actor_id, &current.id),
+                    )
+                    .recovery_message();
+            }
             history.push(row);
         }
-        if !window_fits(provider, prompt, &history, tools, &baseline) {
-            return Ok(history);
+        let balanced = balanced_history(history.clone());
+        if !window_fits(provider, prompt, &balanced, tools, &baseline) {
+            return Ok(balanced);
         }
     }
 }
@@ -1057,8 +1110,145 @@ fn context_overflow(error: &miette::Report) -> bool {
     crate::context_budget::is_context_budget_exceeded(error)
 }
 
-fn core_user_input_waiting(system: &ActorSystem, actor: &ActorRecord) -> Result<bool> {
-    Ok(actor.id == crate::stage::shared::ACTOR_ID && system.store().core_user_input_waiting()?)
+/// New messages preempt inference at settled boundaries. A nested input owns
+/// its execution authority, replies and lifetime; the interrupted request stays
+/// open and resumes from history once the incoming input releases the worker.
+async fn receive_incoming(
+    system: &ActorSystem,
+    actor: &ActorRecord,
+    current: &MessageRecord,
+    control: &ActorControl,
+    apps: &mut AppManager,
+) -> Result<bool> {
+    let mut received = false;
+    while let Some(input) = system.store().claim_incoming(&actor.id, &current.id)? {
+        received = true;
+        let result = async {
+            let incoming_actor = system.execution_actor(&input)?;
+            Box::pin(execute_message(
+                system,
+                &incoming_actor,
+                &input,
+                control,
+                apps,
+            ))
+            .await
+        }
+        .await;
+        if actor.id == crate::stage::shared::ACTOR_ID && !system.core_execution_permitted() {
+            return Err(miette!("Core worker no longer owns execution"));
+        }
+        let (status, reply, error) = match (interruption(control, &input), result) {
+            (Some(status), _) => (
+                status,
+                None,
+                Some("Execution interrupted; completed effects were not rolled back".to_owned()),
+            ),
+            (_, Ok(reply)) => (MessageStatus::Completed, reply, None),
+            (_, Err(error)) => (
+                MessageStatus::Failed,
+                None,
+                Some(
+                    error
+                        .downcast_ref::<crate::providers::ModelRequestFailure>()
+                        .map_or_else(
+                            || system.safe_error(&error.to_string()),
+                            |error| error.code().into(),
+                        ),
+                ),
+            ),
+        };
+        if let Some(reply) =
+            system
+                .store()
+                .finish_message(&input.id, status, reply.as_deref(), error.as_deref())?
+        {
+            system.wake(&reply.actor_id);
+        }
+        control.cancelled.lock().remove(&input.id);
+        if status != MessageStatus::Completed {
+            let replacements = if actor.id == crate::stage::shared::ACTOR_ID && !system.local_core()
+            {
+                system
+                    .shared_core()
+                    .ok_or_else(|| miette!("Shared Actor worker is unavailable"))?
+                    .model_apps()
+                    .await?
+            } else {
+                builtin_apps::create_apps(actor, system.clone(), &system.config())?
+            };
+            let previous = std::mem::replace(apps, replacements);
+            previous.shutdown().await?;
+            let context = system.execution_context(actor, current)?;
+            refresh_apps(system, actor, apps, &context, false).await?;
+        }
+        if actor.id == crate::stage::shared::ACTOR_ID {
+            system.checkpoint_core().await?;
+        }
+        check_interruption(system, control, current)?;
+    }
+    if received {
+        system.store().resume_input(&actor.id, &current.id)?;
+    }
+    Ok(received)
+}
+
+/// A delegated native invocation may be waiting for review on another device.
+/// Suspend it atomically before borrowing a fresh portable Actors facade for
+/// incoming Core input. The operation device keeps the original future and
+/// cannot start its effect until this input releases the execution stream.
+async fn receive_during_remote_review(
+    system: &ActorSystem,
+    actor: &ActorRecord,
+    message: &MessageRecord,
+    control: &ActorControl,
+    call: &AgentToolCall,
+) -> Result<()> {
+    use crate::stage::core_wire::{Request, Response};
+    let Some(core) = system.shared_core() else {
+        return Ok(());
+    };
+    let Some(stage) = call
+        .arguments
+        .get("stage_id")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<crate::stage::StageId>(value).ok())
+    else {
+        return Ok(());
+    };
+    let pause = |paused| Request::InvocationPause {
+        epoch: core.epoch(),
+        message: message.id.clone(),
+        call_id: call.id.clone(),
+        paused,
+    };
+    if !matches!(
+        core.request(stage, pause(true)).await,
+        Ok(Response::InvocationPaused { paused: true })
+    ) {
+        return Ok(());
+    }
+    let received = async {
+        let mut incoming_apps = core.model_apps().await?;
+        let result = Box::pin(receive_incoming(
+            system,
+            actor,
+            message,
+            control,
+            &mut incoming_apps,
+        ))
+        .await;
+        let shutdown = incoming_apps.shutdown().await;
+        result?;
+        shutdown
+    }
+    .await;
+    // Always release the native suspension, including on cancellation/error.
+    // Epoch, authority and target checks still precede the original effect.
+    let resumed = core.request(stage, pause(false)).await;
+    received?;
+    resumed.map_err(miette::Report::new)?;
+    Ok(())
 }
 
 // Keep Actor and request authority explicit at the model execution boundary.
@@ -1082,7 +1272,7 @@ async fn generate(
     };
     for attempt in 1..=policy.max_attempts {
         check_interruption(system, control, message)?;
-        if core_user_input_waiting(system, actor)? {
+        if system.store().has_queued_input(&actor.id)? {
             return Ok(None);
         }
         *generation = generation.saturating_add(1);
@@ -1148,7 +1338,7 @@ async fn generate(
                 _ = timer.tick() => {
                     pending.flush(system, actor, message, *generation)?;
                     check_interruption(system,control, message)?;
-                    if core_user_input_waiting(system, actor)? || !system.store().pending_steering(&actor.id, &message.id)?.is_empty() {
+                    if system.store().has_queued_input(&actor.id)? {
                         let usage = provider.token_usage_info();
                         system.store().record_model_usage(&actor.id, usage.total_token_usage.delta_from(&usage_before), usage.model_context_window)?;
                         return Ok(None);
@@ -1156,7 +1346,7 @@ async fn generate(
                 },
                 () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
                     check_interruption(system,control, message)?;
-                    if core_user_input_waiting(system, actor)? || !system.store().pending_steering(&actor.id, &message.id)?.is_empty() {
+                    if system.store().has_queued_input(&actor.id)? {
                         let usage = provider.token_usage_info();
                         system.store().record_model_usage(&actor.id, usage.total_token_usage.delta_from(&usage_before), usage.model_context_window)?;
                         return Ok(None);
@@ -1211,7 +1401,7 @@ async fn generate(
                         () = &mut backoff => break,
                         () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
                             check_interruption(system,control, message)?;
-                            if core_user_input_waiting(system, actor)? || !system.store().pending_steering(&actor.id, &message.id)?.is_empty() { return Ok(None); }
+                            if system.store().has_queued_input(&actor.id)? { return Ok(None); }
                         },
                     }
                 }

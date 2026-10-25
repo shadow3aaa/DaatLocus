@@ -1,6 +1,9 @@
 //! Atomic, source-owned appeals. Denied calls are never replayed here.
 use super::*;
 
+/// The runtime control envelope, delivered verbatim when inserted at a boundary.
+pub(crate) const APPEAL_NOTICE_TYPE: &str = "approval_appeal_decision";
+
 fn approval_tx(tx: &Transaction<'_>, id: &str) -> Result<ApprovalRecord> {
     decode(
         sql(tx
@@ -213,9 +216,9 @@ impl ActorStore {
             insert_message(&tx, MessageRecord {
                 seq:0, id:notification_id.clone(), actor_id:approval.actor_id.clone(),
                 source:MessageSource::Actor{actor_id:core.into()}, reply_to:original.reply_to.clone(),
-                kind:MessageKind::Progress, in_reply_to:Some(approval.message_id.clone()),
+                kind:MessageKind::Request, in_reply_to:Some(approval.message_id.clone()),
                 delegation_grant:original.delegation_grant.clone(), remote_authority:None,
-                content:serde_json::json!({"type":"approval_appeal_decision", "approval_id":id,
+                content:serde_json::json!({"type":APPEAL_NOTICE_TYPE, "approval_id":id,
                     "decision":decision, "reason":reason,
                     "instruction":"Permission memory has been updated if approved. No effect was executed. Recheck current targets and retry only if still needed; do not replay uncertain effects."}).to_string(),
                 attachments:vec![], status:MessageStatus::Queued, cancel_requested:false,

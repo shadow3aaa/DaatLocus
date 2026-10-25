@@ -36,6 +36,7 @@ pub struct Controller {
     checkpoint: tokio::sync::Mutex<()>,
     replica: tokio::sync::Mutex<()>,
     device_apps: tokio::sync::Mutex<Option<(String, AppManager)>>,
+    invocation_pauses: Mutex<std::collections::HashSet<(StageId, u64, String, String)>>,
     wake: Notify,
     replica_wake: Notify,
     desired: RwLock<Option<shared::Reply>>,
@@ -45,6 +46,16 @@ pub struct Controller {
     frozen: Mutex<Option<(StageId, Instant)>>,
     failure: RwLock<Option<&'static str>>,
     last_confirmed: Mutex<Instant>,
+}
+
+struct InvocationPauseGuard<'a> {
+    controller: &'a Controller,
+    key: (StageId, u64, String, String),
+}
+impl Drop for InvocationPauseGuard<'_> {
+    fn drop(&mut self) {
+        self.controller.invocation_pauses.lock().remove(&self.key);
+    }
 }
 
 impl Controller {
@@ -87,6 +98,7 @@ impl Controller {
             checkpoint: tokio::sync::Mutex::new(()),
             replica: tokio::sync::Mutex::new(()),
             device_apps: tokio::sync::Mutex::new(None),
+            invocation_pauses: Mutex::new(std::collections::HashSet::new()),
             wake: Notify::new(),
             replica_wake: Notify::new(),
             desired: RwLock::new(None),
@@ -161,34 +173,6 @@ impl Controller {
     pub fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
     }
-    pub async fn steer(
-        &self,
-        message: &str,
-        target: &str,
-        expected: i64,
-    ) -> Result<crate::actors::MessageRecord> {
-        let leader = self
-            .fence
-            .lock()
-            .leader(Instant::now())
-            .ok_or(StageError::Unavailable("Worker is reconnecting"))?;
-        match self
-            .request(
-                leader,
-                Request::Steer {
-                    message: message.into(),
-                    target: target.into(),
-                    expected,
-                },
-            )
-            .await?
-        {
-            Response::Steered { message } => Ok(*message),
-            _ => Err(StageError::Unavailable(
-                "Input was not applied to the active task",
-            )),
-        }
-    }
     pub async fn amend(
         &self,
         message: &str,
@@ -211,7 +195,7 @@ impl Controller {
             )
             .await?
         {
-            Response::Steered { message } => Ok(*message),
+            Response::Amended { message } => Ok(*message),
             _ => Err(StageError::Unavailable("Queued input was not changed")),
         }
     }
@@ -951,31 +935,8 @@ impl Controller {
                     )
                     .map_err(|_| StageError::Conflict("Queued input changed"))?;
                 self.checkpoint().await?;
-                Ok(Response::Steered {
+                Ok(Response::Amended {
                     message: Box::new(record),
-                })
-            }
-            Request::Steer {
-                message,
-                target,
-                expected,
-            } => {
-                self.require_worker(runtime.host.local, self.epoch())
-                    .await?;
-                let message = system
-                    .store()
-                    .steer_queued(shared::ACTOR_ID, &message, &target, expected)
-                    .map_err(|_| {
-                        tracing::debug!(expected,
-                            input=?system.store().message(&message).ok().map(|m|(m.status,m.updated_at_ms,m.kind)),
-                            target=?system.store().message(&target).ok().map(|m|(m.status,m.cancel_requested)),
-                            "Guidance revision or execution changed");
-                        StageError::Conflict("Queued input or target execution changed")
-                    })?;
-                self.checkpoint().await?;
-                system.wake(shared::ACTOR_ID);
-                Ok(Response::Steered {
-                    message: Box::new(message),
                 })
             }
             Request::Preferences {
@@ -1061,7 +1022,6 @@ impl Controller {
                 if message.actor_id != shared::ACTOR_ID
                     || message.id.len() > 128
                     || message.content.len() > 64 * 1024
-                    || message.status != MessageStatus::Queued
                     || message.remote_authority.is_some()
                     || message.delegation_grant.is_some()
                 {
@@ -1081,10 +1041,27 @@ impl Controller {
                     }
                 }
                 if let Ok(previous) = system.store().message(&message.id) {
-                    if previous.content != message.content || previous.source != message.source {
+                    if previous.actor_id != message.actor_id
+                        || previous.content != message.content
+                        || previous.source != message.source
+                        || previous.reply_to != message.reply_to
+                        || previous.kind != message.kind
+                        || previous.in_reply_to != message.in_reply_to
+                        || previous.attachments != message.attachments
+                    {
                         return Err(StageError::Conflict("Input retry changed content"));
                     }
                 } else {
+                    // A follower may retry after the worker already received or
+                    // finished this exact input. Acknowledge known immutable
+                    // input above; never admit an unknown started execution.
+                    if message.status != MessageStatus::Queued
+                        || message.started_at_ms.is_some()
+                        || message.finished_at_ms.is_some()
+                        || message.cancel_requested
+                    {
+                        return Err(StageError::Forbidden("Invalid account Actor input"));
+                    }
                     system
                         .store()
                         .enqueue(*message, None)
@@ -1112,6 +1089,29 @@ impl Controller {
                     identity_read_only,
                 )
                 .await
+            }
+            Request::InvocationPause {
+                epoch,
+                message,
+                call_id,
+                paused,
+            } => {
+                self.require_worker(peer, epoch).await?;
+                let key = (peer, epoch, message.clone(), call_id.clone());
+                let mut pauses = self.invocation_pauses.lock();
+                // Serialize suspension with the durable effect-start intent. A
+                // running effect can never be paused or implicitly cancelled.
+                let waiting = system.store().stage_transaction(|tx| {
+                    Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM approvals WHERE message_id=?1 AND json_extract(record,'$.call.id')=?2 AND json_extract(record,'$.decision')='pending') AND NOT EXISTS(SELECT 1 FROM core_app_effects WHERE message=?1 AND call=?2)", params![message,call_id], |row| row.get::<_,bool>(0))?)
+                })?;
+                if paused && waiting {
+                    pauses.insert(key.clone());
+                } else if !paused {
+                    pauses.remove(&key);
+                }
+                Ok(Response::InvocationPaused {
+                    paused: pauses.contains(&key),
+                })
             }
             Request::ToolResult { message, call_id } => self.effect_result(&message, &call_id),
         }
@@ -2064,6 +2064,10 @@ impl Controller {
         if exists {
             return self.effect_result(message, &call.id);
         }
+        let _pause_guard = InvocationPauseGuard {
+            controller: self,
+            key: (peer, epoch, message.into(), call.id.clone()),
+        };
         if identity_read_only {
             actor.remote_read_only = true;
             actor.config.permissions.writable_roots.clear();
@@ -2107,6 +2111,7 @@ impl Controller {
         let requirement = manager
             .review_requirement(&call, &context)
             .map_err(|_| StageError::Invalid("App review policy is unavailable"))?;
+        drop(resources);
         let review = crate::actors::approval::authorize(
             system,
             &actor,
@@ -2136,11 +2141,62 @@ impl Controller {
                 },
             }
         };
-        self.require_worker(peer, epoch).await?;
-        let result_id = system
-            .store()
-            .shared_tool_started(&actor.id, message, &call, actor.remote_read_only, &digest)
-            .map_err(|_| StageError::Unavailable("Cannot persist device execution provenance"))?;
+        let (mut resources, result_id) = loop {
+            self.require_worker(peer, epoch).await?;
+            crate::actors::approval::ensure_current(system, &actor, &input, &control)
+                .map_err(|_| StageError::Forbidden("App authority changed while suspended"))?;
+            if Instant::now() >= deadline {
+                return Err(StageError::Unavailable(
+                    "App invocation timed out while suspended",
+                ));
+            }
+            let mut resources = self.device_apps.lock().await;
+            if resources
+                .as_ref()
+                .is_none_or(|(revision, _)| revision != &cache_revision)
+            {
+                if let Some((_, old)) = resources.take() {
+                    let _ = old.shutdown().await;
+                }
+                *resources = Some((
+                    cache_revision.clone(),
+                    builtin_apps::create_apps(&actor, system.clone(), &system.config())
+                        .map_err(|_| StageError::Unavailable("Device Apps could not start"))?,
+                ));
+            }
+            let started = {
+                let pauses = self.invocation_pauses.lock();
+                if pauses.contains(&(peer, epoch, message.into(), call.id.clone())) {
+                    None
+                } else {
+                    Some(
+                        system
+                            .store()
+                            .shared_tool_started(
+                                &actor.id,
+                                message,
+                                &call,
+                                actor.remote_read_only,
+                                &digest,
+                            )
+                            .map_err(|_| {
+                                StageError::Unavailable(
+                                    "Cannot persist device execution provenance",
+                                )
+                            })?,
+                    )
+                }
+            };
+            if let Some(result_id) = started {
+                break (resources, result_id);
+            }
+            drop(resources);
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        let manager = &mut resources.as_mut().expect("device Apps installed").1;
+        manager.validate_tool_call(&call, &approved).map_err(|_| {
+            StageError::Forbidden("App target or installation changed while suspended")
+        })?;
         let mut future = Box::pin(manager.execute_tool(&call, &approved));
         let result = loop {
             tokio::select! {

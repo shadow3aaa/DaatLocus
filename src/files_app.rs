@@ -47,7 +47,7 @@ impl App for FilesApp {
             AppToolSpec { name: "search_text".into(), description: "Find literal text in authorized files beneath a path. Requires an explicit depth (1-32). Respects repository and global Git ignore rules and skips .git metadata unless include_ignored is true. Explicit search roots remain searchable. Returns original matching lines with file paths and line numbers.".into(), input_schema: model_schema_for::<SearchTextArgs>() },
             AppToolSpec { name: "read_file".into(), description: "Read plaintext lines and the whole-file sha256. Relative paths use the Actor workspace. Expand skill root aliases to their listed absolute paths before calling; start_line is 1-based or null, never 0.".into(), input_schema: model_schema_for::<ReadFileArgs>() },
             AppToolSpec { name: "write_file".into(), description: "Create a file or overwrite it using its current expected_sha256.".into(), input_schema: model_schema_for::<WriteFileArgs>() },
-            AppToolSpec { name: "edit_file".into(), description: "Replace exact unique old_text using the current file expected_sha256.".into(), input_schema: model_schema_for::<EditFileArgs>() },
+            AppToolSpec { name: "edit_file".into(), description: "Replace text using the current file expected_sha256: either one exact unique old_text/new_text pair or an ordered edits array applied sequentially on the updated text. Every edit must match uniquely (LF/CRLF equivalent) with new_text written in the matched region's line endings; any failure aborts the entire batch before a single write.".into(), input_schema: model_schema_for::<EditFileArgs>() },
             AppToolSpec { name: "list_skills".into(), description: "List authorized skill metadata and source paths. Read selected SKILL.md files with read_file.".into(), input_schema: model_schema_for::<EmptyAppArgs>() },
         ];
         if self.supports_vision {
@@ -143,6 +143,14 @@ impl App for FilesApp {
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
     ) -> Result<()> {
+        if context
+            .actor_call
+            .as_ref()
+            .is_some_and(|caller| caller.remote_read_only)
+            && matches!(call.name.as_str(), "write_file" | "edit_file" | "copy_file")
+        {
+            return Err(miette!("Authenticated remote authority is read-only"));
+        }
         if call.name == "copy_file" {
             let args: CopyFileArgs = serde_json::from_value(call.arguments.clone())
                 .map_err(|_| miette!("invalid copy_file arguments"))?;
@@ -334,14 +342,27 @@ mod tests {
 
     const BUILTIN_SKILL: &[u8] = b"---\nname: builtin-fixture\ndescription: Trusted test skill.\n---\nUse this built-in instruction.\n";
 
+    /// Fixtures that exercise missing-scope, built-in-exemption and
+    /// search boundaries must stay outside the system temporary
+    /// directories: the baseline temporary authorization would otherwise
+    /// mask the boundaries these tests verify.
+    fn non_temporary_scratch() -> tempfile::TempDir {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        std::fs::create_dir_all(&base).unwrap();
+        tempfile::Builder::new()
+            .prefix("notemp-files-app-")
+            .tempdir_in(&base)
+            .unwrap()
+    }
+
     fn builtin_context() -> (
         tempfile::TempDir,
         tempfile::TempDir,
         AppToolExecutionContext,
         PathBuf,
     ) {
-        let workspace = tempfile::tempdir().unwrap();
-        let resources = tempfile::tempdir().unwrap();
+        let workspace = non_temporary_scratch();
+        let resources = non_temporary_scratch();
         let cwd = workspace.path().canonicalize().unwrap();
         let root = resources.path().canonicalize().unwrap();
         let skill = root.join("skills/builtin-fixture/SKILL.md");
@@ -533,8 +554,8 @@ mod tests {
 
     #[tokio::test]
     async fn permission_request_is_effect_free_and_final_context_controls_access() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let dir = non_temporary_scratch();
+        let outside = non_temporary_scratch();
         let target = outside.path().join("new.txt");
         let mut policy = RuntimeSandboxPolicy::disabled();
         policy.filesystem.full_disk_read = false;

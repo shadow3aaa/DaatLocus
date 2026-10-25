@@ -12,8 +12,16 @@ impl crate::app::App for ScopeFixture {
             input_schema: crate::schema_utils::model_schema_for::<crate::app::EmptyAppArgs>(),
         }]
     }
-    fn review_requirement(&self, _: &AgentToolCall, _: &AppToolExecutionContext) -> miette::Result<Option<crate::actors::AppReview>> {
-        Ok(Some(crate::actors::AppReview::new("fixture/source-review/v1", "Review the source fixture effect", json!({"effect":"inspect"}))))
+    fn review_requirement(
+        &self,
+        _: &AgentToolCall,
+        _: &AppToolExecutionContext,
+    ) -> miette::Result<Option<crate::actors::AppReview>> {
+        Ok(Some(crate::actors::AppReview::new(
+            "fixture/source-review/v1",
+            "Review the source fixture effect",
+            json!({"effect":"inspect"}),
+        )))
     }
     async fn execute_tool(
         &mut self,
@@ -85,12 +93,32 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
         .await
         .unwrap();
     let actor = system.core_device_actor().unwrap();
-    let portable = crate::stage::shared_apps::manager(core.clone(), actor.clone(), system.clone()).unwrap();
-    let appeal = portable.model_tool_specs().unwrap().into_iter().find(|tool| tool.name == "actors__appeal_approval").unwrap();
-    let crate::model_protocol::AgentToolInputSpec::JsonSchema { schema } = appeal.input_spec else { panic!("permission control must expose a portable schema") };
+    let portable =
+        crate::stage::shared_apps::manager(core.clone(), actor.clone(), system.clone()).unwrap();
+    let appeal = portable
+        .model_tool_specs()
+        .unwrap()
+        .into_iter()
+        .find(|tool| tool.name == "actors__appeal_approval")
+        .unwrap();
+    let crate::model_protocol::AgentToolInputSpec::JsonSchema { schema } = appeal.input_spec else {
+        panic!("permission control must expose a portable schema")
+    };
     crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
-    for name in ["approval_id", "tool_result_id", "readable_roots", "writable_roots", "explanation"] {
-        assert!(schema["required"].as_array().unwrap().iter().any(|value| value == name));
+    for name in [
+        "approval_id",
+        "tool_result_id",
+        "readable_roots",
+        "writable_roots",
+        "explanation",
+    ] {
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == name)
+        );
     }
     let revision = super::super::digest(
         &serde_json::to_vec(&json!({"actor":actor.config,"configuration":system.config()}))
@@ -209,7 +237,10 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
         refused.payload["approval"]["approval_id"],
         "source-denied-approval"
     );
-    let extra = _directory.path().join("extra-scope");
+    // System temp is already readable by native processes. Exercise a real
+    // missing scope instead of requesting an approval for an exempt path.
+    let extra_root = crate::sandbox::test_support::scoped_directory();
+    let extra = extra_root.path().join("extra-scope");
     std::fs::create_dir(&extra).unwrap();
     let submitted = core
         .handle_approval_application(
@@ -250,26 +281,72 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
     );
     // Losing source authority while Ask is pending must cancel the record and
     // leave the effect unstarted, rather than only dropping the RPC future.
-    system.apply_owned_preferences(shared::ACTOR_ID, None, Some(crate::actors::ApprovalMode::Ask)).await.unwrap();
+    system
+        .apply_owned_preferences(
+            shared::ACTOR_ID,
+            None,
+            Some(crate::actors::ApprovalMode::Ask),
+        )
+        .await
+        .unwrap();
     let actor = system.core_device_actor().unwrap();
-    let revision = super::super::digest(&serde_json::to_vec(&json!({"actor":actor.config,"configuration":system.config()})).unwrap());
-    *core.device_apps.lock().await = Some((revision.clone(), AppManager::new(vec![Box::new(ScopeFixture(count.clone(), false))]).unwrap()));
-    let waiting = AgentToolCall { id: "wait-before-effect".into(), ..call.clone() };
-    let invoke = core.invoke(runtime.host.local, reply.epoch, input, "fixture", &revision, &waiting, false);
+    let revision = super::super::digest(
+        &serde_json::to_vec(&json!({"actor":actor.config,"configuration":system.config()}))
+            .unwrap(),
+    );
+    *core.device_apps.lock().await = Some((
+        revision.clone(),
+        AppManager::new(vec![Box::new(ScopeFixture(count.clone(), false))]).unwrap(),
+    ));
+    let waiting = AgentToolCall {
+        id: "wait-before-effect".into(),
+        ..call.clone()
+    };
+    let invoke = core.invoke(
+        runtime.host.local,
+        reply.epoch,
+        input,
+        "fixture",
+        &revision,
+        &waiting,
+        false,
+    );
     let lose_authority = async {
         let record = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if let Some(record) = system.store().pending_approvals(Some(shared::ACTOR_ID), None, 10).unwrap().items.into_iter().find(|record| record.call.id == waiting.id) { break record; }
+                if let Some(record) = system
+                    .store()
+                    .pending_approvals(Some(shared::ACTOR_ID), None, 10)
+                    .unwrap()
+                    .items
+                    .into_iter()
+                    .find(|record| record.call.id == waiting.id)
+                {
+                    break record;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.expect("source invocation must wait for Ask approval");
+        })
+        .await
+        .expect("source invocation must wait for Ask approval");
         *core.fence.lock() = Fence::default();
         record.id
     };
-    let (result, id) = tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(invoke, lose_authority) }).await.expect("source review cancellation must finish");
+    let (result, id) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(invoke, lose_authority)
+    })
+    .await
+    .expect("source review cancellation must finish");
     assert!(result.is_err());
-    assert_eq!(system.store().approval(&id).unwrap().decision, crate::actors::ApprovalDecision::Cancelled);
-    assert_eq!(count.load(Ordering::SeqCst), 2, "authority loss must not execute the waiting effect");
+    assert_eq!(
+        system.store().approval(&id).unwrap().decision,
+        crate::actors::ApprovalDecision::Cancelled
+    );
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        2,
+        "authority loss must not execute the waiting effect"
+    );
     coordinator.stop().await;
     system.shutdown().await;
 }

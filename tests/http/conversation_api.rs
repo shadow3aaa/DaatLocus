@@ -10,6 +10,54 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 #[tokio::test]
+async fn initial_message_page_includes_the_active_input_outside_its_history_window() {
+    let fixture = Fixture::new().await;
+    let active = fixture
+        .system
+        .send_user("root", "Long-running input".into(), vec![], None)
+        .unwrap();
+    fixture.system.store().claim_next("root").unwrap().unwrap();
+    for index in 0..5 {
+        fixture
+            .system
+            .send_user("root", format!("Incoming {index}"), vec![], None)
+            .unwrap();
+    }
+    let response = fixture
+        .owner(reqwest::Method::GET, "/v1/actors/root/messages?limit=2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: Value = response.json().await.unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert!(
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["id"] != active.id)
+    );
+    assert_eq!(page["active"]["id"], active.id);
+    assert_eq!(page["active"]["status"], "running");
+    assert!(page["active"].get("remote_authority").is_none());
+    assert!(page["active"].get("delegation_grant").is_none());
+    let cursor = page["next_cursor"].as_i64().unwrap();
+    let earlier: Value = fixture
+        .owner(
+            reqwest::Method::GET,
+            &format!("/v1/actors/root/messages?before={cursor}&limit=2"),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(earlier.get("active").is_none());
+}
+
+#[tokio::test]
 async fn actor_catalog_pages_keep_stable_order_without_loading_the_whole_catalog() {
     let fixture = Fixture::new().await;
     for name in ["page-a", "page-b", "page-c", "page-d"] {
@@ -54,88 +102,7 @@ async fn actor_catalog_pages_keep_stable_order_without_loading_the_whole_catalog
 }
 
 #[tokio::test]
-async fn queue_guidance_is_versioned_scoped_and_survives_a_finishing_target() {
-    use daat_locus::actors::{MessageKind, MessageStatus};
-    let fixture = Fixture::new().await;
-    let actor = fixture.child("guidance").await;
-    let target = fixture
-        .system
-        .send_user(&actor, "current task".into(), vec![], None)
-        .unwrap();
-    fixture.system.store().claim_next(&actor).unwrap().unwrap();
-    let input = fixture
-        .system
-        .send_user(&actor, "guide this task".into(), vec![], None)
-        .unwrap();
-    let path = format!("/v1/actors/{actor}/messages/{}/steer", input.id);
-    assert_eq!(
-        fixture
-            .client
-            .post(format!("{}{path}", fixture.url))
-            .header("origin", &fixture.url)
-            .header("x-daat-request", "1")
-            .json(
-                &json!({"target_message_id":target.id,"expected_updated_at_ms":input.updated_at_ms})
-            )
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(fixture.owner(reqwest::Method::POST,&path).json(&json!({"target_message_id":target.id,"expected_updated_at_ms":input.updated_at_ms-1})).send().await.unwrap().status(),StatusCode::CONFLICT);
-    let queued = fixture
-        .owner(
-            reqwest::Method::GET,
-            &format!("/v1/actors/{actor}/queue?limit=1"),
-        )
-        .send()
-        .await
-        .unwrap()
-        .json::<Value>()
-        .await
-        .unwrap();
-    assert_eq!(queued["items"][0]["id"], input.id);
-    assert_eq!(
-        fixture
-            .owner(reqwest::Method::POST, &path)
-            .json(
-                &json!({"target_message_id":target.id,"expected_updated_at_ms":input.updated_at_ms})
-            )
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
-    assert_eq!(
-        fixture.system.store().message(&input.id).unwrap().kind,
-        MessageKind::Steering
-    );
-    fixture
-        .system
-        .store()
-        .finish_message(&target.id, MessageStatus::Completed, Some("finished"), None)
-        .unwrap();
-    let restored = fixture.system.store().message(&input.id).unwrap();
-    assert_eq!(restored.kind, MessageKind::Request);
-    assert_eq!(restored.status, MessageStatus::Queued);
-    assert_eq!(restored.content, "guide this task");
-    assert_eq!(
-        fixture
-            .system
-            .store()
-            .claim_next(&actor)
-            .unwrap()
-            .unwrap()
-            .id,
-        input.id
-    );
-    fixture.system.shutdown().await;
-}
-
-#[tokio::test]
-async fn queued_edit_withdraw_and_clear_are_atomic_and_do_not_steer_running_work() {
+async fn queued_edit_withdraw_and_clear_are_atomic_and_do_not_mutate_running_work() {
     let fixture = Fixture::new().await;
     let send = |content: &str| {
         fixture
@@ -195,7 +162,7 @@ async fn queued_clear_preserves_actor_requests_and_started_work() {
     fixture.system.store().claim_next("root").unwrap().unwrap();
     let delegated = fixture
         .system
-        .send_from_actor("root", &root.id, &actor, "collaboration".into())
+        .message_from_actor("root", &root.id, &actor, "collaboration".into())
         .unwrap();
     let own = fixture
         .system

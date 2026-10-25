@@ -216,7 +216,7 @@ mod tests {
 
     #[tokio::test]
     async fn present_reuses_generic_resources_and_snapshots_authorized_local_images() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::sandbox::test_support::scoped_directory();
         let _home =
             crate::daat_locus_paths::DaatLocusHomeOverride::set(temporary.path().join("profile"))
                 .await;

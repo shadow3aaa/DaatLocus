@@ -50,11 +50,53 @@ pub struct WriteFileArgs {
 #[model_schema]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct EditFileArgs {
-    pub path: String,
+pub struct EditFileEntry {
     pub old_text: String,
     pub new_text: String,
+}
+
+#[model_schema]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditFileArgs {
+    pub path: String,
+    /// Single-edit form (mutually exclusive with `edits`): the exact unique
+    /// text to replace, matched with LF/CRLF equivalence.
+    pub old_text: Option<String>,
+    /// Single-edit form replacement text (required when old_text is given).
+    pub new_text: Option<String>,
+    /// Ordered multi-edit form (mutually exclusive with `old_text` and
+    /// `new_text`): each entry must match uniquely in the progressively
+    /// updated text; a failing entry aborts the whole batch before any write.
+    pub edits: Option<Vec<EditFileEntry>>,
     pub expected_sha256: String,
+}
+
+impl EditFileArgs {
+    /// The ordered edits to apply, resolving the single pair to a batch of one.
+    fn resolved_edits(&self) -> Result<Vec<EditFileEntry>> {
+        match (&self.edits, &self.old_text, &self.new_text) {
+            (Some(edits), None, None) => {
+                if edits.is_empty() {
+                    return Err(miette!("edits must not be empty"));
+                }
+                Ok(edits.clone())
+            }
+            (Some(_), _, _) => Err(miette!(
+                "edits cannot be combined with old_text or new_text"
+            )),
+            (None, Some(old_text), Some(new_text)) => Ok(vec![EditFileEntry {
+                old_text: old_text.clone(),
+                new_text: new_text.clone(),
+            }]),
+            (None, Some(_), None) | (None, None, Some(_)) => {
+                Err(miette!("old_text and new_text must be provided together"))
+            }
+            (None, None, None) => Err(miette!(
+                "provide either old_text and new_text or a non-empty edits array"
+            )),
+        }
+    }
 }
 
 #[model_schema]
@@ -588,6 +630,49 @@ pub(crate) fn read_authorized_bytes(
     Ok(bytes)
 }
 
+/// Read at most the leading `limit` bytes of a file for bounded inspection.
+/// Unlike [`read_bytes`], oversized files are truncated instead of rejected.
+pub(crate) fn read_prefix(
+    path: &Path,
+    limit: u64,
+    policy: &RuntimeSandboxPolicy,
+) -> Result<Vec<u8>> {
+    guarded_directory::local_path(path)
+        .map_err(|_| miette!("remote or device file paths are unsupported"))?;
+    policy.ensure_path_readable(path, "file target")?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| miette!("unable to read file"))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_DISK, GetFileType};
+        if unsafe { GetFileType(file.as_raw_handle().cast()) } != FILE_TYPE_DISK {
+            return Err(miette!("file target is not on a local filesystem"));
+        }
+    }
+    let actual = opened_file_path(&file, path)?;
+    policy.ensure_path_readable(&actual, "opened file")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| miette!("unable to inspect file"))?;
+    if !metadata.is_file() {
+        return Err(miette!("file target is not a regular file"));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len().min(limit) as usize);
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|_| miette!("unable to read file"))?;
+    Ok(bytes)
+}
+
 fn check_opened_file(
     file: &fs::File,
     path: &Path,
@@ -1034,30 +1119,109 @@ pub fn copy_file(
     )
 }
 
-pub fn edit_file(
-    cwd: &Path,
-    policy: &RuntimeSandboxPolicy,
-    args: &EditFileArgs,
-) -> Result<FileWriteResult> {
-    if args.old_text.is_empty() {
+/// The line ending a matched region of text actually uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditLineEnding {
+    Lf,
+    Crlf,
+}
+
+/// Collapses CRLF line endings to LF for line-ending-equivalent matching.
+/// Removing an ASCII carriage return cannot break a multi-byte sequence.
+fn normalize_line_endings_to_lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+/// The original byte offset that corresponds to `target` normalized (LF)
+/// byte offset after CRLF collapsing, walking the text without materializing
+/// a per-byte offset table.
+fn original_offset_for_normalized(content: &str, target: usize) -> usize {
+    let bytes = content.as_bytes();
+    let mut normalized = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() && normalized < target {
+        if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+            normalized += 1;
+            index += 2;
+        } else {
+            normalized += 1;
+            index += 1;
+        }
+    }
+    index
+}
+
+/// The first line ending in `text`, if it contains any.
+fn first_line_ending(text: &str) -> Option<EditLineEnding> {
+    let bytes = text.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            return Some(if index > 0 && bytes[index - 1] == b'\r' {
+                EditLineEnding::Crlf
+            } else {
+                EditLineEnding::Lf
+            });
+        }
+    }
+    None
+}
+
+/// The line ending a text uses most; a tie keeps the first one seen.
+fn dominant_line_ending(text: &str) -> Option<EditLineEnding> {
+    let bytes = text.as_bytes();
+    let mut crlf = 0usize;
+    let mut lf = 0usize;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            if index > 0 && bytes[index - 1] == b'\r' {
+                crlf += 1;
+            } else {
+                lf += 1;
+            }
+        }
+    }
+    if crlf == 0 && lf == 0 {
+        None
+    } else if crlf == lf {
+        first_line_ending(text)
+    } else if crlf > lf {
+        Some(EditLineEnding::Crlf)
+    } else {
+        Some(EditLineEnding::Lf)
+    }
+}
+
+/// Rewrites every line ending in `text` to `ending`.
+fn rewrite_line_endings(text: &str, ending: EditLineEnding) -> String {
+    let normalized = text.replace("\r\n", "\n");
+    match ending {
+        EditLineEnding::Lf => normalized,
+        EditLineEnding::Crlf => normalized.replace('\n', "\r\n"),
+    }
+}
+
+/// Replaces the single occurrence of `old_text` while treating LF and CRLF
+/// as equivalent, then writes `new_text` with the line endings the matched
+/// region actually uses (a region without line endings falls back to the
+/// file's dominant ending; a file without any keeps `new_text` unchanged).
+/// Bytes outside the match are preserved exactly.
+fn apply_line_ending_tolerant_edit(
+    content: &str,
+    old_text: &str,
+    new_text: &str,
+) -> Result<String> {
+    if old_text.is_empty() {
         return Err(miette!("old_text must not be empty"));
     }
-    let _guard = FILE_WRITES
-        .lock()
-        .map_err(|_| miette!("file write lock is unavailable"))?;
-    let path = authorized_path(cwd, policy, &args.path, true)?;
-    policy.ensure_path_readable(&path, "existing file")?;
-    let bytes = read_bytes(&path, u64::MAX, policy)?;
-    check_hash(&bytes, &args.expected_sha256)?;
-    let mut content =
-        String::from_utf8(bytes.clone()).map_err(|_| miette!("file is not UTF-8 text"))?;
-    let mut matches = content
+    let normalized = normalize_line_endings_to_lf(content);
+    let old_normalized = normalize_line_endings_to_lf(old_text);
+    let mut matches = normalized
         .as_bytes()
-        .windows(args.old_text.len())
+        .windows(old_normalized.len())
         .enumerate()
-        .filter(|(_, window)| *window == args.old_text.as_bytes())
+        .filter(|(_, window)| *window == old_normalized.as_bytes())
         .map(|(offset, _)| offset);
-    let offset = matches
+    let start = matches
         .next()
         .ok_or_else(|| miette!("old_text does not occur in the file"))?;
     if matches.next().is_some() {
@@ -1065,7 +1229,62 @@ pub fn edit_file(
             "old_text is ambiguous; include more surrounding text"
         ));
     }
-    content.replace_range(offset..offset + args.old_text.len(), &args.new_text);
+    let end = start + old_normalized.len();
+    let (original_start, original_end) = (
+        original_offset_for_normalized(content, start),
+        original_offset_for_normalized(content, end),
+    );
+    let matched = &content[original_start..original_end];
+    let ending = first_line_ending(matched).or_else(|| dominant_line_ending(content));
+    let replacement = match ending {
+        Some(ending) => rewrite_line_endings(new_text, ending),
+        None => new_text.to_owned(),
+    };
+    let mut edited =
+        String::with_capacity(content.len() - (original_end - original_start) + replacement.len());
+    edited.push_str(&content[..original_start]);
+    edited.push_str(&replacement);
+    edited.push_str(&content[original_end..]);
+    Ok(edited)
+}
+
+/// Applies every edit in order on the progressively updated text. Each edit
+/// must match uniquely; the first failing edit aborts the whole batch with
+/// its position, and nothing is written.
+fn apply_edit_batch(content: &str, edits: &[EditFileEntry]) -> Result<String> {
+    if edits.is_empty() {
+        return Err(miette!("edits must not be empty"));
+    }
+    let mut edited = content.to_owned();
+    let total = edits.len();
+    for (index, edit) in edits.iter().enumerate() {
+        edited = apply_line_ending_tolerant_edit(&edited, &edit.old_text, &edit.new_text)
+            .map_err(|error| miette!("edit {} of {} failed: {error}", index + 1, total))?;
+    }
+    Ok(edited)
+}
+
+/// Applies one ordered batch of text edits with a single write: either the
+/// single `old_text`/`new_text` pair or the `edits` array. Every edit must
+/// match uniquely (LF/CRLF equivalent) in the progressively updated text and
+/// is written with the matched region's line endings; a failing edit aborts
+/// the whole batch before anything is written.
+pub fn edit_file(
+    cwd: &Path,
+    policy: &RuntimeSandboxPolicy,
+    args: &EditFileArgs,
+) -> Result<FileWriteResult> {
+    let edits = args.resolved_edits()?;
+    let _guard = FILE_WRITES
+        .lock()
+        .map_err(|_| miette!("file write lock is unavailable"))?;
+    let path = authorized_path(cwd, policy, &args.path, true)?;
+    policy.ensure_path_readable(&path, "existing file")?;
+    let bytes = read_bytes(&path, u64::MAX, policy)?;
+    check_hash(&bytes, &args.expected_sha256)?;
+    let content =
+        String::from_utf8(bytes.clone()).map_err(|_| miette!("file is not UTF-8 text"))?;
+    let content = apply_edit_batch(&content, &edits)?;
     let permissions = fs::metadata(&path)
         .map_err(|_| miette!("unable to inspect file"))?
         .permissions();
@@ -1131,8 +1350,21 @@ pub fn view_image(
 mod tests {
     const BUILTIN_BYTES: &[u8] = b"trusted built-in instructions\n";
 
+    /// Fixtures that exercise missing-scope, built-in-exemption and
+    /// search boundaries must stay outside the system temporary
+    /// directories: the baseline temporary authorization would otherwise
+    /// mask the boundaries these tests verify.
+    fn non_temporary_scratch() -> tempfile::TempDir {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        std::fs::create_dir_all(&base).unwrap();
+        tempfile::Builder::new()
+            .prefix("notemp-file-io-")
+            .tempdir_in(&base)
+            .unwrap()
+    }
+
     fn builtin_fixture() -> (tempfile::TempDir, RuntimeSandboxPolicy, PathBuf) {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = non_temporary_scratch();
         let root = directory.path().canonicalize().unwrap();
         let path = root.join("skills/computer-use/SKILL.md");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1320,8 +1552,9 @@ mod tests {
                 &policy,
                 &EditFileArgs {
                     path: path.display().to_string(),
-                    old_text: "trusted".into(),
-                    new_text: "modified".into(),
+                    old_text: Some("trusted".into()),
+                    new_text: Some("modified".into()),
+                    edits: None,
                     expected_sha256: sha256(BUILTIN_BYTES),
                 },
             )
@@ -1367,8 +1600,9 @@ mod tests {
             &policy,
             &EditFileArgs {
                 path: path.display().to_string(),
-                old_text: "replacement".into(),
-                new_text: "modified".into(),
+                old_text: Some("replacement".into()),
+                new_text: Some("modified".into()),
+                edits: None,
                 expected_sha256: sha256(b"replacement"),
             },
         )
@@ -1571,6 +1805,264 @@ mod tests {
         );
     }
 
+    #[test]
+    fn edit_matches_across_line_endings_and_writes_the_region_style() {
+        // CRLF file x LF old: the match succeeds and new_text is written CRLF.
+        let edited = apply_line_ending_tolerant_edit(
+            "alpha\r\nbeta line\r\ngamma\r\n",
+            "beta line\ngamma",
+            "delta\nepsilon",
+        )
+        .unwrap();
+        assert_eq!(edited, "alpha\r\ndelta\r\nepsilon\r\n");
+        // LF file x CRLF old: the match succeeds and new_text is written LF.
+        let edited = apply_line_ending_tolerant_edit(
+            "alpha\nbeta line\ngamma\n",
+            "beta line\r\ngamma",
+            "delta\r\nepsilon",
+        )
+        .unwrap();
+        assert_eq!(edited, "alpha\ndelta\nepsilon\n");
+        // Identical line endings in both directions.
+        let edited = apply_line_ending_tolerant_edit("a\r\nb\r\n", "a\r\nb", "x\r\ny").unwrap();
+        assert_eq!(edited, "x\r\ny\r\n");
+        let edited = apply_line_ending_tolerant_edit("a\nb\n", "a\nb", "x\ny").unwrap();
+        assert_eq!(edited, "x\ny\n");
+    }
+
+    #[test]
+    fn edit_preserves_untouched_line_endings_in_mixed_files() {
+        // A mixed file keeps every untouched byte; the matched region's own
+        // line ending wins for the replacement.
+        let content = "one\r\ntwo\nthree\r\nfour\nfive\r\n";
+        let edited =
+            apply_line_ending_tolerant_edit(content, "two\nthree", "TWO\nTHREE\nMORE").unwrap();
+        assert_eq!(edited, "one\r\nTWO\nTHREE\nMORE\r\nfour\nfive\r\n");
+        // A single-line match has no local line ending and falls back to the
+        // dominant file ending (CRLF here).
+        let edited =
+            apply_line_ending_tolerant_edit(content, "four", "four-and-a-half\nnext").unwrap();
+        assert_eq!(
+            edited,
+            "one\r\ntwo\nthree\r\nfour-and-a-half\r\nnext\nfive\r\n"
+        );
+    }
+
+    #[test]
+    fn edit_match_errors_keep_their_semantics_on_the_normalized_view() {
+        let error = apply_line_ending_tolerant_edit("a\nb\n", "missing", "x").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("old_text does not occur in the file"),
+            "{error}"
+        );
+        // Two occurrences that differ only in line endings are ambiguous.
+        let error =
+            apply_line_ending_tolerant_edit("keep\nnext\na\nkeep\r\nnext\nb\n", "keep\nnext", "x")
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("old_text is ambiguous"),
+            "{error}"
+        );
+        // Two byte-identical occurrences stay ambiguous.
+        let error = apply_line_ending_tolerant_edit("x\ny\nx\ny\n", "x\ny", "z").unwrap_err();
+        assert!(
+            error.to_string().contains("old_text is ambiguous"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn edit_keeps_bom_and_non_ascii_content() {
+        let content = "\u{feff}# 标题\r\n第一行\r\n第二行\r\n结尾\r\n";
+        let edited =
+            apply_line_ending_tolerant_edit(content, "第一行\n第二行", "甲\n乙\n丙").unwrap();
+        assert_eq!(edited, "\u{feff}# 标题\r\n甲\r\n乙\r\n丙\r\n结尾\r\n");
+        // No line ending in the match or the file: new_text is kept as provided.
+        let edited = apply_line_ending_tolerant_edit("单行", "单行", "单行\n继续").unwrap();
+        assert_eq!(edited, "单行\n继续");
+    }
+
+    fn edit_entry(old_text: &str, new_text: &str) -> EditFileEntry {
+        EditFileEntry {
+            old_text: old_text.into(),
+            new_text: new_text.into(),
+        }
+    }
+
+    fn edit_args(
+        old_text: Option<&str>,
+        new_text: Option<&str>,
+        edits: Option<Vec<EditFileEntry>>,
+    ) -> EditFileArgs {
+        EditFileArgs {
+            path: "a.txt".into(),
+            old_text: old_text.map(str::to_owned),
+            new_text: new_text.map(str::to_owned),
+            edits,
+            expected_sha256: String::new(),
+        }
+    }
+
+    #[test]
+    fn edit_forms_are_mutually_exclusive_and_resolve_to_ordered_batches() {
+        assert_eq!(
+            edit_args(Some("a"), Some("b"), None)
+                .resolved_edits()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            edit_args(
+                None,
+                None,
+                Some(vec![edit_entry("a", "b"), edit_entry("c", "d")])
+            )
+            .resolved_edits()
+            .unwrap()
+            .len(),
+            2
+        );
+        assert!(
+            edit_args(None, None, Some(Vec::new()))
+                .resolved_edits()
+                .unwrap_err()
+                .to_string()
+                .contains("edits must not be empty")
+        );
+        assert!(
+            edit_args(Some("a"), Some("b"), Some(vec![edit_entry("a", "b")]))
+                .resolved_edits()
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be combined")
+        );
+        assert!(edit_args(None, None, None).resolved_edits().is_err());
+        assert!(edit_args(Some("a"), None, None).resolved_edits().is_err());
+        assert!(edit_args(None, Some("b"), None).resolved_edits().is_err());
+    }
+
+    #[test]
+    fn edit_batch_applies_every_hunk_on_progressively_updated_content() {
+        // The third edit can only match text the second edit produced.
+        let edited = apply_edit_batch(
+            "alpha\r\nbeta\r\ngamma\r\ndelta\r\n",
+            &[
+                edit_entry("alpha\nbeta", "one\ntwo"),
+                edit_entry("two\ngamma", "two\nTHREE"),
+                edit_entry("THREE\ndelta", "THREE\nend"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(edited, "one\r\ntwo\r\nTHREE\r\nend\r\n");
+        // An LF file keeps LF while CRLF payloads still match.
+        let edited = apply_edit_batch(
+            "alpha\nbeta\ngamma\n",
+            &[
+                edit_entry("alpha\r\nbeta", "one\ntwo"),
+                edit_entry("two\r\ngamma", "two\nTHREE"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(edited, "one\ntwo\nTHREE\n");
+    }
+
+    #[test]
+    fn edit_batch_reports_the_failing_entry_and_aborts() {
+        let error = apply_edit_batch(
+            "alpha\nbeta\n",
+            &[edit_entry("alpha", "one"), edit_entry("missing", "two")],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("edit 2 of 2 failed"), "{error}");
+        assert!(
+            error.to_string().contains("does not occur in the file"),
+            "{error}"
+        );
+        let error = apply_edit_batch("same\nsame\n", &[edit_entry("same", "one")]).unwrap_err();
+        assert!(error.to_string().contains("edit 1 of 1 failed"), "{error}");
+        assert!(error.to_string().contains("ambiguous"), "{error}");
+        assert!(
+            apply_edit_batch("same\n", &[])
+                .unwrap_err()
+                .to_string()
+                .contains("edits must not be empty")
+        );
+    }
+
+    #[test]
+    fn edit_file_batch_abort_leaves_the_file_untouched() {
+        let dir = non_temporary_scratch();
+        let file = dir.path().join("doc.txt");
+        fs::write(&file, "alpha\r\nbeta\r\ngamma\r\n").unwrap();
+        let error = edit_file(
+            dir.path(),
+            &RuntimeSandboxPolicy::disabled(),
+            &EditFileArgs {
+                path: "doc.txt".into(),
+                old_text: None,
+                new_text: None,
+                edits: Some(vec![
+                    edit_entry("alpha\nbeta", "one\ntwo"),
+                    edit_entry("missing", "x"),
+                ]),
+                expected_sha256: sha256(b"alpha\r\nbeta\r\ngamma\r\n"),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("edit 2 of 2 failed"), "{error}");
+        assert_eq!(fs::read(&file).unwrap(), b"alpha\r\nbeta\r\ngamma\r\n");
+    }
+
+    #[test]
+    fn edit_file_single_pair_stays_supported() {
+        let dir = non_temporary_scratch();
+        let file = dir.path().join("doc.txt");
+        fs::write(&file, "alpha\n").unwrap();
+        let error = edit_file(
+            dir.path(),
+            &RuntimeSandboxPolicy::disabled(),
+            &EditFileArgs {
+                path: "doc.txt".into(),
+                old_text: Some("missing".into()),
+                new_text: Some("x".into()),
+                edits: None,
+                expected_sha256: sha256(b"alpha\n"),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("edit 1 of 1 failed"), "{error}");
+        assert_eq!(fs::read(&file).unwrap(), b"alpha\n");
+    }
+
+    #[test]
+    fn edit_file_batch_applies_all_edits_with_one_write() {
+        let dir = non_temporary_scratch();
+        let file = dir.path().join("doc.txt");
+        fs::write(&file, "alpha\r\nbeta\r\ngamma\r\n").unwrap();
+        let result = edit_file(
+            dir.path(),
+            &RuntimeSandboxPolicy::disabled(),
+            &EditFileArgs {
+                path: "doc.txt".into(),
+                old_text: None,
+                new_text: None,
+                edits: Some(vec![
+                    edit_entry("alpha\nbeta", "one\ntwo"),
+                    edit_entry("gamma", "gamma\nend"),
+                ]),
+                expected_sha256: sha256(b"alpha\r\nbeta\r\ngamma\r\n"),
+            },
+        )
+        .unwrap();
+        assert!(!result.created);
+        assert_eq!(result.byte_count, "one\r\ntwo\r\ngamma\r\nend\r\n".len());
+        assert_eq!(result.sha256, sha256(b"one\r\ntwo\r\ngamma\r\nend\r\n"));
+        assert_eq!(fs::read(&file).unwrap(), b"one\r\ntwo\r\ngamma\r\nend\r\n");
+    }
+
     fn read_args() -> ReadFileArgs {
         ReadFileArgs {
             path: "a.txt".into(),
@@ -1613,8 +2105,9 @@ mod tests {
         assert!(write_file(dir.path(), &policy, &args).is_err());
         let mut edit = EditFileArgs {
             path: "a.txt".into(),
-            old_text: "aa".into(),
-            new_text: "b".into(),
+            old_text: Some("aa".into()),
+            new_text: Some("b".into()),
+            edits: None,
             expected_sha256: created.sha256.clone(),
         };
         assert!(
@@ -1623,7 +2116,7 @@ mod tests {
                 .to_string()
                 .contains("ambiguous")
         );
-        edit.old_text = "aaa".into();
+        edit.old_text = Some("aaa".into());
         edit_file(dir.path(), &policy, &edit).unwrap();
         assert!(edit_file(dir.path(), &policy, &edit).is_err());
         args.expected_sha256 = Some(created.sha256);
@@ -1639,7 +2132,7 @@ mod tests {
 
     #[test]
     fn ensure_directory_preserves_readonly_and_checks_each_missing_parent() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = non_temporary_scratch();
         let root = dir.path().canonicalize().unwrap();
         let mut policy = RuntimeSandboxPolicy::disabled();
         policy.filesystem.full_disk_read = false;
@@ -1669,7 +2162,7 @@ mod tests {
 
     #[test]
     fn readonly_and_protected_paths_are_denied_before_access() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::sandbox::test_support::scoped_directory();
         let private = dir.path().join("private");
         fs::create_dir(&private).unwrap();
         fs::write(private.join("secret.txt"), "private").unwrap();
@@ -1896,7 +2389,7 @@ mod tests {
     #[test]
     fn subdirectory_search_inherits_repository_rules_and_stops_at_git_boundary() {
         for git_file in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = non_temporary_scratch();
             let outer = dir.path().canonicalize().unwrap();
             let root = outer.join("repo");
             let subdir = root.join("src/deep");

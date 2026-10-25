@@ -126,7 +126,12 @@ pub fn read(
             value["model_ready"] = crate::config_setup::readiness_for_config(&system.config()).is_complete().into();
             if manages{value["config"]=serde_json::to_value(&source.config).map_err(|_|StageError::Invalid("Invalid Actor config"))?;}Ok(value)
         },
-        Query::Messages {before,limit} => serde_json::to_value(system.store().messages(&actor.actor_id,*before,*limit as usize).map_err(fail)?),
+        Query::Messages {before,limit} => {
+            let page=system.store().messages(&actor.actor_id,*before,*limit as usize).map_err(fail)?;
+            let mut value=serde_json::to_value(page).map_err(|_|StageError::Invalid("Invalid message page"))?;
+            if before.is_none() { value["active"]=serde_json::to_value(system.store().current_message(&actor.actor_id).map_err(fail)?).map_err(|_|StageError::Invalid("Invalid active input"))?; }
+            Ok(value)
+        },
         Query::Search {text,before,limit} => serde_json::to_value(system.store().search_messages(&actor.actor_id,text,*before,*limit as usize).map_err(fail)?),
         Query::Message {id} => {let record=system.store().message(id).map_err(fail)?;if record.actor_id!=actor.actor_id{return Err(StageError::Forbidden("Message belongs to another Actor"));} serde_json::to_value(record)},
         Query::Results {message,before,limit} => serde_json::to_value(system.store().tool_summaries(&actor.actor_id,message,*before,*limit as usize).map_err(fail)?),

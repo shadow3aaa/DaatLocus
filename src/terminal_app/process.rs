@@ -109,6 +109,9 @@ impl TerminalProcess {
                 stdout: SandboxStdio::Piped,
                 stderr: SandboxStdio::Piped,
                 spawn_cancelled,
+                // Terminal children record native denials when the host
+                // supports deny-and-record; unsupported hosts ignore it.
+                capture_denials: true,
             },
         )?;
         let stdin = child.take_stdin();
@@ -185,6 +188,11 @@ impl TerminalProcess {
 
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         self.child.try_wait()
+    }
+
+    /// Native denial records captured for this process, when available.
+    pub(super) fn take_denials(&mut self) -> Vec<crate::sandbox::DenialRecord> {
+        self.child.take_denials()
     }
 
     pub fn output_len(&self) -> usize {

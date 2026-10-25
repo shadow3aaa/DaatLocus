@@ -404,7 +404,7 @@ async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
     unsafe {
         std::env::set_var("DL_MCP_AMBIENT_SECRET", "ambient-fixture");
     }
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::sandbox::test_support::scoped_directory();
     let system = actor_system(directory.path()).await;
     let mut context = system.owner_app_context().unwrap();
     context.actor_call.as_mut().unwrap().actor_id = "test-actor".into();

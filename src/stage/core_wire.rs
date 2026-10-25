@@ -109,11 +109,6 @@ pub enum Request {
         expected: i64,
         content: Option<String>,
     },
-    Steer {
-        message: String,
-        target: String,
-        expected: i64,
-    },
     Preferences {
         model_present: bool,
         model: Option<String>,
@@ -141,6 +136,12 @@ pub enum Request {
         revision: String,
         call: AgentToolCall,
         identity_read_only: bool,
+    },
+    InvocationPause {
+        epoch: u64,
+        message: String,
+        call_id: String,
+        paused: bool,
     },
     ToolResult {
         message: String,
@@ -178,7 +179,7 @@ pub enum Response {
     QueueCleared {
         count: usize,
     },
-    Steered {
+    Amended {
         message: Box<MessageRecord>,
     },
     Catalog {
@@ -192,6 +193,9 @@ pub enum Response {
         batches: Vec<Batch>,
     },
     InputAccepted,
+    InvocationPaused {
+        paused: bool,
+    },
     ToolResult {
         result: Option<AppToolExecutionResult>,
         uncertain: bool,

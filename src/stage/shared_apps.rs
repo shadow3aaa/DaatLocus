@@ -53,10 +53,13 @@ struct ListArgs {
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct SendArgs {
+struct MessageArgs {
     stage_id: String,
     actor_id: String,
+    reply_to: Option<String>,
     content: String,
+    /// Show a task link in the user's Core conversation. False keeps this coordination internal.
+    show_to_user: bool,
 }
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
@@ -64,15 +67,6 @@ struct SendArgs {
 struct RequestArgs {
     stage_id: String,
     message_id: String,
-}
-
-#[model_schema]
-#[derive(Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct SteerArgs {
-    stage_id: String,
-    message_id: String,
-    content: String,
 }
 
 #[model_schema]
@@ -127,8 +121,7 @@ impl App for AccountActors {
             "list"
                 | "create"
                 | "import_conversation"
-                | "send"
-                | "steer"
+                | "message"
                 | "status"
                 | "cancel"
                 | "archive"
@@ -142,8 +135,7 @@ impl App for AccountActors {
                 "list" => model_schema_for::<ListArgs>(),
                 "create" => model_schema_for::<CreateArgs>(),
                 "import_conversation" => model_schema_for::<ImportArgs>(),
-                "send" => model_schema_for::<SendArgs>(),
-                "steer" => model_schema_for::<SteerArgs>(),
+                "message" => model_schema_for::<MessageArgs>(),
                 "status" | "cancel" => model_schema_for::<RequestArgs>(),
                 "archive" | "unarchive" => model_schema_for::<ArchiveArgs>(),
                 "resolve_approval_appeal" => model_schema_for::<ResolveAppealArgs>(),
@@ -218,6 +210,19 @@ impl App for AccountActors {
                 .ok_or_else(|| miette::miette!("Select an explicit device"))?,
         )
         .map_err(|_| miette::miette!("Invalid target device"))?;
+        if matches!(call.name.as_str(), "status" | "cancel")
+            && stage == self.system.store().public_stage_id()?
+            && call
+                .arguments
+                .get("message_id")
+                .and_then(|id| id.as_str())
+                .and_then(|id| self.system.store().message(id).ok())
+                .is_some_and(|input| input.actor_id == shared::ACTOR_ID)
+        {
+            let mut local = call.clone();
+            local.arguments["stage_id"] = serde_json::Value::Null;
+            return self.local.execute_tool(&local, context).await;
+        }
         let Response::Catalog { apps } = self
             .controller
             .request(

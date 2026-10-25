@@ -19,16 +19,60 @@ use wxc_common::{
     filesystem_object::normalize_object_conflicts,
     logger::{Logger, Mode},
     models::{
-        BaseProcessUiConfig, ContainerPolicy, ExecutionRequest, FallbackPolicy, NetworkAction,
-        NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy, UiPolicy,
+        BaseProcessUiConfig, CaptureDenialsConfig, ContainerPolicy, ExecutionRequest,
+        FallbackPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy,
+        UiPolicy,
     },
     sandbox_process::{SandboxBackend, SandboxProcess, StdioMode},
 };
 
-use super::{SandboxPolicy, SandboxProcessOptions, SandboxStdio, policy_paths_with_resolved};
+use super::{
+    SandboxPolicy, SandboxProcessOptions, SandboxStdio, policy_paths_with_resolved,
+    system_temporary_paths,
+};
+use crate::denial::{DenialRecord, MAX_CAPTURE_DENIALS, denials_from_capture_document};
 
 #[link(name = "advapi32")]
 unsafe extern "system" {}
+
+/// Prefix of the per-spawn directory that owns the captureDenials output file.
+const CAPTURE_DIRECTORY_PREFIX: &str = "daat-locus-capture-";
+/// Upper bound for one captureDenials JSON document read back from disk.
+const MAX_CAPTURE_DOCUMENT_BYTES: u64 = 1024 * 1024;
+
+/// Creates the per-spawn directory for a captureDenials output document.
+/// Errors leave capture disabled rather than failing the spawn.
+fn prepare_capture_document_path() -> Option<PathBuf> {
+    let directory = std::env::temp_dir().join(format!(
+        "{CAPTURE_DIRECTORY_PREFIX}{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).ok()?;
+    Some(directory.join("denials.json"))
+}
+
+/// Bounded read of a captureDenials JSON document written by the runner.
+fn read_capture_document(path: &Path) -> Option<(Vec<DenialRecord>, bool)> {
+    use std::io::Read;
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_CAPTURE_DOCUMENT_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_CAPTURE_DOCUMENT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_CAPTURE_DOCUMENT_BYTES {
+        return None;
+    }
+    Some(denials_from_capture_document(&bytes, MAX_CAPTURE_DENIALS))
+}
 
 pub struct WindowsSandboxAsyncChild {
     process: Mutex<Box<dyn SandboxProcess>>,
@@ -37,6 +81,8 @@ pub struct WindowsSandboxAsyncChild {
     stderr: Option<DuplexStream>,
     status: Option<ExitStatus>,
     shutdown: watch::Sender<()>,
+    capture_output: Option<PathBuf>,
+    denials: Option<Vec<DenialRecord>>,
 }
 
 impl WindowsSandboxAsyncChild {
@@ -61,8 +107,67 @@ impl WindowsSandboxAsyncChild {
             // releasing PSEC. Output pumps continue draining the taken pipes.
             let code = self.process.get_mut().wait()?;
             self.status = Some(ExitStatus::from_raw(code as u32));
+            self.harvest_captured_denials();
         }
         Ok(self.status)
+    }
+
+    /// Reads and clears the capture document once this child reached a
+    /// terminal state; bounded, best-effort, and local to this spawn.
+    fn harvest_captured_denials(&mut self) {
+        if self.denials.is_some() {
+            return;
+        }
+        let mut document_path = self
+            .process
+            .get_mut()
+            .output_metadata()
+            .and_then(|metadata| metadata.capture_denials.as_ref())
+            .map(|capture| PathBuf::from(&capture.output_path));
+        if document_path.is_none()
+            && let Some(configured) = &self.capture_output
+            && let Some(directory) = configured.parent()
+            && let Ok(entries) = std::fs::read_dir(directory)
+        {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with("denials") {
+                    document_path = Some(entry.path());
+                    break;
+                }
+            }
+        }
+        if self.capture_output.is_some() {
+            self.denials = Some(
+                document_path
+                    .as_deref()
+                    .and_then(read_capture_document)
+                    .map(|(records, _truncated)| records)
+                    .unwrap_or_default(),
+            );
+        }
+        self.remove_capture_directory();
+    }
+
+    /// Native denial records captured for this child, if any.
+    pub fn take_denials(&mut self) -> Vec<DenialRecord> {
+        self.denials.take().unwrap_or_default()
+    }
+
+    /// Deletes the per-spawn capture directory this child owns, if any.
+    fn remove_capture_directory(&self) {
+        let Some(directory) = self
+            .capture_output
+            .as_deref()
+            .and_then(|path| path.parent())
+        else {
+            return;
+        };
+        let owned = directory
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(CAPTURE_DIRECTORY_PREFIX));
+        if owned {
+            let _ = std::fs::remove_dir_all(directory);
+        }
     }
 }
 
@@ -93,7 +198,23 @@ pub fn spawn_restricted_async(
             "Windows process isolation requires usable MXC/PSEC; update Windows to a supported build",
         ));
     }
-    let request = build_request(policy, program, args, &options)?;
+    // Deny-and-record capture is enabled only when this host can run the
+    // native PSEC/V2 learning-mode trace: the request then keeps every
+    // denial enforced and only records it. Unsupported hosts keep today's
+    // behavior (no capture, no guarded-WPR/UAC fallback).
+    let mut capture_output =
+        if options.capture_denials && BaseContainerRunner::is_capture_denials_usable() {
+            prepare_capture_document_path()
+        } else {
+            None
+        };
+    let mut request = build_request(policy, program, args.clone(), &options)?;
+    if let Some(capture_document) = capture_output.as_deref() {
+        request.policy.capture_denials = Some(CaptureDenialsConfig {
+            output_path: Some(unicode(capture_document)?),
+            ..Default::default()
+        });
+    }
     if !request.policy.denied_paths.is_empty()
         && !SecurityEnvironmentApi::load()
             .map_err(io::Error::other)?
@@ -122,17 +243,39 @@ pub fn spawn_restricted_async(
     // native spawns so they cannot capture these process-private channels.
     let creation = crate::process_spawn::creation_lock()?;
     cancelled(&options)?;
-    let mut process = BaseContainerRunner::new()
-        .spawn(
-            &request,
-            &mut logger,
-            if inherited {
-                StdioMode::Inherit
+    let mut process = match BaseContainerRunner::new().spawn(
+        &request,
+        &mut logger,
+        if inherited {
+            StdioMode::Inherit
+        } else {
+            StdioMode::Pipes
+        },
+    ) {
+        Ok(process) => process,
+        Err(error) => {
+            // A host that advertised capture but cannot complete it must keep
+            // today's behavior instead of failing the spawn: retry once with
+            // capture disabled when the refusal is capture-specific.
+            if capture_output.is_some() && error.error_message.contains("captureDenials") {
+                capture_output = None;
+                let request = build_request(policy, program, args, &options)?;
+                BaseContainerRunner::new()
+                    .spawn(
+                        &request,
+                        &mut logger,
+                        if inherited {
+                            StdioMode::Inherit
+                        } else {
+                            StdioMode::Pipes
+                        },
+                    )
+                    .map_err(|error| io::Error::other(error.error_message))?
             } else {
-                StdioMode::Pipes
-            },
-        )
-        .map_err(|error| io::Error::other(error.error_message))?;
+                return Err(io::Error::other(error.error_message));
+            }
+        }
+    };
     drop(creation);
     // Never publish SDK logs: they can contain command/environment secrets.
     cancelled(&options)?; // SDK Drop kills the tree if startup was cancelled.
@@ -169,6 +312,8 @@ pub fn spawn_restricted_async(
         stderr,
         status: None,
         shutdown,
+        capture_output,
+        denials: None,
     })
 }
 
@@ -176,6 +321,7 @@ impl Drop for WindowsSandboxAsyncChild {
     fn drop(&mut self) {
         let _ = self.process.get_mut().kill();
         let _ = self.shutdown.send(());
+        self.remove_capture_directory();
     }
 }
 
@@ -372,6 +518,10 @@ fn build_request(
     if fs.full_disk_write {
         write.extend(volumes()?);
     }
+    // The platform's shared temporary directories are baseline-authorized:
+    // sandboxed children always receive them without any approval scope.
+    read.extend(system_temporary_paths().iter().cloned());
+    write.extend(system_temporary_paths().iter().cloned());
     let mut readonly = fs.deny_write_paths.clone();
     readonly.extend(
         fs.writable_roots
@@ -448,6 +598,10 @@ fn build_request(
         "SYSTEMDRIVE".into(),
         unicode(&windows)?.chars().take(2).collect(),
     );
+    if let Some(temp) = system_temporary_paths().first() {
+        env.insert("TEMP".into(), unicode(temp)?);
+        env.insert("TMP".into(), unicode(temp)?);
+    }
     let cwd = options
         .current_dir
         .clone()
@@ -960,5 +1114,148 @@ mod tests {
         .unwrap();
         assert_eq!(bytes.len(), 65537);
         assert!(bytes.iter().all(|byte| *byte == b'x'));
+    }
+}
+
+#[cfg(test)]
+mod capture_denial_tests {
+    use crate::denial::Access;
+    use crate::{
+        SandboxAsyncChild, SandboxPolicy, SandboxProcessOptions, SandboxStdio,
+        StrongFilesystemSandboxMode, WritableRoot,
+    };
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+
+    fn powershell_program() -> String {
+        use std::os::windows::ffi::OsStringExt;
+        let mut buffer = vec![0u16; 32768];
+        let length = unsafe {
+            windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW(
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+            )
+        } as usize;
+        assert!(length > 0 && length < buffer.len());
+        PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length]))
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn narrow_policy(root: &Path) -> SandboxPolicy {
+        let mut policy = SandboxPolicy::disabled();
+        policy.strong_filesystem = StrongFilesystemSandboxMode::Required;
+        policy.filesystem.full_disk_read = false;
+        policy.filesystem.full_disk_write = false;
+        policy.filesystem.readable_roots = vec![root.to_path_buf()];
+        policy.filesystem.writable_roots = vec![WritableRoot {
+            root: root.to_path_buf(),
+            read_only_subpaths: vec![],
+        }];
+        policy
+    }
+
+    async fn run_powershell(
+        script: &str,
+        capture: bool,
+    ) -> (bool, String, Vec<crate::denial::DenialRecord>) {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().canonicalize().unwrap();
+        let mut child = SandboxAsyncChild::spawn_shell(
+            &narrow_policy(&root),
+            &powershell_program(),
+            vec![
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                script.into(),
+            ],
+            SandboxProcessOptions {
+                capture_denials: capture,
+                stdin: SandboxStdio::Null,
+                stdout: SandboxStdio::Piped,
+                stderr: SandboxStdio::Piped,
+                ..Default::default()
+            },
+        )
+        .expect("required native sandbox must start the capture probe");
+        let mut stdout = child.take_stdout().unwrap();
+        let mut stderr = child.take_stderr().unwrap();
+        let (out, err, status) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::try_join!(
+                async {
+                    let mut text = String::new();
+                    stdout.read_to_string(&mut text).await?;
+                    Ok::<_, std::io::Error>(text)
+                },
+                async {
+                    let mut text = String::new();
+                    stderr.read_to_string(&mut text).await?;
+                    Ok::<_, std::io::Error>(text)
+                },
+                async {
+                    loop {
+                        if let Some(status) = child.try_wait()? {
+                            return Ok::<_, std::io::Error>(status);
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }
+            )
+        })
+        .await
+        .expect("capture probe timed out")
+        .unwrap();
+        let denials = child.take_denials();
+        let success = status.success();
+        (success, format!("{out}{err}"), denials)
+    }
+
+    #[tokio::test]
+    async fn capture_denials_records_denied_reads() {
+        use appcontainer_common::base_container_runner::BaseContainerRunner;
+        if !BaseContainerRunner::is_capture_denials_usable() {
+            return;
+        }
+        let home = std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .expect("capture probe requires a home directory");
+        let secret = home.join(format!("daat-capture-probe-{}.txt", std::process::id()));
+        std::fs::write(&secret, "capture probe secret").unwrap();
+        let script = format!(
+            "try {{ Get-Content -LiteralPath '{}' | Out-Null }} catch {{}}; exit 0",
+            secret.to_string_lossy().replace('\'', "''")
+        );
+        let (_success, _output, denials) = run_powershell(&script, true).await;
+        let _ = std::fs::remove_file(&secret);
+        assert!(
+            denials.iter().any(|record| {
+                record.access == Access::Read
+                    && record
+                        .path
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("daat-capture-probe")
+            }),
+            "expected a native read denial for the probe file: {denials:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn system_temp_is_writable_without_a_grant() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
+        let script = "$p = Join-Path $env:TEMP ('daat-temp-probe-' + [Guid]::NewGuid().ToString('N') + '.txt'); \
+Set-Content -LiteralPath $p -Value 'ok'; \
+$ok = (Get-Content -LiteralPath $p).Trim() -eq 'ok'; \
+Remove-Item -LiteralPath $p -Force; \
+if ($ok) { 'temp-ok' } else { throw 'temp probe failed' }";
+        let (success, output, _) = run_powershell(script, false).await;
+        assert!(success, "output={output}");
+        assert!(output.contains("temp-ok"), "output={output}");
     }
 }

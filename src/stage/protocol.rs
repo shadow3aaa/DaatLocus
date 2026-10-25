@@ -272,6 +272,8 @@ pub enum Body {
         chunk: u32,
     },
     Invoke {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        related_message: Option<Uuid>,
         origin: Origin,
         target: ActorAddress,
         content: BlobRef,
@@ -328,11 +330,6 @@ pub enum ConversationAction {
         message: String,
         expected: i64,
         content: Option<String>,
-    },
-    Steer {
-        message: String,
-        target: String,
-        expected: i64,
     },
     ClearQueue,
 }
@@ -567,6 +564,7 @@ impl Envelope {
                 target,
                 content,
                 attachments,
+                ..
             } => {
                 if self.invocation_id.is_none() || target.stage_id != local {
                     return Err(StageError::Invalid("Invalid invocation routing"));
@@ -698,6 +696,7 @@ mod tests {
             created_at_ms: 100,
             expires_at_ms: 10000,
             body: Body::Invoke {
+                related_message: None,
                 origin: Origin::User,
                 target: ActorAddress {
                     stage_id: target,

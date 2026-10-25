@@ -1,3 +1,6 @@
+#[path = "tool_definition_tests.rs"]
+mod tool_definition_tests;
+
 use super::super::{MessageKind, MessageSource, ModelFactory};
 use super::*;
 use crate::{
@@ -23,7 +26,7 @@ enum MockReply {
 async fn approval_rejection_is_not_a_tool_or_input_failure() {
     use super::super::{ApprovalDecision, ApprovalMode};
     for mode in [ApprovalMode::Auto, ApprovalMode::Ask] {
-        let outside = tempfile::tempdir().unwrap();
+        let outside = crate::sandbox::test_support::scoped_directory();
         let target = outside.path().join("not-authorized.txt");
         let reason = "The requested output folder is not authorized <private>";
         let provider = Arc::new(ReplayProvider::new(vec![
@@ -125,7 +128,7 @@ async fn approval_rejection_is_not_a_tool_or_input_failure() {
 async fn preflight_approval_executes_original_call_without_a_model_retry() {
     use super::super::{ApprovalDecision, ApprovalMode};
     for mode in [ApprovalMode::Auto, ApprovalMode::Ask] {
-        let outside = tempfile::tempdir().unwrap();
+        let outside = crate::sandbox::test_support::scoped_directory();
         let target = outside.path().join("approved-output.txt");
         let provider = Arc::new(ReplayProvider::new(vec![
             MockReply::Calls(vec![AgentToolCall {
@@ -1426,17 +1429,18 @@ async fn two_device_small_control_round_trip_uses_no_content_transfer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn core_guidance_routes_to_a_busy_worker_on_another_device() {
+async fn messages_route_to_a_busy_worker_on_another_device() {
     let core_model = Arc::new(ReplayProvider::new(vec![]));
     let worker_model = Arc::new(ReplayProvider::new(vec![
         MockReply::Pending,
+        MockReply::Answer("Remote message handled"),
         MockReply::Answer("Remote task updated"),
     ]));
     let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
         device_pair(core_model.clone(), worker_model.clone()).await;
     core_model.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {id:"remote-delegation".into(), name:"actors__send".into(),
-            arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","content":"Original remote task"})}]),
+        MockReply::Calls(vec![AgentToolCall {id:"remote-delegation".into(), name:"actors__message".into(),
+            arguments:json!({"reply_to":null,"stage_id":net_b.host.local,"actor_id":"root","content":"Original remote task","show_to_user":true})}]),
         MockReply::Pending,
     ]);
     let original = a
@@ -1467,8 +1471,8 @@ async fn core_guidance_routes_to_a_busy_worker_on_another_device() {
     let epoch = net_a.core.read().as_ref().unwrap().epoch();
     let policy = b.execution_actor(&target).unwrap().config;
     core_model.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {id:"remote-guidance".into(),name:"actors__steer".into(),
-            arguments:json!({"stage_id":net_b.host.local,"message_id":target.id,"content":"REMOTE_CORE_GUIDANCE"})}]),
+        MockReply::Calls(vec![AgentToolCall {id:"remote-guidance".into(),name:"actors__message".into(),
+            arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","reply_to":target.id,"content":"REMOTE_CORE_GUIDANCE","show_to_user":false})}]),
         MockReply::Answer("Guidance sent"),
         MockReply::PendingOnEveryRequest,
     ]);
@@ -1491,7 +1495,7 @@ async fn core_guidance_routes_to_a_busy_worker_on_another_device() {
     let guides = b.store().messages("root", None, 10).unwrap().items;
     let guide = guides
         .iter()
-        .find(|message| message.kind == MessageKind::Steering)
+        .find(|message| message.content == "REMOTE_CORE_GUIDANCE")
         .unwrap();
     assert_eq!(guide.status, MessageStatus::Completed);
     assert_eq!(guide.in_reply_to.as_deref(), Some(target.id.as_str()));
@@ -1507,12 +1511,22 @@ async fn core_guidance_routes_to_a_busy_worker_on_another_device() {
     assert!(result[0].error.is_none());
     let outcome = result[0].outcome.as_ref().unwrap();
     assert_eq!(outcome["stage_id"], net_b.host.local.to_string());
-    assert_eq!(outcome["target_message_id"], target.id);
-    assert_eq!(outcome["kind"], "steering");
+    assert_eq!(outcome["reply_to"], target.id);
+    assert_eq!(outcome["show_to_user"], json!(false));
+    let delegation = a
+        .store()
+        .tool_summaries("core", &original.id, None, 10)
+        .unwrap()
+        .items;
+    assert_eq!(
+        delegation[0].outcome.as_ref().unwrap()["show_to_user"],
+        json!(true)
+    );
     assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
+    // The new coordination input does not implicitly finish its parent.
     assert_eq!(
         a.store().message(&original.id).unwrap().status,
-        MessageStatus::Completed
+        MessageStatus::Running
     );
     net_a.stop().await;
     net_b.stop().await;
@@ -2148,9 +2162,14 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     use crate::stage::{host::Host, ledger::StageLedger, runtime::Runtime, shared, shared_store};
     let model_a = Arc::new(ReplayProvider::new(vec![]));
     let (_a_dir, a) = runtime(model_a.clone()).await;
-    let model_b = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "Continued on the next device without repeating Actor creation.",
-    )]));
+    let model_b = Arc::new(ReplayProvider::new(vec![
+        MockReply::Answer("Continued on the next device without repeating Actor creation."),
+        MockReply::Calls(vec![AgentToolCall {
+            id: "finish-resumed-original".into(),
+            name: "actors__yield".into(),
+            arguments: json!({}),
+        }]),
+    ]));
     let (_b_dir, b) = runtime(model_b.clone()).await;
     let model_c = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
         "Continued on the third device with the same account context.",
@@ -2433,9 +2452,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
             None,
         )
         .unwrap();
-    // Core treats a fresh owner input as the next conversation turn. Wait for
-    // it to supersede speculative inference instead of racing a steering RPC
-    // against that intentional turn boundary.
+    // A fresh input enters inference while the original request remains open.
     tokio::time::timeout(Duration::from_secs(10), async {
         while !model_a.requests.lock().iter().any(|request| {
             request.messages.iter().any(|message| matches!(message,
@@ -2449,7 +2466,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     .await
     .expect("the new Core input did not supersede speculative inference");
     let original = a.store().message(&input.id).unwrap();
-    assert_eq!(original.status, MessageStatus::Completed);
+    assert_eq!(original.status, MessageStatus::Running);
     assert!(original.reply.is_none());
     assert!(original.error.is_none());
     let active = a.store().message(&guidance.id).unwrap();
@@ -2458,28 +2475,6 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
         MessageStatus::Queued | MessageStatus::Running
     ));
     assert_eq!(active.kind, MessageKind::Request);
-    assert!(
-        b.steer_queued(
-            shared::ACTOR_ID,
-            &guidance.id,
-            &input.id,
-            active.updated_at_ms
-        )
-        .await
-        .is_err(),
-        "a running request cannot steer an already completed Core turn"
-    );
-    let unchanged = a.store().message(&guidance.id).unwrap();
-    assert_eq!(unchanged.kind, MessageKind::Request);
-    assert_eq!(unchanged.in_reply_to, active.in_reply_to);
-    // The rejected RPC must not turn this request into steering. Its execution
-    // revision may advance independently if a slow round trip fences and resumes
-    // inference; exact transaction non-mutation is covered with paused workers.
-    assert!(matches!(
-        unchanged.status,
-        MessageStatus::Queued | MessageStatus::Running
-    ));
-    assert!(unchanged.error.is_none());
     assert!(model_a.dropped.load(Ordering::Acquire));
     net_a.stop().await;
     let result = tokio::time::timeout(Duration::from_secs(20), async {
@@ -2503,8 +2498,10 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
         0,
         "the retired worker must not retain pending inference"
     );
-    assert_eq!(model_b.requests.lock().len(), 1);
-    let retained = b.store().message(&input.id).unwrap();
+    // Completing the incoming input does not complete the suspended original.
+    // The replacement worker resumes it separately without repeating its effect.
+    let retained = wait_core_completed(&b, &input.id).await;
+    assert_eq!(model_b.requests.lock().len(), 2);
     assert_eq!(retained.status, MessageStatus::Completed);
     assert!(retained.reply.is_none());
     for request in model_b.requests.lock().iter() {
@@ -2601,7 +2598,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
         )
         .unwrap();
     let started = tokio::time::timeout(Duration::from_secs(12), async {
-        while model_b.requests.lock().len() < 2 {
+        while model_b.requests.lock().len() < 3 {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
@@ -2706,7 +2703,7 @@ fn runtime_config() -> crate::config::Config {
 }
 
 async fn runtime(provider: Arc<ReplayProvider>) -> (tempfile::TempDir, ActorSystem) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::sandbox::test_support::scoped_directory();
     let workspace = directory.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let system = ActorSystem::open_with_factory(
@@ -2803,7 +2800,7 @@ async fn remote_delegation_retains_readonly_authority_and_original_review_mode()
     let input = system.store().enqueue(input, None).unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let delegated = system
-        .send_from_actor("root", &input.id, &child.id, "Inspect the project".into())
+        .message_from_actor("root", &input.id, &child.id, "Inspect the project".into())
         .unwrap();
     let execution = system.execution_actor(&delegated).unwrap();
     assert!(execution.remote_read_only);
@@ -3025,8 +3022,8 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
     let caller_model = Arc::new(ReplayProvider::new(vec![
         MockReply::Calls(vec![AgentToolCall {
             id: "dispatch-once".into(),
-            name: "actors__send".into(),
-            arguments: json!({"actor_id":"root","stage_id":b_id.to_string(),"content":"Write one file and report."}),
+            name: "actors__message".into(),
+            arguments: json!({"reply_to":null,"actor_id":"root","stage_id":b_id.to_string(),"content":"Write one file and report."}),
         }]),
         MockReply::Answer("The task is delegated."),
         MockReply::Answer("The collaborator reported progress."),
@@ -3296,7 +3293,7 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
             arguments: json!({"path":approved_file,"start_line":null,"line_count":null}),
         });
         calls.push(AgentToolCall { id:"remote-write-memory".into(), name:"files__write_file".into(), arguments:json!({"path":approved.join("forbidden.txt"),"content":"denied","expected_sha256":null}) });
-        calls.push(AgentToolCall { id:"remote-delegation".into(), name:"actors__send".into(), arguments:json!({"actor_id":child.id,"stage_id":null,"content":"Attempt delegated work"}) });
+        calls.push(AgentToolCall { id:"remote-delegation".into(), name:"actors__message".into(), arguments:json!({"reply_to":null,"actor_id":child.id,"stage_id":null,"content":"Attempt delegated work"}) });
     }
     let mut host = DeviceIdentity::generate().unwrap();
     let remote = DeviceIdentity::generate().unwrap();
@@ -3351,6 +3348,7 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
         created_at_ms: now,
         expires_at_ms: now + 60000,
         body: Body::Invoke {
+            related_message: None,
             origin: Origin::User,
             target: ActorAddress {
                 stage_id: host.profile().stage_id,
@@ -3495,10 +3493,10 @@ fn enqueue_root(system: &ActorSystem, content: &str) -> MessageRecord {
 }
 
 #[tokio::test]
-async fn actor_executes_serial_inbox_and_retains_context_across_requests() {
+async fn actor_receives_pending_inputs_before_completion_and_retains_context() {
     let provider = Arc::new(ReplayProvider::new(vec![
-        MockReply::Answer("first answer"),
         MockReply::Answer("second answer"),
+        MockReply::Answer("first answer"),
     ]));
     let (_directory, system) = runtime(provider.clone()).await;
     let first = enqueue_root(&system, "first request");
@@ -3515,7 +3513,7 @@ async fn actor_executes_serial_inbox_and_retains_context_across_requests() {
         let requests = provider.requests.lock();
         assert_eq!(requests.len(), 2);
         assert!(requests[1].messages.iter().any(
-        |row| matches!(row, AgentMessage::Assistant { content, .. } if content == "first answer")
+        |row| matches!(row, AgentMessage::Assistant { content, .. } if content == "second answer")
     ));
     }
     let events = system.store().events(0, Some("root"), false, 100).unwrap();
@@ -3571,354 +3569,6 @@ async fn app_failures_are_model_observations_and_full_protocol_is_persisted() {
     system.shutdown().await;
 }
 
-#[tokio::test]
-async fn rejected_guidance_preserves_revision_and_contents_without_concurrent_workers() {
-    for completed_target in [false, true] {
-        let (_directory, system, _) = paused_runtime().await;
-        let original = system
-            .send_user("root", "Original task".into(), vec![], None)
-            .unwrap();
-        assert_eq!(
-            system.store().claim_next("root").unwrap().unwrap().id,
-            original.id
-        );
-        let guidance = system
-            .send_user("root", "Initial guidance".into(), vec![], None)
-            .unwrap();
-        let current = system
-            .store()
-            .amend_queued_user(
-                "root",
-                &guidance.id,
-                guidance.updated_at_ms,
-                "Revised guidance".into(),
-                vec![],
-                false,
-            )
-            .unwrap();
-        let expected = if completed_target {
-            system
-                .store()
-                .finish_message(
-                    &original.id,
-                    MessageStatus::Completed,
-                    Some("Finished"),
-                    None,
-                )
-                .unwrap();
-            current.updated_at_ms
-        } else {
-            guidance.updated_at_ms
-        };
-        let source_before =
-            serde_json::to_value(system.store().message(&guidance.id).unwrap()).unwrap();
-        let target_before =
-            serde_json::to_value(system.store().message(&original.id).unwrap()).unwrap();
-        let error = system
-            .store()
-            .steer_queued("root", &guidance.id, &original.id, expected)
-            .unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<super::super::ActorError>(),
-            Some(super::super::ActorError::Conflict(_))
-        ));
-        assert_eq!(
-            serde_json::to_value(system.store().message(&guidance.id).unwrap()).unwrap(),
-            source_before
-        );
-        assert_eq!(
-            serde_json::to_value(system.store().message(&original.id).unwrap()).unwrap(),
-            target_before
-        );
-        assert!(
-            system
-                .store()
-                .pending_steering("root", &original.id)
-                .unwrap()
-                .is_empty()
-        );
-        system.shutdown().await;
-    }
-}
-
-#[tokio::test]
-async fn queued_guidance_updates_the_active_task_without_replaying_completed_tools() {
-    let provider = Arc::new(ReplayProvider::new(vec![
-        MockReply::Calls(vec![AgentToolCall {
-            id: "one-write-before-guidance".into(),
-            name: "files__write_file".into(),
-            arguments: json!({"path":"guided.txt","content":"write once","expected_sha256":null}),
-        }]),
-        MockReply::Pending,
-        MockReply::Answer("guided answer"),
-    ]));
-    let (directory, system) = runtime(provider.clone()).await;
-    let original = enqueue_root(&system, "Original task constraints.");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if provider.requests.lock().len() >= 2 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let update = system
-        .send_user(
-            "root",
-            "Continue in Chinese and keep the original constraints.".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    system
-        .steer_queued("root", &update.id, &original.id, update.updated_at_ms)
-        .await
-        .unwrap();
-    let result = wait_completed(&system, &original.id).await;
-    assert_eq!(result.reply.as_deref(), Some("guided answer"));
-    let guided = system.store().message(&update.id).unwrap();
-    assert_eq!(guided.kind, super::super::MessageKind::Steering);
-    assert_eq!(guided.status, MessageStatus::Completed);
-    assert!(guided.reply.is_none());
-    assert!(provider.dropped.load(Ordering::Acquire));
-    assert_eq!(provider.requests.lock().len(), 3);
-    {
-        let requests = provider.requests.lock();
-        let last = &requests[2].messages;
-        assert!(last.iter().any(|row|matches!(row,AgentMessage::Tool{tool_call_id,..} if tool_call_id=="one-write-before-guidance")));
-        assert!(last.iter().any(|row|matches!(row,AgentMessage::User{content} if content.as_text().contains("Continue in Chinese"))));
-        assert!(last.iter().any(|row|matches!(row,AgentMessage::User{content} if content.as_text().contains("Original task constraints"))));
-    }
-    assert_eq!(
-        std::fs::read_to_string(directory.path().join("workspace/guided.txt")).unwrap(),
-        "write once"
-    );
-    system.shutdown().await;
-}
-
-#[tokio::test]
-async fn core_guidance_updates_a_previous_delegation_while_send_stays_queued() {
-    let (directory, system, provider) = paused_runtime().await;
-    provider.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {id:"write-once".into(),name:"files__write_file".into(),
-            arguments:json!({"path":"core-guided.txt","content":"one effect","expected_sha256":null})}]),
-        MockReply::Pending,
-        MockReply::Answer("Updated original task"),
-        MockReply::Answer("Separate queued task"),
-    ]);
-    let first = system
-        .send_user("core", "Delegate the original task".into(), vec![], None)
-        .unwrap();
-    system.store().claim_next("core").unwrap().unwrap();
-    let target = system
-        .send_from_actor("core", &first.id, "root", "Original task".into())
-        .unwrap();
-    system
-        .store()
-        .finish_message(&first.id, MessageStatus::Completed, None, None)
-        .unwrap();
-    let followup = system
-        .send_user("core", "Add constraints".into(), vec![], None)
-        .unwrap();
-    system.store().claim_next("core").unwrap().unwrap();
-    let core = system.actor("core").unwrap();
-    let context = system
-        .execution_context(&core, &system.store().message(&followup.id).unwrap())
-        .unwrap();
-    let policy = system.execution_actor(&target).unwrap().config;
-    system.resume_execution().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while provider.requests.lock().len() < 2 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let queued = system
-        .send_from_actor("core", &followup.id, "root", "Independent task".into())
-        .unwrap();
-    assert_eq!(
-        system.store().message(&queued.id).unwrap().status,
-        MessageStatus::Queued
-    );
-    assert!(!provider.dropped.load(Ordering::Acquire));
-    let mut apps =
-        crate::builtin_apps::create_apps(&core, system.clone(), &system.config()).unwrap();
-    let accepted = apps.execute_tool(&AgentToolCall {id:"guide-target".into(),name:"actors__steer".into(),
-        arguments:json!({"stage_id":null,"message_id":target.id,"content":"Keep the original task; add constraint CORE_GUIDANCE"})}, &context).await.unwrap();
-    assert_eq!(accepted.payload["status"], "queued");
-    let guide_id = accepted.payload["message_id"].as_str().unwrap();
-    let completed = wait_completed(&system, &target.id).await;
-    assert_eq!(completed.reply.as_deref(), Some("Updated original task"));
-    let guide = system.store().message(guide_id).unwrap();
-    assert_eq!(guide.status, MessageStatus::Completed);
-    assert_eq!(guide.in_reply_to.as_deref(), Some(target.id.as_str()));
-    assert_eq!(
-        guide.source,
-        MessageSource::Actor {
-            actor_id: "core".into()
-        }
-    );
-    assert_eq!(system.execution_actor(&target).unwrap().config, policy);
-    assert_eq!(
-        wait_completed(&system, &queued.id).await.reply.as_deref(),
-        Some("Separate queued task")
-    );
-    assert!(provider.dropped.load(Ordering::Acquire));
-    {
-        let requests = provider.requests.lock();
-        assert_eq!(requests.len(), 4);
-        let guided = &requests[2].messages;
-        assert!(guided.iter().any(|row| matches!(row,AgentMessage::User {content} if content.as_text().contains("CORE_GUIDANCE") && content.as_text().contains("Source: Actor core"))));
-        assert!(guided.iter().any(
-            |row| matches!(row,AgentMessage::Tool {tool_call_id,..} if tool_call_id == "write-once")
-        ));
-        assert!(!guided.iter().any(|row| matches!(row,AgentMessage::User {content} if content.as_text().contains("Independent task"))));
-    }
-    assert_eq!(
-        std::fs::read_to_string(directory.path().join("workspace/core-guided.txt")).unwrap(),
-        "one effect"
-    );
-    assert_eq!(
-        system
-            .store()
-            .tool_summaries("root", &target.id, None, 10)
-            .unwrap()
-            .items
-            .len(),
-        1
-    );
-    let results = system.store().messages("core", None, 30).unwrap().items;
-    assert!(
-        results
-            .iter()
-            .any(|message| message.kind == MessageKind::Result
-                && message.in_reply_to.as_deref() == Some(first.id.as_str())
-                && message.content.contains("Updated original task"))
-    );
-    system.shutdown().await;
-}
-
-#[tokio::test]
-async fn core_guidance_applies_before_a_queued_request_first_inference() {
-    let (_directory, system, provider) = paused_runtime().await;
-    provider
-        .replies
-        .lock()
-        .push_back(MockReply::Answer("Guided from the start"));
-    let input = system
-        .send_user("core", "Delegate".into(), vec![], None)
-        .unwrap();
-    system.store().claim_next("core").unwrap().unwrap();
-    let target = system
-        .send_from_actor("core", &input.id, "root", "Original queued task".into())
-        .unwrap();
-    let core = system.actor("core").unwrap();
-    let context = system
-        .execution_context(&core, &system.store().message(&input.id).unwrap())
-        .unwrap();
-    let guide = system
-        .steer_from_core(
-            context.actor_call.as_ref().unwrap(),
-            &target.id,
-            "QUEUED_CORE_GUIDANCE".into(),
-        )
-        .unwrap();
-    assert_eq!(guide.status, MessageStatus::Queued);
-    system.resume_execution().await.unwrap();
-    assert_eq!(
-        wait_completed(&system, &target.id).await.reply.as_deref(),
-        Some("Guided from the start")
-    );
-    assert_eq!(
-        system.store().message(&guide.id).unwrap().status,
-        MessageStatus::Completed
-    );
-    assert!(provider.requests.lock()[0].messages.iter().any(|row| matches!(row, AgentMessage::User {content} if content.as_text().contains("QUEUED_CORE_GUIDANCE"))));
-    system.shutdown().await;
-}
-
-#[tokio::test]
-async fn core_guidance_rejects_wrong_authority_and_notifies_when_a_target_ends() {
-    let (_directory, system, _provider) = paused_runtime().await;
-    let input = system
-        .send_user("core", "Coordinate".into(), vec![], None)
-        .unwrap();
-    system.store().claim_next("core").unwrap().unwrap();
-    let target = system
-        .send_from_actor("core", &input.id, "root", "Original task".into())
-        .unwrap();
-    let core = system.actor("core").unwrap();
-    let context = system
-        .execution_context(&core, &system.store().message(&input.id).unwrap())
-        .unwrap();
-    let caller = context.actor_call.unwrap();
-    let mut forbidden = caller.clone();
-    forbidden.actor_id = "root".into();
-    assert!(
-        system
-            .steer_from_core(&forbidden, &target.id, "Invalid sender".into())
-            .is_err()
-    );
-    forbidden = caller.clone();
-    forbidden.remote_read_only = true;
-    assert!(
-        system
-            .steer_from_core(&forbidden, &target.id, "Read-only source".into())
-            .is_err()
-    );
-    let unrelated = system
-        .send_user("root", "An Owner's separate task".into(), vec![], None)
-        .unwrap();
-    assert!(
-        system
-            .steer_from_core(&caller, &unrelated.id, "Wrong request".into())
-            .is_err()
-    );
-    let guide = system
-        .steer_from_core(&caller, &target.id, "Update for the original only".into())
-        .unwrap();
-    let routed = system
-        .store()
-        .finish_message(
-            &target.id,
-            MessageStatus::Completed,
-            Some("Finished before guidance"),
-            None,
-        )
-        .unwrap()
-        .unwrap();
-    assert_eq!(routed.actor_id, "core");
-    let unapplied = system.store().message(&guide.id).unwrap();
-    assert_eq!(unapplied.kind, MessageKind::Steering);
-    assert_eq!(unapplied.status, MessageStatus::Cancelled);
-    assert!(unapplied.error.is_none());
-    assert!(
-        system
-            .steer_from_core(&caller, &target.id, "Too late".into())
-            .is_err()
-    );
-    assert!(
-        system
-            .store()
-            .messages("core", None, 30)
-            .unwrap()
-            .items
-            .iter()
-            .any(|message| message.kind == MessageKind::Result
-                && message.in_reply_to.as_deref() == Some(input.id.as_str())
-                && message.content.contains(&guide.id)
-                && message.content.contains("not applied"))
-    );
-    assert_eq!(
-        system.store().claim_next("root").unwrap().unwrap().id,
-        unrelated.id,
-        "unapplied guidance must not turn into a separate executable task"
-    );
-    system.shutdown().await;
-}
 #[tokio::test]
 async fn shutdown_interrupts_model_wait_and_restart_never_replays_it() {
     let provider = Arc::new(ReplayProvider::new(vec![MockReply::Pending]));
@@ -4017,7 +3667,7 @@ async fn files_allow_requested_runtime_scope() {
 }
 
 async fn paused_runtime() -> (tempfile::TempDir, ActorSystem, Arc<ReplayProvider>) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::sandbox::test_support::scoped_directory();
     let workspace = directory.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let provider = Arc::new(ReplayProvider::new(vec![]));
@@ -4073,7 +3723,7 @@ async fn delegated_and_direct_inputs_keep_their_original_reply_targets() {
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let delegated = system
-        .send_from_actor("root", &original.id, &child.id, "Delegated work".into())
+        .message_from_actor("root", &original.id, &child.id, "Delegated work".into())
         .unwrap();
     let direct = system
         .send_user(&child.id, "Separate direct user work".into(), vec![], None)
@@ -4316,7 +3966,7 @@ async fn hosted_actors_delegate_to_account_peers_without_capability_or_recipient
         .unwrap();
     system.store().claim_next(&sender.id).unwrap().unwrap();
     let delegated = system
-        .send_from_actor(
+        .message_from_actor(
             &sender.id,
             &input.id,
             &receiver.id,
@@ -4394,13 +4044,13 @@ async fn removing_recipient_lists_preserves_account_ownership_including_foreign_
     system.store().claim_next(&sender.id).unwrap().unwrap();
     assert!(
         system
-            .send_from_actor(&sender.id, &input.id, &peer.id, "Requested work".into())
+            .message_from_actor(&sender.id, &input.id, &peer.id, "Requested work".into())
             .is_ok()
     );
     for target in [&foreign.id, &child.id] {
         assert!(
             system
-                .send_from_actor(
+                .message_from_actor(
                     &sender.id,
                     &input.id,
                     target,
@@ -4432,7 +4082,7 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let delegated = system
-        .send_from_actor("root", &original.id, &parent.id, "Create the report".into())
+        .message_from_actor("root", &original.id, &parent.id, "Create the report".into())
         .unwrap();
     let active_parent = system.store().claim_next(&parent.id).unwrap().unwrap();
     let parent_context = system.execution_context(&parent, &active_parent).unwrap();
@@ -4453,7 +4103,7 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
             .any(|actor| actor.id == deep.id)
     );
     let request = system
-        .send_from_actor(&parent.id, &delegated.id, &deep.id, "Write report".into())
+        .message_from_actor(&parent.id, &delegated.id, &deep.id, "Write report".into())
         .unwrap();
     system.store().claim_next(&deep.id).unwrap().unwrap();
     let resource_id = uuid::Uuid::new_v4().to_string();
@@ -5066,6 +4716,7 @@ async fn core_new_user_input_preempts_thinking_without_losing_context_or_complet
         }]),
         MockReply::Pending,
         MockReply::Answer("Both messages are now considered."),
+        MockReply::Answer("Original coordination completed."),
     ]);
     let original = system
         .send_user("core", "Prepare a worker, then think.".into(), vec![], None)
@@ -5109,16 +4760,20 @@ async fn core_new_user_input_preempts_thinking_without_losing_context_or_complet
         done.reply.as_deref(),
         Some("Both messages are now considered.")
     );
-    let previous = system.store().message(&original.id).unwrap();
+    let previous = wait_core_completed(&system, &original.id).await;
     assert_eq!(previous.status, MessageStatus::Completed);
-    assert!(previous.reply.is_none() && previous.error.is_none() && !previous.cancel_requested);
+    assert_eq!(
+        previous.reply.as_deref(),
+        Some("Original coordination completed.")
+    );
+    assert!(previous.error.is_none() && !previous.cancel_requested);
     assert!(
         provider.dropped.load(Ordering::Acquire),
         "The obsolete model request must be dropped"
     );
     {
         let requests = provider.requests.lock();
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 4);
         let history = &requests[2].messages;
         for text in [&original.content, &update.content] {
             assert!(history.iter().any(|row| matches!(row, AgentMessage::User { content } if content.as_text().contains(text.as_str()))));
@@ -5214,7 +4869,7 @@ async fn core_import_routes_through_device_permissions_and_never_starts_the_impo
         .unwrap();
     assert!(created.error.is_none(), "{:?}", created.error);
     assert_eq!(created.outcome.as_ref().unwrap()["id"], imported.id);
-    assert!(tools.iter().all(|tool| tool.name != "actors__send"));
+    assert!(tools.iter().all(|tool| tool.name != "actors__message"));
     assert_eq!(
         provider.requests.lock().len(),
         3,
@@ -5302,7 +4957,7 @@ impl ModelFactory for CoordinatorFactory {
 }
 #[tokio::test]
 async fn core_yields_after_delegating_and_silently_receives_progress_while_worker_runs() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::sandbox::test_support::scoped_directory();
     let workspace = dir.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let core = Arc::new(ReplayProvider::new(vec![]));
@@ -5342,7 +4997,7 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
     let stage = system.store().public_stage_id().unwrap();
     core.replies.lock().extend([
         MockReply::Calls(vec![
-            AgentToolCall{id:"delegate".into(),name:"actors__send".into(),arguments:json!({"stage_id":stage,"actor_id":child.id,"content":"Investigate and repair"})},
+            AgentToolCall{id:"delegate".into(),name:"actors__message".into(),arguments:json!({"reply_to":null,"stage_id":stage,"actor_id":child.id,"content":"Investigate and repair","show_to_user":true})},
             AgentToolCall{id:"ack".into(),name:"actors__deliver".into(),arguments:json!({"content":"The worker is investigating.","finish_turn":true})},
         ]),
         MockReply::Answer("Your second message has been handled."),
@@ -5473,7 +5128,7 @@ async fn coordinator_yields_between_required_results_and_routes_only_progress_th
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let request = system
-        .send_from_actor(
+        .message_from_actor(
             "root",
             &original.id,
             &coordinator.id,
@@ -5486,12 +5141,12 @@ async fn coordinator_yields_between_required_results_and_routes_only_progress_th
         .unwrap();
     provider.replies.lock().extend([
         MockReply::Calls(vec![
-            AgentToolCall{id:"first-review".into(),name:"actors__send".into(),arguments:json!({"actor_id":first.id,"stage_id":null,"content":"Review the first area"})},
-            AgentToolCall{id:"second-review".into(),name:"actors__send".into(),arguments:json!({"actor_id":second.id,"stage_id":null,"content":"Review the second area"})},
+            AgentToolCall{id:"first-review".into(),name:"actors__message".into(),arguments:json!({"reply_to":null,"actor_id":first.id,"stage_id":null,"content":"Review the first area"})},
+            AgentToolCall{id:"second-review".into(),name:"actors__message".into(),arguments:json!({"reply_to":null,"actor_id":second.id,"stage_id":null,"content":"Review the second area"})},
             AgentToolCall{id:"brief-progress".into(),name:"actors__report".into(),arguments:json!({"content":"Both reviews are underway."})},
             AgentToolCall{id:"wait-for-reviews".into(),name:"actors__yield".into(),arguments:json!({})},
             // Even a call after yield receives its observation before the boundary.
-            AgentToolCall{id:"read-context".into(),name:"actors__read_history".into(),arguments:json!({"cursor":null,"message_id":null,"limit":1})},
+            AgentToolCall{id:"read-context".into(),name:"actors__read_history".into(),arguments:json!({"cursor":null,"message_id":null,"scope":null,"related_cursor":null,"limit":1})},
         ]),
         MockReply::Calls(vec![AgentToolCall{id:"first-review-received".into(),name:"actors__yield".into(),arguments:json!({})}]),
         MockReply::Answer("Combined report: area one is correct; area two needs a correction."),
@@ -6038,7 +5693,7 @@ async fn follower_http_import_forwards_original_evidence_without_local_execution
     assert!(
         tools
             .iter()
-            .all(|tool| tool.error.is_none() && tool.name != "actors__send")
+            .all(|tool| tool.error.is_none() && tool.name != "actors__message")
     );
     let read = tools
         .iter()
@@ -6503,3 +6158,6 @@ async fn runtime_scope_typed_app_denial_and_bounded_output_keep_consumable_refer
     assert!(saved.model_content.contains("permission_reference"));
     system.shutdown().await;
 }
+
+#[path = "message_tests.rs"]
+mod message_tests;

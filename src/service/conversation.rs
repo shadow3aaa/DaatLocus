@@ -19,7 +19,6 @@ pub(super) fn routes() -> Router<ServiceState> {
         )
         .route("/v1/actors/{actor}/queue/clear", post(clear))
         .route("/v1/actors/{actor}/queue", get(queue))
-        .route("/v1/actors/{actor}/messages/{message}/steer", post(steer))
         .route(
             "/v1/actors/{actor}/messages/{message}/activity",
             get(activity),
@@ -42,12 +41,6 @@ struct Withdraw {
 struct Activity {
     after: Option<i64>,
     limit: Option<usize>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Steer {
-    target_message_id: String,
-    expected_updated_at_ms: i64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -95,46 +88,6 @@ async fn queue(
     redact(&mut value, &state.system.config());
     Ok(Json(value))
 }
-async fn steer(
-    State(state): State<ServiceState>,
-    headers: HeaderMap,
-    Path((actor, message)): Path<(String, String)>,
-    Json(input): Json<Steer>,
-) -> ApiResult<Json<Value>> {
-    access_actor(&state, &headers, &actor, true).await?;
-    if input.target_message_id.len() > 128 || input.expected_updated_at_ms < 0 {
-        return Err(ApiError::invalid());
-    }
-    if let Some(value) = super::remote::core_control(
-        &state,
-        &headers,
-        &actor,
-        crate::stage::protocol::ConversationAction::Steer {
-            message: message.clone(),
-            target: input.target_message_id.clone(),
-            expected: input.expected_updated_at_ms,
-        },
-    )
-    .await?
-    {
-        return Ok(Json(value));
-    }
-    reject_import_edit(&state, &actor, &message)?;
-    let record = state
-        .system
-        .steer_queued(
-            &actor,
-            &message,
-            &input.target_message_id,
-            input.expected_updated_at_ms,
-        )
-        .await
-        .map_err(ApiError::from_report)?;
-    let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
-    redact(&mut value, &state.system.config());
-    Ok(Json(value))
-}
-
 async fn edit(
     State(state): State<ServiceState>,
     headers: HeaderMap,

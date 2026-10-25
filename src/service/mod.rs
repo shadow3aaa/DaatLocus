@@ -579,6 +579,16 @@ async fn messages(
         .map_err(ApiError::from_report)?;
     let mut value = serde_json::to_value(page).map_err(|_| ApiError::internal())?;
     value["event_cursor"] = Value::from(cursor);
+    if query.before.is_none() {
+        value["active"] = serde_json::to_value(
+            state
+                .system
+                .store()
+                .current_message(&actor)
+                .map_err(ApiError::from_report)?,
+        )
+        .map_err(|_| ApiError::internal())?;
+    }
     redact(&mut value, &state.system.config());
     Ok(Json(value))
 }

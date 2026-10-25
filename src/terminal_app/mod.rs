@@ -859,18 +859,12 @@ impl App for TerminalApp {
         };
         let mut arguments = call.arguments.clone();
         if let Some(object) = arguments.as_object_mut() {
-            for field in [
-                "yield_time_ms",
-                "max_chars",
-                "wait_mode",
-                "additional_read_roots",
-                "additional_write_roots",
-            ] {
+            for field in ["yield_time_ms", "max_chars", "wait_mode"] {
                 object.remove(field);
             }
         }
         Ok(review.then(|| crate::actors::AppReview::new("terminal/process/v1",
-            "Review the exact command or process input and working directory for requested effects, destructive changes, network publication, credential use and data disclosure. A directory grant alone does not authorize arbitrary shell effects. Empty output polling requires no review.",
+            "Review the exact command or process input and working directory for requested effects, destructive changes, network publication, credential use and data disclosure. A directory grant alone does not authorize arbitrary shell effects. Reads and writes inside the platform's system temporary directories are baseline-authorized and are not out-of-bounds effects. Empty output polling requires no review.",
             serde_json::json!({"tool":call.name,"arguments":arguments,"cwd":context.execution_cwd}))))
     }
     fn permission_request(
@@ -891,16 +885,6 @@ impl App for TerminalApp {
         let session_id = match call.name.as_str() {
             "terminal_exec" => {
                 let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
-                let reads = args.additional_read_roots.unwrap_or_default();
-                let writes = args.additional_write_roots.unwrap_or_default();
-                request.readable_roots = reads
-                    .iter()
-                    .map(|path| crate::file_io::resolve_file_path(&context.execution_cwd, path))
-                    .collect::<Result<_>>()?;
-                request.writable_roots = writes
-                    .iter()
-                    .map(|path| crate::file_io::resolve_file_path(&context.execution_cwd, path))
-                    .collect::<Result<_>>()?;
                 let workdir = args.workdir.as_deref().unwrap_or(
                     context
                         .execution_cwd
@@ -968,10 +952,6 @@ impl App for TerminalApp {
                 |path| context.resolve_tool_path(Path::new(path), None),
             );
             process_policy.ensure_path_readable(&workdir, "terminal workdir")?;
-            for root in args.additional_write_roots.unwrap_or_default() {
-                let root = context.resolve_tool_path(Path::new(&root), None);
-                process_policy.ensure_path_writable(&root, "terminal requested write root")?;
-            }
         }
         if call.name == "terminal_write_stdin" {
             let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
@@ -1056,7 +1036,8 @@ impl App for TerminalApp {
                     &extra_lines,
                     context.tool_output_max_tokens,
                 );
-                Ok(AppToolExecutionResult::new(
+                let session_id = result.session.session_id.clone();
+                let mut tool_result = AppToolExecutionResult::new(
                     summary,
                     json!({
                         "session": result.session,
@@ -1070,7 +1051,9 @@ impl App for TerminalApp {
                         "max_chars": args.max_chars,
                     }),
                     Some(model_content),
-                ))
+                );
+                tool_result.sandbox_denials = take_session_denials(&mut self.sessions, &session_id);
+                Ok(tool_result)
             }
             "terminal_write_stdin" => {
                 let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
@@ -1145,7 +1128,8 @@ impl App for TerminalApp {
                     &extra_lines,
                     context.tool_output_max_tokens,
                 );
-                Ok(AppToolExecutionResult::new(
+                let session_id = result.session.session_id.clone();
+                let mut tool_result = AppToolExecutionResult::new(
                     summary,
                     json!({
                         "session": result.session,
@@ -1161,16 +1145,21 @@ impl App for TerminalApp {
                         "max_chars": args.max_chars,
                     }),
                     Some(model_content),
-                ))
+                );
+                tool_result.sandbox_denials = take_session_denials(&mut self.sessions, &session_id);
+                Ok(tool_result)
             }
             "terminal_terminate" => {
                 let args: TerminalTerminateArgs = parse_terminal_tool_args(call)?;
                 let session = self.terminate_session(&args.session_id)?;
-                Ok(AppToolExecutionResult::new(
+                let mut tool_result = AppToolExecutionResult::new(
                     format!("terminated {}", display_session_label(&session.session_id)),
                     json!({ "session": session }),
                     None,
-                ))
+                );
+                tool_result.sandbox_denials =
+                    take_session_denials(&mut self.sessions, &args.session_id);
+                Ok(tool_result)
             }
             _ => Err(miette!("unknown terminal tool `{}`", call.name)),
         }
@@ -1187,6 +1176,18 @@ fn terminal_process_policy(context: &AppToolExecutionContext) -> RuntimeSandboxP
     policy.filesystem.deny_write_paths.sort();
     policy.filesystem.deny_write_paths.dedup();
     policy
+}
+
+/// Takes the native denial records an exited session captured, if any.
+fn take_session_denials(
+    sessions: &mut BTreeMap<String, TerminalSession>,
+    session_id: &str,
+) -> Vec<crate::sandbox::DenialRecord> {
+    sessions
+        .get_mut(session_id)
+        .and_then(|session| session.process.as_mut())
+        .map(|process| process.take_denials())
+        .unwrap_or_default()
 }
 
 fn refresh_terminal_session(session: &mut TerminalSession) {
@@ -1973,7 +1974,6 @@ mod tests {
             name: "terminal_exec".into(),
             arguments: json!({
                 "command":command,"session_id":null,"workdir":null,
-                "additional_read_roots":null,"additional_write_roots":null,
                 "yield_time_ms":5000,"max_chars":2000
             }),
         };
@@ -2213,7 +2213,6 @@ mod tests {
                 id: "read-fixture".into(),
                 name: "terminal_exec".into(),
                 arguments: json!({"command":command,"session_id":null,"workdir":null,
-                    "additional_read_roots":null,"additional_write_roots":null,
                     "yield_time_ms":5000,"max_chars":2000}),
             };
             let mut app = TerminalApp::new();
@@ -2227,10 +2226,24 @@ mod tests {
         }
     }
 }
+
+/// Fixtures that exercise missing-scope behavior must stay outside the
+/// system temporary directories: the baseline temporary authorization
+/// would otherwise mask the boundary this test verifies.
+#[cfg(test)]
+fn non_temporary_scratch() -> tempfile::TempDir {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+    std::fs::create_dir_all(&base).unwrap();
+    tempfile::Builder::new()
+        .prefix("notemp-terminal-")
+        .tempdir_in(&base)
+        .unwrap()
+}
+
 #[test]
 fn session_extra_roots_are_requested_again_before_stdin() {
-    let dir = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap();
+    let dir = non_temporary_scratch();
+    let outside = non_temporary_scratch();
     let root = outside.path().canonicalize().unwrap();
     let mut app = TerminalApp::new();
     let session_id = app.create_session();
@@ -2286,17 +2299,17 @@ fn session_extra_roots_are_requested_again_before_stdin() {
 }
 
 #[test]
-fn terminal_extra_roots_schema_is_required_nullable_and_portable() {
+fn terminal_scope_roots_are_absent_from_the_declared_schema() {
     let schema = model_schema_for::<TerminalExecArgs>();
     crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
     for name in ["additional_read_roots", "additional_write_roots"] {
+        assert!(schema["properties"].get(name).is_none());
         assert!(
-            schema["required"]
+            !schema["required"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|item| item == name)
         );
-        assert_eq!(schema["properties"][name]["type"], json!(["array", "null"]));
     }
 }

@@ -234,9 +234,9 @@ pub enum ReplyTarget {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageKind {
+    #[serde(alias = "steering")]
     Request,
     Result,
-    Steering,
     /// An explicit outward message; never claimed as model input.
     Delivery,
     /// A collaborator's material update, without completing its request.

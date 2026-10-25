@@ -41,6 +41,24 @@ fn sent(tx: &Transaction<'_>, peer: StageId, id: Uuid) -> Result<Sent> {
         .ok_or(StageError::Forbidden("Reply has no originating request"))?;
     parse(record)
 }
+
+pub(crate) fn related_reply_input(
+    tx: &Transaction<'_>,
+    peer: StageId,
+    invocation: Uuid,
+    recipient: &str,
+    origin: &Origin,
+) -> Result<Option<String>> {
+    let previous = sent(tx, peer, invocation)?;
+    if previous.local_actor != recipient
+        || !matches!(origin, Origin::Actor { actor, .. } if actor == &previous.target)
+    {
+        return Err(StageError::Forbidden(
+            "Related message belongs to another conversation",
+        ));
+    }
+    Ok(previous.request_id)
+}
 pub(crate) fn reply_authority(
     store: &ActorStore,
     peer: StageId,
@@ -75,7 +93,46 @@ impl<'a> Deliveries<'a> {
         now: i64,
         key: &str,
     ) -> Result<Envelope> {
+        self.queue_related(source, request, target, input, now, key, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn queue_related(
+        &self,
+        source: &ActorRecord,
+        request: Option<&MessageRecord>,
+        target: ActorAddress,
+        input: (String, Vec<crate::resources::Resource>),
+        now: i64,
+        key: &str,
+        related: Option<&str>,
+    ) -> Result<Envelope> {
         let (text, attachments) = input;
+        let related_message = related
+            .map(|related| {
+                if let Ok(message) = self.store.message(related) {
+                    if message.actor_id != source.id {
+                        return Err(StageError::Forbidden(
+                            "Related message belongs to another Actor",
+                        ));
+                    }
+                    if let MessageSource::RemoteActor {
+                        stage_id,
+                        actor_id,
+                        invocation_id,
+                    } = message.source
+                        && stage_id == target.stage_id
+                        && actor_id == target.actor_id
+                    {
+                        return Ok(invocation_id);
+                    }
+                    return Err(StageError::Forbidden(
+                        "Related message belongs to another conversation",
+                    ));
+                }
+                Uuid::parse_str(related)
+                    .map_err(|_| StageError::Invalid("Invalid related message identity"))
+            })
+            .transpose()?;
         target.validate()?;
         if target.stage_id == self.local
             || (text.trim().is_empty() && attachments.is_empty())
@@ -129,7 +186,11 @@ impl<'a> Deliveries<'a> {
             let peer = ledger::peer(tx, target.stage_id, now)?;
             if key.is_empty()||key.len()>512{return Err(StageError::Invalid("Invalid remote send key"));}
             let principal=request.map_or("user".to_string(),|request|format!("actor:{}",request.id));
-            let input_hash=super::digest(json(&(target.clone(),&text,&attachments))?.as_bytes());
+            let input_hash=super::digest(if related_message.is_some() {
+                json(&(target.clone(),&text,&attachments,related_message))?
+            } else {
+                json(&(target.clone(),&text,&attachments))?
+            }.as_bytes());
             let previous:Option<(String,Vec<u8>)>=tx.query_row("SELECT digest,frame FROM stage_send_keys WHERE actor=?1 AND principal=?2 AND key=?3",params![source.id,principal,key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             if let Some((previous,bytes))=previous{if previous!=input_hash{return Err(StageError::Conflict("Remote send key changed input"));}return Envelope::decode(&bytes);}
             super::blob::put(tx, &source.id, text.as_bytes())?;
@@ -144,6 +205,7 @@ impl<'a> Deliveries<'a> {
                 created_at_ms: now,
                 expires_at_ms: now.saturating_add(super::protocol::MAX_INVOCATION_LIFETIME_MS),
                 body: Body::Invoke {
+                    related_message,
                     origin,
                     target,
                     content: reference,

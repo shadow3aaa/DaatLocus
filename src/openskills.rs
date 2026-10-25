@@ -899,9 +899,22 @@ const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r"- Discovery: The list above is th
 mod tests {
     use super::*;
 
+    /// Fixtures that exercise missing-scope, built-in-exemption and
+    /// search boundaries must stay outside the system temporary
+    /// directories: the baseline temporary authorization would otherwise
+    /// mask the boundaries these tests verify.
+    fn non_temporary_scratch() -> tempfile::TempDir {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        std::fs::create_dir_all(&base).unwrap();
+        tempfile::Builder::new()
+            .prefix("notemp-skills-")
+            .tempdir_in(&base)
+            .unwrap()
+    }
+
     #[test]
     fn authorized_catalog_excludes_denied_skills() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = non_temporary_scratch();
         let allowed = dir.path().join("allowed");
         let denied = dir.path().join("denied");
         fs::create_dir_all(&allowed).unwrap();
@@ -1096,7 +1109,7 @@ mod tests {
     }
     #[test]
     fn builtin_catalog_uses_only_verified_manifest_files_under_denied_roots() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::sandbox::test_support::scoped_directory();
         let temporary = crate::runtime_temp::RuntimeTemp::create(
             &directory.path().canonicalize().unwrap().join("runtime"),
         )
@@ -1167,7 +1180,7 @@ mod tests {
 
     #[test]
     fn published_gui_skills_are_discoverable_only_for_the_host_platform() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::sandbox::test_support::scoped_directory();
         let temporary = crate::runtime_temp::RuntimeTemp::create(
             &directory.path().canonicalize().unwrap().join("runtime"),
         )
