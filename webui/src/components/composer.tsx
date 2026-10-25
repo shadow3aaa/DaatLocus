@@ -68,7 +68,7 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
             {models.map(model => <DropdownMenuRadioItem value={model.name} key={model.name}><span className="dl-menu-choice"><span>{model.label}</span>{(model.effort || model.name !== model.label) && <small>{effortLabel(model.effort) || model.name}</small>}</span></DropdownMenuRadioItem>)}
           </DropdownMenuRadioGroup></DropdownMenuContent>
         </DropdownMenu>}
-        <InputGroupButton size="icon-sm" variant="default" className="dl-send-button" aria-label={t(showStop ? "composer.stop_task" : "composer.send_message")} disabled={showStop ? busy : !canSend} onClick={showStop ? onStop : onSubmit}>{busy ? <Spinner /> : showStop ? <SquareIcon fill="currentColor" strokeWidth={0} /> : <ArrowUpIcon />}</InputGroupButton>
+        <InputGroupButton size="icon-sm" variant="default" className="dl-send-button" aria-label={t(showStop ? "composer.stop_task" : "composer.send_message")} disabled={showStop ? busy : !canSend} onClick={showStop ? onStop : onSubmit}>{busy ? <Spinner /> : showStop ? <SquareIcon fill="currentColor" strokeWidth={0} style={{ scale: "0.75" }} /> : <ArrowUpIcon />}</InputGroupButton>
       </InputGroupAddon>
     </InputGroup>
     <input ref={file} className="sr-only" aria-hidden="true" tabIndex={-1} type="file" multiple onChange={event => { onFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
