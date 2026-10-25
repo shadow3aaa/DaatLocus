@@ -361,13 +361,14 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn actor_scope_runs_shell_and_enforces_future_and_ancestor_denies() {
+    async fn device_scope_runs_shell_and_enforces_future_and_ancestor_denies() {
         if !crate::test_support::native_sandbox_available() {
             return;
         }
+        let fixture = crate::test_support::scoped_directory();
         let temp = tempfile::Builder::new()
             .prefix("dl quoted \" (root)\n")
-            .tempdir()
+            .tempdir_in(fixture.path())
             .unwrap();
         let root = temp.path().join("work");
         std::fs::create_dir(&root).unwrap();
