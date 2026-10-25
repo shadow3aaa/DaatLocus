@@ -1734,6 +1734,8 @@ mod tests {
             let mut policy = RuntimeSandboxPolicy::disabled();
             policy.filesystem.full_disk_read = false;
             policy.filesystem.readable_roots = vec![root.clone()];
+            let rules = root.parent().unwrap().join("global-ignore");
+            assert!(read_authorized_bytes(&rules, u64::MAX, &policy).is_err());
             let args = SearchTextArgs {
                 path: ".".into(),
                 query: "needle".into(),
@@ -1757,7 +1759,9 @@ mod tests {
             assert_eq!(all.matches.len(), 2);
             return;
         }
-        let temp = tempfile::tempdir().unwrap();
+        // Keep rules outside implicit temporary scopes and Windows short-name
+        // temp paths: ignore expands every '~' in excludesFile as a home path.
+        let temp = crate::sandbox::test_support::scoped_directory();
         let root = temp.path().join("repo");
         fs::create_dir_all(root.join(".git")).unwrap();
         fs::write(root.join("visible.txt"), "needle visible\n").unwrap();
