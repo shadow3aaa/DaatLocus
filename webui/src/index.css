@@ -1016,11 +1016,30 @@ html[data-desktop-platform="windows"] .dl-virtual-displays-header { padding-righ
 @media (max-width: 767px) { .dl-virtual-displays-page { border-radius: 0; padding-inline: max(16px,var(--dl-safe-left)) max(16px,var(--dl-safe-right)); } }
 
 /* Shared browser: quiet chrome, native page viewport, local start/library pages. */
+html[data-browser-tint] :is(.dl-browser-tabs,.dl-browser-toolbar,.dl-browser-progress,.dl-browser-find,.dl-browser-notice,.dl-browser-menu,.dl-browser-downloads,.dl-browser-download-menu) {
+  --background: var(--dl-browser-tab-background);
+  --foreground: var(--dl-browser-tab-foreground);
+  --popover: var(--dl-browser-surface);
+  --popover-foreground: var(--foreground);
+  --muted: color-mix(in srgb,var(--foreground) 6%,var(--background));
+  --muted-foreground: color-mix(in srgb,var(--foreground) 76%,transparent);
+  --accent: var(--dl-browser-hover);
+  --accent-foreground: var(--foreground);
+  --secondary: var(--dl-browser-surface);
+  --secondary-foreground: var(--foreground);
+  --primary: var(--foreground);
+  --primary-foreground: var(--background);
+  --border: color-mix(in srgb,var(--background) 78%,var(--foreground));
+  --input: var(--border);
+  --ring: var(--foreground);
+  color: var(--foreground);
+  color-scheme: var(--dl-browser-color-scheme);
+}
 .dl-browser-page { position: relative; display: flex; flex-direction: column; height: 100%; min-width: 0; min-height: 0; overflow: hidden; border-radius: 16px 0 0 16px; background: var(--background); }
 .dl-browser-tabs { display: flex; align-items: center; min-width: 0; gap: 4px; min-height: 38px; padding: 3px 12px 0; flex: none; color: var(--dl-browser-tab-foreground,var(--foreground)); background: var(--dl-browser-tab-background,color-mix(in srgb,var(--foreground) 1.5%,var(--background))); transition: background-color .18s ease,color .18s ease; }
 .dl-browser-tab-strip { display: flex; min-width: 0; overflow: auto; scrollbar-width: none; }
 .dl-browser-tab { display: flex; align-items: center; width: 200px; min-width: 100px; max-width: 220px; border-radius: 9px 9px 0 0; color: inherit; }
-.dl-browser-tab[data-active=true] { color: var(--foreground); background: var(--background); }
+.dl-browser-tab[data-active=true] { color: var(--dl-browser-tab-foreground,var(--foreground)); background: var(--dl-browser-surface,var(--background)); }
 .dl-browser-tab { position: relative; flex-shrink: 0; user-select: none; }
 .dl-browser-tab[data-dragging=true] { opacity: .45; }
 .dl-browser-tab[data-drop]::after { content: ""; position: absolute; top: 5px; bottom: 5px; width: 2px; border-radius: 2px; background: var(--foreground); pointer-events: none; }
@@ -1031,7 +1050,9 @@ html[data-desktop-platform="windows"] .dl-virtual-displays-header { padding-righ
 .dl-browser-tab>button[role=tab] svg { width: 14px; height: 14px; flex: none; }
 .dl-browser-tab>[data-slot=button] { width: 24px; height: 24px; margin-right: 6px; }
 html[data-browser-tint] .dl-window-controls { color: var(--dl-browser-tab-foreground); }
-html[data-browser-tint] :is(.dl-browser-tabs>[data-slot=button],.dl-browser-tab:not([data-active=true])>[data-slot=button],.dl-window-controls>[data-slot=button]:not(:last-child)):hover { color: var(--dl-browser-tab-foreground); background: color-mix(in srgb,var(--dl-browser-tab-background) 88%,var(--dl-browser-tab-foreground)); }
+html[data-browser-tint] .dl-browser-tab:not([data-active=true]) { color: color-mix(in srgb,var(--dl-browser-tab-foreground) 84%,transparent); }
+html[data-browser-tint] .dl-browser-tab:not([data-active=true]):hover { background: color-mix(in srgb,var(--dl-browser-hover) 55%,transparent); }
+html[data-browser-tint] :is(.dl-browser-tabs [data-slot=button],.dl-window-controls>[data-slot=button]:not(:last-child),.dl-browser-toolbar [data-slot=button],.dl-browser-find [data-slot=button],.dl-browser-menu [data-slot=button],.dl-browser-downloads [data-slot=button]):hover { color: var(--dl-browser-tab-foreground); background: var(--dl-browser-hover); }
 @media (prefers-reduced-motion: reduce) { .dl-browser-tabs { transition: none; } }
 .dl-browser-toolbar { display: flex; align-items: center; gap: 12px; padding: 10px 10px 11px; min-width: 0; flex: none; border-bottom: 1px solid var(--border); background: var(--background); }
 .dl-browser-navigation,.dl-browser-actions { display: flex; align-items: center; gap: 0; flex: none; border: 1px solid var(--border); border-radius: 28px; padding: 3px; box-shadow: 0 2px 12px color-mix(in srgb,var(--foreground) 3%,transparent); }
@@ -1103,10 +1124,10 @@ html[data-browser-tint] :is(.dl-browser-tabs>[data-slot=button],.dl-browser-tab:
 .dl-browser-download-progress { height: 3px; margin-top: 12px; width: 100%; overflow: hidden; border-radius: 2px; background: var(--muted); }
 .dl-browser-download-progress::after { content: ''; display: block; width: 35%; height: 100%; background: var(--foreground); animation: dl-browser-progress 1.4s ease-in-out infinite alternate; }
 @keyframes dl-browser-progress { to { transform: translateX(185%); } }
-.dl-browser-find { display: flex; align-items: center; gap: 4px; padding: 8px 12px; flex: none; border-bottom: 1px solid var(--border); }
+.dl-browser-find { display: flex; align-items: center; gap: 4px; padding: 8px 12px; flex: none; border-bottom: 1px solid var(--border); background: var(--background); }
 .dl-browser-find>[data-slot=input-group] { width: min(360px,100%); min-width: 0; margin-left: auto; }
 .dl-browser-find [role=status] { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.dl-browser-notice { flex: none; padding: 8px 16px; color: var(--muted-foreground); font-size: 13px; border-bottom: 1px solid var(--border); }
+.dl-browser-notice { flex: none; padding: 8px 16px; color: var(--muted-foreground); font-size: 13px; border-bottom: 1px solid var(--border); background: var(--background); }
 .dl-browser-error { display: flex; align-items: center; margin: 8px; width: auto; }
 html[data-desktop-platform=windows] .dl-browser-tabs { padding-right: var(--dl-caption-width); }
 @media(max-width:767px) {

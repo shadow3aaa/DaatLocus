@@ -5,6 +5,7 @@ import { t } from "@/lib/i18n";
 import { browserControl, browserFind, browserLayout, browserLibrary, browserScreenshot, subscribeBrowserWorkspace, type BrowserAction, type BrowserFindAction, type BrowserFindResult, type BrowserLibrary, type BrowserLibraryAction, type BrowserWorkspace } from "@/lib/browser-workspace";
 import { browserForeground } from "@/lib/browser-composition";
 import { browserChrome } from "@/lib/browser-chrome";
+import { browserFullscreenActive, subscribeBrowserFullscreen } from "@/lib/browser-fullscreen";
 import { isTauri } from "@tauri-apps/api/core";
 import { browserDestination } from "@/lib/browser-address";
 import { browserShortcut } from "@/lib/browser-shortcuts";
@@ -24,6 +25,17 @@ const initial: BrowserWorkspace = { pages: [], selected: null };
 const emptyLibrary:BrowserLibrary={history:[],downloads:[]};
 type Panel="history"|"downloads"|"settings"|null;
 const host=(url:string)=>{try{return new URL(url).hostname;}catch{return url;}};
+/** Repaint browser chrome from the page palette; repeated page switches keep it. */
+function tintBrowserChrome(palette:ReturnType<typeof browserChrome>){
+  const root=document.documentElement;
+  if(!palette){root.removeAttribute("data-browser-tint");for(const name of ["tab-background","tab-foreground","surface","hover","color-scheme"])root.style.removeProperty(`--dl-browser-${name}`);return;}
+  root.setAttribute("data-browser-tint","");
+  root.style.setProperty("--dl-browser-tab-background",palette.background);
+  root.style.setProperty("--dl-browser-tab-foreground",palette.foreground);
+  root.style.setProperty("--dl-browser-surface",palette.surface);
+  root.style.setProperty("--dl-browser-hover",palette.hover);
+  root.style.setProperty("--dl-browser-color-scheme",palette.scheme);
+}
 export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
   const {i18n}=useTranslation();
   const [workspace,setWorkspace]=useState(initial);
@@ -53,6 +65,7 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
   const tabStrip=useRef<HTMLDivElement>(null);
   const [canDrag,setCanDrag]=useState(false);
   const [expanded,setExpanded]=useState(true);
+  const [fullscreen,setFullscreen]=useState<string|null>(null);
   const {value:browserSettings}=useBrowserPreferences();
   const engine=searchEngines[browserSettings.search_engine];
   const viewport=useRef<HTMLDivElement>(null);
@@ -64,16 +77,21 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
   const blocked=useRef(false);
   const current=workspace.pages.find(page=>page.tab===workspace.selected);
   const home=!current || current.url==="about:blank";
+  const browserFullscreen=browserFullscreenActive(fullscreen,workspace.selected);
+  useEffect(()=>{tintBrowserChrome(home?null:browserChrome(current?.background));},[home,current?.background]);
+  useEffect(()=>()=>tintBrowserChrome(null),[]);
+  useEffect(()=>{
+    let live=true;let stop:(()=>void)|undefined;
+    void subscribeBrowserFullscreen(value=>{if(live)setFullscreen(value.fullscreen?value.tab:null);}).then(unsubscribe=>{if(live)stop=unsubscribe;else unsubscribe();}).catch(()=>{});
+    return()=>{live=false;stop?.();};
+  },[]);
   useEffect(()=>{
     const root=document.documentElement;
-    const palette=browserChrome(home?null:current?.background);
-    if(palette){
-      root.setAttribute("data-browser-tint","");
-      root.style.setProperty("--dl-browser-tab-background",palette.background);
-      root.style.setProperty("--dl-browser-tab-foreground",palette.foreground);
-    }
-    return()=>{root.removeAttribute("data-browser-tint");root.style.removeProperty("--dl-browser-tab-background");root.style.removeProperty("--dl-browser-tab-foreground");};
-  },[home,current?.background]);
+    root.toggleAttribute("data-browser-fullscreen",browserFullscreen&&isTauri());
+    if(browserFullscreen){setPanel(null);setFind(null);setMenu(false);setClear(false);}
+    return()=>{root.removeAttribute("data-browser-fullscreen");};
+  },[browserFullscreen]);
+  useEffect(()=>{if(fullscreen&&fullscreen!==workspace.selected)setFullscreen(null);},[fullscreen,workspace.selected]);
   const nativeVisible=!home && !panel;
   blocked.current=!nativeVisible;
   const zoom=current?.zoom??1;

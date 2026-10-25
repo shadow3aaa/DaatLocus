@@ -67,6 +67,14 @@ pub(crate) fn resize(app: &tauri::AppHandle) -> Result<(), String> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    // A fullscreen page covers the window even while the shell keeps measuring itself.
+    let (x, y, width, height) = if attached_fullscreen(&host)
+        .is_some_and(|key| selected.as_deref() == Some(key.as_str()))
+    {
+        (0, 0, size.width, size.height)
+    } else {
+        (x, y, width, height)
+    };
     if let Some(key) = selected
         && let Some(view) = app.get_webview(&key)
     {
@@ -90,6 +98,118 @@ pub(crate) fn resize(app: &tauri::AppHandle) -> Result<(), String> {
         let _ = apply_input_regions(&updating).await;
     });
     Ok(())
+}
+fn fullscreen_page(host: &NativeHost) -> Option<String> {
+    host.fullscreen
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Only a page attached to the main window replaces the shell; detached pages keep it.
+fn attached_fullscreen(host: &NativeHost) -> Option<String> {
+    let key = fullscreen_page(host)?;
+    host.app
+        .get_webview(&key)
+        .is_some_and(|page| page.window().label() == "main")
+        .then_some(key)
+}
+
+/// A page requesting DOM fullscreen covers the whole window while the shell steps
+/// aside; leaving fullscreen (Esc, navigation, tab change) restores both.
+pub(crate) fn apply_page_fullscreen(host: &NativeHost, key: &str, fullscreen: bool) {
+    {
+        let mut current = host.fullscreen.lock().unwrap_or_else(|e| e.into_inner());
+        if fullscreen {
+            if current.as_deref() == Some(key) {
+                return;
+            }
+            *current = Some(key.to_owned());
+        } else if current.as_deref() == Some(key) {
+            *current = None;
+        } else {
+            return;
+        }
+    }
+    let app = host.app.clone();
+    let updating = host.clone();
+    let page_key = key.to_owned();
+    let _ = app.run_on_main_thread(move || {
+        let attached = updating
+            .app
+            .get_webview(&page_key)
+            .is_some_and(|page| page.window().label() == "main");
+        if attached && let Some(shell) = updating.app.get_webview("main") {
+            let _ = if fullscreen {
+                shell.hide()
+            } else {
+                shell.show()
+            };
+        }
+        if let Some(page) = updating.app.get_webview(&page_key) {
+            // Entering and leaving fullscreen both continue inside the page.
+            let _ = page.set_focus();
+        }
+        let _ = resize(&updating.app);
+        let host = updating.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = apply_input_regions(&host).await;
+        });
+    });
+    if let Some(shell) = app.get_webview("main") {
+        use tauri::Emitter;
+        let prefix = format!("web-{SHARED_BROWSER_PROFILE}-");
+        let tab = key.strip_prefix(&prefix).unwrap_or(key).to_owned();
+        let _ = shell.emit(
+            "dl-browser-fullscreen",
+            serde_json::json!({"tab": tab, "fullscreen": fullscreen}),
+        );
+    }
+}
+
+/// Leaving, closing or switching the fullscreen page must never strand the hidden shell.
+pub(crate) fn clear_page_fullscreen(host: &NativeHost) {
+    if let Some(key) = fullscreen_page(host) {
+        apply_page_fullscreen(host, &key, false);
+    }
+}
+
+/// WebView2 reports DOM fullscreen changes for every shared page.
+#[cfg(windows)]
+pub(crate) fn watch_fullscreen(host: &NativeHost, view: &Webview, key: &str) {
+    use webview2_com::ContainsFullScreenElementChangedEventHandler;
+    let host = host.clone();
+    let key = key.to_owned();
+    let registered = view.with_webview(move |platform| {
+        let result = (|| -> windows::core::Result<()> {
+            unsafe {
+                let core = platform.controller().CoreWebView2()?;
+                let host = host.clone();
+                let key = key.clone();
+                let mut token = 0i64;
+                core.add_ContainsFullScreenElementChanged(
+                    &ContainsFullScreenElementChangedEventHandler::create(Box::new(
+                        move |sender, _| {
+                            let mut fullscreen = windows::core::BOOL::default();
+                            if let Some(sender) = sender {
+                                sender.ContainsFullScreenElement(&mut fullscreen)?;
+                            }
+                            apply_page_fullscreen(&host, &key, fullscreen.as_bool());
+                            Ok(())
+                        },
+                    )),
+                    &mut token,
+                )?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            eprintln!("Browser fullscreen events are unavailable");
+        }
+    });
+    if registered.is_err() {
+        eprintln!("Browser fullscreen tracking could not start");
+    }
 }
 pub(crate) async fn set_panel(
     host: &NativeHost,
@@ -176,10 +296,16 @@ pub async fn browser_control(
     let host = app.state::<NativeHost>().inner().clone();
     // Visual detachment must also work after logout, without revealing page facts.
     if action == "detach" {
+        // The shell reports detach when its own page becomes hidden. A fullscreen
+        // page keeps the window and stays attached until it leaves fullscreen.
+        if fullscreen_page(&host).is_some() {
+            return Ok(serde_json::json!({}));
+        }
         host.foreground
             .lock()
             .map_err(|_| "Browser unavailable")?
             .clear();
+        clear_page_fullscreen(&host);
         set_panel(&host, None).await?;
         return Ok(serde_json::json!({}));
     }
@@ -561,12 +687,30 @@ pub(crate) fn move_tab(host: &NativeHost, key: &str, before: Option<&str>) -> Re
     Ok(())
 }
 pub(crate) async fn apply_input_regions(host: &NativeHost) -> Result<(), String> {
-    let bounds = *host.panel.lock().map_err(|_| "Browser unavailable")?;
-    let foreground = host
-        .foreground
-        .lock()
-        .map_err(|_| "Browser unavailable")?
-        .clone();
+    // A fullscreen page owns the whole window, so no shell chrome may cut into it.
+    let (bounds, foreground) = if attached_fullscreen(host).is_some() {
+        let area = host.app.get_webview("main").and_then(|shell| {
+            let window = shell.window();
+            let size = window.inner_size().ok()?;
+            let scale = window.scale_factor().ok()?;
+            Some(BrowserBounds {
+                x: 0.0,
+                y: 0.0,
+                width: (f64::from(size.width) / scale).max(1.0),
+                height: (f64::from(size.height) / scale).max(1.0),
+                scale,
+            })
+        });
+        (area, Vec::new())
+    } else {
+        (
+            *host.panel.lock().map_err(|_| "Browser unavailable")?,
+            host.foreground
+                .lock()
+                .map_err(|_| "Browser unavailable")?
+                .clone(),
+        )
+    };
     if let Some(shell) = host.app.get_webview("main") {
         crate::browser_use::compose(&shell, bounds, foreground).await?;
     }

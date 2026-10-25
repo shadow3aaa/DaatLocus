@@ -40,6 +40,7 @@ pub struct NativeHost {
     pub(crate) tab_order: Arc<Mutex<Vec<String>>>,
     pub(crate) titles: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) selected: Arc<Mutex<Option<String>>>,
+    pub(crate) fullscreen: Arc<Mutex<Option<String>>>,
     pub(crate) browser_frames:
         Arc<Mutex<HashMap<String, VecDeque<crate::browser_use::ImageFrame>>>>,
 }
@@ -83,6 +84,7 @@ impl NativeHost {
             tab_order: Default::default(),
             titles: Default::default(),
             selected: Default::default(),
+            fullscreen: Default::default(),
         }
     }
     pub(crate) fn navigation_allowed(&self, url: &url::Url) -> bool {
@@ -396,6 +398,8 @@ impl NativeHost {
         if shared {
             #[cfg(any(windows, target_os = "macos"))]
             crate::browser_use::shortcuts(&view, self.app.clone());
+            #[cfg(windows)]
+            crate::browser_ui::watch_fullscreen(self, &view, key);
             self.tab_order
                 .lock()
                 .map_err(|_| "Browser unavailable")?
@@ -452,6 +456,16 @@ impl NativeHost {
         Ok(())
     }
     pub(crate) fn close_page(&self, label: &str) -> Result<(), String> {
+        // Closing the fullscreen page restores the shell before it goes away.
+        if self
+            .fullscreen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+            == Some(label)
+        {
+            crate::browser_ui::clear_page_fullscreen(self);
+        }
         self.browser_frames
             .lock()
             .map_err(|_| "Browser unavailable")?
@@ -538,6 +552,18 @@ impl NativeHost {
                     .map_err(|_| "Browser page could not focus")?;
             }
             return Ok(());
+        }
+        // Switching pages while another is fullscreen restores the shell first.
+        let displaced = {
+            let current = self
+                .fullscreen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            current.filter(|key| key != label)
+        };
+        if let Some(key) = displaced {
+            crate::browser_ui::apply_page_fullscreen(self, &key, false);
         }
         for (key, page) in self.app.webviews() {
             if self.is_browser_page(&key) {
