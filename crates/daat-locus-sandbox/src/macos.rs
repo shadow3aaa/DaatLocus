@@ -175,6 +175,7 @@ pub fn wrap_command(
 
 pub(super) struct MacosSandboxAsyncChild {
     child: tokio::process::Child,
+    group_termination_sent: bool,
 }
 
 fn finish_exited_group_cleanup(pid: u32, result: std::io::Result<()>) -> std::io::Result<()> {
@@ -222,6 +223,9 @@ impl MacosSandboxAsyncChild {
         self.child.id()
     }
     pub fn start_kill(&mut self) -> std::io::Result<()> {
+        if self.group_termination_sent {
+            return Ok(());
+        }
         if let Some(pid) = self.child.id() {
             let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
             if result < 0 {
@@ -230,6 +234,10 @@ impl MacosSandboxAsyncChild {
                     return Err(error);
                 }
             }
+            // A successful group signal already targets the leader and its
+            // descendants. Repeating it while they become zombies can return
+            // EPERM on XNU despite the original termination having succeeded.
+            self.group_termination_sent = result == 0;
         }
         self.child.start_kill()
     }
@@ -285,6 +293,7 @@ pub(super) fn spawn_restricted_async(
     }
     let child = MacosSandboxAsyncChild {
         child: command.spawn()?,
+        group_termination_sent: false,
     };
     if cancelled
         .as_ref()

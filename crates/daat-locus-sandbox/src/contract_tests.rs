@@ -381,6 +381,9 @@ async fn live_process_scope_change_requires_explicit_restart_without_replaying_e
     );
     assert!(!root.join("extra").exists());
     child.start_kill().unwrap();
+    // Cancellation and completion may both request cleanup of the same tree.
+    #[cfg(target_os = "macos")]
+    child.start_kill().unwrap();
     let _ = collect(child).await;
 }
 
