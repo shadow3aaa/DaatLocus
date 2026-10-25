@@ -62,9 +62,16 @@ pub enum ProviderConfig {
         auth_file: String,
     },
     /// OpenCode Console OAuth: an OpenAI-compatible gateway (default
-    /// `https://opencode.ai/zen/v1`) authenticated with a device-code OAuth
+    /// `https://opencode.ai/inference/openai/v1`) authenticated with a device-code OAuth
     /// access token stored in `auth_file`.
     OpenCodeConsoleOauth {
+        #[serde(default)]
+        base_url: Option<String>,
+        #[serde(default)]
+        auth_file: String,
+    },
+    /// OpenCode Go uses the same Console OAuth login with subscription routing.
+    OpenCodeGoOauth {
         #[serde(default)]
         base_url: Option<String>,
         #[serde(default)]

@@ -1,4 +1,4 @@
-import type { DiscoveredModel, ModelConfig, SetupConfigRequest } from "./actor-api";
+import type { DiscoveredModel, ModelConfig, ProviderConfig, ProviderKind, SetupConfigRequest } from "./actor-api";
 
 function withRemainingModels(config: SetupConfigRequest, models: ModelConfig[]): SetupConfigRequest {
   return {...config, models,
@@ -36,4 +36,18 @@ export function reasoningValues(model?: DiscoveredModel): string[] {
     }
   }
   return [...new Set(values.filter(Boolean))];
+}
+
+export function isOpenCodeProvider(kind: ProviderKind): boolean {
+  return kind === "open_code_console" || kind === "open_code_go";
+}
+
+export function changeProviderKind(provider: ProviderConfig, kind: ProviderKind): ProviderConfig {
+  if (provider.kind === kind) return provider;
+  if (isOpenCodeProvider(provider.kind) && isOpenCodeProvider(kind)) {
+    return { ...provider, kind, base_url: null };
+  }
+  return { ...provider, kind, base_url: isOpenCodeProvider(provider.kind) || isOpenCodeProvider(kind) ? null : provider.base_url, api_key: null,
+    credential_configured: false, credential_name: null, codex_auth_method: null,
+    github_auth_method: null, opencode_auth_method: null, codex_auth_file: null };
 }

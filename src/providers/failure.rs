@@ -6,6 +6,7 @@ use std::error::Error;
 pub(crate) enum ModelFailureKind {
     Authentication,
     Forbidden,
+    Billing,
     CertificateRevoked,
     CertificateInvalid,
     Connection,
@@ -31,6 +32,7 @@ impl ModelRequestFailure {
         match self.kind {
             ModelFailureKind::Authentication => "model_authentication_failed",
             ModelFailureKind::Forbidden => "model_access_denied",
+            ModelFailureKind::Billing => "model_billing_required",
             ModelFailureKind::CertificateRevoked => "model_certificate_revoked",
             ModelFailureKind::CertificateInvalid => "model_certificate_invalid",
             ModelFailureKind::Connection => "model_connection_failed",
@@ -47,6 +49,7 @@ impl ModelRequestFailure {
             self.kind,
             ModelFailureKind::Authentication
                 | ModelFailureKind::Forbidden
+                | ModelFailureKind::Billing
                 | ModelFailureKind::CertificateRevoked
                 | ModelFailureKind::CertificateInvalid
                 | ModelFailureKind::ModelUnavailable
@@ -72,6 +75,15 @@ impl ModelRequestFailure {
     ) -> Option<miette::Report> {
         if status.is_success() || !super::is_opencode_gateway_base_url(base) {
             return None;
+        }
+        if status == reqwest::StatusCode::PAYMENT_REQUIRED {
+            return Some(Self::report(
+                ModelFailureKind::Billing,
+                format!(
+                    "OpenCode API returned HTTP {status}: {}",
+                    super::truncate_for_error(body)
+                ),
+            ));
         }
         let value: serde_json::Value = serde_json::from_str(body).ok()?;
         let error = value.get("error")?.as_object()?;
@@ -180,6 +192,24 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn opencode_billing_status_is_terminal_even_with_misleading_or_invalid_body() {
+        for body in [
+            r#"{"error":{"type":"server_error","message":"Upstream request failed: Insufficient account funds"}}"#,
+            "Payment required",
+        ] {
+            let report = ModelRequestFailure::opencode_response(
+                "https://opencode.ai/inference/go/openai/v1",
+                reqwest::StatusCode::PAYMENT_REQUIRED,
+                body,
+            )
+            .unwrap();
+            let failure = report.downcast_ref::<ModelRequestFailure>().unwrap();
+            assert_eq!(failure.code(), "model_billing_required");
+            assert!(!failure.retryable());
+        }
+    }
+
     #[test]
     fn revoked_certificate_is_not_an_expired_api_credential() {
         let certificate = rustls::Error::InvalidCertificate(rustls::CertificateError::Revoked);

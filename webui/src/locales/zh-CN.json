@@ -127,6 +127,7 @@
   },
   "conversation_turns": {
     "model_authentication_failed": "模型凭据无效或已过期，请更新提供商设置。",
+    "model_billing_required": "模型计费不可用，请检查所选提供商线路、余额和套餐。",
     "model_access_denied": "提供商拒绝了访问，请检查凭据及模型权限。",
     "model_certificate_revoked": "模型服务的证书已被吊销，请检查服务地址或网络代理。",
     "model_certificate_invalid": "无法验证模型服务的证书，请检查服务地址或网络代理。",

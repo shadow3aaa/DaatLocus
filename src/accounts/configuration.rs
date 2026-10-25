@@ -49,7 +49,8 @@ impl Definitions {
         let mut providers = config.providers.clone();
         for provider in providers.values_mut() {
             if let ProviderConfig::OpenaiCodexOauth { auth_file, .. }
-            | ProviderConfig::OpenCodeConsoleOauth { auth_file, .. } = provider
+            | ProviderConfig::OpenCodeConsoleOauth { auth_file, .. }
+            | ProviderConfig::OpenCodeGoOauth { auth_file, .. } = provider
             {
                 auth_file.clear();
             }
@@ -79,8 +80,12 @@ impl Definitions {
                     Some(ProviderConfig::OpenaiCodexOauth { auth_file: old, .. }),
                 )
                 | (
-                    ProviderConfig::OpenCodeConsoleOauth { auth_file, .. },
-                    Some(ProviderConfig::OpenCodeConsoleOauth { auth_file: old, .. }),
+                    ProviderConfig::OpenCodeConsoleOauth { auth_file, .. }
+                    | ProviderConfig::OpenCodeGoOauth { auth_file, .. },
+                    Some(
+                        ProviderConfig::OpenCodeConsoleOauth { auth_file: old, .. }
+                        | ProviderConfig::OpenCodeGoOauth { auth_file: old, .. },
+                    ),
                 ) => auth_file.clone_from(old),
                 _ => {}
             }
@@ -316,4 +321,45 @@ pub fn persist_device_config(system: &ActorSystem, config: &Config) -> Result<()
         crate::persistence::PersistenceFileMode::Private,
     )
     .into_diagnostic()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_channel_sync_omits_sender_auth_and_retains_receiver_login() {
+        for (source, target) in [
+            ("open-code-console-oauth", "open-code-go-oauth"),
+            ("open-code-go-oauth", "open-code-console-oauth"),
+        ] {
+            let mut sender = Config::default();
+            sender.providers.insert(
+                "console".into(),
+                serde_json::from_value(serde_json::json!({
+                    "type":source, "auth_file":"sender-private.json"
+                }))
+                .unwrap(),
+            );
+            let definitions =
+                Definitions::from_config(&sender, "account".into(), 1, StageId::new());
+            assert!(
+                !serde_json::to_string(&definitions)
+                    .unwrap()
+                    .contains("sender-private.json")
+            );
+            let mut receiver = Config::default();
+            receiver.providers.insert(
+                "console".into(),
+                serde_json::from_value(serde_json::json!({
+                    "type":target, "auth_file":"receiver-private.json"
+                }))
+                .unwrap(),
+            );
+            let imported = definitions.materialize(&receiver);
+            let provider = serde_json::to_value(&imported.providers["console"]).unwrap();
+            assert_eq!(provider["type"], source);
+            assert_eq!(provider["auth_file"], "receiver-private.json");
+        }
+    }
 }

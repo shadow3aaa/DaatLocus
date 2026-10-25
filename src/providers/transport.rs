@@ -573,6 +573,12 @@ mod tests {
         use crate::providers::{ModelFailureKind, ModelRequestFailure};
         for (status, error_type, message, expected) in [
             (
+                402,
+                "server_error",
+                "Upstream request failed: Insufficient account funds",
+                ModelFailureKind::Billing,
+            ),
+            (
                 400,
                 "server_error",
                 "Upstream request failed: Model is unavailable.",
@@ -624,7 +630,12 @@ mod tests {
             let server = tokio::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
-            for path in ["zen/v1", "go/v1"] {
+            for path in [
+                "zen/v1",
+                "go/v1",
+                "inference/openai/v1",
+                "inference/go/openai/v1",
+            ] {
                 let base = format!("http://opencode.ai:{}/{path}", address.port());
                 let client = crate::http_client::builder()
                     .no_proxy()
@@ -689,7 +700,7 @@ mod tests {
             }
             assert_eq!(
                 calls.load(Ordering::SeqCst),
-                12,
+                24,
                 "known errors must not trigger parameter fallback or repeated requests"
             );
             server.abort();

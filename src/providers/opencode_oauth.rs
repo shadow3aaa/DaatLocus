@@ -1,10 +1,7 @@
 //! OpenCode Console OAuth (device-code flow) support.
 //!
-//! OpenCode's `/zen/v1` free tier rejects plain service-account API keys and
-//! requires a personal Console login. This module implements the same OAuth
-//! device-code flow the official OpenCode client uses, persists the resulting
-//! tokens in a Daat-owned file, and exposes a provider that forwards requests
-//! to the zen gateway with a freshly resolved access token.
+//! Standard and Go inference share the Console device-code login. Tokens are
+//! persisted in a private device-local file and resolved before inference.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,10 +23,9 @@ use crate::persistence::{PersistenceFileMode, write_bytes_atomic};
 
 /// Default OpenCode Console origin used for the device-code OAuth flow.
 pub const OPENCODE_OAUTH_DEFAULT_SERVER: &str = "https://opencode.ai/console";
-/// Default OpenAI-compatible gateway base URL for OpenCode Console OAuth
-/// models: the Console-issued inference endpoint from `GET /api/config`.
-/// OAuth access tokens are only accepted here; the public `/zen/v1` gateway
-/// only accepts `oc_sk_`/`sk-` service-account API keys.
+/// Subscription inference endpoint; authentication is shared with standard OpenCode.
+pub const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/inference/go/openai/v1";
+/// Standard balance-funded inference endpoint.
 pub const OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/inference/openai/v1";
 
 const OPENCODE_OAUTH_CLIENT_ID: &str = "opencode-cli";
@@ -734,6 +730,7 @@ mod tests {
                 .route("/console/api/orgs", get(orgs))
                 .route("/console/auth/device/token", post(refresh))
                 .route("/inference/openai/v1/chat/completions", post(inference))
+                .route("/inference/go/openai/v1/chat/completions", post(inference))
                 .with_state(state.clone());
             let task = tokio::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
@@ -770,7 +767,10 @@ mod tests {
                 },
             )
         }
-        async fn infer(&self, provider: &OpenCodeOAuthClient) -> Result<AgentTurnStreamResult> {
+        async fn infer(
+            &self,
+            provider: &(dyn ModelProvider + Send + Sync),
+        ) -> Result<AgentTurnStreamResult> {
             let request = AgentTurnRequest {
                 messages: vec![crate::model_protocol::AgentMessage::user("Return OK")],
                 tools: vec![],
@@ -778,6 +778,35 @@ mod tests {
             let options = ModelRequestOptions::for_agent_turn(provider, &request, None)?;
             provider.complete_agent_turn(request, options).await
         }
+    }
+
+    #[tokio::test]
+    async fn opencode_channels_share_oauth_and_route_to_the_selected_inference_path() {
+        use crate::config::{Config, ProviderConfig};
+        let console = Console::new(axum::http::StatusCode::OK, r#"[{"id":"wrk_test"}]"#).await;
+        let mut config = Config::default();
+        config.models.insert(
+            "test".into(),
+            ModelConfig {
+                provider: "console".into(),
+                model_id: "test-model".into(),
+                ..Default::default()
+            },
+        );
+        for (wire, path) in [
+            ("open-code-console-oauth", "/inference/openai/v1"),
+            ("open-code-go-oauth", "/inference/go/openai/v1"),
+        ] {
+            let provider: ProviderConfig = serde_json::from_value(serde_json::json!({
+                "type": wire, "base_url":format!("{}{path}", console.base_url), "auth_file":console.auth_file
+            })).unwrap();
+            config.providers.insert("console".into(), provider);
+            let provider = super::super::build_model_provider("test", &config).unwrap();
+            console.infer(provider.as_ref()).await.unwrap();
+        }
+        assert_eq!(console.state.inference.load(Ordering::SeqCst), 2);
+        assert_eq!(console.state.lookups.load(Ordering::SeqCst), 1);
+        assert_eq!(console.state.refreshes.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

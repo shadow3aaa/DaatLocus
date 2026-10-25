@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { removeConfiguredModel, removeProvider, reasoningValues, selectDiscoveredModel } from "../src/lib/model-settings";
+import { changeProviderKind, removeConfiguredModel, removeProvider, reasoningValues, selectDiscoveredModel } from "../src/lib/model-settings";
 import type { SetupConfigRequest } from "../src/lib/actor-api";
 
 const configuration: SetupConfigRequest = {providers:[{kind:"openai",name:"old"},{kind:"openai",name:"remaining"}],models:[
@@ -32,4 +32,17 @@ describe("model directory selections", () => {
   test("token-budget suggestions respect directory limits and keep toggle/effort options", () => {
     expect(reasoningValues({id: "reasoner", thinking_budgets: ["high"], reasoning_options: [{type: "effort", values: ["medium", "high"]}, {type: "budget_tokens", min: 2000, max: 10000}, {type: "toggle"}]})).toEqual(["high", "medium", "2000", "4096", "8192", "10000", "true", "false"]);
   });
+});
+
+test("switching OpenCode channels retains login and clears the previous URL override", () => {
+  const standard = {kind: "open_code_console", name: "console", credential_name: "original",
+    credential_configured: true, opencode_auth_method: "existing_auth_file",
+    base_url: "https://opencode.ai/inference/openai/v1"} as const;
+  const go = changeProviderKind(standard, "open_code_go");
+  expect(go).toEqual({...standard, kind: "open_code_go", base_url: null});
+  expect(changeProviderKind({...go, base_url: "https://custom.invalid/v1"}, "open_code_console"))
+    .toEqual({...standard, base_url: null});
+  expect(changeProviderKind(go, "openai")).toMatchObject({kind: "openai",
+    credential_name: null, credential_configured: false, opencode_auth_method: null});
+  expect(changeProviderKind(standard, "open_code_console")).toBe(standard);
 });

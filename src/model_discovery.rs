@@ -109,7 +109,9 @@ fn catalog_provider_id_for_model(provider: &ProviderConfig, model_id: &str) -> O
         // line up with OpenAI entries for capacity metadata; Codex-specific
         // reasoning defaults are handled separately below.
         ProviderConfig::OpenaiCodexOauth { .. } => Some("openai".to_string()),
-        ProviderConfig::OpenCodeConsoleOauth { .. } => None,
+        ProviderConfig::OpenCodeConsoleOauth { .. } | ProviderConfig::OpenCodeGoOauth { .. } => {
+            None
+        }
         ProviderConfig::OpenaiCompatible { base_url, .. } => {
             catalog_provider_id_for_base_url_and_model(base_url, model_id)
         }
@@ -156,7 +158,9 @@ pub fn catalog_discovery_models(provider: &ProviderConfig) -> Vec<DiscoveredMode
         | ProviderConfig::AnthropicCompatible { base_url, .. } => {
             catalog_provider_ids_for_api_url(base_url)
         }
-        ProviderConfig::Ollama { .. } | ProviderConfig::OpenCodeConsoleOauth { .. } => Vec::new(),
+        ProviderConfig::Ollama { .. }
+        | ProviderConfig::OpenCodeConsoleOauth { .. }
+        | ProviderConfig::OpenCodeGoOauth { .. } => Vec::new(),
     };
     crate::model_catalog::catalog_model_ids(&provider_ids)
         .into_iter()
@@ -215,6 +219,18 @@ pub async fn discover_model_ids(
             base_url,
             auth_file,
         } => fetch_opencode_console_models(base_url.as_deref(), auth_file).await,
+        ProviderConfig::OpenCodeGoOauth {
+            base_url,
+            auth_file,
+        } => {
+            fetch_opencode_console_models(
+                base_url
+                    .as_deref()
+                    .or(Some(crate::providers::OPENCODE_GO_BASE_URL)),
+                auth_file,
+            )
+            .await
+        }
         ProviderConfig::OpenaiCompatible {
             base_url, api_key, ..
         } => {
@@ -395,7 +411,11 @@ fn parse_opencode_console_models(json: &serde_json::Value, base_url: &str) -> Ve
     let provider = providers
         .values()
         .find(|value| matches_base(value))
-        .or_else(|| providers.get("opencode"));
+        .or_else(|| {
+            (base_url == crate::providers::OPENCODE_ZEN_BASE_URL)
+                .then(|| providers.get("opencode"))
+                .flatten()
+        });
     let Some(provider) = provider else {
         return Vec::new();
     };
@@ -999,6 +1019,16 @@ mod tests {
             parse_opencode_console_models(&json, "https://opencode.ai/inference/go/openai/v1");
         let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
         assert_eq!(ids, vec!["b"]);
+    }
+
+    #[test]
+    fn opencode_go_does_not_borrow_the_standard_catalog() {
+        let json = serde_json::json!({"config":{"provider":{
+            "opencode":{"api":"https://opencode.ai/inference/openai/v1", "models":{"standard-only":{}}}
+        }}});
+        assert!(
+            parse_opencode_console_models(&json, crate::providers::OPENCODE_GO_BASE_URL).is_empty()
+        );
     }
 
     #[test]

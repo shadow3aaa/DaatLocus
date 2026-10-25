@@ -2079,7 +2079,8 @@ impl ActorSystem {
                     api_key: Some(key), ..
                 } => message = redact_secret_text(&message, &resolve_env_reference(key)),
                 ProviderConfig::OpenaiCodexOauth { auth_file, .. }
-                | ProviderConfig::OpenCodeConsoleOauth { auth_file, .. } => {
+                | ProviderConfig::OpenCodeConsoleOauth { auth_file, .. }
+                | ProviderConfig::OpenCodeGoOauth { auth_file, .. } => {
                     fn scrub(value: &serde_json::Value, message: &mut String) {
                         if let Some(fields) = value.as_object() {
                             for (key, value) in fields {

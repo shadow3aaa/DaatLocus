@@ -2,6 +2,7 @@ import { t } from "./i18n";
 
 const labels: Record<string, string> = {
   model_authentication_failed: "conversation_turns.model_authentication_failed",
+  model_billing_required: "conversation_turns.model_billing_required",
   model_access_denied: "conversation_turns.model_access_denied",
   model_certificate_revoked: "conversation_turns.model_certificate_revoked",
   model_certificate_invalid: "conversation_turns.model_certificate_invalid",

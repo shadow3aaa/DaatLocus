@@ -127,6 +127,7 @@
   },
   "conversation_turns": {
     "model_authentication_failed": "Model credentials are invalid or expired. Update the provider settings.",
+    "model_billing_required": "Model billing requires attention. Check the selected provider channel, balance and plan.",
     "model_access_denied": "The provider denied access. Check the credentials and model permissions.",
     "model_certificate_revoked": "The model service certificate was revoked. Check the service address or network proxy.",
     "model_certificate_invalid": "Cannot verify the model service certificate. Check the service address or network proxy.",

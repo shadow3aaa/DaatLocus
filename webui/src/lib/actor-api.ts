@@ -225,7 +225,7 @@ export type EventRecord = {
   created_at_ms: number;
   event: ActorEvent;
 };
-export type ProviderKind = "openai" | "anthropic_compatible" | "openai_compatible" | "openai_codex_oauth" | "open_code_console" | "github_copilot" | "ollama" | "ollama_cloud";
+export type ProviderKind = "openai" | "anthropic_compatible" | "openai_compatible" | "openai_codex_oauth" | "open_code_console" | "open_code_go" | "github_copilot" | "ollama" | "ollama_cloud";
 export type ProviderConfig = {
   kind: ProviderKind;
   name: string;

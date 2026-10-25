@@ -92,6 +92,11 @@ Chat Completions、Responses 与 Anthropic 的兼容降级记忆仅存于进程�
 模型的 deny 结果不改变原有错误或决策语义。条目空闲 30 分钟后失效；容量达到 512
 时淘汰最旧的非使用中条目，进行中的协商不被淘汰。进程重启清空缓存，不持久化凭据。
 
+OpenCode 与 OpenCode Go 是独立的提供商类型，共用 Console OAuth 登录与设备本地凭据，
+默认分别使用 `https://opencode.ai/inference/openai/v1` 和
+`https://opencode.ai/inference/go/openai/v1`，允许显式 URL 覆盖；名称不决定线路。
+WebUI 切换两种类型时保留登录关联并清空 URL 覆盖。模型目录按线路选择，Go 不回退
+到标准目录。HTTP 402 记为不可重试的计费失败，不自动改换线路。
 OpenCode Console OAuth 在发送模型请求前解析工作区选择，成功后写回私有凭据文件，
 由模型推理与模型目录查询共享。查询失败不发送缺少工作区标识的推理请求，也不缓存
 不完整授权；保留认证、连接、限流与服务错误分类。凭据刷新先持久化新的令牌，

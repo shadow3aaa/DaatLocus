@@ -40,9 +40,9 @@ pub use codex_oauth::{
 };
 mod opencode_oauth;
 pub use opencode_oauth::{
-    OPENCODE_OAUTH_DEFAULT_SERVER, OPENCODE_ZEN_BASE_URL, OpenCodeDevicePoll, OpenCodeOAuthClient,
-    opencode_auth_file_path, opencode_console_access, opencode_poll_device_token,
-    opencode_start_device_code, write_opencode_oauth_tokens,
+    OPENCODE_GO_BASE_URL, OPENCODE_OAUTH_DEFAULT_SERVER, OPENCODE_ZEN_BASE_URL, OpenCodeDevicePoll,
+    OpenCodeOAuthClient, opencode_auth_file_path, opencode_console_access,
+    opencode_poll_device_token, opencode_start_device_code, write_opencode_oauth_tokens,
 };
 mod ollama;
 pub use ollama::OllamaClient;
@@ -1437,6 +1437,14 @@ pub fn build_model_provider(
             base_url.as_deref(),
             model_config,
         )),
+        ProviderConfig::OpenCodeGoOauth {
+            base_url,
+            auth_file,
+        } => Box::new(OpenCodeOAuthClient::new(
+            auth_file.into(),
+            base_url.as_deref().or(Some(OPENCODE_GO_BASE_URL)),
+            model_config,
+        )),
         ProviderConfig::Ollama {
             host,
             api_key,
@@ -1457,7 +1465,8 @@ pub fn build_model_provider(
             base_url: Some(base_url),
             ..
         } => is_opencode_gateway_base_url(base_url),
-        ProviderConfig::OpenCodeConsoleOauth { base_url, .. } => {
+        ProviderConfig::OpenCodeConsoleOauth { base_url, .. }
+        | ProviderConfig::OpenCodeGoOauth { base_url, .. } => {
             base_url.as_deref().is_none_or(is_opencode_gateway_base_url)
         }
         _ => false,

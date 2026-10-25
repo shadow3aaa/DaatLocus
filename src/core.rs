@@ -742,6 +742,7 @@ mod tests {
         for kind in [
             ModelFailureKind::Authentication,
             ModelFailureKind::Forbidden,
+            ModelFailureKind::Billing,
             ModelFailureKind::CertificateRevoked,
             ModelFailureKind::CertificateInvalid,
             ModelFailureKind::ModelUnavailable,

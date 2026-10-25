@@ -186,6 +186,7 @@ pub enum SetupProviderKind {
     OpenaiCompatible,
     OpenaiCodexOauth,
     OpenCodeConsole,
+    OpenCodeGo,
     GithubCopilot,
     Ollama,
     OllamaCloud,
@@ -542,7 +543,7 @@ pub async fn run_setup_provider_auth(
         SetupProviderKind::GithubCopilot => Err(miette!(
             "GitHub Copilot device login must be started before it can be completed"
         )),
-        SetupProviderKind::OpenCodeConsole => {
+        SetupProviderKind::OpenCodeConsole | SetupProviderKind::OpenCodeGo => {
             run_opencode_setup_provider_auth(&request.provider).await
         }
         SetupProviderKind::Openai
@@ -580,7 +581,9 @@ pub async fn start_setup_provider_auth(
     match request.provider.kind {
         SetupProviderKind::OpenaiCodexOauth => start_codex_device_auth().await,
         SetupProviderKind::GithubCopilot => start_github_device_auth().await,
-        SetupProviderKind::OpenCodeConsole => start_opencode_device_auth().await,
+        kind @ (SetupProviderKind::OpenCodeConsole | SetupProviderKind::OpenCodeGo) => {
+            start_opencode_device_auth(kind).await
+        }
         _ => Err(miette!(
             "selected provider type does not support device authentication"
         )),
@@ -612,7 +615,7 @@ pub async fn complete_setup_provider_auth(
             },
         ) => complete_codex_device_auth(&request.provider, device_auth_id, user_code).await,
         (
-            SetupProviderKind::OpenCodeConsole,
+            SetupProviderKind::OpenCodeConsole | SetupProviderKind::OpenCodeGo,
             PendingSetupProviderAuthFlow::OpenCodeDevice {
                 device_code,
                 server,
@@ -695,8 +698,13 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
             opencode_auth_method: None,
             github_auth_method: None,
         },
-        ProviderConfig::OpenCodeConsoleOauth { base_url, .. } => SetupProviderRequest {
-            kind: SetupProviderKind::OpenCodeConsole,
+        ProviderConfig::OpenCodeConsoleOauth { base_url, .. }
+        | ProviderConfig::OpenCodeGoOauth { base_url, .. } => SetupProviderRequest {
+            kind: if matches!(provider, ProviderConfig::OpenCodeGoOauth { .. }) {
+                SetupProviderKind::OpenCodeGo
+            } else {
+                SetupProviderKind::OpenCodeConsole
+            },
             name: name.to_string(),
             credential_name: Some(name.to_string()),
             api_key: None,
@@ -913,6 +921,12 @@ fn provider_from_setup_provider(provider: &SetupProviderRequest) -> Result<Provi
             auth_file: required_codex_auth_file(provider)?,
         }),
         SetupProviderKind::OpenCodeConsole => Ok(ProviderConfig::OpenCodeConsoleOauth {
+            base_url: optional_normalized_url(base_url),
+            auth_file: crate::providers::opencode_auth_file_path()
+                .display()
+                .to_string(),
+        }),
+        SetupProviderKind::OpenCodeGo => Ok(ProviderConfig::OpenCodeGoOauth {
             base_url: optional_normalized_url(base_url),
             auth_file: crate::providers::opencode_auth_file_path()
                 .display()
@@ -1249,8 +1263,9 @@ async fn run_opencode_setup_provider_auth(
     }
 }
 
-async fn start_opencode_device_auth()
--> Result<(SetupProviderAuthStartResponse, PendingSetupProviderAuthFlow)> {
+async fn start_opencode_device_auth(
+    provider_kind: SetupProviderKind,
+) -> Result<(SetupProviderAuthStartResponse, PendingSetupProviderAuthFlow)> {
     let server = OPENCODE_OAUTH_DEFAULT_SERVER;
     let device = crate::providers::opencode_start_device_code(server).await?;
     let expires_at_ms = chrono::Utc::now().timestamp_millis()
@@ -1262,7 +1277,7 @@ async fn start_opencode_device_auth()
     Ok((
         SetupProviderAuthStartResponse {
             flow_id: flow_id.clone(),
-            provider_kind: SetupProviderKind::OpenCodeConsole,
+            provider_kind,
             verification_url: device.verification_url,
             user_code: device.user_code,
             expires_at_ms,
@@ -1816,7 +1831,8 @@ fn provider_error(name: &str, provider: &ProviderConfig) -> Option<String> {
                 ))
             }
         }
-        ProviderConfig::OpenCodeConsoleOauth { auth_file, .. } => {
+        ProviderConfig::OpenCodeConsoleOauth { auth_file, .. }
+        | ProviderConfig::OpenCodeGoOauth { auth_file, .. } => {
             let auth_file = if auth_file.trim().is_empty() {
                 crate::providers::opencode_auth_file_path()
             } else {
@@ -2199,6 +2215,36 @@ fn fill_uuid_random_bytes(bytes: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_setup_roundtrip_keeps_explicit_channel_independent_of_name() {
+        for (wire, kind) in [
+            (
+                "open-code-console-oauth",
+                SetupProviderKind::OpenCodeConsole,
+            ),
+            ("open-code-go-oauth", SetupProviderKind::OpenCodeGo),
+        ] {
+            for base_url in [None, Some("https://custom.invalid/v1")] {
+                let provider: ProviderConfig = serde_json::from_value(serde_json::json!({
+                    "type":wire,"base_url":base_url,"auth_file":"device-local.json"
+                }))
+                .unwrap();
+                let setup = setup_provider_from_config("opencode-go", &provider);
+                assert_eq!(setup.kind, kind);
+                let restored = provider_from_setup_provider(&setup).unwrap();
+                let json = serde_json::to_value(restored).unwrap();
+                assert_eq!(json["type"], wire);
+                assert_eq!(json["base_url"], serde_json::json!(base_url));
+                assert_eq!(
+                    json["auth_file"],
+                    crate::providers::opencode_auth_file_path()
+                        .display()
+                        .to_string()
+                );
+            }
+        }
+    }
 
     #[test]
     fn deleting_a_provider_cascades_models_and_falls_back_in_request_order() {

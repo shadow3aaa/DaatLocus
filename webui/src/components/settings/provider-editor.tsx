@@ -1,3 +1,4 @@
+import { changeProviderKind, isOpenCodeProvider } from "@/lib/model-settings";
 import { t } from "@/lib/i18n";
 import { useState } from "react";
 import { CheckIcon, CopyIcon, ExternalLinkIcon } from "lucide-react";
@@ -15,6 +16,7 @@ const PROVIDER_KINDS: { value: ProviderConfig["kind"]; label: string }[] = [
   { value: "anthropic_compatible", label: "Anthropic Compatible" }, { value: "openai_codex_oauth", label: "Codex OAuth" },
   { value: "github_copilot", label: "GitHub Copilot" }, { value: "ollama", label: "Ollama" },
   { value: "ollama_cloud", label: "Ollama Cloud" }, { value: "open_code_console", label: "OpenCode" },
+  { value: "open_code_go", label: "OpenCode Go" },
 ];
 
 export function providerKindLabel(kind: ProviderConfig["kind"]) {
@@ -37,7 +39,7 @@ export function ProviderEditor({ provider, onChange, disabled }: {
   const locked = disabled || Boolean(busy);
   const codex = provider.kind === "openai_codex_oauth";
   const github = provider.kind === "github_copilot";
-  const opencode = provider.kind === "open_code_console";
+  const opencode = isOpenCodeProvider(provider.kind);
   const method = codex ? (provider.codex_auth_method ?? "browser_login") : github ? (provider.github_auth_method ?? "manual_token") : opencode ? (provider.opencode_auth_method ?? "device_login") : "api_key";
   const methods = codex ? [
     { value: "browser_login", label: t("provider_editor.browser_sign_in") },
@@ -67,6 +69,7 @@ export function ProviderEditor({ provider, onChange, disabled }: {
         const result = complete && flow ? await completeProviderAuth(provider, flow.flow_id) : await runProviderAuth(provider);
         onChange({ ...provider,
           ...(result.api_key ? { api_key: result.api_key, credential_configured: true } : {}),
+          ...(opencode && result.auth_file ? { opencode_auth_method: "existing_auth_file" as const, credential_configured: true } : {}),
           ...(codex && result.auth_file ? { codex_auth_file: result.auth_file, codex_auth_method: "existing_auth_file" } : {}),
         });
         setFlow(null); setNotice( t("provider_editor.authorized"));
@@ -85,10 +88,10 @@ export function ProviderEditor({ provider, onChange, disabled }: {
     <FieldGroup>
       <TextField id="dl-provider-name" label={t("account_editor.name")} value={provider.name} disabled={locked} onChange={(event) => edit({ name: event.target.value })} />
       <Picker id="dl-provider-kind" label={t("provider_editor.provider_type")} value={provider.kind} options={PROVIDER_KINDS.map(option => ({...option,label: providerKindLabel(option.value)}))} disabled={locked}
-        onChange={(value) => edit({ kind: value as ProviderConfig["kind"], api_key: null, credential_configured: false, credential_name: null, codex_auth_method: null, github_auth_method: null, opencode_auth_method: null, codex_auth_file: null })} />
+        onChange={(value) => edit(changeProviderKind(provider, value as ProviderConfig["kind"]))} />
       {(codex || github || opencode) ? <Choices id="dl-provider-auth-method" label={t("provider_editor.authentication")} value={method} options={methods} disabled={locked}
         onChange={(value) => edit(codex ? { codex_auth_method: value as ProviderConfig["codex_auth_method"] } : github ? { github_auth_method: value as ProviderConfig["github_auth_method"] } : { opencode_auth_method: value as ProviderConfig["opencode_auth_method"] })} /> : null}
-      {!github ? <TextField id="dl-provider-url" label={t("provider_editor.base_url")} type="url" required={baseRequired} value={provider.base_url ?? ""} disabled={locked} placeholder={baseRequired ? "https://…" : t("model_editor.default")} onChange={(event) => edit({ base_url: event.target.value || null })} /> : null}
+      {!github ? <TextField id="dl-provider-url" label={t("provider_editor.base_url")} type="url" required={baseRequired} value={provider.base_url ?? ""} disabled={locked} placeholder={opencode ? provider.kind === "open_code_go" ? "https://opencode.ai/inference/go/openai/v1" : "https://opencode.ai/inference/openai/v1" : baseRequired ? "https://…" : t("model_editor.default")} onChange={(event) => edit({ base_url: event.target.value || null })} /> : null}
       {showKey ? <TextField id="dl-provider-key" label={method === "env_token" ? t("provider_editor.token_environment_variable") : github ? t("provider_editor.access_token") : t("provider_editor.api_key")}
         type={method === "env_token" ? "text" : "password"} autoComplete="off" value={provider.api_key ?? ""} disabled={locked}
         placeholder={provider.credential_configured ? t("provider_editor.configured_leave_blank_to_keep") : method === "env_token" ? "${TOKEN_VARIABLE}" : ""}
