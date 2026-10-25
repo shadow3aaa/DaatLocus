@@ -1311,7 +1311,7 @@ exit 42
     fn writable_root_does_not_allow_symlink_escape() {
         use std::os::unix::fs::symlink;
 
-        let tempdir = tempfile::tempdir().expect("tempdir");
+        let tempdir = crate::test_support::scoped_directory();
         let workspace_dir = tempdir.path().join("workspace");
         let outside_dir = tempdir.path().join("outside");
         std::fs::create_dir_all(&workspace_dir).expect("create workspace");

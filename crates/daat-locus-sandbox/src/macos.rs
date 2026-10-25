@@ -72,7 +72,7 @@ pub fn wrap_command(
             profile.rule("allow", read_ops, &root)?;
         }
     }
-    if fs.full_disk_write {
+    if fs.full_disk_write && !fs.deny_all_writes {
         profile.rule("allow", "file-write*", Path::new("/"))?;
     }
     let mut writable_roots = fs.writable_roots.clone();
@@ -86,7 +86,9 @@ pub fn wrap_command(
     );
     for root in &writable_roots {
         for root in policy_paths_with_resolved(std::slice::from_ref(&root.root)) {
-            profile.rule("allow", "file-write*", &root)?;
+            if !fs.deny_all_writes {
+                profile.rule("allow", "file-write*", &root)?;
+            }
             profile.filter(&root)?;
             // Keep authority anchors from being unlinked/replaced while a
             // sandboxed process (or one of its descendants) is running.

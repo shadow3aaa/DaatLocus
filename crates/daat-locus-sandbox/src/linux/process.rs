@@ -645,11 +645,11 @@ mod tests {
         (status, out, err)
     }
     #[tokio::test]
-    async fn actor_scope_runs_shell_and_preserves_missing_denies() {
+    async fn device_scope_runs_shell_and_preserves_missing_denies() {
         if !crate::test_support::native_sandbox_available() {
             return;
         }
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::scoped_directory();
         let root = temp.path().join("work");
         std::fs::create_dir(&root).unwrap();
         let private = root.join("private");
