@@ -460,7 +460,15 @@ fn shell_invocation(command: &str) -> (String, Vec<String>) {
             ],
         )
     } else {
-        ("bash".into(), vec!["-lc".to_string(), shell_command])
+        // macOS PATH often selects Homebrew bash, whose executable and dylibs
+        // require ordinary extra scopes. The default shell is the OS runtime;
+        // selecting it must not silently depend on third-party installations.
+        let program = if cfg!(target_os = "macos") {
+            "/bin/bash"
+        } else {
+            "bash"
+        };
+        (program.into(), vec!["-lc".to_string(), shell_command])
     }
 }
 

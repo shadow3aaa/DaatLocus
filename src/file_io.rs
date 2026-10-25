@@ -2181,8 +2181,8 @@ mod tests {
     #[test]
     #[cfg_attr(windows, ignore = "requires Windows symlink creation privileges")]
     fn symlink_escape_is_denied() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let dir = crate::sandbox::test_support::scoped_directory();
+        let outside = crate::sandbox::test_support::scoped_directory();
         fs::write(outside.path().join("a.txt"), "outside").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();

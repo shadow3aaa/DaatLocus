@@ -12,6 +12,7 @@ use std::{collections::VecDeque, sync::atomic::AtomicBool};
 
 enum MockReply {
     Answer(&'static str),
+    AnswerOnEveryRequest(&'static str),
     Calls(Vec<AgentToolCall>),
     Pending,
     // An explicitly unresponsive provider may resume inference any number of
@@ -530,9 +531,9 @@ async fn idle_actors_activate_on_demand_and_reload_durable_history() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_wakes_execute_each_input_once_across_idle_retirement() {
-    let provider = Arc::new(ReplayProvider::new(
-        (0..24).map(|_| MockReply::Answer("Done")).collect(),
-    ));
+    let provider = Arc::new(ReplayProvider::new(vec![MockReply::AnswerOnEveryRequest(
+        "Done",
+    )]));
     let (_dir, mut system) = runtime(provider.clone()).await;
     system.set_idle_timeout(Duration::from_millis(1));
     for round in 0..6 {
@@ -547,14 +548,25 @@ async fn concurrent_wakes_execute_each_input_once_across_idle_retirement() {
         }
         while let Some(sent) = sends.join_next().await {
             let message = sent.unwrap();
-            assert_eq!(
-                wait_completed(&system, &message.id).await.status,
-                MessageStatus::Completed
-            );
+            let completed = wait_completed(&system, &message.id).await;
+            assert_eq!(completed.status, MessageStatus::Completed);
+            assert_eq!(completed.reply.as_deref(), Some("Done"));
         }
         wait_passivated(&system).await;
     }
-    assert_eq!(provider.requests.lock().len(), 24);
+    // New arrivals may discard speculative responses. Only committed replies
+    // count as executions; retirement/wake races must not commit one twice.
+    assert!(provider.requests.lock().len() >= 24);
+    let history = system.store().history("root", 4096).unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .filter(|row| matches!(row,
+                AgentMessage::Assistant {content, ..} if content == "Done"
+            ))
+            .count(),
+        24
+    );
     system.shutdown().await;
 }
 
@@ -770,6 +782,7 @@ struct ReplayProvider {
     review_replies: parking_lot::Mutex<VecDeque<serde_json::Value>>,
     review_blocked: AtomicBool,
     review_release: tokio::sync::Notify,
+    inference_gate: parking_lot::Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 impl ReplayProvider {
@@ -786,6 +799,7 @@ impl ReplayProvider {
             review_replies: parking_lot::Mutex::new(VecDeque::new()),
             review_blocked: AtomicBool::new(false),
             review_release: tokio::sync::Notify::new(),
+            inference_gate: parking_lot::Mutex::new(None),
         }
     }
 }
@@ -830,12 +844,16 @@ impl ModelProvider for ReplayProvider {
         self.started.notify_one();
         let reply = {
             let mut replies = self.replies.lock();
-            if matches!(replies.front(), Some(MockReply::PendingOnEveryRequest)) {
-                MockReply::PendingOnEveryRequest
-            } else {
-                replies.pop_front().expect("mock reply available")
+            match replies.front() {
+                Some(MockReply::PendingOnEveryRequest) => MockReply::PendingOnEveryRequest,
+                Some(MockReply::AnswerOnEveryRequest(text)) => MockReply::Answer(text),
+                _ => replies.pop_front().expect("mock reply available"),
             }
         };
+        let gate = self.inference_gate.lock().take();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
         let bias = self.usage_bias.load(Ordering::Relaxed);
         if bias > 0 && !matches!(reply, MockReply::Pending | MockReply::PendingOnEveryRequest) {
             self.usage
@@ -872,16 +890,18 @@ impl ModelProvider for ReplayProvider {
                     json!({"type":"message","phase":"partial_answer","content":[{"type":"output_text","text":text}]}),
                 ]),
             }),
-            MockReply::Answer(text) => Ok(AgentTurnStreamResult {
-                items: vec![],
-                raw_stream_follow_up: false,
-                last_assistant_message: Some(text.into()),
-                last_reasoning_content: None,
-                last_reasoning_signature: None,
-                responses_output: Some(vec![
-                    json!({"type":"message","content":[{"type":"output_text","text":text}]}),
-                ]),
-            }),
+            MockReply::Answer(text) | MockReply::AnswerOnEveryRequest(text) => {
+                Ok(AgentTurnStreamResult {
+                    items: vec![],
+                    raw_stream_follow_up: false,
+                    last_assistant_message: Some(text.into()),
+                    last_reasoning_content: None,
+                    last_reasoning_signature: None,
+                    responses_output: Some(vec![
+                        json!({"type":"message","content":[{"type":"output_text","text":text}]}),
+                    ]),
+                })
+            }
             MockReply::Calls(calls) => {
                 let mut output =
                     vec![json!({"type":"reasoning","encrypted_content":"encrypted reasoning"})];
@@ -1649,8 +1669,18 @@ async fn remote_automatic_review_uses_busy_core_worker_without_moving_it_or_shar
         1,
         "review must not enter the Core inbox"
     );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let permitted = net_a.core.read().as_ref().unwrap().permitted();
+            if permitted {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the same Core worker must renew its healthy affinity after review");
     assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), before_epoch);
-    assert!(net_a.core.read().as_ref().unwrap().permitted());
     assert!(!net_b.core.read().as_ref().unwrap().permitted());
     device_model.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {
@@ -4900,6 +4930,8 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
         }]),
         MockReply::Pending,
     ]));
+    let release_progress = Arc::new(tokio::sync::Notify::new());
+    *worker.inference_gate.lock() = Some(release_progress.clone());
     let mut config = runtime_config();
     config
         .models
@@ -4969,6 +5001,10 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
             .as_deref(),
         Some("Your second message has been handled.")
     );
+    // Exercise progress while the worker stays active, after the second Owner
+    // input settles. The mock's three responses describe these three inputs,
+    // rather than depending on scheduler ordering between Owner and progress.
+    release_progress.notify_one();
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let messages = system.store().messages("core", None, 100).unwrap().items;
