@@ -27,7 +27,9 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
   const [dragging, setDragging] = useState(false);
   const preference = models.some(model => model.name === modelName) ? modelName : "";
   const selected = models.find(model => model.name === preference) || models.find(model => model.isDefault);
-  const canSend = !disabled && !submissionDisabled && !busy && !uploading && (Boolean(value.trim()) || attachments.length > 0);
+  const hasDraft = Boolean(value.trim()) || attachments.length > 0;
+  const showStop = working && !hasDraft && !uploading;
+  const canSend = !disabled && !submissionDisabled && !busy && !uploading && hasDraft;
   useEffect(() => {
     const element = text.current;
     if (!element) return;
@@ -66,8 +68,7 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
             {models.map(model => <DropdownMenuRadioItem value={model.name} key={model.name}><span className="dl-menu-choice"><span>{model.label}</span>{(model.effort || model.name !== model.label) && <small>{effortLabel(model.effort) || model.name}</small>}</span></DropdownMenuRadioItem>)}
           </DropdownMenuRadioGroup></DropdownMenuContent>
         </DropdownMenu>}
-        {working && !value.trim() && attachments.length === 0 && <InputGroupButton size="icon-sm" variant="default" className="dl-send-button dl-stop-button" aria-label={t("composer.stop_task")} disabled={busy} onClick={onStop}><SquareIcon fill="currentColor" strokeWidth={0} /></InputGroupButton>}
-        <InputGroupButton size="icon-sm" variant="default" className="dl-send-button" aria-label={t("composer.send_message")} disabled={!canSend} onClick={onSubmit}>{busy ? <Spinner /> : <ArrowUpIcon />}</InputGroupButton>
+        <InputGroupButton size="icon-sm" variant="default" className="dl-send-button" aria-label={t(showStop ? "composer.stop_task" : "composer.send_message")} disabled={showStop ? busy : !canSend} onClick={showStop ? onStop : onSubmit}>{busy ? <Spinner /> : showStop ? <SquareIcon fill="currentColor" strokeWidth={0} /> : <ArrowUpIcon />}</InputGroupButton>
       </InputGroupAddon>
     </InputGroup>
     <input ref={file} className="sr-only" aria-hidden="true" tabIndex={-1} type="file" multiple onChange={event => { onFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />

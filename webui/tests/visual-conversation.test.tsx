@@ -46,6 +46,28 @@ describe("fixed presentation and chronological source", () => {
     expect(html).not.toContain(`aria-label="${i18n.t("composer.stop_task")}"`);
     expect(html).not.toContain('disabled=""');
   });
+  test("the composer renders exactly one action for its current draft and execution state", () => {
+    const props: Parameters<typeof Composer>[0] = {value:"",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,working:true,onStop:()=>{},canManage:false,models:[],modelName:"",onModelChange:()=>{}};
+    const attachment = {id:"file",name:"report.txt",media_type:"text/plain",size_bytes:10,uri:"/v1/actors/root/resources/file"};
+    const cases = [
+      {patch:{},stop:true,disabled:false},
+      {patch:{value:"   "},stop:true,disabled:false},
+      {patch:{value:"Continue"},stop:false,disabled:false},
+      {patch:{attachments:[attachment]},stop:false,disabled:false},
+      {patch:{uploading:true},stop:false,disabled:true},
+      {patch:{working:false},stop:false,disabled:true},
+      {patch:{busy:true},stop:true,disabled:true},
+    ];
+    for (const {patch,stop,disabled} of cases) {
+      const html = renderToStaticMarkup(<Composer {...props} {...patch} />);
+      const label = i18n.t(stop ? "composer.stop_task" : "composer.send_message");
+      const other = i18n.t(stop ? "composer.send_message" : "composer.stop_task");
+      const actions = html.match(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`, "g"));
+      expect(actions).toHaveLength(1);
+      expect(actions![0].includes('disabled=""')).toBe(disabled);
+      expect(html).not.toContain(`aria-label="${other}"`);
+    }
+  });
   test("Core shows newly queued user messages before the running input finishes", () => {
     const queued = {...message,id:"new-input",actor_id:"core",status:"queued" as const,content:"NEW_IM_INPUT"};
     const chat = {messages:[message,queued],tools:[],approvals:[],events:[]} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
