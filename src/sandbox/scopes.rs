@@ -47,7 +47,6 @@ impl SandboxScope {
     pub(crate) fn active_filesystem(&self) -> Option<(&Path, bool)> {
         if !crate::actors::permissions::canonical_path(&self.path)
             .is_ok_and(|current| current == self.path)
-            || self.recursive && self.path.exists() && !self.path.is_dir()
             || !self.recursive && self.path.is_dir()
         {
             return None;
@@ -254,6 +253,40 @@ impl crate::actors::store::ActorStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newly_created_file_keeps_its_remembered_write_scope() {
+        let directory = crate::sandbox::test_support::scoped_directory();
+        let file = directory.path().join("new-file.txt");
+        let scope = SandboxScope::filesystem(&file, true).unwrap();
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sandbox_scopes(path TEXT NOT NULL,write INTEGER NOT NULL,recursive INTEGER NOT NULL,PRIMARY KEY(path,write,recursive));").unwrap();
+        let tx = db.transaction().unwrap();
+        remember(&tx, &[scope]).unwrap();
+        let before = policy(&scopes(&tx).unwrap(), false);
+        before
+            .ensure_path_writable(&file, "new native file target")
+            .unwrap();
+        // Native in-place creation does not use the Files atomic writer's
+        // sibling temporary file. Simulate that effect, then reload memory.
+        std::fs::write(&file, "remember this file").unwrap();
+        let saved = scopes(&tx).unwrap();
+        assert_eq!(saved.len(), 1);
+        let after = policy(&saved, false);
+        let read = crate::file_io::read_file(
+            directory.path(),
+            &after,
+            &crate::file_io::ReadFileArgs {
+                path: file.to_string_lossy().into_owned(),
+                start_line: None,
+                line_count: None,
+            },
+        )
+        .expect("creation must not revoke the scope just approved for this file");
+        assert_eq!(read.content, "remember this file");
+        assert!(after.is_path_writable(&file));
+        assert!(!after.is_path_readable(&directory.path().join("unapproved-sibling.txt")));
+    }
 
     #[cfg(windows)]
     #[test]

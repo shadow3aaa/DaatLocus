@@ -471,6 +471,50 @@ async fn denied_application_forwards_asynchronously_and_reusing_the_incident_nev
 }
 
 #[tokio::test]
+async fn atomic_write_reviews_the_first_missing_directory_before_creating_its_hierarchy() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let reviewer = Arc::new(Reviewer::new(ReviewReply::Blocked(
+        release.clone(),
+        json!({"decision":"approve","reason":"create the requested report directory"}),
+    )));
+    let (directory, system, actor, message) = fixture(reviewer.clone()).await;
+    let missing = directory.path().join("new-output");
+    let file = missing.join("nested/report.txt");
+    let (call, _) = source(&system, &actor, &message, false);
+    let control = ActorControl::default();
+    let mut context = system.execution_context(&actor, &message).unwrap();
+    runtime::bind_access_broker(&mut context, &system, &actor, &message, &call, &control);
+    let filesystem = crate::sandbox::access::FileSystem::new(&context);
+    let args = crate::file_io::WriteFileArgs {
+        path: file.to_string_lossy().into_owned(),
+        content: "report output".into(),
+        expected_sha256: None,
+    };
+    let operation = filesystem.write_file(&args);
+    tokio::pin!(operation);
+    tokio::select! {
+        _ = reviewer.started.notified() => {},
+        result = &mut operation => panic!("write returned before review: {result:?}"),
+    }
+    assert!(!missing.exists(), "review must precede directory creation");
+    release.notify_one();
+    operation
+        .await
+        .expect("the same atomic write must resume after approving its actual creation boundary");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "report output");
+    assert_eq!(reviewer.requests.lock().len(), 1);
+    assert!(core_inputs(&system).is_empty());
+    let after = system.execution_context(&actor, &message).unwrap();
+    assert!(after.sandbox_policy.is_path_writable(&file));
+    assert!(
+        !after
+            .sandbox_policy
+            .is_path_writable(&directory.path().join("unrequested.txt"))
+    );
+    system.shutdown().await;
+}
+
+#[tokio::test]
 async fn suspended_read_refusal_stays_local_until_explicit_application_and_is_reviewed_once() {
     let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
         json!({"decision":"deny","reason":"Owner authorization is needed"}),

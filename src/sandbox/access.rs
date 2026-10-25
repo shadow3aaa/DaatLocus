@@ -6,6 +6,19 @@ use async_trait::async_trait;
 use miette::Result;
 use std::path::Path;
 
+// Directory creation walks from the first absent component. Approving only a
+// deeper path would not authorize the earlier creation steps of the same I/O.
+fn first_missing_directory(path: &Path) -> &Path {
+    let mut boundary = path;
+    while let Some(parent) = boundary.parent() {
+        if parent.exists() {
+            break;
+        }
+        boundary = parent;
+    }
+    boundary
+}
+
 #[async_trait]
 pub trait SandboxAccessBroker: Send + Sync {
     async fn authorize(&self, denial: DenialRecord) -> Result<RuntimeSandboxPolicy>;
@@ -78,7 +91,9 @@ impl<'a> FileSystem<'a> {
         let parent = path
             .parent()
             .ok_or_else(|| miette::miette!("File has no parent directory"))?;
-        let policy = self.access(initial, parent, Access::Write).await?;
+        let policy = self
+            .access(initial, first_missing_directory(parent), Access::Write)
+            .await?;
         self.access(&policy, &path, Access::Write).await
     }
 
@@ -145,15 +160,12 @@ impl<'a> FileSystem<'a> {
             self.access(&self.context.sandbox_policy, &path, Access::Read)
                 .await?
         } else {
-            let mut first_missing = path.as_path();
-            while let Some(parent) = first_missing.parent() {
-                if parent.exists() {
-                    break;
-                }
-                first_missing = parent;
-            }
-            self.access(&self.context.sandbox_policy, first_missing, Access::Write)
-                .await?
+            self.access(
+                &self.context.sandbox_policy,
+                first_missing_directory(&path),
+                Access::Write,
+            )
+            .await?
         };
         file_io::ensure_directory(&policy, &path)?;
         Ok(policy)
