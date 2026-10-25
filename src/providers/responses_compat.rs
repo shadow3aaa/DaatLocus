@@ -1,5 +1,4 @@
 use super::transport::{Authentication, BackendHttp};
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -24,6 +23,12 @@ use crate::model_protocol::{
     AgentTurnStreamResult, HistoryMessage, PromptRequest,
 };
 
+#[derive(Clone, Copy, PartialEq)]
+struct ResponsesCompatibility {
+    supports_vision: bool,
+    supports_reasoning_summary: bool,
+}
+
 pub struct ResponsesCompatibleClient {
     transport: BackendHttp,
     api_key: String,
@@ -39,10 +44,8 @@ pub struct ResponsesCompatibleClient {
     auto_compact_threshold_tokens: usize,
     reserved_output_tokens: usize,
     token_usage: std::sync::Mutex<TokenUsageInfo>,
-    supports_vision: std::sync::atomic::AtomicBool,
-    /// Whether the provider accepts `reasoning.summary`. It is an optional
-    /// display enhancement, so runtime errors disable it and retry.
-    supports_reasoning_summary: std::sync::atomic::AtomicBool,
+    initial_compatibility: ResponsesCompatibility,
+    compatibility: super::compatibility::CompatibilityCache<ResponsesCompatibility>,
 }
 
 impl ResponsesCompatibleClient {
@@ -99,8 +102,15 @@ impl ResponsesCompatibleClient {
                 model_context_window: i64::try_from(context_window_tokens).ok(),
                 daily_token_usage: Vec::new(),
             }),
-            supports_vision: std::sync::atomic::AtomicBool::new(supports_vision),
-            supports_reasoning_summary: std::sync::atomic::AtomicBool::new(true),
+            initial_compatibility: ResponsesCompatibility {
+                supports_vision,
+                supports_reasoning_summary: true,
+            },
+            compatibility: super::compatibility::CompatibilityCache::new(
+                "responses",
+                &base_url,
+                model_config,
+            ),
         }
     }
 
@@ -392,7 +402,7 @@ impl ModelProvider for ResponsesCompatibleClient {
             &instructions,
             &input,
             &Vec::new(),
-            responses_reasoning_payload(self, "prompt"),
+            responses_reasoning_payload(self, false),
         );
         payload["text"] = json!({
             "format": {
@@ -453,14 +463,22 @@ impl ModelProvider for ResponsesCompatibleClient {
             &self.extra_headers,
             &options,
         )?;
-        let mut strip_images = !self.supports_vision.load(Ordering::Relaxed);
+        let mut negotiation = self
+            .compatibility
+            .begin(
+                &self.api_key,
+                &self.extra_headers,
+                self.initial_compatibility,
+            )
+            .await;
         loop {
-            let payload = build_agent_payload(self, &request, strip_images);
+            let payload = build_agent_payload(self, &request, negotiation.state);
             let response = backend_request
                 .post(&payload, &request_context, self.request_timeout)
                 .await?;
             let status = response.status();
             if status.is_success() {
+                negotiation.succeeded();
                 return self
                     .parse_responses_stream(options.progress.as_ref(), response, true)
                     .await;
@@ -491,11 +509,19 @@ impl ModelProvider for ResponsesCompatibleClient {
             {
                 return Err(error);
             }
+            if status != reqwest::StatusCode::BAD_REQUEST {
+                return Err(miette!(
+                    "responses-compatible returned HTTP {status}: {}",
+                    truncate_for_error(&body)
+                ));
+            }
+            if negotiation.refresh_after_failure().await {
+                continue;
+            }
             if super::io::should_retry_request_without_reasoning_summary(&body)
-                && self.supports_reasoning_summary.load(Ordering::Relaxed)
+                && negotiation.state.supports_reasoning_summary
             {
-                self.supports_reasoning_summary
-                    .store(false, Ordering::Relaxed);
+                negotiation.state.supports_reasoning_summary = false;
                 warn!(
                     "responses-compatible rejected reasoning.summary; retrying without reasoning summaries\n{}",
                     request_context.join("\n")
@@ -503,10 +529,9 @@ impl ModelProvider for ResponsesCompatibleClient {
                 continue;
             }
             if super::io::looks_like_vision_unsupported_error(&body)
-                && self.supports_vision.load(Ordering::Relaxed)
+                && negotiation.state.supports_vision
             {
-                self.supports_vision.store(false, Ordering::Relaxed);
-                strip_images = true;
+                negotiation.state.supports_vision = false;
                 warn!(
                     "responses-compatible rejected image input; retrying without images\n{}",
                     request_context.join("\n")
@@ -574,10 +599,9 @@ fn base_payload(
 /// and only forward the configured effort.
 fn responses_reasoning_payload(
     client: &ResponsesCompatibleClient,
-    request_kind: &str,
+    request_summary: bool,
 ) -> Option<Value> {
-    let summary = request_kind == "agent"
-        && client.supports_reasoning_summary.load(Ordering::Relaxed)
+    let summary = request_summary
         && !client
             .thinking_budget
             .as_deref()
@@ -600,9 +624,10 @@ fn responses_reasoning_payload(
 fn build_agent_payload(
     client: &ResponsesCompatibleClient,
     request: &AgentTurnRequest,
-    strip_images: bool,
+    state: ResponsesCompatibility,
 ) -> Value {
-    let (instructions, input) = agent_messages_to_responses_parts(&request.messages, strip_images);
+    let (instructions, input) =
+        agent_messages_to_responses_parts(&request.messages, !state.supports_vision);
     let tools = request
         .tools
         .iter()
@@ -614,7 +639,7 @@ fn build_agent_payload(
         &instructions,
         &input,
         &tools,
-        responses_reasoning_payload(client, "agent"),
+        responses_reasoning_payload(client, state.supports_reasoning_summary),
     )
 }
 
@@ -927,7 +952,7 @@ mod tests {
                 messages: vec![AgentMessage::system("base"), AgentMessage::user("work")],
                 tools: Vec::new(),
             },
-            false,
+            client.initial_compatibility,
         );
 
         assert_eq!(payload["reasoning"]["summary"], "auto");
@@ -951,7 +976,7 @@ mod tests {
             "instructions",
             &[],
             &[],
-            responses_reasoning_payload(&client, "prompt"),
+            responses_reasoning_payload(&client, false),
         );
 
         assert!(payload.get("reasoning").is_none(), "{payload:#}");
@@ -1002,7 +1027,7 @@ mod tests {
                 ],
                 tools: vec![],
             },
-            false,
+            client.initial_compatibility,
         );
 
         assert_eq!(payload["input"][0]["type"], "function_call");
@@ -1130,7 +1155,7 @@ mod tests {
                 "base",
                 &[],
                 &[],
-                responses_reasoning_payload(&client, "agent"),
+                responses_reasoning_payload(&client, true),
             );
             assert_eq!(payload["reasoning"]["effort"], effort);
             if effort == "none" {

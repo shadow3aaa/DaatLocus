@@ -169,6 +169,13 @@ impl BackendRequest<'_> {
                 ));
             }
             if status != reqwest::StatusCode::TOO_MANY_REQUESTS && !status.is_server_error() {
+                if status.is_client_error() {
+                    tracing::debug!(
+                        %status,
+                        url = %self.url,
+                        "Model request returned a non-retryable client error status"
+                    );
+                }
                 return Ok(response);
             }
             let retry_after = response

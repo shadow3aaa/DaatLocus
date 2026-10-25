@@ -51,6 +51,9 @@ mod anthropic_compat;
 pub mod responses_compat;
 mod responses_protocol;
 
+mod compatibility;
+#[cfg(test)]
+mod compatibility_tests;
 mod transport;
 use transport::{Authentication, BackendHttp};
 mod failure;
@@ -95,7 +98,8 @@ pub struct OpenAIClient {
     auto_compact_threshold_tokens: usize,
     reserved_output_tokens: usize,
     max_completion_tokens: usize,
-    adapter_state: Mutex<ChatCompletionsAdapterState>,
+    initial_adapter_state: ChatCompletionsAdapterState,
+    compatibility: compatibility::CompatibilityCache<ChatCompletionsAdapterState>,
     token_usage: Mutex<TokenUsageInfo>,
 }
 
@@ -178,7 +182,9 @@ trait ChatCompletionsAdapter {
     ) -> serde_json::Value;
 }
 
-struct StandardChatCompletionsAdapter;
+struct StandardChatCompletionsAdapter {
+    state: ChatCompletionsAdapterState,
+}
 
 struct CompatibleChatCompletionsAdapter {
     state: ChatCompletionsAdapterState,
@@ -216,6 +222,11 @@ impl OpenAIClient {
         let reserved_output_tokens = model_config.reserved_output_tokens().max(1);
         let max_completion_tokens = model_config.max_completion_tokens();
         Self {
+            compatibility: compatibility::CompatibilityCache::new(
+                "chat-completions",
+                &base_url,
+                model_config,
+            ),
             transport,
             api_key: api_key.to_string(),
             base_url: base_url.clone(),
@@ -233,7 +244,7 @@ impl OpenAIClient {
             auto_compact_threshold_tokens,
             reserved_output_tokens,
             max_completion_tokens,
-            adapter_state: Mutex::new({
+            initial_adapter_state: {
                 use crate::model_catalog::catalog_model_capacity;
                 let vision_mode = match model_config.supports_vision {
                     Some(true) => VisionMode::Enabled,
@@ -252,7 +263,7 @@ impl OpenAIClient {
                     vision_mode,
                     ..ChatCompletionsAdapterState::default()
                 }
-            }),
+            },
             token_usage: Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
@@ -270,26 +281,14 @@ impl OpenAIClient {
         )
     }
 
-    fn adapter_state_guard(&self) -> ChatCompletionsAdapterState {
-        self.adapter_state
-            .lock()
-            .map(|state| *state)
-            .unwrap_or_default()
-    }
-
-    fn update_adapter_state(&self, next: ChatCompletionsAdapterState) {
-        if let Ok(mut state) = self.adapter_state.lock() {
-            *state = next;
-        }
-    }
-
-    fn current_adapter(&self) -> ActiveChatCompletionsAdapter {
+    fn adapter_for_state(
+        &self,
+        state: ChatCompletionsAdapterState,
+    ) -> ActiveChatCompletionsAdapter {
         if is_standard_openai_base_url(&self.base_url) {
-            ActiveChatCompletionsAdapter::Standard(StandardChatCompletionsAdapter)
+            ActiveChatCompletionsAdapter::Standard(StandardChatCompletionsAdapter { state })
         } else {
-            ActiveChatCompletionsAdapter::Compatible(CompatibleChatCompletionsAdapter {
-                state: self.adapter_state_guard(),
-            })
+            ActiveChatCompletionsAdapter::Compatible(CompatibleChatCompletionsAdapter { state })
         }
     }
 
@@ -360,11 +359,21 @@ impl OpenAIClient {
             &self.extra_headers,
             options,
         )?;
-        let mut adapter_state = self.adapter_state_guard();
+        let mut negotiation = self
+            .compatibility
+            .begin(
+                &self.api_key,
+                &self.extra_headers,
+                self.initial_adapter_state,
+            )
+            .await;
+        let mut adapter_state = negotiation.state;
         let body = loop {
-            let payload =
-                self.current_adapter()
-                    .build_prompt_payload(self, &request, output_schema.clone());
+            let payload = self.adapter_for_state(adapter_state).build_prompt_payload(
+                self,
+                &request,
+                output_schema.clone(),
+            );
             let response = backend_request
                 .post(&payload, &request_context, self.request_timeout)
                 .await?;
@@ -379,6 +388,8 @@ impl OpenAIClient {
             .await?;
 
             if status.is_success() {
+                negotiation.state = adapter_state;
+                negotiation.succeeded();
                 break body;
             }
 
@@ -400,17 +411,24 @@ impl OpenAIClient {
             {
                 return Err(error);
             }
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && negotiation.refresh_after_failure().await
+            {
+                adapter_state = negotiation.state;
+                continue;
+            }
             // On 400, step through adapter compatibility modes in order:
             // Omit function strict first, then downgrade tool_choice and the thinking budget.
             // Providers may reject parameters with generic error messages
             // that don't name the specific parameter, so we always try the
             // next mode instead of matching error text.
-            if Self::step_adapter_state_for_bad_request(
-                &mut adapter_state,
-                self.thinking_budget.is_some(),
-                !is_standard_openai_base_url(&self.base_url),
-            ) {
-                self.update_adapter_state(adapter_state);
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && Self::step_adapter_state_for_bad_request(
+                    &mut adapter_state,
+                    self.thinking_budget.is_some(),
+                    !is_standard_openai_base_url(&self.base_url),
+                )
+            {
                 warn!(
                     "llm api returned 400; retrying prompt request with downgraded adapter (tool_strict={:?}, tool_choice={:?}, thinking={:?})\n{}",
                     adapter_state.tool_strict_mode,
@@ -499,11 +517,19 @@ impl OpenAIClient {
                 } if !reasoning_content.trim().is_empty()
             )
         });
-        let mut adapter_state = self.adapter_state_guard();
+        let mut negotiation = self
+            .compatibility
+            .begin(
+                &self.api_key,
+                &self.extra_headers,
+                self.initial_adapter_state,
+            )
+            .await;
+        let mut adapter_state = negotiation.state;
         let (response, content_type) = loop {
-            let payload =
-                self.current_adapter()
-                    .build_agent_turn_payload(self, request.clone(), true);
+            let payload = self
+                .adapter_for_state(adapter_state)
+                .build_agent_turn_payload(self, request.clone(), true);
             let response = backend_request
                 .post(&payload, &request_context, self.request_timeout)
                 .await?;
@@ -516,6 +542,8 @@ impl OpenAIClient {
                 .to_string();
 
             if status.is_success() {
+                negotiation.state = adapter_state;
+                negotiation.succeeded();
                 break (response, content_type);
             }
 
@@ -545,12 +573,21 @@ impl OpenAIClient {
             {
                 return Err(error);
             }
+            if status != reqwest::StatusCode::BAD_REQUEST {
+                return Err(miette!(
+                    "llm api returned HTTP {status}: {}",
+                    truncate_for_error(&body)
+                ));
+            }
+            if negotiation.refresh_after_failure().await {
+                adapter_state = negotiation.state;
+                continue;
+            }
             if request_has_reasoning_content
                 && adapter_state.reasoning_content_mode == ReasoningContentMode::Enabled
                 && should_retry_request_without_reasoning_content(&body)
             {
                 adapter_state.reasoning_content_mode = ReasoningContentMode::Disabled;
-                self.update_adapter_state(adapter_state);
                 warn!(
                     "llm provider rejected reasoning_content message fields; retrying agent turn without them\n{}",
                     request_context.join("\n")
@@ -563,7 +600,6 @@ impl OpenAIClient {
                 && adapter_state.thinking_budget_mode == ThinkingBudgetMode::ReasoningEffortString
             {
                 adapter_state.thinking_budget_mode = ThinkingBudgetMode::NestedReasoningObject;
-                self.update_adapter_state(adapter_state);
                 warn!(
                     "llm provider rejected reasoning_effort; retrying agent turn with reasoning.effort\n{}",
                     request_context.join("\n")
@@ -576,7 +612,6 @@ impl OpenAIClient {
                 && adapter_state.thinking_budget_mode != ThinkingBudgetMode::Unsupported
             {
                 adapter_state.thinking_budget_mode = ThinkingBudgetMode::Unsupported;
-                self.update_adapter_state(adapter_state);
                 warn!(
                     "llm provider rejected thinking budget parameter; retrying agent turn without it\n{}",
                     request_context.join("\n")
@@ -588,7 +623,6 @@ impl OpenAIClient {
                 && adapter_state.vision_mode == VisionMode::Enabled
             {
                 adapter_state.vision_mode = VisionMode::Disabled;
-                self.update_adapter_state(adapter_state);
                 warn!(
                     "llm provider rejected image input; retrying agent turn without images\n{}",
                     request_context.join("\n")
@@ -600,7 +634,6 @@ impl OpenAIClient {
                 && !is_standard_openai_base_url(&self.base_url)
                 && Self::disable_tool_strict_for_bad_request(&mut adapter_state, request_has_tools)
             {
-                self.update_adapter_state(adapter_state);
                 warn!(
                     "llm provider returned HTTP 400; retrying agent turn without function strict\n{}",
                     request_context.join("\n")
@@ -613,7 +646,6 @@ impl OpenAIClient {
                 && adapter_state.reasoning_content_mode == ReasoningContentMode::Enabled
             {
                 adapter_state.reasoning_content_mode = ReasoningContentMode::Disabled;
-                self.update_adapter_state(adapter_state);
                 warn!(
                     "llm provider returned HTTP 400 with no recognized error pattern; retrying agent turn without reasoning_content as fallback\n{}",
                     request_context.join("\n")
@@ -964,7 +996,7 @@ impl ChatCompletionsAdapter for StandardChatCompletionsAdapter {
             &mut payload,
             client,
             client.thinking_budget.as_deref(),
-            client.adapter_state_guard().thinking_budget_mode,
+            self.state.thinking_budget_mode,
         );
         payload
     }
@@ -975,14 +1007,7 @@ impl ChatCompletionsAdapter for StandardChatCompletionsAdapter {
         request: AgentTurnRequest,
         stream: bool,
     ) -> serde_json::Value {
-        build_agent_turn_payload_common(
-            client,
-            request,
-            stream,
-            false,
-            false,
-            ToolStrictMode::Enabled,
-        )
+        build_agent_turn_payload_common(client, request, stream, false, false, self.state)
     }
 }
 
@@ -1049,7 +1074,7 @@ impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
             stream,
             true,
             self.state.reasoning_content_mode == ReasoningContentMode::Enabled,
-            self.state.tool_strict_mode,
+            self.state,
         )
     }
 }
@@ -2350,7 +2375,7 @@ mod tests {
             true,
             false,
             false,
-            ToolStrictMode::Enabled,
+            client.initial_adapter_state,
         );
 
         assert_eq!(payload["reasoning_effort"], "medium");
@@ -2378,7 +2403,7 @@ mod tests {
             true,
             false,
             false,
-            ToolStrictMode::Enabled,
+            client.initial_adapter_state,
         );
 
         assert_eq!(payload["thinking"]["type"], "enabled");
@@ -2408,7 +2433,7 @@ mod tests {
             true,
             false,
             false,
-            ToolStrictMode::Enabled,
+            client.initial_adapter_state,
         );
 
         assert_eq!(
@@ -2438,7 +2463,7 @@ mod tests {
             true,
             false,
             false,
-            ToolStrictMode::Enabled,
+            client.initial_adapter_state,
         );
 
         assert_eq!(client.request_budget_limits().reserved_output_tokens, 1);

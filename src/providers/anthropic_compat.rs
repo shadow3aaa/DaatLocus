@@ -11,9 +11,9 @@
 //! (`ProviderConfig::AnthropicCompatible`), not an `openai-compatible`
 //! `api_style`.
 
+use super::compatibility::{CompatibilityCache, Negotiation};
 use super::transport::{Authentication, BackendHttp};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -52,6 +52,13 @@ const THINKING_MODE_BUDGET: u8 = 2;
 const THINKING_MODE_DISABLED: u8 = 3;
 const MAX_THINKING_RETRIES: u8 = 2;
 
+#[derive(Clone, Copy, PartialEq)]
+struct AnthropicCompatibility {
+    supports_vision: bool,
+    force_tool: bool,
+    thinking_mode: u8,
+}
+
 pub struct AnthropicCompatibleClient {
     transport: BackendHttp,
     api_key: String,
@@ -67,11 +74,8 @@ pub struct AnthropicCompatibleClient {
     reserved_output_tokens: usize,
     max_completion_tokens: usize,
     token_usage: std::sync::Mutex<TokenUsageInfo>,
-    supports_vision: AtomicBool,
-    /// Extended thinking request shape. `AUTO` prefers adaptive thinking and
-    /// falls back to an explicit token budget (or off) when a provider rejects
-    /// the chosen shape, so thinking keeps working without failing the turn.
-    thinking_mode: AtomicU8,
+    initial_compatibility: AnthropicCompatibility,
+    compatibility: CompatibilityCache<AnthropicCompatibility>,
 }
 
 impl AnthropicCompatibleClient {
@@ -118,9 +122,69 @@ impl AnthropicCompatibleClient {
                 model_context_window: i64::try_from(context_window_tokens).ok(),
                 daily_token_usage: Vec::new(),
             }),
-            supports_vision: AtomicBool::new(supports_vision),
-            thinking_mode: AtomicU8::new(THINKING_MODE_AUTO),
+            initial_compatibility: AnthropicCompatibility {
+                supports_vision,
+                force_tool: true,
+                thinking_mode: THINKING_MODE_AUTO,
+            },
+            compatibility: CompatibilityCache::new("anthropic", &base_url, model_config),
         }
+    }
+
+    async fn retry_compatibility(
+        &self,
+        negotiation: &mut Negotiation<AnthropicCompatibility>,
+        status: reqwest::StatusCode,
+        body: &str,
+        thinking_retries: &mut u8,
+        json_request: bool,
+        request_context: &[String],
+    ) -> bool {
+        if status != reqwest::StatusCode::BAD_REQUEST {
+            return false;
+        }
+        if negotiation.refresh_after_failure().await {
+            return true;
+        }
+        let state = &mut negotiation.state;
+        if json_request && state.force_tool && looks_like_forced_tool_choice_error(body) {
+            state.force_tool = false;
+            warn!(
+                "anthropic-compatible rejected forced tool_choice; retrying with tool_choice=auto\n{}",
+                request_context.join("\n")
+            );
+            return true;
+        }
+        let adaptive_available = self
+            .thinking_budget
+            .as_deref()
+            .is_some_and(|budget| adaptive_effort(budget).is_some());
+        // Structured JSON requests never send thinking alongside their forced tool.
+        if !json_request
+            && *thinking_retries < MAX_THINKING_RETRIES
+            && let Some(next_mode) =
+                next_thinking_mode_on_error(body, state.thinking_mode, adaptive_available)
+            && next_mode != state.thinking_mode
+        {
+            warn!(
+                "anthropic-compatible rejected thinking_mode={} ; retrying with thinking_mode={}\n{}",
+                state.thinking_mode,
+                next_mode,
+                request_context.join("\n")
+            );
+            state.thinking_mode = next_mode;
+            *thinking_retries += 1;
+            return true;
+        }
+        if !json_request && looks_like_vision_unsupported_error(body) && state.supports_vision {
+            state.supports_vision = false;
+            warn!(
+                "anthropic-compatible rejected image input; retrying without images\n{}",
+                request_context.join("\n")
+            );
+            return true;
+        }
+        false
     }
 
     fn url(&self) -> String {
@@ -245,17 +309,24 @@ impl ModelProvider for AnthropicCompatibleClient {
             &reqwest::header::HeaderMap::new(),
             &options,
         )?;
+        let mut negotiation = self
+            .compatibility
+            .begin(
+                &self.api_key,
+                &reqwest::header::HeaderMap::new(),
+                self.initial_compatibility,
+            )
+            .await;
         let tool_name = request.tool_name.clone();
-        // Some models (e.g. Claude Opus 5.5) reject a forced tool_choice; fall back
-        // to `auto` and read the structured object from the text answer.
-        let mut force_tool = true;
+        let mut thinking_retries = 0u8;
         let response = loop {
-            let payload = build_prompt_payload(self, &request, force_tool);
+            let payload = build_prompt_payload(self, &request, negotiation.state);
             let response = backend_request
                 .post(&payload, &request_context, self.request_timeout)
                 .await?;
             let status = response.status();
             if status.is_success() {
+                negotiation.succeeded();
                 break response;
             }
             let url = self.url();
@@ -284,12 +355,17 @@ impl ModelProvider for AnthropicCompatibleClient {
             {
                 return Err(error);
             }
-            if force_tool && looks_like_forced_tool_choice_error(&body) {
-                force_tool = false;
-                warn!(
-                    "anthropic-compatible rejected forced tool_choice; retrying with tool_choice=auto\n{}",
-                    request_context.join("\n")
-                );
+            if self
+                .retry_compatibility(
+                    &mut negotiation,
+                    status,
+                    &body,
+                    &mut thinking_retries,
+                    true,
+                    &request_context,
+                )
+                .await
+            {
                 continue;
             }
             return Err(miette!(
@@ -330,15 +406,23 @@ impl ModelProvider for AnthropicCompatibleClient {
             &reqwest::header::HeaderMap::new(),
             &options,
         )?;
-        let mut strip_images = !self.supports_vision.load(Ordering::Relaxed);
+        let mut negotiation = self
+            .compatibility
+            .begin(
+                &self.api_key,
+                &reqwest::header::HeaderMap::new(),
+                self.initial_compatibility,
+            )
+            .await;
         let mut thinking_retries = 0u8;
         loop {
-            let payload = build_agent_payload(self, &request, strip_images);
+            let payload = build_agent_payload(self, &request, negotiation.state);
             let response = backend_request
                 .post(&payload, &request_context, self.request_timeout)
                 .await?;
             let status = response.status();
             if status.is_success() {
+                negotiation.succeeded();
                 return self
                     .parse_messages_stream(options.progress.as_ref(), response, true)
                     .await;
@@ -369,35 +453,17 @@ impl ModelProvider for AnthropicCompatibleClient {
             {
                 return Err(error);
             }
-            let current_thinking_mode = self.thinking_mode.load(Ordering::Relaxed);
-            let adaptive_available = self
-                .thinking_budget
-                .as_deref()
-                .is_some_and(|budget| adaptive_effort(budget).is_some());
-            if thinking_retries < MAX_THINKING_RETRIES
-                && let Some(next_mode) =
-                    next_thinking_mode_on_error(&body, current_thinking_mode, adaptive_available)
-                && next_mode != current_thinking_mode
+            if self
+                .retry_compatibility(
+                    &mut negotiation,
+                    status,
+                    &body,
+                    &mut thinking_retries,
+                    false,
+                    &request_context,
+                )
+                .await
             {
-                self.thinking_mode.store(next_mode, Ordering::Relaxed);
-                thinking_retries += 1;
-                warn!(
-                    "anthropic-compatible rejected thinking_mode={} ; retrying with thinking_mode={}\n{}",
-                    current_thinking_mode,
-                    next_mode,
-                    request_context.join("\n")
-                );
-                continue;
-            }
-            if looks_like_vision_unsupported_error(&body)
-                && self.supports_vision.load(Ordering::Relaxed)
-            {
-                self.supports_vision.store(false, Ordering::Relaxed);
-                strip_images = true;
-                warn!(
-                    "anthropic-compatible rejected image input; retrying without images\n{}",
-                    request_context.join("\n")
-                );
                 continue;
             }
             return Err(miette!(
@@ -460,11 +526,14 @@ fn looks_like_anthropic_context_error(body: &str) -> bool {
 fn build_agent_payload(
     client: &AnthropicCompatibleClient,
     request: &AgentTurnRequest,
-    strip_images: bool,
+    state: AnthropicCompatibility,
 ) -> Value {
-    let include_reasoning_blocks = thinking_enabled_for_request(client);
-    let (system, messages) =
-        agent_messages_to_anthropic(&request.messages, strip_images, include_reasoning_blocks);
+    let include_reasoning_blocks = thinking_enabled_for_request(client, state);
+    let (system, messages) = agent_messages_to_anthropic(
+        &request.messages,
+        !state.supports_vision,
+        include_reasoning_blocks,
+    );
     let mut payload = json!({
         "model": client.model,
         "max_tokens": client.max_output_tokens(),
@@ -486,7 +555,7 @@ fn build_agent_payload(
         payload["tool_choice"] = json!({ "type": "auto" });
     }
 
-    apply_thinking(client, &mut payload);
+    apply_thinking(client, state, &mut payload);
     apply_temperature(client, &mut payload);
     payload
 }
@@ -494,14 +563,10 @@ fn build_agent_payload(
 fn build_prompt_payload(
     client: &AnthropicCompatibleClient,
     request: &PromptRequest,
-    force_tool: bool,
+    state: AnthropicCompatibility,
 ) -> Value {
     let messages = collect_prompt_messages(request);
-    let (system, messages) = agent_messages_to_anthropic(
-        &messages,
-        !client.supports_vision.load(Ordering::Relaxed),
-        false,
-    );
+    let (system, messages) = agent_messages_to_anthropic(&messages, !state.supports_vision, false);
     // The OpenAI paths force a structured-output tool call; the Anthropic-native
     // equivalent is a single tool with the output schema forced via tool_choice.
     // A forced tool_choice is incompatible with extended thinking, so prompt
@@ -515,7 +580,7 @@ fn build_prompt_payload(
             "description": request.tool_description,
             "input_schema": request.output_schema,
         }],
-        "tool_choice": if force_tool {
+        "tool_choice": if state.force_tool {
             json!({ "type": "tool", "name": request.tool_name })
         } else {
             json!({ "type": "auto" })
@@ -574,9 +639,11 @@ fn is_thinking_disabled(budget: &str) -> bool {
 /// Whether reasoning blocks should be replayed and thinking requested. Once a
 /// provider has rejected every thinking shape, this turns off so later turns
 /// skip thinking entirely.
-fn thinking_enabled_for_request(client: &AnthropicCompatibleClient) -> bool {
-    thinking_configured(client)
-        && client.thinking_mode.load(Ordering::Relaxed) != THINKING_MODE_DISABLED
+fn thinking_enabled_for_request(
+    client: &AnthropicCompatibleClient,
+    state: AnthropicCompatibility,
+) -> bool {
+    thinking_configured(client) && state.thinking_mode != THINKING_MODE_DISABLED
 }
 
 /// Adaptive-thinking effort derived from the provider-agnostic budget.
@@ -621,8 +688,12 @@ fn explicit_thinking_budget(budget: &str) -> Option<u64> {
 /// Apply the configured extended thinking when the trailing turn allows it.
 /// Sampling parameters must be omitted whenever thinking is configured, which
 /// [`apply_temperature`] already enforces independently of this function.
-fn apply_thinking(client: &AnthropicCompatibleClient, payload: &mut Value) {
-    if !thinking_enabled_for_request(client) {
+fn apply_thinking(
+    client: &AnthropicCompatibleClient,
+    state: AnthropicCompatibility,
+    payload: &mut Value,
+) {
+    if !thinking_enabled_for_request(client, state) {
         return;
     }
     let Some(budget) = client.thinking_budget.as_deref() else {
@@ -631,7 +702,7 @@ fn apply_thinking(client: &AnthropicCompatibleClient, payload: &mut Value) {
     let Some(messages) = payload.get("messages").and_then(Value::as_array) else {
         return;
     };
-    let prefer_adaptive = match client.thinking_mode.load(Ordering::Relaxed) {
+    let prefer_adaptive = match state.thinking_mode {
         THINKING_MODE_ADAPTIVE => true,
         THINKING_MODE_BUDGET => false,
         // AUTO: prefer adaptive whenever the budget maps to an effort.
@@ -1415,6 +1486,373 @@ mod tests {
         )
     }
 
+    #[derive(Clone, Default)]
+    struct CompatibilityGateway {
+        requests: std::sync::Arc<parking_lot::Mutex<Vec<Value>>>,
+        reject_adaptive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        reject_budget: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        failure_status: std::sync::Arc<std::sync::atomic::AtomicU16>,
+        successful_barrier:
+            std::sync::Arc<parking_lot::Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>>,
+        stream_barrier:
+            std::sync::Arc<parking_lot::Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>>,
+    }
+
+    async fn compatibility_response(
+        axum::extract::State(state): axum::extract::State<CompatibilityGateway>,
+        axum::Json(payload): axum::Json<Value>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        use std::sync::atomic::Ordering;
+        state.requests.lock().push(payload.clone());
+        if (payload["thinking"]["type"] == "adaptive"
+            && state.reject_adaptive.load(Ordering::SeqCst))
+            || (payload["thinking"]["type"] == "enabled"
+                && state.reject_budget.load(Ordering::SeqCst))
+        {
+            return (axum::http::StatusCode::BAD_REQUEST, "unsupported thinking").into_response();
+        }
+        if let Ok(status) =
+            axum::http::StatusCode::from_u16(state.failure_status.load(Ordering::SeqCst))
+        {
+            // Deliberately resembles a compatibility error; only HTTP 400 may negotiate.
+            return (status, "unsupported thinking; tool_choice not supported").into_response();
+        }
+        if payload["tool_choice"]["type"] == "tool" {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                "tool_choice not supported",
+            )
+                .into_response();
+        }
+        if has_image(&payload) {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                "does not support image",
+            )
+                .into_response();
+        }
+        let barrier = state.successful_barrier.lock().clone();
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+        let events = [
+            json!({"type":"message_start", "message":{"usage":{"input_tokens":1}}}),
+            json!({"type":"content_block_start", "index":0, "content_block":{"type":"text"}}),
+            json!({"type":"content_block_delta", "index":0, "delta":{"type":"text_delta","text":"{\"decision\":\"deny\"}"}}),
+            json!({"type":"message_delta", "usage":{"output_tokens":1}}),
+            json!({"type":"message_stop"}),
+        ];
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        let stream_barrier = state.stream_barrier.lock().clone();
+        let body = axum::body::Body::from_stream(futures_util::stream::once(async move {
+            if let Some(barrier) = stream_barrier {
+                barrier.wait().await;
+            }
+            Ok::<_, std::convert::Infallible>(body)
+        }));
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            body,
+        )
+            .into_response()
+    }
+
+    fn has_image(payload: &Value) -> bool {
+        payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|block| block["type"] == "image")
+            })
+    }
+
+    async fn compatibility_server() -> (String, CompatibilityGateway, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let state = CompatibilityGateway::default();
+        let app = axum::Router::new()
+            .fallback(axum::routing::post(compatibility_response))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (base, state, server)
+    }
+
+    fn compatibility_client(base: &str) -> AnthropicCompatibleClient {
+        let mut client = AnthropicCompatibleClient::new(
+            "fixture",
+            base,
+            &ModelConfig {
+                model_id: "claude-sonnet-4-5".into(),
+                provider: "anthropic".into(),
+                thinking_budget: Some(ThinkingBudget::new("high")),
+                supports_vision: Some(true),
+                ..ModelConfig::default()
+            },
+        );
+        client.set_test_client(crate::http_client::builder().no_proxy().build().unwrap());
+        client
+    }
+
+    async fn compatibility_turn(
+        client: &AnthropicCompatibleClient,
+        image: bool,
+    ) -> Result<AgentTurnStreamResult> {
+        let content = if image {
+            AgentContent::multimodal(
+                "Work",
+                vec![AgentContentPart::ImageData {
+                    media_type: "image/png".into(),
+                    data_base64: "aGVsbG8=".into(),
+                    description: None,
+                }],
+            )
+        } else {
+            AgentContent::text("Work")
+        };
+        let request = AgentTurnRequest {
+            messages: vec![AgentMessage::user_content(content)],
+            tools: vec![],
+        };
+        let options = ModelRequestOptions::for_agent_turn(client, &request, None).unwrap();
+        client.complete_agent_turn(request, options).await
+    }
+
+    fn compatibility_review_request() -> PromptRequest {
+        PromptRequest {
+            tool_name: "review".into(),
+            tool_description: "Review".into(),
+            output_schema: json!({"type":"object","properties":{"decision":{"type":"string"}},"required":["decision"],"additionalProperties":false}),
+            system_messages: vec![],
+            history_messages: vec![],
+            retry_messages: vec![],
+            current_user_message: "Review".into(),
+        }
+    }
+
+    async fn compatibility_review(client: &AnthropicCompatibleClient) -> Value {
+        let request = compatibility_review_request();
+        let options = ModelRequestOptions::for_prompt(client, &request, None).unwrap();
+        client.complete_json(request, options).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn successful_compatibility_survives_instances_and_renegotiates_later_400s() {
+        use std::sync::atomic::Ordering;
+        let (base, state, server) = compatibility_server().await;
+        state.reject_adaptive.store(true, Ordering::SeqCst);
+        compatibility_turn(&compatibility_client(&base), true)
+            .await
+            .unwrap();
+        {
+            let requests = state.requests.lock();
+            assert_eq!(requests.len(), 3);
+            assert_eq!(requests[0]["thinking"]["type"], "adaptive");
+            assert_eq!(requests[1]["thinking"]["type"], "enabled");
+            assert!(has_image(&requests[1]));
+            assert!(!has_image(&requests[2]));
+        }
+        compatibility_turn(&compatibility_client(&base), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.requests.lock().len(),
+            4,
+            "a recreated client reuses thinking and vision compatibility"
+        );
+        assert_eq!(
+            compatibility_review(&compatibility_client(&base)).await,
+            json!({"decision":"deny"})
+        );
+        assert_eq!(
+            state.requests.lock().len(),
+            6,
+            "JSON negotiates its forced tool choice without losing the other choices"
+        );
+        assert_eq!(
+            compatibility_review(&compatibility_client(&base)).await,
+            json!({"decision":"deny"})
+        );
+        assert_eq!(state.requests.lock().len(), 7);
+        state.reject_budget.store(true, Ordering::SeqCst);
+        compatibility_turn(&compatibility_client(&base), true)
+            .await
+            .unwrap();
+        compatibility_turn(&compatibility_client(&base), true)
+            .await
+            .unwrap();
+        let requests = state.requests.lock();
+        assert_eq!(
+            requests.len(),
+            10,
+            "a later 400 continues the existing thinking fallback"
+        );
+        assert_eq!(requests[7]["thinking"]["type"], "enabled");
+        assert!(requests[8].get("thinking").is_none());
+        assert!(requests[9].get("thinking").is_none());
+        assert!(!has_image(&requests[9]));
+        drop(requests);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_negotiation_does_not_publish_attempted_thinking_mode() {
+        use std::sync::atomic::Ordering;
+        let (base, state, server) = compatibility_server().await;
+        let original = compatibility_client(&base);
+        compatibility_turn(&original, false).await.unwrap();
+        state.reject_adaptive.store(true, Ordering::SeqCst);
+        state.failure_status.store(402, Ordering::SeqCst);
+        assert!(compatibility_turn(&original, false).await.is_err());
+        assert_eq!(state.requests.lock().len(), 3);
+        state.reject_adaptive.store(false, Ordering::SeqCst);
+        state.failure_status.store(0, Ordering::SeqCst);
+        compatibility_turn(&original, false).await.unwrap();
+        compatibility_turn(&compatibility_client(&base), false)
+            .await
+            .unwrap();
+        let requests = state.requests.lock();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[2]["thinking"]["type"], "enabled");
+        assert_eq!(
+            requests[3]["thinking"]["type"], "adaptive",
+            "failed probes do not mutate the original client"
+        );
+        assert_eq!(
+            requests[4]["thinking"]["type"], "adaptive",
+            "failed probes do not update the shared cache"
+        );
+        drop(requests);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn authentication_and_payment_errors_never_negotiate_compatibility() {
+        use std::sync::atomic::Ordering;
+        for status in [401, 402] {
+            let (base, state, server) = compatibility_server().await;
+            state.failure_status.store(status, Ordering::SeqCst);
+            let client = compatibility_client(&base);
+            assert!(compatibility_turn(&client, false).await.is_err());
+            assert_eq!(state.requests.lock().len(), 1);
+            state.failure_status.store(0, Ordering::SeqCst);
+            compatibility_turn(&compatibility_client(&base), false)
+                .await
+                .unwrap();
+            let requests = state.requests.lock();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[1]["thinking"]["type"], "adaptive");
+            drop(requests);
+            server.abort();
+        }
+    }
+
+    async fn concurrent_compatibility_turns(base: &str) {
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..4 {
+            let client = compatibility_client(base);
+            tasks.spawn(async move {
+                compatibility_turn(&client, false).await.unwrap();
+            });
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(result) = tasks.join_next().await {
+                result.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn compatibility_probes_singleflight_but_cached_requests_remain_concurrent() {
+        use std::sync::atomic::Ordering;
+        let (base, state, server) = compatibility_server().await;
+        state.reject_adaptive.store(true, Ordering::SeqCst);
+        concurrent_compatibility_turns(&base).await;
+        assert_eq!(
+            state.requests.lock().len(),
+            5,
+            "one rejected adaptive probe and four successful requests"
+        );
+        *state.successful_barrier.lock() = Some(std::sync::Arc::new(tokio::sync::Barrier::new(4)));
+        concurrent_compatibility_turns(&base).await;
+        assert_eq!(
+            state.requests.lock().len(),
+            9,
+            "cached requests reach the server concurrently"
+        );
+        *state.successful_barrier.lock() = None;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn json_vision_errors_preserve_the_existing_terminal_failure() {
+        let (base, state, server) = compatibility_server().await;
+        let client = compatibility_client(&base);
+        let mut request = compatibility_review_request();
+        request
+            .history_messages
+            .push(crate::model_protocol::HistoryMessage {
+                message: AgentMessage::user_content(AgentContent::multimodal(
+                    "Image",
+                    vec![AgentContentPart::ImageData {
+                        media_type: "image/png".into(),
+                        data_base64: "aGVsbG8=".into(),
+                        description: None,
+                    }],
+                )),
+            });
+        let options = ModelRequestOptions::for_prompt(&client, &request, None).unwrap();
+        assert!(client.complete_json(request, options).await.is_err());
+        {
+            let requests = state.requests.lock();
+            assert_eq!(
+                requests.len(),
+                2,
+                "only the existing forced-tool fallback is attempted"
+            );
+            assert_eq!(requests[0]["tool_choice"]["type"], "tool");
+            assert_eq!(requests[1]["tool_choice"]["type"], "auto");
+            assert!(
+                has_image(&requests[1]),
+                "JSON must not introduce a vision fallback"
+            );
+        }
+        assert_eq!(
+            compatibility_review(&compatibility_client(&base)).await,
+            json!({"decision":"deny"})
+        );
+        assert_eq!(
+            state.requests.lock().len(),
+            4,
+            "a failed probe does not cache even its forced-tool downgrade"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cold_probe_releases_when_headers_accept_the_parameters_not_after_streaming() {
+        let (base, state, server) = compatibility_server().await;
+        // Every stream waits for all four requests. Holding the cold probe across
+        // stream consumption would prevent the other requests reaching this barrier.
+        *state.stream_barrier.lock() = Some(std::sync::Arc::new(tokio::sync::Barrier::new(4)));
+        concurrent_compatibility_turns(&base).await;
+        assert_eq!(state.requests.lock().len(), 4);
+        *state.stream_barrier.lock() = None;
+        server.abort();
+    }
+
     #[test]
     fn data_url_parser_keeps_image_blocks_and_structured_parts() {
         let block =
@@ -1505,7 +1943,7 @@ mod tests {
                 ],
                 tools: vec![read_tool()],
             },
-            false,
+            client.initial_compatibility,
         );
 
         assert_eq!(payload["system"], "base");
@@ -1587,22 +2025,34 @@ mod tests {
                 messages: vec![AgentMessage::user("hi")],
                 tools: Vec::new(),
             },
-            false,
+            client.initial_compatibility,
         );
         assert_eq!(fresh["thinking"]["type"], "adaptive");
         assert_eq!(fresh["output_config"]["effort"], "high");
         assert!(fresh.get("temperature").is_none());
 
         // Adaptive thinking may skip a step; the next step must still ask for it.
-        let continuation = build_agent_payload(&client, &unsigned_continuation(), false);
+        let continuation = build_agent_payload(
+            &client,
+            &unsigned_continuation(),
+            client.initial_compatibility,
+        );
         assert_eq!(continuation["thinking"]["type"], "adaptive");
         assert_eq!(continuation["output_config"]["effort"], "high");
 
         // The legacy budget shape still requires a signed thinking block.
-        client
-            .thinking_mode
-            .store(THINKING_MODE_BUDGET, Ordering::Relaxed);
-        let budget_continuation = build_agent_payload(&client, &unsigned_continuation(), false);
+        let client = AnthropicCompatibleClient {
+            initial_compatibility: AnthropicCompatibility {
+                thinking_mode: THINKING_MODE_BUDGET,
+                ..client.initial_compatibility
+            },
+            ..client
+        };
+        let budget_continuation = build_agent_payload(
+            &client,
+            &unsigned_continuation(),
+            client.initial_compatibility,
+        );
         assert!(budget_continuation.get("thinking").is_none());
         assert!(budget_continuation.get("temperature").is_none());
     }
@@ -1639,7 +2089,7 @@ mod tests {
                 ],
                 tools: vec![read_tool()],
             },
-            false,
+            client.initial_compatibility,
         );
 
         let messages = payload["messages"].as_array().unwrap();
@@ -1672,7 +2122,7 @@ mod tests {
                 messages: vec![AgentMessage::user("hi")],
                 tools: Vec::new(),
             },
-            false,
+            client.initial_compatibility,
         );
         assert_eq!(payload["thinking"]["type"], "adaptive");
         assert_eq!(payload["output_config"]["effort"], "medium");
@@ -1695,16 +2145,20 @@ mod tests {
         );
         // A provider that rejected adaptive thinking falls back to the older
         // explicit `enabled` + `budget_tokens` shape.
-        client
-            .thinking_mode
-            .store(THINKING_MODE_BUDGET, Ordering::Relaxed);
+        let client = AnthropicCompatibleClient {
+            initial_compatibility: AnthropicCompatibility {
+                thinking_mode: THINKING_MODE_BUDGET,
+                ..client.initial_compatibility
+            },
+            ..client
+        };
         let payload = build_agent_payload(
             &client,
             &AgentTurnRequest {
                 messages: vec![AgentMessage::user("hi")],
                 tools: Vec::new(),
             },
-            false,
+            client.initial_compatibility,
         );
         assert_eq!(payload["thinking"]["type"], "enabled");
         assert_eq!(payload["thinking"]["budget_tokens"], 4096);

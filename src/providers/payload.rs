@@ -8,12 +8,12 @@ pub(super) fn build_agent_turn_payload_common(
     stream: bool,
     flatten_orphan_tool_messages: bool,
     include_reasoning_content: bool,
-    tool_strict_mode: ToolStrictMode,
+    state: ChatCompletionsAdapterState,
 ) -> serde_json::Value {
     // Every in-repo caller passes stream=true. Non-streaming agent turns are
     // unused, so the JSON stays the streaming shape instead of emitting stream:false.
     let _ = stream;
-    let strip_images = client.adapter_state_guard().vision_mode == VisionMode::Disabled;
+    let strip_images = state.vision_mode == VisionMode::Disabled;
     let messages = agent_turn_request_to_openai_messages(
         request.messages,
         flatten_orphan_tool_messages,
@@ -48,7 +48,7 @@ pub(super) fn build_agent_turn_payload_common(
                 "description": description,
                 "parameters": parameters,
             });
-            if tool_strict_mode == ToolStrictMode::Enabled {
+            if state.tool_strict_mode == ToolStrictMode::Enabled {
                 function["strict"] = json!(strict);
             }
             json!({
@@ -70,7 +70,7 @@ pub(super) fn build_agent_turn_payload_common(
         &mut payload,
         client,
         client.thinking_budget.as_deref(),
-        client.adapter_state_guard().thinking_budget_mode,
+        state.thinking_budget_mode,
     );
     payload
 }
