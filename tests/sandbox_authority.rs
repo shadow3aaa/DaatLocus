@@ -108,6 +108,10 @@ fn upgrade_consolidates_filesystem_authority_without_retaining_actor_permissions
     let other_workspace = root.path().join("other-workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::create_dir_all(&other_workspace).unwrap();
+    // Legacy Actor configuration persisted canonical roots, including macOS's
+    // /private prefix. An alias is not proof that an old grant can be rebound.
+    let workspace = std::fs::canonicalize(workspace).unwrap();
+    let other_workspace = std::fs::canonicalize(other_workspace).unwrap();
     {
         let db = rusqlite::Connection::open(&database).unwrap();
         db.execute_batch("CREATE TABLE actors(id TEXT PRIMARY KEY,parent_id TEXT,depth INTEGER NOT NULL,record TEXT NOT NULL);
