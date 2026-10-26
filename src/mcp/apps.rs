@@ -33,11 +33,38 @@ struct InstallArgs {
     url: Option<String>,
     command: Option<String>,
     arguments: Vec<String>,
+    /// KEY=value entries added to the inherited environment; names must not start with DAAT_LOCUS.
+    #[serde(default)]
+    environment: Vec<String>,
 }
 impl InstallArgs {
+    fn environment_map(&self) -> Result<BTreeMap<String, String>> {
+        let mut environment = BTreeMap::new();
+        for entry in &self.environment {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let (key, value) = entry
+                .split_once('=')
+                .ok_or_else(|| miette!("MCP environment entries must be KEY=value"))?;
+            if environment
+                .insert(key.to_string(), value.to_string())
+                .is_some()
+            {
+                return Err(miette!("Invalid MCP environment"));
+            }
+        }
+        Ok(environment)
+    }
     fn source(&self) -> Result<Source> {
+        let environment = self.environment_map()?;
         let source = match self.transport {
-            TransportKind::Http if self.command.is_none() && self.arguments.is_empty() => {
+            TransportKind::Http
+                if self.command.is_none()
+                    && self.arguments.is_empty()
+                    && environment.is_empty() =>
+            {
                 Source::Http {
                     url: self
                         .url
@@ -52,7 +79,7 @@ impl InstallArgs {
                     .clone()
                     .ok_or_else(|| miette!("MCP command is required"))?,
                 arguments: self.arguments.clone(),
-                environment: Default::default(),
+                environment,
             },
             _ => {
                 return Err(miette!(
@@ -124,7 +151,7 @@ impl App for AppsManager {
             ),
             spec::<InstallArgs>(
                 "install",
-                "Install an MCP App on this device. Connections and native commands use the device sandbox. Never put credentials in the name or command arguments.",
+                "Install an MCP App on this device. Connections and native commands use the device sandbox. List environment as KEY=value entries; names must not start with DAAT_LOCUS. Never put credentials in the name or command arguments.",
             ),
             spec::<ChangeArgs>(
                 "enable",

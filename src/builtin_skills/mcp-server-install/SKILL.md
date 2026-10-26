@@ -1,6 +1,6 @@
 ---
 name: mcp-server-install
-description: Add, enable or debug an external MCP server as a Daat Locus device App through the Apps page or the apps HTTP API, including stdio command resolution, environment variables, and registry troubleshooting.
+description: Add, enable or debug an external MCP server as a Daat Locus device App through the Apps page or the apps_manager tools, including stdio command resolution on Windows, environment variables, and registry troubleshooting.
 ---
 
 # MCP Server Install
@@ -17,46 +17,44 @@ from the Owner Apps page.
 Prefer the shortest path that can express what the server needs.
 
 - Owner Apps page (`/apps` in the WebUI): name, transport, command or URL,
-  arguments one per line, and environment key/value rows. This is the graphical
-  path for stdio servers that need environment variables.
-- `POST /v1/apps`: body `{name, description, source}`. This is the only
-  programmatic path that accepts `environment`. It requires the Owner's session
-  cookie and a trusted Origin; an `Authorization` header is rejected, `name` is
-  limited to 100 characters and `description` to 500.
-- `apps_manager__install`: fastest inside an Actor, but it cannot set
-  environment variables — it rejects an `environment` field instead of ignoring
-  it, and stores the source with an empty one. Use it only for servers that need
-  no environment. `apps_manager__list`, `inspect` and `refresh` only read.
+  arguments one per line, environment key/value rows, and a bearer token for an
+  HTTP server that needs one.
+- `apps_manager__install`, from any non-Core Actor: one call for command,
+  arguments and `environment`. `list`, `inspect`, `enable`, `close` and
+  `refresh` manage the result afterwards. An HTTP server that needs a bearer
+  token cannot be installed this way; the tool always stores no token.
 
 Do not edit the registry file by hand; see "Why not hand-edit" below.
 
 ## Payload
 
+`apps_manager__install` takes one flat object. `description`, `url`, `command`
+and `environment` may be null or empty, but every field must be present:
+
 ```json
 {
   "name": "example-server",
   "description": "Optional summary",
-  "source": {
-    "transport": "stdio",
-    "command": "npx",
-    "arguments": ["-y", "example-mcp-server@1.2.3"],
-    "environment": { "EXAMPLE_API_TOKEN": "value" }
-  }
+  "transport": "stdio",
+  "url": null,
+  "command": "npx",
+  "arguments": ["-y", "example-mcp-server@1.2.3"],
+  "environment": ["EXAMPLE_API_TOKEN=value"]
 }
 ```
 
-A source is one of two transports; there is no SSE and no WebSocket transport.
+`transport` is `http` or `stdio`. There is no SSE and no WebSocket transport,
+and the two are mutually exclusive: a request that mixes their fields is refused
+instead of partially applied.
 
-- `{"transport":"http","url":"https://host/path","bearer_token":"secret"|null}`.
-  HTTPS is required; plain HTTP is accepted only for `localhost`, `127.0.0.1` and
-  `[::1]`. Redirects are refused, and the URL must carry no fragment.
-- `{"transport":"stdio","command":"name-or-path","arguments":["..."],"environment":{"KEY":"value"}}`.
-  stdio is unavailable on Android.
+- `http` needs `url`. HTTPS is required; plain HTTP is accepted only for
+  `localhost`, `127.0.0.1` and `[::1]`. Redirects are refused, and the URL must
+  carry no fragment.
+- `stdio` needs `command`, and accepts `arguments` and `environment`. stdio is
+  unavailable on Android.
 
-Both variants reject unknown fields, so a misspelled key fails the request. Keep
-credentials in `environment` or `bearer_token`, never in `name`, `arguments` or
-a URL. Public reads omit the token, the environment, the arguments and URL query
-strings.
+Unknown fields are refused, so a misspelled key fails the call instead of being
+ignored. Keep credentials in `environment`, never in `name` or `arguments`.
 
 ## stdio on Windows
 
@@ -92,23 +90,26 @@ the launch itself is being refused.
 
 ## Environment variables
 
-The field is `environment`, a flat string-to-string map, not `env`. It is added
-to the inherited daemon environment rather than replacing it. Setting `PATH`
-therefore narrows the search path for a bare `command` to exactly that value,
-which breaks a server that relied on the daemon's own `PATH`.
+The field is `environment`, a list of `KEY=value` strings. Each entry is split
+on its first `=`, so a value may contain `=` and is passed through unchanged.
+Blank entries are ignored and a repeated name is refused. The entries are added
+to the inherited daemon environment rather than replacing it, so setting `PATH`
+narrows the search path for a bare `command` to exactly that value and breaks a
+server that relied on the daemon's own `PATH`.
 
-Keys must be valid variable names, non-empty, and must not start with
-`DAAT_LOCUS`; values must not contain a NUL byte. A rejected map is reported as
-`Invalid MCP environment`.
+Names must be valid variable names, non-empty, and must not start with
+`DAAT_LOCUS`; values must not contain a NUL byte. A rejected list is reported as
+`Invalid MCP environment`, and an entry with no `=` as `MCP environment entries
+must be KEY=value`.
 
 ## Make it take effect
 
-Changes made through the Apps page, `POST /v1/apps` or `apps_manager` are
-written atomically and scheduled. The Actor picks them up at the start of the
-next model loop after the current tool group settles: no daemon restart, no
-Actor restart, and the conversation context is preserved. `enable` and `close`
-take an `expected_revision` from `list` or `inspect`; disabling blocks new calls
-and lets started calls finish.
+Changes made through the Apps page or `apps_manager` are written atomically and
+scheduled. The Actor picks them up at the start of the next model loop after the
+current tool group settles: no daemon restart, no Actor restart, and the
+conversation context is preserved. `enable` and `close` take an
+`expected_revision` from `list` or `inspect`; disabling blocks new calls and
+lets started calls finish.
 
 Changes made by editing the registry file need a daemon restart, because nothing
 watches it.
@@ -118,8 +119,7 @@ watches it.
 A server tool named `read` appears to the model as `t` plus the first ten hex
 characters of the SHA-256 of that name, and its description is prefixed with the
 App name and the original tool name. Read the mapping and the original JSON
-Schema with `apps_manager__inspect`, passing `id` and `tool`, or with
-`GET /v1/apps/{id}?tool=…`.
+Schema with `apps_manager__inspect`, passing `id` and `tool`.
 
 A portable schema is exposed directly. Any other schema is wrapped in a
 portable `{"arguments_json":"{…}"}` object, and Daat Locus validates the decoded
@@ -147,9 +147,9 @@ reported as uncertain effects: inspect the real state before calling again.
 ## Troubleshoot
 
 Read `<root>/logs/daat-locus.log`, where `<root>` is `$DAAT_LOCUS_HOME` or
-`~/.daat-locus`; `RUST_LOG` sets the filter. Then query `GET /v1/apps` for
-`revision`, `enabled`, `tool_count` and `stdio_supported`, and
-`GET /v1/apps/{id}` for the tool list.
+`~/.daat-locus`; `RUST_LOG` sets the filter. Then read `apps_manager__list` for
+the revision and the enabled state, and `apps_manager__inspect` for the
+discovered tools.
 
 - `MCP executable was not found`: the command did not resolve; check the `PATH`
   that this installation actually passes.
@@ -181,28 +181,26 @@ Daat Locus fill the catalog.
 ## Example: a stdio server that needs environment
 
 REA is an npm MCP server that reads its analysis settings from the environment,
-so `apps_manager__install` cannot add it. Install it from the Owner Apps page or
-with `POST /v1/apps`:
+so its App needs `environment` entries:
 
 ```json
 {
   "name": "rea",
   "description": "Reverse engineering analysis",
-  "source": {
-    "transport": "stdio",
-    "command": "npx",
-    "arguments": ["-y", "rea-agents@6.8.0", "mcp"],
-    "environment": {
-      "GHIDRA_INSTALL_DIR": "C:\\tools\\ghidra",
-      "REA_ANALYSIS_PROVIDER": "ghidra",
-      "REA_JADX_MCP_JAR": "C:\\tools\\jadx-headless-mcp.jar",
-      "REA_WABT_BIN_DIRECTORY": "C:\\tools\\wabt\\bin"
-    }
-  }
+  "transport": "stdio",
+  "url": null,
+  "command": "npx",
+  "arguments": ["-y", "rea-agents@6.8.0", "mcp"],
+  "environment": [
+    "GHIDRA_INSTALL_DIR=C:\\tools\\ghidra",
+    "REA_ANALYSIS_PROVIDER=ghidra",
+    "REA_JADX_MCP_JAR=C:\\tools\\jadx-headless-mcp.jar",
+    "REA_WABT_BIN_DIRECTORY=C:\\tools\\wabt\\bin"
+  ]
 }
 ```
 
-Use the values that server's own installation produced; the environment names
-and version constraints are part of that server's contract, not this App schema.
-Then confirm the result with `GET /v1/apps`, inspect the discovered tools, and
+Use the values that server's own installation produced; the variable names and
+version constraints are part of that server's contract, not this App schema.
+Then call `apps_manager__list` to confirm the entry, `inspect` its tools, and
 invoke one to prove the server answers.
