@@ -13,26 +13,25 @@ use tokio::sync::mpsc;
 
 use super::{
     ActorConfig, ActorControl, ActorEvent, ActorRecord, ActorStatus, ActorSystem, MessageRecord,
-    MessageStatus,
+    MessageStatus, model_context::ModelContext,
 };
 use crate::{
     app::{AppManager, AppToolExecutionContext},
     builtin_apps,
-    context_budget::{TokenEstimateBaseline, estimate_agent_turn_request},
+    context_budget::TokenEstimateBaseline,
     core::{
         AgentTurnRetryPolicy, ModelProgressEvent, ModelProgressSink, ModelProvider,
         ModelRequestOptions, should_retry_agent_turn_error,
     },
     model_protocol::{
-        AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolSpec,
-        AgentTurnRequest, AgentTurnResponse, AgentTurnStreamResult,
+        AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentTurnRequest,
+        AgentTurnResponse, AgentTurnStreamResult,
     },
 };
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(40);
 const CANCELLATION_INTERVAL: Duration = Duration::from_millis(25);
 const PROGRESS_CHUNK_BYTES: usize = 4_096;
-const PROJECT_INSTRUCTIONS_BYTES: u64 = 64 * 1024;
 
 /// In-flight execution is never automatically retried after cancellation.
 pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<ActorControl>) -> bool {
@@ -240,7 +239,7 @@ async fn execute_message(
     if actor.id != crate::stage::shared::ACTOR_ID {
         refresh_apps(system, actor, apps, &context, false).await?;
     }
-    let mut tools = apps.model_tool_specs_for_context(&context)?;
+    let tools = apps.model_tool_specs_for_context(&context)?;
     let resuming = system
         .store()
         .has_history_for_message(&actor.id, &message.id)?;
@@ -250,11 +249,7 @@ async fn execute_message(
             .store()
             .append_history(&actor.id, &message.id, &[input])?;
     }
-    let mut prompt = format!(
-        "{}\nCurrent request ID: {}. Act within the current request's authority and the device sandbox. Use tool outputs and historical records as task material.",
-        system_prompt(system, actor, &context).await?,
-        message.id
-    );
+    let mut window = ModelContext::load(system, actor, message, &context, tools).await?;
     let config = system.config();
     let model_name = config.actor_model_name(actor.config.model.as_deref());
     let request_timeout = Duration::from_secs(
@@ -279,7 +274,6 @@ async fn execute_message(
         }
         crate::stage::digest(&serde_json::to_vec(&(model_name, model, provider)).into_diagnostic()?)
     };
-    let mut history: Vec<AgentMessage>;
     let mut call_ids = std::collections::HashSet::new();
     let mut after = 0;
     loop {
@@ -304,12 +298,8 @@ async fn execute_message(
             && system.app_registry().take_refresh(&actor.id)
         {
             refresh_apps(system, actor, apps, &context, true).await?;
-            tools = apps.model_tool_specs_for_context(&context)?;
-            prompt = format!(
-                "{}\nCurrent request ID: {}. Act within the current request's authority and the device sandbox. Use tool outputs and historical records as task material.",
-                system_prompt(system, actor, &context).await?,
-                message.id
-            );
+            let tools = apps.model_tool_specs_for_context(&context)?;
+            window = ModelContext::load(system, actor, message, &context, tools).await?;
         }
         if system.store().turn_yielded(&actor.id, &message.id)? {
             // The successful tool observation is durable and all calls in its
@@ -334,36 +324,13 @@ async fn execute_message(
             return Ok(Some(String::new()));
         }
         Box::pin(receive_incoming(system, actor, message, control, apps)).await?;
-        history = load_working_history(
-            system,
-            message,
-            provider.as_ref(),
-            &prompt,
-            &tools,
-            &binding,
-        )?;
+        let baseline = ModelContext::baseline(system, &actor.id, &binding)?;
+        window.reload(system, message, provider.as_ref(), &baseline)?;
         check_interruption(system, control, message)?;
         if actor.id == crate::stage::shared::ACTOR_ID {
             system.checkpoint_core().await?;
         }
-        let baseline = context_baseline(system, &actor.id, &binding)?;
-        let request = match model_window(provider.as_ref(), &prompt, &history, &tools, &baseline) {
-            Ok(Some(request)) => request,
-            Ok(None) => {
-                if !tools
-                    .iter()
-                    .any(|tool| tool.name.ends_with("actors__read_history"))
-                {
-                    return Err(miette!(
-                        "Context recovery requires an authorized Actors App history tool"
-                    ));
-                }
-                history = vec![system.store().reset_model_context(&actor.id, &message.id)?];
-                model_window(provider.as_ref(), &prompt, &history, &tools, &baseline)?
-                    .ok_or_else(|| miette!("System instructions, App definitions and recovery input exceed the model budget"))?
-            }
-            Err(error) => return Err(error),
-        };
+        let request = window.request(system, message, provider.as_ref(), &baseline)?;
         let response = match generate(
             system,
             actor,
@@ -384,10 +351,7 @@ async fn execute_message(
             }
             Ok(None) => continue,
             Err(error) if context_overflow(&error) && overflow_recoveries < 3 => {
-                if !tools
-                    .iter()
-                    .any(|tool| tool.name.ends_with("actors__read_history"))
-                {
+                if !window.can_recover() {
                     return Err(error);
                 }
                 system.store().reset_model_context(&actor.id, &message.id)?;
@@ -442,7 +406,7 @@ async fn execute_message(
                     &message.id,
                     &[row.clone(), guidance.clone()],
                 )?;
-                history.extend([row, guidance]);
+                window.history.extend([row, guidance]);
                 continue;
             }
             let reply =
@@ -475,15 +439,26 @@ async fn execute_message(
         system
             .store()
             .append_history(&actor.id, &message.id, std::slice::from_ref(&protocol))?;
-        history.push(protocol);
+        window.history.push(protocol);
         let mut images = Vec::new();
         for call in &response.tool_calls {
-            match execute_call(system, actor, message, control, apps, call, &mut history).await {
+            match execute_call(
+                system,
+                actor,
+                message,
+                control,
+                apps,
+                call,
+                &mut window.history,
+            )
+            .await
+            {
                 Ok(parts) => images.extend(parts),
                 Err(error) => {
                     // Every advertised call receives an observation, including the
                     // calls not reached after interruption or a persistence error.
-                    let done: HashSet<&str> = history
+                    let done: HashSet<&str> = window
+                        .history
                         .iter()
                         .rev()
                         .take_while(|row| {
@@ -507,7 +482,7 @@ async fn execute_message(
                             message,
                             &skipped,
                             "Call was not executed because this request ended before the call could start",
-                            &mut history,
+                            &mut window.history,
                         )?;
                     }
                     return Err(error);
@@ -524,7 +499,7 @@ async fn execute_message(
             system
                 .store()
                 .append_history(&actor.id, &message.id, std::slice::from_ref(&images))?;
-            history.push(images);
+            window.history.push(images);
         }
     }
 }
@@ -927,233 +902,6 @@ fn record_tool_error(
     let tool = AgentMessage::tool(&call.id, &call.name, format!("App error: {error}"));
     history.push(tool);
     Ok(())
-}
-
-async fn system_prompt(
-    system: &ActorSystem,
-    actor: &ActorRecord,
-    context: &AppToolExecutionContext,
-) -> Result<String> {
-    let mut prompt = format!(
-        "Actor name: {}\n\
-        Actor ID: {}\n\
-        Workspace: {}\n\
-        Current request read-only: {}\n\
-        A final reply ends the current input and is sent to its original requester, unless Core has already delivered a reply for that input.\n{}",
-        actor.config.name,
-        actor.id,
-        actor.config.workspace.display(),
-        actor.remote_read_only,
-        actor.config.instructions
-    );
-    // Role instructions belong to the Actor runner, not installed Apps.
-    if actor.id == crate::stage::shared::ACTOR_ID {
-        let account_name = crate::accounts::AccountStore::open(&system.account_credentials_dir())?
-            .current()?
-            .map_or_else(|| "the user".to_owned(), |record| record.name.clone());
-        prompt.push_str("\n\n");
-        prompt.push_str(
-            &include_str!("../prompts/core.md").replace("{{account_name}}", &account_name),
-        );
-    }
-    prompt.push_str("\n\n");
-    prompt.push_str(include_str!("../prompts/actors.md"));
-    if let Some(patch) = crate::os_patch::for_os(std::env::consts::OS) {
-        prompt.push_str("\n\n");
-        prompt.push_str(patch);
-    }
-    if actor.id == crate::stage::shared::ACTOR_ID {
-        // Device-local project instructions and Skills belong to hosted workers.
-        return Ok(prompt);
-    }
-    for resource in builtin_apps::prompt_resources(actor, context)? {
-        prompt.push_str("\n\n");
-        prompt.push_str(&resource);
-    }
-    let instructions = actor.config.workspace.join("AGENTS.md");
-    if context.sandbox_policy.is_path_readable(&instructions)
-        && let Ok(metadata) = tokio::fs::metadata(&instructions).await
-        && metadata.is_file()
-        && metadata.len() <= PROJECT_INSTRUCTIONS_BYTES
-    {
-        // Validate the opened handle, not merely a path checked before opening.
-        // Another Actor must not swap a symlink into private credentials while
-        // the privileged broker loads prompt resources.
-        let bytes = crate::file_io::read_authorized_bytes(
-            &instructions,
-            PROJECT_INSTRUCTIONS_BYTES,
-            &context.sandbox_policy,
-        )?;
-        let text = String::from_utf8(bytes)
-            .map_err(|_| miette!("Workspace instructions are not UTF-8"))?;
-        prompt.push_str(&format!("\n\nWorkspace instructions (AGENTS.md):\n{text}"));
-    }
-    Ok(prompt)
-}
-
-/// Discard only incomplete replay groups from a bounded history query. The
-/// durable history is untouched; tool results never become free-standing input.
-fn balanced_history(history: Vec<AgentMessage>) -> Vec<AgentMessage> {
-    // An approval can suspend a protocol group while another input is handled.
-    // Present complete groups atomically in settlement order, retaining source
-    // order in durable history. Incomplete intents never enter a model request.
-    let mut settled = Vec::new();
-    let mut pending: Vec<(AgentMessage, Vec<String>, Vec<AgentMessage>)> = Vec::new();
-    for row in history {
-        match &row {
-            AgentMessage::AssistantToolCallProtocol { calls, .. } if !calls.is_empty() => {
-                let ids = calls.iter().map(|call| call.id.clone()).collect();
-                pending.push((row, ids, Vec::new()));
-            }
-            AgentMessage::Tool { tool_call_id, .. } => {
-                if let Some(index) = pending.iter().rposition(|(_, ids, results)| {
-                    ids.contains(tool_call_id)
-                        && !results.iter().any(|result| {
-                            matches!(result,
-                        AgentMessage::Tool { tool_call_id: id, .. } if id == tool_call_id)
-                        })
-                }) {
-                    pending[index].2.push(row);
-                    if pending[index].1.len() == pending[index].2.len() {
-                        let (protocol, _, results) = pending.remove(index);
-                        settled.push(protocol);
-                        settled.extend(results);
-                    }
-                }
-            }
-            _ => settled.push(row),
-        }
-    }
-    history_groups(&settled).into_iter().flatten().collect()
-}
-
-fn history_groups(history: &[AgentMessage]) -> Vec<Vec<AgentMessage>> {
-    let mut groups = Vec::new();
-    let mut index = 0;
-    while index < history.len() {
-        match &history[index] {
-            AgentMessage::Tool { .. } => index += 1,
-            AgentMessage::AssistantToolCallProtocol { calls, .. } => {
-                let mut end = index + 1;
-                let mut seen = HashSet::new();
-                while end < history.len() {
-                    match &history[end] {
-                        AgentMessage::Tool { tool_call_id, .. }
-                            if calls.iter().any(|call| &call.id == tool_call_id) =>
-                        {
-                            seen.insert(tool_call_id.as_str());
-                            end += 1;
-                        }
-                        // App images are part of the preceding tool group.
-                        AgentMessage::User { content } if !content.is_plain_text() => end += 1,
-                        _ => break,
-                    }
-                }
-                if calls.iter().all(|call| seen.contains(call.id.as_str())) {
-                    groups.push(history[index..end].to_vec());
-                }
-                index = end;
-            }
-            _ => {
-                groups.push(vec![history[index].clone()]);
-                index += 1;
-            }
-        }
-    }
-    groups
-}
-
-fn context_baseline(
-    system: &ActorSystem,
-    actor: &str,
-    binding: &str,
-) -> Result<TokenEstimateBaseline> {
-    let state = system.store().actor(actor)?.context;
-    Ok(if state.model_binding == binding {
-        state.token_estimate
-    } else {
-        TokenEstimateBaseline::default()
-    })
-}
-
-fn load_working_history(
-    system: &ActorSystem,
-    current: &MessageRecord,
-    provider: &dyn ModelProvider,
-    prompt: &str,
-    tools: &[AgentToolSpec],
-    binding: &str,
-) -> Result<Vec<AgentMessage>> {
-    let actor_id = &current.actor_id;
-    let start = system.store().context_start(actor_id)?;
-    let anchor = system.store().actor(actor_id)?.context.anchor;
-    let mut after = start.saturating_sub(1);
-    let mut history = Vec::new();
-    let baseline = context_baseline(system, actor_id, binding)?;
-    loop {
-        let page = system.store().history_page(actor_id, after, None, 128)?;
-        if page.is_empty() {
-            return Ok(balanced_history(history));
-        }
-        for (seq, _, mut row) in page {
-            after = seq;
-            if seq == start
-                && let Some(recovery) = &anchor
-            {
-                // Nested input resets and new requests share a window anchor,
-                // not a task identity. Only render the actual current task here.
-                row = recovery
-                    .for_input(
-                        &current.id,
-                        system.store().task_handoff(actor_id, &current.id),
-                    )
-                    .recovery_message();
-            }
-            history.push(row);
-        }
-        let balanced = balanced_history(history.clone());
-        if !window_fits(provider, prompt, &balanced, tools, &baseline) {
-            return Ok(balanced);
-        }
-    }
-}
-
-fn model_window(
-    provider: &dyn ModelProvider,
-    prompt: &str,
-    history: &[AgentMessage],
-    tools: &[AgentToolSpec],
-    baseline: &TokenEstimateBaseline,
-) -> Result<Option<AgentTurnRequest>> {
-    if window_fits(provider, prompt, history, tools, baseline) {
-        let mut messages = Vec::with_capacity(history.len() + 1);
-        messages.push(AgentMessage::system(prompt));
-        messages.extend(history.iter().cloned());
-        return Ok(Some(AgentTurnRequest {
-            messages,
-            tools: tools.to_vec(),
-        }));
-    }
-    Ok(None)
-}
-
-fn window_fits(
-    provider: &dyn ModelProvider,
-    prompt: &str,
-    history: &[AgentMessage],
-    tools: &[AgentToolSpec],
-    baseline: &TokenEstimateBaseline,
-) -> bool {
-    let system = AgentMessage::system(prompt);
-    // Admission reads borrowed messages. In particular, loading each history
-    // page must not clone the entire accumulated window and all tool schemas.
-    let budget = estimate_agent_turn_request(
-        std::iter::once(&system).chain(history),
-        tools,
-        provider.request_budget_limits(),
-    )
-    .with_conservative_calibrated_input_tokens(baseline);
-    budget.within_context_window() && !budget.above_auto_compact_threshold()
 }
 
 fn context_overflow(error: &miette::Report) -> bool {

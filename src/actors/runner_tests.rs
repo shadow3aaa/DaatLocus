@@ -1,12 +1,14 @@
 #[path = "tool_definition_tests.rs"]
 mod tool_definition_tests;
 
-use super::super::{MessageKind, MessageSource, ModelFactory};
+use super::super::{
+    MessageKind, MessageSource, ModelFactory, model_context::balanced_history, prompt::SystemPrompt,
+};
 use super::*;
 use crate::{
-    context_budget::RequestBudgetLimits,
+    context_budget::{RequestBudgetLimits, estimate_agent_turn_request},
     core::TokenUsageInfo,
-    model_protocol::{AgentContentPart, PromptRequest},
+    model_protocol::{AgentContentPart, AgentToolSpec, PromptRequest},
 };
 use std::{collections::VecDeque, sync::atomic::AtomicBool};
 
@@ -229,7 +231,7 @@ async fn app_installation_refreshes_tools_between_protocol_groups_without_replay
         MockReply::Calls(vec![AgentToolCall {
             id: "install-app".into(),
             name: "apps_manager__install".into(),
-            arguments: json!({"name":"Example","description":null,"transport":"http","url":server.url,"command":null,"arguments":[]}),
+            arguments: json!({"name":"Example","description":null,"transport":"http","url":server.url,"command":null,"arguments":[],"environment":[]}),
         }]),
         MockReply::Answer("Ready"),
     ]));
@@ -240,6 +242,22 @@ async fn app_installation_refreshes_tools_between_protocol_groups_without_replay
     let done = wait_completed(&system, &input.id).await;
     assert_eq!(done.status, MessageStatus::Completed);
     assert_eq!(done.reply.as_deref(), Some("Ready"));
+    let installed = system
+        .store()
+        .tool_summaries("root", &input.id, None, 10)
+        .unwrap();
+    let install = system.store().tool_result(&installed.items[0].id).unwrap();
+    assert!(
+        install.error.is_none(),
+        "installation failed: {:?}",
+        install.error
+    );
+    assert_eq!(
+        system.app_registry().entries().len(),
+        1,
+        "installation outcome: {}",
+        install.payload
+    );
     {
         let requests = provider.requests.lock();
         assert!(
@@ -4292,6 +4310,14 @@ fn protocol(calls: Vec<AgentToolCall>) -> AgentMessage {
     ]))
 }
 
+fn test_window(prompt: &str, history: &[AgentMessage], tools: &[AgentToolSpec]) -> ModelContext {
+    ModelContext {
+        system: AgentMessage::system(prompt),
+        history: history.to_vec(),
+        tools: tools.to_vec(),
+    }
+}
+
 #[test]
 fn window_preserves_complete_multi_tool_protocol_and_encrypted_reasoning() {
     let protocol = protocol(vec![call("a"), call("b")]);
@@ -4309,14 +4335,10 @@ fn window_preserves_complete_multi_tool_protocol_and_encrypted_reasoning() {
             }],
         )),
     ];
-    let window = model_window(
+    let window = test_window("system", &history, &[]).admitted(
         &BudgetProvider { tokens: 10_000 },
-        "system",
-        &history,
-        &[],
         &TokenEstimateBaseline::default(),
-    )
-    .unwrap();
+    );
     let window = window.unwrap();
     assert!(window.messages[2] == protocol);
     assert_eq!(
@@ -4335,15 +4357,12 @@ fn oversized_window_requests_reset_without_sliding_or_mutating_history() {
         AgentMessage::user("current request"),
     ];
     assert!(
-        model_window(
-            &BudgetProvider { tokens: 500 },
-            "system",
-            &history,
-            &[],
-            &TokenEstimateBaseline::default()
-        )
-        .unwrap()
-        .is_none()
+        test_window("system", &history, &[])
+            .admitted(
+                &BudgetProvider { tokens: 500 },
+                &TokenEstimateBaseline::default()
+            )
+            .is_none()
     );
     assert_eq!(history.len(), 4);
 }
@@ -4352,15 +4371,12 @@ fn oversized_window_requests_reset_without_sliding_or_mutating_history() {
 fn oversized_current_input_is_archived_for_recovery() {
     let history = vec![AgentMessage::user("z".repeat(8_000))];
     assert!(
-        model_window(
-            &BudgetProvider { tokens: 100 },
-            "system",
-            &history,
-            &[],
-            &TokenEstimateBaseline::default()
-        )
-        .unwrap()
-        .is_none()
+        test_window("system", &history, &[])
+            .admitted(
+                &BudgetProvider { tokens: 100 },
+                &TokenEstimateBaseline::default()
+            )
+            .is_none()
     );
 }
 
@@ -4380,6 +4396,35 @@ fn interrupted_history_cannot_replay_partial_multi_call_group() {
             .iter()
             .all(|row| matches!(row, AgentMessage::User { .. }))
     );
+}
+
+#[test]
+fn settled_groups_preserve_nested_inputs_images_and_original_tool_observations() {
+    let outer = protocol(vec![call("outer-a"), call("outer-b")]);
+    let nested = protocol(vec![call("nested")]);
+    let first = AgentMessage::tool("outer-a", "files__read_file", "first result");
+    let last = AgentMessage::tool("outer-b", "files__read_file", "second result");
+    let result = AgentMessage::tool("nested", "files__read_file", "nested result");
+    let input = AgentMessage::user("an incoming input");
+    let image = AgentMessage::user_content(AgentContent::multimodal(
+        "App image",
+        vec![AgentContentPart::Image {
+            path: "owned.png".into(),
+            media_type: "image/png".into(),
+            description: None,
+        }],
+    ));
+    let balanced = balanced_history(vec![
+        outer.clone(),
+        first.clone(),
+        input.clone(),
+        nested.clone(),
+        result.clone(),
+        image.clone(),
+        result.clone(),
+        last.clone(),
+    ]);
+    assert!(balanced == vec![input, nested, result, image, outer, first, last]);
 }
 
 #[test]
@@ -4516,30 +4561,18 @@ fn window_admission_uses_observed_input_bias_without_reducing_estimates() {
         observed_input_tokens: Some(20),
     };
     assert!(
-        model_window(
-            &BudgetProvider { tokens: 500 },
-            "system",
-            &history,
-            &[],
-            &low
-        )
-        .unwrap()
-        .is_some()
+        test_window("system", &history, &[])
+            .admitted(&BudgetProvider { tokens: 500 }, &low)
+            .is_some()
     );
     let high = TokenEstimateBaseline {
         estimated_input_tokens: 100,
         observed_input_tokens: Some(450),
     };
     assert!(
-        model_window(
-            &BudgetProvider { tokens: 500 },
-            "system",
-            &history,
-            &[],
-            &high
-        )
-        .unwrap()
-        .is_none()
+        test_window("system", &history, &[])
+            .admitted(&BudgetProvider { tokens: 500 }, &high)
+            .is_none()
     );
 }
 
@@ -4576,7 +4609,7 @@ async fn token_calibration_survives_restart_and_is_bound_to_the_model() {
     .unwrap();
     assert_eq!(reopened.store().actor("root").unwrap().context, state);
     assert_eq!(
-        context_baseline(&reopened, "root", "another-model").unwrap(),
+        ModelContext::baseline(&reopened, "root", "another-model").unwrap(),
         TokenEstimateBaseline::default()
     );
     provider.usage_bias.store(0, Ordering::Relaxed);
@@ -5284,7 +5317,10 @@ async fn core_prompt_injects_role_and_account_name_once_for_local_and_shared_hos
             system.install_shared_core(&controller);
         }
         assert_eq!(system.local_core(), local);
-        let prompt = system_prompt(&system, &actor, &context).await.unwrap();
+        let prompt = SystemPrompt::load(&system, &actor, &context)
+            .await
+            .unwrap()
+            .render();
         assert_shared_actor_instructions(&prompt);
         assert!(!prompt.contains("Device project instructions must stay out of Core."));
         assert!(!prompt.contains("Workspace instructions (AGENTS.md):"));
@@ -5314,7 +5350,10 @@ async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_inval
     let (_directory, system) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
     let actor = system.actor("core").unwrap();
     let context = system.owner_app_context().unwrap();
-    let prompt = system_prompt(&system, &actor, &context).await.unwrap();
+    let prompt = SystemPrompt::load(&system, &actor, &context)
+        .await
+        .unwrap()
+        .render();
     assert!(prompt.contains("You are DaatLocus, the user's assistant."));
     assert!(!prompt.contains("{{account_name}}"));
 
@@ -5323,10 +5362,13 @@ async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_inval
         "invalid account fixture",
     )
     .unwrap();
-    assert!(system_prompt(&system, &actor, &context).await.is_err());
+    assert!(SystemPrompt::load(&system, &actor, &context).await.is_err());
 
     let worker = system.actor("root").unwrap();
-    let prompt = system_prompt(&system, &worker, &context).await.unwrap();
+    let prompt = SystemPrompt::load(&system, &worker, &context)
+        .await
+        .unwrap()
+        .render();
     assert_shared_actor_instructions(&prompt);
     system.shutdown().await;
 }
@@ -5729,7 +5771,10 @@ async fn runner_prompt_retains_identity_instructions_and_current_request_read_on
     let context = system.owner_app_context().unwrap();
     for read_only in [false, true] {
         actor.remote_read_only = read_only;
-        let prompt = system_prompt(&system, &actor, &context).await.unwrap();
+        let prompt = SystemPrompt::load(&system, &actor, &context)
+            .await
+            .unwrap()
+            .render();
         let expected = format!(
             "Actor name: {}\nActor ID: {}\nWorkspace: {}\nCurrent request read-only: {}\n",
             actor.config.name,
@@ -5825,14 +5870,20 @@ async fn builtin_skill_metadata_is_discovered_by_workers_but_not_core() {
     let mut worker = system.actor("root").unwrap();
     for read_only in [false, true] {
         worker.remote_read_only = read_only;
-        let prompt = system_prompt(&system, &worker, &context).await.unwrap();
+        let prompt = SystemPrompt::load(&system, &worker, &context)
+            .await
+            .unwrap()
+            .render();
         assert_eq!(prompt.matches("builtin-prompt-fixture").count(), 1);
         assert_shared_actor_instructions(&prompt);
         assert!(!prompt.contains("You are DaatLocus,"));
         assert!(!prompt.contains("Detailed body stays on disk."));
     }
     let core = system.actor("core").unwrap();
-    let prompt = system_prompt(&system, &core, &context).await.unwrap();
+    let prompt = SystemPrompt::load(&system, &core, &context)
+        .await
+        .unwrap()
+        .render();
     assert!(!prompt.contains("builtin-prompt-fixture"));
     assert_shared_actor_instructions(&prompt);
     assert_eq!(

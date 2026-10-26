@@ -1445,3 +1445,22 @@ coproc 和内部管道操作重新启动相同
 上一条 exec 的 shell 变量或函数。stdin 仅发送给仍在运行的进程。会话终止、App 关闭或
 丢弃都会终止进程树并释放输出读取任务；输出保留与原接口相同的容量、游标和丢弃计数。
 Android 继续保持现有 App 可用性边界。外部工具仍按平台安装情况解析。
+
+### Static system instructions
+
+`actors::prompt::SystemPrompt` owns the ordered instruction files and assembles the
+exact system text for execution. Generated Actor metadata, role/platform sources,
+the scoped Skills catalog and authorized workspace AGENTS.md use this one path;
+Core excludes project instructions and Skills. `ModelContext` owns the transient
+system message, replay-balanced working history and current App definitions. It
+loads bounded history pages, applies model-bound budget calibration, admits the
+model request and resets an oversized window through the existing durable anchor.
+The runner retains execution, interruption and retry scheduling; `AgentContext`
+retains durable anchors/calibration/usage, not another copy of the working window.
+Per-input authority text is rendered once by `SystemPrompt`; dynamic inputs and
+tools are not part of the settings visualization.
+Owner-only `/v1/system-prompt?role=core|others` lists bounded role-wide static
+file metadata; Actor metadata, Skills catalogs and workspace AGENTS.md stay out
+of this visualization. Indexed file reads return at most 16 KiB at a UTF-8 boundary and require the assembly
+revision. Inspection reads the compiled role/platform sources without constructing
+Apps, starting workers, invoking a model or persisting another context snapshot.

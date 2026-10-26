@@ -1,5 +1,7 @@
 mod context;
 pub(crate) mod migrations;
+mod model_context;
+pub(crate) mod prompt;
 mod types;
 pub use crate::sandbox::SandboxScope;
 pub use context::{AgentContext, HistoryAnchor, TaskHandoff};

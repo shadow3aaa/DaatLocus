@@ -15,6 +15,8 @@ mod conversation;
 mod devices;
 #[path = "http/imports_api.rs"]
 mod imports;
+#[path = "http/prompt_api.rs"]
+mod prompt;
 #[path = "http/reset_api.rs"]
 mod reset;
 #[path = "http/resources_api.rs"]

@@ -6,12 +6,11 @@ use miette::{Result, miette};
 use crate::{
     actor_app::ActorApp,
     actors::{ActorRecord, ActorSystem},
-    app::{App, AppManager, AppToolExecutionContext},
+    app::{App, AppManager},
     artifacts_app::ArtifactsApp,
     config::Config,
     files_app::FilesApp,
     model_catalog::catalog_model_capacity,
-    openskills::load_openskills_with_policy,
     terminal_app::TerminalApp,
     web_app::WebApp,
 };
@@ -129,18 +128,6 @@ pub fn create_apps(
         )));
     }
     AppManager::new(apps)
-}
-
-pub fn prompt_resources(
-    _actor: &ActorRecord,
-    context: &AppToolExecutionContext,
-) -> Result<Vec<String>> {
-    Ok(
-        load_openskills_with_policy(&context.execution_cwd, &context.sandbox_policy)
-            .render_prompt_block()
-            .into_iter()
-            .collect(),
-    )
 }
 
 #[cfg(test)]

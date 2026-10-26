@@ -6,6 +6,7 @@ mod auth;
 mod computer_use;
 mod conversation;
 mod imports;
+mod prompt;
 mod remote;
 mod reset;
 mod resources;
@@ -148,6 +149,7 @@ pub fn router(state: ServiceState) -> Router {
         .merge(virtual_displays::routes())
         .merge(apps::routes())
         .merge(imports::routes())
+        .merge(prompt::routes())
         .merge(stages::routes())
         .merge(remote::routes())
         .merge(approvals::routes())
