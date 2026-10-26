@@ -27,7 +27,7 @@ const MAX_SEARCH_DEPTH: usize = 32;
 static FILE_WRITES: Mutex<()> = Mutex::new(());
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadFileArgs {
     pub path: String,
@@ -38,7 +38,7 @@ pub struct ReadFileArgs {
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WriteFileArgs {
     pub path: String,
@@ -48,7 +48,7 @@ pub struct WriteFileArgs {
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditFileEntry {
     pub old_text: String,
@@ -56,7 +56,7 @@ pub struct EditFileEntry {
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditFileArgs {
     pub path: String,
@@ -100,7 +100,7 @@ impl EditFileArgs {
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CopyFileArgs {
     pub source: String,
@@ -109,14 +109,14 @@ pub struct CopyFileArgs {
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ViewImageArgs {
     pub path: String,
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListDirectoryArgs {
     pub path: String,
@@ -126,7 +126,7 @@ pub struct ListDirectoryArgs {
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchTextArgs {
     pub path: String,
@@ -140,33 +140,33 @@ pub struct SearchTextArgs {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryEntry {
     pub name: String,
     pub path: String,
-    pub kind: &'static str,
+    pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryPage {
     pub entries: Vec<DirectoryEntry>,
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchMatch {
     pub path: String,
     pub line_number: usize,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub matches: Vec<SearchMatch>,
     pub limited: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadFileResult {
     pub path: String,
     pub start_line: usize,
@@ -178,7 +178,7 @@ pub struct ReadFileResult {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileWriteResult {
     pub path: String,
     pub sha256: String,
@@ -187,7 +187,7 @@ pub struct FileWriteResult {
     pub change: Option<FileChange>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChange {
     pub before_sha256: Option<String>,
     pub after_sha256: String,
@@ -197,9 +197,9 @@ pub struct FileChange {
     pub patch: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffLine {
-    pub kind: &'static str,
+    pub kind: String,
     pub old_line: Option<usize>,
     pub new_line: Option<usize>,
     pub text: String,
@@ -253,7 +253,7 @@ fn file_change(before: &[u8], after: &[u8], created: bool) -> Option<FileChange>
                 }
             };
             change.lines.push(DiffLine {
-                kind,
+                kind: kind.into(),
                 old_line: old_number,
                 new_line: new_number,
                 text: text.trim_end_matches(['\r', '\n']).into(),
@@ -771,7 +771,7 @@ pub fn list_directory(
             DirectoryEntry {
                 name,
                 path: entry_path.display().to_string(),
-                kind,
+                kind: kind.into(),
             },
         );
         if entries.len() > limit + 1 {
@@ -1303,6 +1303,14 @@ pub fn view_image(
     }
     let path = authorized_path(cwd, policy, &args.path, false)?;
     let bytes = read_bytes(&path, MAX_VIEW_IMAGE_BYTES, policy)?;
+    view_image_bytes(&bytes, image_state_dir, &args.path)
+}
+
+pub(crate) fn view_image_bytes(
+    bytes: &[u8],
+    image_state_dir: &Path,
+    description: &str,
+) -> Result<ViewedImage> {
     let (media_type, extension) = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         ("image/png", "png")
     } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
@@ -1316,10 +1324,10 @@ pub fn view_image(
             "unsupported image type; use PNG, JPEG, GIF or WebP"
         ));
     };
-    let snapshot = image_state_dir.join(format!("{}.{}", sha256(&bytes), extension));
+    let snapshot = image_state_dir.join(format!("{}.{}", sha256(bytes), extension));
     crate::persistence::write_bytes_atomic_sync(
         &snapshot,
-        &bytes,
+        bytes,
         crate::persistence::PersistenceFileMode::Private,
     )
     .map_err(|_| miette!("unable to store image input"))?;
@@ -1329,7 +1337,7 @@ pub fn view_image(
         model_image: AgentContentPart::Image {
             path: snapshot.display().to_string(),
             media_type: media_type.into(),
-            description: Some(args.path.clone()),
+            description: Some(description.into()),
         },
     })
 }

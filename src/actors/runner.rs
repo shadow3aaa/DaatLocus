@@ -541,6 +541,142 @@ fn validate_response_calls(response: &AgentTurnResponse) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn execute_sudo_call(
+    system: &ActorSystem,
+    actor: &ActorRecord,
+    message: &MessageRecord,
+    control: &ActorControl,
+    apps: &mut AppManager,
+    call: &AgentToolCall,
+    context: &AppToolExecutionContext,
+) -> Option<Result<crate::app::AppToolExecutionResult>> {
+    let request = (|| {
+        let (args, mut invocation) =
+            crate::sudo_app::SudoApp::request(call, context.execution_cwd.clone())?;
+        let target = invocation.call(&call.id);
+        let unrestricted = super::sudo::unrestricted_context(context)?;
+        apps.validate_tool_call(&target, &unrestricted)?;
+        let owner = target.name.split_once("__").unwrap().0;
+        if let Some(revision) = apps.managed_versions().get(owner) {
+            let entry = system.app_registry().get(owner)?;
+            if entry.revision != *revision || !entry.enabled {
+                return Err(miette!("Target App changed before Sudo review"));
+            }
+            invocation.app_revision = Some(*revision);
+            invocation.app_source = Some(entry.source.public());
+        }
+        Ok::<_, miette::Report>((args, invocation))
+    })();
+    let (args, invocation) = match request {
+        Ok(value) => value,
+        Err(error) => return Some(Err(error)),
+    };
+    let reviewed = {
+        let future = super::sudo::review(
+            system, actor, message, control, context, call, args, invocation,
+        );
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                result = &mut future => break result,
+                () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
+                    if check_interruption(system, control, message).is_err() { return None; }
+                    if let Err(error) = Box::pin(receive_incoming(system, actor, message, control, apps)).await {
+                        return Some(Err(error));
+                    }
+                }
+            }
+        }
+    };
+    let (approval_id, invocation) = match reviewed {
+        Ok(super::sudo::ReviewOutcome::Execute {
+            approval_id,
+            invocation,
+        }) => (approval_id, invocation),
+        Ok(super::sudo::ReviewOutcome::Submitted(result)) => return Some(Ok(result)),
+        Err(error) => return Some(Err(error)),
+    };
+    let prepared = (|| {
+        let current = system.execution_actor(message)?;
+        let context = system.execution_context(&current, message)?;
+        super::approval::ensure_current(system, actor, message, control)?;
+        let mut unrestricted = super::sudo::unrestricted_context(&context)?;
+        unrestricted.restart_native = invocation.restart_native;
+        let target = invocation.call(&call.id);
+        apps.validate_tool_call(&target, &unrestricted)?;
+        let owner = target.name.split_once("__").unwrap().0;
+        if apps.managed_versions().get(owner).copied() != invocation.app_revision {
+            return Err(miette!("Target App changed while Sudo review was pending"));
+        }
+        if let Some(revision) = invocation.app_revision {
+            system.app_registry().check(owner, revision)?;
+        }
+        system
+            .store()
+            .claim_sudo(&approval_id, &message.id, &call.id, &invocation)?;
+        Ok::<_, miette::Report>((target, unrestricted))
+    })();
+    let (target, mut unrestricted) = match prepared {
+        Ok(value) => value,
+        Err(error) => return Some(Err(error)),
+    };
+    if invocation.administrator {
+        let elevation = system.sudo_administrator();
+        tokio::pin!(elevation);
+        loop {
+            tokio::select! {
+                result=&mut elevation=>match result {
+                    Ok(client)=>{unrestricted.sandbox_policy.administrator=Some(client);break;},
+                    Err(error)=>return Some(Err(error)),
+                },
+                ()=tokio::time::sleep(CANCELLATION_INTERVAL)=>{
+                    if check_interruption(system, control, message).is_err(){return None;}
+                }
+            }
+        }
+    }
+    if let Err(error) = super::approval::ensure_current(system, actor, message, control) {
+        return Some(Err(error));
+    }
+    let fresh = match system
+        .execution_actor(message)
+        .and_then(|actor| system.execution_context(&actor, message))
+    {
+        Ok(context) => context,
+        Err(error) => return Some(Err(error)),
+    };
+    if let Err(error) = super::sudo::unrestricted_context(&fresh) {
+        return Some(Err(error));
+    }
+    match crate::actors::permissions::canonical_path(&invocation.cwd) {
+        Ok(path) if path == invocation.cwd && fresh.execution_cwd == invocation.cwd => {}
+        _ => {
+            return Some(Err(miette!(
+                "Sudo working directory binding changed before execution"
+            )));
+        }
+    }
+    unrestricted.actor_call = fresh.actor_call;
+    unrestricted.turn_epoch = fresh.turn_epoch;
+    let future = apps.execute_tool(&target, &unrestricted);
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return Some(result.map(|mut result| {
+                if let Some(payload)=result.payload.as_object_mut() {
+                    payload.insert("sudo".into(),serde_json::json!({"tool":target.name,
+                        "administrator":invocation.administrator,"approval_id":approval_id}));
+                }
+                result
+            })),
+            () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
+                if check_interruption(system, control, message).is_err() { return None; }
+            }
+        }
+    }
+}
+
 async fn execute_call(
     system: &ActorSystem,
     actor: &ActorRecord,
@@ -592,7 +728,9 @@ async fn execute_call(
         call,
         control,
     );
-    let outcome = if call.name == "actors__appeal_approval" {
+    let outcome = if call.name.starts_with("sudo__") {
+        execute_sudo_call(system, actor, message, control, apps, call, &context).await
+    } else if call.name == "actors__appeal_approval" {
         // Actors is a stateless facade. Keep its review-control future while
         // retaining this Actor's existing stateful Apps for incoming input.
         use crate::app::App;
@@ -698,6 +836,11 @@ fn finish_tool_result(
     } else {
         false
     };
+    if let Some(report) = &result.sandbox
+        && let Some(payload) = result.payload.as_object_mut()
+    {
+        payload.insert("sandbox".into(), json!(report));
+    }
     let mut full_text = result
         .model_content
         .unwrap_or_else(|| result.payload.to_string());
@@ -715,7 +858,7 @@ fn finish_tool_result(
     if let Some(reference) = &result.permission_reference {
         reference.append_to(&mut model_content);
     }
-    super::runtime_permissions::append_denial_summary(&result.sandbox_denials, &mut model_content);
+    super::runtime_permissions::append_denial_summary(result.sandbox.as_ref(), &mut model_content);
     system.store().tool_finished_with_reference(
         &actor.id,
         &message.id,
@@ -815,6 +958,10 @@ async fn system_prompt(
     }
     prompt.push_str("\n\n");
     prompt.push_str(include_str!("../app_instructions/actors.md"));
+    if let Some(patch) = crate::os_patch::for_os(std::env::consts::OS) {
+        prompt.push_str("\n\n");
+        prompt.push_str(patch);
+    }
     if actor.id == crate::stage::shared::ACTOR_ID {
         // Device-local project instructions and Skills belong to hosted workers.
         return Ok(prompt);

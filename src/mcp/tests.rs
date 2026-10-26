@@ -145,6 +145,7 @@ pub(crate) async fn server() -> Server {
 }
 fn context(directory: &std::path::Path) -> AppToolExecutionContext {
     AppToolExecutionContext {
+        restart_native: false,
         access_broker: None,
         execution_cwd: directory.into(),
         sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),
@@ -362,9 +363,8 @@ async fn refresh_preserves_other_app_instances_and_queries_are_exempt() {
     assert_eq!(server.state.calls.load(Ordering::SeqCst), 0);
     apps.shutdown().await.unwrap();
 }
-#[cfg(target_os = "windows")]
 #[tokio::test]
-async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
+async fn stdio_enforces_native_and_explicit_sudo_connection_authority_and_reaps_processes() {
     if !crate::sandbox::test_support::native_sandbox_available() {
         return;
     }
@@ -456,7 +456,60 @@ async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
         .unwrap()
         .parse()
         .unwrap();
+    let mut host = context.clone();
+    host.sandbox_policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
+    assert!(
+        app.execute_tool(&call(&name, json!({"value":false})), &host)
+            .await
+            .is_err(),
+        "selecting host authority cannot silently replace an existing sandboxed process"
+    );
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "private");
+    host.restart_native = true;
+    let result = app
+        .execute_tool(&call(&name, json!({"value":false})), &host)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.model_content.as_deref(),
+        Some("explicit|ambient-fixture|private|write-allowed")
+    );
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "bad");
+    let host_pid: u32 = std::fs::read_to_string(workspace.join("server.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_ne!(host_pid, running_pid);
+    assert_eq!(
+        result.sandbox.unwrap().status,
+        crate::sandbox::CaptureStatus::NotRequested
+    );
+    let broker = crate::sudo_host::tests::local_client();
+    let mut administrator = host.clone();
+    administrator.sandbox_policy.administrator = Some(broker.clone());
+    let result = app
+        .execute_tool(&call(&name, json!({"value":true})), &administrator)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.model_content.as_deref(),
+        Some("explicit|ambient-fixture|public")
+    );
+    let administrator_pid: u32 = std::fs::read_to_string(workspace.join("server.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_ne!(administrator_pid, host_pid);
+    app.prepare_turn(&context, true).await.unwrap();
+    assert!(
+        app.execute_tool(&call(&name, json!({"value":false})), &context)
+            .await
+            .is_err(),
+        "ordinary requests cannot borrow a reviewed administrator connection"
+    );
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "bad");
     app.shutdown().await.unwrap();
+    broker.close();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let mut processes = sysinfo::System::new();
@@ -464,6 +517,8 @@ async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
                 sysinfo::ProcessesToUpdate::Some(&[
                     sysinfo::Pid::from_u32(preflight_pid),
                     sysinfo::Pid::from_u32(running_pid),
+                    sysinfo::Pid::from_u32(host_pid),
+                    sysinfo::Pid::from_u32(administrator_pid),
                 ]),
                 true,
             );

@@ -110,11 +110,9 @@ pub struct AppToolExecutionResult {
     pub overflow_continuation: Option<String>,
     #[serde(default)]
     pub model_images: Vec<AgentContentPart>,
-    /// Native sandbox denial records observed while this call executed.
-    /// Bounded, local to the executing device, and never inferred from
-    /// output, errno or command text.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sandbox_denials: Vec<crate::sandbox::DenialRecord>,
+    /// Device-native observations, including unknown denials and capture gaps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<crate::sandbox::DenialReport>,
 }
 
 impl AppToolExecutionResult {
@@ -127,7 +125,7 @@ impl AppToolExecutionResult {
             model_content,
             overflow_continuation: None,
             model_images: Vec::new(),
-            sandbox_denials: Vec::new(),
+            sandbox: None,
         }
     }
 }
@@ -143,6 +141,7 @@ pub struct ActorCallContext {
 
 #[derive(Clone)]
 pub struct AppToolExecutionContext {
+    pub restart_native: bool,
     pub access_broker: Option<std::sync::Arc<dyn crate::sandbox::access::SandboxAccessBroker>>,
     pub execution_cwd: PathBuf,
     pub sandbox_policy: RuntimeSandboxPolicy,
@@ -479,6 +478,7 @@ mod tests {
             "An App must opt in to idle reconstruction"
         );
         let context = AppToolExecutionContext {
+            restart_native: false,
             access_broker: None,
             execution_cwd: std::env::temp_dir(),
             sandbox_policy: RuntimeSandboxPolicy::disabled(),

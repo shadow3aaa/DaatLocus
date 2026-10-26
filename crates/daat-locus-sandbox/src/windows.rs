@@ -30,7 +30,10 @@ use super::{
     SandboxPolicy, SandboxProcessOptions, SandboxStdio, policy_paths_with_resolved,
     system_temporary_paths,
 };
-use crate::denial::{DenialRecord, MAX_CAPTURE_DENIALS, denials_from_capture_document};
+use crate::{
+    CaptureFailure, CaptureStatus, DenialReport, MAX_CAPTURE_BYTES, NativeBackend,
+    report_from_capture_document,
+};
 
 #[link(name = "advapi32")]
 unsafe extern "system" {}
@@ -38,7 +41,7 @@ unsafe extern "system" {}
 /// Prefix of the per-spawn directory that owns the captureDenials output file.
 const CAPTURE_DIRECTORY_PREFIX: &str = "daat-locus-capture-";
 /// Upper bound for one captureDenials JSON document read back from disk.
-const MAX_CAPTURE_DOCUMENT_BYTES: u64 = 1024 * 1024;
+const MAX_CAPTURE_DOCUMENT_BYTES: u64 = MAX_CAPTURE_BYTES as u64;
 
 /// Creates the per-spawn directory for a captureDenials output document.
 /// Errors leave capture disabled rather than failing the spawn.
@@ -56,22 +59,23 @@ fn prepare_capture_document_path() -> Option<PathBuf> {
 }
 
 /// Bounded read of a captureDenials JSON document written by the runner.
-fn read_capture_document(path: &Path) -> Option<(Vec<DenialRecord>, bool)> {
+fn read_capture_document(path: &Path) -> DenialReport {
     use std::io::Read;
-    let metadata = std::fs::metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_CAPTURE_DOCUMENT_BYTES {
-        return None;
+    let backend = NativeBackend::WindowsMxc;
+    let read = || -> io::Result<Vec<u8>> {
+        let file = std::fs::File::open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other("Native capture is not a file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_CAPTURE_DOCUMENT_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    };
+    match read() {
+        Ok(bytes) => report_from_capture_document(&bytes),
+        Err(_) => DenialReport::failed(backend, CaptureFailure::Read),
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    std::fs::File::open(path)
-        .ok()?
-        .take(MAX_CAPTURE_DOCUMENT_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() as u64 > MAX_CAPTURE_DOCUMENT_BYTES {
-        return None;
-    }
-    Some(denials_from_capture_document(&bytes, MAX_CAPTURE_DENIALS))
 }
 
 pub struct WindowsSandboxAsyncChild {
@@ -82,7 +86,7 @@ pub struct WindowsSandboxAsyncChild {
     status: Option<ExitStatus>,
     shutdown: watch::Sender<()>,
     capture_output: Option<PathBuf>,
-    denials: Option<Vec<DenialRecord>>,
+    report: DenialReport,
 }
 
 impl WindowsSandboxAsyncChild {
@@ -115,7 +119,7 @@ impl WindowsSandboxAsyncChild {
     /// Reads and clears the capture document once this child reached a
     /// terminal state; bounded, best-effort, and local to this spawn.
     fn harvest_captured_denials(&mut self) {
-        if self.denials.is_some() {
+        if self.report.status != CaptureStatus::Pending {
             return;
         }
         let mut document_path = self
@@ -136,21 +140,23 @@ impl WindowsSandboxAsyncChild {
                 }
             }
         }
-        if self.capture_output.is_some() {
-            self.denials = Some(
-                document_path
-                    .as_deref()
-                    .and_then(read_capture_document)
-                    .map(|(records, _truncated)| records)
-                    .unwrap_or_default(),
-            );
-        }
+        self.report = document_path
+            .as_deref()
+            .map(read_capture_document)
+            .unwrap_or_else(|| {
+                DenialReport::failed(NativeBackend::WindowsMxc, CaptureFailure::NativeCapture)
+            });
         self.remove_capture_directory();
     }
 
-    /// Native denial records captured for this child, if any.
-    pub fn take_denials(&mut self) -> Vec<DenialRecord> {
-        self.denials.take().unwrap_or_default()
+    pub fn take_denial_report(&mut self) -> DenialReport {
+        if self.try_wait().is_err() {
+            self.report =
+                DenialReport::failed(NativeBackend::WindowsMxc, CaptureFailure::NativeCapture);
+        }
+        let mut report = self.report.clone();
+        report.denials = std::mem::take(&mut self.report.denials);
+        report
     }
 
     /// Deletes the per-spawn capture directory this child owns, if any.
@@ -202,12 +208,26 @@ pub fn spawn_restricted_async(
     // native PSEC/V2 learning-mode trace: the request then keeps every
     // denial enforced and only records it. Unsupported hosts keep today's
     // behavior (no capture, no guarded-WPR/UAC fallback).
-    let mut capture_output =
-        if options.capture_denials && BaseContainerRunner::is_capture_denials_usable() {
-            prepare_capture_document_path()
+    let backend = NativeBackend::WindowsMxc;
+    let mut report = DenialReport::new(
+        backend,
+        if !options.capture_denials {
+            CaptureStatus::NotRequested
+        } else if BaseContainerRunner::is_capture_denials_usable() {
+            CaptureStatus::Pending
         } else {
-            None
-        };
+            CaptureStatus::Unavailable
+        },
+    );
+    let mut capture_output = if report.status == CaptureStatus::Pending {
+        let path = prepare_capture_document_path();
+        if path.is_none() {
+            report = DenialReport::failed(backend, CaptureFailure::Setup);
+        }
+        path
+    } else {
+        None
+    };
     let mut request = build_request(policy, program, args.clone(), &options)?;
     if let Some(capture_document) = capture_output.as_deref() {
         // We call BaseContainerRunner directly rather than MXC's config
@@ -266,7 +286,11 @@ pub fn spawn_restricted_async(
             // today's behavior instead of failing the spawn: retry once with
             // capture disabled when the refusal is capture-specific.
             if capture_output.is_some() && error.error_message.contains("captureDenials") {
+                if let Some(directory) = capture_output.as_ref().and_then(|path| path.parent()) {
+                    let _ = std::fs::remove_dir(directory);
+                }
                 capture_output = None;
+                report = DenialReport::failed(backend, CaptureFailure::NativeCapture);
                 let request = build_request(policy, program, args, &options)?;
                 BaseContainerRunner::new()
                     .spawn(
@@ -321,7 +345,7 @@ pub fn spawn_restricted_async(
         status: None,
         shutdown,
         capture_output,
-        denials: None,
+        report,
     })
 }
 
@@ -1220,7 +1244,7 @@ mod capture_denial_tests {
         .await
         .expect("capture probe timed out")
         .unwrap();
-        let denials = child.take_denials();
+        let denials = child.take_denial_report().filesystem_denials().collect();
         let success = status.success();
         (success, format!("{out}{err}"), denials)
     }

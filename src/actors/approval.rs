@@ -26,6 +26,14 @@ const REVIEW_ARGUMENT_BYTES: usize = 16 * 1024;
 const CANCEL_INTERVAL: Duration = Duration::from_millis(25);
 
 pub(crate) fn scopes_digest(record: &ApprovalRecord) -> Result<String> {
+    if let Some(invocation) = &record.sudo {
+        return Ok(crate::stage::digest(
+            &serde_json::to_vec(&json!({
+                "scopes":record.scopes,"sudo":invocation
+            }))
+            .map_err(|error| miette!("{error}"))?,
+        ));
+    }
     Ok(crate::stage::digest(
         &serde_json::to_vec(&record.scopes).map_err(|error| miette!("{error}"))?,
     ))
@@ -381,6 +389,7 @@ async fn automatic_review(
                 .iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<String>>(),
                 "runtime_read_scopes":runtime_reads},
             "source_call":proposed_call,
+            "sudo_invocation":record.sudo,
             "requested_additional_filesystem_access":record.requested,
             "requested_scopes":record.scopes})
         .to_string();

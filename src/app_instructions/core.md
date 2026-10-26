@@ -12,3 +12,4 @@ for cleanup. Cancel affects only one message; other suspended inputs may continu
 Archiving alone does not stop running work. Stopping preserves identity and history.
 When approval is needed, explain the target, permission and purpose, then await the user's decision.
 Resolve approval appeals from the user's authorization in the conversation, including on a later input.
+Sudo consent permits one exact invocation, including its administrator flag; filesystem consent remembers device scope.

@@ -22,6 +22,8 @@ pub const DEVICE_APPS: &[&str] = &[
     "files",
     #[cfg(not(target_os = "android"))]
     "terminal",
+    #[cfg(not(target_os = "android"))]
+    "sudo",
     "web",
     #[cfg(any(windows, target_os = "macos", target_os = "android"))]
     "browser_use",
@@ -35,6 +37,7 @@ pub(crate) const ALL_APPS: &[&str] = &[
     "actors",
     "files",
     "terminal",
+    "sudo",
     "web",
     "browser_use",
     "artifacts",
@@ -86,6 +89,7 @@ pub fn create_apps(
             )),
             "files" => Box::new(FilesApp::new(state_dir.join("images"), supports_vision)),
             "terminal" if !cfg!(target_os = "android") => Box::new(TerminalApp::new()),
+            "sudo" if !cfg!(target_os = "android") => Box::new(crate::sudo_app::SudoApp),
             "web" => Box::new(WebApp::new(
                 actor.id.clone(),
                 system.clone(),

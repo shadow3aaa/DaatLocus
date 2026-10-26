@@ -303,6 +303,15 @@ impl App for McpApp {
         {
             return Ok(());
         }
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.ensure_policy(&context.sandbox_policy).is_err())
+        {
+            // A prior reviewed invocation may own an elevated connection.
+            // Background catalog refresh cannot borrow that authority.
+            return Ok(());
+        }
         if (refresh
             || self
                 .session
@@ -323,7 +332,6 @@ impl App for McpApp {
                 .await?;
             self.entry = self.registry.get(&self.entry.id)?;
         }
-        let _ = context;
         Ok(())
     }
     async fn execute_tool(
@@ -345,6 +353,20 @@ impl App for McpApp {
         self.registry.check(&self.entry.id, self.entry.revision)?;
         let name = self.tool(&call.name)?.name.clone();
         let arguments = self.arguments(call)?;
+        // Selecting Sudo explicitly requests a new OS execution environment.
+        // Reconnect that native session; never assert that an existing process
+        // acquired another token/policy, or replay any prior MCP tool effects.
+        if context.restart_native
+            && context.actor_call.is_some()
+            && context.sandbox_policy.is_unrestricted()
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.ensure_policy(&context.sandbox_policy).is_err())
+            && let Some(mut session) = self.session.take()
+        {
+            session.close().await;
+        }
         if self.session.is_none() {
             let mut session = transport::Session::connect(&self.entry.source, context).await?;
             let tools = session.tools().await?;
@@ -372,7 +394,26 @@ impl App for McpApp {
         let service = self.session.as_ref().unwrap().service.as_ref().unwrap();
         let params = rmcp::model::CallToolRequestParams::new(name)
             .with_arguments(arguments.as_object().unwrap().clone());
-        let outcome=tokio::time::timeout(std::time::Duration::from_secs(120),service.call_tool(params)).await.map_err(|_|miette!("MCP call timed out; its effects are uncertain and it must not be automatically replayed"))?.map_err(|_|miette!("MCP call failed; its effects may be uncertain"))?;
+        let outcome = match tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            service.call_tool(params),
+        )
+        .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            outcome => {
+                let reason = if outcome.is_err() {
+                    "MCP call timed out; effects are uncertain, do not replay"
+                } else {
+                    "MCP call failed; effects may be uncertain"
+                };
+                return Err(self
+                    .session
+                    .as_mut()
+                    .unwrap()
+                    .with_diagnostics(miette!("{reason}")));
+            }
+        };
         let mut payload = serde_json::to_value(outcome).into_diagnostic()?;
         let actor = context
             .actor_call
@@ -465,6 +506,10 @@ impl App for McpApp {
             }),
         );
         result.model_images = images;
+        result.sandbox = self
+            .session
+            .as_mut()
+            .and_then(|session| session.take_denial_report());
         if failed {
             result.failure = Some("MCP tool returned an error".into());
         }

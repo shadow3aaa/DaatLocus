@@ -21,6 +21,14 @@ on which Actor applied. A directory recursively covers descendants added later;
 write access includes reads. File access covers the file only. Consider this
 lasting extent when judging the application. There are no operation fingerprints.
 
+A non-null sudo_invocation instead requests one exact tool invocation outside
+the sandbox. Inspect its target, arguments, working directory and administrator
+flag. Approval allows that invocation once; it never adds permanent device scope.
+Sandbox bypass as the current OS user and OS administrator elevation are distinct
+requests. Approve elevation only when the Owner-authorized task reasonably needs
+it. Approved Sudo can execute the waiting invocation; a Core decision itself never
+executes or replays it.
+
 Approval never overrides authenticated remote restrictions, device revocation,
 resource-reference ownership or other hard authority. Platform baseline temporary
 directories listed in authorized_baseline are already allowed; do not request
@@ -29,6 +37,6 @@ allow reads of OS runtime files; they do not grant writes.
 An entry with recursive=false permits only that exact path, including when the
 path is the root directory. Its descendants still need their own scope.
 
-Approval grants sandbox scope only. It does not execute or replay the source
-call. A denial is final for this automatic review; the Actor's application may
+Filesystem approval grants sandbox scope only. It does not execute or replay the
+source call. A denial is final for this automatic review; the Actor's application may
 then be forwarded asynchronously to Core for an Owner-authorized decision.

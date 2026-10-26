@@ -521,6 +521,8 @@ async fn owner_can_open_and_control_created_actors() {
         .system
         .store()
         .create_approval(ApprovalRecord {
+            sudo: None,
+            execution_claim: None,
             seq: 0,
             id: uuid::Uuid::new_v4().to_string(),
             message_id: input.id,

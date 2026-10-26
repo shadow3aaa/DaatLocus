@@ -56,6 +56,11 @@ jobs:
         env:
           DAAT_LOCUS_TEST_STAGE_TRACE: '1'
         run: cargo test --locked -p daat-locus --lib actors::runner::tests::three_device_core_preserves_resources_context_and_effects_across_sequential_takeover -- --exact
+      - name: Verify the Unix administrator helper with real root authority
+        if: runner.os != 'Windows'
+        env:
+          DAAT_LOCUS_TEST_COMPANION: ${{ github.workspace }}/target/debug/daat-locus
+        run: cargo test --locked -p daat-locus --lib root_helper_reads_protected_files_without_elevating_the_service -- --ignored --nocapture --test-threads=1
       - name: Check macOS native host integration
         if: runner.os == 'macOS'
         run: cargo clippy --locked -p daat-locus-app --features native-contract --all-targets -- -D warnings

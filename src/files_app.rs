@@ -227,6 +227,7 @@ mod tests {
             content: BUILTIN_SKILL,
         }];
         let context = AppToolExecutionContext {
+            restart_native: false,
             access_broker: None,
             execution_cwd: cwd,
             sandbox_policy: policy,
@@ -387,6 +388,7 @@ mod tests {
             read_only_subpaths: vec![],
         }];
         let base = AppToolExecutionContext {
+            restart_native: false,
             access_broker: None,
             execution_cwd: dir.path().into(),
             sandbox_policy: policy,
@@ -435,6 +437,7 @@ mod tests {
         policy.filesystem.full_disk_write = false;
         policy.filesystem.writable_roots.clear();
         let context = AppToolExecutionContext {
+            restart_native: false,
             access_broker: None,
             execution_cwd: dir.path().into(),
             sandbox_policy: policy,

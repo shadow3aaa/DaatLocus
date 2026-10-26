@@ -298,6 +298,7 @@ async fn suspended_filesystem_write_has_no_effect_until_review_and_does_not_repl
         // Original bytes must survive both refusal and cancellation.
         std::fs::write(&file, "original").unwrap();
         let policy = RuntimeSandboxPolicy {
+            administrator: None,
             builtin_resources: vec![],
             native: SandboxPolicy {
                 filesystem: FileSystemSandboxPolicy {
@@ -334,6 +335,7 @@ async fn suspended_filesystem_write_has_no_effect_until_review_and_does_not_repl
             tool_output_max_tokens: 1024,
             turn_epoch: 0,
             actor_call: None,
+            restart_native: false,
             access_broker: Some(review.clone()),
         };
         let call = AgentToolCall {
@@ -500,6 +502,7 @@ async fn recursive_directory_creation_waits_at_the_first_missing_component() {
         .unwrap();
     let directory = root.path().join("new/nested/workspace");
     let policy = RuntimeSandboxPolicy {
+        administrator: None,
         builtin_resources: vec![],
         native: SandboxPolicy {
             filesystem: FileSystemSandboxPolicy {
@@ -533,6 +536,7 @@ async fn recursive_directory_creation_waits_at_the_first_missing_component() {
         tool_output_max_tokens: 1024,
         turn_epoch: 0,
         actor_call: None,
+        restart_native: false,
         access_broker: Some(review.clone()),
     };
     let files = context.files();

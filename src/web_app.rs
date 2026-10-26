@@ -379,6 +379,7 @@ mod tests {
         system.seed_test_actor("reader");
         system.seed_test_actor("other-reader");
         let context = AppToolExecutionContext {
+            restart_native: false,
             access_broker: None,
             execution_cwd: temporary.path().join("workspace"),
             sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),

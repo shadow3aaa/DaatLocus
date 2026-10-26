@@ -4,11 +4,13 @@ mod baseline;
 pub mod capabilities;
 pub use baseline::{RuntimeReadScope, runtime_read_scopes};
 mod denial;
+mod diagnostics;
 #[cfg(windows)]
 pub mod process_spawn;
-pub use denial::{
-    Access, AccessDenied, DenialRecord, DenialSource, MAX_CAPTURE_DENIALS,
-    denials_from_capture_document,
+pub use denial::{Access, AccessDenied, DenialRecord, DenialSource};
+pub use diagnostics::{
+    CaptureFailure, CaptureStatus, DenialReport, MAX_CAPTURE_BYTES, MAX_CAPTURE_DENIALS,
+    NativeBackend, NativeDenial, ProcessFailure, report_from_capture_document,
 };
 
 #[cfg(all(
@@ -390,16 +392,24 @@ impl SandboxAsyncChild {
         }
     }
 
-    /// Native denial records captured for a finished sandboxed child.
-    ///
-    /// Empty unless capture was requested, the backend produced records, and
-    /// the child reached a terminal state. Records are bounded and only name
-    /// filesystem read/write targets that the sandbox actually denied.
-    pub fn take_denials(&mut self) -> Vec<denial::DenialRecord> {
+    /// Bounded native observations and explicit collection status. Pending,
+    /// failed and unavailable collection never imply that access was allowed.
+    /// Unknown resource/access kinds remain evidence without becoming grants.
+    pub fn take_denial_report(&mut self) -> DenialReport {
         match &mut self.inner {
             #[cfg(target_os = "windows")]
-            SandboxAsyncChildInner::Windows(child) => child.take_denials(),
-            _ => Vec::new(),
+            SandboxAsyncChildInner::Windows(child) => child.take_denial_report(),
+            #[cfg(target_os = "linux")]
+            SandboxAsyncChildInner::Linux(_) => {
+                DenialReport::new(NativeBackend::LinuxBubblewrap, CaptureStatus::Unavailable)
+            }
+            #[cfg(target_os = "macos")]
+            SandboxAsyncChildInner::Macos(_) => {
+                DenialReport::new(NativeBackend::MacosSeatbelt, CaptureStatus::Unavailable)
+            }
+            SandboxAsyncChildInner::Tokio(_) => {
+                DenialReport::new(NativeBackend::Unrestricted, CaptureStatus::NotRequested)
+            }
         }
     }
 

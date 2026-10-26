@@ -62,7 +62,7 @@ struct OutputSegment {
 
 impl TerminalProcess {
     pub(super) fn ensure_policy(&self, current: &RuntimeSandboxPolicy) -> miette::Result<()> {
-        self.child.ensure_policy(&current.native)
+        self.child.ensure_policy(current)
     }
     pub fn spawn(
         command: &str,
@@ -194,8 +194,8 @@ impl TerminalProcess {
     }
 
     /// Native denial records captured for this process, when available.
-    pub(super) fn take_denials(&mut self) -> Vec<crate::sandbox::DenialRecord> {
-        self.child.take_denials()
+    pub(super) fn take_denial_report(&mut self) -> crate::sandbox::DenialReport {
+        self.child.take_denial_report()
     }
 
     pub fn output_len(&self) -> usize {

@@ -104,6 +104,9 @@ pub(super) fn sandbox_application(
     let rows = sql(statement.query_map(params![message, call], |row| row.get::<_, String>(0)))?;
     for row in rows {
         let record: ApprovalRecord = decode(sql(row)?)?;
+        if record.sudo.is_some() {
+            continue;
+        }
         if record.requested == *requested
             || record.decision == ApprovalDecision::Approved
                 && requested_scopes

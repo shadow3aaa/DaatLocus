@@ -3850,6 +3850,8 @@ async fn actor_identity_history_and_queued_work_survive_crash_recovery() {
     let pending = system
         .store()
         .create_approval(ApprovalRecord {
+            sudo: None,
+            execution_claim: None,
             seq: 0,
             id: uuid::Uuid::new_v4().to_string(),
             message_id: active.id.clone(),
@@ -6129,3 +6131,572 @@ async fn runtime_scope_typed_app_denial_and_bounded_output_keep_consumable_refer
 
 #[path = "message_tests.rs"]
 mod message_tests;
+
+fn sudo_write_call(id: &str, path: &std::path::Path, approval: Option<&str>) -> AgentToolCall {
+    AgentToolCall {
+        id: id.into(),
+        name: "sudo__execute".into(),
+        arguments: json!({
+            "tool":"files__write_file", "arguments_json":json!({"path":path,"content":"reviewed host effect","expected_sha256":null}).to_string(),
+            "reason":"Write the report requested by the Owner", "restart_native":false, "approval_id":approval,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn native_capture_failures_preserve_output_and_late_scope_evidence_in_saved_results() {
+    let (directory, system, _) = paused_runtime().await;
+    system
+        .send_user("root", "Check package setup".into(), vec![], None)
+        .unwrap();
+    let message = system.store().claim_next("root").unwrap().unwrap();
+    let actor = system.execution_actor(&message).unwrap();
+    let context = system.execution_context(&actor, &message).unwrap();
+    let call = AgentToolCall {
+        id: "native-evidence".into(),
+        name: "terminal__terminal_exec".into(),
+        arguments: json!({}),
+    };
+    let id = system
+        .store()
+        .tool_started(&actor.id, &message.id, &call)
+        .unwrap();
+    let late = directory.path().join("package-cache");
+    std::fs::create_dir(&late).unwrap();
+    let mut denials=(0..32).map(|n| json!({"resource":directory.path().join(format!("probe-{n}")),"resourceType":"file","accessType":"write"})).collect::<Vec<_>>();
+    denials.push(json!({"resource":late,"resourceType":"directory","accessType":"write"}));
+    denials.push(
+        json!({"resource":"package-activation","resourceType":"capability","accessType":"execute"}),
+    );
+    let report=crate::sandbox::report_from_capture_document(&serde_json::to_vec(&json!({"denials":denials,"summary":{"deniedResourcesTruncated":true,"totalDenials":40}})).unwrap());
+    let error: miette::Report = crate::sandbox::ProcessFailure {
+        message: "original native failure".into(),
+        report: report.clone(),
+    }
+    .into();
+    let mut result = super::super::runtime_permissions::error_result(&system, &error);
+    super::super::runtime_permissions::attach_reference(
+        &system,
+        &actor,
+        &message,
+        &call,
+        &context,
+        &id,
+        &mut result,
+        Some(&error),
+    )
+    .unwrap();
+    finish_tool_result(
+        &system,
+        &actor,
+        &message,
+        &call,
+        &context,
+        result,
+        &mut vec![],
+    )
+    .unwrap();
+    let saved = system.store().tool_result(&id).unwrap();
+    assert_eq!(saved.error.as_deref(), Some("original native failure"));
+    assert_eq!(saved.payload["sandbox"], json!(report));
+    let reference = saved
+        .model_content
+        .lines()
+        .find_map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|value| value.get("permission_reference").cloned())
+        })
+        .unwrap();
+    let approval = system
+        .store()
+        .approval(reference["approval_id"].as_str().unwrap())
+        .unwrap();
+    assert!(
+        approval
+            .requested
+            .writable_roots
+            .contains(&late.canonicalize().unwrap())
+    );
+    assert_eq!(
+        approval.requested.writable_roots.len(),
+        33,
+        "non-filesystem observations cannot turn into grants"
+    );
+    system.shutdown().await;
+}
+fn sudo_fixture_apps() -> AppManager {
+    AppManager::new(vec![
+        Box::new(crate::sudo_app::SudoApp),
+        Box::new(crate::files_app::FilesApp::new(std::env::temp_dir(), false)),
+    ])
+    .unwrap()
+}
+
+#[tokio::test]
+async fn sudo_review_allows_incoming_input_and_executes_once_without_device_scope_memory() {
+    let (directory, system, provider) = paused_runtime().await;
+    system.install_local_core().unwrap();
+    provider
+        .review_replies
+        .lock()
+        .push_back(json!({"decision":"approve","reason":"Owner requested the report"}));
+    provider.review_blocked.store(true, Ordering::Release);
+    provider
+        .replies
+        .lock()
+        .push_back(MockReply::Answer("Received the new instructions"));
+    system
+        .send_user("root", "Write the report".into(), vec![], None)
+        .unwrap();
+    let message = system.store().claim_next("root").unwrap().unwrap();
+    let actor = system.execution_actor(&message).unwrap();
+    let before = system.store().sandbox_scopes().unwrap();
+    let path = directory.path().join("report.txt");
+    assert!(
+        !system
+            .execution_context(&actor, &message)
+            .unwrap()
+            .sandbox_policy
+            .is_path_writable(&path)
+    );
+    let mut apps = sudo_fixture_apps();
+    let call = sudo_write_call("sudo-write", &path, None);
+    let control = ActorControl::default();
+    let mut history = vec![];
+    let execution = execute_call(
+        &system,
+        &actor,
+        &message,
+        &control,
+        &mut apps,
+        &call,
+        &mut history,
+    );
+    let steering = async {
+        while provider.review_requests.lock().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert!(!path.exists(), "effects must wait for Auto");
+        let incoming = system
+            .send_user(
+                "root",
+                "Keep the requested report concise".into(),
+                vec![],
+                None,
+            )
+            .unwrap();
+        while system.store().message(&incoming.id).unwrap().status != MessageStatus::Completed {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !path.exists(),
+            "incoming inference must not authorize the suspended call"
+        );
+        provider.review_release.notify_one();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(execution, steering)
+    })
+    .await
+    .unwrap();
+    result.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "reviewed host effect"
+    );
+    assert_eq!(provider.review_requests.lock().len(), 1);
+    assert_eq!(system.store().sandbox_scopes().unwrap(), before);
+    let record = system
+        .store()
+        .approvals(Some("root"), None, 10)
+        .unwrap()
+        .items
+        .remove(0);
+    assert!(record.execution_claim.is_some());
+    assert!(record.appeal.is_none());
+    let repeat = sudo_write_call("sudo-replay", &path, Some(&record.id));
+    execute_call(
+        &system,
+        &actor,
+        &message,
+        &control,
+        &mut apps,
+        &repeat,
+        &mut history,
+    )
+    .await
+    .unwrap();
+    assert_eq!(provider.review_requests.lock().len(), 1);
+    let summaries = system
+        .store()
+        .tool_summaries("root", &message.id, None, 10)
+        .unwrap();
+    let repeated = summaries
+        .items
+        .iter()
+        .find(|tool| tool.call_id == "sudo-replay")
+        .unwrap();
+    assert!(
+        system
+            .store()
+            .tool_result(&repeated.id)
+            .unwrap()
+            .error
+            .is_some()
+    );
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn sudo_denial_goes_to_core_and_consent_requires_an_explicit_unchanged_invocation() {
+    let (directory, system, provider) = paused_runtime().await;
+    system.install_local_core().unwrap();
+    provider
+        .review_replies
+        .lock()
+        .push_back(json!({"decision":"deny","reason":"Core should confirm authorization"}));
+    system
+        .send_user("root", "Write the report".into(), vec![], None)
+        .unwrap();
+    let message = system.store().claim_next("root").unwrap().unwrap();
+    let actor = system.execution_actor(&message).unwrap();
+    let path = directory.path().join("report.txt");
+    let mut apps = sudo_fixture_apps();
+    let control = ActorControl::default();
+    let mut history = vec![];
+    let call = sudo_write_call("sudo-denied", &path, None);
+    execute_call(
+        &system,
+        &actor,
+        &message,
+        &control,
+        &mut apps,
+        &call,
+        &mut history,
+    )
+    .await
+    .unwrap();
+    assert!(!path.exists());
+    let record = system
+        .store()
+        .approvals(Some("root"), None, 10)
+        .unwrap()
+        .items
+        .remove(0);
+    assert_eq!(record.decision, super::super::ApprovalDecision::Denied);
+    assert!(record.appeal.is_some());
+    assert!(record.execution_claim.is_none());
+    let mut elevated = sudo_write_call("sudo-elevation-substitution", &path, Some(&record.id));
+    elevated.name = "sudo__execute_as_admin".into();
+    execute_call(
+        &system,
+        &actor,
+        &message,
+        &control,
+        &mut apps,
+        &elevated,
+        &mut history,
+    )
+    .await
+    .unwrap();
+    assert!(!path.exists());
+    assert!(
+        system
+            .store()
+            .approval(&record.id)
+            .unwrap()
+            .execution_claim
+            .is_none()
+    );
+    let retry = sudo_write_call("sudo-pending", &path, Some(&record.id));
+    execute_call(
+        &system,
+        &actor,
+        &message,
+        &control,
+        &mut apps,
+        &retry,
+        &mut history,
+    )
+    .await
+    .unwrap();
+    assert_eq!(provider.review_requests.lock().len(), 1);
+    let core_input = system.store().claim_next("core").unwrap().unwrap();
+    let core = system.core_device_actor().unwrap();
+    let context = system.execution_context(&core, &core_input).unwrap();
+    system
+        .resolve_appeal_from_core(
+            context.actor_call.as_ref().unwrap(),
+            &record.id,
+            super::super::ApprovalDecision::Approved,
+            "The Owner authorized this report",
+        )
+        .await
+        .unwrap();
+    assert!(!path.exists(), "consent never replays the source effect");
+    let forged_path = directory.path().join("unapproved.txt");
+    let forged = sudo_write_call("sudo-forged", &forged_path, Some(&record.id));
+    execute_call(
+        &system,
+        &actor,
+        &message,
+        &control,
+        &mut apps,
+        &forged,
+        &mut history,
+    )
+    .await
+    .unwrap();
+    assert!(!forged_path.exists());
+    assert!(
+        system
+            .store()
+            .approval(&record.id)
+            .unwrap()
+            .execution_claim
+            .is_none()
+    );
+    // The decision notification remains a separate durable input; execute the
+    // explicit retry under this still-active original request's authority.
+    let retry = sudo_write_call("sudo-approved", &path, Some(&record.id));
+    execute_call(
+        &system,
+        &actor,
+        &message,
+        &control,
+        &mut apps,
+        &retry,
+        &mut history,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        "reviewed host effect"
+    );
+    assert_eq!(provider.review_requests.lock().len(), 1);
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn sudo_rejects_hard_authority_and_invalid_targets_before_automatic_review() {
+    let (directory, system, provider) = paused_runtime().await;
+    system.install_local_core().unwrap();
+    system
+        .send_user("root", "Write a report".into(), vec![], None)
+        .unwrap();
+    let message = system.store().claim_next("root").unwrap().unwrap();
+    let actor = system.execution_actor(&message).unwrap();
+    let context = system.execution_context(&actor, &message).unwrap();
+    let path = directory.path().join("unauthorized.txt");
+    let call = sudo_write_call("sudo-hard-authority", &path, None);
+    let control = ActorControl::default();
+    let mut readonly = context.clone();
+    readonly.actor_call.as_mut().unwrap().remote_read_only = true;
+    assert!(super::super::sudo::unrestricted_context(&readonly).is_err());
+    let mut remote = message.clone();
+    remote.remote_authority = Some(super::super::RemoteAuthority {
+        read_only: false,
+        peer: system.store().public_stage_id().unwrap(),
+        origin_actor: "root".into(),
+        reply_for: None,
+    });
+    let (args, invocation) =
+        crate::sudo_app::SudoApp::request(&call, context.execution_cwd.clone()).unwrap();
+    assert!(
+        super::super::sudo::review(
+            &system, &actor, &remote, &control, &context, &call, args, invocation
+        )
+        .await
+        .is_err()
+    );
+    let mut invalid = call.clone();
+    invalid.arguments["arguments_json"] = json!("{\"unexpected\":true}");
+    execute_call(
+        &system,
+        &actor,
+        &message,
+        &control,
+        &mut sudo_fixture_apps(),
+        &invalid,
+        &mut vec![],
+    )
+    .await
+    .unwrap();
+    assert!(provider.review_requests.lock().is_empty());
+    assert!(
+        system
+            .store()
+            .approvals(Some("root"), None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(!path.exists());
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn sudo_cancelled_while_waiting_for_auto_never_executes() {
+    let (directory, system, provider) = paused_runtime().await;
+    system.install_local_core().unwrap();
+    provider.review_blocked.store(true, Ordering::Release);
+    provider
+        .review_replies
+        .lock()
+        .push_back(json!({"decision":"approve","reason":"Owner requested it"}));
+    system
+        .send_user("root", "Write a report".into(), vec![], None)
+        .unwrap();
+    let message = system.store().claim_next("root").unwrap().unwrap();
+    let actor = system.execution_actor(&message).unwrap();
+    let path = directory.path().join("cancelled.txt");
+    let call = sudo_write_call("sudo-cancelled", &path, None);
+    let control = ActorControl::default();
+    let mut apps = sudo_fixture_apps();
+    let mut history = vec![];
+    let execution = execute_call(
+        &system,
+        &actor,
+        &message,
+        &control,
+        &mut apps,
+        &call,
+        &mut history,
+    );
+    let cancellation = async {
+        while provider.review_requests.lock().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        control.stop.store(true, Ordering::Release);
+        provider.review_release.notify_one();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(execution, cancellation)
+    })
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    assert!(!path.exists());
+    for record in system
+        .store()
+        .approvals(Some("root"), None, 10)
+        .unwrap()
+        .items
+    {
+        assert!(record.execution_claim.is_none());
+    }
+    system.shutdown().await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "requires native MXC/PSEC and a registered packaged winget client; runs --version only"]
+async fn sudo_runs_packaged_winget_without_uac_after_native_container_refuses_it() {
+    assert!(
+        crate::sandbox::test_support::native_sandbox_available(),
+        "this opt-in probe requires native isolation"
+    );
+    let alias = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+        .join("Microsoft/WindowsApps/winget.exe");
+    let expected = std::process::Command::new(&alias)
+        .arg("--version")
+        .output()
+        .expect("registered packaged winget prerequisite");
+    assert!(expected.status.success());
+    let expected = String::from_utf8(expected.stdout).unwrap();
+    let (_directory, system, provider) = paused_runtime().await;
+    system.install_local_core().unwrap();
+    provider.review_replies.lock().push_back(json!({"decision":"approve","reason":"Owner requested verification of the installed package manager"}));
+    system
+        .send_user(
+            "root",
+            "Check the installed winget version".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    let message = system.store().claim_next("root").unwrap().unwrap();
+    let actor = system.execution_actor(&message).unwrap();
+    let context = system.execution_context(&actor, &message).unwrap();
+    let args = json!({"command":"$ErrorActionPreference='Stop'; & winget --version; exit $LASTEXITCODE",
+        "workdir":context.execution_cwd,"yield_time_ms":90000,"max_chars":2000,"session_id":null});
+    let mut apps = AppManager::new(vec![
+        Box::new(crate::sudo_app::SudoApp),
+        Box::new(crate::terminal_app::TerminalApp::new()),
+    ])
+    .unwrap();
+    let mut history = vec![];
+    let control = ActorControl::default();
+    execute_call(
+        &system,
+        &actor,
+        &message,
+        &control,
+        &mut apps,
+        &AgentToolCall {
+            id: "native-winget".into(),
+            name: "terminal__terminal_exec".into(),
+            arguments: args.clone(),
+        },
+        &mut history,
+    )
+    .await
+    .unwrap();
+    let summary = system
+        .store()
+        .tool_summaries("root", &message.id, None, 10)
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|tool| tool.call_id == "native-winget")
+        .unwrap();
+    let restricted = system.store().tool_result(&summary.id).unwrap();
+    assert_ne!(
+        restricted.payload["session"]["exit_code"],
+        json!(0),
+        "native container unexpectedly ran the packaged application"
+    );
+    let call = AgentToolCall {
+        id: "sudo-winget".into(),
+        name: "sudo__execute".into(),
+        arguments: json!({
+        "tool":"terminal__terminal_exec","arguments_json":args.to_string(),"reason":"Check the Owner-requested installed winget version",
+        "restart_native":false,"approval_id":null}),
+    };
+    execute_call(
+        &system,
+        &actor,
+        &message,
+        &control,
+        &mut apps,
+        &call,
+        &mut history,
+    )
+    .await
+    .unwrap();
+    let summary = system
+        .store()
+        .tool_summaries("root", &message.id, None, 10)
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|tool| tool.call_id == "sudo-winget")
+        .unwrap();
+    let host = system.store().tool_result(&summary.id).unwrap();
+    assert_eq!(
+        host.payload["session"]["exit_code"],
+        json!(0),
+        "{}",
+        host.model_content
+    );
+    assert_eq!(
+        host.payload["output"].as_str().unwrap().trim(),
+        expected.trim()
+    );
+    assert_eq!(host.payload["sudo"]["administrator"], json!(false));
+    assert_eq!(provider.review_requests.lock().len(), 1);
+    apps.shutdown().await.unwrap();
+    system.shutdown().await;
+}

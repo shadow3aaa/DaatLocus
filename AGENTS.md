@@ -260,6 +260,11 @@ Sandbox expansion uses the unified review/application path.
   and authenticated maintenance authority remain independent of filesystem scope.
 - Restrictive native process isolation needs platform-specific positive and
   negative tests. Never replace an unavailable sandbox with host execution.
+- Sudo is the explicit desktop exception: review one immutable target invocation
+  outside the sandbox as the OS user or through OS administrator authorization.
+  Wait for Auto; on denial submit to Core asynchronously. Consent never replays
+  effects or remembers unrestricted device access. Preserve hard authority,
+  native connection policy identity and descendant cleanup. Android has no Sudo.
 - The Web HTTP source uses bounded HTTP GET without page JavaScript,
   validates DNS/redirect destinations and does not inherit ambient credentials.
   Rendered Web uses isolated device-native WebViews under authenticated device authority;

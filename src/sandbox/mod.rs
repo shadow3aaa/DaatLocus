@@ -1,4 +1,7 @@
 pub mod access;
+pub(crate) mod host_process;
+mod process;
+pub use process::{SandboxAsyncChild, SandboxChildStderr, SandboxChildStdin, SandboxChildStdout};
 pub(crate) mod scopes;
 pub use scopes::{SandboxScope, SandboxScopeRequest};
 
@@ -16,13 +19,24 @@ pub use daat_locus_sandbox::*;
 pub struct RuntimeSandboxPolicy {
     pub builtin_resources: Vec<crate::builtin_resources::BuiltinResource>,
     pub native: SandboxPolicy,
+    pub administrator: Option<std::sync::Arc<crate::sudo_host::Client>>,
 }
 
 impl RuntimeSandboxPolicy {
+    pub fn is_unrestricted(&self) -> bool {
+        let fs = &self.filesystem;
+        self.strong_filesystem == StrongFilesystemSandboxMode::Off
+            && fs.full_disk_read
+            && fs.full_disk_write
+            && !fs.deny_all_writes
+            && fs.deny_read_paths.is_empty()
+            && fs.deny_write_paths.is_empty()
+    }
     pub const fn disabled() -> Self {
         Self {
             builtin_resources: Vec::new(),
             native: SandboxPolicy::disabled(),
+            administrator: None,
         }
     }
 

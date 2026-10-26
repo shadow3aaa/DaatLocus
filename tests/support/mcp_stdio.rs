@@ -1,4 +1,4 @@
-//! Minimal native MCP server for the Windows sandbox/pipe integration test.
+//! Minimal native MCP server for sandbox and reviewed host-connection tests.
 use std::io::{self, BufRead, Write};
 fn main() {
     let paths: Vec<_> = std::env::args_os().skip(1).collect();

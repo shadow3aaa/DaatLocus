@@ -33,6 +33,11 @@ pub struct ApprovalRecord {
     pub message_id: String,
     pub call: crate::model_protocol::AgentToolCall,
     pub requested: crate::sandbox::SandboxScopeRequest,
+    /// Explicit one-call sandbox bypass; it never becomes device filesystem memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sudo: Option<crate::sudo_app::Invocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_claim: Option<SudoExecutionClaim>,
     #[serde(default)]
     pub scopes: Vec<super::SandboxScope>,
     /// Immutable refusals for overlapping scopes of this same source event.
@@ -47,6 +52,12 @@ pub struct ApprovalRecord {
     pub appeal: Option<ApprovalAppeal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application: Option<ReviewApplication>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SudoExecutionClaim {
+    pub message_id: String,
+    pub call_id: String,
 }
 
 impl ApprovalRecord {

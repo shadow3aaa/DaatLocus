@@ -9,5 +9,6 @@ pub mod permissions;
 pub mod runner;
 pub(crate) mod runtime_permissions;
 pub mod store;
+mod sudo;
 mod system;
 pub use system::{ActorControl, ActorSystem, ModelFactory};

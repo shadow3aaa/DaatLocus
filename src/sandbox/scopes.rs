@@ -221,6 +221,7 @@ pub(crate) fn policy(scopes: &[SandboxScope], read_only: bool) -> super::Runtime
         }
     }
     super::RuntimeSandboxPolicy {
+        administrator: None,
         builtin_resources: vec![],
         native: super::SandboxPolicy {
             filesystem,

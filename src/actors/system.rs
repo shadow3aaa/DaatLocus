@@ -57,6 +57,7 @@ struct Worker {
     task: JoinHandle<()>,
 }
 struct Inner {
+    sudo_host: tokio::sync::Mutex<Option<Arc<crate::sudo_host::Client>>>,
     web_host: Arc<crate::web_host::Host>,
     temporary: Mutex<Option<crate::runtime_temp::RuntimeTemp>>,
     builtin_resources: Vec<crate::builtin_resources::BuiltinResource>,
@@ -397,6 +398,7 @@ impl ActorSystem {
         let builtin_resources = crate::builtin_resources::publish(&temporary)?;
         let system = Self {
             inner: Arc::new(Inner {
+                sudo_host: tokio::sync::Mutex::new(None),
                 web_host: Arc::new(crate::web_host::Host::default()),
                 temporary: Mutex::new(Some(temporary)),
                 builtin_resources,
@@ -563,6 +565,16 @@ impl ActorSystem {
     pub fn account_credentials_dir(&self) -> PathBuf {
         self.inner.data_dir.join("account")
     }
+    pub(crate) async fn sudo_administrator(&self) -> Result<Arc<crate::sudo_host::Client>> {
+        let mut host = self.inner.sudo_host.lock().await;
+        if let Some(client) = host.as_ref().filter(|client| !client.is_closed()) {
+            return Ok(client.clone());
+        }
+        let client = crate::sudo_host::elevate().await?;
+        *host = Some(client.clone());
+        Ok(client)
+    }
+
     pub fn actor_state_dir(&self, id: &str) -> PathBuf {
         self.inner.data_dir.join("apps").join(id)
     }
@@ -1004,12 +1016,20 @@ impl ActorSystem {
             }
             creation.sandbox_policy
         } else {
-            let policy = context
+            let mut authorization = context.clone();
+            if authorization.sandbox_policy.is_unrestricted() {
+                let source = self.store().message(&call.message_id)?;
+                authorization.sandbox_policy =
+                    self.execution_context(&caller, &source)?.sandbox_policy;
+            }
+            let policy = authorization
                 .files()
                 .authorize_roots(&initial_authorization)
                 .await?;
             let mut creation = context.clone();
-            creation.sandbox_policy = policy;
+            if !creation.sandbox_policy.is_unrestricted() {
+                creation.sandbox_policy = policy;
+            }
             creation.files().ensure_directory(&config.workspace).await?
         };
         self.record_for_tool(sender, call)?;
@@ -1805,6 +1825,9 @@ impl ActorSystem {
         for (id, worker) in workers {
             let _ = self.stop_actor_worker(&id, worker).await;
         }
+        if let Some(host) = self.inner.sudo_host.lock().await.take() {
+            host.close();
+        }
         let temporary = self.inner.temporary.lock().take();
         drop(temporary);
     }
@@ -1853,6 +1876,7 @@ impl ActorSystem {
             sandbox_policy.builtin_resources = self.inner.builtin_resources.clone();
         }
         let context = AppToolExecutionContext {
+            restart_native: false,
             access_broker: None,
             execution_cwd: actor.config.workspace.clone(),
             sandbox_policy,

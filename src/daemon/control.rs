@@ -379,6 +379,12 @@ pub async fn web_host(root: &Path) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(windows)]
+pub(crate) fn sudo_listener(
+    path: &Path,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    platform::secure_pipe(path, true, true)
+}
 pub async fn bootstrap(
     root: &Path,
     input: daat_locus_client_protocol::BootstrapRequest,
@@ -921,7 +927,19 @@ mod platform {
         }
     }
     fn pipe(path: &Path, first: bool) -> Result<NamedPipeServer> {
-        let sddl: Vec<u16> = format!("D:P(A;;GA;;;{})", owner(std::process::id())?)
+        secure_pipe(path, first, false)
+    }
+    pub(super) fn secure_pipe(
+        path: &Path,
+        first: bool,
+        administrator: bool,
+    ) -> Result<NamedPipeServer> {
+        let admin = if administrator {
+            "(A;;GA;;;BA)(A;;GA;;;SY)"
+        } else {
+            ""
+        };
+        let sddl: Vec<u16> = format!("D:P(A;;GA;;;{}){admin}", owner(std::process::id())?)
             .encode_utf16()
             .chain([0])
             .collect();

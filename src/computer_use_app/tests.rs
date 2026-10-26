@@ -178,6 +178,7 @@ fn drag_interpolation_preserves_negative_coordinates_and_endpoints() {
 #[test]
 fn desktop_exception_preserves_other_app_policy_and_rejects_read_only_authority() {
     let mut context = AppToolExecutionContext {
+        restart_native: false,
         access_broker: None,
         execution_cwd: ".".into(),
         sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),

@@ -15,6 +15,7 @@ mod approval_appeals;
 #[path = "store/history_handoff_tests.rs"]
 mod history_handoff_tests;
 mod review_applications;
+mod sudo;
 mod tool_provenance;
 
 pub struct ActorStore {
@@ -1392,12 +1393,39 @@ impl ActorStore {
                     ActorError::Conflict("Approval request is no longer active".into()).into(),
                 );
             }
-            if let Some(existing) = review_applications::sandbox_application(
-                &tx,
-                &approval.message_id,
-                &approval.call.id,
-                &approval.requested,
-            )? {
+            if approval.sudo.is_some() {
+                if approval.requested != crate::sandbox::SandboxScopeRequest::default()
+                    || !approval.scopes.is_empty()
+                    || approval.execution_claim.is_some()
+                {
+                    return Err(ActorError::Invalid(
+                        "Sudo reviews exactly one invocation and cannot remember filesystem scopes"
+                            .into(),
+                    )
+                    .into());
+                }
+                let existing: Option<String> = sql(tx.query_row(
+                    "SELECT record FROM approvals WHERE message_id=?1 AND json_extract(record,'$.call.id')=?2 AND json_type(record,'$.sudo')='object' LIMIT 1",
+                    params![approval.message_id,approval.call.id],|row|row.get(0)).optional())?;
+                if let Some(existing) = existing {
+                    let existing: ApprovalRecord = decode(existing)?;
+                    if existing.sudo != approval.sudo || existing.call != approval.call {
+                        return Err(ActorError::Conflict(
+                            "Sudo incident target is immutable".into(),
+                        )
+                        .into());
+                    }
+                    return Ok(existing);
+                }
+            }
+            if approval.sudo.is_none()
+                && let Some(existing) = review_applications::sandbox_application(
+                    &tx,
+                    &approval.message_id,
+                    &approval.call.id,
+                    &approval.requested,
+                )?
+            {
                 return Ok(existing);
             }
             approval.previous_denials = review_applications::overlapping_denials(

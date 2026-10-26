@@ -932,7 +932,7 @@ impl App for TerminalApp {
                     }),
                     Some(model_content),
                 );
-                tool_result.sandbox_denials = take_session_denials(&mut self.sessions, &session_id);
+                tool_result.sandbox = take_session_denial_report(&mut self.sessions, &session_id);
                 Ok(tool_result)
             }
             "terminal_write_stdin" => {
@@ -1026,7 +1026,7 @@ impl App for TerminalApp {
                     }),
                     Some(model_content),
                 );
-                tool_result.sandbox_denials = take_session_denials(&mut self.sessions, &session_id);
+                tool_result.sandbox = take_session_denial_report(&mut self.sessions, &session_id);
                 Ok(tool_result)
             }
             "terminal_terminate" => {
@@ -1037,8 +1037,8 @@ impl App for TerminalApp {
                     json!({ "session": session }),
                     None,
                 );
-                tool_result.sandbox_denials =
-                    take_session_denials(&mut self.sessions, &args.session_id);
+                tool_result.sandbox =
+                    take_session_denial_report(&mut self.sessions, &args.session_id);
                 Ok(tool_result)
             }
             _ => Err(miette!("unknown terminal tool `{}`", call.name)),
@@ -1048,9 +1048,6 @@ impl App for TerminalApp {
 
 fn terminal_process_policy(context: &AppToolExecutionContext) -> RuntimeSandboxPolicy {
     let mut policy = context.sandbox_policy.clone();
-    if context.actor_call.is_some() {
-        policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
-    }
     policy.filesystem.deny_read_paths.sort();
     policy.filesystem.deny_read_paths.dedup();
     policy.filesystem.deny_write_paths.sort();
@@ -1059,15 +1056,14 @@ fn terminal_process_policy(context: &AppToolExecutionContext) -> RuntimeSandboxP
 }
 
 /// Takes the native denial records an exited session captured, if any.
-fn take_session_denials(
+fn take_session_denial_report(
     sessions: &mut BTreeMap<String, TerminalSession>,
     session_id: &str,
-) -> Vec<crate::sandbox::DenialRecord> {
+) -> Option<crate::sandbox::DenialReport> {
     sessions
         .get_mut(session_id)
         .and_then(|session| session.process.as_mut())
-        .map(|process| process.take_denials())
-        .unwrap_or_default()
+        .map(|process| process.take_denial_report())
 }
 
 fn refresh_terminal_session(session: &mut TerminalSession) {
@@ -1254,6 +1250,7 @@ mod tests {
 
     fn test_sandbox_policy() -> RuntimeSandboxPolicy {
         RuntimeSandboxPolicy {
+            administrator: None,
             builtin_resources: Vec::new(),
             native: crate::sandbox::SandboxPolicy {
                 filesystem: FileSystemSandboxPolicy {
@@ -1844,6 +1841,7 @@ mod tests {
             )
         };
         let context = AppToolExecutionContext {
+            restart_native: false,
             access_broker: None,
             execution_cwd: directory.path().to_path_buf(),
             sandbox_policy: test_sandbox_policy(),
@@ -2080,6 +2078,7 @@ mod tests {
             policy.filesystem.full_disk_write = false;
             policy.filesystem.readable_roots = vec![workspace.clone(), root];
             let context = AppToolExecutionContext {
+                restart_native: false,
                 access_broker: None,
                 execution_cwd: workspace.clone(),
                 sandbox_policy: policy,
@@ -2135,6 +2134,7 @@ async fn live_terminal_rejects_new_input_after_scope_change_but_keeps_observatio
     policy.filesystem.readable_roots = vec![dir.path().into()];
     policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
     let base = AppToolExecutionContext {
+        restart_native: false,
         access_broker: None,
         execution_cwd: dir.path().into(),
         sandbox_policy: policy,

@@ -107,6 +107,20 @@ open -n -a '/Applications/Daat Locus GUI Test.app' --args --profile mac-test-nat
 这些结果不替代 App 审批和 schema 测试。普通 CI 覆盖无需系统授权的 IPC、坐标
 和 Cookie 回归；GUI runner 必须另行配置交互会话和实际权限。
 
+## Sudo 验证
+
+Sudo 协议、进程树清理与审查回归随 Windows/Linux/macOS 普通后端测试运行。
+真实提权单独显式运行：先编译无默认 feature 的 `daat-locus`，将
+`DAAT_LOCUS_TEST_COMPANION` 设为该二进制的绝对路径，再运行
+`cargo test --no-default-features --lib native_elevation_runs_only_the_helper -- --ignored --nocapture --test-threads=1`。
+操作者需完成真实 UAC/polkit/macOS 授权；测试确认 helper 的系统身份与服务身份保持，
+普通用户协议 fixture 不能代替提权证据。Windows 已具备 MXC/PSEC 与打包 winget 时可运行
+`cargo test --no-default-features --lib sudo_runs_packaged_winget -- --ignored --nocapture --test-threads=1`，
+只读取版本，不安装软件或请求 UAC。
+Unix CI 通过 runner 的免密 sudo 运行
+`root_helper_reads_protected_files_without_elevating_the_service`，验证真实 root helper
+可读取受保护文件而调用方保持普通身份；此用例不代替交互式 polkit/macOS 授权框验证。
+
 ## Windows Virtual Workspace
 
 窗口观察按需使用 WGC 捕获目标 HWND，被覆盖也不混入其他窗口像素；取帧后关闭会话。
