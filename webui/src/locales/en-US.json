@@ -475,6 +475,7 @@
     "message_actor": "Message Actor",
     "action_not_approved": "{{action}} · Not approved",
     "archive_actor": "Archive Actor",
+    "stop_actor": "Stop Actor",
     "unarchive_actor": "Unarchive Actor",
     "create_actor": "Create Actor",
     "view_actor": "View Actor",

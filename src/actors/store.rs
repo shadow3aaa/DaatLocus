@@ -111,6 +111,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
             "byte_len",
         ],
         "actors__create"
+        | "actors__stop"
         | "actors__import_conversation"
         | "actors__message"
         | "actors__archive"
@@ -125,6 +126,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
             "kind",
             "reply_to",
             "show_to_user",
+            "cancelled_count",
         ],
         "files__write_file" | "files__edit_file" | "files__copy_file" => {
             &["path", "created", "byte_count", "sha256"]
@@ -140,6 +142,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
     if matches!(
         domain_name,
         "actors__create"
+            | "actors__stop"
             | "actors__import_conversation"
             | "actors__message"
             | "actors__archive"
@@ -2181,6 +2184,45 @@ impl ActorStore {
             Ok(message)
         })
     }
+    pub(crate) fn request_cancel_actor(&self, actor: &str) -> Result<Vec<String>> {
+        database_io(|| {
+            let mut db = self.db.lock();
+            let tx = sql(db.transaction())?;
+            actor_tx(&tx, actor)?;
+            let ids = {
+                let mut query = sql(tx.prepare("SELECT id FROM messages WHERE actor_id=?1 AND status IN ('\"queued\"','\"running\"') ORDER BY seq"))?;
+                sql(query.query_map([actor], |row| row.get::<_, String>(0)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .into_diagnostic()?
+            };
+            for id in &ids {
+                let mut message = message_tx(&tx, id)?;
+                message.cancel_requested = true;
+                message.updated_at_ms = now();
+                save_message(&tx, &message)?;
+            }
+            self.commit(tx)?;
+            Ok(ids)
+        })
+    }
+
+    pub(crate) fn settle_cancelled_inputs(&self, ids: &[String]) -> Result<()> {
+        for id in ids {
+            let message = self.message(id)?;
+            if message.cancel_requested
+                && matches!(
+                    message.status,
+                    MessageStatus::Running | MessageStatus::Queued
+                )
+            {
+                self.interrupt_message(
+                    id,
+                    "Actor stopped; completed effects were not rolled back",
+                )?;
+            }
+        }
+        Ok(())
+    }
     pub fn register_resource(&self, resource: StoredResource) -> Result<()> {
         self.register_resource_for_message(resource, None)
     }
@@ -2247,7 +2289,7 @@ impl ActorStore {
     /// Used after an individual worker has terminated, including forced stops.
     /// It never replays effects or interrupts another inbox.
     pub fn interrupt_actor(&self, actor_id: &str, reason: &str) -> Result<()> {
-        if let Some(message) = self.current_message(actor_id)? {
+        while let Some(message) = self.current_message(actor_id)? {
             self.interrupt_message(&message.id, reason)?;
         }
         self.set_status(actor_id, ActorStatus::Idle)

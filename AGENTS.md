@@ -173,6 +173,11 @@ Every effect still requires device-side epoch, authenticated authority and sandb
 Sandbox expansion uses the unified review/application path.
 
 - Each Actor has one serial inference/tool execution stream; Actors advance concurrently.
+  Core uses Actors `stop` to stop a hosted Actor's whole current execution:
+  atomically cancel every pending/running input, including suspended inputs, and
+  await worker/App cleanup. Keep identity, configuration, history and completed
+  effects; later messages may start new work. Ordinary request `cancel` affects
+  only its exact input. Stop never grants cross-account or remote readonly authority.
   All messages, progress, results and runtime notices are durable immediate inputs.
   Use one Actors App message operation; do not expose queued versus steering modes.
   New input interrupts speculative inference or retry backoff and is received at the

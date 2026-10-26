@@ -714,7 +714,7 @@ impl ActorSystem {
         }
         // A message can arrive during asynchronous App shutdown. Its wake may
         // have reached the retiring worker; the durable inbox closes that race.
-        if passivated {
+        if passivated || control.stop.load(Ordering::Acquire) {
             self.wake(id);
         }
     }
@@ -1527,6 +1527,105 @@ impl ActorSystem {
         }
         Ok(())
     }
+    pub(crate) async fn stop_from_core(
+        &self,
+        target: &str,
+        caller: &ActorCallContext,
+    ) -> Result<usize> {
+        self.validate_actor_stop(target, caller)?;
+        let system = self.clone();
+        let target = target.to_owned();
+        let caller = caller.clone();
+        struct CancelAdmission(Arc<AtomicBool>);
+        impl Drop for CancelAdmission {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _admission = CancelAdmission(cancelled.clone());
+        // Cleanup survives cancellation of Core's future once the stop is committed.
+        // Keep the old worker registered until its Apps release running effects.
+        tokio::spawn(async move {
+            let _lifecycle = system.inner.lifecycle.lock().await;
+            if cancelled.load(Ordering::Acquire) {
+                return Err(forbidden("Actor stop was cancelled before admission"));
+            }
+            system.validate_actor_stop(&target, &caller)?;
+            let (ids, retiring) = {
+                let workers = system.inner.workers.lock();
+                let ids = system.store().request_cancel_actor(&target)?;
+                let retiring = workers.get(&target).map(|worker| {
+                    worker.control.stop.store(true, Ordering::Release);
+                    worker.control.wake.notify_one();
+                    worker.control.clone()
+                });
+                (ids, retiring)
+            };
+            for id in &ids {
+                if system.store().message(id)?.status == MessageStatus::Queued {
+                    system
+                        .store()
+                        .settle_cancelled_inputs(std::slice::from_ref(id))?;
+                }
+            }
+            if let Some(retiring) = retiring {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    let finished = {
+                        let workers = system.inner.workers.lock();
+                        workers.get(&target).is_none_or(|worker| {
+                            !Arc::ptr_eq(&worker.control, &retiring) || worker.task.is_finished()
+                        })
+                    };
+                    if finished || tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                let remaining = {
+                    let mut workers = system.inner.workers.lock();
+                    if workers
+                        .get(&target)
+                        .is_some_and(|worker| Arc::ptr_eq(&worker.control, &retiring))
+                    {
+                        workers.remove(&target)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(worker) = remaining {
+                    worker.task.abort();
+                    let _ = worker.task.await;
+                }
+            }
+            system.store().settle_cancelled_inputs(&ids)?;
+            system.start_queued_workers()?;
+            Ok(ids.len())
+        })
+        .await
+        .map_err(|error| miette::miette!("Actor stop cleanup failed: {error}"))?
+    }
+
+    fn validate_actor_stop(&self, target: &str, caller: &ActorCallContext) -> Result<()> {
+        let core = self.record_for_tool(crate::stage::shared::ACTOR_ID, caller)?;
+        if core.remote_read_only
+            || crate::conversation_import::is_import(&self.store().message(&caller.message_id)?)
+            || self
+                .store()
+                .message(&caller.message_id)?
+                .remote_authority
+                .is_some()
+            || target == crate::stage::shared::ACTOR_ID
+            || !self.account_actor_ids(&core.id)?.contains(target)
+        {
+            return Err(forbidden(
+                "Stopping an Actor requires account Core authority over a hosted Actor",
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn update_owned(&self, id: &str, config: ActorConfig) -> Result<ActorRecord> {
         if id == crate::stage::shared::ACTOR_ID && self.shared_core().is_some() {
             return Err(forbidden("Shared Actor only accepts model preferences"));
@@ -1945,6 +2044,75 @@ async fn stop_worker(mut worker: Worker) {
 mod tests {
     const FIXTURE_ACTOR_ID: &str = "root";
     use super::*;
+
+    #[tokio::test]
+    async fn committed_actor_stop_finishes_cleanup_even_when_its_core_call_is_cancelled() {
+        struct OwnedResource(Arc<AtomicBool>);
+        impl Drop for OwnedResource {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let (_directory, system) = fixture().await;
+        system.install_local_core().unwrap();
+        let first = system
+            .send_user("root", "Original input".into(), vec![], None)
+            .unwrap();
+        system.store().claim_next("root").unwrap().unwrap();
+        let second = system
+            .send_user("root", "Nested input".into(), vec![], None)
+            .unwrap();
+        system
+            .store()
+            .claim_incoming("root", &first.id)
+            .unwrap()
+            .unwrap();
+        system
+            .send_user("core", "Stop the Actor".into(), vec![], None)
+            .unwrap();
+        let input = system.store().claim_next("core").unwrap().unwrap();
+        let caller = system
+            .execution_context(&system.actor("core").unwrap(), &input)
+            .unwrap()
+            .actor_call
+            .unwrap();
+        let released = Arc::new(AtomicBool::new(false));
+        let resource = OwnedResource(released.clone());
+        let task = tokio::spawn(async move {
+            let _resource = resource;
+            std::future::pending::<()>().await;
+        });
+        system.inner.workers.lock().insert(
+            "root".into(),
+            Worker {
+                control: Arc::new(ActorControl::default()),
+                task,
+            },
+        );
+        let stopping = system.clone();
+        let call = tokio::spawn(async move { stopping.stop_from_core("root", &caller).await });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !system.store().message(&first.id).unwrap().cancel_requested {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        call.abort();
+        let _ = call.await;
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            while system.store().message(&first.id).unwrap().status != MessageStatus::Cancelled
+                || system.store().message(&second.id).unwrap().status != MessageStatus::Cancelled
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("committed stop lost cleanup after its caller was cancelled");
+        assert!(released.load(Ordering::Acquire));
+        assert!(system.store().current_message("root").unwrap().is_none());
+        system.shutdown().await;
+    }
 
     struct NoModels;
     impl ModelFactory for NoModels {

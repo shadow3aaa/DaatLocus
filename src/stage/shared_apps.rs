@@ -74,7 +74,7 @@ struct RequestArgs {
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ArchiveArgs {
+struct ActorTargetArgs {
     stage_id: String,
     actor_id: String,
 }
@@ -126,7 +126,7 @@ impl App for AccountActors {
                 "import_conversation" => model_schema_for::<ImportArgs>(),
                 "message" => model_schema_for::<MessageArgs>(),
                 "status" | "cancel" => model_schema_for::<RequestArgs>(),
-                "archive" | "unarchive" => model_schema_for::<ArchiveArgs>(),
+                "stop" | "archive" | "unarchive" => model_schema_for::<ActorTargetArgs>(),
                 "resolve_approval_appeal" => model_schema_for::<ResolveAppealArgs>(),
                 "appeal_approval" => model_schema_for::<AppealArgs>(),
                 _ => continue,

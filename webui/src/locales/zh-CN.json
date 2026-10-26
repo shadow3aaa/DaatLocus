@@ -475,6 +475,7 @@
     "message_actor": "发送消息",
     "action_not_approved": "{{action}} · 未获批准",
     "archive_actor": "归档 Actor",
+    "stop_actor": "停止 Actor",
     "unarchive_actor": "取消归档 Actor",
     "create_actor": "创建 Actor",
     "view_actor": "查看 Actor",

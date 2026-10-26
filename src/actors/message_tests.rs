@@ -1,5 +1,326 @@
 use super::*;
 
+fn core_stop_context(system: &ActorSystem, template: &MessageRecord) -> AppToolExecutionContext {
+    system.install_local_core().unwrap();
+    let mut input = template.clone();
+    input.id = uuid::Uuid::new_v4().to_string();
+    input.seq = 0;
+    input.actor_id = "core".into();
+    input.status = MessageStatus::Queued;
+    input.started_at_ms = None;
+    input.finished_at_ms = None;
+    input.cancel_requested = false;
+    input.content = "Stop the hosted Actor".into();
+    system.store().enqueue(input, None).unwrap();
+    let input = system.store().claim_next("core").unwrap().unwrap();
+    system
+        .execution_context(&system.actor("core").unwrap(), &input)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn interrupt_actor_repairs_all_nested_running_inputs() {
+    let (_directory, system, _) = paused_runtime().await;
+    let first = system
+        .send_user("root", "Original work".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next("root").unwrap().unwrap();
+    let second = system
+        .send_user("root", "First guidance".into(), vec![], None)
+        .unwrap();
+    system
+        .store()
+        .claim_incoming("root", &first.id)
+        .unwrap()
+        .unwrap();
+    let third = system
+        .send_user("root", "Second guidance".into(), vec![], None)
+        .unwrap();
+    system
+        .store()
+        .claim_incoming("root", &second.id)
+        .unwrap()
+        .unwrap();
+    system
+        .store()
+        .interrupt_actor("root", "Worker stopped")
+        .unwrap();
+    for input in [&first, &second, &third] {
+        assert_eq!(
+            system.store().message(&input.id).unwrap().status,
+            MessageStatus::Interrupted
+        );
+    }
+    assert!(system.store().current_message("root").unwrap().is_none());
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn core_stop_cancels_all_suspended_inputs_and_preserves_identity_history_and_future_work() {
+    use crate::app::App;
+    let provider = Arc::new(ReplayProvider::new(vec![
+        MockReply::Calls(vec![AgentToolCall {
+            id: "completed-once".into(),
+            name: "files__write_file".into(),
+            arguments: json!({"path":"once.txt","content":"one effect","expected_sha256":null}),
+        }]),
+        MockReply::PendingOnEveryRequest,
+    ]));
+    let (directory, system) = runtime(provider.clone()).await;
+    let actor = system.actor("root").unwrap();
+    let first = system
+        .send_user("root", "Original work".into(), vec![], None)
+        .unwrap();
+    wait_requests(&provider, 2).await;
+    let second = system
+        .send_user("root", "First guidance".into(), vec![], None)
+        .unwrap();
+    wait_requests(&provider, 3).await;
+    let third = system
+        .send_user("root", "Second guidance".into(), vec![], None)
+        .unwrap();
+    wait_requests(&provider, 4).await;
+    let context = core_stop_context(&system, &first);
+    let mut app = crate::actor_app::ActorApp::new("core".into(), system.clone());
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        app.execute_tool(
+            &AgentToolCall {
+                id: "stop-worker".into(),
+                name: "stop".into(),
+                arguments: json!({"stage_id":null,"actor_id":"root"}),
+            },
+            &context,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.payload["cancelled_count"], 3);
+    for input in [&first, &second, &third] {
+        let state = system.store().message(&input.id).unwrap();
+        assert_eq!(state.status, MessageStatus::Cancelled);
+        assert!(state.cancel_requested);
+    }
+    assert_eq!(provider.pending.load(Ordering::Acquire), 0);
+    assert_eq!(system.actor("root").unwrap().config, actor.config);
+    assert_eq!(system.actor("root").unwrap().status, ActorStatus::Idle);
+    assert!(
+        !system
+            .store()
+            .history_page("root", 0, None, 100)
+            .unwrap()
+            .is_empty()
+    );
+    provider.replies.lock().clear();
+    provider
+        .replies
+        .lock()
+        .push_back(MockReply::Answer("New work completed"));
+    let next = system
+        .send_user("root", "Start new work".into(), vec![], None)
+        .unwrap();
+    assert_eq!(
+        wait_completed(&system, &next.id).await.reply.as_deref(),
+        Some("New work completed")
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("workspace/once.txt")).unwrap(),
+        "one effect"
+    );
+    assert_eq!(
+        system
+            .store()
+            .tool_summaries("root", &first.id, None, 10)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn core_stop_rejects_self_readonly_foreign_and_ordinary_actor_authority() {
+    use crate::app::App;
+    let (_directory, system, _) = paused_runtime().await;
+    let input = system
+        .send_user("root", "Continue work".into(), vec![], None)
+        .unwrap();
+    let context = core_stop_context(&system, &input);
+    let mut core = crate::actor_app::ActorApp::new("core".into(), system.clone());
+    let mut call = AgentToolCall {
+        id: "stop".into(),
+        name: "stop".into(),
+        arguments: json!({"stage_id":null,"actor_id":"core"}),
+    };
+    assert!(core.execute_tool(&call, &context).await.is_err());
+    let mut foreign = system.actor("root").unwrap();
+    foreign.id = "foreign".into();
+    foreign.parent_id = None;
+    foreign.depth = 0;
+    system.store().save_actor(&foreign).unwrap();
+    system.store().stage_transaction(|tx| {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);
+            INSERT INTO stage_account_actors VALUES('core','owner-account'),('root','owner-account'),('foreign','other-account');")?;
+        Ok(())
+    }).unwrap();
+    call.arguments["actor_id"] = json!("foreign");
+    assert!(core.execute_tool(&call, &context).await.is_err());
+    call.arguments["actor_id"] = json!("root");
+    let mut readonly = context.clone();
+    readonly.actor_call.as_mut().unwrap().remote_read_only = true;
+    assert!(core.execute_tool(&call, &readonly).await.is_err());
+    let input = system.store().claim_next("root").unwrap().unwrap();
+    let actor = system.actor("root").unwrap();
+    let mut ordinary = crate::actor_app::ActorApp::new("root".into(), system.clone());
+    assert!(!ordinary.tool_specs().iter().any(|tool| tool.name == "stop"));
+    let ordinary_context = system.execution_context(&actor, &input).unwrap();
+    assert!(
+        ordinary
+            .execute_tool(&call, &ordinary_context)
+            .await
+            .is_err()
+    );
+    assert!(!system.store().message(&input.id).unwrap().cancel_requested);
+    system.shutdown().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn core_stop_reaps_running_terminal_and_discards_queued_input() {
+    use crate::app::App;
+    if !crate::sandbox::test_support::native_sandbox_available() {
+        return;
+    }
+    let provider = Arc::new(ReplayProvider::new(vec![]));
+    let (directory, system) = runtime(provider.clone()).await;
+    let pidfile = directory.path().join("workspace/process.pid");
+    #[cfg(windows)]
+    let command = format!(
+        "[IO.File]::WriteAllText('{}', [string]$PID); Start-Sleep -Seconds 300",
+        pidfile.display().to_string().replace('\'', "''")
+    );
+    #[cfg(unix)]
+    let command = format!(
+        "printf '%s' \"$$\" > '{}'; sleep 300",
+        pidfile.display().to_string().replace('\'', "'\\''")
+    );
+    provider.replies.lock().extend([MockReply::Calls(vec![AgentToolCall {
+        id:"long-process".into(),name:"terminal__terminal_exec".into(),
+        arguments:json!({"command":command,"session_id":null,"workdir":null,"yield_time_ms":30000,"max_chars":1024}),
+    }]),MockReply::PendingOnEveryRequest]);
+    let first = system
+        .send_user("root", "Run the process".into(), vec![], None)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !std::fs::read_to_string(&pidfile).is_ok_and(|v| v.parse::<u32>().is_ok()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let pid = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    let queued = system
+        .send_user("root", "Must not start".into(), vec![], None)
+        .unwrap();
+    let context = core_stop_context(&system, &first);
+    let mut core = crate::actor_app::ActorApp::new("core".into(), system.clone());
+    core.execute_tool(
+        &AgentToolCall {
+            id: "stop-process".into(),
+            name: "stop".into(),
+            arguments: json!({"stage_id":null,"actor_id":"root"}),
+        },
+        &context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        system.store().message(&first.id).unwrap().status,
+        MessageStatus::Cancelled
+    );
+    let queued_state = system.store().message(&queued.id).unwrap();
+    assert_eq!(queued_state.status, MessageStatus::Cancelled);
+    assert!(queued_state.started_at_ms.is_none());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let processes = sysinfo::System::new_all();
+            if processes.process(sysinfo::Pid::from_u32(pid)).is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("stopped Actor retained its native process");
+    assert_eq!(provider.requests.lock().len(), 1);
+    system.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn core_stop_routes_to_remote_actor_and_cancels_all_its_open_inputs() {
+    let core_model = Arc::new(ReplayProvider::new(vec![]));
+    let worker_model = Arc::new(ReplayProvider::new(vec![MockReply::PendingOnEveryRequest]));
+    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
+        device_pair(core_model.clone(), worker_model.clone()).await;
+    let first = b
+        .send_user("root", "Remote original work".into(), vec![], None)
+        .unwrap();
+    wait_requests(&worker_model, 1).await;
+    let second = b
+        .send_user("root", "Remote guidance".into(), vec![], None)
+        .unwrap();
+    wait_requests(&worker_model, 2).await;
+    let identity = b.actor("root").unwrap().config;
+    let epoch = net_a.core.read().as_ref().unwrap().epoch();
+    core_model.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall {
+            id: "remote-stop".into(),
+            name: "actors__stop".into(),
+            arguments: json!({"stage_id":net_b.host.local,"actor_id":"root"}),
+        }]),
+        MockReply::Answer("Remote Actor stopped"),
+        MockReply::PendingOnEveryRequest,
+    ]);
+    let request = a
+        .send_user("core", "Stop the remote Actor".into(), vec![], None)
+        .unwrap();
+    assert_eq!(
+        wait_completed(&a, &request.id).await.reply.as_deref(),
+        Some("Remote Actor stopped")
+    );
+    for id in [&first.id, &second.id] {
+        assert_eq!(
+            b.store().message(id).unwrap().status,
+            MessageStatus::Cancelled
+        );
+    }
+    assert_eq!(worker_model.pending.load(Ordering::Acquire), 0);
+    assert_eq!(b.actor("root").unwrap().config, identity);
+    assert_eq!(b.actor("root").unwrap().status, ActorStatus::Idle);
+    assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
+    let tools = a
+        .store()
+        .tool_summaries("core", &request.id, None, 10)
+        .unwrap()
+        .items;
+    assert_eq!(tools.len(), 1);
+    assert!(tools[0].error.is_none());
+    assert_eq!(tools[0].outcome.as_ref().unwrap()["cancelled_count"], 2);
+    assert_eq!(
+        tools[0].outcome.as_ref().unwrap()["stage_id"],
+        net_b.host.local.to_string()
+    );
+    net_a.stop().await;
+    net_b.stop().await;
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
 async fn wait_requests(provider: &ReplayProvider, count: usize) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while provider.requests.lock().len() < count {
