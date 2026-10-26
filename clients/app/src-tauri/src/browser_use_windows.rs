@@ -108,11 +108,12 @@ pub fn shortcuts(view: &Webview, app: tauri::AppHandle) {
                     0x09=>Some(if shift {"previous-tab".into()}else{"next-tab".into()}),
                     0x47=>Some(if shift {"find-previous".into()}else{"find-next".into()}),
                     0xbb|0x6b=>Some("zoom-in".into()),
+                    0x4f if shift=>Some("bookmarks".into()),
                     _ if shift=>None,
                     0x21=>Some("previous-tab".into()),0x22=>Some("next-tab".into()),
                     0xbd|0x6d=>Some("zoom-out".into()),0x30=>Some("zoom-reset".into()),
                     0x31..=0x39=>Some(format!("tab-{}",key-0x30)),
-                    0x4c|0x54|0x57|0x48|0x4a|0x46|0x50|0x52=>Some(char::from_u32(key).unwrap().to_ascii_lowercase().to_string()),
+                    0x44|0x4c|0x54|0x57|0x48|0x4a|0x46|0x50|0x52=>Some(char::from_u32(key).unwrap().to_ascii_lowercase().to_string()),
                     _=>None,
                 }
             }else if alt && !control && !shift {

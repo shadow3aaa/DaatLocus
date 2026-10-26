@@ -71,11 +71,12 @@ pub(crate) fn shortcuts(view: &Webview, app: tauri::AppHandle) {
                     48=>Some(if shift{"previous-tab".into()}else{"next-tab".into()}),
                     24=>Some("zoom-in".into()),
                     _ if chars=="g"=>Some(if shift{"find-previous".into()}else{"find-next".into()}),
+                    _ if chars=="o"&&shift=>Some("bookmarks".into()),
                     _ if shift=>None,
                     116=>Some("previous-tab".into()),121=>Some("next-tab".into()),27=>Some("zoom-out".into()),
                     _ if chars=="0"=>Some("zoom-reset".into()),
                     _ if matches!(chars.as_str(),"1"|"2"|"3"|"4"|"5"|"6"|"7"|"8"|"9")=>Some(format!("tab-{chars}")),
-                    _ if matches!(chars.as_str(),"l"|"t"|"h"|"j"|"f"|"w"|"r"|"p")=>Some(chars),_=>None,
+                    _ if matches!(chars.as_str(),"l"|"t"|"h"|"j"|"f"|"w"|"r"|"p"|"d")=>Some(chars),_=>None,
                 }
             }else if alt&&!command&&!shift{match key{123=>Some("back".into()),124=>Some("forward".into()),_ if chars=="d"=>Some("l".into()),_=>None}}
             else if !command&&!alt{match key{96 if !shift=>Some("r".into()),99=>Some(if shift{"find-previous".into()}else{"find-next".into()}),_=>None}}else{None};

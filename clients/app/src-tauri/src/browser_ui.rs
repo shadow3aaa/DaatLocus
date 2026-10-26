@@ -355,6 +355,25 @@ pub async fn browser_control(
             .clone(),
     };
     match action.as_str() {
+        "suggestions" | "bookmarks" | "bookmark" | "save_bookmark" | "remove_bookmark"
+        | "record_search" | "remove_search" => {
+            let input = serde_json::from_str(url.as_deref().unwrap_or("{}"))
+                .map_err(|_| "Invalid browser library request")?;
+            let mut library = host
+                .library
+                .lock()
+                .map_err(|_| "Browser library unavailable")?;
+            if matches!(action.as_str(), "suggestions" | "bookmarks" | "bookmark") {
+                return library.saved(&action, input);
+            }
+            let mut candidate = library.clone();
+            let result = candidate.saved(&action, input)?;
+            candidate.save(&host.root)?;
+            *library = candidate;
+            drop(library);
+            host.changed();
+            return Ok(result);
+        }
         "preferences" => {
             return serde_json::to_value(
                 &*host.preferences.lock().map_err(|_| "Browser unavailable")?,
@@ -426,6 +445,7 @@ pub async fn browser_control(
                 .lock()
                 .map_err(|_| "Browser library unavailable")?;
             library.history.clear();
+            library.searches.clear();
             library.save(&host.root)?;
         }
         "remove_history" => {

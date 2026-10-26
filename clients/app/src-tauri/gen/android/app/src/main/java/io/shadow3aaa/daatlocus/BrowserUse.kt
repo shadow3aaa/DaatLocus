@@ -308,6 +308,7 @@ internal object BrowserUse {
     val tab=command.optString("tab").takeIf{it.matches(Regex("[0-9a-f]{32}"))}
     val key=tab?.let{"$profile-$it"} ?: selected
     when(action){
+      "suggestions","bookmarks","bookmark","save_bookmark","remove_bookmark","record_search","remove_search"->return saved(owner,action,JSONObject(command.optString("url","{}")))
       "mount"->{
         ensure(owner)
         val client=WebHost.clientView.get() ?: throw IllegalStateException("Client view unavailable")
@@ -336,7 +337,7 @@ internal object BrowserUse {
         if(key!=target){tabOrder.remove(key);val index=target?.let{tabOrder.indexOf(it)} ?: tabOrder.size;tabOrder.add(index,key!!)}
       }
       "library"->return library(owner,command.optString("url").toIntOrNull() ?: 0)
-      "clear_history"->{saveArray(owner,"history",JSONArray())}
+      "clear_history"->{saveArray(owner,"history",JSONArray());saveArray(owner,"searches",JSONArray())}
       "remove_history"->{val id=command.getString("url");saveArray(owner,"history",filtered(array(owner,"history")){it.optString("id")!=id})}
       "remove_download"->{val id=command.getString("url");saveArray(owner,"downloads",filtered(array(owner,"downloads")){it.optString("id")!=id || it.optString("status")=="downloading"})}
       "save_download"->{
@@ -370,6 +371,37 @@ internal object BrowserUse {
     return JSONObject().put("pages",pages(profile)).put("selected",selected?.removePrefix("$profile-") ?: JSONObject.NULL)
   }
   private val zooms=mutableMapOf<String,Double>()
+  private fun saved(owner:MainActivity,action:String,input:JSONObject):JSONObject{
+    val query=input.optString("query","").trim()
+    if(query.length>4096)throw IllegalArgumentException("Search is too long")
+    val words=query.lowercase(java.util.Locale.ROOT).split(Regex("\\s+")).filter{it.isNotEmpty()}
+    fun entries(key:String):List<JSONObject>{val values=array(owner,key);return (0 until values.length()).map{values.getJSONObject(it)}}
+    fun matches(value:JSONObject):Boolean{val text=(value.optString("title")+" "+value.optString("url")+" "+value.optString("query")).lowercase(java.util.Locale.ROOT);return words.all{text.contains(it)}}
+    val bookmarks=entries("bookmarks")
+    val id=input.optString("id").takeUnless{it.isEmpty()||it=="null"}
+    when(action){
+      "suggestions"->return JSONObject().put("history",JSONArray(entries("history").asReversed().filter(::matches).distinctBy{it.optString("url")}.take(8))).put("bookmarks",JSONArray(bookmarks.asReversed().filter(::matches).take(8))).put("searches",JSONArray(entries("searches").asReversed().filter(::matches).take(8)))
+      "bookmarks"->{val offset=input.optInt("offset",0).coerceAtLeast(0);val result=bookmarks.asReversed().filter(::matches).drop(offset).take(101);return JSONObject().put("items",JSONArray(result.take(100))).put("next_offset",if(result.size>100)offset+100 else JSONObject.NULL)}
+      "bookmark"->return JSONObject().put("item",bookmarks.find{it.optString("id")==id||it.optString("url")==input.optString("url")} ?: JSONObject.NULL)
+      "save_bookmark"->{
+        val raw=input.getString("url");val uri=java.net.URI(raw)
+        if(uri.scheme !in listOf("http","https")||uri.host.isNullOrEmpty()||uri.rawUserInfo!=null)throw IllegalArgumentException("Invalid bookmark URL")
+        val url=if(uri.rawPath.isNullOrEmpty()&&uri.rawQuery==null&&uri.rawFragment==null)"$raw/" else raw
+        val title=input.optString("title").trim().ifEmpty{uri.host}
+        if(title.length>4096)throw IllegalArgumentException("Bookmark name is too long")
+        if(id!=null&&bookmarks.none{it.optString("id")==id})throw IllegalArgumentException("Bookmark no longer exists")
+        if(id!=null&&bookmarks.any{it.optString("url")==url&&it.optString("id")!=id})throw IllegalArgumentException("This page is already bookmarked")
+        val old=bookmarks.find{if(id!=null)it.optString("id")==id else it.optString("url")==url}
+        val icon=input.optString("favicon").takeIf{it.startsWith("data:image/png;base64,")&&it.length<48000} ?: old?.takeIf{runCatching{val previous=java.net.URI(it.getString("url"));previous.scheme==uri.scheme&&previous.rawAuthority.equals(uri.rawAuthority,true)}.getOrDefault(false)}?.optString("favicon")
+        val entry=JSONObject().put("id",old?.getString("id") ?: java.util.UUID.randomUUID().toString().replace("-","")).put("title",title).put("url",url).put("time",System.currentTimeMillis()).put("favicon",icon ?: JSONObject.NULL)
+        saveArray(owner,"bookmarks",JSONArray(bookmarks.filter{it.optString("id")!=entry.getString("id")}+entry));changed();return entry
+      }
+      "remove_bookmark"->saveArray(owner,"bookmarks",JSONArray(bookmarks.filter{it.optString("id")!=id}))
+      "record_search"->{if(query.isEmpty())throw IllegalArgumentException("Enter a search");val entries=entries("searches").filter{!it.optString("query").equals(query,true)};saveArray(owner,"searches",JSONArray(entries+JSONObject().put("id",java.util.UUID.randomUUID().toString().replace("-","")).put("query",query).put("time",System.currentTimeMillis())))}
+      "remove_search"->saveArray(owner,"searches",JSONArray(entries("searches").filter{it.optString("id")!=id}))
+    }
+    changed();return JSONObject()
+  }
   private fun array(owner:MainActivity,key:String)=try{JSONArray(owner.getSharedPreferences("browser-library",0).getString(key,"[]"))}catch(_:Exception){JSONArray()}
   private fun saveArray(owner:MainActivity,key:String,value:JSONArray){if(!owner.getSharedPreferences("browser-library",0).edit().putString(key,value.toString()).commit())throw IllegalStateException("Browser library could not be saved")}
   private fun filtered(source:JSONArray,keep:(JSONObject)->Boolean)=JSONArray().also{result->for(index in 0 until source.length()){val value=source.getJSONObject(index);if(keep(value))result.put(value)}}
@@ -418,12 +450,13 @@ internal object BrowserUse {
       if(code==KeyEvent.KEYCODE_TAB)return if(shift)"previous-tab" else "next-tab"
       if(code==KeyEvent.KEYCODE_G)return if(shift)"find-previous" else "find-next"
       if(code==KeyEvent.KEYCODE_EQUALS||code==KeyEvent.KEYCODE_PLUS||code==KeyEvent.KEYCODE_NUMPAD_ADD)return "zoom-in"
+      if(code==KeyEvent.KEYCODE_O&&shift)return "bookmarks"
       if(shift)return null
       return when(code){
         KeyEvent.KEYCODE_PAGE_UP->"previous-tab";KeyEvent.KEYCODE_PAGE_DOWN->"next-tab"
         KeyEvent.KEYCODE_MINUS,KeyEvent.KEYCODE_NUMPAD_SUBTRACT->"zoom-out";KeyEvent.KEYCODE_0->"zoom-reset"
         in KeyEvent.KEYCODE_1..KeyEvent.KEYCODE_9->"tab-${code-KeyEvent.KEYCODE_0}"
-        KeyEvent.KEYCODE_L->"l";KeyEvent.KEYCODE_T->"t";KeyEvent.KEYCODE_W->"w";KeyEvent.KEYCODE_H->"h";KeyEvent.KEYCODE_J->"j";KeyEvent.KEYCODE_F->"f";KeyEvent.KEYCODE_P->"p";KeyEvent.KEYCODE_R->"r";else->null
+        KeyEvent.KEYCODE_D->"d";KeyEvent.KEYCODE_L->"l";KeyEvent.KEYCODE_T->"t";KeyEvent.KEYCODE_W->"w";KeyEvent.KEYCODE_H->"h";KeyEvent.KEYCODE_J->"j";KeyEvent.KEYCODE_F->"f";KeyEvent.KEYCODE_P->"p";KeyEvent.KEYCODE_R->"r";else->null
       }
     }
     if(event.isAltPressed&&!command&&!shift)return when(code){KeyEvent.KEYCODE_DPAD_LEFT->"back";KeyEvent.KEYCODE_DPAD_RIGHT->"forward";KeyEvent.KEYCODE_D->"l";else->null}
