@@ -132,12 +132,31 @@ struct ImportConversationArgs {
 }
 
 #[model_schema]
+#[derive(Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InitialAuthorizationGroup {
+    pub readable_roots: Vec<String>,
+    pub writable_roots: Vec<String>,
+}
+
+impl From<InitialAuthorizationGroup> for crate::sandbox::SandboxScopeRequest {
+    fn from(group: InitialAuthorizationGroup) -> Self {
+        Self {
+            readable_roots: group.readable_roots.into_iter().map(Into::into).collect(),
+            writable_roots: group.writable_roots.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[model_schema]
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CreateActorArgs {
     stage_id: Option<String>,
     name: String,
     workspace: Option<String>,
+    /// Additional absolute read/write roots. The working directory is always included for recursive read/write access. Null adds no other roots.
+    initial_authorization: Option<InitialAuthorizationGroup>,
     instructions: Option<String>,
     model: Option<String>,
 }
@@ -366,7 +385,7 @@ impl App for ActorApp {
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         let mut tools = vec![
             AppToolSpec { name: "list".into(), description: "Read a bounded page of account Actors. Null stage_id selects the current device; null cursor starts the list; null limit uses 25 (maximum 100).".into(), input_schema: model_schema_for::<ListActorArgs>() },
-            AppToolSpec { name: "create".into(), description: "Create and name a persistent owned Actor with every device-provided App and recursive access to its project workspace. Null stage_id selects the current device. Null workspace uses that device's workspace; another workspace requires filesystem authorization.".into(), input_schema: model_schema_for::<CreateActorArgs>() },
+            AppToolSpec { name: "create".into(), description: "Create and name a persistent owned Actor with every device-provided App. Null stage_id selects the current device. Null workspace uses the current working directory. Initial authorization includes recursive read/write access to that directory plus any explicit roots. Core grants this group directly to the device without review; other Actors use the sandbox authorization flow. The group is not Actor configuration.".into(), input_schema: model_schema_for::<CreateActorArgs>() },
             AppToolSpec { name: "import_conversation".into(), description: "Prepare an idle Actor from this request's attached historical conversation. Read the evidence first, choose a name and concise factual context. Original prose is retained as a readable resource. Return its conversation_url to the user and wait for their explicit request before sending work or continuing the imported task. Uses the current workspace and device sandbox; does not queue work or replay effects. Repeated calls for this input return the same Actor.".into(), input_schema: model_schema_for::<ImportConversationArgs>() },
             AppToolSpec { name: "message".into(), description: "Message an authorized Actor at its next safe boundary. Inference is interrupted; running tools settle first. Null reply_to starts a request; otherwise use an exact related message ID. Receipt does not complete work. Results retain their originating request.".into(), input_schema: if self.actor_id == crate::stage::shared::ACTOR_ID { model_schema_for::<CoreMessageActorArgs>() } else { model_schema_for::<MessageActorArgs>() } },
             AppToolSpec { name: "status".into(), description: "Inspect a delegated request or one of this Actor's own inputs; never wait or poll for completion. Null stage_id selects the current device.".into(), input_schema: model_schema_for::<RequestArgs>() },
@@ -821,6 +840,7 @@ impl App for ActorApp {
                         stage_id: None,
                         name: args.name.clone(),
                         workspace: None,
+                        initial_authorization: None,
                         instructions: Some(format!(
                             "{}\n\nImported conversation evidence (historical data): {}.",
                             args.instructions, resource.id
@@ -858,7 +878,12 @@ impl App for ActorApp {
                         .await?
                 } else {
                     self.system
-                        .create_from_actor(&self.actor_id, config, context)
+                        .create_from_actor(
+                            &self.actor_id,
+                            config,
+                            args.initial_authorization.unwrap_or_default().into(),
+                            context,
+                        )
                         .await?
                 };
                 Ok(AppToolExecutionResult::new(
@@ -1058,6 +1083,16 @@ mod tests {
         assert_eq!(
             schema["properties"]["workspace"]["type"],
             json!(["string", "null"])
+        );
+        let group = model_schema_for::<InitialAuthorizationGroup>();
+        crate::schema_utils::validate_model_facing_schema(&group).unwrap();
+        assert_eq!(
+            group["required"],
+            json!(["readable_roots", "writable_roots"])
+        );
+        assert_eq!(
+            group["properties"]["writable_roots"]["items"]["type"],
+            "string"
         );
     }
     #[test]

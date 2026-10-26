@@ -404,8 +404,7 @@ async fn messages_wait_for_the_whole_started_tool_group_and_never_split_its_obse
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn remote_automatic_review_retains_new_core_inputs_and_resumes_the_original_operation_once() {
-    use crate::actors::ApprovalDecision;
+async fn remote_core_initial_authorization_survives_new_inputs_without_replay() {
     let outside = crate::sandbox::test_support::scoped_directory();
     let workspace = outside.path().join("new-workspace");
     let core_model = Arc::new(ReplayProvider::new(vec![]));
@@ -413,6 +412,7 @@ async fn remote_automatic_review_retains_new_core_inputs_and_resumes_the_origina
     let ((_a, a, net_a), (_b, b, net_b), _relay) =
         device_pair(core_model.clone(), worker_model.clone()).await;
     let epoch = net_a.core.read().as_ref().unwrap().epoch();
+    let source_scopes = a.store().sandbox_scopes().unwrap();
     core_model.review_blocked.store(true, Ordering::Release);
     core_model
         .review_replies
@@ -420,7 +420,8 @@ async fn remote_automatic_review_retains_new_core_inputs_and_resumes_the_origina
         .push_back(json!({"decision":"approve","reason":"requested workspace"}));
     core_model.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {id:"remote-create".into(),name:"actors__create".into(),
-            arguments:json!({"stage_id":net_b.host.local,"name":"New collaborator","workspace":workspace,"instructions":null,"model":null})}]),
+            arguments:json!({"stage_id":net_b.host.local,"name":"New collaborator","workspace":workspace,"instructions":null,"model":null,"initial_authorization":null})}]),
+        MockReply::Pending,
         MockReply::Answer("Incoming message received"),MockReply::Answer("Original creation completed"),MockReply::PendingOnEveryRequest,
     ]);
     let original = a
@@ -428,30 +429,23 @@ async fn remote_automatic_review_retains_new_core_inputs_and_resumes_the_origina
         .unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if b.store()
-                .approvals(Some("core"), None, 10)
-                .unwrap()
-                .items
-                .iter()
-                .any(|record| record.decision == ApprovalDecision::Pending)
-            {
+            if workspace.is_dir() && core_model.requests.lock().len() >= 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("remote filesystem boundary did not reach automatic review");
+    .expect("Core did not finish remote creation before continuing inference");
     let incoming = a
         .send_user("core", "Additional information".into(), vec![], None)
         .unwrap();
-    assert!(!workspace.exists());
+    assert!(workspace.is_dir());
     assert_eq!(
         a.store().message(&original.id).unwrap().status,
         MessageStatus::Running
     );
     assert!(a.store().message(&incoming.id).is_ok());
-    core_model.review_release.notify_one();
     assert_eq!(
         wait_completed(&a, &incoming.id).await.reply.as_deref(),
         Some("Incoming message received")
@@ -470,7 +464,24 @@ async fn remote_automatic_review_retains_new_core_inputs_and_resumes_the_origina
             .count(),
         1
     );
-    assert_eq!(core_model.review_requests.lock().len(), 1);
+    assert!(core_model.review_requests.lock().is_empty());
+    assert!(
+        b.store()
+            .approvals(Some("core"), None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        b.store()
+            .sandbox_scopes()
+            .unwrap()
+            .iter()
+            .any(|scope| scope.path == workspace.canonicalize().unwrap()
+                && scope.write
+                && scope.recursive)
+    );
+    assert_eq!(a.store().sandbox_scopes().unwrap(), source_scopes);
     assert!(worker_model.review_requests.lock().is_empty());
     assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
     net_a.stop().await;

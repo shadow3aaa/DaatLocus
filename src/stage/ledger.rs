@@ -252,12 +252,26 @@ fn migrate_device_authority(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-pub fn inherit_account_ownership(store: &ActorStore, parent: &str, actor: &str) -> Result<()> {
-    store.stage_transaction(|tx|{
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
-        let account:Option<String>=tx.query_row("SELECT account FROM stage_account_actors WHERE actor=?1",[parent],|r|r.get(0)).optional()?;
-        if let Some(account)=account{tx.execute("INSERT INTO stage_account_actors VALUES(?1,?2)",params![actor,account])?;}Ok(())
-    })
+pub(crate) fn inherit_account_ownership(
+    tx: &Transaction<'_>,
+    parent: &str,
+    actor: &str,
+) -> Result<()> {
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
+    let account: Option<String> = tx
+        .query_row(
+            "SELECT account FROM stage_account_actors WHERE actor=?1",
+            [parent],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(account) = account {
+        tx.execute(
+            "INSERT INTO stage_account_actors VALUES(?1,?2)",
+            params![actor, account],
+        )?;
+    }
+    Ok(())
 }
 /// Bind the device's existing Actor tree when its verified account core starts.
 /// Never overwrite a recorded account or traverse through another account's Actor.

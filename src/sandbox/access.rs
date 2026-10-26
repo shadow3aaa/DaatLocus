@@ -8,7 +8,7 @@ use std::path::Path;
 
 // Directory creation walks from the first absent component. Approving only a
 // deeper path would not authorize the earlier creation steps of the same I/O.
-fn first_missing_directory(path: &Path) -> &Path {
+pub(crate) fn first_missing_directory(path: &Path) -> &Path {
     let mut boundary = path;
     while let Some(parent) = boundary.parent() {
         if parent.exists() {
@@ -33,6 +33,20 @@ pub struct FileSystem<'a> {
 impl<'a> FileSystem<'a> {
     pub fn new(context: &'a AppToolExecutionContext) -> Self {
         Self { context }
+    }
+
+    pub(crate) async fn authorize_roots(
+        &self,
+        requested: &super::SandboxScopeRequest,
+    ) -> Result<RuntimeSandboxPolicy> {
+        let mut policy = self.context.sandbox_policy.clone();
+        for path in &requested.writable_roots {
+            policy = self.access(&policy, path, Access::Write).await?;
+        }
+        for path in &requested.readable_roots {
+            policy = self.access(&policy, path, Access::Read).await?;
+        }
+        Ok(policy)
     }
 
     async fn access(

@@ -888,7 +888,13 @@ zstd 窗口大小。实际写入前逐帧复核授权，不能复用进入背压
 权限属于账号在执行设备上的公共沙箱，不属于 Actor。文件授权只记录规范路径、读写类型与
 递归范围；不包含 Actor ID、工具名称、操作指纹或参数摘要。同设备全部 Actor 共享授权，
 不同设备分别保存本机范围。工作目录只决定相对路径与默认执行目录，不自动授予访问。
-创建、委派、归档及工作目录选择不复制或扩展权限；账号工作重置显式清理设备授权。
+创建接受一次性的 `initial_authorization` 初始化授权组：默认包含工作目录的递归读写范围，
+也可填写额外 `readable_roots` / `writable_roots`。Core 创建时无需自动审查，直接将该组
+与新 Actor 一起事务化保存到执行设备的共享权限；已有覆盖范围复用，普通 Actor 创建仍走
+统一沙箱授权流程。组不保存在 Actor 配置中，不存在独立 project root 权限或 Actor 授权组。
+嵌套工作目录准备所需的祖先目录创建权限只临时使用，不保存成父目录授权。
+创建仍检查原输入、账号、远程限制与路径绑定；失败不保存新的 Core 授权。
+单独修改工作目录、委派和归档不复制或扩展权限；账号工作重置显式清理设备授权。
 
 App 不声明需要或无需审批的操作，不生成权限申请或审查指纹。普通工具参数没有审批字段。
 所有文件访问与进程创建经过同一沙箱基础设施；沙箱内操作直接执行。
@@ -1370,7 +1376,8 @@ evidence and returns its opaque resource ID, title and message count.
 `POST /v1/imports/codex` submits it to Core through the normal durable user inbox,
 using the resource identity for idempotency. Core reads the evidence and chooses
 an explicit device, name and factual context through Actors `import_conversation`.
-Creation inherits device/parent grants and the current workspace, retains the
+Creation uses the shared device scopes and current working directory, applies
+the same initial authorization group as ordinary creation, retains the
 original resource in the new Actor ledger, and leaves the inbox empty. Retrying
 creation for that input returns the same Actor. Import inputs cannot create via
 the ordinary creation tool, message collaborators, cancel delegated work or edit evidence.

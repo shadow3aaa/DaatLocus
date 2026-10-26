@@ -219,6 +219,204 @@ fn core_inputs(system: &ActorSystem) -> Vec<MessageRecord> {
 }
 
 #[tokio::test]
+async fn core_creation_initial_authorization_is_shared_persistent_and_never_reviewed() {
+    use crate::app::App;
+    let reviewer = Arc::new(Reviewer::new(ReviewReply::Pending));
+    let (directory, system, observer, observer_input) = fixture(reviewer.clone()).await;
+    let project = directory.path().join("project");
+    let nested = directory.path().join("new-parent/nested/project");
+    let sources = directory.path().join("sources");
+    let output = directory.path().join("output");
+    for path in [&project, &sources, &output] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(sources.join("input.txt"), "source bytes").unwrap();
+    let core = system.actor("core").unwrap();
+    let core_input = input(&system, "core");
+    let context = system.execution_context(&core, &core_input).unwrap();
+    let mut app = crate::actor_app::ActorApp::new(core.id.clone(), system.clone());
+    for cwd in [&project, &nested] {
+        let group = if cwd == &project {
+            serde_json::Value::Null
+        } else {
+            json!({"readable_roots":[sources],"writable_roots":[output]})
+        };
+        let result = app
+            .execute_tool(
+                &AgentToolCall {
+                    id: Uuid::new_v4().to_string(),
+                    name: "create".into(),
+                    arguments: json!({"stage_id":null,"name":"Project worker","workspace":cwd,
+                "instructions":null,"model":null,
+                "initial_authorization":group}),
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+        let created = system
+            .actor(result.payload["id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            created.config.workspace,
+            std::fs::canonicalize(cwd).unwrap()
+        );
+        let config = serde_json::to_value(&created.config).unwrap();
+        assert!(config.get("initial_authorization").is_none());
+        assert!(config.get("permissions").is_none());
+        let fresh = system
+            .execution_context(&observer, &observer_input)
+            .unwrap();
+        crate::file_io::write_file(
+            cwd,
+            &fresh.sandbox_policy,
+            &crate::file_io::WriteFileArgs {
+                path: "shared.txt".into(),
+                content: "visible to existing actors".into(),
+                expected_sha256: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("shared.txt")).unwrap(),
+            "visible to existing actors"
+        );
+    }
+    assert!(reviewer.requests.lock().is_empty());
+    assert_eq!(
+        core_inputs(&system).len(),
+        1,
+        "creation must not submit an appeal"
+    );
+    let fresh = system
+        .execution_context(&observer, &observer_input)
+        .unwrap();
+    assert!(
+        fresh
+            .sandbox_policy
+            .is_path_readable(&sources.join("input.txt"))
+    );
+    assert!(
+        !fresh
+            .sandbox_policy
+            .is_path_writable(&sources.join("input.txt"))
+    );
+    assert!(
+        fresh
+            .sandbox_policy
+            .is_path_writable(&output.join("future/file.txt"))
+    );
+    assert!(
+        !fresh
+            .sandbox_policy
+            .is_path_readable(&directory.path().join("unrequested"))
+    );
+    assert!(
+        !fresh
+            .sandbox_policy
+            .is_path_writable(&directory.path().join("new-parent/sibling"))
+    );
+    let scopes = system.store().sandbox_scopes().unwrap();
+    system.shutdown().await;
+    let reopened =
+        crate::actors::store::ActorStore::open(&directory.path().join("data/actors.sqlite3"))
+            .unwrap();
+    assert_eq!(reopened.sandbox_scopes().unwrap(), scopes);
+}
+
+#[tokio::test]
+async fn initial_authorization_cannot_bypass_ordinary_or_readonly_actor_authority() {
+    let reviewer = Arc::new(Reviewer::new(ReviewReply::Pending));
+    let (directory, system, actor, message) = fixture(reviewer.clone()).await;
+    let target = directory.path().join("ungranted");
+    std::fs::create_dir_all(&target).unwrap();
+    let initial = system.store().sandbox_scopes().unwrap();
+    let actors = system.store().actors().unwrap().len();
+    let mut config = actor.config.clone();
+    config.name = "Child".into();
+    let request = crate::sandbox::SandboxScopeRequest {
+        readable_roots: vec![],
+        writable_roots: vec![target.clone()],
+    };
+    let context = system.execution_context(&actor, &message).unwrap();
+    assert!(
+        system
+            .create_from_actor(&actor.id, config.clone(), request.clone(), &context)
+            .await
+            .is_err()
+    );
+    let core = system.actor("core").unwrap();
+    let message = input(&system, "core");
+    let mut context = system.execution_context(&core, &message).unwrap();
+    context.actor_call.as_mut().unwrap().remote_read_only = true;
+    assert!(
+        system
+            .create_from_actor("core", config.clone(), request.clone(), &context)
+            .await
+            .is_err()
+    );
+    // A caller cannot acquire Core's grant authority by substituting its name.
+    assert!(
+        system
+            .create_from_actor(&actor.id, config, request, &context)
+            .await
+            .is_err()
+    );
+    assert_eq!(system.store().sandbox_scopes().unwrap(), initial);
+    assert_eq!(system.store().actors().unwrap().len(), actors);
+    assert!(reviewer.requests.lock().is_empty());
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn invalid_creation_does_not_remember_initial_authorization_or_create_workspace() {
+    let reviewer = Arc::new(Reviewer::new(ReviewReply::Pending));
+    let (directory, system, _, _) = fixture(reviewer.clone()).await;
+    let core = system.actor("core").unwrap();
+    let message = input(&system, "core");
+    let context = system.execution_context(&core, &message).unwrap();
+    let scopes = system.store().sandbox_scopes().unwrap();
+    let mut config = core.config.clone();
+    config.workspace = directory.path().join("new-project");
+    config.model = Some("missing-model".into());
+    assert!(
+        system
+            .create_from_actor("core", config.clone(), Default::default(), &context)
+            .await
+            .is_err()
+    );
+    assert!(!config.workspace.exists());
+    assert_eq!(system.store().sandbox_scopes().unwrap(), scopes);
+    assert!(reviewer.requests.lock().is_empty());
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn initial_authorization_storage_failure_rolls_back_actor_creation() {
+    let reviewer = Arc::new(Reviewer::new(ReviewReply::Pending));
+    let (directory, system, _, _) = fixture(reviewer).await;
+    let core = system.actor("core").unwrap();
+    let message = input(&system, "core");
+    let context = system.execution_context(&core, &message).unwrap();
+    let scopes = system.store().sandbox_scopes().unwrap();
+    let actors = system.store().actors().unwrap().len();
+    let db = rusqlite::Connection::open(directory.path().join("data/actors.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_initial_scope BEFORE INSERT ON sandbox_scopes BEGIN SELECT RAISE(ABORT, 'fixture storage failure'); END;").unwrap();
+    let mut config = core.config.clone();
+    config.name = "New project".into();
+    config.workspace = directory.path().join("new-project");
+    assert!(
+        system
+            .create_from_actor("core", config, Default::default(), &context)
+            .await
+            .is_err()
+    );
+    assert_eq!(system.store().sandbox_scopes().unwrap(), scopes);
+    assert_eq!(system.store().actors().unwrap().len(), actors);
+    system.shutdown().await;
+}
+
+#[tokio::test]
 async fn approved_application_blocks_for_review_then_grants_device_scope_without_core_or_replay() {
     let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
         json!({"decision":"approve","reason":"required scope"}),

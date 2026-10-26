@@ -578,16 +578,45 @@ impl ActorStore {
             self.commit(tx)
         })
     }
-    pub(crate) fn save_actor_with_resource(
+    pub(crate) fn save_created_actor(
         &self,
         actor: &ActorRecord,
-        resource: StoredResource,
+        resource: Option<StoredResource>,
+        initial_scopes: &[SandboxScope],
+        source_message: Option<&str>,
     ) -> Result<()> {
         database_io(|| {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
+            if let Some(source) = source_message {
+                let input = message_tx(&tx, source)?;
+                if actor.parent_id.as_deref() != Some(input.actor_id.as_str())
+                    || input.status != MessageStatus::Running
+                    || input.cancel_requested
+                {
+                    return Err(ActorError::Forbidden(
+                        "Actor creation authority is no longer valid".into(),
+                    )
+                    .into());
+                }
+            }
+            if initial_scopes
+                .iter()
+                .any(|scope| scope.active_filesystem().is_none())
+            {
+                return Err(
+                    ActorError::Forbidden("Initial authorization target changed".into()).into(),
+                );
+            }
             save_actor(&tx, actor)?;
-            save_resource(&tx, resource, None)?;
+            if let Some(resource) = resource {
+                save_resource(&tx, resource, None)?;
+            }
+            if let Some(parent) = &actor.parent_id {
+                crate::stage::ledger::inherit_account_ownership(&tx, parent, &actor.id)
+                    .map_err(|error| miette::miette!("{error}"))?;
+            }
+            crate::sandbox::scopes::remember(&tx, initial_scopes)?;
             self.commit(tx)
         })
     }

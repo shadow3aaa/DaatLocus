@@ -30,6 +30,8 @@ struct CreateArgs {
     stage_id: String,
     name: String,
     workspace: Option<String>,
+    /// Additional absolute read/write roots. The working directory is included automatically; Core grants these device scopes without review.
+    initial_authorization: Option<crate::actor_app::InitialAuthorizationGroup>,
     instructions: Option<String>,
     model: Option<String>,
 }

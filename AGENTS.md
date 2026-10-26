@@ -90,6 +90,12 @@ client are connected.
   Model selection stays a composer preference. There is no account or Actor
   Full access / Ask / Auto selector. Actor creation happens through the Actors App,
   without permission inheritance. Actors have no individual deletion operation.
+  Creation accepts an initial authorization group which always includes recursive
+  read/write access to the working directory and may include other explicit roots.
+  Core grants this group to the execution device without review; ordinary Actors
+  use the unified sandbox authorization flow. The group is never Actor configuration
+  or an Actor-specific permission set. Persist new Core grants with Actor creation;
+  retain input authority, remote restrictions and canonical path bindings.
 - All Actors retain identity, configuration, context, and history outside an
   explicit Owner account-wide work reset. This settings-only maintenance operation
   stops execution, clears Actors, history, resources and grants across devices,

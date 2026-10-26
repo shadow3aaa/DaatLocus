@@ -855,6 +855,8 @@ impl ActorSystem {
         config: ActorConfig,
         workspace_policy: Option<&crate::sandbox::RuntimeSandboxPolicy>,
         imported: Option<(&crate::resources::Resource, &str)>,
+        initial_scopes: &[SandboxScope],
+        source_message: Option<&str>,
     ) -> Result<ActorRecord> {
         if cfg!(target_os = "android") && config.apps.iter().any(|app| app == "terminal") {
             return Err(invalid("Terminal is unavailable on this device"));
@@ -898,29 +900,29 @@ impl ActorSystem {
             updated_at_ms: now(),
         };
         self.prepare_dirs(&actor.id)?;
-        if let Some((resource, _)) = imported {
-            let evidence = crate::conversation_import::prepare_evidence(
+        let evidence = if let Some((resource, _)) = imported {
+            Some(crate::conversation_import::prepare_evidence(
                 self, &parent.id, &actor.id, resource,
-            )?;
-            self.store().save_actor_with_resource(&actor, evidence)?;
+            )?)
         } else {
-            self.store().save_actor(&actor)?;
-        }
-        crate::stage::ledger::inherit_account_ownership(self.store(), &parent.id, &actor.id)
-            .map_err(|error| miette::miette!("{error}"))?;
+            None
+        };
+        self.store()
+            .save_created_actor(&actor, evidence, initial_scopes, source_message)?;
         Ok(actor)
     }
     pub fn create_owned(&self, parent: &str, config: ActorConfig) -> Result<ActorRecord> {
         let parent = self.actor(parent)?;
-        self.create(&parent, config, None, None)
+        self.create(&parent, config, None, None, &[], None)
     }
     pub async fn create_from_actor(
         &self,
         sender: &str,
         config: ActorConfig,
+        initial_authorization: SandboxScopeRequest,
         context: &AppToolExecutionContext,
     ) -> Result<ActorRecord> {
-        self.create_from_actor_with_resource(sender, config, context, None)
+        self.create_from_actor_with_resource(sender, config, initial_authorization, context, None)
             .await
     }
     pub(crate) async fn import_from_actor(
@@ -930,13 +932,20 @@ impl ActorSystem {
         resource: &crate::resources::Resource,
         context: &AppToolExecutionContext,
     ) -> Result<ActorRecord> {
-        self.create_from_actor_with_resource(sender, config, context, Some(resource))
-            .await
+        self.create_from_actor_with_resource(
+            sender,
+            config,
+            SandboxScopeRequest::default(),
+            context,
+            Some(resource),
+        )
+        .await
     }
     async fn create_from_actor_with_resource(
         &self,
         sender: &str,
         config: ActorConfig,
+        mut initial_authorization: SandboxScopeRequest,
         context: &AppToolExecutionContext,
         resource: Option<&crate::resources::Resource>,
     ) -> Result<ActorRecord> {
@@ -950,7 +959,10 @@ impl ActorSystem {
             .actor_call
             .as_ref()
             .ok_or_else(|| forbidden("Missing Actor creation authority"))?;
-        self.record_for_tool(sender, call)?;
+        let caller = self.record_for_tool(sender, call)?;
+        if caller.remote_read_only {
+            return Err(forbidden("Remote read-only authority cannot create Actors"));
+        }
         if self
             .store()
             .message(&call.message_id)?
@@ -961,13 +973,53 @@ impl ActorSystem {
             return Err(forbidden("External requests cannot create Actors"));
         }
         self.validate_config(&config)?;
-        let policy = context.files().ensure_directory(&config.workspace).await?;
+        initial_authorization
+            .writable_roots
+            .push(config.workspace.clone());
+        let initial_authorization = initial_authorization.canonicalized()?;
+        let core = sender == crate::stage::shared::ACTOR_ID;
+        let mut initial_scopes = vec![];
+        let policy = if core {
+            // This is Core's explicit device grant, not a per-App review bypass.
+            let mut creation = self.requested_tool_context(context, &initial_authorization)?;
+            for (roots, write) in [
+                (&initial_authorization.readable_roots, false),
+                (&initial_authorization.writable_roots, true),
+            ] {
+                for root in roots {
+                    initial_scopes.push(SandboxScope::filesystem(root, write)?);
+                }
+            }
+            if !config.workspace.exists() {
+                // Preparing a nested cwd may create ancestors. This temporary
+                // creation authority is never remembered as a parent grant.
+                let preparation = SandboxScopeRequest {
+                    readable_roots: vec![],
+                    writable_roots: vec![
+                        crate::sandbox::access::first_missing_directory(&config.workspace)
+                            .to_owned(),
+                    ],
+                };
+                creation = self.requested_tool_context(&creation, &preparation)?;
+            }
+            creation.sandbox_policy
+        } else {
+            let policy = context
+                .files()
+                .authorize_roots(&initial_authorization)
+                .await?;
+            let mut creation = context.clone();
+            creation.sandbox_policy = policy;
+            creation.files().ensure_directory(&config.workspace).await?
+        };
         self.record_for_tool(sender, call)?;
         self.create(
             &parent,
             config,
             Some(&policy),
             resource.map(|resource| (resource, call.message_id.as_str())),
+            &initial_scopes,
+            Some(&call.message_id),
         )
     }
     pub fn list_visible(&self) -> Result<Vec<ActorSummary>> {
@@ -2591,7 +2643,7 @@ mod tests {
                         name: "create".into(),
                         arguments: serde_json::json!({
                             "stage_id":null,"name":name,"workspace":null,
-                            "instructions":null,"model":null
+                            "instructions":null,"model":null,"initial_authorization":null
                         }),
                     },
                     &context,
@@ -2624,7 +2676,7 @@ mod tests {
                     name: "create".into(),
                     arguments: serde_json::json!({
                         "stage_id":null,"name":"Extra","workspace":null,
-                        "instructions":null,"model":null,"apps":["files"]
+                        "instructions":null,"model":null,"initial_authorization":null,"apps":["files"]
                     }),
                 },
                 &context

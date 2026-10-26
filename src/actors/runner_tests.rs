@@ -1497,92 +1497,91 @@ async fn messages_route_to_a_busy_worker_on_another_device() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn remote_sandbox_review_resumes_authorized_access_without_failing_core() {
-    for verdict in ["deny", "approve"] {
-        let core_model = Arc::new(ReplayProvider::new(vec![]));
-        let device_model = Arc::new(ReplayProvider::new(vec![]));
-        let ((_a_dir, a, net_a), (b_dir, b, net_b), _relay) =
-            device_pair(core_model.clone(), device_model.clone()).await;
+async fn remote_core_creation_grants_initial_authorization_without_review_on_target_device() {
+    let core_model = Arc::new(ReplayProvider::new(vec![]));
+    let device_model = Arc::new(ReplayProvider::new(vec![]));
+    let ((_a_dir, a, net_a), (b_dir, b, net_b), _relay) =
+        device_pair(core_model.clone(), device_model.clone()).await;
 
-        let baseline_a = a.store().sandbox_scopes().unwrap();
-        let baseline_b = b.store().sandbox_scopes().unwrap();
-        let workspace = b_dir.path().join("unapproved-project");
-        std::fs::create_dir(&workspace).unwrap();
-        let reason = "The proposed workspace needs the Owner's confirmation";
-        core_model
-            .review_replies
-            .lock()
-            .push_back(json!({"decision":verdict,"reason":reason}));
-        core_model.replies.lock().extend([
-            MockReply::Calls(vec![AgentToolCall {
-                id: "create-on-b".into(),
-                name: "actors__create".into(),
-                arguments: json!({"stage_id":net_b.host.local,"name":"Unapproved project",
-                "workspace":workspace,"instructions":null,"model":null}),
-            }]),
-            MockReply::Answer("Permission decision received."),
-        ]);
-        let epoch = net_a.core.read().as_ref().unwrap().epoch();
-        let input = a
-            .send_user("core", "Create the project".into(), vec![], None)
-            .unwrap();
-        let finished = wait_completed(&a, &input.id).await;
-        assert_eq!(
-            finished.status,
-            MessageStatus::Completed,
-            "{:?}",
-            finished.error
-        );
-        assert!(finished.error.is_none());
-        let tools = a
-            .store()
-            .tool_summaries("core", &input.id, None, 10)
-            .unwrap()
-            .items;
-        assert_eq!(tools.len(), 1);
-        assert!(tools.iter().all(|tool| tool.error.is_none()));
-        let decision = b
-            .store()
+    let baseline_a = a.store().sandbox_scopes().unwrap();
+    let baseline_b = b.store().sandbox_scopes().unwrap();
+    let workspace = b_dir.path().join("unapproved-project");
+    let additional = b_dir.path().join("additional-sources");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&additional).unwrap();
+    let reason = "This reviewer must not be consulted for Core creation";
+    core_model
+        .review_replies
+        .lock()
+        .push_back(json!({"decision":"deny","reason":reason}));
+    core_model.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall {
+            id: "create-on-b".into(),
+            name: "actors__create".into(),
+            arguments: json!({"stage_id":net_b.host.local,"name":"Unapproved project",
+                "workspace":workspace,"instructions":null,"model":null,
+                "initial_authorization":{"readable_roots":[additional],"writable_roots":[]}}),
+        }]),
+        MockReply::Answer("Permission decision received."),
+    ]);
+    let epoch = net_a.core.read().as_ref().unwrap().epoch();
+    let input = a
+        .send_user("core", "Create the project".into(), vec![], None)
+        .unwrap();
+    let finished = wait_completed(&a, &input.id).await;
+    assert_eq!(
+        finished.status,
+        MessageStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert!(finished.error.is_none());
+    let tools = a
+        .store()
+        .tool_summaries("core", &input.id, None, 10)
+        .unwrap()
+        .items;
+    assert_eq!(tools.len(), 1);
+    assert!(tools.iter().all(|tool| tool.error.is_none()));
+    assert!(
+        b.store()
             .approvals(Some("core"), None, 10)
             .unwrap()
             .items
-            .pop()
-            .unwrap();
-        if verdict == "deny" {
-            let expected = json!({"approval":{"decision":"denied","approval_id":decision.id,
-                "stage_id":net_b.host.local.to_string(),"reason":reason}});
-            assert_eq!(tools[0].outcome.as_ref(), Some(&expected));
-        } else {
-            assert_eq!(decision.decision, super::super::ApprovalDecision::Approved);
-        }
-        assert_eq!(
-            b.store()
-                .actors()
-                .unwrap()
-                .iter()
-                .any(|actor| actor.config.name == "Unapproved project"),
-            verdict == "approve"
-        );
-        if verdict == "deny" {
-            assert_eq!(b.store().sandbox_scopes().unwrap(), baseline_b);
-        } else {
-            assert!(
-                b.store()
-                    .sandbox_scopes()
-                    .unwrap()
-                    .iter()
-                    .any(|scope| scope.path == workspace.canonicalize().unwrap())
-            );
-        }
-        assert_eq!(a.store().sandbox_scopes().unwrap(), baseline_a);
-        assert_eq!(core_model.review_requests.lock().len(), 1);
-        assert!(device_model.review_requests.lock().is_empty());
-        assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
-        net_a.stop().await;
-        net_b.stop().await;
-        a.shutdown().await;
-        b.shutdown().await;
-    }
+            .is_empty()
+    );
+    assert!(
+        b.store()
+            .actors()
+            .unwrap()
+            .iter()
+            .any(|actor| actor.config.name == "Unapproved project")
+    );
+    assert_ne!(b.store().sandbox_scopes().unwrap(), baseline_b);
+    assert!(
+        b.store()
+            .sandbox_scopes()
+            .unwrap()
+            .iter()
+            .any(|scope| scope.path == workspace.canonicalize().unwrap())
+    );
+    assert_eq!(a.store().sandbox_scopes().unwrap(), baseline_a);
+    assert!(
+        b.store()
+            .sandbox_scopes()
+            .unwrap()
+            .iter()
+            .any(|scope| scope.path == additional.canonicalize().unwrap()
+                && !scope.write
+                && scope.recursive)
+    );
+    assert!(core_model.review_requests.lock().is_empty());
+    assert!(device_model.review_requests.lock().is_empty());
+    assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
+    net_a.stop().await;
+    net_b.stop().await;
+    a.shutdown().await;
+    b.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2243,7 +2242,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     model_a.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {
             id: "one-device-effect".into(), name: "actors__create".into(),
-            arguments: json!({"stage_id":host_b.local,"name":"Hosted project","workspace":null,"instructions":null,"model":null}),
+            arguments: json!({"stage_id":host_b.local,"name":"Hosted project","workspace":null,"instructions":null,"model":null,"initial_authorization":null}),
         }]),
         MockReply::Calls(vec![AgentToolCall {
             id: "remote-image".into(), name: "actors__read_resource".into(),
@@ -4053,7 +4052,7 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
     config.name = "report worker".into();
     config.workspace = parent.config.workspace.join("report-worker");
     let deep = system
-        .create_from_actor(&parent.id, config, &parent_context)
+        .create_from_actor(&parent.id, config, Default::default(), &parent_context)
         .await
         .unwrap();
     assert_eq!(deep.parent_id.as_deref(), Some(parent.id.as_str()));
@@ -4673,7 +4672,7 @@ async fn core_new_user_input_preempts_thinking_without_losing_context_or_complet
         MockReply::Calls(vec![AgentToolCall {
             id: "create-once-before-new-input".into(),
             name: "actors__create".into(),
-            arguments: json!({"stage_id":network.host.local,"name":"Retained worker","workspace":null,"instructions":null,"model":null}),
+            arguments: json!({"stage_id":network.host.local,"name":"Retained worker","workspace":null,"instructions":null,"model":null,"initial_authorization":null}),
         }]),
         MockReply::Pending,
         MockReply::Answer("Both messages are now considered."),
