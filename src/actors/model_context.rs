@@ -12,6 +12,7 @@ pub(super) struct ModelContext {
     pub system: AgentMessage,
     pub tools: Vec<AgentToolSpec>,
     pub history: Vec<AgentMessage>,
+    pub history_complete: bool,
 }
 
 impl ModelContext {
@@ -27,6 +28,7 @@ impl ModelContext {
             ),
             tools,
             history: Vec::new(),
+            history_complete: false,
         })
     }
 
@@ -77,9 +79,11 @@ impl ModelContext {
         }
         let mut after = start.saturating_sub(1);
         let mut history = Vec::new();
+        self.history_complete = false;
         self.history = loop {
             let page = system.store().history_page(actor, after, None, 128)?;
             if page.is_empty() {
+                self.history_complete = true;
                 break balanced_history(history);
             }
             for (seq, _, mut row) in page {
@@ -95,6 +99,10 @@ impl ModelContext {
             }
             let balanced = balanced_history(history.clone());
             if !self.fits(provider, &balanced, baseline) {
+                self.history_complete = system
+                    .store()
+                    .history_page(actor, after, None, 1)?
+                    .is_empty();
                 break balanced;
             }
         };
@@ -132,30 +140,58 @@ impl ModelContext {
             })
     }
 
-    pub fn request(
-        &mut self,
-        system: &ActorSystem,
+    /// Use the old window to write the checkpoint before publishing a new anchor.
+    pub fn handoff_request(
+        &self,
         input: &MessageRecord,
         provider: &dyn ModelProvider,
         baseline: &TokenEstimateBaseline,
     ) -> Result<AgentTurnRequest> {
-        if let Some(request) = self.admitted(provider, baseline) {
-            return Ok(request);
-        }
         if !self.can_recover() {
             return Err(miette!(
                 "Context recovery requires an authorized Actors App history tool"
             ));
         }
-        let recovery = system
-            .store()
-            .reset_model_context(&input.actor_id, &input.id)?;
-        self.history = vec![recovery];
-        self.admitted(provider, baseline).ok_or_else(|| {
-            miette!(
-                "System instructions, App definitions and recovery input exceed the model budget"
-            )
-        })
+        let excerpt: String = input.content.chars().take(4096).collect();
+        let build = |count: usize| {
+            let mut messages = vec![self.system.clone()];
+            messages.extend(balanced_history(self.history[..count].to_vec()));
+            messages.push(AgentMessage::user(format!(
+                "{}\nCurrent input ID: {}\nCurrent input excerpt: {}\nLoaded history suffix omitted: {}",
+                include_str!("../prompts/context_handoff.md"), input.id, excerpt, !self.history_complete || count < self.history.len()
+            )));
+            AgentTurnRequest {
+                messages,
+                tools: vec![],
+            }
+        };
+        let fits = |request: &AgentTurnRequest| {
+            estimate_agent_turn_request(&request.messages, &[], provider.request_budget_limits())
+                .with_conservative_calibrated_input_tokens(baseline)
+                .within_context_window()
+        };
+        // A single oversized input/observation may exceed even the hard limit.
+        // Keep a complete prefix only for note generation; durable history is untouched.
+        let full = build(self.history.len());
+        if fits(&full) {
+            return Ok(full);
+        }
+        let mut low = 0;
+        let mut high = self.history.len();
+        if !fits(&build(0)) {
+            return Err(miette!(
+                "Context handoff instructions exceed the model budget"
+            ));
+        }
+        while low + 1 < high {
+            let middle = low + (high - low) / 2;
+            if fits(&build(middle)) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        Ok(build(low))
     }
 }
 

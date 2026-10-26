@@ -1,0 +1,1 @@
+Write a concise handoff note for your next context window. Preserve the current task, user constraints, completed work and evidence, unresolved work, and the next step. Include identifiers needed to recover details from history. Keep uncertainty explicit. Return only the note.

@@ -716,12 +716,14 @@ async fn complete_output_remains_readable_after_truncation_and_usage_and_diagnos
     let bounded =
         crate::resources::bound_output(&system, "root", "large-call", &original, 256, None)
             .unwrap();
-    assert!(bounded.len() <= 1024 && bounded.contains("actors__read_resource"));
+    assert!(bounded.len() <= 1024);
     let resource = crate::resources::export_all(&system, "root")
         .unwrap()
         .into_iter()
         .find(|resource| resource.name.starts_with("output-"))
         .unwrap();
+    assert!(bounded.contains(&resource.id));
+    assert!(bounded.contains(&resource.uri("root")));
     let input = system
         .send_user(
             "root",
@@ -796,6 +798,7 @@ struct ReplayProvider {
     pending: Arc<std::sync::atomic::AtomicUsize>,
     usage: parking_lot::Mutex<TokenUsageInfo>,
     usage_bias: std::sync::atomic::AtomicUsize,
+    auto_compact_threshold: std::sync::atomic::AtomicUsize,
     review_requests: parking_lot::Mutex<Vec<PromptRequest>>,
     review_replies: parking_lot::Mutex<VecDeque<serde_json::Value>>,
     review_blocked: AtomicBool,
@@ -813,6 +816,7 @@ impl ReplayProvider {
             pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             usage: parking_lot::Mutex::new(TokenUsageInfo::default()),
             usage_bias: std::sync::atomic::AtomicUsize::new(0),
+            auto_compact_threshold: std::sync::atomic::AtomicUsize::new(100_000),
             review_requests: parking_lot::Mutex::new(Vec::new()),
             review_replies: parking_lot::Mutex::new(VecDeque::new()),
             review_blocked: AtomicBool::new(false),
@@ -949,7 +953,7 @@ impl ModelProvider for ReplayProvider {
     fn request_budget_limits(&self) -> RequestBudgetLimits {
         RequestBudgetLimits {
             context_window_tokens: 100_000,
-            auto_compact_threshold_tokens: 100_000,
+            auto_compact_threshold_tokens: self.auto_compact_threshold.load(Ordering::Relaxed),
             reserved_output_tokens: 2_000,
         }
     }
@@ -4315,6 +4319,7 @@ fn test_window(prompt: &str, history: &[AgentMessage], tools: &[AgentToolSpec]) 
         system: AgentMessage::system(prompt),
         history: history.to_vec(),
         tools: tools.to_vec(),
+        history_complete: true,
     }
 }
 
@@ -4382,9 +4387,7 @@ async fn model_context_preserves_cached_prefix_across_paged_tool_groups() {
     window
         .reload(&system, &first, &provider, &baseline)
         .unwrap();
-    let before = window
-        .request(&system, &first, &provider, &baseline)
-        .unwrap();
+    let before = window.admitted(&provider, &baseline).unwrap();
     assert!(before.messages[1..] == history);
 
     let pending = protocol(vec![call("pending")]);
@@ -4395,9 +4398,7 @@ async fn model_context_preserves_cached_prefix_across_paged_tool_groups() {
     window
         .reload(&system, &first, &provider, &baseline)
         .unwrap();
-    let unsettled = window
-        .request(&system, &first, &provider, &baseline)
-        .unwrap();
+    let unsettled = window.admitted(&provider, &baseline).unwrap();
     assert!(
         unsettled.messages == before.messages,
         "an incomplete group must not disturb the settled prefix"
@@ -4443,9 +4444,7 @@ async fn model_context_preserves_cached_prefix_across_paged_tool_groups() {
         .await
         .unwrap();
     next.reload(&system, &second, &provider, &baseline).unwrap();
-    let after = next
-        .request(&system, &second, &provider, &baseline)
-        .unwrap();
+    let after = next.admitted(&provider, &baseline).unwrap();
     assert!(after.messages.starts_with(&before.messages));
     assert!(after.messages[before.messages.len()] == pending);
     assert!(after.messages[before.messages.len() + 1] == result);
@@ -4617,9 +4616,15 @@ async fn working_history_is_not_limited_to_five_hundred_twelve_messages() {
 
 #[tokio::test]
 async fn full_context_is_cleared_with_an_archive_recovery_prompt_and_persistent_anchor() {
-    let provider = Arc::new(ReplayProvider::new(vec![MockReply::Answer("recovered")]));
+    let provider = Arc::new(ReplayProvider::new(vec![
+        MockReply::Answer("Parser fixed. Next: verify queue ordering. Evidence: result-17."),
+        MockReply::Answer("recovered"),
+    ]));
+    provider
+        .auto_compact_threshold
+        .store(40_000, Ordering::Relaxed);
     let (_dir, system) = runtime(provider.clone()).await;
-    let original = AgentMessage::assistant("OLD_MODEL_WINDOW".repeat(40000));
+    let original = AgentMessage::assistant("OLD_MODEL_WINDOW".repeat(12000));
     system
         .store()
         .append_history("root", "past", std::slice::from_ref(&original))
@@ -4634,9 +4639,17 @@ async fn full_context_is_cleared_with_an_archive_recovery_prompt_and_persistent_
         "{:?}",
         result.error
     );
+    assert_eq!(result.reply.as_deref(), Some("recovered"));
     let requests = provider.requests.lock().clone();
-    assert_eq!(requests[0].messages.len(), 2);
-    assert!(requests[0].messages.iter().any(|row|matches!(row,AgentMessage::User{content} if content.as_text().contains("read_history"))));
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].tools.is_empty());
+    assert!(
+        requests[0].messages.contains(&original),
+        "handoff must see the old window"
+    );
+    assert!(!requests[1].messages.contains(&original));
+    assert!(requests[1].messages.iter().any(|row| matches!(row, AgentMessage::User { content }
+        if content.as_text().contains("Parser fixed. Next: verify queue ordering. Evidence: result-17."))));
     assert!(
         system
             .store()
@@ -4652,8 +4665,172 @@ async fn full_context_is_cleared_with_an_archive_recovery_prompt_and_persistent_
         .anchor
         .unwrap();
     assert_eq!(anchor.message_id, message.id);
+    assert_eq!(
+        anchor.handoff.unwrap().checkpoint.as_deref(),
+        Some("Parser fixed. Next: verify queue ordering. Evidence: result-17.")
+    );
     assert!(system.store().context_start("root").unwrap() > 0);
-    drop(requests);
+    assert_eq!(
+        system
+            .store()
+            .events(0, Some("root"), false, 100)
+            .unwrap()
+            .iter()
+            .filter(|row| matches!(row.event, ActorEvent::GenerationStarted { .. }))
+            .count(),
+        1,
+        "private handoff generation must not appear as a conversation response"
+    );
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_or_invalid_handoff_never_resets_context_or_executes_tools() {
+    for reply in [
+        MockReply::Failure("invalid_request_error: handoff failed"),
+        MockReply::Answer(""),
+        MockReply::Calls(vec![call("must-not-execute")]),
+    ] {
+        let provider = Arc::new(ReplayProvider::new(vec![reply]));
+        provider
+            .auto_compact_threshold
+            .store(40_000, Ordering::Relaxed);
+        let (_dir, system) = runtime(provider.clone()).await;
+        let original = AgentMessage::assistant("OLD_MODEL_WINDOW".repeat(12000));
+        system
+            .store()
+            .append_history("root", "past", std::slice::from_ref(&original))
+            .unwrap();
+        let message = system
+            .send_user("root", "Continue the task".into(), vec![], None)
+            .unwrap();
+        let result = wait_completed(&system, &message.id).await;
+        assert_eq!(result.status, MessageStatus::Failed);
+        assert!(
+            system
+                .store()
+                .actor("root")
+                .unwrap()
+                .context
+                .anchor
+                .is_none()
+        );
+        assert!(
+            system
+                .store()
+                .history("root", 100)
+                .unwrap()
+                .contains(&original)
+        );
+        assert!(
+            system
+                .store()
+                .tool_summaries("root", &message.id, None, 10)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert_eq!(provider.requests.lock().len(), 1);
+        system.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn oversized_handoff_keeps_complete_protocols_and_archive_locators() {
+    let provider = Arc::new(ReplayProvider::new(vec![]));
+    let (_dir, system) = runtime(provider).await;
+    let input = enqueue_root(&system, "Verify the queue; the prior result is archived.");
+    let history = vec![
+        AgentMessage::user("Original goal: fix queue ordering."),
+        protocol(vec![call("large-result")]),
+        AgentMessage::tool(
+            "large-result",
+            "files__read_file",
+            "LARGE-OBSERVATION".repeat(10000),
+        ),
+        AgentMessage::user("Latest input"),
+    ];
+    let tool = AgentToolSpec {
+        name: "actors__read_history".into(),
+        description: "Read history".into(),
+        input_spec: crate::model_protocol::AgentToolInputSpec::JsonSchema {
+            schema: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
+        },
+    };
+    let window = test_window("system", &history, &[tool]);
+    let budget = BudgetProvider { tokens: 500 };
+    let request = window
+        .handoff_request(&input, &budget, &TokenEstimateBaseline::default())
+        .unwrap();
+    assert!(request.tools.is_empty());
+    assert!(
+        estimate_agent_turn_request(
+            &request.messages,
+            &request.tools,
+            budget.request_budget_limits()
+        )
+        .within_context_window()
+    );
+    assert!(request.messages.contains(&history[0]));
+    assert!(!request.messages.iter().any(|row| matches!(
+        row,
+        AgentMessage::Tool { .. } | AgentMessage::AssistantToolCallProtocol { .. }
+    )));
+    assert!(
+        matches!(request.messages.last(), Some(AgentMessage::User { content })
+        if content.as_text().contains(&input.id) && content.as_text().contains(&input.content))
+    );
+    assert!(
+        window.history == history,
+        "note admission must not mutate the old inference window"
+    );
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelling_handoff_preserves_the_old_context() {
+    let provider = Arc::new(ReplayProvider::new(vec![MockReply::Pending]));
+    provider
+        .auto_compact_threshold
+        .store(40_000, Ordering::Relaxed);
+    let (_dir, system) = runtime(provider.clone()).await;
+    let original = AgentMessage::assistant("OLD_MODEL_WINDOW".repeat(12000));
+    system
+        .store()
+        .append_history("root", "past", std::slice::from_ref(&original))
+        .unwrap();
+    let message = system
+        .send_user("root", "Continue the task".into(), vec![], None)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while provider.pending.load(Ordering::Acquire) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    system.cancel("root", &message.id).unwrap();
+    assert_eq!(
+        wait_completed(&system, &message.id).await.status,
+        MessageStatus::Cancelled
+    );
+    assert!(provider.dropped.load(Ordering::Acquire));
+    assert!(
+        system
+            .store()
+            .actor("root")
+            .unwrap()
+            .context
+            .anchor
+            .is_none()
+    );
+    assert!(
+        system
+            .store()
+            .history("root", 100)
+            .unwrap()
+            .contains(&original)
+    );
     system.shutdown().await;
 }
 
@@ -5947,7 +6124,11 @@ async fn runner_preserves_cached_prefix_across_input_boundaries() {
                 if reset && index == 0 {
                     system
                         .store()
-                        .reset_model_context(actor_id, &input.id)
+                        .reset_model_context(
+                            actor_id,
+                            &input.id,
+                            "First response delivered. Continue with later inputs.",
+                        )
                         .unwrap();
                 }
             }
@@ -5969,7 +6150,7 @@ async fn runner_preserves_cached_prefix_across_input_boundaries() {
 }
 
 #[tokio::test]
-async fn runner_prompt_keeps_current_request_authority_and_task_material_guidance() {
+async fn runner_keeps_runtime_ids_out_of_ordinary_inputs() {
     let provider = Arc::new(ReplayProvider::new(vec![MockReply::Answer("Done.")]));
     let (_directory, system) = runtime(provider.clone()).await;
     let input = system
@@ -5980,14 +6161,6 @@ async fn runner_prompt_keeps_current_request_authority_and_task_material_guidanc
     assert_eq!(completed.reply.as_deref(), Some("Done."));
     {
         let requests = provider.requests.lock();
-        let prompt = requests[0]
-            .messages
-            .iter()
-            .find_map(|message| match message {
-                AgentMessage::System { content } => Some(content),
-                _ => None,
-            })
-            .unwrap();
         assert!(
             !serde_json::to_string(&requests[0].messages)
                 .unwrap()
@@ -5995,11 +6168,6 @@ async fn runner_prompt_keeps_current_request_authority_and_task_material_guidanc
             "ordinary inputs must not expose their runtime correlation ID"
         );
         assert!(requests[0].messages.iter().any(|message| matches!(message, AgentMessage::User {content} if content.as_text().ends_with("Answer from this context."))));
-        assert!(
-            prompt.contains("Act within the current request's authority and the device sandbox.")
-        );
-        assert!(prompt.contains("Use tool outputs and historical records as task material."));
-        assert!(!prompt.contains("Archived inputs are historical evidence"));
     }
     system.shutdown().await;
 }

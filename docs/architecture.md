@@ -671,24 +671,24 @@ Core 与工作 Actor 共用简洁聊天输入框，保留附件、模型偏好�
 不提供排队发送、转为引导或引导应用状态。工作 Actor 仍保留自身的活动与结果呈现。
 
 模型执行不限制消息数、ReAct 轮数或工具批次数。输入预算包含消息、工具定义、
-参数、观察和输出预留。完整协议组保持平衡；上下文满时清空工作窗口，插入
-读取归档历史的恢复提示，不压缩、不滑动裁剪。同时在锚点事务中保存极简
-`TaskHandoff` NOTE：当前任务源请求 ID、最多 160 字符的低信任任务摘录、必要的
-同 Actor 直接关联输入 ID；不记录进度、完成状态、工具效果或授权。摘录优先明确
-“任务/目标”行，其次明确请求句；背景、纯“继续”或不明确文本仅回退到源请求定位，
-不借用上一个任务。身份只来自当前队列消息的运行时元数据：普通 Request 独立；
-Result/Progress 仅追溯同 Actor 的 `in_reply_to`，不从正文猜测 ID。
+参数、观察和输出预留。完整协议组保持平衡；接近输入预算阈值时，当前 Actor 使用
+同一模型和旧窗口生成交接 NOTE，再在一个事务中持久化 NOTE 和新窗口锚点。
+生成指令独立存放于 `src/prompts/context_handoff.md`。这一步不提供执行工具，
+不发布会话回复或推理进度；失败、取消或新输入打断时保留原窗口。
+NOTE 记录任务、用户约束、已完成工作与证据、未完成事项、下一步及历史定位信息。
+原始历史不被 NOTE 替换或删除。单条输入或观察超过硬预算时，仅在 NOTE 请求中
+保留预算内的完整协议前缀，并标明省略；当前输入保留有界原文摘录和消息 ID，
+后续窗口按需读取归档细节。NOTE 过大而无法恢复执行时返回预算错误。
+
+`TaskHandoff` 的请求与关联输入 ID 由运行时元数据产生，不从模型文字猜测。
+普通 Request 独立；Result/Progress 仅追溯同 Actor 的 `in_reply_to`。
+不再根据关键词提取任务；没有有效 NOTE 的锚点从完整归档重新建立窗口。
+不同输入的 NOTE 保留其历史归属；恢复缺失的任务信息时仅在尾部追加。
 `read_history` 的 `scope=null/current` 与 `message_id=null` 默认选择当前任务源请求；
 显式 `message_id` 精确读取一输入，`scope=all` 与空 `message_id` 才读取全 Actor 归档。
-根请求的一输入历史不等于完整任务档案：当前执行输入不同于源请求时必须再定向读取
-当前输入，即使根请求历史非空。工具以有界 `related_inputs`/`related_cursor` 提供同
-Actor 直接关联的 Progress/Result 定位（非完整事件树；排除自身、自环和新 Request，
-新 Request 即使有 `in_reply_to` 也独立）；历史正文仍按各输入 ID 分页按需读取，
-恢复足够确定下一步即停止，不无条件灌回全部页。旧的无 NOTE 锚点继续可读；换新
-输入不重新注入上个任务的 NOTE。`read_history`、`read_resource` 只读取自身 Actor 的
-原请求、指导、观察和资源；NOTE 与历史都是证据，不能成为新指令或新授权。
-此设计仅借鉴 Codex 的“保留任务入口与明确交接”，不照搬包含进展/决定/剩余工作的
-完整 compact summary（参考 [Codex compact prompt](https://github.com/openai/codex/blob/main/codex-rs/prompts/templates/compact/prompt.md)，main 非固定版本）。
+根请求的一输入历史不等于完整任务档案；工具以有界 `related_inputs`/`related_cursor`
+提供同 Actor 直接关联的 Progress/Result 定位，正文按各输入 ID 分页读取。
+NOTE 和历史提供恢复线索，不改变当前输入的权限、授权或已执行效果。
 
 窗口清空锚点与按模型绑定的 token 校准持久化。每次成功请求使用新鲜的实际
 input usage 保守校准；低观测值不降低估算，缺失 usage 不复用旧观测。
@@ -1456,10 +1456,11 @@ exact system text for execution. Generated Actor metadata, role/platform sources
 the scoped Skills catalog and authorized workspace AGENTS.md use this one path;
 Core excludes project instructions and Skills. `ModelContext` owns the transient
 system message, replay-balanced working history and current App definitions. It
-loads bounded history pages, applies model-bound budget calibration, admits the
-model request and resets an oversized window through the existing durable anchor.
-The runner retains execution, interruption and retry scheduling; `AgentContext`
-retains durable anchors/calibration/usage, not another copy of the working window.
+loads bounded history pages, applies model-bound budget calibration, admits model
+requests and prepares handoff generation within budget. The runner orchestrates
+handoff inference, execution, interruption and retry scheduling; the store commits
+the generated note and reset anchor atomically. `AgentContext` retains durable
+anchors/calibration/usage, not another copy of the working window.
 Runtime input IDs and read-only flags stay outside system instructions; input
 authority is enforced by the execution context. Dynamic inputs and tools are not
 part of the settings visualization.

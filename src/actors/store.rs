@@ -691,21 +691,41 @@ impl ActorStore {
     /// Optional, runtime-owned task lookup; never infer links from message prose.
     pub(crate) fn task_handoff(&self, actor: &str, input: &str) -> Option<TaskHandoff> {
         database_io(|| {
+            let saved = self
+                .actor(actor)?
+                .context
+                .anchor
+                .filter(|anchor| anchor.message_id == input)
+                .and_then(|anchor| anchor.handoff);
             let db = self.db.lock();
-            Ok::<_, miette::Report>(task_handoff_db(&db, actor, input))
+            Ok::<_, miette::Report>(saved.or_else(|| task_handoff_db(&db, actor, input)))
         })
         .ok()
         .flatten()
     }
-    pub(crate) fn reset_model_context(&self, id: &str, message: &str) -> Result<AgentMessage> {
+    pub(crate) fn reset_model_context(
+        &self,
+        id: &str,
+        message: &str,
+        checkpoint: &str,
+    ) -> Result<AgentMessage> {
+        if checkpoint.trim().is_empty() {
+            return Err(miette::miette!("Context handoff note is empty"));
+        }
         database_io(|| {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
             let mut actor = actor_tx(&tx, id)?;
+            let mut handoff = task_handoff_db(&tx, id, message).unwrap_or_else(|| TaskHandoff {
+                task_message_id: message.to_owned(),
+                checkpoint: None,
+                related_message_ids: vec![],
+            });
+            handoff.checkpoint = Some(checkpoint.to_owned());
             let anchor = HistoryAnchor {
                 message_id: message.to_owned(),
                 reset_id: Uuid::new_v4(),
-                handoff: task_handoff_db(&tx, id, message),
+                handoff: Some(handoff),
             };
             let recovery = anchor.recovery_message();
             sql(tx.execute(
@@ -740,13 +760,19 @@ impl ActorStore {
     pub(crate) fn context_start(&self, id: &str) -> Result<i64> {
         database_io(|| {
             let actor = self.actor(id)?;
-            let Some(anchor) = actor.context.anchor else {
+            let Some(anchor) = actor.context.anchor.filter(|anchor| {
+                anchor
+                    .handoff
+                    .as_ref()
+                    .and_then(|note| note.checkpoint.as_ref())
+                    .is_some()
+            }) else {
                 return Ok(0);
             };
             let db = self.db.lock();
             let local: i64 = sql(db.query_row(
-                "SELECT MIN(seq) FROM history WHERE actor_id=?1 AND message_id=?2 AND record IN (?3,?4)",
-                params![id, anchor.message_id, encode(&anchor.recovery_message())?, encode(&anchor.legacy_recovery_message())?],
+                "SELECT MIN(seq) FROM history WHERE actor_id=?1 AND message_id=?2 AND record=?3",
+                params![id, anchor.message_id, encode(&anchor.recovery_message())?],
                 |row| row.get::<_, Option<i64>>(0),
             ))?
             .ok_or_else(|| miette::miette!("Working context anchor is unavailable"))?;

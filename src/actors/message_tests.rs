@@ -498,7 +498,7 @@ async fn messages_interrupt_inference_and_resume_the_original_without_replaying_
             wait_requests(&provider, 3).await;
             system
                 .store()
-                .reset_model_context("root", &incoming.id)
+                .reset_model_context("root", &incoming.id, "Collaboration evidence received; finish the incoming input, then resume the original task.")
                 .unwrap();
             gate.notify_one();
         }
@@ -525,11 +525,17 @@ async fn messages_interrupt_inference_and_resume_the_original_without_replaying_
                         _ => None,
                     })
                     .unwrap();
-                assert!(
-                    recovery.contains("Investigate original work."),
-                    "{recovery}"
-                );
                 assert!(recovery.contains(&original.id));
+                assert!(
+                    system
+                        .store()
+                        .history_page("root", 0, Some(&original.id), 100)
+                        .unwrap()
+                        .iter()
+                        .any(|(_, _, row)| matches!(row, AgentMessage::User { content }
+                        if content.as_text().contains(&original.content))),
+                    "the restored locator must still resolve the original request"
+                );
                 assert!(!recovery.contains("New collaboration evidence"));
             } else {
                 for pair in requests.windows(2) {

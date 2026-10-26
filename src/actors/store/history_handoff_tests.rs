@@ -121,20 +121,41 @@ fn task_handoff_transaction_repeated_resets_do_not_mix_interleaved_tasks() {
     );
     history(&store, "task-A", AgentMessage::user("OLD TASK DATA"));
     history(&store, "task-B", AgentMessage::user("CURRENT TASK DATA"));
-    store.reset_model_context("worker", "task-B").unwrap();
+    store
+        .reset_model_context("worker", "task-B", "Budget recovery checkpoint")
+        .unwrap();
     let first = store.actor("worker").unwrap().context.anchor.unwrap();
     assert_eq!(first.handoff.as_ref().unwrap().task_message_id, "task-B");
     assert_eq!(
-        first.handoff.as_ref().unwrap().goal.as_deref(),
-        Some("Fix budget recovery.")
+        first.handoff.as_ref().unwrap().checkpoint.as_deref(),
+        Some("Budget recovery checkpoint")
+    );
+    assert_eq!(
+        store
+            .task_handoff("worker", "task-B")
+            .unwrap()
+            .checkpoint
+            .as_deref(),
+        Some("Budget recovery checkpoint")
+    );
+    assert!(
+        store
+            .task_handoff("worker", "progress-A")
+            .unwrap()
+            .checkpoint
+            .is_none()
     );
     let first_start = store.context_start("worker").unwrap();
-    store.reset_model_context("worker", "task-B").unwrap();
+    store
+        .reset_model_context("worker", "task-B", "Budget recovery checkpoint")
+        .unwrap();
     let repeated = store.actor("worker").unwrap().context.anchor.unwrap();
     assert_ne!(first.reset_id, repeated.reset_id);
     assert_eq!(first.handoff, repeated.handoff);
     assert!(store.context_start("worker").unwrap() > first_start);
-    store.reset_model_context("worker", "progress-A").unwrap();
+    store
+        .reset_model_context("worker", "progress-A", "Queue investigation checkpoint")
+        .unwrap();
     let note = store
         .actor("worker")
         .unwrap()
@@ -144,7 +165,10 @@ fn task_handoff_transaction_repeated_resets_do_not_mix_interleaved_tasks() {
         .handoff
         .unwrap();
     assert_eq!(note.task_message_id, "task-A");
-    assert_eq!(note.goal.as_deref(), Some("Investigate queue ordering."));
+    assert_eq!(
+        note.checkpoint.as_deref(),
+        Some("Queue investigation checkpoint")
+    );
     assert!(
         !serde_json::to_string(&note)
             .unwrap()
@@ -161,35 +185,29 @@ fn task_handoff_transaction_repeated_resets_do_not_mix_interleaved_tasks() {
 }
 
 #[test]
-fn task_handoff_legacy_anchor_lookup_and_note_failure_are_safe() {
+fn task_handoff_anchor_without_checkpoint_rebuilds_from_durable_history() {
     let store = memory_store();
-    let old = HistoryAnchor {
-        message_id: "old".into(),
+    let original = AgentMessage::user("Preserve the original task and observations.");
+    history(&store, "task", original.clone());
+    let mut actor = store.actor("worker").unwrap();
+    actor.context.anchor = Some(HistoryAnchor {
+        message_id: "task".into(),
         reset_id: Uuid::new_v4(),
         handoff: None,
-    };
-    let old_seq = history(&store, "old", old.legacy_recovery_message());
-    let mut actor = store.actor("worker").unwrap();
-    actor.context.anchor = Some(old);
+    });
     store.save_actor(&actor).unwrap();
-    assert_eq!(store.context_start("worker").unwrap(), old_seq);
+    assert_eq!(store.context_start("worker").unwrap(), 0);
+    assert!(store.history_page("worker", 0, None, 10).unwrap()[0].2 == original);
     let recovery = store
-        .reset_model_context("worker", "unavailable-source")
+        .reset_model_context(
+            "worker",
+            "task",
+            "Original task retained; inspect its observations next.",
+        )
         .unwrap();
-    assert!(
-        store
-            .actor("worker")
-            .unwrap()
-            .context
-            .anchor
-            .unwrap()
-            .handoff
-            .is_none()
-    );
-    assert!(
-        matches!(recovery,AgentMessage::User {content} if content.as_text().contains("NOTE generation was unavailable or ambiguous"))
-    );
-    assert!(store.context_start("worker").unwrap() > old_seq);
+    let start = store.context_start("worker").unwrap();
+    assert!(start > 0);
+    assert!(store.history_page("worker", start - 1, None, 10).unwrap()[0].2 == recovery);
 }
 
 #[test]
@@ -232,7 +250,10 @@ fn task_handoff_related_requests_and_self_loops_never_become_old_task_events() {
     assert_eq!(page.items[0]["message_id"], "result");
     let new_task = store.task_handoff("worker", "new-request").unwrap();
     assert_eq!(new_task.task_message_id, "new-request");
-    assert_eq!(new_task.goal.as_deref(), Some("Fix a distinct new task."));
+    assert!(
+        new_task.checkpoint.is_none(),
+        "a new request must not borrow another task's checkpoint"
+    );
     input(
         &store,
         "loop",
@@ -364,7 +385,12 @@ fn task_handoff_linked_input_pages_are_bounded_isolated_and_preserve_current_res
         handoff: Some(note),
     }
     .recovery_message();
-    assert!(
-        matches!(recovery,AgentMessage::User{content} if content.as_text().contains("MUST read message_id=\"result-6\""))
-    );
+    let AgentMessage::User { content } = recovery else {
+        panic!()
+    };
+    let text = content.as_text();
+    let note: crate::actors::context::TaskHandoff =
+        serde_json::from_str(&text[text.find('{').unwrap()..=text.rfind('}').unwrap()]).unwrap();
+    assert_eq!(note.task_message_id, "root");
+    assert!(note.related_message_ids.iter().any(|id| id == "result-6"));
 }

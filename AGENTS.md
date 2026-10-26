@@ -197,9 +197,9 @@ Sandbox expansion uses the unified review/application path.
   return as correlated inputs; Core chooses meaningful user updates without polling
   or a second fast-response model. Do not load device project instructions into Core.
 - The Agent loop has no fixed message, ReAct-step or tool-batch count limit. On
-  input-budget exhaustion clear the working window and inject an archive recovery
-  instruction; never summarize or slide away history. Actors App history reads
-  remain scoped and paginated. Persist and replicate reset anchors and model-bound
+  input-budget pressure have the current Actor write a handoff note before clearing
+  the working window and injecting archive recovery instructions; preserve durable
+  history. Actors App history reads remain scoped and paginated. Persist and replicate reset anchors and model-bound
   actual-usage calibration, without reusing stale usage or replaying uncertain effects.
 - Record interrupted executions. Do not automatically replay App effects after
   restart, cancellation, configuration changes or resource shutdown.

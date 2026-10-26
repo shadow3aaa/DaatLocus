@@ -1667,7 +1667,13 @@ mod context_checkpoint_tests {
             )],
         )
         .unwrap();
-        let recovery = a.reset_model_context(ACTOR_ID, &input.id).unwrap();
+        let recovery = a
+            .reset_model_context(
+                ACTOR_ID,
+                &input.id,
+                "Original request inspected; continue verification.",
+            )
+            .unwrap();
         a.update_token_estimate(
             ACTOR_ID,
             "model-a",

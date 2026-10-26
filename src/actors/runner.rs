@@ -291,6 +291,7 @@ async fn execute_message(
         }
     }
     let mut overflow_recoveries = 0;
+    let mut handoff_required = false;
     let mut empty_reasoning_responses = 0;
     loop {
         check_interruption(system, control, message)?;
@@ -330,7 +331,55 @@ async fn execute_message(
         if actor.id == crate::stage::shared::ACTOR_ID {
             system.checkpoint_core().await?;
         }
-        let request = window.request(system, message, provider.as_ref(), &baseline)?;
+        let request = if !handoff_required {
+            window.admitted(provider.as_ref(), &baseline)
+        } else {
+            None
+        };
+        let Some(request) = request else {
+            let request = window.handoff_request(message, provider.as_ref(), &baseline)?;
+            let Some(response) = generate(
+                system,
+                actor,
+                message,
+                control,
+                provider.as_ref(),
+                request,
+                request_timeout,
+                &mut generation,
+                &binding,
+                &baseline,
+                false,
+            )
+            .await?
+            else {
+                continue;
+            };
+            let response = response.protocol();
+            if !response.tool_calls.is_empty() || response.raw_stream_follow_up {
+                return Err(miette!("Context handoff did not return a complete note"));
+            }
+            let note = response
+                .final_assistant_message
+                .or(response.assistant_text)
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| miette!("Context handoff note is empty"))?;
+            check_interruption(system, control, message)?;
+            if system.store().has_queued_input(&actor.id)? {
+                continue;
+            }
+            let recovery = system
+                .store()
+                .reset_model_context(&actor.id, &message.id, &note)?;
+            window.history = vec![recovery];
+            if window.admitted(provider.as_ref(), &baseline).is_none() {
+                return Err(miette!(
+                    "System instructions, App definitions and handoff note exceed the model budget"
+                ));
+            }
+            handoff_required = false;
+            continue;
+        };
         let response = match generate(
             system,
             actor,
@@ -342,6 +391,7 @@ async fn execute_message(
             &mut generation,
             &binding,
             &baseline,
+            true,
         )
         .await
         {
@@ -354,7 +404,7 @@ async fn execute_message(
                 if !window.can_recover() {
                     return Err(error);
                 }
-                system.store().reset_model_context(&actor.id, &message.id)?;
+                handoff_required = true;
                 overflow_recoveries += 1;
                 continue;
             }
@@ -398,9 +448,7 @@ async fn execute_message(
                     AgentMessage::assistant(reply.unwrap_or_default())
                         .with_responses_output(response.responses_output)
                 };
-                let guidance = AgentMessage::user(
-                    "Continue the current request: the previous response was not a final answer. Produce the next App calls or a complete final answer; existing authority and grants remain unchanged.",
-                );
+                let guidance = AgentMessage::user("Continue the current request to completion.");
                 system.store().append_history(
                     &actor.id,
                     &message.id,
@@ -493,7 +541,7 @@ async fn execute_message(
         // user message in the middle of an outstanding multi-call response.
         if !images.is_empty() {
             let images = AgentMessage::user_content(AgentContent::multimodal(
-                "Images returned by the App calls",
+                "Images from the preceding observations",
                 images,
             ));
             system
@@ -1004,6 +1052,7 @@ async fn generate(
     generation: &mut u32,
     binding: &str,
     baseline: &TokenEstimateBaseline,
+    publish_progress: bool,
 ) -> Result<Option<AgentTurnStreamResult>> {
     let policy = AgentTurnRetryPolicy {
         base_request_timeout: timeout,
@@ -1015,14 +1064,16 @@ async fn generate(
         if system.store().has_queued_input(&actor.id)? {
             return Ok(None);
         }
-        *generation = generation.saturating_add(1);
-        system.store().append_event(
-            &actor.id,
-            ActorEvent::GenerationStarted {
-                message_id: message.id.clone(),
-                generation: *generation,
-            },
-        )?;
+        if publish_progress {
+            *generation = generation.saturating_add(1);
+            system.store().append_event(
+                &actor.id,
+                ActorEvent::GenerationStarted {
+                    message_id: message.id.clone(),
+                    generation: *generation,
+                },
+            )?;
+        }
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut options =
             ModelRequestOptions::for_agent_turn(provider, &request, Some(actor.id.clone()))?;
@@ -1041,7 +1092,7 @@ async fn generate(
                 .into(),
             );
         }
-        let options = options.with_progress(Some(ModelProgressSink::new(tx)));
+        let options = options.with_progress(publish_progress.then_some(ModelProgressSink::new(tx)));
         crate::logging::write_current_turn_messages_dump(
             system,
             &actor.id,

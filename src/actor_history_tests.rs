@@ -6,7 +6,7 @@ fn args(value: serde_json::Value) -> ReadHistoryArgs {
 fn task() -> crate::actors::TaskHandoff {
     crate::actors::TaskHandoff {
         task_message_id: "source-request".into(),
-        goal: Some("Fix recovery.".into()),
+        checkpoint: Some("Fix recovery; verify result-input next.".into()),
         related_message_ids: vec!["result-input".into()],
     }
 }
