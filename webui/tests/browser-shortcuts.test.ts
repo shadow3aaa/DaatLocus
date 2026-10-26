@@ -8,6 +8,7 @@ test("browser shortcuts distinguish navigation, tab cycling and ordinary editing
     ["PageUp", {ctrlKey:true}, "previous-tab"], ["9", {ctrlKey:true}, "tab-9"],
     ["ArrowLeft", {altKey:true}, "back"], ["F3", {shiftKey:true}, "find-previous"],
     ["+", {ctrlKey:true,shiftKey:true}, "zoom-in"], ["0", {ctrlKey:true}, "zoom-reset"],
+    ["d", {ctrlKey:true}, "d"], ["O", {ctrlKey:true,shiftKey:true}, "bookmarks"],
     ["a", {ctrlKey:true}, null], ["ArrowLeft", {}, null], ["Tab", {}, null],
     ["f", {ctrlKey:true,altKey:true}, null], ["w", {ctrlKey:true,isComposing:true}, null],
     ["w", {ctrlKey:true,shiftKey:true}, null],

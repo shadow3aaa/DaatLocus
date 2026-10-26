@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { ArrowLeftIcon, ArrowRightIcon, CameraIcon, ChevronDownIcon, ChevronUpIcon, Clock3Icon, DownloadIcon, FolderOpenIcon, LoaderCircleIcon, MinusIcon, MoreHorizontalIcon, PanelLeftIcon, PlusIcon, PrinterIcon, RotateCwIcon, SearchIcon, Settings2Icon, Trash2Icon, XIcon } from "lucide-react";
+import { ArrowLeftIcon, ArrowRightIcon, CameraIcon, ChevronDownIcon, ChevronUpIcon, Clock3Icon, DownloadIcon, FolderOpenIcon, LoaderCircleIcon, MinusIcon, MoreHorizontalIcon, PanelLeftIcon, PlusIcon, PrinterIcon, RotateCwIcon, SearchIcon, Settings2Icon, StarIcon, Trash2Icon, XIcon } from "lucide-react";
 import { t } from "@/lib/i18n";
 import { browserControl, browserFind, browserLayout, browserLibrary, browserScreenshot, subscribeBrowserWorkspace, type BrowserAction, type BrowserFindAction, type BrowserFindResult, type BrowserLibrary, type BrowserLibraryAction, type BrowserWorkspace } from "@/lib/browser-workspace";
 import { browserForeground } from "@/lib/browser-composition";
@@ -19,11 +19,13 @@ import { BrowserSettings, ClearBrowserDataDialog } from "@/components/settings/b
 import { useBrowserPreferences, searchEngines } from "@/lib/browser-settings";
 import { BrowserSiteIcon } from "@/components/browser-site-icon";
 import { BrowserDownloads } from "@/components/browser-downloads";
+import { BrowserOmnibox } from "@/components/browser-omnibox";
+import { BrowserBookmarkButton, BrowserBookmarks } from "@/components/browser-bookmarks";
 import { Popover, PopoverContent, PopoverTitle, PopoverTrigger } from "@/components/ui/popover";
 
 const initial: BrowserWorkspace = { pages: [], selected: null };
 const emptyLibrary:BrowserLibrary={history:[],downloads:[]};
-type Panel="history"|"downloads"|"settings"|null;
+type Panel="history"|"downloads"|"settings"|"bookmarks"|null;
 const host=(url:string)=>{try{return new URL(url).hostname;}catch{return url;}};
 /** Repaint browser chrome from the page palette; repeated page switches keep it. */
 function tintBrowserChrome(palette:ReturnType<typeof browserChrome>){
@@ -41,7 +43,7 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
   const [workspace,setWorkspace]=useState(initial);
   const [library,setLibrary]=useState(emptyLibrary);
   const [address,setAddress]=useState("");
-  const [requestedPanel,setPanel]=useState<Panel>(()=>{const value=new URLSearchParams(location.search).get("view");return value==="history"||value==="downloads"||value==="settings"?value:null;});
+  const [requestedPanel,setPanel]=useState<Panel>(()=>{const value=new URLSearchParams(location.search).get("view");return value==="history"||value==="downloads"||value==="settings"||value==="bookmarks"?value:null;});
   const [wide,setWide]=useState(()=>matchMedia("(min-width: 768px)").matches);
   const downloadPopover=wide&&requestedPanel==="downloads";
   const panel=requestedPanel==="downloads"&&wide?null:requestedPanel;
@@ -173,7 +175,7 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
       if(alive.current&&result.destination!=="cancelled")setNotice(result.destination);
     }catch{if(alive.current)setFailed(true);}finally{if(alive.current)setCapturing(false);}
   }
-  function showPanel(value:Panel){setPanel(value);setQuery("");setFind(null);setMenu(false);}
+  function showPanel(value:Panel){input.current?.blur();setPanel(value);setQuery("");setFind(null);setMenu(false);}
   function focusAddress(){input.current?.focus();input.current?.select();}
   function selectOffset(offset:number){const index=workspace.pages.findIndex(page=>page.tab===workspace.selected);const page=workspace.pages[(index+offset+workspace.pages.length)%workspace.pages.length];if(page)void control("select",page.tab);}
   useEffect(()=>{
@@ -182,6 +184,8 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
       if(code==="l")focusAddress();
       if(code==="t"){void control("new_tab");setTimeout(focusAddress,100);}
       if(code==="h")showPanel("history");
+      if(code==="bookmarks")showPanel("bookmarks");
+      if(code==="d"&&!home)window.dispatchEvent(new Event("dl-browser-bookmark-current"));
       if(code==="j")showPanel("downloads");
       if(code==="f" && !home && !panel)openFind();
       if(code==="w" && current)void control("close",current.tab);
@@ -260,7 +264,7 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
         <span className="dl-browser-toolbar-divider"/>
         <Button variant="ghost" size="icon" disabled={busy||home} aria-label={t(current?.loading?"browser_use.stop":"browser_use.reload")} onClick={()=>void control(current?.loading?"stop":"reload")}>{current?.loading?<XIcon/>:<RotateCwIcon/>}</Button>
       </div>
-      <form className="dl-browser-address" onSubmit={event=>{event.preventDefault();go(address);}}><InputGroup><InputGroupInput ref={input} aria-label={t("browser_use.address")} placeholder={t("browser_use.address_hint")} value={address} onChange={event=>{edited.current=true;setAddress(event.target.value);}} onFocus={event=>event.target.select()} onKeyDown={event=>{if(event.key==="Escape"){edited.current=false;setAddress(home?"":current?.url??"");input.current?.blur();}}} spellCheck={false} autoComplete="off" autoCapitalize="off"/></InputGroup></form>
+      <BrowserOmnibox value={address} onChange={value=>{edited.current=true;setAddress(value);}} onNavigate={go} onSelectTab={tab=>void control("select",tab)} onReset={()=>{edited.current=false;setAddress(home?"":current?.url??"");}} input={input} engine={engine} pages={workspace.pages} current={current}><BrowserBookmarkButton page={current}/></BrowserOmnibox>
       <div className="dl-browser-actions">
         <Button variant="ghost" size="icon" aria-label={t("browser_use.history")} onClick={()=>showPanel(panel==="history"?null:"history")}><Clock3Icon/></Button>
         <Popover modal={false} open={downloadPopover} onOpenChange={open=>{if(wide)showPanel(open?"downloads":null);}}>
@@ -278,7 +282,7 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
         <DropdownMenuItem disabled={home} onSelect={()=>void libraryAction("print")}><PrinterIcon/>{t("browser_use.print")}<kbd>Ctrl+P</kbd></DropdownMenuItem>
       </DropdownMenuGroup><DropdownMenuSeparator/>
         <div className="dl-browser-zoom"><span>{t("browser_use.zoom")}</span><div><Button variant="ghost" size="icon-sm" aria-label={t("browser_use.zoom_out")} disabled={home||zoom<=0.25} onClick={()=>void libraryAction("zoom",String(Math.max(.25,zoom-.1)))}><MinusIcon/></Button><Button variant="ghost" size="sm" disabled={home} onClick={()=>void libraryAction("zoom","1")}>{Math.round(zoom*100)}%</Button><Button variant="ghost" size="icon-sm" aria-label={t("browser_use.zoom_in")} disabled={home||zoom>=5} onClick={()=>void libraryAction("zoom",String(Math.min(5,zoom+.1)))}><PlusIcon/></Button></div></div>
-      <DropdownMenuSeparator/><DropdownMenuGroup><DropdownMenuItem onSelect={()=>showPanel("downloads")}><DownloadIcon/>{t("browser_use.downloads")}<kbd>Ctrl+J</kbd></DropdownMenuItem><DropdownMenuItem onSelect={()=>showPanel("history")}><Clock3Icon/>{t("browser_use.history")}<kbd>Ctrl+H</kbd></DropdownMenuItem><DropdownMenuItem onSelect={()=>setClear(true)}><Trash2Icon/>{t("browser_use.clear_data")}</DropdownMenuItem></DropdownMenuGroup><DropdownMenuSeparator/><DropdownMenuGroup><DropdownMenuItem onSelect={()=>showPanel("settings")}><Settings2Icon/>{t("browser_use.settings")}</DropdownMenuItem></DropdownMenuGroup></DropdownMenuContent></DropdownMenu>
+      <DropdownMenuSeparator/><DropdownMenuGroup><DropdownMenuItem onSelect={()=>showPanel("bookmarks")}><StarIcon/>{t("browser_use.bookmarks")}<kbd>Ctrl+Shift+O</kbd></DropdownMenuItem><DropdownMenuItem onSelect={()=>showPanel("downloads")}><DownloadIcon/>{t("browser_use.downloads")}<kbd>Ctrl+J</kbd></DropdownMenuItem><DropdownMenuItem onSelect={()=>showPanel("history")}><Clock3Icon/>{t("browser_use.history")}<kbd>Ctrl+H</kbd></DropdownMenuItem><DropdownMenuItem onSelect={()=>setClear(true)}><Trash2Icon/>{t("browser_use.clear_data")}</DropdownMenuItem></DropdownMenuGroup><DropdownMenuSeparator/><DropdownMenuGroup><DropdownMenuItem onSelect={()=>showPanel("settings")}><Settings2Icon/>{t("browser_use.settings")}</DropdownMenuItem></DropdownMenuGroup></DropdownMenuContent></DropdownMenu>
     </header>
     <div className="dl-browser-progress" data-loading={Boolean(current?.loading)&&!panel} role={current?.loading?"progressbar":undefined} aria-label={current?.loading?t("browser_settings.loading"):undefined} aria-valuemin={0} aria-valuemax={100} aria-valuenow={current?.loading?current.progress:undefined}><span style={current?.progress!==undefined?{width:`${current.progress}%`}:undefined}/></div>
     {failed && <Alert variant="destructive" className="dl-browser-error"><AlertDescription>{t("browser_use.unavailable")}</AlertDescription><Button variant="ghost" size="icon-sm" aria-label={t("common.close")} onClick={()=>setFailed(false)}><XIcon/></Button></Alert>}
@@ -290,6 +294,7 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
         {!panel && <><section><h2>{t("browser_use.tools")}</h2><div className="dl-browser-tool-grid">{[
           {Icon:PlusIcon,label:"new_tab",action:()=>{void control("new_tab");setTimeout(focusAddress,100);},key:"Ctrl+T"},
           {Icon:Clock3Icon,label:"history",action:()=>showPanel("history"),key:"Ctrl+H"},
+          {Icon:StarIcon,label:"bookmarks",action:()=>showPanel("bookmarks"),key:"Ctrl+Shift+O"},
           {Icon:DownloadIcon,label:"downloads",action:()=>showPanel("downloads"),key:"Ctrl+J"},
           {Icon:Settings2Icon,label:"settings",action:()=>showPanel("settings"),key:""},
         ].map(({Icon,label,action,key})=><button type="button" key={label} onClick={action}><Icon/><span>{t(`browser_use.${label}`)}</span>{key&&<kbd>{key}</kbd>}</button>)}</div></section>
@@ -302,6 +307,7 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
         </section>}
         {panel==="downloads" && <BrowserDownloads library={library} onAction={(action,value)=>void libraryAction(action,value)} onMore={()=>void refreshLibrary(library.next_offset!)}/>}
         {panel==="settings" && <BrowserSettings/>}
+        {panel==="bookmarks" && <BrowserBookmarks onNavigate={go}/>}
       </main></div>}
     </div>
     <ClearBrowserDataDialog open={clear} onOpenChange={setClear}/>

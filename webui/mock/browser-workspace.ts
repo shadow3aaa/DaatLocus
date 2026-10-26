@@ -1,5 +1,5 @@
 /** Development-only browser fixtures; no native bridge or external page requests. */
-import type { BrowserAction, BrowserBounds, BrowserWorkspace, BrowserLibraryAction, BrowserLibrary, BrowserFindAction, BrowserFindResult, BrowserPreferences } from "../src/lib/browser-workspace";
+import type { BrowserAction, BrowserBounds, BrowserWorkspace, BrowserLibraryAction, BrowserLibrary, BrowserFindAction, BrowserFindResult, BrowserPreferences, BrowserBookmark, BrowserSearch, SavedAction } from "../src/lib/browser-workspace";
 import cursorScript from "../../crates/daat-locus-client-protocol/src/browser-cursor.js?raw";
 import html2canvas from "html2canvas";
 import { browserShortcut } from "../src/lib/browser-shortcuts";
@@ -11,6 +11,9 @@ let preferences:BrowserPreferences=JSON.parse(localStorage.getItem("dl.mock.brow
 export async function browserPreferences(patch?:Partial<BrowserPreferences>){if(patch){preferences={...preferences,...patch};localStorage.setItem("dl.mock.browser.preferences",JSON.stringify(preferences));}return structuredClone(preferences);}
 const icon="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABsUlEQVR4nGNgGGDAiE/SveLWf2pZtLNDDatdjLS2mJBDmOhpOTbzmehpOTZ7mOhtObp9TAwDDBiRXTMQgIUYRd7m/Ay5AWIY4v//MzD8+P2P4d2nvwzXHn5n2HDsA8PdZz+p7wBcgJGRgYGTjYlBWgSEWRmcDfkYZm59zbDx2AcGYgET0SqJMYyJgSHTV5TBQpObdiFw9eF3huIZT8C+Z2ZiZODnZmYw1+BmSHQXZuDlYgarATni1M2vDP/+EeFoBjIBKP7//P3P8PbTH4Ztpz4yNC15DpcTF2RlMFHjpm8UXL7/neEOUgLUVeSkrwNA4NbjHwwwICvKxkB3B3z+joh0bg7ijGZioBEAJVC6O4CXE2Hcl+9/6e8AJUl2OPvJm9/0dYCcGBuDuiwHnH/p3jf6FMXcHEwMpurcDPFuwmA+CLx4/xtcENHEAdrynAw72lXxqpm15Q1RpSBZDsAHQJbO2f6G4di1L0TrYaHEQlBx/PP3P4bXH/8wXLr3nWHz8Q8MD17+GloNEqaBshjFATtxdBpoDUD2Do4QGIhQgNnHhE2QXpZjOIAejkA3f8B7xwBtGZQ3QE+2wAAAAABJRU5ErkJggg==";
 export const browserSupported = () => true;
+function savedFixture<T>(key:string,fallback:T):T{try{return JSON.parse(localStorage.getItem(key)??"null")??fallback;}catch{return fallback;}}
+let bookmarks=savedFixture<BrowserBookmark[]>("dl.mock.browser.bookmarks",[{id:"docs",url:"https://developer.mozilla.org/",title:"MDN Web Docs",time:Date.now()}]);
+let searches=savedFixture<BrowserSearch[]>("dl.mock.browser.searches",[{id:"search-one",query:"WebView2 composition",time:Date.now()},{id:"search-two",query:"浏览器快捷键",time:Date.now()-60000}]);
 const demo="https://example.com/browser-demo";
 let state: BrowserWorkspace={pages:[{tab:"home",url:"about:blank",title:""},{tab:"demo",url:demo,title:"光标与输入演示",can_back:false,can_forward:false}],selected:"home"};
 const library:BrowserLibrary={history:[
@@ -129,7 +132,7 @@ export async function browserControl(action:BrowserAction,tab:string|null=null,u
   render();return structuredClone(state);
 }
 export async function browserLibrary(action:BrowserLibraryAction,value:string|null=null):Promise<BrowserLibrary>{
-  if(action==="clear_history")library.history=[];
+  if(action==="clear_history"){library.history=[];searches=[];localStorage.setItem("dl.mock.browser.searches","[]");window.dispatchEvent(new Event("dl-browser-saved-changed"));}
   if(action==="clear_data")for(const view of frames.values()){view.srcdoc="";}
   if(action==="remove_history")library.history=library.history.filter(item=>item.id!==value);
   if(action==="remove_download")library.downloads=library.downloads.filter(item=>item.id!==value || item.status==="downloading");
@@ -137,6 +140,27 @@ export async function browserLibrary(action:BrowserLibraryAction,value:string|nu
   if(action==="print")frame?.contentWindow?.postMessage({type:"dl-browser-command",action,value},"*");
   if(action==="zoom"){const page=state.pages.find(page=>page.tab===state.selected);if(page)page.zoom=Number(value);if(frame){frame.style.zoom=String(Number(value));frame.style.width=`${100/Number(value)}%`;frame.style.height=`${100/Number(value)}%`;}}
   return structuredClone(library);
+}
+export async function browserSaved<T>(action:SavedAction,input:Record<string,unknown>={}):Promise<T>{
+  const query=String(input.query??"").trim().toLocaleLowerCase();
+  const match=(item:{title?:string;url?:string;query?:string})=>query.split(/\s+/).every(word=>`${item.title??""} ${item.url??""} ${item.query??""}`.toLocaleLowerCase().includes(word));
+  let result:unknown={};let nextBookmarks=[...bookmarks],nextSearches=[...searches];
+  if(action==="suggestions")return structuredClone({history:library.history.filter(match).filter((item,index,all)=>all.findIndex(other=>other.url===item.url)===index).slice(0,8),bookmarks:bookmarks.slice().reverse().filter(match).slice(0,8),searches:searches.slice().reverse().filter(match).slice(0,8)}) as T;
+  if(action==="bookmarks"){const offset=Number(input.offset??0),items=bookmarks.slice().reverse().filter(match).slice(offset,offset+101);return structuredClone({items:items.slice(0,100),next_offset:items.length>100?offset+100:null}) as T;}
+  if(action==="bookmark")return structuredClone({item:bookmarks.find(item=>item.id===input.id||item.url===input.url)??null}) as T;
+  if(action==="save_bookmark"){
+    const url=new URL(String(input.url));if(!["http:","https:"].includes(url.protocol)||url.username||url.password)throw new Error("Invalid bookmark URL");
+    const old=bookmarks.find(item=>input.id?item.id===input.id:item.url===url.href);
+    if(input.id&&!old)throw new Error("Bookmark no longer exists");
+    if(input.id&&bookmarks.some(item=>item.url===url.href&&item.id!==input.id))throw new Error("This page is already bookmarked");
+    const entry:BrowserBookmark={id:old?.id??crypto.randomUUID(),url:url.href,title:String(input.title??"").trim()||url.hostname,time:Date.now(),favicon:typeof input.favicon==="string"?input.favicon:old&&new URL(old.url).origin===url.origin?old.favicon:null};
+    nextBookmarks=[...bookmarks.filter(item=>item.id!==entry.id),entry];result=entry;
+  }
+  if(action==="remove_bookmark")nextBookmarks=bookmarks.filter(item=>item.id!==input.id);
+  if(action==="record_search")nextSearches=[...searches.filter(item=>item.query.toLocaleLowerCase()!==query),{id:crypto.randomUUID(),query:String(input.query).trim(),time:Date.now()}];
+  if(action==="remove_search")nextSearches=searches.filter(item=>item.id!==input.id);
+  localStorage.setItem("dl.mock.browser.bookmarks",JSON.stringify(nextBookmarks));localStorage.setItem("dl.mock.browser.searches",JSON.stringify(nextSearches));bookmarks=nextBookmarks;searches=nextSearches;
+  window.dispatchEvent(new Event("dl-browser-saved-changed"));return structuredClone(result) as T;
 }
 function frameCommand<T>(tab:string,action:string,value:string|null=null):Promise<T>{
   const view=frames.get(tab);if(!view?.contentWindow)return Promise.reject(new Error("Browser page unavailable"));

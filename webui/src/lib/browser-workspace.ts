@@ -5,6 +5,16 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 export type BrowserPageInfo = { tab: string; url: string; title: string; favicon?: string | null; background?: string | null; progress?: number; loading?: boolean; can_back?: boolean; can_forward?: boolean; zoom?: number };
 export type BrowserWorkspace = { pages: BrowserPageInfo[]; selected: string | null };
 export type BrowserVisit = { id: string; url: string; title: string; time: number; favicon?: string | null };
+export type BrowserBookmark = BrowserVisit;
+export type BrowserSearch = {id:string;query:string;time:number};
+export type BrowserSuggestions = {history:BrowserVisit[];bookmarks:BrowserBookmark[];searches:BrowserSearch[]};
+export type BookmarkPage = {items:BrowserBookmark[];next_offset:number|null};
+export type SavedAction = "suggestions"|"bookmarks"|"bookmark"|"save_bookmark"|"remove_bookmark"|"record_search"|"remove_search";
+export async function browserSaved<T>(action:SavedAction,input:object={}){
+  const value=await invoke<T>("browser_control",{action,url:JSON.stringify(input),tab:null,bounds:null});
+  if(!["suggestions","bookmarks","bookmark"].includes(action))window.dispatchEvent(new Event("dl-browser-saved-changed"));
+  return value;
+}
 export type BrowserPreferences = {search_engine:"google"|"bing"|"duckduckgo"|"baidu";language:"system"|"zh-CN"|"en-US";default_zoom:number};
 export function browserPreferences(patch?:Partial<BrowserPreferences>){return invoke<BrowserPreferences>("browser_control",{action:patch?"set_preferences":"preferences",url:patch?JSON.stringify(patch):null,tab:null,bounds:null});}
 export type BrowserDownload = { id: string; url: string; name: string; time: number; status: "downloading" | "complete" | "failed" | "interrupted"; bytes: number };

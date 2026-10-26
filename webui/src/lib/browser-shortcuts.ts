@@ -17,11 +17,12 @@ export function browserShortcut(event: Key): string | null {
   if (key === "tab") return event.shiftKey ? "previous-tab" : "next-tab";
   if (key === "g") return event.shiftKey ? "find-previous" : "find-next";
   if (key === "+" || key === "=") return "zoom-in";
+  if (key === "o" && event.shiftKey) return "bookmarks";
   if (event.shiftKey) return null;
   if (key === "pageup") return "previous-tab";
   if (key === "pagedown") return "next-tab";
   if (/^[1-9]$/.test(key)) return `tab-${key}`;
   if (key === "-") return "zoom-out";
   if (key === "0") return "zoom-reset";
-  return ["l", "t", "h", "j", "f", "w", "r", "p"].includes(key) ? key : null;
+  return ["l", "t", "h", "j", "f", "w", "r", "p", "d"].includes(key) ? key : null;
 }
