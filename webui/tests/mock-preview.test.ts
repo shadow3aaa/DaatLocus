@@ -5,6 +5,14 @@ import { ROOT_ACTOR_ID, store } from "../mock/state";
 
 const request=(path:string,init?:RequestInit)=>handle(new Request(`http://127.0.0.1${path}`,init));
 describe("standalone WebUI preview",()=>{
+  test("Core prompt inspection excludes execution-platform patches",async()=>{
+    const core = await (await request("/v1/system-prompt?role=core")).json() as {items: {name:string}[]};
+    const others = await (await request("/v1/system-prompt?role=others")).json() as {items: {name:string}[]};
+    expect(core.items.map(file=>file.name)).toContain("core.md");
+    expect(core.items.map(file=>file.name)).toContain("actors.md");
+    expect(core.items.some(file=>file.name.startsWith("os/"))).toBe(false);
+    expect(others.items.map(file=>file.name)).toContain("os/windows-patch.md");
+  });
   test("account reset preview preserves model and device settings and rejects stale confirmation",async()=>{
     activateScenario("work");
     const before = await (await request("/v1/account/reset")).json();

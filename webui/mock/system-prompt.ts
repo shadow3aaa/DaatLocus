@@ -13,7 +13,7 @@ export function systemPromptRoute(url: URL): Response | null {
   const files = [
     ...(role === "core" ? [{ name: "core.md", content: source("core.md").replaceAll("{{account_name}}", "林舟") }] : []),
     { name: "actors.md", content: source("actors.md") },
-    { name: "os/windows-patch.md", content: source("os/windows-patch.md") },
+    ...(role === "others" ? [{ name: "os/windows-patch.md", content: source("os/windows-patch.md") }] : []),
   ];
   const encoder = new TextEncoder(), bytes = (text: string) => encoder.encode(text).length;
   const revision = createHash("sha256").update(JSON.stringify(files)).digest("hex");
